@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -131,6 +131,22 @@ function processGroupId(pid: number): number | null {
   } catch {
     return null;
   }
+}
+
+function pidNamespaceMembers(namespaceId: string): number[] {
+  const members: number[] = [];
+  for (const name of readdirSync("/proc")) {
+    const pid = Number(name);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    const identity = procBackend.processIdentity(pid);
+    if (identity === null) continue;
+    try {
+      if (readlinkSync(`/proc/${pid}/ns/pid`) === namespaceId
+        && procBackend.processIdentity(pid) === identity
+        && readlinkSync(`/proc/${pid}/ns/pid`) === namespaceId) members.push(pid);
+    } catch {}
+  }
+  return members;
 }
 
 function confirmedFixtureProcessGroups(executable: string): FixtureProcessGroup[] {
@@ -302,8 +318,8 @@ async function withResourceWorkerChunks<T>(
   const encodedChunks = JSON.stringify(chunks.map((chunk) => chunk.toString("base64")));
   writeFileSync(executable, [
     "#!/usr/bin/env node",
-    'const { writeFileSync } = require("node:fs");',
-    `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+    'const { readFileSync, writeFileSync } = require("node:fs");',
+    `writeFileSync(${JSON.stringify(pidFile)}, readFileSync("/proc/self/stat", "utf8").split(" ", 1)[0]);`,
     `const chunks = ${encodedChunks}.map((chunk) => Buffer.from(chunk, "base64"));`,
     "let index = 0;",
     "const writeNext = () => {",
@@ -974,9 +990,9 @@ describe("resource recurring reads", () => {
       const descendantPid = path.join(directory, "deadline-descendant-pid");
       const ready = path.join(directory, "deadline-descendant-ready");
       return [
-        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
         "trap 'exit 0' TERM INT",
-        `sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" &`,
+        `sh -c 'trap "" TERM INT; read host_pid _ < /proc/self/stat; printf "%s" "$host_pid" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" &`,
         `while [ ! -e "${ready}" ]; do sleep 0.01; done`,
         "while :; do sleep 0.01; done",
       ];
@@ -1020,8 +1036,8 @@ describe("resource recurring reads", () => {
       const descendantPid = path.join(directory, "descendant-pid");
       const ready = path.join(directory, "descendant-ready");
       return [
-        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
-        `sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" &`,
+        `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
+        `sh -c 'trap "" TERM INT; read host_pid _ < /proc/self/stat; printf "%s" "$host_pid" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" &`,
         `while [ ! -e "${ready}" ]; do sleep 0.01; done`,
         "exit 0",
       ];
@@ -1048,8 +1064,8 @@ describe("resource recurring reads", () => {
     await withResourceWorkerScript((directory) => {
       const writerPid = path.join(directory, "late-writer-pid");
       return [
-        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
-        `sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; sleep 0.02; printf "%s\\n" "$2"' sh "${writerPid}" '${EMPTY_FRESH_WORKER_MESSAGE}' &`,
+        `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
+        `sh -c 'trap "" TERM INT; read host_pid _ < /proc/self/stat; printf "%s" "$host_pid" > "$1"; sleep 0.02; printf "%s\\n" "$2"' sh "${writerPid}" '${EMPTY_FRESH_WORKER_MESSAGE}' &`,
         "exit 0",
       ];
     }, async (directory) => {
@@ -1072,9 +1088,9 @@ describe("resource recurring reads", () => {
       const descendantPid = path.join(directory, "redirected-descendant-pid");
       const ready = path.join(directory, "redirected-descendant-ready");
       return [
-        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
         "trap 'exit 0' TERM INT",
-        `sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" </dev/null >/dev/null 2>&1 &`,
+        `sh -c 'trap "" TERM INT; read host_pid _ < /proc/self/stat; printf "%s" "$host_pid" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" </dev/null >/dev/null 2>&1 &`,
         `while [ ! -e "${ready}" ]; do sleep 0.01; done`,
         `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
         "while :; do sleep 0.01; done",
@@ -1109,9 +1125,9 @@ describe("resource recurring reads", () => {
           const ready = path.join(directory, "matrix-descendant-ready");
           const redirect = pipes === "redirected" ? " </dev/null >/dev/null 2>&1" : "";
           return [
-            `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+            `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
             "trap 'exit 0' TERM INT",
-            `sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}"${redirect} &`,
+            `sh -c 'trap "" TERM INT; read host_pid _ < /proc/self/stat; printf "%s" "$host_pid" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}"${redirect} &`,
             `while [ ! -e "${ready}" ]; do sleep 0.01; done`,
             fixture.output,
             "while :; do sleep 0.01; done",
@@ -1169,7 +1185,7 @@ describe("resource recurring reads", () => {
 
     for (const fixture of fixtures) {
       await withResourceWorkerScript((directory) => [
-        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
         "trap 'exit 0' TERM INT",
         ...fixture.lines,
       ], async (directory) => {
@@ -1212,7 +1228,7 @@ describe("resource recurring reads", () => {
 
   test("ineffective TERM and SIGKILL settle once with cleanup failure and zero referenced handles", async () => {
     await withResourceWorkerScript((directory) => [
-      `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+      `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
       "trap '' TERM INT",
       "printf 'ineffective-signal-trace\\n' >&2",
       `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
@@ -1261,7 +1277,7 @@ describe("resource recurring reads", () => {
 
   test("ESRCH cleanup settles without a secondary failure or referenced handles", async () => {
     await withResourceWorkerScript((directory) => [
-      `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+      `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
       `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
       "exit 0",
     ], async () => {
@@ -1286,13 +1302,47 @@ describe("resource recurring reads", () => {
     });
   });
 
+  test("a portable runtime without kernel containment fails closed after bounded cleanup", async () => {
+    await withResourceWorkerScript([
+      "trap 'exit 0' TERM INT",
+      `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+      "while :; do sleep 0.01; done",
+    ], async (directory) => {
+      const baseline = referencedHandles();
+      const outcome = await workerTestReader({
+        initial: null,
+        workerLimits: { observeTimeoutMs: 300, inputTimeoutMs: 10, timeoutMs: 80, closeTimeoutMs: 10, headroomMs: 40 },
+        workerProcessRuntime: {
+          kernelContainment: "unavailable",
+          pidAlive: processExists,
+          processIdentity: (pid) => procBackend.processIdentity(pid),
+          descendants: (pid) => [pid],
+          processGroupId,
+          processGroupMembers: (groupId) => [groupId],
+          signal: (pid, signal) => process.kill(pid, signal),
+        },
+      }).read(true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(outcome.diagnostic).toMatchObject({
+        degradedReason: "collector-crash",
+        failure: {
+          cause: "worker-cleanup",
+          causes: expect.arrayContaining(["resource collector kernel containment is unavailable"]),
+        },
+      });
+      expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker"))).toEqual([]);
+      expect(newReferencedHandleCount(baseline)).toBe(0);
+    });
+  });
+
   test("an owned escaped descendant retaining inherited pipes is supervised to bounded completion", async () => {
     await withResourceWorkerScript((directory) => {
       const descendantPid = path.join(directory, "escaped-descendant-pid");
       const ready = path.join(directory, "escaped-descendant-ready");
       return [
-        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
-        `setsid sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" &`,
+        `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
+        `setsid sh -c 'trap "" TERM INT; read host_pid _ < /proc/self/stat; printf "%s" "$host_pid" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" &`,
         `while [ ! -e "${ready}" ]; do sleep 0.01; done`,
         `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
         "exit 0",
@@ -1344,7 +1394,7 @@ describe("resource recurring reads", () => {
       },
       {
         name: "crash",
-        output: "exit 7",
+        output: "",
         expected: { degradedReason: "collector-crash", failure: { cause: "worker-exit" } },
         denyEscaped: false,
         escapedAtSettlement: false,
@@ -1359,9 +1409,9 @@ describe("resource recurring reads", () => {
       {
         name: "denied success cleanup",
         output: `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
-        expected: { degradedReason: "collector-crash", failure: { cause: "worker-cleanup" } },
+        expected: { fresh: true, status: "complete" },
         denyEscaped: true,
-        escapedAtSettlement: true,
+        escapedAtSettlement: false,
       },
       {
         name: "denied malformed cleanup",
@@ -1370,11 +1420,10 @@ describe("resource recurring reads", () => {
           degradedReason: "collector-crash",
           failure: {
             cause: "worker-output-invalid",
-            causes: expect.arrayContaining(["resource collector worker cleanup deadline expired"]),
           },
         },
         denyEscaped: true,
-        escapedAtSettlement: true,
+        escapedAtSettlement: false,
       },
     ] as const;
 
@@ -1392,7 +1441,8 @@ describe("resource recurring reads", () => {
             'const [pidFile, readyFile] = process.argv.slice(2);',
             'process.on("SIGTERM", () => {});',
             'process.on("SIGINT", () => {});',
-            'fs.writeFileSync(pidFile, String(process.pid));',
+            'const hostPid = fs.readFileSync("/proc/self/stat", "utf8").split(" ", 1)[0];',
+            'fs.writeFileSync(pidFile, hostPid);',
             'fs.writeFileSync(readyFile, "ready");',
             'setInterval(() => {}, 1_000);',
             '',
@@ -1416,12 +1466,15 @@ describe("resource recurring reads", () => {
             '',
           ].join("\n"));
           return [
-            `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+            `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
             `trap 'exit 0' TERM INT`,
             `/usr/bin/node "${memberScript}" "${escapedScript}" "${escapedPid}" "${escapedReady}" "${memberReady}" "${pipes}" &`,
+            "member_pid=$!",
             `while [ ! -e "${memberReady}" ]; do sleep 0.005; done`,
             "sleep 0.08",
-            fixture.output,
+            fixture.name === "crash"
+              ? `kill -TERM "$member_pid"; while [ ! -e "${escapedReady}" ]; do sleep 0.005; done; exit 7`
+              : fixture.output,
             "while :; do sleep 0.01; done",
           ];
         }, async (directory) => {
@@ -1470,10 +1523,228 @@ describe("resource recurring reads", () => {
     }
   });
 
+  test("owner-mutating TERM descendants cannot escape settlement", async () => {
+    const fixtures = [
+      {
+        name: "success",
+        output: `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+        timeoutMs: 500,
+        expected: { status: "complete" },
+      },
+      {
+        name: "malformed output",
+        output: "printf '{invalid}\\n'",
+        timeoutMs: 500,
+        expected: { degradedReason: "collector-crash", failure: { cause: "worker-output-invalid" } },
+      },
+      {
+        name: "crash",
+        output: "exit 7",
+        timeoutMs: 500,
+        expected: { degradedReason: "collector-crash", failure: { cause: "worker-exit" } },
+      },
+      {
+        name: "timeout",
+        output: ":",
+        timeoutMs: 180,
+        expected: { degradedReason: "timeout", failure: { cause: "worker-timeout" } },
+      },
+    ] as const;
+    const results: Array<{
+      owner: "deleted" | "changed";
+      outcome: string;
+      diagnostic: Awaited<ReturnType<ReturnType<typeof workerTestReader>["read"]>>["diagnostic"];
+      descendantAliveAtSettlement: boolean;
+    }> = [];
+
+    for (const owner of ["deleted", "changed"] as const) {
+      for (const fixture of fixtures) {
+        await withResourceWorkerScript((directory) => {
+          const escapedScript = path.join(directory, "owner-escaped-child.cjs");
+          const memberScript = path.join(directory, "owner-term-member.cjs");
+          const escapedPid = path.join(directory, "owner-escaped-pid");
+          const escapedNamespace = path.join(directory, "owner-escaped-namespace");
+          const escapedReady = path.join(directory, "owner-escaped-ready");
+          const memberReady = path.join(directory, "owner-member-ready");
+          writeFileSync(escapedScript, [
+            '#!/usr/bin/node',
+            'const fs = require("node:fs");',
+            'const [pidFile, namespaceFile, readyFile] = process.argv.slice(2);',
+            'process.on("SIGTERM", () => {});',
+            'process.on("SIGINT", () => {});',
+            'const hostPid = fs.readFileSync("/proc/self/stat", "utf8").split(" ", 1)[0];',
+            'fs.writeFileSync(pidFile, hostPid);',
+            'fs.writeFileSync(namespaceFile, fs.readlinkSync("/proc/self/ns/pid"));',
+            'fs.writeFileSync(readyFile, "ready");',
+            'setInterval(() => {}, 1_000);',
+            '',
+          ].join("\n"));
+          writeFileSync(memberScript, [
+            '#!/usr/bin/node',
+            'const fs = require("node:fs");',
+            'const { spawn } = require("node:child_process");',
+            'const [escapedScript, escapedPid, escapedNamespace, escapedReady, memberReady, ownerMode] = process.argv.slice(2);',
+            'fs.writeFileSync(memberReady, "ready");',
+            'let handled = false;',
+            'process.on("SIGTERM", () => {',
+            '  if (handled) return;',
+            '  handled = true;',
+            '  const env = { ...process.env };',
+            '  if (ownerMode === "deleted") delete env.LLV_RESOURCE_COLLECTOR_OWNER;',
+            '  else env.LLV_RESOURCE_COLLECTOR_OWNER = "changed-owner";',
+            '  const child = spawn(process.execPath, [escapedScript, escapedPid, escapedNamespace, escapedReady], {',
+            '    detached: true, stdio: "ignore", env,',
+            '  });',
+            '  child.unref();',
+            '  process.exit(0);',
+            '});',
+            'setInterval(() => {}, 1_000);',
+            '',
+          ].join("\n"));
+          return [
+            `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
+            "trap 'exit 0' TERM INT",
+            `/usr/bin/node "${memberScript}" "${escapedScript}" "${escapedPid}" "${escapedNamespace}" "${escapedReady}" "${memberReady}" "${owner}" &`,
+            "member_pid=$!",
+            `while [ ! -e "${memberReady}" ]; do sleep 0.005; done`,
+            "sleep 0.08",
+            fixture.name === "crash"
+              ? `kill -TERM "$member_pid"; while [ ! -e "${escapedReady}" ]; do sleep 0.005; done; exit 7`
+              : fixture.output,
+            "while :; do sleep 0.01; done",
+          ];
+        }, async (directory) => {
+          const escapedPidFile = path.join(directory, "owner-escaped-pid");
+          const escapedNamespaceFile = path.join(directory, "owner-escaped-namespace");
+          const diagnostic = (await workerTestReader({
+            initial: null,
+            workerLimits: {
+              observeTimeoutMs: 900,
+              inputTimeoutMs: 10,
+              timeoutMs: fixture.timeoutMs,
+              closeTimeoutMs: 40,
+              cleanupTimeoutMs: 150,
+              headroomMs: 250,
+            },
+          }).read(true)).diagnostic;
+          for (let attempt = 0; attempt < 20 && !existsSync(escapedPidFile); attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          expect(existsSync(escapedPidFile), `${owner} ${fixture.name} spawn: ${JSON.stringify(diagnostic)}`).toBeTrue();
+          const escapedPid = Number(readFileSync(escapedPidFile, "utf8"));
+          const namespaceId = readFileSync(escapedNamespaceFile, "utf8");
+          const descendantAliveAtSettlement = processExists(escapedPid);
+          results.push({ owner, outcome: fixture.name, diagnostic, descendantAliveAtSettlement });
+          if (descendantAliveAtSettlement) process.kill(escapedPid, "SIGKILL");
+          await expectProcessAbsentAfterQuietInterval(escapedPid, `${owner} ${fixture.name} RED cleanup`);
+
+          expect(diagnostic, `${owner} ${fixture.name} primary outcome`).toMatchObject(fixture.expected);
+          expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker")), `${owner} ${fixture.name} groups`).toEqual([]);
+          expect(pidNamespaceMembers(namespaceId), `${owner} ${fixture.name} namespace`).toEqual([]);
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          expect(processExists(escapedPid), `${owner} ${fixture.name} sustained identity`).toBeFalse();
+          expect(pidNamespaceMembers(namespaceId), `${owner} ${fixture.name} sustained namespace`).toEqual([]);
+        });
+      }
+    }
+
+    const healthySuccesses = results.filter((result) => (
+      result.outcome === "success"
+      && result.diagnostic.status === "complete"
+      && result.diagnostic.degradedReason === undefined
+    ));
+    expect(healthySuccesses).toHaveLength(2);
+    expect(results.filter((result) => (
+      result.descendantAliveAtSettlement
+      && result.diagnostic.failure?.cause !== "worker-cleanup"
+    )), `uncontained outcomes: ${JSON.stringify(results)}`).toEqual([]);
+  });
+
+  test("concurrent containment verification reaches exact zero for every TERM descendant", async () => {
+    await withResourceWorkerScript((directory) => {
+      const memberScript = path.join(directory, "concurrent-term-member.cjs");
+      writeFileSync(memberScript, [
+        '#!/usr/bin/node',
+        'const fs = require("node:fs");',
+        'const { spawn } = require("node:child_process");',
+        'const [directory, key] = process.argv.slice(2);',
+        'fs.writeFileSync(`${directory}/${key}.member`, "ready");',
+        'let handled = false;',
+        'process.on("SIGTERM", () => {',
+        '  if (handled) return;',
+        '  handled = true;',
+        '  const env = { ...process.env };',
+        '  delete env.LLV_RESOURCE_COLLECTOR_OWNER;',
+        '  const script = [',
+        '    "trap \\\"\\\" TERM INT",',
+        '    "read host_pid _ < /proc/self/stat",',
+        '    `printf \'%s\' \\\"$host_pid\\\" > \\\"$1/${key}.pid\\\"`,',
+        '    `readlink /proc/self/ns/pid > \\\"$1/${key}.namespace\\\"`,',
+        '    `: > \\\"$1/${key}.ready\\\"`,',
+        '    "while :; do sleep 1; done",',
+        '  ].join("; ");',
+        '  const child = spawn("/bin/sh", ["-c", script, "sh", directory], { detached: true, stdio: "ignore", env });',
+        '  child.unref();',
+        '  process.exit(0);',
+        '});',
+        'setInterval(() => {}, 1_000);',
+        '',
+      ].join("\n"));
+      return [
+        "read host_pid _ < /proc/self/stat",
+        `printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
+        "trap 'exit 0' TERM INT",
+        `/usr/bin/node "${memberScript}" "${directory}" "$host_pid" &`,
+        `while [ ! -e "${directory}/$host_pid.member" ]; do sleep 0.005; done`,
+        `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+        "while :; do sleep 0.01; done",
+      ];
+    }, async (directory) => {
+      const baseline = referencedHandles();
+      const outcomes = await Promise.all(Array.from({ length: 6 }, () => workerTestReader({
+        initial: null,
+        workerLimits: {
+          observeTimeoutMs: 1_200,
+          inputTimeoutMs: 10,
+          timeoutMs: 700,
+          closeTimeoutMs: 50,
+          cleanupTimeoutMs: 300,
+          headroomMs: 300,
+        },
+      }).read(true)));
+      const pidFiles = readdirSync(directory).filter((name) => /^\d+\.pid$/.test(name));
+      expect(outcomes).toHaveLength(6);
+      expect(outcomes.every((outcome) => (
+        (outcome.diagnostic.status === "complete" && outcome.diagnostic.degradedReason === undefined)
+        || outcome.diagnostic.failure?.cause === "worker-cleanup"
+      )), JSON.stringify(outcomes.map((outcome) => outcome.diagnostic))).toBeTrue();
+      expect(outcomes.some((outcome) => outcome.diagnostic.status === "complete")).toBeTrue();
+      expect(pidFiles).toHaveLength(6);
+      for (const pidFile of pidFiles) {
+        const key = pidFile.slice(0, -4);
+        const escapedPid = Number(readFileSync(path.join(directory, pidFile), "utf8"));
+        const namespaceId = readFileSync(path.join(directory, `${key}.namespace`), "utf8").trim();
+        expect(processExists(escapedPid), `${key} identity`).toBeFalse();
+        expect(pidNamespaceMembers(namespaceId), `${key} namespace`).toEqual([]);
+      }
+      expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker"))).toEqual([]);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      for (const pidFile of pidFiles) {
+        const key = pidFile.slice(0, -4);
+        const escapedPid = Number(readFileSync(path.join(directory, pidFile), "utf8"));
+        const namespaceId = readFileSync(path.join(directory, `${key}.namespace`), "utf8").trim();
+        expect(processExists(escapedPid), `${key} sustained identity`).toBeFalse();
+        expect(pidNamespaceMembers(namespaceId), `${key} sustained namespace`).toEqual([]);
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(newReferencedHandleCount(baseline)).toBe(0);
+    });
+  });
+
   test("leader-first cleanup sends no signals to recycled or null-identity groups", async () => {
     for (const identity of ["recycled", "null"] as const) {
       await withResourceWorkerScript((directory) => [
-        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
         "exit 0",
       ], async () => {
         const realKill = process.kill.bind(process);
@@ -1753,7 +2024,7 @@ describe("resource recurring reads", () => {
 
   test("a near-limit handoff to an immediately exiting worker keeps the parent alive and releases the worker", async () => {
     await withResourceWorkerScript((directory) => [
-      `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+      `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
       "exit 0",
     ], async (directory) => {
       const entrypoint = path.join(directory, "node-parent.ts");
@@ -2048,9 +2319,9 @@ describe("resource recurring reads", () => {
 
   test("malformed, oversized, crash, timeout, and immediate-exit paths release complete worker trees", async () => {
     const withGrandchild = (directory: string, lines: string[]) => [
-      `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
-      "sleep 60 </dev/null >/dev/null 2>&1 &",
-      `printf '%s' "$!" > "${path.join(directory, "grandchild-pid")}"`,
+      `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
+      `sh -c 'read host_pid _ < /proc/self/stat; printf "%s" "$host_pid" > "$1"; exec sleep 60' sh "${path.join(directory, "grandchild-pid")}" </dev/null >/dev/null 2>&1 &`,
+      `while [ ! -e "${path.join(directory, "grandchild-pid")}" ]; do sleep 0.005; done`,
       ...lines,
     ];
     const cases: Array<{ name: string; reason: "collector-crash" | "timeout"; cause: string; lines: (directory: string) => string[]; limits?: { timeoutMs?: number; closeTimeoutMs?: number; outputMaxBytes?: number } }> = [

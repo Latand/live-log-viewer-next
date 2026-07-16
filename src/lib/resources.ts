@@ -1,7 +1,7 @@
 import { procBackend } from "@/lib/proc";
 import type { ProcBackend } from "@/lib/proc";
 import crypto from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -404,16 +404,30 @@ const RESOURCE_WORKER_SUPERVISOR = `
 const { spawn } = require("node:child_process");
 const child = spawn(process.argv[1], process.argv.slice(2), { stdio: "inherit" });
 let finished = false;
+let terminationRequested = false;
 const finish = (code, signal) => {
   if (finished) return;
   finished = true;
   setTimeout(() => {
     if (signal) process.kill(process.pid, signal);
     else process.exit(code ?? 1);
-  }, ${RESOURCE_WORKER_SUPERVISOR_EXIT_GRACE_MS});
+  }, terminationRequested
+    ? ${RESOURCE_WORKER_SUPERVISOR_EXIT_GRACE_MS}
+    : ${Math.ceil(RESOURCE_WORKER_SUPERVISOR_EXIT_GRACE_MS / 2)});
 };
 child.once("error", () => finish(127, null));
 child.once("exit", finish);
+process.on("SIGTERM", () => { terminationRequested = true; });
+process.on("SIGINT", () => { terminationRequested = true; });
+`;
+/** The worker runs as PID 1 in a private namespace. Its brief TERM grace lets
+    child handlers finish while the kernel retains authority over every fork. */
+const RESOURCE_WORKER_PID_NAMESPACE_ENTRYPOINT = `
+token="$1"
+shift
+read host_pid _ < /proc/self/stat
+printf '%s %s %s\n' "$token" "$host_pid" "$(readlink /proc/self/ns/pid)"
+exec "$@"
 `;
 const RESOURCE_OBSERVATION_MAX_SESSIONS = 10_000;
 const RESOURCE_OBSERVATION_MAX_TARGETS = 10_000;
@@ -439,12 +453,16 @@ type ResourceWorkerLimits = Partial<{
 }>;
 
 type ResourceWorkerProcessRuntime = Readonly<{
+  kernelContainment?: "proven" | "unavailable";
   pidAlive(pid: number): boolean;
   processIdentity(pid: number): string | null;
   descendants(pid: number): number[];
   processGroupId(pid: number): number | null;
   processGroupMembers(groupId: number): number[];
   namespaceMembers?(owner: string): number[] | null;
+  processNamespaceId?(pid: number): string | null;
+  processNamespacePid?(pid: number): number | null;
+  containmentMembers?(namespaceId: string): number[] | null;
   signal(pid: number, signal: NodeJS.Signals | 0): void;
 }>;
 
@@ -580,6 +598,45 @@ function portableWorkerNamespaceMembers(owner: string): number[] | null {
   return members;
 }
 
+function linuxProcessNamespaceId(pid: number): string | null {
+  try {
+    const namespaceId = readlinkSync(`/proc/${pid}/ns/pid`);
+    return /^pid:\[\d+\]$/.test(namespaceId) ? namespaceId : null;
+  } catch {
+    return null;
+  }
+}
+
+function linuxProcessNamespacePid(pid: number): number | null {
+  try {
+    const status = readFileSync(`/proc/${pid}/status`, "utf8");
+    const line = status.split("\n").find((candidate) => candidate.startsWith("NSpid:"));
+    const namespacePid = Number(line?.trim().split(/\s+/).at(-1));
+    return Number.isInteger(namespacePid) && namespacePid > 0 ? namespacePid : null;
+  } catch {
+    return null;
+  }
+}
+
+function linuxProcessNamespaceMembers(namespaceId: string): number[] | null {
+  let names: string[];
+  try {
+    names = readdirSync("/proc");
+  } catch {
+    return null;
+  }
+  const members: number[] = [];
+  for (const name of names) {
+    const pid = Number(name);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    const identity = procBackend.processIdentity(pid);
+    if (identity === null || linuxProcessNamespaceId(pid) !== namespaceId) continue;
+    if (procBackend.processIdentity(pid) === identity
+      && linuxProcessNamespaceId(pid) === namespaceId) members.push(pid);
+  }
+  return members;
+}
+
 const defaultResourceWorkerProcessRuntime: ResourceWorkerProcessRuntime = {
   pidAlive: (pid) => procBackend.pidAlive(pid),
   processIdentity: (pid) => procBackend.processIdentity(pid),
@@ -591,6 +648,11 @@ const defaultResourceWorkerProcessRuntime: ResourceWorkerProcessRuntime = {
   namespaceMembers: (owner) => procBackend.name === "linux"
     ? linuxWorkerNamespaceMembers(owner)
     : portableWorkerNamespaceMembers(owner),
+  processNamespaceId: (pid) => procBackend.name === "linux" ? linuxProcessNamespaceId(pid) : null,
+  processNamespacePid: (pid) => procBackend.name === "linux" ? linuxProcessNamespacePid(pid) : null,
+  containmentMembers: (namespaceId) => procBackend.name === "linux"
+    ? linuxProcessNamespaceMembers(namespaceId)
+    : null,
   signal: (pid, signal) => process.kill(pid, signal),
 };
 
@@ -866,7 +928,7 @@ async function collectResourcesInWorker(
   );
   const successCleanupTimeoutMs = Math.max(
     cleanupTimeoutMs,
-    closeTimeoutMs + cleanupAbsenceConfirmationMs + 60,
+    closeTimeoutMs + cleanupAbsenceConfirmationMs + RESOURCE_WORKER_SUPERVISOR_EXIT_GRACE_MS,
   );
   const settlementHeadroomMs = Math.max(
     Math.min(250, Math.ceil(observeTimeoutMs * 0.2)),
@@ -906,9 +968,35 @@ async function collectResourcesInWorker(
   const superviseWorker = processRuntime === defaultResourceWorkerProcessRuntime
     && resourceWorkerExecutableCanBeSupervised(launch.executable);
   const workerOwner = crypto.randomUUID();
+  const workerExecutable = superviseWorker ? process.execPath : launch.executable;
+  const workerArguments = superviseWorker
+    ? ["-e", RESOURCE_WORKER_SUPERVISOR, launch.executable, launch.workerPath]
+    : [launch.workerPath];
+  const namespaceExecutable = ["/usr/bin/unshare", "/bin/unshare"].find(existsSync);
+  const invalidAbsoluteExecutable = launch.executable.includes(path.sep)
+    && !resourceWorkerExecutableCanBeSupervised(launch.executable);
+  const containmentRequested = processRuntime === defaultResourceWorkerProcessRuntime
+    && process.platform === "linux"
+    && namespaceExecutable !== undefined
+    && !invalidAbsoluteExecutable;
+  const containmentToken = crypto.randomUUID();
   const worker = spawn(
-    superviseWorker ? process.execPath : launch.executable,
-    superviseWorker ? ["-e", RESOURCE_WORKER_SUPERVISOR, launch.executable, launch.workerPath] : [launch.workerPath],
+    containmentRequested ? namespaceExecutable : workerExecutable,
+    containmentRequested
+      ? [
+          "--user",
+          "--map-root-user",
+          "--pid",
+          "--fork",
+          "/bin/sh",
+          "-c",
+          RESOURCE_WORKER_PID_NAMESPACE_ENTRYPOINT,
+          "llv-resource-worker",
+          containmentToken,
+          workerExecutable,
+          ...workerArguments,
+        ]
+      : workerArguments,
     {
       cwd: process.cwd(),
       detached: true,
@@ -950,6 +1038,13 @@ async function collectResourcesInWorker(
     let cleanupFailure: Error | null = null;
     let cleanupVerificationFailed = false;
     let namespaceScanComplete = processRuntime.namespaceMembers === undefined;
+    let containmentNamespaceId: string | null = null;
+    let containmentRootPid: number | null = null;
+    let containmentRootIdentity: string | null = null;
+    const injectedContainmentProven = processRuntime !== defaultResourceWorkerProcessRuntime
+      && processRuntime.kernelContainment !== "unavailable";
+    let containmentScanComplete = injectedContainmentProven;
+    let containmentProven = injectedContainmentProven;
     let groupContinuityLost = false;
     let groupSignalSent = false;
     let leaderExited = false;
@@ -983,8 +1078,60 @@ async function collectResourcesInWorker(
       for (const timer of ownershipTimers) clearTimeout(timer);
       ownershipTimers.length = 0;
     };
+    const retainLiveContainmentMembers = (): boolean => {
+      if (!containmentProven || containmentNamespaceId === null || !processRuntime.containmentMembers) {
+        return false;
+      }
+      let members: number[] | null;
+      try {
+        const currentRootIdentity = containmentRootPid === null
+          ? null
+          : processRuntime.processIdentity(containmentRootPid);
+        const rootIsLive = containmentRootPid !== null
+          && containmentRootIdentity !== null
+          && currentRootIdentity === containmentRootIdentity
+          && processRuntime.processNamespaceId?.(containmentRootPid) === containmentNamespaceId
+          && processRuntime.processNamespacePid?.(containmentRootPid) === 1;
+        const rootIsAbsent = containmentRootPid !== null
+          && containmentRootIdentity !== null
+          && currentRootIdentity === null
+          && !processRuntime.pidAlive(containmentRootPid);
+        if (!rootIsLive && !rootIsAbsent && currentRootIdentity !== null) {
+          failCleanupVerification("resource collector PID namespace root identity changed");
+        }
+        if (rootIsLive) members = processRuntime.descendants(containmentRootPid!);
+        else if (rootIsAbsent) members = [];
+        else members = processRuntime.containmentMembers(containmentNamespaceId);
+      } catch (error) {
+        containmentScanComplete = false;
+        rememberCleanupIssue(error);
+        return false;
+      }
+      containmentScanComplete = members !== null;
+      if (members === null) {
+        rememberCleanupIssue(new Error("resource collector PID namespace could not be inspected"));
+        return false;
+      }
+      let discovered = false;
+      for (const member of members) {
+        const identity = processRuntime.processIdentity(member);
+        if (identity === null
+          || processRuntime.processNamespaceId?.(member) !== containmentNamespaceId
+          || processRuntime.processIdentity(member) !== identity) continue;
+        const prior = ownedProcesses.get(member);
+        if (prior !== undefined && prior !== identity) {
+          failCleanupVerification("resource collector PID namespace member identity was recycled");
+          continue;
+        }
+        if (prior === undefined) {
+          ownedProcesses.set(member, identity);
+          discovered = true;
+        }
+      }
+      return discovered;
+    };
     const retainLiveGroupMembers = () => {
-      if (!groupEstablished || groupContinuityLost || groupSignalSent || leaderExited
+      if (containmentNamespaceId !== null || !groupEstablished || groupContinuityLost || groupSignalSent || leaderExited
         || typeof pid !== "number" || expectedIdentity === null) return;
       if (processRuntime.processIdentity(pid) !== expectedIdentity) {
         groupContinuityLost = true;
@@ -1097,7 +1244,11 @@ async function collectResourcesInWorker(
         }
       }
       retainLiveGroupMembers();
-      return (includeNamespace && retainLiveNamespaceMembers()) || discovered;
+      const containmentDiscovered = retainLiveContainmentMembers();
+      const namespaceDiscovered = includeNamespace && containmentNamespaceId === null
+        ? retainLiveNamespaceMembers()
+        : false;
+      return namespaceDiscovered || containmentDiscovered || discovered;
     };
     const ownedProcessState = () => {
       const active: number[] = [];
@@ -1139,6 +1290,44 @@ async function collectResourcesInWorker(
     };
     const signalOwnedCleanup = (signal: NodeJS.Signals, includeNamespace = true) => {
       refreshOwnedProcesses(includeNamespace);
+      if (containmentNamespaceId !== null && containmentRootPid !== null && containmentRootIdentity !== null) {
+        const containmentTargets = signal === "SIGTERM"
+          ? ownedProcessState().active.filter((ownedPid) => ownedPid !== containmentRootPid
+            && processRuntime.processNamespaceId?.(ownedPid) === containmentNamespaceId)
+          : [];
+        for (const ownedPid of containmentTargets) {
+          const identity = ownedProcesses.get(ownedPid);
+          if (identity === undefined) continue;
+          const currentIdentity = processRuntime.processIdentity(ownedPid);
+          if (currentIdentity === null) continue;
+          if (currentIdentity !== identity
+            || processRuntime.processNamespaceId?.(ownedPid) !== containmentNamespaceId
+            || processRuntime.processIdentity(ownedPid) !== currentIdentity) {
+            failCleanupVerification("resource collector PID namespace member identity changed before cleanup");
+            continue;
+          }
+          try {
+            processRuntime.signal(ownedPid, signal);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") rememberCleanupIssue(error);
+          }
+        }
+        const currentIdentity = processRuntime.processIdentity(containmentRootPid);
+        if (currentIdentity === null) return;
+        if (currentIdentity !== containmentRootIdentity
+          || processRuntime.processNamespaceId?.(containmentRootPid) !== containmentNamespaceId
+          || processRuntime.processNamespacePid?.(containmentRootPid) !== 1
+          || processRuntime.processIdentity(containmentRootPid) !== currentIdentity) {
+          failCleanupVerification("resource collector PID namespace root identity changed before cleanup");
+          return;
+        }
+        try {
+          processRuntime.signal(containmentRootPid, signal);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") rememberCleanupIssue(error);
+        }
+        return;
+      }
       const state = ownedProcessState();
       const group = probeWorkerGroup();
       if (group === "present") {
@@ -1174,10 +1363,16 @@ async function collectResourcesInWorker(
     };
     const cleanupIsAbsent = (): boolean => {
       const state = ownedProcessState();
-      const absent = namespaceScanComplete
+      const processChecksAbsent = namespaceScanComplete
         && probeWorkerGroup() === "absent"
         && state.active.length === 0
         && !state.uncertain;
+      const absent = processChecksAbsent && containmentScanComplete;
+      if (processChecksAbsent && !containmentProven && cleanupFailure === null) {
+        cleanupVerificationFailed = true;
+        cleanupFailure = new Error("resource collector kernel containment could not be established");
+        return true;
+      }
       if (absent && cleanupVerificationFailed && cleanupFailure === null) {
         cleanupFailure = new Error(
           "resource collector worker cleanup ownership verification failed",
@@ -1198,6 +1393,39 @@ async function collectResourcesInWorker(
       }
       worker.unref();
     };
+    const acceptContainmentHandshake = (line: string): boolean => {
+      if (!containmentRequested || !line.startsWith(`${containmentToken} `)) return false;
+      const [token, rawRootPid, namespaceId, ...extra] = line.split(" ");
+      const rootPid = Number(rawRootPid);
+      if (line.length > 512 || token !== containmentToken || !Number.isInteger(rootPid) || rootPid <= 0
+        || !/^pid:\[\d+\]$/.test(namespaceId) || extra.length > 0
+        || !processRuntime.containmentMembers || !processRuntime.processNamespaceId
+        || !processRuntime.processNamespacePid) {
+        failCleanupVerification("resource collector PID namespace handshake was invalid");
+        return true;
+      }
+      const rootIdentity = processRuntime.processIdentity(rootPid);
+      const liveRootIsValid = rootIdentity !== null
+        && processRuntime.processNamespaceId(rootPid) === namespaceId
+        && processRuntime.processNamespacePid(rootPid) === 1
+        && processRuntime.processIdentity(rootPid) === rootIdentity;
+      const members = liveRootIsValid ? null : processRuntime.containmentMembers(namespaceId);
+      if (!liveRootIsValid && (members === null || members.length > 0)) {
+        failCleanupVerification("resource collector PID namespace root could not be verified");
+        return true;
+      }
+      containmentNamespaceId = namespaceId;
+      containmentRootPid = rootPid;
+      containmentRootIdentity = rootIdentity;
+      containmentProven = true;
+      containmentScanComplete = members?.length === 0;
+      namespaceScanComplete = true;
+      retainLiveContainmentMembers();
+      return true;
+    };
+    if (!containmentRequested && !containmentProven) {
+      failCleanupVerification("resource collector kernel containment is unavailable");
+    }
     const clearLifecycleTimers = () => {
       clearTimeout(workerTimer);
       if (killTimer) clearTimeout(killTimer);
@@ -1291,13 +1519,20 @@ async function collectResourcesInWorker(
       cause: "worker-timeout",
       message: "resource collector worker timed out",
     }), timeoutMs);
-    const onWorkerError = (error: Error) => finish({
-      type: "failure",
-      reason: "collector-crash",
-      cause: "worker-spawn",
-      message: "resource collector worker failed to start",
-      error,
-    });
+    const onWorkerError = (error: Error) => {
+      if (typeof pid !== "number") {
+        containmentProven = true;
+        containmentScanComplete = true;
+        namespaceScanComplete = true;
+      }
+      finish({
+        type: "failure",
+        reason: "collector-crash",
+        cause: "worker-spawn",
+        message: "resource collector worker failed to start",
+        error,
+      });
+    };
     const onWorkerExit = (code: number | null, signal: NodeJS.Signals | null) => {
       leaderExited = true;
       clearOwnershipTimers();
@@ -1333,7 +1568,7 @@ async function collectResourcesInWorker(
     worker.stdout.setEncoding("utf8");
     const onStdout = (chunk: string) => {
       outputBytes += Buffer.byteLength(chunk);
-      if (outputBytes > outputMaxBytes) {
+      if (outputBytes > outputMaxBytes + (containmentRequested && !containmentProven ? 512 : 0)) {
         finish({
           type: "failure",
           reason: "collector-crash",
@@ -1343,60 +1578,83 @@ async function collectResourcesInWorker(
         return;
       }
       output += chunk;
-      const newline = output.indexOf("\n");
-      if (newline < 0) return;
-      const raw = output.slice(0, newline);
-      output = output.slice(newline + 1);
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
+      while (!outcome) {
+        const newline = output.indexOf("\n");
+        if (newline < 0) return;
+        const raw = output.slice(0, newline);
+        output = output.slice(newline + 1);
+        if (acceptContainmentHandshake(raw)) {
+          outputBytes -= Buffer.byteLength(raw) + 1;
+          if (outputBytes > outputMaxBytes) {
+            finish({
+              type: "failure",
+              reason: "collector-crash",
+              cause: "worker-output-limit",
+              message: "resource collector worker exceeded stdout limit",
+            });
+          }
+          continue;
+        }
+        if (outputBytes > outputMaxBytes) {
+          finish({
+            type: "failure",
+            reason: "collector-crash",
+            cause: "worker-output-limit",
+            message: "resource collector worker exceeded stdout limit",
+          });
+          return;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          finish({
+            type: "failure",
+            reason: "collector-crash",
+            cause: "worker-output-invalid",
+            message: "resource collector worker emitted invalid JSON",
+          });
+          return;
+        }
+        const message = resourceWorkerMessage(parsed);
+        if (!message) {
+          finish({
+            type: "failure",
+            reason: "collector-crash",
+            cause: "worker-output-invalid",
+            message: "resource collector worker emitted an invalid message",
+          });
+          return;
+        }
+        if (message.type === "observation" && message.diagnostic.fresh !== fresh) {
+          finish({
+            type: "failure",
+            reason: "collector-crash",
+            cause: "worker-output-invalid",
+            message: "resource collector worker returned mismatched freshness",
+          });
+          return;
+        }
+        if (message.type === "failure") {
+          finish({
+            type: "failure",
+            reason: "collector-crash",
+            cause: "worker-failure",
+            message: "resource collector worker reported a failure",
+            error: new Error(message.error),
+          });
+          return;
+        }
         finish({
-          type: "failure",
-          reason: "collector-crash",
-          cause: "worker-output-invalid",
-          message: "resource collector worker emitted invalid JSON",
+          type: "success",
+          value: collectedResources(message.payload, message.diagnostic, message.targets, targetEpoch),
         });
-        return;
       }
-      const message = resourceWorkerMessage(parsed);
-      if (!message) {
-        finish({
-          type: "failure",
-          reason: "collector-crash",
-          cause: "worker-output-invalid",
-          message: "resource collector worker emitted an invalid message",
-        });
-        return;
-      }
-      if (message.type === "observation" && message.diagnostic.fresh !== fresh) {
-        finish({
-          type: "failure",
-          reason: "collector-crash",
-          cause: "worker-output-invalid",
-          message: "resource collector worker returned mismatched freshness",
-        });
-        return;
-      }
-      if (message.type === "failure") {
-        finish({
-          type: "failure",
-          reason: "collector-crash",
-          cause: "worker-failure",
-          message: "resource collector worker reported a failure",
-          error: new Error(message.error),
-        });
-        return;
-      }
-      finish({
-        type: "success",
-        value: collectedResources(message.payload, message.diagnostic, message.targets, targetEpoch),
-      });
     };
     const onStderr = (chunk: Buffer) => {
       outputBytes += chunk.length;
       stderrTail.append(stderrDecoder.write(chunk));
-      if (outputBytes > outputMaxBytes) {
+      if (outputBytes > outputMaxBytes + (containmentRequested && !containmentProven ? 512 : 0)) {
         finish({
           type: "failure",
           reason: "collector-crash",
