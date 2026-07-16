@@ -164,6 +164,12 @@ export interface RuntimeAttention {
 
 export interface RuntimeOperationReceipt {
   operationId: string;
+  /** The terminal attempt this operation replaces, when it was created by Retry. */
+  retryOfOperationId?: string | null;
+  /** Stable reducer identity used to replace the visible retry ancestor. */
+  presentationOperationId?: string;
+  /** Monotonic revision across every attempt sharing the presentation identity. */
+  presentationRevision?: number;
   idempotencyKey: string;
   conversationId: string;
   kind: RuntimeOperationKind;
@@ -176,6 +182,20 @@ export interface RuntimeOperationReceipt {
   revision: number;
 }
 export type RuntimeReceipt = RuntimeOperationReceipt;
+
+export function runtimePresentationReceipt(receipt: RuntimeOperationReceipt): RuntimeOperationReceipt {
+  if (!receipt.presentationOperationId || receipt.presentationRevision === undefined) return receipt;
+  const {
+    presentationOperationId,
+    presentationRevision,
+    ...durable
+  } = receipt;
+  return {
+    ...durable,
+    operationId: presentationOperationId,
+    revision: presentationRevision,
+  };
+}
 
 interface RuntimeCommandBase {
   kind: RuntimeOperationKind;
@@ -224,6 +244,10 @@ export interface RuntimeOperationResult {
   operationId: string;
   receipt: RuntimeOperationReceipt;
   replayed: boolean;
+}
+
+export interface RuntimeRetryOptions {
+  requireHostedConversationId?: string;
 }
 
 export class RuntimeIdempotencyConflictError extends Error {
