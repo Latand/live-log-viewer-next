@@ -6,6 +6,7 @@ import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt } from "./contracts";
+import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { didStructuredHostStartupFail, markStructuredHostStartupReady } from "./startupStatus";
 
@@ -22,8 +23,8 @@ export interface StructuredMessageRequest {
 }
 
 export type StructuredMessageResult =
-  | { ok: true; structured: true; target: string; outcome: "queued" | "delivering" | "delivered"; operationId: string; receipt: RuntimeOperationReceipt }
-  | { ok: true; structured: true; target: string; outcome: "held" }
+  | { ok: true; structured: true; target: string | null; outcome: "queued" | "delivering" | "delivered"; operationId: string; receipt: RuntimeOperationReceipt; spawned?: boolean }
+  | { ok: true; structured: true; target: string | null; outcome: "held"; spawned?: boolean }
   | { ok: false; structured: true; outcome: "failed"; error: string; status: number; operationId?: string; receipt?: RuntimeOperationReceipt };
 
 export interface StructuredMessageDependencies {
@@ -34,6 +35,7 @@ export interface StructuredMessageDependencies {
   requestMigrationTick?: () => void;
   startupFailed?: () => boolean;
   startupRecovered?: () => void;
+  recover?: typeof recoverDeadStructuredConversation;
 }
 
 export interface HeldStructuredMessageRequest {
@@ -154,6 +156,26 @@ export async function enqueueStructuredMessage(
   }
   if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
   const registry = (dependencies.registry ?? agentRegistry)();
+  let recoveredHost = false;
+  if (session.host === "dead" || session.host === "unhosted") {
+    let recovered;
+    try {
+      recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({
+        path: request.path || session.artifactPath || "",
+        conversationId: session.conversationId as ViewerConversationId,
+      }, { registry, client });
+    } catch (error) {
+      return {
+        ok: false,
+        structured: true,
+        outcome: "failed",
+        error: error instanceof Error ? error.message : "structured host recovery failed",
+        status: 503,
+      };
+    }
+    if (!recovered) return ownershipUnavailable();
+    recoveredHost = recovered.spawned;
+  }
   const conversation = registry.conversation(session.conversationId as ViewerConversationId);
   if (!conversation) return ownershipUnavailable();
   try {
@@ -165,14 +187,26 @@ export async function enqueueStructuredMessage(
     }
     if (reservation.state === "held") {
       (dependencies.requestMigrationTick ?? requestAccountMigrationTick)();
-      return { ok: true, structured: true, target: conversation.id, outcome: "held" };
+      return {
+        ok: true,
+        structured: true,
+        target: recoveredHost ? null : conversation.id,
+        outcome: "held",
+        ...(recoveredHost ? { spawned: true } : {}),
+      };
     }
     if (reservation.state === "assigned" && reservation.generationId) {
       const claimed = registry.beginDeliveryAttempt(reservation.id, reservation.generationId);
       if (!claimed) {
         registry.requeueHeldDelivery(reservation.id);
         (dependencies.requestMigrationTick ?? requestAccountMigrationTick)();
-        return { ok: true, structured: true, target: conversation.id, outcome: "held" };
+        return {
+          ok: true,
+          structured: true,
+          target: recoveredHost ? null : conversation.id,
+          outcome: "held",
+          ...(recoveredHost ? { spawned: true } : {}),
+        };
       }
       claimedReservationId = claimed.id;
     } else if (reservation.state !== "delivered") {
@@ -215,7 +249,15 @@ export async function enqueueStructuredMessage(
     }
     (dependencies.kick ?? kickStructuredDeliveryQueue)();
     const outcome = receipt.status === "delivering" || receipt.status === "delivered" ? receipt.status : "queued";
-    return { ok: true, structured: true, target: conversation.id, outcome, operationId: result.operationId, receipt };
+    return {
+      ok: true,
+      structured: true,
+      target: recoveredHost ? null : conversation.id,
+      outcome,
+      operationId: result.operationId,
+      receipt,
+      ...(recoveredHost ? { spawned: true } : {}),
+    };
   } catch (error) {
     return {
       ok: false,

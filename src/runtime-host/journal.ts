@@ -8,6 +8,7 @@ import {
   assertRuntimeEvent,
   normalizeRuntimeEventInput,
   parseRuntimeScope,
+  runtimePresentationReceipt,
   runtimeScopeKey,
   type RuntimeAttention,
   type RuntimeEdge,
@@ -22,6 +23,7 @@ import {
   type RuntimeOperationResult,
   type RuntimeReceiptStatus,
   type RuntimeReplay,
+  type RuntimeRetryOptions,
   type RuntimeSession,
   type RuntimeSnapshot,
   type ViewerDeploymentOwner,
@@ -101,6 +103,17 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function terminalRetryOperationId(operationId: string): string {
+  return `retry_${createHash("sha256").update(operationId).digest("hex")}`;
+}
+
+function retryRequestHash(command: RuntimeOperationCommand): string {
+  const value = { ...command } as Record<string, unknown>;
+  delete value.idempotencyKey;
+  delete value.operationId;
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
 function recordHash(previous: string, row: HashableEventRow | EventRow): string {
   const envelope = { ...row } as Record<string, unknown>;
   delete envelope.prev_hash;
@@ -140,6 +153,27 @@ function strings(value: unknown): string[] {
 
 function receipts(value: unknown): RuntimeOperationReceipt[] {
   return Array.isArray(value) ? value.filter((item): item is RuntimeOperationReceipt => Boolean(item) && typeof item === "object") : [];
+}
+
+/**
+ * Receipts are append-only audit records.  The session projection is a
+ * presentation index, so a replacement hides every ancestor in its retry
+ * chain.  Keep this derivation here so snapshots and live projection use the
+ * same rule. Durable operation rows and events remain unchanged.
+ */
+function visibleReceipts(value: RuntimeOperationReceipt[]): RuntimeOperationReceipt[] {
+  const byOperationId = new Map(value.map((receipt) => [receipt.operationId, receipt]));
+  const superseded = new Set<string>();
+  for (const receipt of value) {
+    const seen = new Set<string>();
+    let ancestor = receipt.retryOfOperationId ?? null;
+    while (ancestor && !seen.has(ancestor)) {
+      seen.add(ancestor);
+      superseded.add(ancestor);
+      ancestor = byOperationId.get(ancestor)?.retryOfOperationId ?? null;
+    }
+  }
+  return value.filter((receipt) => !superseded.has(receipt.operationId));
 }
 
 function baseSession(id: string, payload: Record<string, unknown>, revision: number): RuntimeSession {
@@ -273,6 +307,14 @@ export class RuntimeJournal {
   }
 
   executeOperation(command: RuntimeOperationCommand): RuntimeOperationResult {
+    return this.executeOperationWithLineage(command);
+  }
+
+  private executeOperationWithLineage(
+    command: RuntimeOperationCommand,
+    retryOfOperationId?: string,
+    beforeAdmission?: () => void,
+  ): RuntimeOperationResult {
     this.assertHealthy();
     this.assertOperation(command);
     const operationId = command.operationId?.trim() || newOperationId();
@@ -292,7 +334,16 @@ export class RuntimeJournal {
       }
       const operationOwner = this.db.query<{ idempotency_key: string }, [string]>("SELECT idempotency_key FROM operations WHERE operation_id = ?").get(operationId);
       if (operationOwner) throw new RuntimeIdempotencyConflictError("operationId already belongs to another request");
-      const receipt = this.operationReceipt(command, operationId);
+      beforeAdmission?.();
+      const retryParent = retryOfOperationId
+        ? this.db.query<{ receipt_json: string }, [string]>(
+            "SELECT receipt_json FROM operations WHERE operation_id = ?",
+          ).get(retryOfOperationId)
+        : null;
+      const parentReceipt = retryParent
+        ? JSON.parse(retryParent.receipt_json) as RuntimeOperationReceipt
+        : null;
+      const receipt = this.operationReceipt(command, operationId, retryOfOperationId, parentReceipt);
       const effectPayload = command.kind === "answer"
         ? { ...command, operationId, resolution: this.encryptSecret(command.resolution) }
         : {
@@ -334,6 +385,32 @@ export class RuntimeJournal {
     this.assertHealthy();
     const row = this.db.query<{ operation_id: string; receipt_json: string }, [string]>("SELECT operation_id, receipt_json FROM operations WHERE operation_id = ?").get(operationId);
     return row ? { operationId: row.operation_id, receipt: JSON.parse(row.receipt_json) as RuntimeOperationReceipt, replayed: false } : null;
+  }
+
+  currentRetryResult(operationId: string): RuntimeOperationResult | null {
+    this.assertHealthy();
+    const rows = this.db.query<{ operation_id: string; receipt_json: string }, []>(
+      "SELECT operation_id, receipt_json FROM operations ORDER BY event_seq",
+    ).all();
+    const byOperationId = new Map<string, RuntimeOperationReceipt>();
+    const byParent = new Map<string, string>();
+    for (const row of rows) {
+      const receipt = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      byOperationId.set(row.operation_id, receipt);
+      if (receipt.retryOfOperationId) byParent.set(receipt.retryOfOperationId, row.operation_id);
+    }
+    let currentOperationId = operationId;
+    let receipt = byOperationId.get(currentOperationId);
+    if (!receipt) return null;
+    const seen = new Set<string>();
+    while (!seen.has(currentOperationId)) {
+      seen.add(currentOperationId);
+      const child = byParent.get(currentOperationId);
+      if (!child) break;
+      currentOperationId = child;
+      receipt = byOperationId.get(child)!;
+    }
+    return { operationId: currentOperationId, receipt, replayed: currentOperationId !== operationId };
   }
 
   completeOperation(
@@ -386,6 +463,9 @@ export class RuntimeJournal {
         reason: details.reason !== undefined ? details.reason : status === "queued" ? previous.reason : null,
         at: new Date(this.now()).toISOString(),
         revision: previous.revision + 1,
+        ...(previous.presentationRevision !== undefined
+          ? { presentationRevision: previous.presentationRevision + 1 }
+          : {}),
       };
       const event = this.appendInTransaction(normalizeRuntimeEventInput({
         scope: { type: "operation", id: operationId },
@@ -409,9 +489,74 @@ export class RuntimeJournal {
     }
   }
 
-  retryOperation(operationId: string): RuntimeOperationResult {
+  retryOperation(
+    operationId: string,
+    nextIdempotencyKey?: string,
+    options: RuntimeRetryOptions = {},
+  ): RuntimeOperationResult {
     this.assertHealthy();
     if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+    if (nextIdempotencyKey !== undefined) {
+      const row = this.db.query<{ request_json: string; receipt_json: string }, [string]>(
+        "SELECT request_json, receipt_json FROM operations WHERE operation_id = ?",
+      ).get(operationId);
+      if (!row) throw new Error("runtime operation is unknown");
+      const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      if (previous.status !== "failed" && previous.status !== "rejected") {
+        throw new Error("only terminal failed runtime operations can start a new attempt");
+      }
+      if (command.kind !== "send" && command.kind !== "steer") {
+        throw new Error("runtime operation does not support retry");
+      }
+      if (!nextIdempotencyKey || nextIdempotencyKey === command.idempotencyKey) {
+        throw new Error("a fresh idempotency key is required for a new attempt");
+      }
+      const replacementOperationId = terminalRetryOperationId(operationId);
+      const replacement = this.db.query<{ request_json: string; receipt_json: string }, [string]>(
+        "SELECT request_json, receipt_json FROM operations WHERE operation_id = ?",
+      ).get(replacementOperationId);
+      if (replacement) {
+        const replacementCommand = JSON.parse(replacement.request_json) as RuntimeOperationCommand;
+        if (retryRequestHash(replacementCommand) !== retryRequestHash(command)) {
+          throw new RuntimeIdempotencyConflictError("terminal retry operation already belongs to another request");
+        }
+        return {
+          operationId: replacementOperationId,
+          receipt: JSON.parse(replacement.receipt_json) as RuntimeOperationReceipt,
+          replayed: true,
+        };
+      }
+      return this.executeOperationWithLineage({
+        ...command,
+        operationId: replacementOperationId,
+        idempotencyKey: nextIdempotencyKey,
+      }, operationId, () => {
+        const current = this.db.query<{ request_json: string; receipt_json: string }, [string]>(
+          "SELECT request_json, receipt_json FROM operations WHERE operation_id = ?",
+        ).get(operationId);
+        if (!current) throw new Error("runtime operation is unknown");
+        const currentReceipt = JSON.parse(current.receipt_json) as RuntimeOperationReceipt;
+        const currentCommand = JSON.parse(current.request_json) as RuntimeOperationCommand;
+        if (currentReceipt.status !== "failed" && currentReceipt.status !== "rejected") {
+          throw new Error("only terminal failed runtime operations can start a new attempt");
+        }
+        if (currentCommand.kind !== "send" && currentCommand.kind !== "steer") {
+          throw new Error("runtime operation does not support retry");
+        }
+        if (options.requireHostedConversationId !== undefined) {
+          if (currentCommand.conversationId !== options.requireHostedConversationId) {
+            throw new Error("structured recovery ownership changed before retry admission");
+          }
+          const session = this.entity<RuntimeSession>("session", options.requireHostedConversationId);
+          if (!session
+            || session.host !== "hosted"
+            || (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker")) {
+            throw new Error("structured recovery ownership changed before retry admission");
+          }
+        }
+      });
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db.query<{ request_json: string; receipt_json: string }, [string]>(
@@ -430,6 +575,9 @@ export class RuntimeJournal {
         reason: null,
         at: new Date(this.now()).toISOString(),
         revision: previous.revision + 1,
+        ...(previous.presentationRevision !== undefined
+          ? { presentationRevision: previous.presentationRevision + 1 }
+          : {}),
       };
       const event = this.appendInTransaction(normalizeRuntimeEventInput({
         scope: { type: "operation", id: operationId },
@@ -482,9 +630,14 @@ export class RuntimeJournal {
         serverTime: new Date(this.now()).toISOString(),
         runtime: { hostEpoch: Number(this.meta("host_epoch")), health: this.meta("health") },
         filesRevision: Number(this.meta("files_revision")),
-        sessions: this.entityValues<RuntimeSession>("session"),
+        sessions: this.entityValues<RuntimeSession>("session").map((session) => ({
+          ...session,
+          recentReceipts: visibleReceipts(session.recentReceipts).map(runtimePresentationReceipt),
+        })),
         attentions: this.entityValues<RuntimeAttention>("attention"),
-        recentOperations: this.recentEntityValues<RuntimeOperationReceipt>("operation", 100),
+        recentOperations: visibleReceipts(
+          this.recentEntityValues<RuntimeOperationReceipt>("operation", 100),
+        ).map(runtimePresentationReceipt),
         edges: this.entityValues<RuntimeEdge>("edge"),
         flows: this.scopedValues<RuntimeSnapshot["flows"][number]["value"]>("flow"),
         workflows: this.scopedValues<RuntimeSnapshot["workflows"][number]["value"]>("workflow"),
@@ -509,7 +662,16 @@ export class RuntimeJournal {
     const events: RuntimeEvent[] = [];
     let bytes = 2;
     for (const row of rows) {
-      const event = toEvent(row);
+      const durableEvent = toEvent(row);
+      const receipt = durableEvent.kind === "receipt"
+        ? runtimePresentationReceipt(durableEvent.payload as unknown as RuntimeOperationReceipt)
+        : null;
+      const event = receipt ? {
+        ...durableEvent,
+        scope: { type: "operation" as const, id: receipt.operationId },
+        revision: receipt.revision,
+        payload: receipt as unknown as Record<string, unknown>,
+      } : durableEvent;
       const size = Buffer.byteLength(JSON.stringify(event)) + (events.length ? 1 : 0);
       if (events.length && bytes + size > 240 * 1024) break;
       events.push(event);
@@ -835,7 +997,12 @@ export class RuntimeJournal {
     }
   }
 
-  private operationReceipt(command: RuntimeOperationCommand, operationId: string): RuntimeOperationReceipt {
+  private operationReceipt(
+    command: RuntimeOperationCommand,
+    operationId: string,
+    retryOfOperationId?: string,
+    retryParent: RuntimeOperationReceipt | null = null,
+  ): RuntimeOperationReceipt {
     const session = this.entity<RuntimeSession>("session", command.conversationId);
     let status: RuntimeReceiptStatus;
     let reason: string | null = null;
@@ -917,6 +1084,11 @@ export class RuntimeJournal {
     const revision = Number(this.db.query<{ revision: number }, [string]>("SELECT revision FROM scope_revisions WHERE scope = ?").get(`operation:${operationId}`)?.revision ?? 0) + 1;
     return {
       operationId,
+      ...(retryOfOperationId ? { retryOfOperationId } : {}),
+      ...(retryParent ? {
+        presentationOperationId: retryParent.presentationOperationId ?? retryParent.operationId,
+        presentationRevision: (retryParent.presentationRevision ?? retryParent.revision) + 1,
+      } : {}),
       idempotencyKey: command.idempotencyKey,
       conversationId: command.conversationId,
       kind: command.kind,
@@ -965,6 +1137,12 @@ export class RuntimeJournal {
       return;
     }
     if (command.kind === "spawn") {
+      const requestedParentConversationId = command.parentConversationId && command.parentConversationId !== command.conversationId
+        ? command.parentConversationId
+        : null;
+      const parentConversationId = requestedParentConversationId
+        ?? this.entity<RuntimeSession>("session", command.conversationId)?.parentConversationId
+        ?? null;
       this.appendInTransaction(normalizeRuntimeEventInput({
         scope: { type: "session", id: command.conversationId },
         kind: "session-status",
@@ -978,14 +1156,16 @@ export class RuntimeJournal {
           turn: "unknown",
           provenance: "structured",
           accountId: command.accountId ?? null,
-          parentConversationId: command.parentConversationId ?? null,
+          parentConversationId,
           cwd: command.cwd,
           artifactPath: null,
           capabilities: { steer: command.engine === "codex", structuredAttention: true },
           activeTurnId: null,
         },
       }));
-      if (command.parentConversationId) {
+      const duplicateLineage = parentConversationId && this.entityValues<RuntimeEdge>("edge").some((edge) =>
+        edge.parentConversationId === parentConversationId && edge.childConversationId === command.conversationId);
+      if (parentConversationId && !duplicateLineage) {
         const edgeId = `edge-${operationId}`;
         this.appendInTransaction(normalizeRuntimeEventInput({
           scope: { type: "edge", id: edgeId },
@@ -995,7 +1175,7 @@ export class RuntimeJournal {
           payload: {
             id: edgeId,
             kind: "viewer_spawn",
-            parentConversationId: command.parentConversationId,
+            parentConversationId,
             childConversationId: command.conversationId,
             createdByOperationId: operationId,
             createdAt: new Date(this.now()).toISOString(),
@@ -1088,7 +1268,10 @@ export class RuntimeJournal {
       if (typeof receipt.conversationId === "string") {
         const session = this.entity<RuntimeSession>("session", receipt.conversationId);
         if (session) {
-          const recentReceipts = [receipt, ...session.recentReceipts.filter((item) => item.operationId !== operationId)].slice(0, 8);
+          const recentReceipts = visibleReceipts([
+            receipt,
+            ...session.recentReceipts.filter((item) => item.operationId !== operationId),
+          ]).slice(0, 8);
           this.upsertEntity("session", receipt.conversationId, session.revision, { ...session, recentReceipts }, event.seq);
         }
       }

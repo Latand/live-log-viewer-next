@@ -16,7 +16,6 @@ import type { RuntimeHostClient } from "./client";
 import type { EngineHost, HostState } from "./engineHost";
 import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
 import { publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "./structuredDeliveryController";
-import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 
 export type SpawnedStructuredHost = EngineHost & {
   identity: { threadId: string; path: string | null } | { sessionId: string };
@@ -110,6 +109,23 @@ export async function recoverPendingStructuredSpawns(
 
   const snapshot = registry.snapshot();
   for (const receipt of Object.values(snapshot.receipts)) {
+    const effect = spawnEffects.get(receipt.launchId);
+    if (receipt.state === "starting" && !receipt.key && receipt.transport !== "tmux") {
+      const operation = await client.operationStatus(receipt.launchId);
+      if (receipt.transport !== "structured" && !effect && !operation) continue;
+      let reason: string;
+      if (operation?.receipt.status === "queued" || operation?.receipt.status === "pending" || operation?.receipt.status === "delivering") {
+        reason = `structured spawn interrupted before identity staging: ${receipt.launchId}`;
+        await client.transitionOperation(receipt.launchId, "failed", { reason });
+      } else if (!operation) {
+        reason = `structured spawn interrupted before runtime admission: ${receipt.launchId}`;
+      } else {
+        reason = operation.receipt.reason
+          ?? `structured spawn operation ended as ${operation.receipt.status} before identity staging`;
+      }
+      registry.failStructuredSpawn(receipt.launchId, reason);
+      continue;
+    }
     if (receipt.state !== "path-pending" || !receipt.key || !receipt.artifactPath) continue;
     const entry = snapshot.entries[sessionKeyId(receipt.key)];
     const operation = await client.operationStatus(receipt.launchId);
@@ -151,12 +167,12 @@ export async function recoverPendingStructuredSpawns(
       continue;
     }
     if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") continue;
-    const effect = spawnEffects.get(receipt.launchId);
     const prompt = typeof effect?.prompt === "string" ? effect.prompt : null;
     if (prompt === null || effect?.conversationId !== receipt.conversationId || effect?.cwd !== receipt.cwd) {
       throw new Error(`structured spawn recovery is missing durable prompt admission for ${receipt.launchId}`);
     }
     if (prompt.trim()) {
+      const { enqueueStructuredMessage } = await import("./structuredMessageDelivery");
       const delivered = await enqueueStructuredMessage({
         path: receipt.artifactPath,
         conversationId: receipt.conversationId,
@@ -235,8 +251,9 @@ export function structuredClaudeSpawnPolicyBaseSettingsPath(
 async function defaultStartHost(input: StructuredSpawnInput, capability: string): Promise<SpawnedStructuredHost> {
   const profile = input.spec.launchProfile ?? {} as LaunchProfile;
   const env = { ...input.account.env, LLV_SPAWN_CAPABILITY: capability };
+  const resumeSessionId = structuredResumeSessionId(input);
   if (input.engine === "codex") {
-    return await CodexAppServerHost.start({
+    const options = {
       cwd: input.spec.cwd,
       codexHome: input.account.home,
       fileAuthCredentials: input.account.kind === "managed",
@@ -246,12 +263,14 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
       sandbox: profile.readOnly ? "read-only" : "danger-full-access",
       approvalPolicy: profile.permissionMode ?? undefined,
       env,
-    });
+    };
+    return resumeSessionId
+      ? await CodexAppServerHost.adopt(resumeSessionId, options)
+      : await CodexAppServerHost.start(options);
   }
-  const sessionId = input.spec.transcript ? path.basename(input.spec.transcript, ".jsonl") : undefined;
-  return await ClaudeStreamBrokerHost.start({
+  const sessionId = resumeSessionId ?? (input.spec.transcript ? path.basename(input.spec.transcript, ".jsonl") : undefined);
+  const options = {
     cwd: input.spec.cwd,
-    ...(sessionId ? { sessionId } : {}),
     claudeConfigDir: input.account.home,
     claudeProjectsDir: input.account.transcriptRoot,
     spawnPolicyBaseSettingsPath: structuredClaudeSpawnPolicyBaseSettingsPath(input.account),
@@ -260,7 +279,20 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     effort: profile.effort ?? undefined,
     permissionMode: profile.permissionMode ?? "default",
     env,
-  });
+  };
+  return resumeSessionId
+    ? await ClaudeStreamBrokerHost.adopt(resumeSessionId, options)
+    : await ClaudeStreamBrokerHost.start({ ...options, ...(sessionId ? { sessionId } : {}) });
+}
+
+export function structuredResumeSessionId(
+  input: Pick<StructuredSpawnInput, "receipt" | "registry">,
+): string | null {
+  if (input.receipt.purpose !== "resume-successor") return null;
+  const conversation = input.registry.conversation(input.receipt.conversationId);
+  const source = conversation?.generations.find((generation) => generation.path === input.receipt.resumeSourcePath)
+    ?? conversation?.generations.at(-1);
+  return source?.id ?? null;
 }
 
 async function defaultBindHost(
@@ -277,6 +309,7 @@ async function defaultBindHost(
 
 async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: string): Promise<void> {
   if (!input.prompt.trim()) return;
+  const { enqueueStructuredMessage } = await import("./structuredMessageDelivery");
   const delivered = await enqueueStructuredMessage({
     path: artifactPath,
     conversationId: input.receipt.conversationId,
@@ -309,7 +342,7 @@ export async function spawnStructuredConversation(
   const processIdentity = dependencies.processIdentity ?? (() => ({ pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }));
   const operationId = input.receipt.launchId;
   let host: SpawnedStructuredHost | null = null;
-  let binding: HostBinding = { stopPersistence: () => {}, unregister: async () => {} };
+  const binding: HostBinding = { stopPersistence: () => {}, unregister: async () => {} };
   let key: SessionKey | null = null;
   try {
     await input.client.command({
@@ -322,6 +355,7 @@ export async function spawnStructuredConversation(
       prompt: input.prompt,
       accountId: input.account.accountId,
       parentConversationId: input.receipt.parentConversationId,
+      ...(input.receipt.purpose === "resume-successor" ? { sessionId: structuredResumeSessionId(input) } : {}),
     });
     const capability = input.registry.rotateSpawnCapabilityForReceipt(input.receipt.launchId);
     host = await startHost(input, capability);

@@ -2004,21 +2004,41 @@ export class AgentRegistry {
         launchProfile: profile,
       };
       file.receipts[receipt.launchId] = receipt;
-      if (receipt.parentConversationId) {
-        file.lineageEdges[receipt.conversationId] = {
-          childConversationId: receipt.conversationId,
-          parentConversationId: receipt.parentConversationId,
-          childSessionKey: null,
-          parentSessionKey: input.parentSessionKey ?? null,
-          childArtifactPath: null,
-          parentArtifactPath: input.parentArtifactPath ?? null,
-          kind: reviewsConversationId ? "review" : "spawn",
-          role,
-          reviewsConversationId,
-          source: "viewer-spawn",
-          evidence: { launchId: receipt.launchId, clientAttemptId: receipt.clientAttemptId },
-          createdAt: receipt.createdAt,
-        };
+      if (receipt.parentConversationId && receipt.parentConversationId !== receipt.conversationId) {
+        const existingLineage = input.purpose === "resume-successor"
+          ? file.lineageEdges[receipt.conversationId]
+          : null;
+        if (existingLineage && existingLineage.childConversationId === receipt.conversationId) {
+          const existingParentConversationId = resolveConversationAlias(file, existingLineage.parentConversationId);
+          if (existingParentConversationId !== receipt.conversationId) {
+            /* A resume creates a fresh receipt for an existing conversation.
+               Its edge records durable relationship metadata, while child
+               generation evidence changes only when that receipt settles. */
+            file.lineageEdges[receipt.conversationId] = {
+              ...existingLineage,
+              childConversationId: receipt.conversationId,
+              parentConversationId: existingParentConversationId,
+              reviewsConversationId: existingLineage.reviewsConversationId
+                ? resolveConversationAlias(file, existingLineage.reviewsConversationId)
+                : null,
+            };
+          }
+        } else {
+          file.lineageEdges[receipt.conversationId] = {
+            childConversationId: receipt.conversationId,
+            parentConversationId: receipt.parentConversationId,
+            childSessionKey: null,
+            parentSessionKey: input.parentSessionKey ?? null,
+            childArtifactPath: null,
+            parentArtifactPath: input.parentArtifactPath ?? null,
+            kind: reviewsConversationId ? "review" : "spawn",
+            role,
+            reviewsConversationId,
+            source: "viewer-spawn",
+            evidence: { launchId: receipt.launchId, clientAttemptId: receipt.clientAttemptId },
+            createdAt: receipt.createdAt,
+          };
+        }
       }
       for (const membership of input.memberships ?? []) {
         recordMembership(file, receipt.conversationId, membership, receipt.createdAt);

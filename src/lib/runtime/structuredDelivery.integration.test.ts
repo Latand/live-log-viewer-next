@@ -644,6 +644,54 @@ test("a delivering entry resumes after restart through the host ledger without a
   reopenedJournal.close();
 });
 
+test("repeated terminal retry clicks produce one replacement engine write", async () => {
+  const filename = path.join(sandbox, "terminal-retry-clicks.sqlite");
+  const journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: "conversation-terminal-retry" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-terminal-retry",
+      sessionKey: { engine: "codex", sessionId: "session-terminal-retry" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/terminal-retry.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "operation-terminal-original",
+    idempotencyKey: "message-terminal-original",
+    conversationId: "conversation-terminal-retry",
+    text: "deliver this once",
+    policy: "queue",
+  });
+  journal.transitionOperation("operation-terminal-original", "delivering");
+  journal.transitionOperation("operation-terminal-original", "failed", { reason: "dead-host" });
+
+  const replacement = journal.retryOperation("operation-terminal-original", "message-terminal-replacement");
+  const repeated = journal.retryOperation("operation-terminal-original", "message-terminal-second-click");
+  const ledger = createFakeDeliveryLedger();
+
+  expect(repeated).toMatchObject({ operationId: replacement.operationId, replayed: true });
+  expect(journal.effectBatch()).toHaveLength(1);
+  await new StructuredDeliveryQueue(journalPort(journal), () => new FakeEngineHost(ledger)).drain();
+
+  expect(ledger.writes).toEqual([{
+    id: replacement.operationId,
+    text: "deliver this once",
+    expectedTurnId: null,
+  }]);
+  expect(journal.operationResult(replacement.operationId)?.receipt).toMatchObject({
+    status: "delivered",
+    retryOfOperationId: "operation-terminal-original",
+  });
+  journal.close();
+});
+
 test("ledger recovery drains every entry beyond one effect batch", async () => {
   const filename = path.join(sandbox, "batch-continuation.sqlite");
   const journal = new RuntimeJournal(filename, { structuredHosts: true });
