@@ -570,8 +570,8 @@ export class MigrationRevisionError extends Error {
 }
 
 export class DeliveryReservationConflictError extends Error {
-  constructor() {
-    super("client message id is already reserved for another request");
+  constructor(message = "client message id is already reserved for another request") {
+    super(message);
     this.name = "DeliveryReservationConflictError";
   }
 }
@@ -3730,11 +3730,20 @@ export class AgentRegistry {
     if (payloadKind === "text" && (!text || text.length > 32_000)) throw new Error("held delivery must contain at most 32000 characters");
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, conversationId);
-      const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;
+      const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) =>
+        resolveConversationAlias(file, item.conversationId) === canonicalId
+        && item.clientMessageId === clientMessageId) : undefined;
       const requestedCommand = canonicalHeldDeliveryCommand(commandInput, existing?.id ?? "pending-delivery");
       const requestDigest = heldDeliveryRequestDigest(canonicalId, text, requestedCommand);
       if (existing && !heldDeliveryRequestDigests(file, canonicalId, text, requestedCommand).has(existing.requestDigest ?? "")) {
         throw new DeliveryReservationConflictError();
+      }
+      if (!existing && commandInput.operationId) {
+        const operationOwner = Object.values(file.heldDeliveries).find((item) =>
+          item.command.operationId === requestedCommand.operationId);
+        if (operationOwner) {
+          throw new DeliveryReservationConflictError("operation id is already reserved for another client message");
+        }
       }
       const conversation = file.conversations[canonicalId];
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));

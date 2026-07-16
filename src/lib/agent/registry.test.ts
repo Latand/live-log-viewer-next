@@ -2549,7 +2549,18 @@ describe("agent registry", () => {
       role: "reviewer",
       reviewsConversationId: provisional.id,
     });
-    const held = store.holdDelivery(provisional.id, "deliver after migration", "provisional-migration-message");
+    const held = store.holdDelivery(
+      provisional.id,
+      "deliver after migration",
+      "provisional-migration-message",
+      "text",
+      {
+        operationId: "operation-provisional-migration-message",
+        kind: "steer",
+        policy: "steer-if-active",
+        turnId: "turn-before-provisional-adoption",
+      },
+    );
     store.reconcileConversations([{
       engine: "claude",
       path: "/child.jsonl",
@@ -2590,13 +2601,39 @@ describe("agent registry", () => {
       parentConversationId: caller.id,
       reviewsConversationId: original.id,
     });
-    expect(snapshot.heldDeliveries[held.id]).toMatchObject({ conversationId: original.id });
-    expect(store.holdDelivery(original.id, "deliver after migration", "provisional-migration-message").id).toBe(held.id);
+    expect(snapshot.heldDeliveries[held.id]).toMatchObject({
+      conversationId: original.id,
+      command: held.command,
+      requestDigest: held.requestDigest,
+    });
+    const matchingRetry = store.holdDelivery(
+      provisional.id,
+      "deliver after migration",
+      "provisional-migration-message",
+      "text",
+      { ...held.command, operationId: "operation-from-matching-alias-retry" },
+    );
+    expect(matchingRetry).toMatchObject({ id: held.id, command: held.command, requestDigest: held.requestDigest });
+    expect(() => store.holdDelivery(
+      original.id,
+      "deliver after migration",
+      "second-client-provisional-migration-message",
+      "text",
+      held.command,
+    )).toThrow("operation id is already reserved for another client message");
     expect(store.conversationForPath("/child.jsonl")?.generations[0]?.launchProfile.parentConversationId).toBe(original.id);
     expect(snapshot.conversationAliases[provisional.id]).toBe(original.id);
     expect(store.canonicalConversationId(provisional.id)).toBe(original.id);
     expect(store.conversation(provisional.id)?.id).toBe(original.id);
-    expect(new AgentRegistry(store.filename).conversation(provisional.id)?.id).toBe(original.id);
+    const reopened = new AgentRegistry(store.filename);
+    expect(reopened.conversation(provisional.id)?.id).toBe(original.id);
+    expect(() => reopened.holdDelivery(
+      provisional.id,
+      "deliver after migration",
+      "third-client-provisional-migration-message",
+      "text",
+      held.command,
+    )).toThrow("operation id is already reserved for another client message");
   });
 
   test("normalizes a legacy receipt after restart without changing its schema version", () => {
