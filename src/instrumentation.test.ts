@@ -13,6 +13,7 @@ import {
   viewerReleaseOwnsTraffic,
 } from "./instrumentation";
 import { operatorSpawnCapabilityPath } from "@/lib/agent/operatorCapability";
+import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { didStructuredHostStartupFail, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
 
 test("account controller delay defaults to immediate startup and retains the explicit escape hatch", () => {
@@ -129,6 +130,23 @@ test("structured-host startup logs the thrown adoption error object", async () =
     await runStructuredHostStartup(async () => undefined, (...args) => { logged.push(args); });
     expect(didStructuredHostStartupFail()).toBe(false);
     expect(logged).toHaveLength(1);
+  } finally {
+    markStructuredHostStartupReady();
+  }
+});
+
+test("unsupported structured runtime aborts server startup", async () => {
+  const failure = new StructuredRuntimeRequirementError("structured hosts require Bun");
+  const logged: unknown[][] = [];
+
+  try {
+    await expect(runStructuredHostStartup(
+      async () => { throw failure; },
+      (...args) => { logged.push(args); },
+    )).rejects.toBe(failure);
+
+    expect(logged).toEqual([["[structured hosts] startup adoption failed", failure]]);
+    expect(didStructuredHostStartupFail()).toBe(true);
   } finally {
     markStructuredHostStartupReady();
   }

@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 import { statePath } from "@/lib/configDir";
 import { markStructuredHostStartupFailed, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
+import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 
 const RELEASE_ACTIVATION_POLL_MS = 250;
 
@@ -105,6 +106,7 @@ export async function runStructuredHostStartup(
   } catch (error) {
     markStructuredHostStartupFailed();
     log("[structured hosts] startup adoption failed", error);
+    if (error instanceof StructuredRuntimeRequirementError) throw error;
   }
 }
 

@@ -106,12 +106,16 @@ export class RuntimeHost {
     catch { console.error("[runtime consumer] recovery deferred after a consumer failure"); }
   }
 
-  async handle(request: RuntimeSocketRequest): Promise<RuntimeSocketResponse> {
+  async handle(request: RuntimeSocketRequest, options: { signal?: AbortSignal } = {}): Promise<RuntimeSocketResponse> {
     try {
       let result: unknown;
       if (request.method === "snapshot") result = this.journal.snapshot();
       else if (request.method === "events") result = this.journal.replay(Number(request.params?.after ?? 0));
-      else if (request.method === "wait") result = await this.journal.waitForEvents(Number(request.params?.after ?? 0), Number(request.params?.timeoutMs ?? 15_000));
+      else if (request.method === "wait") result = await this.journal.waitForEvents(
+        Number(request.params?.after ?? 0),
+        Number(request.params?.timeoutMs ?? 15_000),
+        options.signal,
+      );
       else if (request.method === "append" || request.method === "operation") {
         const event = request.params?.event as RuntimeEventInput;
         const appended = this.journal.append(event);

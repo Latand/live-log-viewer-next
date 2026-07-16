@@ -843,21 +843,37 @@ export class RuntimeJournal {
     }
   }
 
-  waitForEvents(after: number, timeoutMs = 15_000): Promise<RuntimeReplay> {
+  waitForEvents(after: number, timeoutMs = 15_000, signal?: AbortSignal): Promise<RuntimeReplay> {
     const immediate = this.replay(after);
     if (immediate.reset || immediate.events.length > 0) return Promise.resolve(immediate);
     const timeout = Math.min(Math.max(timeoutMs, 10), 30_000);
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const cleanup = () => {
+        if (timer !== null) clearTimeout(timer);
+        this.waiters.delete(finish);
+        signal?.removeEventListener("abort", abort);
+      };
       const finish = () => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
-        this.waiters.delete(finish);
+        cleanup();
         resolve(this.replay(after));
       };
+      const abort = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error("runtime wait aborted"));
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
       this.waiters.add(finish);
-      const timer = setTimeout(finish, timeout);
+      timer = setTimeout(finish, timeout);
     });
   }
 
