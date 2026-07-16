@@ -10,6 +10,68 @@ export interface RuntimeEventStore {
   append(threadId: string, event: RuntimeEvent): void;
 }
 
+export interface RuntimeEventCursorRecoveryDiagnostic {
+  kind: "runtime-event-cursor-recovery";
+  sessionId: string;
+  durableTailSeq: number;
+  registryCursor: number;
+  chosenNextSeq: number;
+  action: "use-durable-tail" | "use-registry-cursor";
+  relation: "registry-behind" | "registry-ahead" | "durable-ledger-empty";
+}
+
+export type RuntimeEventCursorRecoveryReporter = (diagnostic: RuntimeEventCursorRecoveryDiagnostic) => void;
+
+const MAX_DIAGNOSTIC_SESSION_ID_LENGTH = 160;
+
+function reportRuntimeEventCursorRecovery(diagnostic: RuntimeEventCursorRecoveryDiagnostic): void {
+  console.warn("[structured host] runtime event cursor recovered", diagnostic);
+}
+
+export function nextRuntimeEventSequence(cursor: number): number {
+  if (!Number.isSafeInteger(cursor) || cursor < 0) {
+    throw new Error("runtime event cursor is invalid");
+  }
+  const next = cursor + 1;
+  if (!Number.isSafeInteger(next)) {
+    throw new Error("runtime event cursor cannot advance safely");
+  }
+  return next;
+}
+
+export function reconcileRuntimeEventCursor(
+  sessionId: string,
+  durableTailSeq: number,
+  registryCursor: number,
+  report: RuntimeEventCursorRecoveryReporter = reportRuntimeEventCursorRecovery,
+): number {
+  if (!Number.isSafeInteger(durableTailSeq) || durableTailSeq < 0) {
+    throw new Error("runtime event durable tail sequence is invalid");
+  }
+  if (!Number.isSafeInteger(registryCursor) || registryCursor < 0) {
+    throw new Error("runtime event registry cursor is invalid");
+  }
+  const useRegistryCursor = durableTailSeq === 0 && registryCursor > 0;
+  const cursor = useRegistryCursor ? registryCursor : durableTailSeq;
+  const chosenNextSeq = nextRuntimeEventSequence(cursor);
+  if (registryCursor !== durableTailSeq) {
+    try {
+      report({
+        kind: "runtime-event-cursor-recovery",
+        sessionId: sessionId.slice(0, MAX_DIAGNOSTIC_SESSION_ID_LENGTH),
+        durableTailSeq,
+        registryCursor,
+        chosenNextSeq,
+        action: useRegistryCursor ? "use-registry-cursor" : "use-durable-tail",
+        relation: useRegistryCursor
+          ? "durable-ledger-empty"
+          : registryCursor < durableTailSeq ? "registry-behind" : "registry-ahead",
+      });
+    } catch { /* diagnostics never fence durable recovery */ }
+  }
+  return cursor;
+}
+
 function validEvent(value: unknown): value is RuntimeEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const event = value as Record<string, unknown>;
@@ -79,6 +141,7 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
   }
 
   append(threadId: string, event: RuntimeEvent): void {
+    if (!validEvent(event)) throw new Error("runtime event ledger append event is invalid");
     fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     const filename = this.filename(threadId);
     const previous = this.load(threadId).at(-1);

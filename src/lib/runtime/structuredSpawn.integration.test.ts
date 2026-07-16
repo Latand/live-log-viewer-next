@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 
-import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { AccountContext } from "@/lib/accounts/contracts";
@@ -13,7 +13,8 @@ import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
-import type { DeliveryReceipt, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
+import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppServerHost";
+import { StructuredHostAdoptionCleanupError, type DeliveryReceipt, type HostState, type QueueEntry, type RuntimeEvent } from "./engineHost";
 import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./structuredDeliveryController";
 import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
@@ -126,6 +127,10 @@ class RoundTripHost implements SpawnedStructuredHost {
 
   constructor(readonly engine: "codex" | "claude", readonly artifactPath: string, sessionId: string) {
     this.identity = engine === "codex" ? { threadId: sessionId, path: artifactPath } : { sessionId };
+  }
+
+  setWriterFence(fence: () => boolean): void {
+    void fence;
   }
 
   onStateChange(listener: (state: HostState) => void): () => void {
@@ -245,6 +250,49 @@ class RoundTripHost implements SpawnedStructuredHost {
   }
 }
 
+class UnreapableRoundTripHost extends RoundTripHost {
+  override async release(): Promise<void> {
+    this.releaseCount += 1;
+    throw new Error("Codex app-server child could not be reaped");
+  }
+}
+
+class LateReapingRoundTripHost extends RoundTripHost {
+  private readonly lateReapListeners = new Set<(state: HostState) => void>();
+  private reaped = false;
+
+  override onStateChange(listener: (state: HostState) => void): () => void {
+    this.lateReapListeners.add(listener);
+    return () => this.lateReapListeners.delete(listener);
+  }
+
+  override async health(): Promise<HostState> {
+    const state = await super.health();
+    return {
+      ...state,
+      status: this.reaped ? "unhosted" : "idle",
+      endpoint: this.reaped ? "stdio:released" : state.endpoint,
+      pid: this.reaped ? null : state.pid,
+      processStartIdentity: this.reaped ? null : state.processStartIdentity,
+      eventCursor: 942,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    };
+  }
+
+  override async release(): Promise<void> {
+    this.releaseCount += 1;
+    throw new Error("Codex app-server child could not be reaped");
+  }
+
+  async completeLateReap(): Promise<void> {
+    this.reaped = true;
+    const state = await this.health();
+    for (const listener of this.lateReapListeners) listener(state);
+  }
+}
+
 async function waitFor(assertion: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     if (assertion()) return;
@@ -342,6 +390,1279 @@ test("a concurrent structured spawn replay stays pending until durable host setu
     .toMatchObject({ parentConversationId: parent.id });
   expect(journal.snapshot().edges.filter((edge) => edge.childConversationId === begun.receipt.conversationId))
     .toEqual([expect.objectContaining({ parentConversationId: parent.id })]);
+});
+
+test("a failed resume before identity staging projects dead ownership so the following send recovers", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `resume-before-identity-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 2_907,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "",
+    registry,
+    client,
+  }, {
+    startHost: async () => { throw new Error("runtime event ledger sequence gap after 2907"); },
+  })).rejects.toThrow("runtime event ledger sequence gap after 2907");
+
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    claimOwner: null,
+    pendingAction: null,
+    structuredHost: { eventCursor: 2_907, process: null },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    host: "dead",
+    sessionKey: key,
+    artifactPath,
+  });
+
+  let recoveryCalls = 0;
+  const delivery = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "send-after-failed-adoption",
+    text: "continue after failed adoption",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    recover: async () => {
+      recoveryCalls += 1;
+      await client.append({
+        scope: { type: "session", id: conversation.id },
+        kind: "session-status",
+        payload: {
+          conversationId: conversation.id,
+          sessionKey: key,
+          hostKind: "codex-app-server",
+          host: "hosted",
+          turn: "idle",
+          provenance: "structured",
+          accountId: "codex-subscription",
+          cwd,
+          artifactPath,
+          capabilities: { steer: true, structuredAttention: true },
+        },
+      });
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
+    kick: () => {},
+  });
+
+  expect(recoveryCalls).toBe(1);
+  expect(delivery).toMatchObject({
+    ok: true,
+    structured: true,
+    spawned: true,
+    outcome: "queued",
+    receipt: { status: "queued", reason: null },
+  });
+  journal.close();
+});
+
+test("structured successor resume forwards the 942-record registry cursor into host adoption", async () => {
+  const sessionId = "019f66b5-8694-7410-8671-fbec75484a86";
+  const cwd = path.join(sandbox, `resume-cursor-${crypto.randomUUID()}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 3,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 3,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const seen: Array<{ sessionId: string; cursor: number | undefined }> = [];
+  const adopt = spyOn(CodexAppServerHost, "adopt").mockImplementation(async (
+    adoptedSessionId: string,
+    options: CodexAppServerHostOptions,
+  ) => {
+    seen.push({ sessionId: adoptedSessionId, cursor: options.initialEventCursor });
+    throw new Error("stop after adoption options capture");
+  });
+
+  try {
+    await expect(spawnStructuredConversation({
+      engine: "codex",
+      receipt: begun.receipt,
+      spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+      account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+      prompt: "",
+      registry,
+      client,
+    })).rejects.toThrow("stop after adoption options capture");
+  } finally {
+    adopt.mockRestore();
+    journal.close();
+  }
+
+  expect(seen).toEqual([{ sessionId, cursor: 942 }]);
+});
+
+test("an uncertain adoption cleanup retains the child process and writer claim", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `uncertain-adoption-cleanup-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 3,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 3,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const host = new UnreapableRoundTripHost("codex", artifactPath, sessionId);
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "",
+    registry,
+    client,
+  }, {
+    startHost: async () => {
+      throw new StructuredHostAdoptionCleanupError("runtime event ledger sequence gap after 942", host);
+    },
+    bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+      const state = await runningHost.health();
+      const persisted = targetRegistry.setStructuredHostClaimed(key, {
+        kind: "codex-app-server",
+        endpoint: state.endpoint,
+        process: { pid: state.pid!, startIdentity: state.processStartIdentity },
+        eventCursor: state.eventCursor,
+        protocolVersion: state.protocolVersion,
+        writerClaimEpoch: claimEpoch,
+        activeTurnRef: state.activeTurnRef,
+        pendingAttention: state.pendingAttention,
+        activeFlags: state.activeFlags,
+      }, "idle", claimOwner, claimEpoch);
+      if (!persisted) throw new Error("uncertain adoption persistence failed");
+      return () => { targetRegistry.releaseStructuredHostClaim(key, claimOwner, claimEpoch); };
+    },
+    processIdentity: () => ({ pid: process.pid, startIdentity: "uncertain-adoption-owner" }),
+  })).rejects.toThrow("runtime event ledger sequence gap after 942");
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "starting" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    claimEpoch: 4,
+    claimOwner: expect.any(String),
+    structuredHost: {
+      endpoint: "fake:stdio",
+      process: { pid: process.pid, startIdentity: "test-process" },
+      eventCursor: 0,
+      writerClaimEpoch: 4,
+    },
+  });
+  expect(host.releaseCount).toBe(1);
+  journal.close();
+});
+
+test("late adoption cleanup preserves the open failure and terminalizes the released source", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `late-adoption-cleanup-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 3,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 3,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const host = new LateReapingRoundTripHost("codex", artifactPath, sessionId);
+  const openFailure = new StructuredHostAdoptionCleanupError(
+    "runtime event ledger sequence gap after 942",
+    host,
+  );
+  let surfaced: unknown;
+
+  try {
+    await spawnStructuredConversation({
+      engine: "codex",
+      receipt: begun.receipt,
+      spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+      account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+      prompt: "",
+      registry,
+      client,
+    }, {
+      startHost: async () => { throw openFailure; },
+      processIdentity: () => ({ pid: process.pid, startIdentity: "late-adoption-owner" }),
+    });
+  } catch (error) {
+    surfaced = error;
+  }
+
+  await host.completeLateReap();
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "starting" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    claimEpoch: 4,
+    claimOwner: null,
+    structuredHost: {
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      writerClaimEpoch: 4,
+    },
+  });
+  expect(surfaced).toBe(openFailure);
+  expect(host.releaseCount).toBe(1);
+  journal.close();
+});
+
+test("failed adoption keeps dead projection retryable across an append failure and releases its claim", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `resume-projection-retry-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  await client.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      provenance: "structured",
+      accountId: "codex-subscription",
+      cwd,
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: "stale-turn",
+    },
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  let failProjectionAppend = true;
+  const flakyClient = {
+    ...client,
+    append: async (...args: Parameters<RuntimeHostClient["append"]>) => {
+      const event = args[0];
+      if (failProjectionAppend && event.kind === "session-status"
+        && (event.payload as { host?: unknown }).host === "dead") {
+        failProjectionAppend = false;
+        throw new Error("simulated runtime projection append failure");
+      }
+      return client.append(...args);
+    },
+  } as RuntimeHostClient;
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "",
+    registry,
+    client: flakyClient,
+  }, {
+    startHost: async () => { throw new Error("runtime event ledger sequence gap after 942"); },
+    processIdentity: () => ({ pid: 987_654, startIdentity: "failed-adoption" }),
+  })).rejects.toThrow("runtime event ledger sequence gap after 942");
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "starting" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    claimEpoch: 5,
+    claimOwner: null,
+    structuredHost: { eventCursor: 942, process: null, writerClaimEpoch: 5 },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.host).not.toBe("dead");
+
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "failed" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    claimOwner: null,
+    pendingAction: null,
+    structuredHost: { eventCursor: 942, process: null },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    host: "dead",
+    turn: "idle",
+    activeTurnId: null,
+  });
+  journal.close();
+});
+
+test("a staged resume releases its transferred claim when failure projection is unavailable", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `staged-projection-failure-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 5,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 5,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const host = new RoundTripHost("codex", artifactPath, sessionId);
+  const flakyClient = {
+    ...client,
+    append: async (...args: Parameters<RuntimeHostClient["append"]>) => {
+      const event = args[0];
+      if (event.kind === "session-status" && (event.payload as { host?: unknown }).host === "dead") {
+        throw new Error("simulated runtime projection append failure");
+      }
+      return client.append(...args);
+    },
+  } as RuntimeHostClient;
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "",
+    registry,
+    client: flakyClient,
+  }, {
+    startHost: async () => host,
+    bindHost: async () => { throw new Error("resume binding failed after identity staging"); },
+    processIdentity: () => ({ pid: 765_432, startIdentity: "staged-adoption" }),
+  })).rejects.toThrow("resume binding failed after identity staging");
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "path-pending" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    claimEpoch: 6,
+    claimOwner: null,
+    structuredHost: { eventCursor: 942, process: null, writerClaimEpoch: 6 },
+  });
+  expect(host.releaseCount).toBe(1);
+  journal.close();
+});
+
+test("a projected same-session resume failure retains its terminal event cursor", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `staged-projected-failure-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 5,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 5,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const host = new RoundTripHost("codex", artifactPath, sessionId);
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "",
+    registry,
+    client,
+  }, {
+    startHost: async () => host,
+    bindHost: async () => { throw new Error("resume binding failed after identity staging"); },
+    processIdentity: () => ({ pid: 765_432, startIdentity: "staged-adoption" }),
+  })).rejects.toThrow("resume binding failed after identity staging");
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "failed" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    claimEpoch: 6,
+    claimOwner: null,
+    pendingAction: null,
+    structuredHost: {
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      writerClaimEpoch: 6,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    host: "dead",
+    turn: "idle",
+  });
+  expect(host.releaseCount).toBe(1);
+  journal.close();
+});
+
+test("spawn failure preserves the staged writer when its child cannot be reaped", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `unreaped-spawn-failure-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const host = new UnreapableRoundTripHost("codex", artifactPath, sessionId);
+  let published = false;
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "",
+    registry,
+    client,
+  }, {
+    startHost: async () => host,
+    bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+      const state = await runningHost.health();
+      const persisted = targetRegistry.setStructuredHostClaimed(key, {
+        kind: "codex-app-server",
+        endpoint: state.endpoint,
+        process: { pid: state.pid!, startIdentity: state.processStartIdentity },
+        eventCursor: state.eventCursor,
+        protocolVersion: state.protocolVersion,
+        writerClaimEpoch: claimEpoch,
+        activeTurnRef: state.activeTurnRef,
+        pendingAttention: state.pendingAttention,
+        activeFlags: state.activeFlags,
+      }, "idle", claimOwner, claimEpoch);
+      if (!persisted) throw new Error("staged writer persistence failed");
+      return () => { targetRegistry.releaseStructuredHostClaim(key, claimOwner, claimEpoch); };
+    },
+    publishHost: async () => {
+      published = true;
+      return async () => { published = false; };
+    },
+    deliverFirst: async () => { throw new Error("first message delivery failed"); },
+    processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+  })).rejects.toThrow("first message delivery failed");
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "path-pending" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    pendingAction: "spawn",
+    structuredHostOperationId: begun.receipt.launchId,
+    claimOwner: expect.any(String),
+    structuredHost: {
+      endpoint: "fake:stdio",
+      process: { pid: process.pid, startIdentity: "test-process" },
+    },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.host).not.toBe("dead");
+  expect(host.releaseCount).toBe(1);
+  expect(published).toBeTrue();
+  journal.close();
+});
+
+test("startup recovery preserves a live adopted writer while settling its stale unstaged resume", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `live-writer-recovery-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(
+    path.join(cwd, "registry.json"),
+    () => true,
+    undefined,
+    { sqliteMode: "off" },
+  );
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:live",
+      process: { pid: 4321, startIdentity: "live-adopter" },
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 7,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 7,
+    claimOwner: 'structured-host:{"pid":4321,"startIdentity":"live-adopter"}',
+    pendingAction: null,
+  });
+  await client.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      accountId: "codex-subscription",
+      cwd,
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: conversation.id,
+    engine: "codex",
+    cwd,
+    prompt: "",
+    accountId: "codex-subscription",
+  });
+  await client.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      accountId: "codex-subscription",
+      cwd,
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "failed" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    claimEpoch: 7,
+    claimOwner: 'structured-host:{"pid":4321,"startIdentity":"live-adopter"}',
+    structuredHost: {
+      endpoint: "stdio:live",
+      eventCursor: 942,
+      process: { pid: 4321, startIdentity: "live-adopter" },
+      writerClaimEpoch: 7,
+    },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.host).not.toBe("dead");
+  journal.close();
+});
+
+test("startup recovery preserves a live adopted writer while settling its stale staged resume", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `live-staged-writer-recovery-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(
+    path.join(cwd, "registry.json"),
+    () => true,
+    undefined,
+    { sqliteMode: "off" },
+  );
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId };
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:live-staged",
+      process: { pid: 5432, startIdentity: "live-staged-adopter" },
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 11,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 11,
+    claimOwner: 'structured-host:{"pid":5432,"startIdentity":"live-staged-adopter"}',
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("resume identity was unavailable");
+  registry.upsert({
+    ...staged.entry,
+    structuredHostOperationId: "winning-resume-operation",
+  });
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: conversation.id,
+    engine: "codex",
+    cwd,
+    prompt: "",
+    accountId: "codex-subscription",
+  });
+  await client.transitionOperation(begun.receipt.launchId, "failed", { reason: "stale staged resume failed" });
+  await client.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      accountId: "codex-subscription",
+      cwd,
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "failed" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    claimEpoch: 11,
+    claimOwner: 'structured-host:{"pid":5432,"startIdentity":"live-staged-adopter"}',
+    structuredHost: {
+      endpoint: "stdio:live-staged",
+      eventCursor: 942,
+      process: { pid: 5432, startIdentity: "live-staged-adopter" },
+      writerClaimEpoch: 11,
+    },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    host: "hosted",
+    turn: "idle",
+  });
+  journal.close();
+});
+
+function stagedOwnershipRace(label: string) {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `${label}-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId };
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:older",
+      process: { pid: 6543, startIdentity: "older-adopter" },
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 13,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 13,
+    claimOwner: 'structured-host:{"pid":6543,"startIdentity":"older-adopter"}',
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("resume identity was unavailable");
+  registry.upsert({
+    ...staged.entry,
+    structuredHostOperationId: "newer-resume-operation",
+    structuredHost: {
+      ...staged.entry.structuredHost!,
+      endpoint: "stdio:newer",
+      process: { pid: 7654, startIdentity: "newer-adopter" },
+      writerClaimEpoch: 14,
+    },
+    claimEpoch: 14,
+    claimOwner: 'structured-host:{"pid":7654,"startIdentity":"newer-adopter"}',
+  });
+  return { registry, begun, sessionId };
+}
+
+test("an older failed spawn cannot erase a newer structured host owner", () => {
+  const { registry, begun, sessionId } = stagedOwnershipRace("failed-operation-fence");
+
+  registry.failStructuredSpawn(begun.receipt.launchId, "older operation failed");
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    error: "older operation failed",
+  });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    structuredHostOperationId: "newer-resume-operation",
+    claimEpoch: 14,
+    claimOwner: 'structured-host:{"pid":7654,"startIdentity":"newer-adopter"}',
+    structuredHost: {
+      endpoint: "stdio:newer",
+      process: { pid: 7654, startIdentity: "newer-adopter" },
+      writerClaimEpoch: 14,
+    },
+  });
+});
+
+test("an older finalize cannot settle across a newer structured host owner", () => {
+  const { registry, begun, sessionId } = stagedOwnershipRace("finalize-operation-fence");
+
+  expect(registry.finalizeStructuredSpawn(begun.receipt.launchId)).toMatchObject({
+    kind: "conflict",
+    code: "spawn_identity_conflict",
+  });
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "conflicted",
+    error: "spawn_identity_conflict",
+  });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    pendingAction: "spawn",
+    structuredHostOperationId: "newer-resume-operation",
+    claimEpoch: 14,
+    claimOwner: 'structured-host:{"pid":7654,"startIdentity":"newer-adopter"}',
+  });
+});
+
+test("a stale finalize cannot project the newer structured owner dead", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `stale-finalize-projection-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 2,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 2,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const host = new RoundTripHost("codex", artifactPath, sessionId);
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "",
+    registry,
+    client,
+  }, {
+    startHost: async () => host,
+    bindHost: async (targetRegistry, hostKey, runningHost, claimOwner, claimEpoch) => {
+      const state = await runningHost.health();
+      const persisted = targetRegistry.setStructuredHostClaimed(hostKey, {
+        kind: "codex-app-server",
+        endpoint: state.endpoint,
+        process: { pid: state.pid!, startIdentity: state.processStartIdentity },
+        eventCursor: state.eventCursor,
+        protocolVersion: state.protocolVersion,
+        writerClaimEpoch: claimEpoch,
+        activeTurnRef: state.activeTurnRef,
+        pendingAttention: state.pendingAttention,
+        activeFlags: state.activeFlags,
+      }, "idle", claimOwner, claimEpoch);
+      if (!persisted) throw new Error("older writer persistence failed");
+      return () => { targetRegistry.releaseStructuredHostClaim(hostKey, claimOwner, claimEpoch); };
+    },
+    publishHost: async () => async () => {},
+    deliverFirst: async () => {
+      const current = registry.snapshot().entries[`codex:${sessionId}`];
+      registry.upsert({
+        ...current,
+        status: "idle",
+        structuredHostOperationId: "newer-resume-operation",
+        structuredHost: {
+          ...current.structuredHost!,
+          endpoint: "stdio:newer",
+          process: { pid: 86_420, startIdentity: "newer-writer" },
+          writerClaimEpoch: current.claimEpoch + 1,
+        },
+        claimEpoch: current.claimEpoch + 1,
+        claimOwner: 'structured-host:{"pid":86420,"startIdentity":"newer-writer"}',
+      });
+      await client.append({
+        scope: { type: "session", id: conversation.id },
+        kind: "session-status",
+        payload: {
+          conversationId: conversation.id,
+          sessionKey: key,
+          hostKind: "codex-app-server",
+          host: "hosted",
+          turn: "idle",
+          provenance: "structured",
+          accountId: "codex-subscription",
+          cwd,
+          artifactPath,
+          capabilities: { steer: true, structuredAttention: true },
+          activeTurnId: null,
+        },
+      });
+    },
+    processIdentity: () => ({ pid: 75_310, startIdentity: "older-writer" }),
+  })).rejects.toThrow("structured spawn registry conflict: spawn_identity_conflict");
+
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    structuredHostOperationId: "newer-resume-operation",
+    claimOwner: 'structured-host:{"pid":86420,"startIdentity":"newer-writer"}',
+    structuredHost: { endpoint: "stdio:newer", process: { pid: 86_420, startIdentity: "newer-writer" } },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    host: "hosted",
+    turn: "idle",
+  });
+  journal.close();
+});
+
+test("a resume claim loser leaves the winning writer projection and ownership intact", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `resume-claim-loser-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(
+    path.join(cwd, "registry.json"),
+    () => true,
+    undefined,
+    { sqliteMode: "off" },
+  );
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:winner",
+      process: { pid: 8765, startIdentity: "winning-adopter" },
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 9,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 9,
+    claimOwner: 'structured-host:{"pid":8765,"startIdentity":"winning-adopter"}',
+    pendingAction: null,
+  });
+  await client.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      accountId: "codex-subscription",
+      cwd,
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "",
+    registry,
+    client,
+  }, {
+    startHost: async () => { throw new Error("claim loser reached host adoption"); },
+  })).rejects.toThrow("structured resume host claim is unavailable");
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "failed" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    claimEpoch: 9,
+    claimOwner: 'structured-host:{"pid":8765,"startIdentity":"winning-adopter"}',
+    structuredHost: {
+      endpoint: "stdio:winner",
+      eventCursor: 942,
+      process: { pid: 8765, startIdentity: "winning-adopter" },
+      writerClaimEpoch: 9,
+    },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.host).not.toBe("dead");
+  journal.close();
 });
 
 describe.each(["bind", "publish", "first-message"] as const)("structured spawn %s failure", (barrier) => {
@@ -709,6 +2030,77 @@ test("startup recovery cleans a staged host whose spawn operation already failed
   });
 });
 
+test("startup recovery retains a failed staged writer when its child cannot be reaped", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `unreaped-failed-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    cwd,
+    prompt: "crash-window prompt",
+    accountId: "codex-subscription",
+    parentConversationId: null,
+  });
+  const key = { engine: "codex" as const, sessionId: id };
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:stdio",
+      process: { pid: process.pid, startIdentity: "test-process" },
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:test",
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("spawn identity was unavailable");
+  const host = new UnreapableRoundTripHost("codex", artifactPath, id);
+  await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+  await client.transitionOperation(begun.receipt.launchId, "failed", { reason: "engine child failed" });
+
+  await expect(recoverPendingStructuredSpawns(registry, client))
+    .rejects.toThrow("Codex app-server child could not be reaped");
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "path-pending" });
+  expect(registry.snapshot().entries[`codex:${id}`]).toMatchObject({
+    status: "idle",
+    pendingAction: "spawn",
+    structuredHostOperationId: begun.receipt.launchId,
+    claimOwner: "structured-host:test",
+    structuredHost: {
+      endpoint: "fake:stdio",
+      process: { pid: process.pid, startIdentity: "test-process" },
+    },
+  });
+  expect(hasStructuredDeliveryHost(key)).toBeFalse();
+  expect(host.releaseCount).toBe(1);
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId)?.host).not.toBe("dead");
+  journal.close();
+});
+
 test("startup recovery completes an intentionally empty spawn prompt without a host send", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `empty-prompt-recovery-${id}`);
@@ -785,7 +2177,17 @@ test("a queued kill terminalizes after restart when its generation is confirmed 
     accountId: "codex-subscription",
     status: "dead",
     host: null,
-    structuredHost: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
     claimEpoch: 1,
     claimOwner: null,
     pendingAction: null,
@@ -810,6 +2212,7 @@ test("a queued kill terminalizes after restart when its generation is confirmed 
   });
   expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.host).toBe("hosted");
   const operationId = `kill_${id}`;
+  const deliveringOperationId = `kill_delivering_${id}`;
   await client.command({
     kind: "kill",
     operationId,
@@ -817,10 +2220,22 @@ test("a queued kill terminalizes after restart when its generation is confirmed 
     conversationId: conversation.id,
     sessionKey: key,
   });
+  await client.command({
+    kind: "kill",
+    operationId: deliveringOperationId,
+    idempotencyKey: deliveringOperationId,
+    conversationId: conversation.id,
+    sessionKey: key,
+  });
+  await client.transitionOperation(deliveringOperationId, "delivering");
 
   await bindStructuredDeliveryQueue([], { registry, client });
 
   expect((await client.operationStatus(operationId))?.receipt).toMatchObject({
+    kind: "kill",
+    status: "delivered",
+  });
+  expect((await client.operationStatus(deliveringOperationId))?.receipt).toMatchObject({
     kind: "kill",
     status: "delivered",
   });
@@ -836,16 +2251,105 @@ test("a queued kill terminalizes after restart when its generation is confirmed 
     host: "dead",
     activeTurnId: null,
   });
-  const sendOperationId = `send_after_${id}`;
-  const sent = await client.command({
-    kind: "send",
-    operationId: sendOperationId,
-    idempotencyKey: sendOperationId,
-    conversationId: conversation.id,
-    text: "must reject after kill",
-    policy: "queue",
+  const rejected = await Promise.all(Array.from({ length: 3 }, async (_, index) => {
+    const sendOperationId = `send_after_${index}_${id}`;
+    return client.command({
+      kind: "send",
+      operationId: sendOperationId,
+      idempotencyKey: sendOperationId,
+      conversationId: conversation.id,
+      text: "same visible text after failed adoption",
+      policy: "queue",
+    });
+  }));
+  expect(rejected.map((result) => result.receipt)).toEqual([
+    expect.objectContaining({ status: "rejected", reason: "dead-host" }),
+    expect.objectContaining({ status: "rejected", reason: "dead-host" }),
+    expect.objectContaining({ status: "rejected", reason: "dead-host" }),
+  ]);
+});
+
+test("a delivering kill terminalizes a stale structured wrapper owned by the live Viewer", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `absent-wrapper-kill-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const conversation = registry.ensureConversation("claude", artifactPath, "default");
+  const key = { engine: "claude" as const, sessionId: id };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "default",
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "stdio:2000000000",
+      process: { pid: 2_000_000_000, startIdentity: "missing-wrapper" },
+      eventCursor: 17,
+      protocolVersion: "2.1.209",
+      writerClaimEpoch: 4,
+      activeTurnRef: "completed-review-turn",
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: `structured-host:${JSON.stringify({
+      pid: process.pid,
+      startIdentity: null,
+    })}`,
+    pendingAction: null,
   });
-  expect(sent.receipt).toMatchObject({ status: "rejected", reason: "dead-host" });
+  await client.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "running",
+      provenance: "structured",
+      accountId: "default",
+      parentConversationId: null,
+      cwd,
+      artifactPath,
+      capabilities: { steer: false, structuredAttention: true },
+      activeTurnId: "completed-review-turn",
+    },
+  });
+  const operationId = `kill_absent_wrapper_${id}`;
+  await client.command({
+    kind: "kill",
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: conversation.id,
+    sessionKey: key,
+  });
+  await client.transitionOperation(operationId, "delivering");
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect((await client.operationStatus(operationId))?.receipt).toMatchObject({
+    kind: "kill",
+    status: "delivered",
+  });
+  expect(registry.snapshot().entries[`claude:${id}`]).toMatchObject({
+    status: "dead",
+    structuredHost: null,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    host: "dead",
+    turn: "unknown",
+    activeTurnId: null,
+  });
+  expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
 });
 
 test("a dead predecessor kill terminalizes without touching its live successor", async () => {
@@ -949,7 +2453,7 @@ test("a queued kill waits when an unadopted structured process may still be live
     structuredHost: {
       kind: "codex-app-server",
       endpoint: "fake:unadopted",
-      process: { pid: process.pid, startIdentity: "potentially-live" },
+      process: { pid: process.pid, startIdentity: null },
       eventCursor: 1,
       protocolVersion: "fake-v1",
       writerClaimEpoch: 1,

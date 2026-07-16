@@ -4,7 +4,7 @@ import type { AccountContext } from "@/lib/accounts/contracts";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
 import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { AgentEngine, ResumeSpec } from "@/lib/agent/cli";
-import type { AgentRegistry, SpawnReceipt, StructuredHostColumns } from "@/lib/agent/registry";
+import type { AgentRegistry, AgentRegistryEntry, SpawnReceipt, StructuredHostColumns } from "@/lib/agent/registry";
 import { sessionKey, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import type { SpawnResponse } from "@/lib/agent/spawnResponse";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
@@ -13,7 +13,7 @@ import { procBackend } from "@/lib/proc";
 import { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import { CodexAppServerHost } from "./codexAppServerHost";
 import type { RuntimeHostClient } from "./client";
-import type { EngineHost, HostState } from "./engineHost";
+import { StructuredHostAdoptionCleanupError, type EngineHost, type HostState } from "./engineHost";
 import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
 import { publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "./structuredDeliveryController";
 
@@ -81,9 +81,47 @@ async function projectDeadStructuredSpawn(
   });
 }
 
+function resumeIdentityForReceipt(
+  registry: AgentRegistry,
+  receipt: SpawnReceipt,
+): { key: SessionKey; artifactPath: string } | null {
+  if (receipt.purpose !== "resume-successor") return null;
+  const conversation = registry.conversation(receipt.conversationId);
+  const source = conversation?.generations.find((generation) => generation.path === receipt.resumeSourcePath)
+    ?? conversation?.generations.at(-1);
+  return source ? { key: { engine: receipt.engine, sessionId: source.id }, artifactPath: source.path } : null;
+}
+
+function releaseAdoptionClaim(
+  registry: AgentRegistry,
+  claimed: AgentRegistryEntry,
+  terminal: boolean,
+): void {
+  if (!claimed.claimOwner || !claimed.structuredHost) return;
+  if (terminal) {
+    const projected = registry.setStructuredHostClaimed(claimed.key, {
+      ...claimed.structuredHost,
+      endpoint: "stdio:released",
+      process: null,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    }, "dead", claimed.claimOwner, claimed.claimEpoch, true);
+    if (projected) return;
+  }
+  registry.releaseStructuredHostClaim(claimed.key, claimed.claimOwner, claimed.claimEpoch);
+}
+
 export interface StructuredSpawnDependencies {
   startHost?(input: StructuredSpawnInput, capability: string): Promise<SpawnedStructuredHost>;
-  bindHost?(registry: AgentRegistry, key: SessionKey, host: SpawnedStructuredHost, claimOwner: string, claimEpoch: number): Promise<() => void>;
+  bindHost?(
+    registry: AgentRegistry,
+    key: SessionKey,
+    host: SpawnedStructuredHost,
+    claimOwner: string,
+    claimEpoch: number,
+    releasedStatus?: "unhosted" | "dead",
+  ): Promise<() => void>;
   publishHost?(key: SessionKey, host: SpawnedStructuredHost): Promise<() => Promise<void>>;
   deliverFirst?(input: StructuredSpawnInput, artifactPath: string): Promise<void>;
   processIdentity?(): { pid: number; startIdentity: string | null };
@@ -123,6 +161,34 @@ export async function recoverPendingStructuredSpawns(
         reason = operation.receipt.reason
           ?? `structured spawn operation ended as ${operation.receipt.status} before identity staging`;
       }
+      const identity = resumeIdentityForReceipt(registry, receipt);
+      let claimed: AgentRegistryEntry | null = null;
+      if (identity) {
+        const entry = registry.snapshot().entries[sessionKeyId(identity.key)];
+        if (entry?.structuredHost) {
+          claimed = registry.claimStructuredHost(identity.key, {
+            pid: process.pid,
+            startIdentity: procBackend.processIdentity(process.pid),
+          }, { allowUnhosted: true });
+          if (!claimed?.claimOwner) {
+            registry.failStructuredSpawn(receipt.launchId, reason);
+            continue;
+          }
+        }
+        try {
+          await projectDeadStructuredSpawn(
+            client,
+            receipt,
+            entry ?? { accountId: receipt.accountId, cwd: receipt.cwd },
+            `structured-spawn-failed:${receipt.launchId}`,
+            identity,
+          );
+        } catch (error) {
+          if (claimed) releaseAdoptionClaim(registry, claimed, false);
+          throw error;
+        }
+        if (claimed) releaseAdoptionClaim(registry, claimed, true);
+      }
       registry.failStructuredSpawn(receipt.launchId, reason);
       continue;
     }
@@ -131,17 +197,59 @@ export async function recoverPendingStructuredSpawns(
     const operation = await client.operationStatus(receipt.launchId);
     const status = operation?.receipt.status;
     if (status && FAILED_SPAWN_OPERATION_STATUSES.has(status)) {
-      if (entry) await projectDeadStructuredSpawn(
-        client,
-        receipt,
-        entry,
-        `structured-spawn-failed:${receipt.launchId}`,
-      );
+      const stagedByAnotherOperation = typeof entry?.structuredHostOperationId === "string"
+        && entry.structuredHostOperationId !== receipt.launchId;
+      if (stagedByAnotherOperation) {
+        registry.failSpawn(
+          receipt.launchId,
+          operation?.receipt.reason ?? `structured spawn operation ended as ${status}`,
+        );
+        continue;
+      }
+      const ownedByFailedOperation = entry?.structuredHostOperationId === receipt.launchId
+        || (entry?.structuredHostOperationId === undefined && entry?.pendingAction === "spawn");
+      let recoveryClaim: AgentRegistryEntry | null = null;
+      let releasedOwnedHost = false;
+      if (entry?.structuredHost && !ownedByFailedOperation) {
+        recoveryClaim = registry.claimStructuredHost(receipt.key, {
+          pid: process.pid,
+          startIdentity: procBackend.processIdentity(process.pid),
+        }, { allowUnhosted: true });
+        if (!recoveryClaim?.claimOwner) {
+          registry.failSpawn(
+            receipt.launchId,
+            operation?.receipt.reason ?? `structured spawn operation ended as ${status}`,
+          );
+          continue;
+        }
+      }
+      try {
+        const releasedHost = await releaseStructuredDeliveryHost(receipt.key);
+        releasedOwnedHost = ownedByFailedOperation && releasedHost;
+        if (entry?.structuredHost && ownedByFailedOperation && !releasedHost) {
+          recoveryClaim = registry.claimStructuredHost(receipt.key, {
+            pid: process.pid,
+            startIdentity: procBackend.processIdentity(process.pid),
+          }, { allowUnhosted: true });
+          if (!recoveryClaim?.claimOwner) {
+            throw new Error(`structured spawn failed host is still owned for ${receipt.launchId}`);
+          }
+        }
+        if (entry) await projectDeadStructuredSpawn(
+          client,
+          receipt,
+          entry,
+          `structured-spawn-failed:${receipt.launchId}`,
+        );
+      } catch (error) {
+        const failedClaim = recoveryClaim ?? (releasedOwnedHost ? entry : null);
+        if (failedClaim) releaseAdoptionClaim(registry, failedClaim, false);
+        throw error;
+      }
       registry.failStructuredSpawn(
         receipt.launchId,
         operation?.receipt.reason ?? `structured spawn operation ended as ${status}`,
       );
-      await releaseStructuredDeliveryHost(receipt.key).catch(() => false);
       continue;
     }
     if (status === "delivered") {
@@ -154,6 +262,7 @@ export async function recoverPendingStructuredSpawns(
         if (finalized.kind === "conflict") throw new Error(`structured spawn recovery conflict: ${finalized.code}`);
       } else {
         if (!entry) throw new Error(`structured spawn recovery identity is unavailable for ${receipt.launchId}`);
+        await releaseStructuredDeliveryHost(receipt.key);
         await projectDeadStructuredSpawn(
           client,
           receipt,
@@ -162,7 +271,6 @@ export async function recoverPendingStructuredSpawns(
         );
         const settled = registry.recoverDeliveredStructuredSpawn(receipt.launchId);
         if (settled.kind === "conflict") throw new Error(`structured spawn recovery conflict: ${settled.code}`);
-        await releaseStructuredDeliveryHost(receipt.key).catch(() => false);
       }
       continue;
     }
@@ -193,14 +301,14 @@ export async function recoverPendingStructuredSpawns(
   }
 }
 
-function pendingColumns(engine: AgentEngine): StructuredHostColumns {
+function pendingColumns(engine: AgentEngine, eventCursor = 0, writerClaimEpoch = 0): StructuredHostColumns {
   return {
     kind: engine === "codex" ? "codex-app-server" : "claude-broker",
     endpoint: "stdio:pending",
     process: null,
-    eventCursor: 0,
+    eventCursor,
     protocolVersion: null,
-    writerClaimEpoch: 0,
+    writerClaimEpoch,
     activeTurnRef: null,
     pendingAttention: [],
     activeFlags: [],
@@ -252,6 +360,13 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
   const profile = input.spec.launchProfile ?? {} as LaunchProfile;
   const env = { ...input.account.env, LLV_SPAWN_CAPABILITY: capability };
   const resumeSessionId = structuredResumeSessionId(input);
+  const initialEventCursor = resumeSessionId
+    ? input.registry.snapshot().entries[sessionKeyId({ engine: input.engine, sessionId: resumeSessionId })]?.structuredHost?.eventCursor
+    : undefined;
+  if (initialEventCursor !== undefined
+    && (!Number.isSafeInteger(initialEventCursor) || initialEventCursor < 0)) {
+    throw new Error("structured resume event cursor is invalid");
+  }
   if (input.engine === "codex") {
     const options = {
       cwd: input.spec.cwd,
@@ -262,6 +377,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
       allowSubagents: profile.allowSubagents,
       sandbox: profile.readOnly ? "read-only" : "danger-full-access",
       approvalPolicy: profile.permissionMode ?? undefined,
+      initialEventCursor,
       env,
     };
     return resumeSessionId
@@ -278,6 +394,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     model: profile.model ?? undefined,
     effort: profile.effort ?? undefined,
     permissionMode: profile.permissionMode ?? "default",
+    initialEventCursor,
     env,
   };
   return resumeSessionId
@@ -288,11 +405,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
 export function structuredResumeSessionId(
   input: Pick<StructuredSpawnInput, "receipt" | "registry">,
 ): string | null {
-  if (input.receipt.purpose !== "resume-successor") return null;
-  const conversation = input.registry.conversation(input.receipt.conversationId);
-  const source = conversation?.generations.find((generation) => generation.path === input.receipt.resumeSourcePath)
-    ?? conversation?.generations.at(-1);
-  return source?.id ?? null;
+  return resumeIdentityForReceipt(input.registry, input.receipt)?.key.sessionId ?? null;
 }
 
 async function defaultBindHost(
@@ -301,10 +414,11 @@ async function defaultBindHost(
   host: SpawnedStructuredHost,
   claimOwner: string,
   claimEpoch: number,
+  releasedStatus: "unhosted" | "dead" = "unhosted",
 ): Promise<() => void> {
   return key.engine === "codex"
-    ? await bindCodexHostPersistence(registry, key, host as CodexAppServerHost, claimOwner, claimEpoch)
-    : await bindClaudeHostPersistence(registry, key, host as ClaudeStreamBrokerHost, claimOwner, claimEpoch);
+    ? await bindCodexHostPersistence(registry, key, host as CodexAppServerHost, claimOwner, claimEpoch, releasedStatus)
+    : await bindClaudeHostPersistence(registry, key, host as ClaudeStreamBrokerHost, claimOwner, claimEpoch, releasedStatus);
 }
 
 async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: string): Promise<void> {
@@ -326,9 +440,15 @@ async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: st
 }
 
 async function cleanupHost(host: SpawnedStructuredHost | null, binding: HostBinding): Promise<void> {
-  await binding.unregister().catch(() => {});
+  await host?.release();
+  let unregisterError: unknown = null;
+  try {
+    await binding.unregister();
+  } catch (error) {
+    unregisterError = error;
+  }
   binding.stopPersistence();
-  await host?.release().catch(() => {});
+  if (unregisterError) throw unregisterError;
 }
 
 export async function spawnStructuredConversation(
@@ -341,9 +461,15 @@ export async function spawnStructuredConversation(
   const deliverFirst = dependencies.deliverFirst ?? defaultDeliverFirst;
   const processIdentity = dependencies.processIdentity ?? (() => ({ pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }));
   const operationId = input.receipt.launchId;
+  const resumeSessionId = structuredResumeSessionId(input);
+  const resumeKey = resumeSessionId ? sessionKey(input.engine, resumeSessionId) : null;
+  const resumeIdentity = resumeIdentityForReceipt(input.registry, input.receipt);
   let host: SpawnedStructuredHost | null = null;
   const binding: HostBinding = { stopPersistence: () => {}, unregister: async () => {} };
   let key: SessionKey | null = null;
+  let adoptionClaim: AgentRegistryEntry | null = null;
+  let adoptionClaimTransferred = false;
+  let adoptionClaimContended = false;
   try {
     await input.client.command({
       kind: "spawn",
@@ -358,9 +484,22 @@ export async function spawnStructuredConversation(
       ...(input.receipt.purpose === "resume-successor" ? { sessionId: structuredResumeSessionId(input) } : {}),
     });
     const capability = input.registry.rotateSpawnCapabilityForReceipt(input.receipt.launchId);
+    const resumeEntry = resumeKey ? input.registry.snapshot().entries[sessionKeyId(resumeKey)] : null;
+    if (resumeEntry?.structuredHost) {
+      adoptionClaim = input.registry.claimStructuredHost(resumeKey!, processIdentity(), { allowUnhosted: true });
+      if (!adoptionClaim?.claimOwner) {
+        adoptionClaimContended = true;
+        throw new Error("structured resume host claim is unavailable");
+      }
+    }
     host = await startHost(input, capability);
     const identity = hostIdentity(input.engine, host, input);
     key = identity.key;
+    if (resumeKey && sessionKeyId(key) !== sessionKeyId(resumeKey)) {
+      throw new Error("structured resume returned a different session identity");
+    }
+    const stagedClaimEpoch = adoptionClaim?.claimEpoch ?? 0;
+    const stagedClaimOwner = adoptionClaim?.claimOwner ?? null;
     const staged = input.registry.stageStructuredSpawn(input.receipt.launchId, {
       key,
       artifactPath: identity.path,
@@ -369,14 +508,21 @@ export async function spawnStructuredConversation(
       launchProfile: input.spec.launchProfile,
       status: "unhosted",
       host: null,
-      structuredHost: pendingColumns(input.engine),
-      claimEpoch: 0,
-      claimOwner: null,
+      structuredHost: pendingColumns(
+        input.engine,
+        adoptionClaim?.structuredHost?.eventCursor ?? 0,
+        stagedClaimEpoch,
+      ),
+      claimEpoch: stagedClaimEpoch,
+      claimOwner: stagedClaimOwner,
       pendingAction: "spawn",
     });
     if (staged.kind === "conflict") throw new Error(`structured spawn registry conflict: ${staged.code}`);
-    const claimed = input.registry.claimStructuredHost(key, processIdentity(), { allowUnhosted: true });
+    const claimed = adoptionClaim
+      ? staged.entry
+      : input.registry.claimStructuredHost(key, processIdentity(), { allowUnhosted: true });
     if (!claimed?.claimOwner) throw new Error("structured spawn host claim is unavailable");
+    adoptionClaimTransferred = adoptionClaim !== null;
     binding.stopPersistence = await bindHost(input.registry, key, host, claimed.claimOwner, claimed.claimEpoch);
     binding.unregister = await publishHost(key, host);
     await deliverFirst(input, identity.path);
@@ -400,21 +546,66 @@ export async function spawnStructuredConversation(
     await input.client.transitionOperation(operationId, "failed", {
       reason: error instanceof Error ? error.message.slice(0, 240) : "structured spawn failed",
     }).catch(() => {});
-    await cleanupHost(host, binding);
+    if (!host && error instanceof StructuredHostAdoptionCleanupError) {
+      host = error.host as SpawnedStructuredHost;
+      if (resumeKey && adoptionClaim?.claimOwner) {
+        key = resumeKey;
+        binding.stopPersistence = await bindHost(
+          input.registry,
+          resumeKey,
+          host,
+          adoptionClaim.claimOwner,
+          adoptionClaim.claimEpoch,
+          "dead",
+        );
+      }
+    }
+    try {
+      await cleanupHost(host, binding);
+    } catch {
+      throw error;
+    }
+    let failedEntry: AgentRegistryEntry | null = null;
+    let failedIdentity = resumeIdentity;
     if (key) {
-      input.registry.failStructuredSpawn(input.receipt.launchId, error instanceof Error ? error.message : "structured spawn failed");
       const entry = input.registry.snapshot().entries[sessionKeyId(key)];
       if (entry) {
+        failedEntry = entry;
+        failedIdentity = { key, artifactPath: entry.artifactPath };
+      }
+    } else {
+      if (resumeIdentity) {
+        failedEntry = input.registry.snapshot().entries[sessionKeyId(resumeIdentity.key)] ?? null;
+      }
+    }
+    if (typeof failedEntry?.structuredHostOperationId === "string"
+      && failedEntry.structuredHostOperationId !== input.receipt.launchId) {
+      failedIdentity = null;
+    }
+    let projectionSucceeded = true;
+    if (failedIdentity && !adoptionClaimContended) {
+      try {
         await projectDeadStructuredSpawn(
           input.client,
           input.receipt,
-          entry,
+          failedEntry ?? { accountId: input.account.accountId, cwd: input.spec.cwd },
           `structured-spawn-failed:${input.receipt.launchId}`,
-          { key, artifactPath: entry.artifactPath },
-        ).catch(() => {});
+          failedIdentity,
+        );
+      } catch {
+        projectionSucceeded = false;
       }
     }
-    else input.registry.failSpawn(input.receipt.launchId, "structured spawn failed before host binding");
+    if (adoptionClaim && (!adoptionClaimTransferred || !projectionSucceeded)) {
+      releaseAdoptionClaim(input.registry, adoptionClaim, projectionSucceeded);
+    }
+    if (projectionSucceeded) {
+      if (key) {
+        input.registry.failStructuredSpawn(input.receipt.launchId, error instanceof Error ? error.message : "structured spawn failed");
+      } else {
+        input.registry.failSpawn(input.receipt.launchId, "structured spawn failed before host binding");
+      }
+    }
     throw error;
   }
 }

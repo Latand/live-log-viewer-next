@@ -17,7 +17,7 @@ import {
   type ClaudeDeliveryState,
 } from "./claudeStreamBrokerHost";
 import type { RuntimeEventStore } from "./eventStore";
-import type { QueueEntry, RuntimeEvent } from "./engineHost";
+import type { HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import {
   adoptClaudeRegistryHosts,
   bindClaudeHostPersistence,
@@ -86,7 +86,11 @@ class FakeClaude extends EventEmitter {
   readonly inputs: Array<Record<string, unknown>> = [];
   sessionId = "";
 
-  constructor(private readonly ledger: RecordingDeliveryLedger, private readonly ignoreTerm = false) {
+  constructor(
+    private readonly ledger: RecordingDeliveryLedger,
+    private readonly ignoreTerm = false,
+    private readonly ignoreKill = false,
+  ) {
     super();
     let buffer = "";
     this.stdin.on("data", (chunk) => {
@@ -115,6 +119,7 @@ class FakeClaude extends EventEmitter {
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     this.signals.push(signal);
     if (signal === "SIGTERM" && this.ignoreTerm) return true;
+    if (signal === "SIGKILL" && this.ignoreKill) return true;
     queueMicrotask(() => this.emit("close", 0, signal));
     return true;
   }
@@ -155,6 +160,75 @@ describe("ClaudeStreamBrokerHost", () => {
 
     const modeIndex = captured.args!.indexOf("--permission-mode");
     expect(captured.args?.slice(modeIndex, modeIndex + 2)).toEqual(["--permission-mode", "bypassPermissions"]);
+    await host.release();
+  });
+
+  test.each([0, 2])("anchors resumed Claude emission after durable sequence 1 when the registry cursor is %i", async (registryCursor) => {
+    const sessionId = `claude-cursor-${registryCursor}`;
+    const eventStore = new MemoryEventStore();
+    eventStore.append(sessionId, { kind: "session-status", status: "idle", seq: 1 });
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const diagnostics: unknown[] = [];
+
+    const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
+      cwd: "/repo",
+      eventStore,
+      deliveryLedger: ledger,
+      initialEventCursor: registryCursor,
+      onEventCursorRecovery: (diagnostic) => diagnostics.push(diagnostic),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+
+    expect(eventStore.load(sessionId).slice(-2)).toEqual([
+      { kind: "session-status", status: "idle", seq: 1 },
+      { kind: "session-status", status: "idle", seq: 2 },
+    ]);
+    expect(await host.health()).toMatchObject({ eventCursor: 2, status: "idle" });
+    expect(diagnostics).toEqual([expect.objectContaining({
+      kind: "runtime-event-cursor-recovery",
+      sessionId,
+      durableTailSeq: 1,
+      registryCursor,
+      chosenNextSeq: 2,
+      action: "use-durable-tail",
+    })]);
+    await host.release();
+  });
+
+  test("fails closed before Claude emission advances beyond the safe-integer cursor range", async () => {
+    const sessionId = "claude-cursor-near-safe-limit";
+    const eventStore = new MemoryEventStore();
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
+      cwd: "/repo",
+      eventStore,
+      deliveryLedger: ledger,
+      initialEventCursor: Number.MAX_SAFE_INTEGER - 1,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    expect(eventStore.load(sessionId)).toEqual([
+      { kind: "session-status", status: "idle", seq: Number.MAX_SAFE_INTEGER },
+    ]);
+
+    child.emitJson({
+      type: "user",
+      isReplay: true,
+      session_id: sessionId,
+      uuid: "unsafe-cursor-user",
+      message: { role: "user", content: [{ type: "text", text: "remain bounded" }] },
+    });
+    await Bun.sleep(0);
+
+    expect(eventStore.load(sessionId)).toEqual([
+      { kind: "session-status", status: "idle", seq: Number.MAX_SAFE_INTEGER },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "dead", eventCursor: Number.MAX_SAFE_INTEGER });
     await host.release();
   });
 
@@ -905,6 +979,69 @@ describe("ClaudeStreamBrokerHost", () => {
     await restarted[0]!.host.release();
   });
 
+  test("startup adoption retains an unreaped Claude child until late cleanup converges", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-uncertain-claude-adoption-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = "uncertain-claude-adoption";
+    registry.upsert({
+      key: { engine: "claude", sessionId },
+      artifactPath: `/sessions/${sessionId}.jsonl`,
+      cwd: "/repo",
+      accountId: null,
+      status: "dead",
+      host: null,
+      structuredHost: {
+        kind: "claude-broker",
+        endpoint: "stdio:released",
+        process: null,
+        eventCursor: 4,
+        protocolVersion: "2.1.197",
+        writerClaimEpoch: 2,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 2,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger, true, true);
+
+    const adopted = await adoptClaudeRegistryHosts(
+      registry,
+      () => ({
+        cwd: "/repo",
+        deliveryLedger: ledger,
+        eventStore: new MemoryEventStore(),
+        shutdownGraceMs: 2,
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+        readTranscript: () => { throw new Error("resume transcript failed"); },
+        spawnProcess: fakeSpawn(child, {}),
+      }),
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
+    );
+
+    expect(adopted).toEqual([]);
+    expect(registry.snapshot().entries[`claude:${sessionId}`]).toMatchObject({
+      status: "idle",
+      claimOwner: expect.any(String),
+      structuredHost: {
+        endpoint: "stdio:5150",
+        process: { pid: 5150 },
+        writerClaimEpoch: 3,
+      },
+    });
+
+    child.emit("close", 0, "SIGKILL");
+    await Bun.sleep(0);
+    expect(registry.snapshot().entries[`claude:${sessionId}`]).toMatchObject({
+      status: "dead",
+      claimOwner: null,
+      structuredHost: { endpoint: "stdio:released", process: null },
+    });
+  });
+
   test("boot adoption reaps a surviving orphaned Claude child before resume", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-orphan-adoption-"));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -1042,6 +1179,90 @@ describe("ClaudeStreamBrokerHost", () => {
       await Promise.race([orphanExit, Bun.sleep(2_000)]);
     }
   }, 10_000);
+
+  test("a timed-out Claude release converges after a late child reap and permits cleanup retry", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger, true, true);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      shutdownGraceMs: 2,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    const states: HostState[] = [];
+    host.onStateChange((state) => states.push(state));
+
+    await expect(host.release()).rejects.toThrow("Claude child could not be reaped");
+    child.emit("close", 0, "SIGKILL");
+    await Bun.sleep(0);
+
+    expect(await host.health()).toMatchObject({ status: "unhosted", pid: null, endpoint: "stdio:released" });
+    expect(states.at(-1)).toMatchObject({ status: "unhosted", pid: null });
+    await expect(host.release()).resolves.toBeUndefined();
+  });
+
+  test("a late Claude reap after ledger failure releases the persisted writer claim", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-late-ledger-reap-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger, true, true);
+    const eventStore = new FailingEventStore();
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore,
+      shutdownGraceMs: 2,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    const key = { engine: "claude" as const, sessionId: host.identity.sessionId };
+    registry.upsert({
+      key,
+      artifactPath: `/sessions/${host.identity.sessionId}.jsonl`,
+      cwd: "/repo",
+      accountId: null,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "claude-broker",
+        endpoint: "stdio:5150",
+        process: { pid: 5150, startIdentity: null },
+        eventCursor: 1,
+        protocolVersion: null,
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: "late-ledger-reap-owner",
+      pendingAction: null,
+    });
+    await bindClaudeHostPersistence(registry, key, host, "late-ledger-reap-owner", 1);
+
+    child.emitJson({
+      type: "stream_event",
+      session_id: host.identity.sessionId,
+      event: { type: "content_block_delta", delta: { text: "fails append" } },
+    });
+    await Bun.sleep(0);
+    expect(await host.health()).toMatchObject({ status: "dead", pid: 5150 });
+    await expect(host.release()).rejects.toThrow("Claude child could not be reaped");
+
+    child.emit("close", 0, "SIGKILL");
+    await Bun.sleep(0);
+
+    expect(registry.snapshot().entries[`claude:${host.identity.sessionId}`]).toMatchObject({
+      status: "dead",
+      claimOwner: null,
+      structuredHost: { endpoint: "stdio:released", process: null },
+    });
+    await expect(host.release()).resolves.toBeUndefined();
+  });
 
   test("protocol failure reaps a TERM-resistant child and releases its writer claim", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-failure-claim-"));

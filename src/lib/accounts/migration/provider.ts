@@ -13,6 +13,7 @@ import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { ClaudeStreamBrokerHost } from "@/lib/runtime/claudeStreamBrokerHost";
 import { CodexAppServerHost } from "@/lib/runtime/codexAppServerHost";
+import { StructuredHostAdoptionCleanupError } from "@/lib/runtime/engineHost";
 import { hasStructuredDeliveryHost, publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "@/lib/runtime/structuredDeliveryController";
 import { bindClaudeHostPersistence, bindCodexHostPersistence, structuredHostsEnabled } from "@/lib/runtime/registry";
 import { cleanupTmuxHostIfMatches, forgetResumePaneIfMatches, spawnAgentWithPrompt, verifyTmuxHostEvidence, type TmuxHostCleanupResult } from "@/lib/tmux";
@@ -218,6 +219,7 @@ async function publishCodexSuccessorHost(input: {
     cwd: input.profile.cwd,
     accountId: input.target.accountId,
     launchProfile: input.profile,
+    structuredHostOperationId: input.receipt.operationId,
   });
   if (!entry.structuredHost) {
     input.registry.setStructuredHost(key, {
@@ -252,6 +254,7 @@ async function publishCodexSuccessorHost(input: {
       effort: input.profile.effort ?? undefined,
       sandbox: input.profile.readOnly ? "read-only" : undefined,
       approvalPolicy,
+      initialEventCursor: claimed.structuredHost?.eventCursor,
       env: input.target.env,
     });
     stopPersistence = await bindCodexHostPersistence(
@@ -263,6 +266,21 @@ async function publishCodexSuccessorHost(input: {
     );
     unregister = await publishStructuredDeliveryHost({ key, host });
   } catch (error) {
+    if (!host && error instanceof StructuredHostAdoptionCleanupError
+      && error.host instanceof CodexAppServerHost) {
+      host = error.host;
+      stopPersistence = await bindCodexHostPersistence(
+        input.registry,
+        key,
+        host,
+        claimed.claimOwner,
+        claimed.claimEpoch,
+        "dead",
+      );
+      await host.release();
+      stopPersistence();
+      throw error;
+    }
     await unregister();
     if (host) await host.release();
     stopPersistence();
@@ -302,6 +320,7 @@ async function publishClaudeSuccessorHost(
     cwd: input.profile.cwd,
     accountId: input.target.accountId,
     launchProfile: input.profile,
+    structuredHostOperationId: input.receipt.operationId,
   });
   if (!entry.structuredHost) {
     input.registry.setStructuredHost(key, {
@@ -336,6 +355,7 @@ async function publishClaudeSuccessorHost(
       model: input.profile.model ?? undefined,
       effort: input.profile.effort ?? undefined,
       permissionMode: input.profile.permissionMode ?? undefined,
+      initialEventCursor: claimed.structuredHost?.eventCursor,
     });
     stopPersistence = await bindClaudeHostPersistence(
       input.registry,
@@ -346,6 +366,21 @@ async function publishClaudeSuccessorHost(
     );
     unregister = await publishStructuredDeliveryHost({ key, host });
   } catch (error) {
+    if (!host && error instanceof StructuredHostAdoptionCleanupError
+      && error.host instanceof ClaudeStreamBrokerHost) {
+      host = error.host;
+      stopPersistence = await bindClaudeHostPersistence(
+        input.registry,
+        key,
+        host,
+        claimed.claimOwner,
+        claimed.claimEpoch,
+        "dead",
+      );
+      await host.release();
+      stopPersistence();
+      throw error;
+    }
     await unregister();
     if (host) await host.release();
     stopPersistence();

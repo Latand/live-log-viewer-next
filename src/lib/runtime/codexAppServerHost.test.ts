@@ -10,8 +10,8 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 
 import { CodexAppServerHost, redactCodexHostDiagnostic } from "./codexAppServerHost";
-import type { RuntimeEventStore } from "./eventStore";
-import type { RuntimeEvent } from "./engineHost";
+import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
+import type { HostState, RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
 
 class MemoryEventStore implements RuntimeEventStore {
@@ -63,7 +63,9 @@ class FakeAppServer extends EventEmitter {
     private readonly ignoreTerm = false,
     private readonly turns: unknown[] = [],
     private readonly resumeStatus: unknown = undefined,
-    private readonly resumeRequest: { id: string; method: string; params: Record<string, unknown> } | null = null,
+    private readonly resumeRequest: { id?: string; method: string; params: Record<string, unknown> }
+      | Array<{ id?: string; method: string; params: Record<string, unknown> }>
+      | null = null,
     private readonly ignoredMethods: string[] = [],
   ) {
     super();
@@ -121,7 +123,10 @@ class FakeAppServer extends EventEmitter {
     if (method === "thread/start" || method === "thread/resume") {
       const id = method === "thread/resume" ? this.resumedThreadId : this.threadId;
       if (method === "thread/resume" && this.resumeRequest) {
-        this.request(this.resumeRequest.id, this.resumeRequest.method, this.resumeRequest.params);
+        for (const request of Array.isArray(this.resumeRequest) ? this.resumeRequest : [this.resumeRequest]) {
+          if (request.id) this.request(request.id, request.method, request.params);
+          else this.notify(request.method, request.params);
+        }
       }
       return this.respond(message.id, {
         thread: {
@@ -342,12 +347,18 @@ describe("CodexAppServerHost", () => {
 
   test("rejects a resume response for a different durable thread", async () => {
     const server = new FakeAppServer("server-default", "different-thread");
+    const eventStore = new MemoryEventStore();
+    eventStore.append("requested-thread", { kind: "session-status", status: "idle", seq: 1 });
     await expect(CodexAppServerHost.adopt("requested-thread", {
       cwd: "/repo",
-      eventStore: new MemoryEventStore(),
+      eventStore,
+      initialEventCursor: 1,
       spawnProcess: fakeSpawn(server),
     })).rejects.toThrow("thread/resume returned a different thread id");
     expect(server.signals).toContain("SIGTERM");
+    expect(eventStore.load("requested-thread")).toEqual([
+      { kind: "session-status", status: "idle", seq: 1 },
+    ]);
   });
 
   test("rebuilds replay from resume history when a legacy host has no event ledger", async () => {
@@ -622,6 +633,494 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test.each([2906, 2908])("anchors pre-restore notifications after durable sequence 2907 when the registry cursor is %i", async (registryCursor) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-codex-cursor-recovery-"));
+    const threadId = `cursor-recovery-${registryCursor}`;
+    const ledgerPath = path.join(directory, `${encodeURIComponent(threadId)}.jsonl`);
+    const durableEvents = Array.from({ length: 2_907 }, (_, index) => JSON.stringify({
+      kind: "session-status",
+      status: "idle",
+      seq: index + 1,
+    })).join("\n");
+    fs.writeFileSync(ledgerPath, `${durableEvents}\n`, { mode: 0o600 });
+    const eventStore = new FileRuntimeEventStore(directory);
+    const diagnostics: unknown[] = [];
+    const server = new FakeAppServer(threadId, threadId, false, [], { type: "idle" }, {
+      id: "approval-before-restore",
+      method: "item/commandExecution/requestApproval",
+      params: { command: "date" },
+    });
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: registryCursor,
+      onEventCursorRecovery: (diagnostic) => diagnostics.push(diagnostic),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId).slice(-3)).toEqual([
+      { kind: "session-status", status: "idle", seq: 2_907 },
+      {
+        kind: "attention",
+        id: "item/commandExecution/requestApproval:approval-before-restore",
+        method: "item/commandExecution/requestApproval",
+        attention: { command: "date" },
+        seq: 2_908,
+      },
+      { kind: "session-status", status: "idle", seq: 2_909 },
+    ]);
+    expect(await host.health()).toMatchObject({
+      status: "attention",
+      eventCursor: 2_909,
+      pendingAttention: ["item/commandExecution/requestApproval:approval-before-restore"],
+    });
+    expect(diagnostics).toEqual([expect.objectContaining({
+      kind: "runtime-event-cursor-recovery",
+      sessionId: threadId,
+      durableTailSeq: 2_907,
+      registryCursor,
+      chosenNextSeq: 2_908,
+      action: "use-durable-tail",
+    })]);
+    await host.release();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("persists overlapping pre-restore lifecycle notifications exactly once after a 942-record ledger", async () => {
+    const threadId = "019f66b5-8694-7410-8671-fbec75484a86";
+    const turnId = "turn-after-942";
+    const item = { type: "agentMessage", id: "item-after-942", text: "resumed response" };
+    const eventStore = new MemoryEventStore();
+    for (let seq = 1; seq <= 942; seq += 1) {
+      eventStore.append(threadId, { kind: "session-status", status: "idle", seq });
+    }
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: turnId,
+      status: "completed",
+      items: [item],
+    }], { type: "idle" }, [
+      { method: "turn/started", params: { threadId, turn: { id: turnId } } },
+      { method: "item/started", params: { threadId, turnId, item } },
+      { method: "item/completed", params: { threadId, turnId, item } },
+      { method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 942,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId).slice(942)).toEqual([
+      { kind: "turn-started", turnId, seq: 943 },
+      { kind: "item", turnId, item, phase: "started", seq: 944 },
+      { kind: "item", turnId, item, phase: "completed", seq: 945 },
+      { kind: "turn-ended", turnId, status: "completed", seq: 946 },
+      { kind: "session-status", status: "idle", seq: 947 },
+    ]);
+    await host.release();
+
+    const restartCursor = eventStore.load(threadId).at(-1)!.seq;
+    const replacement = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: restartCursor,
+      spawnProcess: fakeSpawn(new FakeAppServer(threadId, threadId, false, [{
+        id: turnId,
+        status: "completed",
+        items: [item],
+      }], { type: "idle" })),
+    });
+    const lifecycle = eventStore.load(threadId).filter((event) =>
+      event.kind === "turn-started" || event.kind === "item" || event.kind === "turn-ended");
+    expect(lifecycle).toEqual([
+      { kind: "turn-started", turnId, seq: 943 },
+      { kind: "item", turnId, item, phase: "started", seq: 944 },
+      { kind: "item", turnId, item, phase: "completed", seq: 945 },
+      { kind: "turn-ended", turnId, status: "completed", seq: 946 },
+    ]);
+    await replacement.release();
+  });
+
+  test("a buffered completion keeps a stale active resume snapshot terminal", async () => {
+    const threadId = "buffered-terminal-stale-active-snapshot";
+    const turnId = "turn-completed-during-resume";
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: turnId,
+      status: "inProgress",
+      items: [],
+    }], { type: "active", activeFlags: ["running"] }, {
+      method: "turn/completed",
+      params: { threadId, turn: { id: turnId, status: "completed" } },
+    });
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-stale-resume-registry-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const key = { engine: "codex" as const, sessionId: threadId };
+    registry.upsert({
+      key,
+      artifactPath: `/sessions/${threadId}.jsonl`,
+      cwd: "/repo",
+      accountId: null,
+      status: "dead",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:released",
+        process: null,
+        eventCursor: 0,
+        protocolVersion: null,
+        writerClaimEpoch: 7,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 7,
+      claimOwner: "viewer",
+      pendingAction: null,
+    });
+    const stopPersistence = await bindCodexHostPersistence(registry, key, host, "viewer", 7);
+
+    expect(eventStore.load(threadId)).toEqual([
+      { kind: "turn-started", turnId, seq: 1 },
+      { kind: "turn-ended", turnId, status: "completed", seq: 2 },
+      { kind: "session-status", status: "idle", seq: 3 },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+    expect(registry.snapshot().entries[`codex:${threadId}`]).toMatchObject({
+      status: "idle",
+      structuredHost: { eventCursor: 3, activeTurnRef: null },
+    });
+
+    stopPersistence();
+    await host.release();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("a newer buffered turn survives the stale snapshot of its completed predecessor", async () => {
+    const threadId = "buffered-successor-after-stale-snapshot";
+    const completedTurnId = "turn-stale-snapshot";
+    const activeTurnId = "turn-started-during-resume";
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: completedTurnId,
+      status: "inProgress",
+      items: [],
+    }], { type: "active", activeFlags: ["running"] }, [
+      {
+        method: "turn/completed",
+        params: { threadId, turn: { id: completedTurnId, status: "completed" } },
+      },
+      { method: "turn/started", params: { threadId, turn: { id: activeTurnId } } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId)).toEqual([
+      { kind: "turn-started", turnId: completedTurnId, seq: 1 },
+      { kind: "turn-ended", turnId: completedTurnId, status: "completed", seq: 2 },
+      { kind: "turn-started", turnId: activeTurnId, seq: 3 },
+      { kind: "session-status", status: "active", activeFlags: ["running"], seq: 4 },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: activeTurnId });
+    await host.release();
+  });
+
+  test("deduplicates a buffered lifecycle overlap against the durable crash prefix", async () => {
+    const threadId = "019f66b5-8694-7410-8671-fbec75484a86-overlap";
+    const turnId = "turn-overlapping-942";
+    const item = { type: "agentMessage", id: "item-overlapping-942", text: "resumed response" };
+    const eventStore = new MemoryEventStore();
+    for (let seq = 1; seq <= 940; seq += 1) {
+      eventStore.append(threadId, { kind: "session-status", status: "idle", seq });
+    }
+    eventStore.append(threadId, { kind: "turn-started", turnId, seq: 941 });
+    eventStore.append(threadId, { kind: "item", turnId, item, phase: "started", seq: 942 });
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: turnId,
+      status: "completed",
+      items: [item],
+    }], { type: "idle" }, [
+      { method: "turn/started", params: { threadId, turn: { id: turnId } } },
+      { method: "item/started", params: { threadId, turnId, item } },
+      { method: "item/completed", params: { threadId, turnId, item } },
+      { method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 942,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId).slice(942)).toEqual([
+      { kind: "item", turnId, item, phase: "completed", seq: 943 },
+      { kind: "turn-ended", turnId, status: "completed", seq: 944 },
+      { kind: "session-status", status: "idle", seq: 945 },
+    ]);
+    await host.release();
+  });
+
+  test("reconciles repeated buffered deltas by occurrence against the durable crash prefix", async () => {
+    const threadId = "buffered-delta-overlap";
+    const turnId = "buffered-delta-turn";
+    const eventStore = new MemoryEventStore();
+    eventStore.append(threadId, { kind: "turn-started", turnId, seq: 1 });
+    eventStore.append(threadId, { kind: "delta", turnId, text: "same fragment", seq: 2 });
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: turnId,
+      status: "inProgress",
+      items: [],
+    }], { type: "active", activeFlags: ["running"] }, [
+      { method: "item/agentMessage/delta", params: { threadId, turnId, delta: "same fragment" } },
+      { method: "item/agentMessage/delta", params: { threadId, turnId, delta: "same fragment" } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 2,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId).filter((event) => event.kind === "delta")).toEqual([
+      { kind: "delta", turnId, text: "same fragment", seq: 2 },
+      { kind: "delta", turnId, text: "same fragment", seq: 3 },
+    ]);
+    await host.release();
+  });
+
+  test("matches buffered delta overlap against the ordered durable suffix", async () => {
+    const threadId = "buffered-delta-ordered-overlap";
+    const turnId = "buffered-delta-ordered-turn";
+    const eventStore = new MemoryEventStore();
+    eventStore.append(threadId, { kind: "turn-started", turnId, seq: 1 });
+    eventStore.append(threadId, { kind: "delta", turnId, text: "first fragment", seq: 2 });
+    eventStore.append(threadId, { kind: "delta", turnId, text: "second fragment", seq: 3 });
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: turnId,
+      status: "inProgress",
+      items: [],
+    }], { type: "active", activeFlags: ["running"] }, [
+      { method: "item/agentMessage/delta", params: { threadId, turnId, delta: "second fragment" } },
+      { method: "item/agentMessage/delta", params: { threadId, turnId, delta: "first fragment" } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 3,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId).filter((event) => event.kind === "delta")).toEqual([
+      { kind: "delta", turnId, text: "first fragment", seq: 2 },
+      { kind: "delta", turnId, text: "second fragment", seq: 3 },
+      { kind: "delta", turnId, text: "first fragment", seq: 4 },
+    ]);
+    await host.release();
+  });
+
+  test("reactivates a dead durable turn before its buffered resumed delta", async () => {
+    const threadId = "buffered-dead-turn-reactivation";
+    const turnId = "buffered-resumed-turn";
+    const eventStore = new MemoryEventStore();
+    eventStore.append(threadId, { kind: "turn-started", turnId, seq: 1 });
+    eventStore.append(threadId, { kind: "session-status", status: "dead", seq: 2 });
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: turnId,
+      status: "inProgress",
+      items: [],
+    }], { type: "active", activeFlags: ["running"] }, [
+      { method: "turn/started", params: { threadId, turn: { id: turnId } } },
+      { method: "item/agentMessage/delta", params: { threadId, turnId, delta: "resumed fragment" } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 2,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId).slice(2)).toEqual([
+      { kind: "turn-started", turnId, seq: 3 },
+      { kind: "delta", turnId, text: "resumed fragment", seq: 4 },
+      { kind: "session-status", status: "active", activeFlags: ["running"], seq: 5 },
+    ]);
+    await host.release();
+  });
+
+  test("preserves buffered terminal ordering before the next resumed turn", async () => {
+    const threadId = "buffered-cross-turn-order";
+    const completedTurnId = "buffered-completed-turn";
+    const activeTurnId = "buffered-next-turn";
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(threadId, threadId, false, [
+      { id: completedTurnId, status: "completed", items: [] },
+      { id: activeTurnId, status: "inProgress", items: [] },
+    ], { type: "active", activeFlags: ["running"] }, [
+      { method: "turn/completed", params: { threadId, turn: { id: completedTurnId, status: "completed" } } },
+      { method: "turn/started", params: { threadId, turn: { id: activeTurnId } } },
+      { method: "item/agentMessage/delta", params: { threadId, turnId: activeTurnId, delta: "next turn fragment" } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId)).toEqual([
+      { kind: "turn-started", turnId: completedTurnId, seq: 1 },
+      { kind: "turn-ended", turnId: completedTurnId, status: "completed", seq: 2 },
+      { kind: "turn-started", turnId: activeTurnId, seq: 3 },
+      { kind: "delta", turnId: activeTurnId, text: "next turn fragment", seq: 4 },
+      { kind: "session-status", status: "active", activeFlags: ["running"], seq: 5 },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: activeTurnId });
+    await host.release();
+  });
+
+  test("reuses a buffered approval already present in the durable crash prefix", async () => {
+    const threadId = "buffered-attention-overlap";
+    const attentionId = "item/commandExecution/requestApproval:buffered-approval";
+    const attention = { command: "date" };
+    const eventStore = new MemoryEventStore();
+    eventStore.append(threadId, {
+      kind: "attention",
+      id: attentionId,
+      method: "item/commandExecution/requestApproval",
+      attention,
+      seq: 1,
+    });
+    const server = new FakeAppServer(threadId, threadId, false, [], { type: "idle" }, {
+      id: "buffered-approval",
+      method: "item/commandExecution/requestApproval",
+      params: attention,
+    });
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 1,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId).filter((event) => event.kind === "attention")).toEqual([{
+      kind: "attention",
+      id: attentionId,
+      method: "item/commandExecution/requestApproval",
+      attention,
+      seq: 1,
+    }]);
+    expect(await host.health()).toMatchObject({ status: "attention", pendingAttention: [attentionId] });
+    await host.answer(attentionId, { decision: "accept" });
+    await host.release();
+  });
+
+  test("orders a buffered terminal-only suffix after reconstructed resume history", async () => {
+    const threadId = "019f66b5-8694-7410-8671-fbec75484a86-terminal-suffix";
+    const turnId = "turn-terminal-suffix-942";
+    const item = { type: "agentMessage", id: "item-terminal-suffix-942", text: "resumed response" };
+    const eventStore = new MemoryEventStore();
+    for (let seq = 1; seq <= 942; seq += 1) {
+      eventStore.append(threadId, { kind: "session-status", status: "idle", seq });
+    }
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: turnId,
+      status: "completed",
+      items: [item],
+    }], { type: "idle" }, [
+      { method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 942,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId).slice(942)).toEqual([
+      { kind: "turn-started", turnId, seq: 943 },
+      { kind: "item", turnId, item, phase: "completed", seq: 944 },
+      { kind: "turn-ended", turnId, status: "completed", seq: 945 },
+      { kind: "session-status", status: "idle", seq: 946 },
+    ]);
+    await host.release();
+  });
+
+  test("a deferred completed turn cannot clear the newer resumed active turn", async () => {
+    const threadId = "deferred-terminal-active-turn";
+    const completedTurnId = "turn-completed-before-resume";
+    const activeTurnId = "turn-active-after-resume";
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(threadId, threadId, false, [
+      { id: completedTurnId, status: "completed", items: [] },
+      { id: activeTurnId, status: "inProgress", items: [] },
+    ], { type: "active", activeFlags: ["running"] }, [
+      { method: "turn/completed", params: { threadId, turn: { id: completedTurnId, status: "completed" } } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId).filter((event) =>
+      event.kind === "turn-started" && event.turnId === activeTurnId)).toEqual([
+      { kind: "turn-started", turnId: activeTurnId, seq: 3 },
+    ]);
+    expect(await host.health()).toMatchObject({
+      status: "active",
+      activeTurnRef: activeTurnId,
+      activeFlags: ["running"],
+    });
+    await host.release();
+  });
+
+  test("fails closed before host emission advances beyond the safe-integer cursor range", async () => {
+    const threadId = "cursor-near-safe-limit";
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(threadId);
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: Number.MAX_SAFE_INTEGER - 1,
+      spawnProcess: fakeSpawn(server),
+    });
+    expect(eventStore.load(threadId)).toEqual([
+      { kind: "session-status", status: "idle", seq: Number.MAX_SAFE_INTEGER },
+    ]);
+
+    server.notify("account/rateLimits/updated", { credits: "unchanged" });
+    await Bun.sleep(0);
+
+    expect(eventStore.load(threadId)).toEqual([
+      { kind: "session-status", status: "idle", seq: Number.MAX_SAFE_INTEGER },
+    ]);
+    expect(await host.health()).toMatchObject({
+      status: "dead",
+      eventCursor: Number.MAX_SAFE_INTEGER,
+    });
+    await host.release();
+  });
+
   test("parses generated-schema thread status notifications", async () => {
     const server = new FakeAppServer("status-thread");
     const host = await CodexAppServerHost.start({
@@ -705,6 +1204,27 @@ describe("CodexAppServerHost", () => {
       { pid: -4242, signal: "SIGKILL" },
     ]);
     expect(server.signals).toEqual([]);
+  });
+
+  test("a timed-out release converges after a late child reap and permits cleanup retry", async () => {
+    const server = new FakeAppServer("late-reap-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      signalProcess: () => {},
+    });
+    const states: HostState[] = [];
+    host.onStateChange((state) => states.push(state));
+
+    await expect(host.release()).rejects.toThrow("Codex app-server child could not be reaped");
+    server.emit("close", 0, "SIGKILL");
+    await Bun.sleep(0);
+
+    expect(await host.health()).toMatchObject({ status: "unhosted", pid: null, endpoint: "stdio:released" });
+    expect(states.at(-1)).toMatchObject({ status: "unhosted", pid: null });
+    await expect(host.release()).resolves.toBeUndefined();
   });
 
   test("protocol failure starts bounded TERM and KILL cleanup", async () => {
@@ -1197,10 +1717,76 @@ describe("CodexAppServerHost", () => {
     });
   });
 
+  test("startup adoption retains an unreaped Codex child until late cleanup converges", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-uncertain-codex-adoption-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = "uncertain-codex-adoption";
+    registry.upsert({
+      key: { engine: "codex", sessionId },
+      artifactPath: `/sessions/${sessionId}.jsonl`,
+      cwd: "/repo",
+      accountId: null,
+      status: "dead",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:released",
+        process: null,
+        eventCursor: 9,
+        protocolVersion: "0.144.1",
+        writerClaimEpoch: 2,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 2,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    const server = new FakeAppServer(sessionId, "different-thread");
+
+    const adopted = await adoptCodexRegistryHosts(
+      registry,
+      () => ({
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        shutdownGraceMs: 2,
+        spawnProcess: fakeSpawn(server),
+        signalProcess: () => {},
+      }),
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
+    );
+
+    expect(adopted).toEqual([]);
+    expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+      status: "idle",
+      claimOwner: expect.any(String),
+      structuredHost: {
+        endpoint: "stdio:4242",
+        process: { pid: 4242 },
+        writerClaimEpoch: 3,
+      },
+    });
+
+    server.emit("close", 0, "SIGKILL");
+    await Bun.sleep(0);
+    expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+      status: "dead",
+      claimOwner: null,
+      structuredHost: { endpoint: "stdio:released", process: null },
+    });
+  });
+
   test("concurrent startup adoption creates one writer and advances its claim epoch", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-claim-"));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
     const key = { engine: "codex" as const, sessionId: "claimed-thread" };
+    const eventStore = new FileRuntimeEventStore(path.join(directory, "events"));
+    fs.mkdirSync(path.join(directory, "events"), { recursive: true });
+    fs.writeFileSync(path.join(directory, "events", "claimed-thread.jsonl"), `${Array.from(
+      { length: 2_907 },
+      (_, index) => JSON.stringify({ kind: "session-status", status: "idle", seq: index + 1 }),
+    ).join("\n")}\n`, { mode: 0o600 });
     registry.upsert({
       key,
       artifactPath: "/sessions/claimed-thread.jsonl",
@@ -1212,7 +1798,7 @@ describe("CodexAppServerHost", () => {
         kind: "codex-app-server",
         endpoint: "stdio:old",
         process: null,
-        eventCursor: 2,
+        eventCursor: 2_908,
         protocolVersion: "0.144.1",
         writerClaimEpoch: 8,
         activeTurnRef: null,
@@ -1227,18 +1813,33 @@ describe("CodexAppServerHost", () => {
     const adopt = () => adoptCodexRegistryHosts(
       registry,
       () => {
-        const server = new FakeAppServer("claimed-thread");
+        const server = new FakeAppServer("claimed-thread", "claimed-thread", false, [], { type: "idle" }, {
+          id: "concurrent-approval",
+          method: "item/commandExecution/requestApproval",
+          params: { command: "date" },
+        });
         servers.push(server);
-        return { cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) };
+        return {
+          cwd: "/repo",
+          eventStore,
+          onEventCursorRecovery: () => {},
+          spawnProcess: fakeSpawn(server),
+        };
       },
       { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
     );
     const [first, second] = await Promise.all([adopt(), adopt()]);
     expect(first.length + second.length).toBe(1);
     expect(servers).toHaveLength(1);
+    expect(await adopt()).toEqual([]);
+    expect(servers).toHaveLength(1);
     expect(registry.snapshot().entries["codex:claimed-thread"]).toMatchObject({
       claimEpoch: 9,
-      structuredHost: { writerClaimEpoch: 9 },
+      structuredHost: {
+        writerClaimEpoch: 9,
+        eventCursor: 2_909,
+        pendingAttention: ["item/commandExecution/requestApproval:concurrent-approval"],
+      },
     });
     await [...first, ...second][0]!.host.release();
   });

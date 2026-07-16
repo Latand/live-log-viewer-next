@@ -102,6 +102,7 @@ export interface AgentRegistryEntry {
   claimEpoch: number;
   claimOwner: string | null;
   pendingAction: "spawn" | "resume" | "handoff" | null;
+  structuredHostOperationId?: string | null;
   updatedAt: string;
 }
 
@@ -711,6 +712,10 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
   if (!value || typeof value !== "object") return null;
   const host = value as Partial<StructuredHostColumns>;
   if (host.kind !== "codex-app-server" && host.kind !== "claude-broker") return null;
+  const eventCursor = (value as Record<string, unknown>).eventCursor;
+  if (eventCursor !== undefined && (!Number.isSafeInteger(eventCursor) || (eventCursor as number) < 0)) {
+    throw new Error("structured host event cursor is invalid");
+  }
   const processIdentity = host.process && typeof host.process === "object"
     && typeof host.process.pid === "number"
     ? { pid: host.process.pid, startIdentity: typeof host.process.startIdentity === "string" ? host.process.startIdentity : null }
@@ -719,7 +724,7 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
     kind: host.kind,
     endpoint: typeof host.endpoint === "string" ? host.endpoint : "",
     process: processIdentity,
-    eventCursor: Number.isSafeInteger(host.eventCursor) && (host.eventCursor ?? -1) >= 0 ? host.eventCursor! : 0,
+    eventCursor: eventCursor === undefined ? 0 : eventCursor as number,
     protocolVersion: typeof host.protocolVersion === "string" ? host.protocolVersion : null,
     writerClaimEpoch: Number.isSafeInteger(host.writerClaimEpoch) && (host.writerClaimEpoch ?? -1) >= 0 ? host.writerClaimEpoch! : 0,
     activeTurnRef: typeof host.activeTurnRef === "string" ? host.activeTurnRef : null,
@@ -2377,7 +2382,10 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const paths = new Set([entry.artifactPath]);
       const signature = migrationReadinessSignature(file, entry.key.engine, paths);
-      const staged = this.settleSpawnInFile(file, launchId, entry, "route-completed", false);
+      const staged = this.settleSpawnInFile(file, launchId, {
+        ...entry,
+        structuredHostOperationId: launchId,
+      }, "route-completed", false);
       advanceMigrationScopeRevision(file, entry.key.engine, signature, paths);
       return staged;
     });
@@ -2393,6 +2401,12 @@ export class AgentRegistry {
       if (!receipt.key || !receipt.artifactPath) throw new Error("structured spawn identity is incomplete");
       const entry = file.entries[sessionKeyId(receipt.key)];
       const conversation = file.conversations[receipt.conversationId];
+      if (entry && typeof entry.structuredHostOperationId === "string"
+        && entry.structuredHostOperationId !== launchId) {
+        receipt.state = "conflicted";
+        receipt.error = "spawn_identity_conflict";
+        return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
+      }
       if (!entry || !conversation
         || entry.artifactPath !== receipt.artifactPath
         || !entry.structuredHost?.process
@@ -2487,17 +2501,30 @@ export class AgentRegistry {
       if (!receipt.key || !receipt.artifactPath) return;
       const entry = file.entries[sessionKeyId(receipt.key)];
       if (!entry || entry.artifactPath !== receipt.artifactPath) return;
+      if (typeof entry.structuredHostOperationId === "string"
+        && entry.structuredHostOperationId !== launchId) return;
+      const preservesResumeCursor = receipt.purpose === "resume-successor"
+        && receipt.resumeSourcePath === receipt.artifactPath
+        && (entry.structuredHost?.eventCursor ?? 0) > 0;
+      const terminalStructuredHost = preservesResumeCursor && entry.structuredHost ? {
+        ...entry.structuredHost,
+        endpoint: "stdio:released",
+        process: null,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      } : null;
       const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(receipt.key), {
         ...entry,
         host: null,
-        structuredHost: null,
+        structuredHost: terminalStructuredHost,
         status: "dead",
         claimOwner: null,
         pendingAction: null,
       });
       const readinessBefore = migrationReadinessSignature(file, receipt.key.engine, changedHostPaths);
       entry.host = null;
-      entry.structuredHost = null;
+      entry.structuredHost = terminalStructuredHost;
       entry.status = "dead";
       entry.claimOwner = null;
       entry.pendingAction = null;
@@ -2585,14 +2612,16 @@ export class AgentRegistry {
       const conversation = file.conversations[conversationId];
       const keyId = sessionKeyId(key);
       const entry = file.entries[keyId];
+      const structuredProcess = entry?.structuredHost?.process ?? null;
+      const staleStructuredWrapper = structuredProcess !== null && !this.ownerAlive(structuredProcess);
       if (!conversation
         || conversation.engine !== key.engine
         || !conversation.generations.some((generation) => generation.id === key.sessionId)
         || !entry
         || entry.host
-        || entry.structuredHost?.process
-        || entry.claimOwner
-        || (entry.status !== "dead" && entry.status !== "unhosted")) return false;
+        || (structuredProcess !== null && !staleStructuredWrapper)
+        || (entry.claimOwner && !staleStructuredWrapper)
+        || (!staleStructuredWrapper && entry.status !== "dead" && entry.status !== "unhosted")) return false;
       const replacement = {
         ...entry,
         host: null,

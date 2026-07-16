@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { expect, test } from "bun:test";
 
-import { FileRuntimeEventStore } from "./eventStore";
+import type { RuntimeEvent } from "./engineHost";
+import { FileRuntimeEventStore, reconcileRuntimeEventCursor } from "./eventStore";
 
 test("runtime event store durably replays ordered events and ignores a partial tail", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-events-"));
@@ -20,6 +21,28 @@ test("runtime event store durably replays ordered events and ignores a partial t
     { kind: "turn-ended", turnId: "turn-1", status: "completed", seq: 3 },
   ]);
   expect(fs.statSync(filename).mode & 0o777).toBe(0o600);
+});
+
+test("runtime event store repairs a crash tail after the production 942-record contiguous prefix", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-crash-tail-"));
+  const filename = path.join(directory, "crash-tail.jsonl");
+  const prefix = Array.from({ length: 942 }, (_, index) => JSON.stringify({
+    kind: "session-status",
+    status: "idle",
+    seq: index + 1,
+  })).join("\n");
+  fs.writeFileSync(filename, `${prefix}\n{\"kind\":\"session-status\",\"status\":`, { mode: 0o600 });
+  const store = new FileRuntimeEventStore(directory);
+
+  store.append("crash-tail", { kind: "turn-started", turnId: "recovered-turn", seq: 943 });
+
+  const restored = store.load("crash-tail");
+  expect(restored).toHaveLength(943);
+  expect(restored.slice(-2)).toEqual([
+    { kind: "session-status", status: "idle", seq: 942 },
+    { kind: "turn-started", turnId: "recovered-turn", seq: 943 },
+  ]);
+  expect(fs.readFileSync(filename, "utf8").endsWith("\n")).toBeTrue();
 });
 
 test("runtime event store fails closed on gaps, duplicates, and malformed middle records", () => {
@@ -51,6 +74,76 @@ test("runtime event store rejects a non-contiguous append", () => {
   expect(() => store.append("append-thread", { kind: "turn-started", turnId: "turn-3", seq: 3 }))
     .toThrow("sequence gap after 1");
   expect(store.load("append-thread")).toEqual([{ kind: "session-status", status: "idle", seq: 1 }]);
+});
+
+test.each([2_906, 2_908])("runtime cursor recovery diagnoses registry cursor %i against durable tail 2907", (registryCursor) => {
+  const diagnostics: unknown[] = [];
+  const cursor = reconcileRuntimeEventCursor(
+    "019f64a8-cfee-7b20-9a5a-259f13192ed1",
+    2_907,
+    registryCursor,
+    (diagnostic) => diagnostics.push(diagnostic),
+  );
+
+  expect(cursor).toBe(2_907);
+  expect(diagnostics).toEqual([{
+    kind: "runtime-event-cursor-recovery",
+    sessionId: "019f64a8-cfee-7b20-9a5a-259f13192ed1",
+    durableTailSeq: 2_907,
+    registryCursor,
+    chosenNextSeq: 2_908,
+    action: "use-durable-tail",
+    relation: registryCursor < 2_907 ? "registry-behind" : "registry-ahead",
+  }]);
+});
+
+test("runtime cursor recovery retains an established registry watermark when the durable ledger is empty", () => {
+  const diagnostics: unknown[] = [];
+
+  expect(reconcileRuntimeEventCursor("legacy-session", 0, 12, (diagnostic) => diagnostics.push(diagnostic))).toBe(12);
+  expect(diagnostics).toEqual([expect.objectContaining({
+    sessionId: "legacy-session",
+    durableTailSeq: 0,
+    registryCursor: 12,
+    chosenNextSeq: 13,
+    action: "use-registry-cursor",
+    relation: "durable-ledger-empty",
+  })]);
+});
+
+test("runtime cursor diagnostics stay bounded and cannot fail ledger recovery", () => {
+  const diagnostics: Array<{ sessionId: string }> = [];
+  const cursor = reconcileRuntimeEventCursor("s".repeat(500), 2_907, 2_908, (value) => {
+    diagnostics.push(value);
+    throw new Error("diagnostic sink unavailable");
+  });
+
+  expect(cursor).toBe(2_907);
+  expect(diagnostics[0]?.sessionId).toHaveLength(160);
+});
+
+test.each([
+  { durableTailSeq: Number.MAX_SAFE_INTEGER, registryCursor: Number.MAX_SAFE_INTEGER },
+  { durableTailSeq: 0, registryCursor: Number.MAX_SAFE_INTEGER },
+])("runtime cursor recovery rejects an exhausted authoritative cursor", ({ durableTailSeq, registryCursor }) => {
+  expect(() => reconcileRuntimeEventCursor("exhausted-session", durableTailSeq, registryCursor))
+    .toThrow("runtime event cursor cannot advance safely");
+});
+
+test.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+  "runtime cursor recovery rejects invalid registry cursor %p",
+  (registryCursor) => {
+    expect(() => reconcileRuntimeEventCursor("invalid-cursor", 0, registryCursor))
+      .toThrow("runtime event registry cursor is invalid");
+  },
+);
+
+test.each([1.5, Number.MAX_SAFE_INTEGER + 1])("runtime event store rejects unsafe append sequence %p", (seq) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-unsafe-append-"));
+  const store = new FileRuntimeEventStore(directory);
+  expect(() => store.append("unsafe-append", { kind: "session-status", status: "idle", seq } as RuntimeEvent))
+    .toThrow("runtime event ledger append event is invalid");
+  expect(store.load("unsafe-append")).toEqual([]);
 });
 
 test("runtime event store rejects every structurally invalid event variant", () => {

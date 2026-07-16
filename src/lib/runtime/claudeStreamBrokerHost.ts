@@ -12,8 +12,14 @@ import { procBackend } from "@/lib/proc";
 import { hardenedRedact } from "@/lib/view/compactText";
 
 import type { DeliveryReceipt, EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
-import { RuntimeReplayGapError } from "./engineHost";
-import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
+import { RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
+import {
+  FileRuntimeEventStore,
+  nextRuntimeEventSequence,
+  reconcileRuntimeEventCursor,
+  type RuntimeEventCursorRecoveryReporter,
+  type RuntimeEventStore,
+} from "./eventStore";
 
 type JsonObject = Record<string, unknown>;
 type Subscriber = { afterSeq: number; queue: RuntimeEvent[]; wake: (() => void) | null; closed: boolean };
@@ -173,6 +179,7 @@ export interface ClaudeStreamBrokerHostOptions {
   requestTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
+  onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   readAuthStatus?: () => ClaudeAuthStatus | Promise<ClaudeAuthStatus>;
   readTranscript?: (cwd: string, sessionId: string) => ClaudeTranscriptUser[];
@@ -325,6 +332,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly deliveryLedger: ClaudeDeliveryLedger;
   private readonly requestTimeoutMs: number;
   private readonly shutdownGraceMs: number;
+  private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly deliveries: ClaudeDeliveryState[] = [];
@@ -366,6 +374,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.deliveryLedger = options.deliveryLedger ?? new FileClaudeDeliveryLedger();
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
+    this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.cursor = options.initialEventCursor ?? 0;
     this.protocolVersion = auth.version ?? null;
     this.account = { type: auth.authMethod, planType: auth.subscriptionType };
@@ -389,7 +398,8 @@ export class ClaudeStreamBrokerHost implements EngineHost {
         this.terminationTimer = null;
       }
       this.resolveReaped();
-      if (this.dead) this.notifyStateListeners();
+      if (this.releasing) this.finishRelease();
+      else if (this.dead) this.notifyStateListeners();
       else if (!this.releasing && !this.released) this.fail(new Error("Claude child exited"));
     });
   }
@@ -448,7 +458,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       host.emit({ kind: "session-status", status: "idle" });
       return host;
     } catch (error) {
-      await host.release();
+      try {
+        await host.release();
+      } catch (cleanupError) {
+        throw new StructuredHostAdoptionCleanupError(safeError(error), host, { cause: cleanupError });
+      }
       throw new Error(safeError(error));
     }
   }
@@ -595,7 +609,14 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   setWriterFence(fence: () => boolean): void { this.writerFence = fence; }
 
   async release(): Promise<void> {
-    this.releasePromise ??= this.releaseAndReap();
+    if (this.released) return;
+    if (!this.releasePromise) {
+      const attempt = this.releaseAndReap();
+      this.releasePromise = attempt;
+      void attempt.catch(() => {
+        if (this.releasePromise === attempt) this.releasePromise = null;
+      });
+    }
     return this.releasePromise;
   }
 
@@ -629,7 +650,12 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private restore(): void {
     const stored = this.eventStore.load(this.identity.sessionId);
     this.events.push(...stored);
-    this.cursor = Math.max(this.cursor, stored.at(-1)?.seq ?? 0);
+    this.cursor = reconcileRuntimeEventCursor(
+      this.identity.sessionId,
+      stored.at(-1)?.seq ?? 0,
+      this.cursor,
+      this.onEventCursorRecovery,
+    );
     this.deliveries.push(...this.deliveryLedger.load(this.identity.sessionId));
     let restoredTurn: string | null = null;
     for (const event of stored) {
@@ -668,7 +694,16 @@ export class ClaudeStreamBrokerHost implements EngineHost {
 
   private emit(event: UnsequencedEvent): void {
     if (this.ledgerFailed) return;
-    const sequenced = { ...event, seq: ++this.cursor } as RuntimeEvent;
+    let nextCursor: number;
+    try {
+      nextCursor = nextRuntimeEventSequence(this.cursor);
+    } catch (error) {
+      this.ledgerFailed = true;
+      this.failWithoutLedger(new Error(safeError(error)));
+      return;
+    }
+    this.cursor = nextCursor;
+    const sequenced = { ...event, seq: nextCursor } as RuntimeEvent;
     try { this.eventStore.append(this.identity.sessionId, sequenced); }
     catch (error) {
       this.cursor = this.events.at(-1)?.seq ?? Math.max(0, this.cursor - 1);
@@ -837,11 +872,17 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
       if (!await this.waitForReap(this.shutdownGraceMs)) throw new Error("Claude child could not be reaped");
     }
+    this.finishRelease();
+  }
+
+  private finishRelease(): void {
+    if (this.released) return;
     this.released = true;
     this.releasing = false;
     this.activeTurnId = null;
     this.attentions.clear();
     this.emit({ kind: "session-status", status: "unhosted" });
+    if (this.ledgerFailed) this.notifyStateListeners();
     this.closeSubscribers();
   }
 
