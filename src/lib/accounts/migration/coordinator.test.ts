@@ -23,7 +23,7 @@ function registry(): AgentRegistry {
 function observation(
   pathname: string,
   accountId: string | null,
-  state: "idle" | "busy" | "terminal",
+  state: "idle" | "busy" | "terminal" | "unknown",
   role: "root" | "worker" = "worker",
   project = "repo",
 ): ConversationObservation {
@@ -46,6 +46,37 @@ function observation(
     turn: { state, source: state === "terminal" ? "lifecycle" : "empty", terminalAt: state === "terminal" ? "2026-07-10T12:00:00.000Z" : null },
     observedAt: "2026-07-10T12:00:00.000Z",
   };
+}
+
+async function withIncompleteTailRead<T>(pathname: string, run: () => Promise<T>): Promise<T> {
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const targetFds = new Set<number>();
+  fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+    const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+    if (path.resolve(String(target)) === pathname) targetFds.add(fd);
+    return fd;
+  }) as typeof fs.openSync;
+  fs.readSync = ((fd: number, ...args: unknown[]) => {
+    if (targetFds.has(fd) && typeof args[3] === "number" && args[3] > 0) {
+      const error = new Error("inventory tail EIO") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    }
+    return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+  }) as typeof fs.readSync;
+  fs.closeSync = ((fd: number) => {
+    targetFds.delete(fd);
+    return originalCloseSync(fd);
+  }) as typeof fs.closeSync;
+  try {
+    return await run();
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
 }
 
 function provider(paths: string[], counts = { create: 0, verify: 0 }, continuityPaths: string[][] = []): SuccessorProviderPort {
@@ -189,6 +220,109 @@ describe("durable account migration coordinator", () => {
     await advanceConversationMigration(store.conversationForPath(pathname)!.id, store, provider(["/after-inventory-recovery.jsonl"], counts));
     expect(counts.create).toBe(1);
     expect(store.conversationForPath("/after-inventory-recovery.jsonl")?.migration?.phase).toBe("committed");
+  });
+
+  for (const priorState of ["idle", "terminal", "busy", "unknown"] as const) {
+    test(`an incomplete busy tail is non-releasable after a durable ${priorState} observation`, async () => {
+      const store = registry();
+      const pathname = path.join(path.dirname(store.filename), `incomplete-current-busy-${priorState}.jsonl`);
+      fs.writeFileSync(pathname, [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+        "x".repeat(150_000),
+        JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_started" } }),
+        "",
+      ].join("\n"));
+      store.reconcileConversations([observation(pathname, "a", priorState)]);
+      const conversation = store.conversationForPath(pathname)!;
+      const intent = store.upsertMigrationIntent("codex", "b", "manual", `incomplete-current-busy-${priorState}`);
+      store.setConversationMigration(conversation.id, {
+        intentId: intent.id,
+        phase: "waiting-turn",
+        targetId: "b",
+        revision: intent.revision,
+        sourceGenerationId: conversation.generations[0]!.id,
+        operationId: `incomplete-current-busy-${priorState}`,
+        error: null,
+        errorCode: null,
+        providerReceipt: null,
+        updatedAt: "2026-07-16T12:00:00.000Z",
+      });
+      const stat = fs.statSync(pathname);
+      const file: FileEntry = {
+        path: pathname,
+        root: "codex-sessions",
+        name: path.basename(pathname),
+        project: "repo",
+        title: `Current busy after ${priorState}`,
+        engine: "codex",
+        kind: "session",
+        fmt: "codex",
+        parent: null,
+        mtime: stat.mtimeMs / 1000,
+        size: stat.size,
+        activity: "live",
+        proc: "running",
+        pid: process.pid,
+        model: "gpt-5.6-sol",
+        pendingQuestion: null,
+        waitingInput: null,
+      };
+      const counts = { create: 0, verify: 0 };
+
+      await withIncompleteTailRead(pathname, async () => {
+        await reconcileMigrationInventory(store, [file]);
+        expect(store.conversationForPath(pathname)?.turn.state).toBe(
+          priorState === "busy" || priorState === "unknown" ? priorState : "unknown",
+        );
+        await advanceConversationMigration(conversation.id, store, provider([`/should-wait-${priorState}.jsonl`], counts));
+        expect(counts.create).toBe(0);
+        expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
+      });
+
+      await reconcileMigrationInventory(store, [file]);
+      expect(store.conversationForPath(pathname)?.turn.state).toBe("busy");
+      await advanceConversationMigration(conversation.id, store, provider([`/still-waiting-${priorState}.jsonl`], counts));
+      expect(counts.create).toBe(0);
+      expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
+    });
+  }
+
+  test("an incomplete first observation stays unknown until same-identity recovery", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "incomplete-first-observation.jsonl");
+    fs.writeFileSync(pathname, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+      "x".repeat(150_000),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_started" } }),
+      "",
+    ].join("\n"));
+    const stat = fs.statSync(pathname);
+    const file: FileEntry = {
+      path: pathname,
+      root: "codex-sessions",
+      name: path.basename(pathname),
+      project: "repo",
+      title: "Incomplete first observation",
+      engine: "codex",
+      kind: "session",
+      fmt: "codex",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "live",
+      proc: "running",
+      pid: process.pid,
+      model: "gpt-5.6-sol",
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+
+    await withIncompleteTailRead(pathname, async () => {
+      await reconcileMigrationInventory(store, [file]);
+      expect(store.conversationForPath(pathname)?.turn.state).toBe("unknown");
+    });
+    await reconcileMigrationInventory(store, [file]);
+    expect(store.conversationForPath(pathname)?.turn.state).toBe("busy");
   });
 
   test("a standard account switch migrates active conversations and defers inactive history", async () => {

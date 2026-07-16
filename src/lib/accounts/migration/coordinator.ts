@@ -82,7 +82,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       ? parsed.state !== "terminal" && (entry.activity === "idle" || entry.activity === "recent")
         ? { state: "idle" as const, source: "empty" as const, terminalAt: null }
         : parsed
-      : existing
+      : existing && (existing.turn.state === "busy" || existing.turn.state === "unknown")
         ? { state: existing.turn.state, source: existing.turn.source, terminalAt: existing.turn.terminalAt }
         : { state: "unknown" as const, source: "empty" as const, terminalAt: null };
     const currentProfile = launchProfileByPath.get(entry.path)
