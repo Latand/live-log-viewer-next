@@ -86,6 +86,153 @@ export async function persistCodexHost(
   return persisted;
 }
 
+export interface StructuredHostPersistenceOptions {
+  cursorDebounceMs?: number;
+}
+
+interface ObservableStructuredHost {
+  health(): Promise<HostState>;
+  release(): Promise<void>;
+  setWriterFence(check: () => boolean): void;
+  onStateChange(listener: (state: HostState) => void): () => void;
+}
+
+const DEFAULT_CURSOR_DEBOUNCE_MS = 1_000;
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameMaterialHostState(left: HostState, right: HostState): boolean {
+  return left.status === right.status
+    && left.endpoint === right.endpoint
+    && left.pid === right.pid
+    && left.processStartIdentity === right.processStartIdentity
+    && left.protocolVersion === right.protocolVersion
+    && left.activeTurnRef === right.activeTurnRef
+    && sameStrings(left.pendingAttention, right.pendingAttention)
+    && sameStrings(left.activeFlags, right.activeFlags);
+}
+
+async function bindStructuredHostPersistence(
+  registry: AgentRegistry,
+  key: SessionKey,
+  host: ObservableStructuredHost,
+  claimOwner: string,
+  writerClaimEpoch: number,
+  releasedStatus: "unhosted" | "dead",
+  columnsFromState: (state: HostState, writerClaimEpoch: number) => StructuredHostColumns,
+  options: StructuredHostPersistenceOptions,
+): Promise<() => void> {
+  host.setWriterFence(() => registry.ownsStructuredHostClaim(key, claimOwner, writerClaimEpoch));
+  let lastPersistedState: HostState;
+  const persist = (state: HostState, terminal = false): AgentRegistryEntry => {
+    const persisted = registry.setStructuredHostClaimed(
+      key,
+      columnsFromState(state, writerClaimEpoch),
+      terminal && releasedStatus === "dead" ? "dead" : registryStatus(state),
+      claimOwner,
+      writerClaimEpoch,
+      terminal,
+    );
+    if (!persisted) throw new Error("structured host writer claim is stale");
+    lastPersistedState = structuredClone(state);
+    return persisted;
+  };
+  try {
+    persist(await host.health());
+  } catch (error) {
+    await host.release();
+    throw error;
+  }
+
+  const cursorDebounceMs = Number.isFinite(options.cursorDebounceMs)
+    ? Math.max(0, options.cursorDebounceMs!)
+    : DEFAULT_CURSOR_DEBOUNCE_MS;
+  let failed = false;
+  let stopped = false;
+  let claimReleased = false;
+  let pendingState: HostState | null = null;
+  let cursorTimer: ReturnType<typeof setTimeout> | null = null;
+  let unsubscribe = () => {};
+
+  const clearCursorTimer = () => {
+    if (cursorTimer === null) return;
+    clearTimeout(cursorTimer);
+    cursorTimer = null;
+  };
+  const releaseClaim = () => {
+    if (claimReleased) return;
+    claimReleased = true;
+    registry.releaseStructuredHostClaim(key, claimOwner, writerClaimEpoch);
+  };
+  const fail = () => {
+    if (failed) return;
+    failed = true;
+    stopped = true;
+    pendingState = null;
+    clearCursorTimer();
+    unsubscribe();
+    releaseClaim();
+    void host.release();
+  };
+  const persistPending = () => {
+    const state = pendingState;
+    pendingState = null;
+    clearCursorTimer();
+    if (state) persist(state);
+  };
+  const schedulePending = () => {
+    if (cursorTimer !== null) return;
+    cursorTimer = setTimeout(() => {
+      cursorTimer = null;
+      if (failed || stopped || pendingState === null) return;
+      try {
+        persistPending();
+      } catch {
+        fail();
+      }
+    }, cursorDebounceMs);
+    cursorTimer.unref?.();
+  };
+  const stop = () => {
+    if (stopped) return;
+    try {
+      persistPending();
+    } catch {
+      fail();
+      return;
+    }
+    stopped = true;
+    unsubscribe();
+    releaseClaim();
+  };
+
+  unsubscribe = host.onStateChange((state) => {
+    if (failed || stopped) return;
+    const terminal = state.status === "unhosted" || (state.status === "dead" && state.pid === null);
+    if (!terminal && sameMaterialHostState(lastPersistedState, state)) {
+      pendingState = structuredClone(state);
+      schedulePending();
+      return;
+    }
+    pendingState = null;
+    clearCursorTimer();
+    try {
+      persist(state, terminal);
+      if (terminal) {
+        claimReleased = true;
+        stopped = true;
+        unsubscribe();
+      }
+    } catch {
+      fail();
+    }
+  });
+  if (stopped) unsubscribe();
+  return stop;
+}
+
 export async function bindCodexHostPersistence(
   registry: AgentRegistry,
   key: SessionKey,
@@ -93,48 +240,18 @@ export async function bindCodexHostPersistence(
   claimOwner: string,
   writerClaimEpoch: number,
   releasedStatus: "unhosted" | "dead" = "unhosted",
+  options: StructuredHostPersistenceOptions = {},
 ): Promise<() => void> {
-  host.setWriterFence(() => registry.ownsStructuredHostClaim(key, claimOwner, writerClaimEpoch));
-  try {
-    await persistCodexHost(registry, key, host, claimOwner, writerClaimEpoch);
-  } catch (error) {
-    await host.release();
-    throw error;
-  }
-  let failed = false;
-  let stopped = false;
-  let unsubscribe = () => {};
-  const stop = () => {
-    if (stopped) return;
-    stopped = true;
-    unsubscribe();
-    registry.releaseStructuredHostClaim(key, claimOwner, writerClaimEpoch);
-  };
-  unsubscribe = host.onStateChange((state) => {
-    if (failed || stopped) return;
-    try {
-      const terminal = state.status === "unhosted" || (state.status === "dead" && state.pid === null);
-      const persisted = registry.setStructuredHostClaimed(
-        key,
-        codexHostColumns(state, writerClaimEpoch),
-        terminal && releasedStatus === "dead" ? "dead" : registryStatus(state),
-        claimOwner,
-        writerClaimEpoch,
-        terminal,
-      );
-      if (!persisted) throw new Error("structured host writer claim is stale");
-      if (terminal) {
-        stopped = true;
-        unsubscribe();
-      }
-    } catch {
-      failed = true;
-      stop();
-      void host.release();
-    }
-  });
-  if (stopped) unsubscribe();
-  return stop;
+  return bindStructuredHostPersistence(
+    registry,
+    key,
+    host,
+    claimOwner,
+    writerClaimEpoch,
+    releasedStatus,
+    codexHostColumns,
+    options,
+  );
 }
 
 export async function bindClaudeHostPersistence(
@@ -144,56 +261,18 @@ export async function bindClaudeHostPersistence(
   claimOwner: string,
   writerClaimEpoch: number,
   releasedStatus: "unhosted" | "dead" = "unhosted",
+  options: StructuredHostPersistenceOptions = {},
 ): Promise<() => void> {
-  host.setWriterFence(() => registry.ownsStructuredHostClaim(key, claimOwner, writerClaimEpoch));
-  const persist = (state: HostState, terminal = false) => registry.setStructuredHostClaimed(
+  return bindStructuredHostPersistence(
+    registry,
     key,
-    claudeHostColumns(state, writerClaimEpoch),
-    registryStatus(state),
+    host,
     claimOwner,
     writerClaimEpoch,
-    terminal,
+    releasedStatus,
+    claudeHostColumns,
+    options,
   );
-  try {
-    if (!persist(await host.health())) throw new Error("structured host writer claim is stale");
-  } catch (error) {
-    await host.release();
-    throw error;
-  }
-  let failed = false;
-  let stopped = false;
-  let unsubscribe = () => {};
-  const stop = () => {
-    if (stopped) return;
-    stopped = true;
-    unsubscribe();
-    registry.releaseStructuredHostClaim(key, claimOwner, writerClaimEpoch);
-  };
-  unsubscribe = host.onStateChange((state) => {
-    if (failed || stopped) return;
-    try {
-      const terminal = state.status === "unhosted" || (state.status === "dead" && state.pid === null);
-      const persisted = registry.setStructuredHostClaimed(
-        key,
-        claudeHostColumns(state, writerClaimEpoch),
-        terminal && releasedStatus === "dead" ? "dead" : registryStatus(state),
-        claimOwner,
-        writerClaimEpoch,
-        terminal,
-      );
-      if (!persisted) throw new Error("structured host writer claim is stale");
-      if (terminal) {
-        stopped = true;
-        unsubscribe();
-      }
-    } catch {
-      failed = true;
-      stop();
-      void host.release();
-    }
-  });
-  if (stopped) unsubscribe();
-  return stop;
 }
 
 export interface AdoptedCodexHost {

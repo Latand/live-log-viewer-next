@@ -1568,9 +1568,10 @@ describe("CodexAppServerHost", () => {
     const receipt = await adopted[0]!.host.send({ id: "persist-turn", text: "start" });
     expect(receipt.outcome).toBe("turn-started");
     expect(registry.snapshot().entries["codex:adopted-thread"]?.structuredHost).toMatchObject({
-      eventCursor: 15,
+      eventCursor: 14,
       activeTurnRef: "turn-1",
     });
+    expect(eventStore.load("adopted-thread").at(-1)?.seq).toBe(15);
     server.request("persist-attention", "item/commandExecution/requestApproval", { command: "date" });
     await Bun.sleep(0);
     expect(registry.snapshot().entries["codex:adopted-thread"]?.structuredHost?.pendingAttention).toEqual([
