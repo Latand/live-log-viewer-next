@@ -78,6 +78,8 @@ mock.module("@/lib/scanner", () => ({
     scanProjects.push(project);
     scanOptions = options;
     const files = hydrateScannedFiles(scanFileResults.shift() ?? scannedFiles, options);
+    const resourceSnapshot = { files, projectCatalog: [], complete: true };
+    (options as { onResourceSnapshot?: (snapshot: typeof resourceSnapshot) => void }).onResourceSnapshot?.(resourceSnapshot);
     await scanGates.shift();
     const pinOverlayPaths = scanPinOverlayResults.shift();
     const complete = scanCompleteResults.shift();
@@ -116,7 +118,11 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } }, conversationAliases: {} });
   expect(second.status).toBe(304);
   expect(scans).toBe(1);
-  expect(scanOptions).toEqual({ persist: false, persistIndex: true });
+  expect(scanOptions).toEqual(expect.objectContaining({
+    persist: false,
+    persistIndex: true,
+    onResourceSnapshot: expect.any(Function),
+  }));
   expect(first.headers.get("x-llv-files-cache")).toBe("miss");
   expect(second.headers.get("x-llv-files-cache")).toBe("hit");
   expect(first.headers.get("x-llv-files-cache-requests")).toBe("1");
@@ -240,6 +246,97 @@ test("an ordinary resource snapshot reuses the completed scanner generation", as
   expect(files.map((entry) => entry.path)).toEqual([before.path]);
 });
 
+test("a fresh resource handoff publishes the exact scan scope before full file enrichment settles", async () => {
+  const before = file("/sessions/resource-stage-before.jsonl");
+  const after = file("/sessions/resource-stage-after.jsonl");
+  scannedFiles = [before];
+  await cachedFileScan();
+
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [after];
+  let settled = false;
+  const handoff = readResourceFileSnapshot(true).then((files) => {
+    settled = true;
+    return files;
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const settledBeforeFullScan = settled;
+  release();
+  const files = await handoff;
+
+  expect(settledBeforeFullScan).toBeTrue();
+  expect(files.map((entry) => entry.path)).toEqual([after.path]);
+  expect(scans).toBe(2);
+});
+
+test("a fresh resource handoff replaces deferred ordinary work without a duplicate scan", async () => {
+  const now = Date.now();
+  const before = file("/sessions/resource-promote-before.jsonl");
+  const after = file("/sessions/resource-promote-after.jsonl");
+  const freshFlags: boolean[] = [];
+  hydrateScannedFiles = (files, options) => {
+    freshFlags.push((options as { fresh?: boolean }).fresh === true);
+    return files;
+  };
+  scannedFiles = [before];
+  await cachedFileScan(undefined, undefined, now);
+
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [after];
+  await cachedFileScan(undefined, undefined, now + 10_100);
+  let settled = false;
+  const handoff = readResourceFileSnapshot(true).then((files) => {
+    settled = true;
+    return files;
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const settledBeforeFullScan = settled;
+  const scansBeforeFullScan = scans;
+  release();
+  const files = await handoff;
+
+  expect(settledBeforeFullScan).toBeTrue();
+  expect(scansBeforeFullScan).toBe(2);
+  expect(files.map((entry) => entry.path)).toEqual([after.path]);
+  expect(freshFlags).toEqual([false, true]);
+  expect(scans).toBe(2);
+});
+
+test("a fresh resource handoff joins an ordinary generation that already started", async () => {
+  const now = Date.now();
+  const before = file("/sessions/resource-running-before.jsonl");
+  const after = file("/sessions/resource-running-after.jsonl");
+  scannedFiles = [before];
+  await cachedFileScan(undefined, undefined, now);
+
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [after];
+  await cachedFileScan(undefined, undefined, now + 10_100);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(scans).toBe(2);
+
+  let settled = false;
+  const handoff = readResourceFileSnapshot(true).then((files) => {
+    settled = true;
+    return files;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const settledBeforeFullScan = settled;
+  const scansBeforeFullScan = scans;
+  release();
+  const files = await handoff;
+
+  expect(settledBeforeFullScan).toBeTrue();
+  expect(scansBeforeFullScan).toBe(2);
+  expect(files.map((entry) => entry.path)).toEqual([after.path]);
+  expect(scans).toBe(2);
+});
+
 test("concurrent fresh callers share one pending generation through failure and retry", async () => {
   const now = Date.now();
   const before = file("/sessions/shared-fresh-before.jsonl");
@@ -334,8 +431,6 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
   expect(scans).toBe(1);
 
   scannedFiles = [after];
-  let releasePostKillRefresh!: () => void;
-  scanGates.push(new Promise<void>((resolve) => { releasePostKillRefresh = resolve; }));
 
   let filesFresh: boolean | undefined;
   let hostEntries: Array<{ path: string }> = [];
@@ -389,19 +484,10 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
   });
 
   expect(filesFresh).toBeTrue();
-  expect(scans).toBe(1);
-  expect(resourceSettled).toBeFalse();
-
-  releasePreKillRefresh();
-  for (let attempt = 0; attempt < 100 && scans < 3; attempt += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-  expect(scans).toBe(3);
-  expect(resourceSettled).toBeFalse();
-
-  releasePostKillRefresh();
+  expect(scans).toBe(2);
   const payload = await payloadPromise;
-  expect(scans).toBe(3);
+  expect(resourceSettled).toBeTrue();
+  expect(scans).toBe(2);
   expect(hostEntries.map((entry) => entry.path)).toEqual([after.path]);
   expect(payload.sessions).toEqual([expect.objectContaining({
     target: "agents:after",
@@ -413,6 +499,7 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
   expect(lastResourceTargetRefs()).toEqual([{ target: "agents:after", ref: resourceRef }]);
   expect(allowedKillTarget("agents:after")).toBeNull();
   expect(allowedKillTarget("agents:before")).toBeNull();
+  releasePreKillRefresh();
 });
 
 test("a fresh resource snapshot replaces stale process and pane observations before host reconciliation", async () => {

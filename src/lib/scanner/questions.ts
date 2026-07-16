@@ -3,7 +3,10 @@ import { tailRecords } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
 
-const questionCache = globalCache<[number, PendingQuestion | null]>("questions");
+type PendingQuestionDraft = Omit<PendingQuestion, "pid" | "paneTarget">;
+
+globalCache<unknown>("questions").clear();
+const questionCache = globalCache<[number, PendingQuestionDraft | null]>("questions-v2");
 
 function timestampOf(obj: Record<string, unknown>): string {
   return stringValue(obj.timestamp) ?? stringValue(obj.created_at) ?? new Date().toISOString();
@@ -84,49 +87,46 @@ export function recordedToolResult(pathname: string, size: number, toolUseId: st
 }
 
 export function pendingQuestionFor(entry: FileEntry): PendingQuestion | null {
-  if (entry.root !== "claude-projects" || !entry.path.endsWith(".jsonl") || entry.proc !== "running" || entry.pid === null) {
-    return null;
-  }
+  if (entry.root !== "claude-projects" || !entry.path.endsWith(".jsonl")) return null;
   const cached = questionCache.get(entry.path);
-  if (cached?.[0] === entry.size) return cached[1];
+  let draft = cached?.[0] === entry.size ? cached[1] : undefined;
 
-  let pending: PendingQuestion | null = null;
-  const answered = new Set<string>();
-  for (const obj of tailRecords(entry.path, entry.size).reverse()) {
-    const result = toolResultId(obj);
-    if (result) {
-      answered.add(result);
-      continue;
-    }
-    const use = assistantToolUse(obj);
-    if (!use || answered.has(use.id)) break;
-    if (use.name === "AskUserQuestion") {
-      const questions = recordsValue(use.input.questions).map(normalizeQuestion).filter((item): item is PendingQuestionItem => item !== null);
-      if (!questions.length) break;
-      pending = {
-        kind: "question",
+  if (draft === undefined) {
+    draft = null;
+    const answered = new Set<string>();
+    for (const obj of tailRecords(entry.path, entry.size).reverse()) {
+      const result = toolResultId(obj);
+      if (result) {
+        answered.add(result);
+        continue;
+      }
+      const use = assistantToolUse(obj);
+      if (!use || answered.has(use.id)) break;
+      if (use.name === "AskUserQuestion") {
+        const questions = recordsValue(use.input.questions).map(normalizeQuestion).filter((item): item is PendingQuestionItem => item !== null);
+        if (!questions.length) break;
+        draft = {
+          kind: "question",
+          toolUseId: use.id,
+          transcriptPath: entry.path,
+          askedAt: timestampOf(obj),
+          questions,
+        };
+        break;
+      }
+      const plan = stringValue(use.input.plan)?.trim();
+      if (!plan) break;
+      draft = {
+        kind: "plan",
         toolUseId: use.id,
         transcriptPath: entry.path,
-        pid: entry.pid,
-        paneTarget: null,
         askedAt: timestampOf(obj),
-        questions,
+        plan,
       };
       break;
     }
-    const plan = stringValue(use.input.plan)?.trim();
-    if (!plan) break;
-    pending = {
-      kind: "plan",
-      toolUseId: use.id,
-      transcriptPath: entry.path,
-      pid: entry.pid,
-      paneTarget: null,
-      askedAt: timestampOf(obj),
-      plan,
-    };
-    break;
+    questionCache.set(entry.path, [entry.size, draft]);
   }
-  questionCache.set(entry.path, [entry.size, pending]);
-  return pending;
+  if (!draft || entry.proc !== "running" || entry.pid === null) return null;
+  return { ...draft, pid: entry.pid, paneTarget: null };
 }
