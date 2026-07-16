@@ -90,6 +90,56 @@ test("the highest receipt revision wins before wall-clock ordering", () => {
   expect(mergeRuntimeReceipts([delivering], [staleQueued])).toEqual([delivering]);
 });
 
+test("a delivered durable retry leaf outlives its stale queued projection", () => {
+  type RetryReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
+  const parent: RetryReceipt = {
+    operationId: "op-A",
+    idempotencyKey: "key-A",
+    conversationId: "conv-one",
+    kind: "send",
+    status: "failed",
+    reason: "dead-host",
+    text: "deliver exactly once",
+    at: "2026-07-16T10:00:00.000Z",
+    revision: 3,
+  };
+  // The immediate retry response projects the new attempt onto the parent
+  // operation id with the fresh idempotency key and a bumped revision.
+  const projection: RetryReceipt = {
+    ...parent,
+    idempotencyKey: "key-A2",
+    status: "queued",
+    reason: null,
+    at: "2026-07-16T10:00:01.000Z",
+    revision: 4,
+    retryOfOperationId: parent.operationId,
+  };
+  // The durable bus later carries the real retry leaf under its own operation
+  // id with its own (lower) per-scope revision counter.
+  const leaf: RetryReceipt = {
+    ...projection,
+    operationId: "op-A-retry",
+    status: "delivered",
+    at: "2026-07-16T10:00:02.000Z",
+    revision: 3,
+  };
+
+  expect(mergeRuntimeReceipts([parent, leaf], [projection])).toEqual([leaf]);
+});
+
+test("the receipt live status pluralizes pending and issue counts in both locales", () => {
+  expect(translate("en", "runtime.receipt.statusPending", { count: 1 })).toBe("1 pending message");
+  expect(translate("en", "runtime.receipt.statusPending", { count: 2 })).toBe("2 pending messages");
+  expect(translate("en", "runtime.receipt.statusProblems", { count: 1 })).toBe("1 issue");
+  expect(translate("en", "runtime.receipt.statusProblems", { count: 2 })).toBe("2 issues");
+  expect(translate("uk", "runtime.receipt.statusPending", { count: 1 })).toBe("1 повідомлення очікує");
+  expect(translate("uk", "runtime.receipt.statusPending", { count: 3 })).toBe("3 повідомлення очікують");
+  expect(translate("uk", "runtime.receipt.statusPending", { count: 5 })).toBe("5 повідомлень очікують");
+  expect(translate("uk", "runtime.receipt.statusProblems", { count: 1 })).toBe("1 проблема");
+  expect(translate("uk", "runtime.receipt.statusProblems", { count: 2 })).toBe("2 проблеми");
+  expect(translate("uk", "runtime.receipt.statusProblems", { count: 5 })).toBe("5 проблем");
+});
+
 test("retry supersession is independent of input and timestamp order", () => {
   type RetryReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
   const parent: RetryReceipt = {

@@ -74,23 +74,33 @@ function expectTransportDetailsHidden(host: HTMLElement) {
   }
 }
 
-test("interrupt automatic retry shows visible busy feedback in English", () => {
+function expectAccessibleBusyFeedback(host: HTMLElement, locale: "en" | "uk") {
+  // The collapsed summary announces busy-retry accessibly: the pending badge
+  // carries the wording in its label/title beside a visible spinner, and the
+  // live status region repeats it for screen readers.
+  const summary = host.querySelector("summary")!;
+  const pending = summary.querySelector("[data-receipt-pending-count]")!;
+  expect(pending.getAttribute("aria-label")).toBe(
+    `${translate(locale, "runtime.receipt.pendingCount", { count: 1 })} · ${translate(locale, "runtime.receipt.busyRetry")}`,
+  );
+  expect(pending.getAttribute("title")).toBe(translate(locale, "runtime.receipt.busyRetry"));
+  expect(pending.querySelector(".animate-spin")).toBeTruthy();
+  const status = host.querySelector("[data-runtime-receipt-status]")!;
+  expect(status.textContent).toContain(translate(locale, "runtime.receipt.busyRetry"));
+  expectTransportDetailsHidden(host);
+}
+
+test("interrupt automatic retry announces busy feedback accessibly in English", () => {
   const { host, root } = renderInterruptAutoRetry("en");
 
-  const summary = host.querySelector("summary");
-  expect(summary?.textContent).toContain("pending: 1");
-  expect(summary?.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));
-  expectTransportDetailsHidden(host);
+  expectAccessibleBusyFeedback(host, "en");
   flushSync(() => root.unmount());
 });
 
-test("interrupt automatic retry shows visible busy feedback in Ukrainian", () => {
+test("interrupt automatic retry announces busy feedback accessibly in Ukrainian", () => {
   const { host, root } = renderInterruptAutoRetry("uk");
 
-  const summary = host.querySelector("summary");
-  expect(summary?.textContent).toContain("очікують: 1");
-  expect(summary?.textContent).toContain(translate("uk", "runtime.receipt.busyRetry"));
-  expectTransportDetailsHidden(host);
+  expectAccessibleBusyFeedback(host, "uk");
   flushSync(() => root.unmount());
 });
 
@@ -296,8 +306,8 @@ test("multiple delivery attempts collapse into one bounded accessible receipt st
   expect(stack.contains(status)).toBe(false);
   expect(status?.getAttribute("role")).toBe("status");
   expect(status?.getAttribute("aria-live")).toBe("polite");
-  expect(status?.textContent).toContain("очікують 1");
-  expect(status?.textContent).toContain("проблем 2");
+  expect(status?.textContent).toContain("1 повідомлення очікує");
+  expect(status?.textContent).toContain("2 проблеми");
 
   const details = stack.querySelector("[data-runtime-receipt-details]") as HTMLElement;
   expect(details.className).toContain("max-h-");
@@ -447,9 +457,48 @@ test("collapsed receipt disclosure keeps live status exposed through keyboard an
 
   render("failed");
   expect(stack.contains(status)).toBe(false);
-  expect(status.textContent).toContain("0 pending");
-  expect(status.textContent).toContain("1 issues");
+  expect(status.textContent).toContain("0 pending messages");
+  expect(status.textContent).toContain("1 issue");
   expect(details.closest("details:not([open])")).toBe(stack);
+  flushSync(() => root.unmount());
+});
+
+test("the disclosure state agrees with the details element across an empty-to-populated remount", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const receipt = (operationId: string, status: "queued" | "delivered"): RuntimeReceipt => ({
+    operationId,
+    idempotencyKey: `key-${operationId}`,
+    conversationId: "conv-one",
+    kind: "send",
+    status,
+    text: "watch the disclosure",
+    at: "2026-07-16T10:00:00.000Z",
+    revision: 1,
+  });
+  const render = (receipts: RuntimeReceipt[]) => flushSync(() => root.render(
+    <RuntimeComposerReceipts receipts={receipts} onRetry={() => {}} onEdit={() => {}} />,
+  ));
+
+  render([receipt("op-first", "queued")]);
+  const summary = host.querySelector("summary") as HTMLElement;
+  flushSync(() => summary.click());
+  expect((host.querySelector("details[data-runtime-receipt-stack]") as HTMLDetailsElement).open).toBe(true);
+  expect(summary.getAttribute("aria-label")).toContain(translate("en", "runtime.receipt.hideDetails"));
+
+  // Every message receipt resolves: the details element unmounts while the
+  // component itself stays mounted with its disclosure state.
+  render([receipt("op-first", "delivered")]);
+  expect(host.querySelector("details[data-runtime-receipt-stack]")).toBeNull();
+
+  // A new attempt repopulates the stack: the fresh details element and the
+  // disclosure label must agree — the remembered open state is restored.
+  render([receipt("op-second", "queued")]);
+  const stack = host.querySelector("details[data-runtime-receipt-stack]") as HTMLDetailsElement;
+  const reopenedSummary = stack.querySelector("summary")!;
+  expect(stack.open).toBe(true);
+  expect(reopenedSummary.getAttribute("aria-label")).toContain(translate("en", "runtime.receipt.hideDetails"));
   flushSync(() => root.unmount());
 });
 
@@ -490,8 +539,10 @@ test("receipt summary keeps the pending count beside busy retry feedback", () =>
   ));
 
   const summary = host.querySelector("summary")!;
-  expect(summary.textContent).toContain("pending: 2");
-  expect(summary.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));
+  const pendingBadge = summary.querySelector("[data-receipt-pending-count]")!;
+  expect(pendingBadge.getAttribute("aria-label")).toBe(
+    `${translate("en", "runtime.receipt.pendingCount", { count: 2 })} · ${translate("en", "runtime.receipt.busyRetry")}`,
+  );
   const status = host.querySelector("[data-runtime-receipt-status]");
   expect(status?.textContent).toContain("2 pending");
   expect(status?.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));

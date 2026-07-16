@@ -75,19 +75,34 @@ export function mergeRuntimeReceipts(
     operations.add(receipt.operationId);
     operationsByIdempotencyKey.set(receipt.idempotencyKey, operations);
   }
-  const candidates = allReceipts.sort((left, right) =>
+  const revisionOrder = (left: RuntimeReceipt, right: RuntimeReceipt) =>
     right.revision - left.revision
       || Date.parse(right.at) - Date.parse(left.at)
       || left.operationId.localeCompare(right.operationId)
-      || left.idempotencyKey.localeCompare(right.idempotencyKey));
-  const operationIds = new Set<string>();
+      || left.idempotencyKey.localeCompare(right.idempotencyKey);
+  /* Tier one: within one operationId the journal's revision counter is the
+     single ordering authority, whichever plane (durable bus or immediate
+     response) carried the receipt. */
+  const sourced = [
+    ...runtimeReceipts.map((receipt) => ({ receipt, durable: true })),
+    ...immediateReceipts.map((receipt) => ({ receipt, durable: false })),
+  ].sort((left, right) => revisionOrder(left.receipt, right.receipt));
+  const currentByOperation = new Map<string, { receipt: RuntimeReceipt; durable: boolean }>();
+  for (const entry of sourced) {
+    if (!currentByOperation.has(entry.receipt.operationId)) currentByOperation.set(entry.receipt.operationId, entry);
+  }
+  /* Tier two: distinct operations claiming one idempotency key are the same
+     logical message seen through two planes — a retry's optimistic projection
+     onto its parent operation versus the durable retry leaf on the bus.
+     Revisions of different operations count from different scopes, so the
+     durable journal receipt outranks a projection before newest-state order. */
   const idempotencyKeys = new Set<string>();
   const attempts: RuntimeReceipt[] = [];
-  for (const receipt of candidates) {
-    if (operationIds.has(receipt.operationId) || idempotencyKeys.has(receipt.idempotencyKey)) continue;
-    operationIds.add(receipt.operationId);
-    idempotencyKeys.add(receipt.idempotencyKey);
-    attempts.push(receipt);
+  for (const entry of [...currentByOperation.values()].sort((left, right) =>
+    Number(right.durable) - Number(left.durable) || revisionOrder(left.receipt, right.receipt))) {
+    if (idempotencyKeys.has(entry.receipt.idempotencyKey)) continue;
+    idempotencyKeys.add(entry.receipt.idempotencyKey);
+    attempts.push(entry.receipt);
   }
   const byOperationId = new Map(attempts.map((receipt) => [receipt.operationId, receipt]));
   const projectedOperationIds = new Set(attempts
@@ -194,9 +209,13 @@ export function RuntimeComposerReceipts({
     <>
       {messageReceipts.length ? (
         <>
+          {/* `open` is controlled: the details element can unmount while all
+              message receipts are resolved and remount for the next attempt,
+              and the disclosure label must keep matching the real element. */}
           <details
             className="group w-full min-w-0 rounded-control border border-border bg-sunken/55 text-caption text-secondary"
             data-runtime-receipt-stack
+            open={detailsOpen}
             onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
           >
             <summary
@@ -327,8 +346,8 @@ export function RuntimeComposerReceipts({
             data-runtime-receipt-status
           >
             {t("runtime.receipt.statusSummary", {
-              pending: pendingReceipts.length,
-              problems: problemReceipts.length,
+              pending: t("runtime.receipt.statusPending", { count: pendingReceipts.length }),
+              problems: t("runtime.receipt.statusProblems", { count: problemReceipts.length }),
             })}
             {` ${attemptGroups
               .map((group) => [runtimeReceiptStatusText(t, group.current), ...supersededStatusLabels(group.attempts)].join(" · "))
