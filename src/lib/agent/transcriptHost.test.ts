@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { withSpawnCapability, type ResumeSpec } from "@/lib/agent/cli";
-import { AgentRegistry } from "@/lib/agent/registry";
-import { beginRegistryResume, createTranscriptHostResolver, type TranscriptHost } from "@/lib/agent/transcriptHost";
+import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { beginRegistryResume, createTranscriptHostResolver, reconcileObservedTranscriptHosts, type TranscriptHost } from "@/lib/agent/transcriptHost";
 import { TmuxDeliveryUncertainError } from "@/lib/tmux";
 import type { AgentProcess } from "@/lib/scanner/process";
 import type { PaneRef, SpawnedPane } from "@/lib/tmux";
@@ -45,6 +45,91 @@ const spec: ResumeSpec = {
   windowName: "codex-resume",
   engine: "codex",
 };
+
+test("stable tmux host reconciliation reads one snapshot without registry mutations", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-host-reconcile-read-"));
+  class CountingRegistry extends AgentRegistry {
+    snapshotCalls = 0;
+    upsertCalls = 0;
+    markUnhostedCalls = 0;
+    reconcileSpawnReceiptCalls = 0;
+
+    override snapshot() {
+      this.snapshotCalls += 1;
+      return super.snapshot();
+    }
+
+    override upsert(value: Parameters<AgentRegistry["upsert"]>[0]) {
+      this.upsertCalls += 1;
+      return super.upsert(value);
+    }
+
+    override markUnhosted(value: Parameters<AgentRegistry["markUnhosted"]>[0]) {
+      this.markUnhostedCalls += 1;
+      return super.markUnhosted(value);
+    }
+
+    override reconcileSpawnReceipts(value: Parameters<AgentRegistry["reconcileSpawnReceipts"]>[0]) {
+      this.reconcileSpawnReceiptCalls += 1;
+      return super.reconcileSpawnReceipts(value);
+    }
+
+    resetCounts() {
+      this.snapshotCalls = 0;
+      this.upsertCalls = 0;
+      this.markUnhostedCalls = 0;
+      this.reconcileSpawnReceiptCalls = 0;
+    }
+  }
+  const registry = new CountingRegistry(path.join(directory, "registry.json"));
+  const host: TranscriptHost = {
+    tmuxServerPid: 900,
+    paneId: "%1",
+    panePid: 100,
+    agentPid: 200,
+    display: "agents:4.0",
+    windowName: "codex-resume",
+    engine: "codex",
+    cwd: "/repo",
+    agentArgv: ["codex", "resume", SESSION],
+    agentIdentity: "200:one",
+    launchId: null,
+    claimedPaths: [PATHNAME],
+    primaryPath: PATHNAME,
+  };
+  const evidence: TmuxHostEvidence = {
+    kind: "tmux",
+    endpoint: "/run/user/1000/agent-log-viewer",
+    server: { pid: 900, startIdentity: "900:one" },
+    paneId: "%1",
+    panePid: { pid: 100, startIdentity: "100:one" },
+    windowName: "codex-resume",
+    agent: { pid: 200, startIdentity: "200:one" },
+    argv: host.agentArgv,
+  };
+  registry.upsert({
+    key: { engine: "codex", sessionId: SESSION },
+    artifactPath: PATHNAME,
+    cwd: "/repo",
+    accountId: null,
+    status: "live",
+    host: evidence,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  registry.resetCounts();
+
+  reconcileObservedTranscriptHosts([host], { registry, evidenceForHost: () => evidence });
+
+  expect({
+    snapshot: registry.snapshotCalls,
+    upsert: registry.upsertCalls,
+    markUnhosted: registry.markUnhostedCalls,
+    reconcileSpawnReceipts: registry.reconcileSpawnReceiptCalls,
+  }).toEqual({ snapshot: 1, upsert: 0, markUnhosted: 0, reconcileSpawnReceipts: 0 });
+  fs.rmSync(directory, { recursive: true, force: true });
+});
 
 test("registry resume receives one conversation-bound capability at central actuation", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-resume-capability-"));

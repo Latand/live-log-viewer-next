@@ -1,5 +1,7 @@
+import { isDeepStrictEqual } from "node:util";
+
 import type { ResumeSpec } from "@/lib/agent/cli";
-import { agentRegistry, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
@@ -120,6 +122,17 @@ interface HostDependencies extends TranscriptHostObservationDependencies {
 
 interface HostReconciliation {
   quarantinedPaneIds: string[];
+}
+
+export interface TranscriptHostRegistryReconciliationDependencies {
+  registry: Pick<AgentRegistry,
+    | "snapshot"
+    | "confirmSpawnPaneAlive"
+    | "completeObservedSpawn"
+    | "upsert"
+    | "markUnhosted"
+    | "reconcileSpawnReceipts">;
+  evidenceForHost: (host: TranscriptHost) => TmuxHostEvidence;
 }
 
 interface HostClaim {
@@ -567,13 +580,54 @@ function confirmRegistryHostAlive(host: TranscriptHost): void {
   }
 }
 
-async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconciliation> {
-  const registry = agentRegistry();
+function upsertChangesEntry(
+  existing: AgentRegistryEntry | undefined,
+  entry: Omit<AgentRegistryEntry, "updatedAt">,
+): boolean {
+  if (!existing) return true;
+  const replacement = entry.structuredHost === undefined && existing.structuredHost !== undefined
+    ? { ...entry, structuredHost: existing.structuredHost }
+    : entry;
+  const current = { ...existing } as Partial<AgentRegistryEntry>;
+  delete current.updatedAt;
+  return !isDeepStrictEqual(current, replacement);
+}
+
+function spawnReceiptReconciliationNeeded(
+  snapshot: ReturnType<AgentRegistry["snapshot"]>,
+  liveIds: Set<string>,
+): boolean {
+  const liveArtifactPaths = new Set<string>();
+  for (const id of liveIds) {
+    const entry = snapshot.entries[id];
+    if (!entry) continue;
+    if (entry.pendingAction !== null) return true;
+    liveArtifactPaths.add(entry.artifactPath);
+  }
+  return Object.values(snapshot.receipts).some((receipt) =>
+    receipt.state === "starting"
+    && receipt.artifactPath !== null
+    && liveArtifactPaths.has(receipt.artifactPath));
+}
+
+export function reconcileObservedTranscriptHosts(
+  hosts: TranscriptHost[],
+  dependencies: TranscriptHostRegistryReconciliationDependencies = {
+    registry: agentRegistry(),
+    evidenceForHost: tmuxEvidenceForHost,
+  },
+): HostReconciliation {
+  const { registry, evidenceForHost } = dependencies;
+  let snapshot = registry.snapshot();
+  let mutated = false;
   const seen = new Set<string>();
   const quarantinedPaneIds = new Set<string>();
   for (const host of hosts) {
-    const evidence = tmuxEvidenceForHost(host);
-    if (host.launchId) registry.confirmSpawnPaneAlive(host.launchId, evidence, { engine: host.engine, cwd: host.cwd });
+    const evidence = evidenceForHost(host);
+    if (host.launchId) {
+      registry.confirmSpawnPaneAlive(host.launchId, evidence, { engine: host.engine, cwd: host.cwd });
+      mutated = true;
+    }
     if (!host.primaryPath) continue;
     const key = sessionKeyFromTranscript(host.engine, host.primaryPath);
     if (!key) continue;
@@ -589,6 +643,7 @@ async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconcili
         claimOwner: null,
         pendingAction: null,
       });
+      mutated = true;
       /* A mismatched pane/artifact remains quarantined. It must never fall
          through into the generic upsert and overwrite the real receipt. */
       if (settled.kind === "settled") {
@@ -598,8 +653,9 @@ async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconcili
       quarantinedPaneIds.add(host.paneId);
       continue;
     }
-    const existing = registry.snapshot().entries[`${key.engine}:${key.sessionId}`];
-    registry.upsert({
+    const id = `${key.engine}:${key.sessionId}`;
+    const existing = snapshot.entries[id];
+    const entry = {
       key,
       artifactPath: host.primaryPath,
       cwd: host.cwd,
@@ -609,16 +665,23 @@ async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconcili
       claimEpoch: existing?.claimEpoch ?? 0,
       claimOwner: existing?.claimOwner ?? null,
       pendingAction: null,
-    });
-    seen.add(`${key.engine}:${key.sessionId}`);
+    } satisfies Omit<AgentRegistryEntry, "updatedAt">;
+    if (upsertChangesEntry(existing, entry)) {
+      registry.upsert(entry);
+      mutated = true;
+    }
+    seen.add(id);
   }
-  for (const [id, entry] of Object.entries(registry.snapshot().entries)) {
+  if (mutated) snapshot = registry.snapshot();
+  for (const [id, entry] of Object.entries(snapshot.entries)) {
     if (entry.host?.kind === "tmux" && !seen.has(id)) registry.markUnhosted(entry.key);
   }
-  registry.reconcileSpawnReceipts([...seen].map((id) => {
-    const [engine, sessionId] = id.split(":");
-    return { engine: engine as "claude" | "codex", sessionId };
-  }));
+  if (spawnReceiptReconciliationNeeded(snapshot, seen)) {
+    registry.reconcileSpawnReceipts([...seen].map((id) => {
+      const [engine, sessionId] = id.split(":");
+      return { engine: engine as "claude" | "codex", sessionId };
+    }));
+  }
   return { quarantinedPaneIds: [...quarantinedPaneIds] };
 }
 
@@ -629,9 +692,19 @@ async function registryResumeRecords(): ReturnType<typeof resumePaneRecords> {
   const snapshot = registry.snapshot();
   if (!snapshot.importedResumePanes) {
     const legacy = await resumePaneRecords();
-    if (legacy) registry.importResumePanes(legacy.serverPid, legacy.records);
+    if (legacy) {
+      registry.importResumePanes(legacy.serverPid, legacy.records);
+      return {
+        serverPid,
+        records: legacy.serverPid === serverPid ? new Map(legacy.records) : new Map(),
+      };
+    }
   }
-  return { serverPid, records: registry.resumePanes(serverPid) };
+  const saved = snapshot.legacyResumePanes;
+  return {
+    serverPid,
+    records: saved.serverPid === serverPid ? new Map(Object.entries(saved.panes)) : new Map(),
+  };
 }
 
 async function rememberRegistryResume(pathname: string, spec: ResumeSpec, pane: SpawnedPane): Promise<void> {
@@ -694,7 +767,7 @@ const runtimeResolver = createTranscriptHostResolver({
   remember: rememberRegistryResume,
   deliver: sendText,
   confirmAlive: confirmRegistryHostAlive,
-  reconcile: reconcileRegistry,
+  reconcile: reconcileObservedTranscriptHosts,
   serializeDelivery: serializeRegistryDelivery,
 }, globalStore.__llvTranscriptHostDecisions ??= new Map());
 
