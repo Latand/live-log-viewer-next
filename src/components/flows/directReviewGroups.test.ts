@@ -337,6 +337,19 @@ describe("directReviewFlows", () => {
     expect(projected[0]!.state).toBe("done_comment");
   });
 
+  test("an active managed flow on the reviewed conversation keeps its deck — the direct group yields", () => {
+    /* One node hosts one deck: a builder that is ALSO an implementer of a live
+       managed loop keeps that loop's deck and controls; direct reviewers stay
+       with today's worker-stack behavior. A CLOSED flow does not block. */
+    const builder = entry({ path: "/builder", conversationId: "conversation-builder", activity: "live" });
+    const reviewer = directReviewer("/reviewer-1", { id: "conversation-r1", reviews: "conversation-builder", activity: "live" });
+    const active = managedFlow({ id: "flow-live", implementerPath: "/builder" });
+    expect(directReviewFlows({ files: [builder, reviewer], flows: [active], tasks: [] })).toHaveLength(0);
+
+    const closed = managedFlow({ id: "flow-closed", implementerPath: "/builder", state: "closed", closedAt: "2026-07-09T00:00:00Z" });
+    expect(directReviewFlows({ files: [builder, reviewer], flows: [closed], tasks: [] })).toHaveLength(1);
+  });
+
   test("a reviewer whose reviewed conversation left the scan projects nothing", () => {
     const reviewer = directReviewer("/reviewer-1", { id: "conversation-r1", reviews: "conversation-gone" });
     expect(directReviewFlows({ files: [reviewer], flows: [], tasks: [] })).toHaveLength(0);

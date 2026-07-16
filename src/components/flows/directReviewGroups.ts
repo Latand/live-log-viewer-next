@@ -5,7 +5,7 @@ import { canonicalizeConversationId, currentConversationFile, withoutArchivedPre
 
 import { projectKey } from "@/components/projectModel";
 
-import { claimedReviewerPaths } from "./flowModel";
+import { claimedReviewerPaths, isActiveFlow } from "./flowModel";
 
 /*
  * Direct one-shot review groups (issue #325).
@@ -129,6 +129,10 @@ export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
        deck to; the reviewers keep today's worker-stack behavior. */
     const anchor = currentConversationFile(visible, latest.reviewedId);
     if (!anchor) continue;
+    /* Existing flow ownership wins (#112): one node hosts one deck, and an
+       active managed loop on the reviewed conversation must keep its deck and
+       controls. The direct reviewers then keep today's worker-stack behavior. */
+    if (input.flows.some((flow) => isActiveFlow(flow) && flow.implementerPath === anchor.path)) continue;
     const rounds = members.map<Round>((member, index) => {
       const { file } = member;
       const isLatest = index === members.length - 1;
