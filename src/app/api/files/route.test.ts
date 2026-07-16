@@ -7,6 +7,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
+import { projectInfoFromCwd } from "@/lib/scanner/describe";
 import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry } from "@/lib/types";
 import { createFilesClientCache } from "@/hooks/useFiles";
@@ -1225,6 +1226,160 @@ function file(path: string): FileEntry {
   };
 }
 
+test("a no-transcript structured reservation projects its card from canonical cwd truth", async () => {
+  const registry = agentRegistry();
+  const cwd = process.cwd();
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "terra",
+    clientAttemptId: "attempt_93c42855_stikon",
+    requestDigest: "9".repeat(64),
+    launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-sol", effort: "xhigh" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a structured reservation");
+  scannedFiles = [];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files?project=latand"));
+  const body = await response.json() as { files: Array<FileEntry & { spawn?: Record<string, unknown> }> };
+  const card = body.files.find((entry) => entry.conversationId === begun.receipt.conversationId);
+
+  expect(card).toMatchObject({
+    path: `spawn:${begun.receipt.launchId}`,
+    project: projectInfoFromCwd(cwd)?.project,
+    cwd,
+    projectRoot: path.resolve(cwd, "../.."),
+    engine: "codex",
+    kind: "session",
+    activity: "live",
+    proc: null,
+    renamable: false,
+    conversationId: begun.receipt.conversationId,
+    launchModel: "gpt-5.6-sol",
+    effort: "xhigh",
+    spawn: {
+      launchId: begun.receipt.launchId,
+      clientAttemptId: "attempt_93c42855_stikon",
+      state: "starting",
+      initialMessage: "pending",
+      retrySafe: false,
+      error: null,
+    },
+  });
+  expect(card?.project).not.toBe("latand");
+});
+
+test("a selected sidebar project cannot replace canonical cwd attribution after transcript discovery", async () => {
+  const registry = agentRegistry();
+  const cwd = process.cwd();
+  const artifactPath = path.join(stateDir, "cwd-attribution-9173e9a2.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd, project: "latand" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a structured reservation");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "cwd-attribution-9173e9a2" },
+    artifactPath,
+    cwd,
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd, project: "latand" }),
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const scanned = file(artifactPath);
+  scanned.project = "latand";
+  scanned.cwd = cwd;
+  scannedFiles = [scanned];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files?project=latand"));
+  const body = await response.json() as { files: FileEntry[] };
+  const entry = body.files.find((candidate) => candidate.conversationId === begun.receipt.conversationId);
+
+  expect(entry?.project).toBe(projectInfoFromCwd(cwd)?.project);
+  expect(entry?.project).not.toBe("latand");
+});
+
+test("a staged structured card stays binding until its initial message is admitted", async () => {
+  const registry = agentRegistry();
+  const cwd = process.cwd();
+  const artifactPath = path.join(stateDir, "e9e8a4b4.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "stikon",
+    clientAttemptId: "attempt_e9e8a4b4_stikon",
+  });
+  if (begun.kind !== "created") throw new Error("expected a structured reservation");
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "e9e8a4b4" },
+    artifactPath,
+    cwd,
+    accountId: "stikon",
+    status: "unhosted",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  scannedFiles = [];
+
+  const bindingResponse = await GET(new Request("http://127.0.0.1/api/files"));
+  const bindingBody = await bindingResponse.json() as { files: FileEntry[] };
+  expect(bindingBody.files.find((entry) => entry.conversationId === begun.receipt.conversationId)?.spawn)
+    .toMatchObject({ state: "binding", initialMessage: "pending" });
+
+  registry.holdDelivery(begun.receipt.conversationId, "Own issue #282", `spawn_${begun.receipt.launchId}`);
+  const queuedResponse = await GET(new Request("http://127.0.0.1/api/files"));
+  const queuedBody = await queuedResponse.json() as { files: FileEntry[] };
+  expect(queuedBody.files.find((entry) => entry.conversationId === begun.receipt.conversationId)?.spawn)
+    .toMatchObject({ state: "queued", initialMessage: "queued" });
+});
+
+test("transcript discovery suppresses the preallocated card for the same conversation", async () => {
+  const registry = agentRegistry();
+  const cwd = process.cwd();
+  const artifactPath = path.join(stateDir, "9173e9a2.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "terra",
+    clientAttemptId: "p0_282_duplicate_suppression_20260716_a1",
+  });
+  if (begun.kind !== "created") throw new Error("expected a structured reservation");
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "9173e9a2" },
+    artifactPath,
+    cwd,
+    accountId: "terra",
+    status: "idle",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  scannedFiles = [file(artifactPath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const matches = body.files.filter((entry) => entry.conversationId === begun.receipt.conversationId);
+
+  expect(matches).toHaveLength(1);
+  expect(matches[0]?.path).toBe(artifactPath);
+  expect(matches[0]?.spawn).toBeUndefined();
+});
+
 test("a provisional Codex fork projects as archived history of its stable conversation", async () => {
   const registry = agentRegistry();
   const sourcePath = "/sessions/source-019f4906-3f67-7b72-9fbc-9ec3b5ad1301.jsonl";
@@ -1517,7 +1672,7 @@ test("a custom session title (issue #33) overrides the derived title and keeps i
   expect(entry?.renamable).toBe(true);
 });
 
-test("the files rail reaggregates uncapped conversations under registry launch projects", async () => {
+test("the files rail reaggregates uncapped conversations under canonical cwd projects", async () => {
   const registry = agentRegistry();
   const transcript = path.join(stateDir, "capped-out-launch-project.jsonl");
   fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "Catalog prompt" } }) + "\n");
@@ -1548,7 +1703,9 @@ test("the files rail reaggregates uncapped conversations under registry launch p
   const response = await GET(new Request("http://127.0.0.1/api/files"));
   const body = await response.json() as { projectCatalog: Array<{ project: string; conversations: number }> };
 
-  expect(body.projectCatalog).toEqual([expect.objectContaining({ project: "effective-project", conversations: 1 })]);
+  expect(body.projectCatalog).toEqual([
+    expect.objectContaining({ project: projectInfoFromCwd(stateDir)?.project, conversations: 1 }),
+  ]);
 });
 
 test("an unreadable pipelines store degrades to pipelinesError without failing the poll", async () => {

@@ -350,6 +350,7 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
         conversationId: begun.receipt.conversationId,
         launched: true,
         retrySafe: false,
+        initialMessage: "delivered" as const,
         state: "settled",
       };
     },

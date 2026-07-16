@@ -1102,7 +1102,10 @@ function recordMembership(
   const rows = file.memberships[canonicalConversationId] ?? [];
   const existing = rows.find((row) => row.kind === membership.kind && row.containerId === membership.containerId && row.slot === membership.slot);
   if (existing) {
-    const immutableShape = ({ createdAt: _createdAt, ...row }: DurableConversationMembership) => row;
+    const immutableShape = ({ createdAt, ...row }: DurableConversationMembership) => {
+      void createdAt;
+      return row;
+    };
     if (JSON.stringify(immutableShape(existing)) !== JSON.stringify(immutableShape(membership))) {
       throw new Error("durable membership is immutable");
     }
@@ -2561,6 +2564,40 @@ export class AgentRegistry {
       receipt.completionMode = receipt.completionMode ?? "route-recovered";
       advanceMigrationScopeRevision(file, receipt.key.engine, readinessBefore, changedHostPaths);
       return { kind: "settled", receipt: clone(receipt), entry: clone(entry), conversation: clone(conversation) };
+    });
+  }
+
+  /** Strong runtime or transcript evidence may arrive after host cleanup marks
+      a structured launch failed. Restore the same reserved conversation and
+      generation while preserving its launch identity. */
+  recoverStructuredSpawnFromEvidence(
+    launchId: string,
+    evidence?: Omit<AgentRegistryEntry, "updatedAt">,
+  ): SpawnSettlement {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.state === "conflicted") {
+        return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
+      }
+      const stored = receipt.key ? file.entries[sessionKeyId(receipt.key)] : null;
+      let storedEvidence: Omit<AgentRegistryEntry, "updatedAt"> | null = null;
+      if (stored) {
+        const { updatedAt, ...entry } = stored;
+        void updatedAt;
+        storedEvidence = entry;
+      }
+      const candidate = evidence ?? storedEvidence;
+      if (!candidate
+        || (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(candidate.key))
+        || (receipt.artifactPath && receipt.artifactPath !== candidate.artifactPath)) {
+        return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
+      }
+      if (receipt.state === "failed") {
+        receipt.state = receipt.key ? "path-pending" : "starting";
+        receipt.error = null;
+      }
+      return this.settleSpawnInFile(file, launchId, candidate, "route-recovered");
     });
   }
 

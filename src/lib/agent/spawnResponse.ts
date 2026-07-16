@@ -11,7 +11,8 @@ export interface SpawnResponse {
   conversationId: string;
   launched: boolean;
   retrySafe: boolean;
-  state: "settled" | "path-pending" | "starting" | "conflict";
+  initialMessage: "pending" | "queued" | "delivered" | "failed";
+  state: "settled" | "path-pending" | "starting" | "failed" | "conflict";
   error?: string;
 }
 
@@ -19,19 +20,30 @@ export function spawnReplayStatus(response: SpawnResponse, structured: boolean):
   return response.state === "starting" || (structured && response.state === "path-pending") ? 202 : 200;
 }
 
+function initialMessageForReceipt(receipt: SpawnReceipt, structured: boolean): SpawnResponse["initialMessage"] {
+  if (receipt.state === "failed" || receipt.state === "conflicted") return "failed";
+  if (receipt.state === "completed" || receipt.state === "prompt-delivered") return "delivered";
+  if (structured && receipt.state === "path-pending") return "queued";
+  return "pending";
+}
+
+function responseStateForReceipt(receipt: SpawnReceipt): SpawnResponse["state"] {
+  if (receipt.state === "conflicted") return "conflict";
+  if (receipt.state === "failed") return "failed";
+  if (receipt.state === "starting" || receipt.state === "pane-bound") return "starting";
+  if (receipt.state === "host-verified" || receipt.state === "prompt-delivered" || receipt.state === "path-pending") {
+    return "path-pending";
+  }
+  return "settled";
+}
+
 export function spawnResponseForReceipt(
   receipt: SpawnReceipt,
   path = receipt.artifactPath,
-  options: { structured?: boolean } = {},
+  options: { structured?: boolean; initialMessage?: SpawnResponse["initialMessage"] } = {},
 ): SpawnResponse {
   const structured = receipt.transport === "structured"
     || (receipt.transport === null && options.structured === true);
-  const conflict = receipt.state === "conflicted";
-  const pending = receipt.state === "starting"
-    || receipt.state === "pane-bound"
-    || receipt.state === "host-verified"
-    || receipt.state === "prompt-delivered"
-    || receipt.state === "path-pending";
   const launched = (receipt.verifiedHost !== null || (options.structured === true && receipt.state === "completed"))
     && receipt.state !== "failed"
     && receipt.state !== "conflicted";
@@ -46,11 +58,8 @@ export function spawnResponseForReceipt(
     conversationId: receipt.conversationId,
     launched,
     retrySafe: receipt.state === "failed",
+    initialMessage: options.initialMessage ?? initialMessageForReceipt(receipt, structured),
     ...(receipt.error ? { error: receipt.error } : {}),
-    state: conflict
-      ? "conflict"
-      : pending
-        ? (receipt.state === "path-pending" || receipt.state === "prompt-delivered" || receipt.state === "host-verified" ? "path-pending" : "starting")
-        : "settled",
+    state: responseStateForReceipt(receipt),
   };
 }
