@@ -8,6 +8,7 @@ import type { ActionEvent, FileEntry } from "@/lib/types";
 import { cleanTitle } from "@/lib/title";
 
 import { attentionId } from "@/components/attention";
+import { isDirectReviewFlow } from "@/components/flows/directReviewGroups";
 import { claimedReviewerPaths, flowByImplementer, flowPresentation } from "@/components/flows/flowModel";
 import { descendantCounts, isAuxTask, isConversation, isSubagent, projectKey } from "@/components/projectModel";
 import { fmtAge } from "@/components/utils";
@@ -90,8 +91,10 @@ export function useSwitchboardData(
     }
     /* Flow-aware attention: an implementer whose loop waits on a decision is
        "yours" even while its transcript looks idle; claimed reviewer runs
-       never surface as standalone cards. */
-    const flowByImpl = flowByImplementer(flows);
+       never surface as standalone cards. Direct review groups (issue #325)
+       claim their reviewers the same way, but they are synthetic read-model
+       flows — the status-line/attention override stays with REAL flows only. */
+    const flowByImpl = flowByImplementer(flows.filter((flow) => !isDirectReviewFlow(flow)));
     const claimed = claimedReviewerPaths(flows);
     const normalized = query.trim().toLowerCase();
     const base = files

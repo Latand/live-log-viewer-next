@@ -53,6 +53,10 @@ interface Props {
   manual: FileEntry[];
   files: FileEntry[];
   flows: Flow[];
+  /** Synthetic direct one-shot review groups (issue #325): joined with `flows`
+      for the layout so their decks render, but excluded from every PATCH-backed
+      flow control (renderableFlows and the pipeline focus row read real flows). */
+  reviewGroups?: Flow[];
   pipelines: Pipeline[];
   /** Active project pipelines needing a scheme surface with no placed stage node
       yet (issue #136): docked as placeholder groups in the map layout. */
@@ -100,7 +104,7 @@ export function pipelinesToDock(groups: SchemeGroup[]): Pipeline[] {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, pipelines, surfacePipelines = [], workerStacks = [], tasks, drafts, favorites, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, drafts, favorites, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -124,7 +128,11 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
     setChipFade((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
   }, []);
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines, surfacePipelines, favorites), [groups, manual, files, flows, drafts, pipelines, surfacePipelines, favorites]);
+  /* Direct review groups join the layout's flow list so their decks place
+     beside the reviewed conversation exactly like managed loops (issue #325);
+     everything action-backed below keeps reading the real `flows`. */
+  const deckFlows = useMemo(() => (reviewGroups.length ? [...flows, ...reviewGroups] : flows), [flows, reviewGroups]);
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, deckFlows, drafts, pipelines, surfacePipelines, favorites), [groups, manual, files, deckFlows, drafts, pipelines, surfacePipelines, favorites]);
   /* Scheme order (depth-first, groups left to right) becomes the strip order,
      so chips and the map agree on what "next" means. */
   const entries = useMemo<Entry[]>(

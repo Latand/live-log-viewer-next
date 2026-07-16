@@ -9,6 +9,7 @@ import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/regis
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
+import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { loadPipelines } from "@/lib/pipelines/store";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -170,7 +171,12 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
           kind: durableEdge?.kind ?? "spawn",
           role: durableEdge?.role ?? null,
           parentConversationId: durableEdge?.parentConversationId ?? profile.parentConversationId,
-          reviewsConversationId: durableEdge?.reviewsConversationId ?? null,
+          /* Alias-canonical review subject (issue #325): an edge recorded
+             against a provisional id must still resolve to the reviewed
+             conversation's current card after registry alias repair. */
+          reviewsConversationId: durableEdge?.reviewsConversationId
+            ? conversationLookup.canonicalConversationId(durableEdge.reviewsConversationId)
+            : null,
           memberships: memberships.map((membership) => ({
             kind: membership.kind,
             containerId: membership.containerId,
@@ -182,6 +188,13 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
             parentConversationId: membership.parentConversationId,
           })),
         };
+      }
+      /* Terminal verdict of a one-shot reviewer, parsed from its transcript
+         tail (issue #325): direct reviews have no flow engine watching them, so
+         the deck projection reads the verdict from this read-model field. */
+      if (file.durableLineage?.role === "reviewer" && file.durableLineage.reviewsConversationId) {
+        const outcome = reviewOutcomeFor(file);
+        if (outcome) file.review = outcome;
       }
       const parentConversationId = durableEdge?.parentConversationId ?? profile.parentConversationId;
       if (parentConversationId) {

@@ -1,8 +1,12 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { directReviewFlows } from "@/components/flows/directReviewGroups";
+import type { BranchGroup } from "@/components/projectModel";
+import type { FileEntry } from "@/lib/types";
+
 import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
-import type { SchemeLayout, SchemeRect } from "./layout";
+import { buildSchemeLayout, type SchemeLayout, type SchemeRect } from "./layout";
 import type { WorkerStack } from "./workerCollapse";
 
 const emptyLayout: SchemeLayout = {
@@ -65,4 +69,38 @@ test("no worker stacks → no legend dots", () => {
     <Minimap layout={emptyLayout} world={world} stackDots={[]} cam={cam} vp={vp} onJump={() => {}} />,
   );
   expect(html).not.toContain("collapsed stack");
+});
+
+test("a direct review group's deck shows on the minimap like any managed deck (#325)", () => {
+  const builder: FileEntry = {
+    root: "claude-projects", name: "/builder", project: "demo", title: "Builder", engine: "claude",
+    kind: "session", fmt: "claude", parent: null, mtime: 9_000, size: 10, activity: "live",
+    proc: null, pid: null, model: null, pendingQuestion: null, waitingInput: null,
+    path: "/builder", conversationId: "conversation-builder",
+  };
+  const reviewer: FileEntry = {
+    ...builder,
+    path: "/reviewer-1", name: "/reviewer-1", title: "Reviewer", parent: "/builder",
+    conversationId: "conversation-r1", mtime: 1_000, activity: "idle",
+    review: { verdict: "APPROVE", findingsCount: 0, observedAt: "2026-07-10T02:00:00.000Z" },
+    durableLineage: { kind: "review", role: "reviewer", parentConversationId: "conversation-builder", reviewsConversationId: "conversation-builder", memberships: [] },
+  };
+  const projected = directReviewFlows({ files: [builder, reviewer], flows: [], tasks: [] });
+  expect(projected).toHaveLength(1);
+  const group: BranchGroup = {
+    key: builder.path,
+    columns: [{ file: builder, tasks: [] }],
+    returnable: [],
+    finished: [],
+    smt: builder.mtime,
+    orphanTask: false,
+  };
+  const layout = buildSchemeLayout([group], [], [builder, reviewer], projected, []);
+  expect(layout.decks).toHaveLength(1);
+
+  const html = renderToStaticMarkup(
+    <Minimap layout={layout} world={{ x: 0, y: 0, w: layout.width, h: layout.height }} stackDots={[]} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  /* One accent deck rect beside the builder node — same read as a managed loop. */
+  expect((html.match(/fill="var\(--color-accent\)"/g) ?? []).length).toBeGreaterThanOrEqual(1);
 });

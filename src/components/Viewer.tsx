@@ -648,6 +648,7 @@ export function Viewer() {
             pipelinesError={pipelinesError}
             workflows={workflows}
             tasks={tasks}
+            conversationAliases={conversationAliases}
             projectCatalog={projectCatalog}
             projectCwd={projectCwds[project]}
             project={project}

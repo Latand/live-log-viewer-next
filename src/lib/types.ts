@@ -1,4 +1,4 @@
-import type { Flow, FlowAnnotation } from "@/lib/flows/types";
+import type { Flow, FlowAnnotation, ReviewVerdict } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { TmuxEndpointHealth } from "@/lib/tmux";
@@ -119,6 +119,12 @@ export interface FileEntry {
   cmdDesc?: string;
   /** Review-loop ownership for grouping implementer/reviewer sessions. */
   flow?: FlowAnnotation;
+  /** Terminal review outcome of a one-shot reviewer, parsed from the reviewer
+      transcript's last assistant message (issue #325). Present only on current
+      generations carrying a durable `role=reviewer` edge; a clean "NO FINDINGS"
+      reply projects as APPROVE with zero findings. Absent while the reviewer is
+      still working or when its tail carries no verdict. */
+  review?: { verdict: ReviewVerdict; findingsCount: number | null; observedAt: string | null } | null;
   /** Stable registry projection used by board adapters after paths rotate. */
   durableLineage?: {
     kind: "spawn" | "review";

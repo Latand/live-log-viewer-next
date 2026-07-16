@@ -4,6 +4,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
+import { directReviewFlows } from "@/components/flows/directReviewGroups";
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
 
 import { deckKey, flowLinkKey } from "./agentLinks";
@@ -501,5 +502,87 @@ describe("buildSchemeLayout favorites band (issue #224)", () => {
     const favNode = layout.nodes.find((node) => node.file.path === "/manual-fav")!;
     const plainNode = layout.nodes.find((node) => node.file.path === "/plain")!;
     expect(plainNode.y).toBeGreaterThan(favNode.y + favNode.h);
+  });
+});
+
+describe("direct one-shot review groups on the scheme (issue #325)", () => {
+  const directReviewer = (pathname: string, id: string, mtime: number, verdict: "APPROVE" | "REQUEST_CHANGES" | null = null): FileEntry => entry({
+    path: pathname,
+    parent: "/orchestrator",
+    conversationId: id,
+    mtime,
+    activity: verdict ? "idle" : "live",
+    durableLineage: {
+      kind: "review",
+      role: "reviewer",
+      parentConversationId: "conversation-orchestrator",
+      reviewsConversationId: "conversation-builder",
+      memberships: [],
+    },
+    ...(verdict ? { review: { verdict, findingsCount: verdict === "APPROVE" ? 0 : 2, observedAt: "2026-07-10T02:00:00.000Z" } } : {}),
+  });
+
+  function directLayoutFixture() {
+    const builder = entry({ path: "/builder", conversationId: "conversation-builder", activity: "live" });
+    const done = directReviewer("/reviewer-1", "conversation-r1", 1_000, "REQUEST_CHANGES");
+    const live = directReviewer("/reviewer-2", "conversation-r2", 2_000);
+    const files = [builder, done, live];
+    const projected = directReviewFlows({ files, flows: [], tasks: [] });
+    const group: BranchGroup = {
+      key: builder.path,
+      columns: [{ file: builder, tasks: [] }],
+      returnable: [],
+      finished: [],
+      smt: builder.mtime,
+      orphanTask: false,
+    };
+    return { files, projected, group };
+  }
+
+  test("the synthetic group places a round deck beside the reviewed conversation", () => {
+    const { files, projected, group } = directLayoutFixture();
+    expect(projected).toHaveLength(1);
+    const layout = buildSchemeLayout([group], [], files, projected, []);
+
+    expect(layout.decks).toHaveLength(1);
+    const deck = layout.decks[0]!;
+    expect(deck.key).toBe(deckKey(projected[0]!.id));
+    expect(deck.rounds.map((round) => round.file?.path)).toEqual(["/reviewer-1", "/reviewer-2"]);
+    /* Deck geometry mirrors the managed review-loop pair: beside the node. */
+    const node = layout.nodes.find((candidate) => candidate.file.path === "/builder")!;
+    expect(deck.x).toBeGreaterThan(node.x + node.w);
+    expect(deck.y).toBe(node.y);
+    expect(layout.loops).toHaveLength(1);
+    expect(layout.byPath.get(deck.key)).toBe(deck);
+  });
+
+  test("a direct group never grows an interactive flow hub or a flow halo", () => {
+    const { files, projected, group } = directLayoutFixture();
+    const layout = buildSchemeLayout([group], [], files, projected, []);
+
+    /* No PATCH-backed control surface may exist for a synthetic id: no flow
+       link (the FlowHub host) and no flow group halo (the override panel host). */
+    expect(layout.links.some((link) => link.key === flowLinkKey(projected[0]!.id))).toBe(false);
+    expect(layout.groups.some((halo) => halo.id === projected[0]!.id)).toBe(false);
+  });
+
+  test("a managed flow on the same board keeps its hub and halo beside a direct group", () => {
+    const { files, projected, group } = directLayoutFixture();
+    const impl = entry({ path: "/impl", activity: "live" });
+    const managed = flow({ id: "flow-managed", implementerPath: "/impl" });
+    const managedGroup: BranchGroup = {
+      key: impl.path,
+      columns: [{ file: impl, tasks: [] }],
+      returnable: [],
+      finished: [],
+      smt: impl.mtime,
+      orphanTask: false,
+    };
+    const layout = buildSchemeLayout([group, managedGroup], [], [...files, impl], [...projected, managed], []);
+
+    expect(layout.decks).toHaveLength(2);
+    expect(layout.links.some((link) => link.key === flowLinkKey("flow-managed"))).toBe(true);
+    expect(layout.groups.some((halo) => halo.id === "flow-managed")).toBe(true);
+    expect(layout.groups.some((halo) => halo.id === projected[0]!.id)).toBe(false);
   });
 });
