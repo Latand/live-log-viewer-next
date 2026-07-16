@@ -4,11 +4,15 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
+import { globalCache } from "@/lib/scanner/caches";
+import type { FileEntry } from "@/lib/types";
 
 type FileScanSnapshot = Awaited<ReturnType<typeof listFilesWithProjectCatalog>>;
 type FileScanRefresh = {
   generation: number;
   promise: Promise<FileScanSnapshot>;
+  resourcePromise: Promise<FileScanSnapshot>;
+  cancelBeforeStart?: () => boolean;
 };
 type FileScanReason = "cold" | "ordinary" | "pinned" | "revision" | "generation" | "fresh" | "current";
 type FileScanDiagnostic = {
@@ -53,7 +57,7 @@ const FILE_SCAN_FRESH_MS = 1_000;
 /** Poll-driven attempts share the client's fallback cadence, including failures. */
 const FILE_SCAN_ORDINARY_REFRESH_MS = 10_000;
 const FILE_SCAN_PIN_CACHE_MAX = 8;
-const FILE_SCAN_CACHE_SCHEMA_VERSION = 4 as const;
+const FILE_SCAN_CACHE_SCHEMA_VERSION = 5 as const;
 const FILE_SCAN_SNAPSHOT_VERSION = 1 as const;
 const FILE_SCAN_SNAPSHOT_FILE = "files-scan-snapshot.json";
 const FILE_SCAN_PERSISTENCE_DIAGNOSTIC_MS = 60_000;
@@ -99,6 +103,43 @@ function isFileScanSnapshot(value: unknown): value is FileScanSnapshot {
     && typeof candidate.conversations === "number" && Number.isSafeInteger(candidate.conversations)
     && (candidate.projectRoot === undefined || typeof candidate.projectRoot === "string"));
   return filesValid && catalogValid;
+}
+
+function persistedTurnState(entry: FileEntry): string | null | undefined {
+  if (entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled") return "busy";
+  if (entry.activityReason === "jsonl_turn_completed") return "done";
+  if (entry.activityReason === "mtime_fresh" || entry.activityReason === "mtime_recent" || entry.activityReason === "mtime_old") return null;
+  return undefined;
+}
+
+function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
+  for (const entry of snapshot.files) {
+    let current: fs.Stats;
+    try {
+      current = fs.statSync(entry.path);
+    } catch {
+      continue;
+    }
+    if (current.size !== entry.size || current.mtimeMs / 1000 !== entry.mtime) continue;
+    const turnState = persistedTurnState(entry);
+    if (turnState !== undefined) globalCache<[number, string | null]>("turn").set(entry.path, [entry.size, turnState]);
+    if (!(entry.root === "claude-projects" && entry.path.includes(`${path.sep}subagents${path.sep}`))) {
+      globalCache<[number, { display: string | null; launch: string | null }]>("model")
+        .set(entry.path, [entry.size, { display: entry.model, launch: entry.launchModel ?? null }]);
+    }
+    if (Object.hasOwn(entry, "effort") && !(entry.engine === "claude" && entry.proc === "running")) {
+      globalCache<[number, string | null]>("effort").set(entry.path, [entry.size, entry.effort ?? null]);
+    }
+    if (Object.hasOwn(entry, "plan")) globalCache<[number, FileEntry["plan"]]>("plan").set(entry.path, [entry.size, entry.plan]);
+    if (Object.hasOwn(entry, "goal")) globalCache<[number, FileEntry["goal"]]>("goal").set(entry.path, [entry.size, entry.goal]);
+    if (Object.hasOwn(entry, "ctx")) globalCache<[number, FileEntry["ctx"]]>("ctx").set(entry.path, [entry.size, entry.ctx]);
+    if (Object.hasOwn(entry, "lastTurn")) {
+      globalCache<[number, FileEntry["lastTurn"]]>("last-turn").set(entry.path, [entry.size, entry.lastTurn]);
+    }
+    if (Object.hasOwn(entry, "pendingWakeup")) {
+      globalCache<[number, FileEntry["pendingWakeup"]]>("wakeup").set(entry.path, [entry.size, entry.pendingWakeup]);
+    }
+  }
 }
 
 function readPersistedFileScanSnapshot(): FileScanSnapshot | undefined {
@@ -154,14 +195,44 @@ function refreshPromise(value: unknown): Promise<FileScanSnapshot> | undefined {
   return undefined;
 }
 
-function installFileScanRefresh(slot: FileScanCacheSlot, generation: number, promise: Promise<FileScanSnapshot>): FileScanRefresh {
-  const refresh = { generation, promise };
+function installFileScanRefresh(
+  slot: FileScanCacheSlot,
+  generation: number,
+  promise: Promise<FileScanSnapshot>,
+  resourcePromise: Promise<FileScanSnapshot> = promise,
+): FileScanRefresh {
+  const refresh = { generation, promise, resourcePromise };
   slot.refresh = refresh;
   const clear = () => {
     if (slot.refresh === refresh) slot.refresh = undefined;
   };
   void promise.then(clear, clear);
   return refresh;
+}
+
+function installStagedFileScanRefresh(
+  slot: FileScanCacheSlot,
+  generation: number,
+  start: (publish: (snapshot: FileScanSnapshot) => void) => Promise<FileScanSnapshot>,
+): FileScanRefresh {
+  let publishResource!: (snapshot: FileScanSnapshot) => void;
+  let rejectResource!: (error: unknown) => void;
+  let published = false;
+  const resourcePromise = new Promise<FileScanSnapshot>((resolve, reject) => {
+    publishResource = resolve;
+    rejectResource = reject;
+  });
+  void resourcePromise.catch(() => {});
+  const publish = (snapshot: FileScanSnapshot) => {
+    if (published) return;
+    published = true;
+    publishResource(snapshot);
+  };
+  const promise = start(publish);
+  void promise.then(publish, (error) => {
+    if (!published) rejectResource(error);
+  });
+  return installFileScanRefresh(slot, generation, promise, resourcePromise);
 }
 
 function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
@@ -216,6 +287,7 @@ function fileScanRefreshPromise(
   slot: FileScanCacheSlot,
   generation: number,
   reason: FileScanReason,
+  onResourceSnapshot?: (snapshot: FileScanSnapshot) => void,
 ): Promise<FileScanSnapshot> {
   const fresh = slot.freshObservationGeneration !== undefined
     && generation >= slot.freshObservationGeneration;
@@ -224,6 +296,7 @@ function fileScanRefreshPromise(
       persist: false,
       persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
       ...(fresh ? { fresh: true } : {}),
+      ...(onResourceSnapshot ? { onResourceSnapshot, resourceBaseline: slot.snapshot } : {}),
     });
     if (!snapshot.complete) throw new Error("filesystem scan incomplete");
     if (process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1") writePersistedFileScanSnapshot(snapshot);
@@ -238,14 +311,52 @@ function fileScanRefreshPromise(
   });
 }
 
-function beginFileScanRefresh(slot: FileScanCacheSlot, generation: number, reason: FileScanReason): FileScanRefresh {
-  return installFileScanRefresh(slot, generation, fileScanRefreshPromise(slot, generation, reason));
+function beginFileScanRefresh(
+  slot: FileScanCacheSlot,
+  generation: number,
+  reason: FileScanReason,
+): FileScanRefresh {
+  return installStagedFileScanRefresh(
+    slot,
+    generation,
+    (publish) => fileScanRefreshPromise(slot, generation, reason, publish),
+  );
 }
 
 function beginDeferredFileScanRefresh(slot: FileScanCacheSlot, generation: number): FileScanRefresh {
-  const promise = new Promise<void>((resolve) => setImmediate(resolve))
-    .then(() => fileScanRefreshPromise(slot, generation, "ordinary"));
-  return installFileScanRefresh(slot, generation, promise);
+  let started = false;
+  let canceled = false;
+  let publishResource!: (snapshot: FileScanSnapshot) => void;
+  let rejectResource!: (error: unknown) => void;
+  let published = false;
+  const resourcePromise = new Promise<FileScanSnapshot>((resolve, reject) => {
+    publishResource = resolve;
+    rejectResource = reject;
+  });
+  void resourcePromise.catch(() => {});
+  const publish = (snapshot: FileScanSnapshot) => {
+    if (published) return;
+    published = true;
+    publishResource(snapshot);
+  };
+  const promise = new Promise<void>((resolve) => setImmediate(resolve)).then(() => {
+    started = true;
+    if (canceled) {
+      if (!slot.snapshot) throw new Error("deferred file scan canceled without a completed snapshot");
+      return slot.snapshot;
+    }
+    return fileScanRefreshPromise(slot, generation, "ordinary", publish);
+  });
+  void promise.then(publish, (error) => {
+    if (!published) rejectResource(error);
+  });
+  const refresh = installFileScanRefresh(slot, generation, promise, resourcePromise);
+  refresh.cancelBeforeStart = () => {
+    if (started) return false;
+    canceled = true;
+    return true;
+  };
+  return refresh;
 }
 
 function beginPinnedFileScanRefresh(
@@ -256,12 +367,14 @@ function beginPinnedFileScanRefresh(
 ): FileScanRefresh {
   const fresh = slot.freshObservationGeneration !== undefined
     && generation >= slot.freshObservationGeneration;
-  const promise = instrumentFileScan(slot, generation, reason, async () => {
+  return installStagedFileScanRefresh(slot, generation, (publish) => instrumentFileScan(slot, generation, reason, async () => {
     const pinnedSnapshot = await listFilesWithProjectCatalog(undefined, {
       persist: false,
       persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
       pin: pinnedPath,
       ...(fresh ? { fresh: true } : {}),
+      onResourceSnapshot: publish,
+      resourceBaseline: slot.snapshot,
     });
     if (!pinnedSnapshot.complete) throw new Error("filesystem scan incomplete");
     const pinOverlayPaths = pinnedSnapshot.pinOverlayPaths ?? [];
@@ -297,8 +410,7 @@ function beginPinnedFileScanRefresh(
       slot.freshObservationGeneration = undefined;
     }
     return globalSnapshot;
-  });
-  return installFileScanRefresh(slot, generation, promise);
+  }));
 }
 
 async function refreshThroughGeneration(
@@ -363,6 +475,23 @@ function completedScan(
   };
 }
 
+function resourceScan(
+  slot: FileScanCacheSlot,
+  snapshot: FileScanSnapshot,
+  generation: number,
+  targetGeneration: number,
+): CachedFileScan {
+  return {
+    snapshot,
+    generation,
+    targetGeneration,
+    cacheStatus: "miss",
+    requestCount: slot.requestCount ?? 0,
+    cloneDurationMs: 0,
+    ...(slot.lastScan ? { lastScan: { ...slot.lastScan } } : {}),
+  };
+}
+
 function nextGeneration(slot: FileScanCacheSlot): number {
   slot.requestedGeneration += 1;
   return slot.requestedGeneration;
@@ -399,9 +528,11 @@ function globalFileScanSlot(): FileScanCacheSlot {
   const cache = fileScanCache();
   const cachedSlot = cache.get(key);
   if (cachedSlot === undefined) {
+    const snapshot = readPersistedFileScanSnapshot();
+    if (snapshot) primePersistedFileDerivations(snapshot);
     const slot: FileScanCacheSlot = {
       schemaVersion: FILE_SCAN_CACHE_SCHEMA_VERSION,
-      snapshot: readPersistedFileScanSnapshot(),
+      snapshot,
       snapshotGeneration: 0,
       requestedGeneration: 0,
       refreshedAt: 0,
@@ -549,6 +680,38 @@ export async function currentFileScan(
   const slot = globalFileScanSlot();
   await refreshThroughGeneration(slot, scan.targetGeneration, undefined, "current");
   return completedScan(slot, undefined, scan.targetGeneration);
+}
+
+/** Returns the fresh resource projection as soon as its file generation has
+    current filesystem scope. The worker performs fresh ownership observation;
+    sidebar enrichment continues through the completed-generation seam. */
+export async function currentResourceFileScan(): Promise<CachedFileScan> {
+  const slot = globalFileScanSlot();
+  slot.requestCount = (slot.requestCount ?? 0) + 1;
+  let targetGeneration = slot.freshObservationGeneration;
+  let requestedRefresh: FileScanRefresh | undefined;
+  if (targetGeneration === undefined) {
+    const pending = slot.refresh;
+    if (pending?.cancelBeforeStart?.()) {
+      targetGeneration = nextGeneration(slot);
+      slot.freshObservationGeneration = targetGeneration;
+      requestedRefresh = beginFileScanRefresh(slot, targetGeneration, "fresh");
+    } else if (pending) {
+      targetGeneration = pending.generation;
+    } else {
+      targetGeneration = nextGeneration(slot);
+      slot.freshObservationGeneration = targetGeneration;
+    }
+  }
+  while (true) {
+    const refresh = requestedRefresh ?? slot.refresh ?? beginFileScanRefresh(slot, targetGeneration, "fresh");
+    requestedRefresh = undefined;
+    const snapshot = await refresh.resourcePromise;
+    if (refresh.generation >= targetGeneration) {
+      return resourceScan(slot, snapshot, refresh.generation, targetGeneration);
+    }
+    await refresh.promise;
+  }
 }
 
 export function resetFilesRouteCacheForTests(): void {

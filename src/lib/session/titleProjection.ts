@@ -1,7 +1,8 @@
 import fs from "node:fs";
 
-import { agentRegistry, RegistryReadError } from "@/lib/agent/registry";
+import { agentRegistry, normalizeRegistry, RegistryReadError } from "@/lib/agent/registry";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { statePath } from "@/lib/configDir";
 import type { FileEntry } from "@/lib/types";
 
 import { isRenameableSessionEntry } from "./renameEligibility";
@@ -21,6 +22,7 @@ interface RegistryProjection {
 }
 
 const registryProjectionCache = new WeakMap<Registry, RegistryProjection>();
+let readOnlyRegistryProjectionCache: RegistryProjection | null = null;
 
 function registrySignature(registry: Registry): string {
   try {
@@ -43,17 +45,7 @@ function canonicalConversationId(snapshot: RegistrySnapshot, alias: string): str
   return current;
 }
 
-function registryProjection(registry: Registry, surfaceUnexpectedError = false): RegistryProjection | null {
-  const signature = registrySignature(registry);
-  const cached = registryProjectionCache.get(registry);
-  if (cached?.signature === signature) return cached;
-  let snapshot: RegistrySnapshot;
-  try {
-    snapshot = registry.snapshot();
-  } catch (error) {
-    if (surfaceUnexpectedError && !(error instanceof RegistryReadError)) throw error;
-    return null;
-  }
+function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string): RegistryProjection {
   const conversationByPath = new Map<string, ViewerConversationId>();
   const aliasesByCanonical = new Map<string, string[]>();
   const ownedPathsByConversation = new Map<string, string[]>();
@@ -88,8 +80,42 @@ function registryProjection(registry: Registry, surfaceUnexpectedError = false):
     projectByPath,
     archivedPaths,
   };
+  return projection;
+}
+
+function registryProjection(registry: Registry, surfaceUnexpectedError = false): RegistryProjection | null {
+  const signature = registrySignature(registry);
+  const cached = registryProjectionCache.get(registry);
+  if (cached?.signature === signature) return cached;
+  let snapshot: RegistrySnapshot;
+  try {
+    snapshot = registry.snapshot();
+  } catch (error) {
+    if (surfaceUnexpectedError && !(error instanceof RegistryReadError)) throw error;
+    return null;
+  }
+  const projection = projectRegistrySnapshot(snapshot, signature);
   registryProjectionCache.set(registry, projection);
   return projection;
+}
+
+function readOnlyRegistryProjection(): RegistryProjection | null {
+  const filename = statePath("agent-registry.json");
+  let signature: string;
+  try {
+    const stat = fs.statSync(filename, { bigint: true });
+    signature = `${filename}:${stat.mtimeNs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+  if (readOnlyRegistryProjectionCache?.signature === signature) return readOnlyRegistryProjectionCache;
+  try {
+    const snapshot = normalizeRegistry(JSON.parse(fs.readFileSync(filename, "utf8")));
+    readOnlyRegistryProjectionCache = projectRegistrySnapshot(snapshot, signature);
+    return readOnlyRegistryProjectionCache;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -109,10 +135,19 @@ export function overlaySessionTitles(entries: FileEntry[]): void {
   for (const entry of entries) project(entry);
 }
 
-function sessionTitleProjector(): (entry: FileEntry) => void {
+/** Applies resource-facing identity and titles while leaving the files-route
+ * rename eligibility pass to its regular bounded shortlist. */
+export function overlayResourceSessionTitles(entries: FileEntry[]): void {
+  const project = sessionTitleProjector(false, readOnlyRegistryProjection());
+  for (const entry of entries) project(entry);
+}
+
+function sessionTitleProjector(
+  includeRenameEligibility = true,
+  suppliedProjection?: RegistryProjection | null,
+): (entry: FileEntry) => void {
   const index = indexSessionTitles(loadSessionTitles());
-  const registry = agentRegistry();
-  const projection = registryProjection(registry);
+  const projection = suppliedProjection === undefined ? registryProjection(agentRegistry()) : suppliedProjection;
   const snapshot = projection?.snapshot ?? null;
   const conversationByPath = projection?.conversationByPath ?? new Map<string, ViewerConversationId>();
   const aliasesByCanonical = projection?.aliasesByCanonical ?? new Map<string, string[]>();
@@ -130,7 +165,7 @@ function sessionTitleProjector(): (entry: FileEntry) => void {
       entry.title = latest.launchProfile.title ?? entry.title;
       entry.project = latest.launchProfile.project ?? entry.project;
     }
-    entry.renamable = isRenameableSessionEntry(entry);
+    if (includeRenameEligibility) entry.renamable = isRenameableSessionEntry(entry);
     if (index.size > 0) {
       const aliases = entry.conversationId ? aliasesByCanonical.get(entry.conversationId) ?? [] : [];
       const ownedPaths = entry.conversationId ? ownedPathsByConversation.get(entry.conversationId) ?? [] : [];

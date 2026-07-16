@@ -5,7 +5,7 @@ import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readF
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { completedFileScan, currentFileScan } from "@/lib/scanner/scanCache";
+import { completedFileScan, currentResourceFileScan } from "@/lib/scanner/scanCache";
 import {
   createResourceCollector,
   createResourceDiagnosticTail,
@@ -17,9 +17,8 @@ import {
   type ResourceObservation,
 } from "@/lib/resourceCollector";
 import { descendantPids } from "@/lib/proc/memory";
-import { overlaySessionTitles } from "@/lib/session/titleProjection";
+import { overlayResourceSessionTitles } from "@/lib/session/titleProjection";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
-import { agentRegistry } from "@/lib/agent/registry";
 import { captureTmuxAttachReferences, type TmuxAttachReference } from "@/lib/tmux";
 import { statePath } from "@/lib/configDir";
 
@@ -243,7 +242,11 @@ export interface ResourceSnapshotDependencies {
 }
 
 const resourceSnapshotDependencies: ResourceSnapshotDependencies = {
-  readFiles: readResourceFileSnapshot,
+  readFiles: async (fresh) => {
+    const files = await readResourceFileSnapshot(fresh);
+    overlayResourceSessionTitles(files as FileEntry[]);
+    return files;
+  },
   readHosts: (fresh, entries, ppids) => readTranscriptHosts(fresh, entries as FileEntry[], ppids),
   proc: procBackend,
   captureAttachReferences: captureTmuxAttachReferences,
@@ -273,15 +276,8 @@ export function resourceWorkerFileSnapshot(
 }
 
 export async function readResourceFileSnapshot(fresh: boolean): Promise<ResourceWorkerFileObservation[]> {
-  const scan = fresh ? await currentFileScan({ fresh: true }) : await completedFileScan();
-  const registrySnapshot = agentRegistry().snapshot();
-  const conversationIdByPath = new Map<string, string>();
-  for (const conversation of Object.values(registrySnapshot.conversations)) {
-    for (const generation of conversation.generations) conversationIdByPath.set(generation.path, conversation.id);
-    for (const pathname of conversation.continuityPaths) conversationIdByPath.set(pathname, conversation.id);
-  }
-  overlaySessionTitles(scan.snapshot.files);
-  return resourceWorkerFileSnapshot(scan.snapshot.files, (pathname) => conversationIdByPath.get(pathname) ?? null);
+  const scan = fresh ? await currentResourceFileScan() : await completedFileScan();
+  return resourceWorkerFileSnapshot(scan.snapshot.files, () => null);
 }
 
 /** `fresh` advances the shared file scan and skips the pane/agent-process
@@ -387,7 +383,8 @@ export type CollectedResources = {
 };
 
 const RESOURCE_OBSERVE_TIMEOUT_MS = 30_000;
-const RESOURCE_FILE_HANDOFF_TIMEOUT_MS = 500;
+/** Exact path discovery stays bounded through high-pressure scheduler turns. */
+const RESOURCE_FILE_HANDOFF_TIMEOUT_MS = 5_000;
 const RESOURCE_WORKER_CLOSE_TIMEOUT_MS = 1_000;
 const RESOURCE_OBSERVE_HEADROOM_MS = 500;
 const RESOURCE_WORKER_TIMEOUT_MS = RESOURCE_OBSERVE_TIMEOUT_MS
@@ -431,7 +428,7 @@ exec "$@"
 `;
 const RESOURCE_OBSERVATION_MAX_SESSIONS = 10_000;
 const RESOURCE_OBSERVATION_MAX_TARGETS = 10_000;
-const RESOURCE_READER_VERSION = 2;
+const RESOURCE_READER_VERSION = 3;
 
 function resourceWorkerExecutableCanBeSupervised(executable: string): boolean {
   try {
