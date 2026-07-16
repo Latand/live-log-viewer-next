@@ -70,7 +70,6 @@ export async function handleRuntimeCommand(
     return NextResponse.json({ error: error instanceof Error ? error.message : "runtime command is invalid" }, { status: 400 });
   }
   const client = dependencies.client();
-  if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
   try {
     if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
       const admitted = await dependencies.enqueue({
@@ -102,6 +101,7 @@ export async function handleRuntimeCommand(
         return NextResponse.json({ operationId: admitted.operationId, receipt: admitted.receipt }, { status });
       }
     }
+    if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
     const result = await client.command(command);
     if (result.receipt.status === "pending" || result.receipt.status === "queued") {
       dependencies.kick?.();

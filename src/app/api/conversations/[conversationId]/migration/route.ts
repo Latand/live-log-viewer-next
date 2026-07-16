@@ -2,20 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { agentRegistry } from "@/lib/agent/registry";
 import { advanceConversationMigration, drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
+import { createMigrationDeliveryPort } from "@/lib/accounts/migration/deliveryPort";
 import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
-import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/delivery";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const deliveryPort = {
-  async deliver({ delivery, path, clientMessageId }: { delivery: { id: string; text: string }; path: string; clientMessageId: string }) {
-    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId, reservedDeliveryId: delivery.id });
-    return migrationDeliveryOutcome(result);
-  },
-};
+const deliveryPort = createMigrationDeliveryPort();
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ conversationId: string }> }) {
   const rejected = rejectCrossOrigin(req); if (rejected) return rejected;

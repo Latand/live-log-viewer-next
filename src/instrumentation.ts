@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import { statePath } from "@/lib/configDir";
+import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { markStructuredHostStartupFailed, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 
@@ -8,6 +9,12 @@ const RELEASE_ACTIVATION_POLL_MS = 250;
 
 interface ActivationTimer {
   unref?(): unknown;
+}
+
+interface StructuredHostStartupOptions {
+  schedule?: (callback: () => void, delayMs: number) => ActivationTimer;
+  initialRetryMs?: number;
+  maxRetryMs?: number;
 }
 
 interface ViewerReleaseActivationOptions {
@@ -99,15 +106,45 @@ export async function initializeOperatorSpawnCapabilityAtStartup(
 export async function runStructuredHostStartup(
   adopt: () => Promise<unknown>,
   log: (...args: unknown[]) => void = console.error,
+  options: StructuredHostStartupOptions = {},
 ): Promise<void> {
-  try {
-    await adopt();
-    markStructuredHostStartupReady();
-  } catch (error) {
-    markStructuredHostStartupFailed();
-    log("[structured hosts] startup adoption failed", error);
-    if (error instanceof StructuredRuntimeRequirementError) throw error;
-  }
+  const schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+  const maxRetryMs = options.maxRetryMs ?? 1_000;
+  let retryMs = options.initialRetryMs ?? 100;
+  let retryPending = false;
+  let attempts = 0;
+
+  const attempt = async (): Promise<void> => {
+    attempts += 1;
+    try {
+      await adopt();
+      markStructuredHostStartupReady();
+      if (attempts > 1) log("[structured hosts] startup adoption recovered", { attempts });
+    } catch (error) {
+      markStructuredHostStartupFailed();
+      if (error instanceof StructuredRuntimeRequirementError) {
+        log("[structured hosts] startup adoption failed", error);
+        throw error;
+      }
+      if (!(error instanceof RuntimeHostUnavailableError)) {
+        log("[structured hosts] startup adoption failed", error);
+        return;
+      }
+      if (retryPending) return;
+      const delayMs = retryMs;
+      retryMs = Math.min(retryMs * 2, maxRetryMs);
+      retryPending = true;
+      if (attempts === 1) log("[structured hosts] startup adoption failed; retry scheduled", error);
+      schedule(() => {
+        retryPending = false;
+        void attempt().catch((retryError) => {
+          log("[structured hosts] startup adoption retry aborted", retryError);
+        });
+      }, delayMs).unref?.();
+    }
+  };
+
+  await attempt();
 }
 
 export async function register(): Promise<void> {
