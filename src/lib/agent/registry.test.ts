@@ -776,6 +776,37 @@ describe("agent registry", () => {
     expect(fs.readFileSync(store.filename, "utf8")).toBe("{ broken");
   });
 
+  test.each([1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects persisted non-safe structured event cursor %p without rewriting it",
+    (eventCursor) => {
+      const store = registry();
+      store.upsert({
+        ...spawnEntry("/repo/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"),
+        structuredHost: {
+          kind: "codex-app-server",
+          endpoint: "stdio:released",
+          process: null,
+          eventCursor: 0,
+          protocolVersion: "0.144.1",
+          writerClaimEpoch: 1,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        },
+      });
+      const persisted = JSON.parse(fs.readFileSync(store.filename, "utf8")) as {
+        entries: Record<string, { structuredHost: { eventCursor: number } }>;
+      };
+      persisted.entries[`codex:${KEY.sessionId}`]!.structuredHost.eventCursor = eventCursor;
+      const invalidBytes = `${JSON.stringify(persisted)}\n`;
+      fs.writeFileSync(store.filename, invalidBytes);
+
+      const reloaded = new AgentRegistry(store.filename);
+      expect(() => reloaded.snapshot()).toThrow("structured host event cursor is invalid");
+      expect(fs.readFileSync(store.filename, "utf8")).toBe(invalidBytes);
+    },
+  );
+
   test("upgrades v1, retains stable identity, and commits an A to B to A generation chain", () => {
     const store = registry();
     fs.writeFileSync(store.filename, JSON.stringify({ version: 1, entries: {}, receipts: {}, importedResumePanes: false, legacyResumePanes: { serverPid: null, panes: {} } }));

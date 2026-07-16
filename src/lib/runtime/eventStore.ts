@@ -28,6 +28,17 @@ function reportRuntimeEventCursorRecovery(diagnostic: RuntimeEventCursorRecovery
   console.warn("[structured host] runtime event cursor recovered", diagnostic);
 }
 
+export function nextRuntimeEventSequence(cursor: number): number {
+  if (!Number.isSafeInteger(cursor) || cursor < 0) {
+    throw new Error("runtime event cursor is invalid");
+  }
+  const next = cursor + 1;
+  if (!Number.isSafeInteger(next)) {
+    throw new Error("runtime event cursor cannot advance safely");
+  }
+  return next;
+}
+
 export function reconcileRuntimeEventCursor(
   sessionId: string,
   durableTailSeq: number,
@@ -42,9 +53,7 @@ export function reconcileRuntimeEventCursor(
   }
   const useRegistryCursor = durableTailSeq === 0 && registryCursor > 0;
   const cursor = useRegistryCursor ? registryCursor : durableTailSeq;
-  if (!Number.isSafeInteger(cursor + 1)) {
-    throw new Error("runtime event cursor cannot advance safely");
-  }
+  const chosenNextSeq = nextRuntimeEventSequence(cursor);
   if (registryCursor !== durableTailSeq) {
     try {
       report({
@@ -52,7 +61,7 @@ export function reconcileRuntimeEventCursor(
         sessionId: sessionId.slice(0, MAX_DIAGNOSTIC_SESSION_ID_LENGTH),
         durableTailSeq,
         registryCursor,
-        chosenNextSeq: cursor + 1,
+        chosenNextSeq,
         action: useRegistryCursor ? "use-registry-cursor" : "use-durable-tail",
         relation: useRegistryCursor
           ? "durable-ledger-empty"
@@ -132,6 +141,7 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
   }
 
   append(threadId: string, event: RuntimeEvent): void {
+    if (!validEvent(event)) throw new Error("runtime event ledger append event is invalid");
     fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     const filename = this.filename(threadId);
     const previous = this.load(threadId).at(-1);

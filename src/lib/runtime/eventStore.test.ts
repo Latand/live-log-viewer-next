@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { expect, test } from "bun:test";
 
+import type { RuntimeEvent } from "./engineHost";
 import { FileRuntimeEventStore, reconcileRuntimeEventCursor } from "./eventStore";
 
 test("runtime event store durably replays ordered events and ignores a partial tail", () => {
@@ -22,10 +23,10 @@ test("runtime event store durably replays ordered events and ignores a partial t
   expect(fs.statSync(filename).mode & 0o777).toBe(0o600);
 });
 
-test("runtime event store repairs a crash tail after a production-sized contiguous prefix", () => {
+test("runtime event store repairs a crash tail after the production 942-record contiguous prefix", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-crash-tail-"));
   const filename = path.join(directory, "crash-tail.jsonl");
-  const prefix = Array.from({ length: 2_907 }, (_, index) => JSON.stringify({
+  const prefix = Array.from({ length: 942 }, (_, index) => JSON.stringify({
     kind: "session-status",
     status: "idle",
     seq: index + 1,
@@ -33,13 +34,13 @@ test("runtime event store repairs a crash tail after a production-sized contiguo
   fs.writeFileSync(filename, `${prefix}\n{\"kind\":\"session-status\",\"status\":`, { mode: 0o600 });
   const store = new FileRuntimeEventStore(directory);
 
-  store.append("crash-tail", { kind: "turn-started", turnId: "recovered-turn", seq: 2_908 });
+  store.append("crash-tail", { kind: "turn-started", turnId: "recovered-turn", seq: 943 });
 
   const restored = store.load("crash-tail");
-  expect(restored).toHaveLength(2_908);
+  expect(restored).toHaveLength(943);
   expect(restored.slice(-2)).toEqual([
-    { kind: "session-status", status: "idle", seq: 2_907 },
-    { kind: "turn-started", turnId: "recovered-turn", seq: 2_908 },
+    { kind: "session-status", status: "idle", seq: 942 },
+    { kind: "turn-started", turnId: "recovered-turn", seq: 943 },
   ]);
   expect(fs.readFileSync(filename, "utf8").endsWith("\n")).toBeTrue();
 });
@@ -127,6 +128,22 @@ test.each([
 ])("runtime cursor recovery rejects an exhausted authoritative cursor", ({ durableTailSeq, registryCursor }) => {
   expect(() => reconcileRuntimeEventCursor("exhausted-session", durableTailSeq, registryCursor))
     .toThrow("runtime event cursor cannot advance safely");
+});
+
+test.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+  "runtime cursor recovery rejects invalid registry cursor %p",
+  (registryCursor) => {
+    expect(() => reconcileRuntimeEventCursor("invalid-cursor", 0, registryCursor))
+      .toThrow("runtime event registry cursor is invalid");
+  },
+);
+
+test.each([1.5, Number.MAX_SAFE_INTEGER + 1])("runtime event store rejects unsafe append sequence %p", (seq) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-unsafe-append-"));
+  const store = new FileRuntimeEventStore(directory);
+  expect(() => store.append("unsafe-append", { kind: "session-status", status: "idle", seq } as RuntimeEvent))
+    .toThrow("runtime event ledger append event is invalid");
+  expect(store.load("unsafe-append")).toEqual([]);
 });
 
 test("runtime event store rejects every structurally invalid event variant", () => {

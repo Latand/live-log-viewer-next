@@ -10,7 +10,7 @@ import { procBackend } from "@/lib/proc";
 
 import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppServerHost";
 import { ClaudeStreamBrokerHost, type ClaudeStreamBrokerHostOptions } from "./claudeStreamBrokerHost";
-import type { HostState } from "./engineHost";
+import { StructuredHostAdoptionCleanupError, type HostState } from "./engineHost";
 
 export function structuredHostsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.LLV_STRUCTURED_HOSTS === "1";
@@ -92,6 +92,7 @@ export async function bindCodexHostPersistence(
   host: CodexAppServerHost,
   claimOwner: string,
   writerClaimEpoch: number,
+  releasedStatus: "unhosted" | "dead" = "unhosted",
 ): Promise<() => void> {
   host.setWriterFence(() => registry.ownsStructuredHostClaim(key, claimOwner, writerClaimEpoch));
   try {
@@ -116,7 +117,7 @@ export async function bindCodexHostPersistence(
       const persisted = registry.setStructuredHostClaimed(
         key,
         codexHostColumns(state, writerClaimEpoch),
-        registryStatus(state),
+        terminal && releasedStatus === "dead" ? "dead" : registryStatus(state),
         claimOwner,
         writerClaimEpoch,
         terminal,
@@ -142,6 +143,7 @@ export async function bindClaudeHostPersistence(
   host: ClaudeStreamBrokerHost,
   claimOwner: string,
   writerClaimEpoch: number,
+  releasedStatus: "unhosted" | "dead" = "unhosted",
 ): Promise<() => void> {
   host.setWriterFence(() => registry.ownsStructuredHostClaim(key, claimOwner, writerClaimEpoch));
   const persist = (state: HostState, terminal = false) => registry.setStructuredHostClaimed(
@@ -171,7 +173,15 @@ export async function bindClaudeHostPersistence(
     if (failed || stopped) return;
     try {
       const terminal = state.status === "unhosted" || (state.status === "dead" && state.pid === null);
-      if (!persist(state, terminal)) throw new Error("structured host writer claim is stale");
+      const persisted = registry.setStructuredHostClaimed(
+        key,
+        claudeHostColumns(state, writerClaimEpoch),
+        terminal && releasedStatus === "dead" ? "dead" : registryStatus(state),
+        claimOwner,
+        writerClaimEpoch,
+        terminal,
+      );
+      if (!persisted) throw new Error("structured host writer claim is stale");
       if (terminal) {
         stopped = true;
         unsubscribe();
@@ -315,7 +325,22 @@ export async function adoptCodexRegistryHosts(
           });
           await bindCodexHostPersistence(registry, entry.key, host, claimed.claimOwner!, claimed.claimEpoch);
           adopted.push({ key: entry.key, host });
-        } catch {
+        } catch (error) {
+          if (error instanceof StructuredHostAdoptionCleanupError
+            && error.host instanceof CodexAppServerHost) {
+            try {
+              await bindCodexHostPersistence(
+                registry,
+                entry.key,
+                error.host,
+                claimed.claimOwner!,
+                claimed.claimEpoch,
+                "dead",
+              );
+              await error.host.release();
+            } catch { /* retain the live process and claim until its late reap is observed */ }
+            return;
+          }
           registry.setStructuredHostClaimed(entry.key, {
             ...claimed.structuredHost,
             endpoint: "stdio:released",
@@ -369,7 +394,22 @@ export async function adoptClaudeRegistryHosts(
           });
           await bindClaudeHostPersistence(registry, entry.key, host, claimed.claimOwner!, claimed.claimEpoch);
           adopted.push({ key: entry.key, host });
-        } catch {
+        } catch (error) {
+          if (error instanceof StructuredHostAdoptionCleanupError
+            && error.host instanceof ClaudeStreamBrokerHost) {
+            try {
+              await bindClaudeHostPersistence(
+                registry,
+                entry.key,
+                error.host,
+                claimed.claimOwner!,
+                claimed.claimEpoch,
+                "dead",
+              );
+              await error.host.release();
+            } catch { /* retain the live process and claim until its late reap is observed */ }
+            return;
+          }
           registry.setStructuredHostClaimed(entry.key, {
             ...claimed.structuredHost,
             endpoint: "stdio:released",

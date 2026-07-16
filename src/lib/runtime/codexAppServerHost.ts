@@ -14,9 +14,10 @@ import type {
   QueueEntry,
   RuntimeEvent,
 } from "./engineHost";
-import { RuntimeReplayGapError } from "./engineHost";
+import { RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
 import {
   FileRuntimeEventStore,
+  nextRuntimeEventSequence,
   reconcileRuntimeEventCursor,
   type RuntimeEventCursorRecoveryReporter,
   type RuntimeEventStore,
@@ -200,6 +201,14 @@ function itemReplayKey(value: unknown): string {
   return `json:${JSON.stringify(value)}`;
 }
 
+function bufferedNotificationReplayKey(event: UnsequencedEvent | RuntimeEvent): string | null {
+  if (event.kind === "delta") return JSON.stringify([event.kind, event.turnId, event.text]);
+  if (event.kind === "attention") {
+    return JSON.stringify([event.kind, event.id, event.method, event.attention]);
+  }
+  return null;
+}
+
 function userMessageText(value: JsonObject): string | null {
   const direct = stringField(value, "text");
   if (direct !== null) return direct;
@@ -250,6 +259,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly preRestoreEvents: UnsequencedEvent[] = [];
   private readonly preRestoreMessages: Array<{ message: JsonObject; bytes: number }> = [];
+  private bufferedNotificationOverlap: string[] = [];
   private nextRpcId = 1;
   private stdoutBuffer = "";
   private preRestoreBytes = 0;
@@ -293,7 +303,9 @@ export class CodexAppServerHost implements EngineHost {
     child.on("close", () => {
       this.reaped = true;
       this.resolveReaped();
-      if (!this.releasing && !this.released) {
+      if (this.releasing) {
+        this.finishRelease();
+      } else if (!this.released) {
         if (this.dead) this.notifyStateListeners();
         else this.fail(new Error("Codex app-server child exited"));
       }
@@ -357,13 +369,19 @@ export class CodexAppServerHost implements EngineHost {
       provisional.identity.path = identity.path;
       provisional.rememberConfirmedDeliveries(result);
       provisional.restoreEvents();
-      if (threadId) provisional.reconcileThreadHistory(result);
+      provisional.beginBufferedNotificationReconciliation();
       provisional.flushPreRestoreEvents();
-      provisional.flushPreRestoreMessages();
+      provisional.flushPreRestoreMessages(threadId ? result : null);
+      if (threadId) provisional.reconcileThreadHistory(result);
+      provisional.endBufferedNotificationReconciliation();
       provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(result));
       return provisional;
     } catch (error) {
-      await provisional.release();
+      try {
+        await provisional.release();
+      } catch (cleanupError) {
+        throw new StructuredHostAdoptionCleanupError(safeError(error), provisional, { cause: cleanupError });
+      }
       throw new Error(safeError(error));
     }
   }
@@ -515,7 +533,14 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   async release(): Promise<void> {
-    this.releasePromise ??= this.releaseAndReap();
+    if (this.released) return;
+    if (!this.releasePromise) {
+      const attempt = this.releaseAndReap();
+      this.releasePromise = attempt;
+      void attempt.catch(() => {
+        if (this.releasePromise === attempt) this.releasePromise = null;
+      });
+    }
     return this.releasePromise;
   }
 
@@ -536,12 +561,17 @@ export class CodexAppServerHost implements EngineHost {
         throw new Error("Codex app-server child could not be reaped");
       }
     }
+    this.finishRelease();
+  }
+
+  private finishRelease(): void {
+    if (this.released) return;
     this.released = true;
     this.releasing = false;
     this.activeTurnId = null;
     this.attentions.clear();
     this.setSessionStatus("unhosted", []);
-    if (this.ledgerFailed) this.notifyStateListeners();
+    if (this.ledgerFailed || !this.eventLedgerRestored) this.notifyStateListeners();
     this.closeSubscribers();
   }
 
@@ -582,7 +612,16 @@ export class CodexAppServerHost implements EngineHost {
       this.preRestoreEvents.push(event);
       return;
     }
-    const sequenced = { ...event, seq: ++this.cursor } as RuntimeEvent;
+    let nextCursor: number;
+    try {
+      nextCursor = nextRuntimeEventSequence(this.cursor);
+    } catch (error) {
+      this.ledgerFailed = true;
+      this.failWithoutLedger(new Error(safeError(error)));
+      return;
+    }
+    this.cursor = nextCursor;
+    const sequenced = { ...event, seq: nextCursor } as RuntimeEvent;
     try {
       this.eventStore.append(this.identity.threadId, sequenced);
     } catch (error) {
@@ -655,41 +694,43 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private reconcileThreadHistory(result: unknown): void {
-    for (const turn of resumedTurns(result)) {
-      const turnId = stringField(turn, "id");
-      if (!turnId) continue;
-      const turnEvents = this.events.filter((event) => "turnId" in event && event.turnId === turnId);
-      const status = stringField(turn, "status");
-      const hasStarted = turnEvents.some((event) => event.kind === "turn-started");
-      if (!hasStarted || (status === "inProgress" && this.activeTurnId !== turnId)) {
-        this.activeTurnId = turnId;
-        this.emit({ kind: "turn-started", turnId });
-      }
-      const completedItems = new Map<string, number>();
-      for (const event of turnEvents) {
-        if (event.kind !== "item" || event.phase !== "completed") continue;
-        const key = itemReplayKey(event.item);
-        completedItems.set(key, (completedItems.get(key) ?? 0) + 1);
-      }
-      if (Array.isArray(turn.items)) {
-        for (const item of turn.items) {
-          const key = itemReplayKey(item);
-          const recorded = completedItems.get(key) ?? 0;
-          if (recorded > 0) {
-            completedItems.set(key, recorded - 1);
-            continue;
-          }
-          this.emit({ kind: "item", turnId, item, phase: "completed" });
+    for (const turn of resumedTurns(result)) this.reconcileTurnHistory(turn);
+  }
+
+  private reconcileTurnHistory(turn: JsonObject): void {
+    const turnId = stringField(turn, "id");
+    if (!turnId) return;
+    const turnEvents = this.events.filter((event) => "turnId" in event && event.turnId === turnId);
+    const status = stringField(turn, "status");
+    const hasStarted = turnEvents.some((event) => event.kind === "turn-started");
+    if (!hasStarted || (status === "inProgress" && this.activeTurnId !== turnId)) {
+      this.activeTurnId = turnId;
+      this.emit({ kind: "turn-started", turnId });
+    }
+    const completedItems = new Map<string, number>();
+    for (const event of turnEvents) {
+      if (event.kind !== "item" || event.phase !== "completed") continue;
+      const key = itemReplayKey(event.item);
+      completedItems.set(key, (completedItems.get(key) ?? 0) + 1);
+    }
+    if (Array.isArray(turn.items)) {
+      for (const item of turn.items) {
+        const key = itemReplayKey(item);
+        const recorded = completedItems.get(key) ?? 0;
+        if (recorded > 0) {
+          completedItems.set(key, recorded - 1);
+          continue;
         }
+        this.emit({ kind: "item", turnId, item, phase: "completed" });
       }
-      if (status === "completed" || status === "interrupted" || status === "failed" || status === "error") {
-        const authoritativeStatus = terminalStatus(status);
-        const recordedTerminal = turnEvents.findLast((event) => event.kind === "turn-ended");
-        if (recordedTerminal?.kind !== "turn-ended" || recordedTerminal.status !== authoritativeStatus) {
-          this.emit({ kind: "turn-ended", turnId, status: authoritativeStatus });
-        }
-        if (this.activeTurnId === turnId) this.activeTurnId = null;
+    }
+    if (status === "completed" || status === "interrupted" || status === "failed" || status === "error") {
+      const authoritativeStatus = terminalStatus(status);
+      const recordedTerminal = turnEvents.findLast((event) => event.kind === "turn-ended");
+      if (recordedTerminal?.kind !== "turn-ended" || recordedTerminal.status !== authoritativeStatus) {
+        this.emit({ kind: "turn-ended", turnId, status: authoritativeStatus });
       }
+      if (this.activeTurnId === turnId) this.activeTurnId = null;
     }
   }
 
@@ -786,10 +827,82 @@ export class CodexAppServerHost implements EngineHost {
     for (const event of this.preRestoreEvents.splice(0)) this.emit(event);
   }
 
-  private flushPreRestoreMessages(): void {
+  private beginBufferedNotificationReconciliation(): void {
+    const durableKeys: string[] = [];
+    for (const event of this.events) {
+      if (event.kind === "attention" && !this.attentions.has(event.id)) continue;
+      const key = bufferedNotificationReplayKey(event);
+      if (key) durableKeys.push(key);
+    }
+    const bufferedKeys: string[] = [];
+    let activeTurnId = this.activeTurnId;
+    for (const { message } of this.preRestoreMessages) {
+      const method = typeof message.method === "string" ? message.method : null;
+      if (!method) continue;
+      const params = record(message.params) ?? {};
+      const id = message.id;
+      if (typeof id === "number" || typeof id === "string") {
+        const key = bufferedNotificationReplayKey({
+          kind: "attention",
+          id: `${method}:${String(id)}`,
+          method,
+          attention: params,
+        });
+        if (key) bufferedKeys.push(key);
+        continue;
+      }
+      const turnId = turnIdFromParams(params);
+      if (method === "turn/started" && turnId) activeTurnId = turnId;
+      if (method === "item/agentMessage/delta") {
+        const key = bufferedNotificationReplayKey({
+          kind: "delta",
+          turnId: turnId ?? activeTurnId ?? "unknown",
+          text: stringField(params, "delta") ?? "",
+        });
+        if (key) bufferedKeys.push(key);
+      }
+      if (method === "turn/completed" && turnId === activeTurnId) activeTurnId = null;
+    }
+    const maximum = Math.min(durableKeys.length, bufferedKeys.length);
+    let overlap = 0;
+    for (let length = maximum; length > 0; length -= 1) {
+      const durableStart = durableKeys.length - length;
+      if (bufferedKeys.slice(0, length).every((key, index) => key === durableKeys[durableStart + index])) {
+        overlap = length;
+        break;
+      }
+    }
+    this.bufferedNotificationOverlap = bufferedKeys.slice(0, overlap);
+  }
+
+  private consumeBufferedNotification(event: UnsequencedEvent): boolean {
+    const key = bufferedNotificationReplayKey(event);
+    if (!key || this.bufferedNotificationOverlap[0] !== key) {
+      this.bufferedNotificationOverlap = [];
+      return false;
+    }
+    this.bufferedNotificationOverlap.shift();
+    return true;
+  }
+
+  private endBufferedNotificationReconciliation(): void {
+    this.bufferedNotificationOverlap = [];
+  }
+
+  private flushPreRestoreMessages(resumeResult: unknown | null): void {
+    const turns = new Map(resumedTurns(resumeResult).flatMap((turn) => {
+      const turnId = stringField(turn, "id");
+      return turnId ? [[turnId, turn] as const] : [];
+    }));
     for (const { message, bytes } of this.preRestoreMessages.splice(0)) {
       this.preRestoreBytes -= bytes;
-      this.acceptParsedMessage(message);
+      if (message.method === "turn/completed") {
+        const params = record(message.params) ?? {};
+        const turnId = turnIdFromParams(params);
+        const turn = turnId ? turns.get(turnId) : null;
+        if (turn) this.reconcileTurnHistory(turn);
+      }
+      this.acceptParsedMessage(message, true);
       if (this.dead || this.releasing || this.released) break;
     }
     this.preRestoreBytes = 0;
@@ -911,7 +1024,7 @@ export class CodexAppServerHost implements EngineHost {
     this.acceptParsedMessage(message);
   }
 
-  private acceptParsedMessage(message: JsonObject): void {
+  private acceptParsedMessage(message: JsonObject, reconcileBufferedLifecycle = false): void {
     const id = message.id;
     const method = typeof message.method === "string" ? message.method : null;
     if ((typeof id === "number" || typeof id === "string") && !method) {
@@ -931,13 +1044,14 @@ export class CodexAppServerHost implements EngineHost {
     if (typeof id === "number" || typeof id === "string") {
       const attentionId = `${method}:${String(id)}`;
       this.attentions.set(attentionId, { rpcId: id, method, origin: "current" });
-      this.emit({ kind: "attention", id: attentionId, method, attention: params });
+      const event = { kind: "attention" as const, id: attentionId, method, attention: params };
+      if (!reconcileBufferedLifecycle || !this.consumeBufferedNotification(event)) this.emit(event);
       return;
     }
-    this.acceptNotification(method, params);
+    this.acceptNotification(method, params, reconcileBufferedLifecycle);
   }
 
-  private acceptNotification(method: string, params: JsonObject): void {
+  private acceptNotification(method: string, params: JsonObject, reconcileBufferedLifecycle = false): void {
     const turnId = turnIdFromParams(params);
     if (method === "serverRequest/resolved") {
       const requestId = params.requestId;
@@ -955,23 +1069,57 @@ export class CodexAppServerHost implements EngineHost {
       return;
     }
     if (method === "turn/started" && turnId) {
+      if (reconcileBufferedLifecycle) {
+        const historicalStart = this.events.some((event) => event.kind === "turn-started" && event.turnId === turnId);
+        const historicalTerminal = this.events.some((event) => event.kind === "turn-ended" && event.turnId === turnId);
+        if (historicalStart && (historicalTerminal || this.activeTurnId !== null)) return;
+      }
       this.activeTurnId = turnId;
       this.emit({ kind: "turn-started", turnId });
       return;
     }
     if (method === "item/agentMessage/delta") {
-      this.emit({ kind: "delta", turnId: turnId ?? this.activeTurnId ?? "unknown", text: stringField(params, "delta") ?? "" });
+      const event = {
+        kind: "delta" as const,
+        turnId: turnId ?? this.activeTurnId ?? "unknown",
+        text: stringField(params, "delta") ?? "",
+      };
+      if (!reconcileBufferedLifecycle || !this.consumeBufferedNotification(event)) this.emit(event);
       return;
     }
     if ((method === "item/started" || method === "item/completed") && "item" in params) {
       if (method === "item/completed" && turnId) this.rememberConfirmedDelivery(turnId, params.item);
-      this.emit({ kind: "item", turnId: turnId ?? this.activeTurnId, item: params.item, phase: method === "item/started" ? "started" : "completed" });
+      const eventTurnId = turnId ?? this.activeTurnId;
+      const phase = method === "item/started" ? "started" : "completed";
+      if (reconcileBufferedLifecycle && eventTurnId) {
+        const terminal = this.events.some((event) => event.kind === "turn-ended" && event.turnId === eventTurnId);
+        if (terminal) return;
+        const replayKey = itemReplayKey(params.item);
+        const duplicate = this.events.some((event) => event.kind === "item"
+          && event.turnId === eventTurnId
+          && event.phase === phase
+          && itemReplayKey(event.item) === replayKey);
+        if (duplicate) return;
+        const started = this.events.some((event) => event.kind === "turn-started" && event.turnId === eventTurnId);
+        if (!started) {
+          this.activeTurnId = eventTurnId;
+          this.emit({ kind: "turn-started", turnId: eventTurnId });
+        }
+      }
+      this.emit({ kind: "item", turnId: eventTurnId, item: params.item, phase });
       return;
     }
     if (method === "turn/completed" && turnId) {
-      this.activeTurnId = null;
       const turn = record(params.turn);
-      this.emit({ kind: "turn-ended", turnId, status: terminalStatus(turn?.status) });
+      const status = terminalStatus(turn?.status);
+      if (reconcileBufferedLifecycle
+        && this.events.some((event) => event.kind === "turn-ended" && event.turnId === turnId)) return;
+      if (this.activeTurnId === turnId) this.activeTurnId = null;
+      if (reconcileBufferedLifecycle
+        && !this.events.some((event) => event.kind === "turn-started" && event.turnId === turnId)) {
+        this.emit({ kind: "turn-started", turnId });
+      }
+      this.emit({ kind: "turn-ended", turnId, status });
       return;
     }
     if (method === "account/rateLimits/updated") {

@@ -51,3 +51,10 @@ export interface EngineHost {
   health(): Promise<HostState>;
   release(): Promise<void>;
 }
+
+export class StructuredHostAdoptionCleanupError<Host extends EngineHost = EngineHost> extends Error {
+  constructor(message: string, readonly host: Host, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "StructuredHostAdoptionCleanupError";
+  }
+}
