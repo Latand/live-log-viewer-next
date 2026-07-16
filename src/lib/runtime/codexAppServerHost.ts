@@ -634,12 +634,11 @@ export class CodexAppServerHost implements EngineHost {
 
   private signalTermination(signal: NodeJS.Signals): TerminationSignalResult {
     const ownership = this.childProcessOwnership();
-    if (this.reaped) {
-      if (ownership !== "gone") return "unsafe";
+    if (ownership === "gone") {
       signalProcessGroup(this.child.pid, signal, this.signalProcess);
       return "attempted";
     }
-    if (ownership !== "owned") return "unsafe";
+    if (this.reaped || ownership !== "owned") return "unsafe";
     signalDetachedProcessGroup(this.child, signal, this.signalProcess);
     return "attempted";
   }

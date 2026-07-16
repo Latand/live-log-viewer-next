@@ -1272,6 +1272,34 @@ describe("CodexAppServerHost", () => {
     expect(server.signals).toEqual([]);
   });
 
+  test("release cleans the process group when TERM removes the leader without a close event", async () => {
+    const server = new FakeAppServer("term-missing-close-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let alive = true;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: ownedFakeProcess.processIdentity,
+      pidAlive: () => alive,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") alive = false;
+      },
+    });
+
+    await expect(host.release()).resolves.toBeUndefined();
+    await Bun.sleep(6);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(server.signals).toEqual([]);
+    expect(await host.health()).toMatchObject({ status: "unhosted", pid: null, endpoint: "stdio:released" });
+  });
+
   test("release never signals a recycled child pid", async () => {
     const server = new FakeAppServer("recycled-pid-thread");
     const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
