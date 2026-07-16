@@ -196,6 +196,43 @@ describe("buildBranchGroups", () => {
     ]);
   });
 
+  test("keeps a project segment visible when its foreign-parent child becomes idle", () => {
+    const projectRoot = entry({ path: "/project-root", project: "viewer", activity: "live" });
+    const foreignParent = entry({
+      path: "/foreign-parent",
+      project: "latand",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: projectRoot.path,
+      activity: "live",
+    });
+    const segment = entry({
+      path: "/project-segment",
+      project: "viewer",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: foreignParent.path,
+      activity: "live",
+    });
+
+    expect(buildBranchGroups([projectRoot, foreignParent, segment], "viewer").map((group) => group.key).sort()).toEqual([
+      projectRoot.path,
+      segment.path,
+    ].sort());
+
+    const idleSegment = { ...segment, activity: "idle" as const };
+    const afterTurn = buildBranchGroups([projectRoot, foreignParent, idleSegment], "viewer");
+    expect(afterTurn.map((group) => group.key).sort()).toEqual([
+      projectRoot.path,
+      segment.path,
+    ].sort());
+    expect(afterTurn.find((group) => group.key === segment.path)!.columns.map((column) => column.file.path)).toEqual([
+      segment.path,
+    ]);
+  });
+
   test("a live root promotes its live-owned subagents to connected columns", () => {
     const groups = buildBranchGroups(TREE, "demo");
     expect(groups).toHaveLength(1);
@@ -306,6 +343,39 @@ describe("buildArchiveBranchGroups", () => {
     expect(groups).toHaveLength(100);
     expect(groups.some((group) => group.key === "/root-0")).toBe(false);
     expect(groups.some((group) => group.key === "/root-104")).toBe(true);
+  });
+
+  test("archives each project segment once across a foreign lineage", () => {
+    const projectRoot = entry({ path: "/archive-root", project: "viewer", mtime: 30 });
+    const foreignParent = entry({
+      path: "/archive-foreign",
+      project: "latand",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: projectRoot.path,
+      mtime: 20,
+    });
+    const projectLeaf = entry({
+      path: "/archive-leaf",
+      project: "viewer",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: foreignParent.path,
+      mtime: 10,
+    });
+
+    const groups = buildArchiveBranchGroups([projectRoot, foreignParent, projectLeaf], "viewer", 100);
+    expect(groups.map((group) => group.key).sort()).toEqual([projectRoot.path, projectLeaf.path].sort());
+    const occurrences = groups.flatMap((group) => [
+      ...group.columns.map((column) => column.file.path),
+      ...group.finished.map((file) => file.path),
+    ]);
+    expect(occurrences.filter((path) => path === projectLeaf.path)).toHaveLength(1);
+    expect(groups.find((group) => group.key === projectRoot.path)!.columns.map((column) => column.file.path)).toEqual([
+      projectRoot.path,
+    ]);
   });
 });
 

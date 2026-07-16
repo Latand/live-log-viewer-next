@@ -220,6 +220,12 @@ function rootOf(file: FileEntry, byPath: Map<string, FileEntry>): FileEntry {
   return cur;
 }
 
+function beginsProjectSegment(file: FileEntry, byPath: Map<string, FileEntry>): boolean {
+  if (!file.parent || !isChildConversation(file)) return false;
+  const parent = byPath.get(file.parent);
+  return Boolean(parent && projectKey(parent) !== projectKey(file));
+}
+
 export function kidsIndex(files: FileEntry[]): Map<string, FileEntry[]> {
   const map = new Map<string, FileEntry[]>();
   for (const file of files) {
@@ -349,6 +355,13 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
   const { expandedConversationPaths } = options;
   for (const file of files) {
     if (projectKey(file) !== project) continue;
+    /* A cross-project child starts an independently owned visual segment. Keep
+       its root card after the child becomes quiet while the durable parent
+       pointer continues to support explicit cross-project navigation. */
+    if (beginsProjectSegment(file, byPath)) {
+      roots.set(file.path, file);
+      continue;
+    }
     const expanded = expandedConversationPaths?.has(file.path) === true;
     if (
       file.activity === "live" ||
@@ -419,7 +432,7 @@ export function buildArchiveBranchGroups(files: FileEntry[], project: string, li
 
   const groups: BranchGroup[] = [];
   for (const root of roots.values()) {
-    const descendants = subtree(root, kids)
+    const descendants = projectSubtree(root, kids)
       .filter((file) => keep.has(file.path) && projectKey(file) === project)
       .sort((a, b) => activityBand(a) - activityBand(b) || b.mtime - a.mtime || a.path.localeCompare(b.path));
     const fullNodes = descendants.filter((file) => !isAuxTask(file) && isChildConversation(file));
