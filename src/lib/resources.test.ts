@@ -1,9 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { createTranscriptHostObserver, type TranscriptHost } from "@/lib/agent/transcriptHost";
+import { procBackend } from "@/lib/proc";
 import { RESOURCE_FAILURE_STDERR_MAX_BYTES } from "@/lib/resourceCollector";
 import type { FileEntry, ResourcesPayload } from "@/lib/types";
 
@@ -160,6 +161,40 @@ function deferred<T>() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+const CLEANUP_DEADLINE = Symbol("cleanup-deadline");
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T | typeof CLEANUP_DEADLINE> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<typeof CLEANUP_DEADLINE>((resolve) => {
+        timer = setTimeout(() => resolve(CLEANUP_DEADLINE), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function errno(code: string): NodeJS.ErrnoException {
+  const error = new Error(code) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
+}
+
+function referencedHandles(): Set<unknown> {
+  const active = (process as NodeJS.Process & { _getActiveHandles(): unknown[] })._getActiveHandles();
+  return new Set(active.filter((handle) => {
+    const ref = (handle as { hasRef?: () => boolean }).hasRef;
+    return typeof ref !== "function" || ref.call(handle);
+  }));
+}
+
+function newReferencedHandleCount(baseline: Set<unknown>): number {
+  return [...referencedHandles()].filter((handle) => !baseline.has(handle)).length;
 }
 
 async function withResourceWorkerScript<T>(
@@ -913,6 +948,29 @@ describe("resource recurring reads", () => {
     });
   });
 
+  test("a complete observation arriving from inherited stdout after leader exit still wins before close", async () => {
+    await withResourceWorkerScript((directory) => {
+      const writerPid = path.join(directory, "late-writer-pid");
+      return [
+        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        `sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; sleep 0.02; printf "%s\\n" "$2"' sh "${writerPid}" '${EMPTY_FRESH_WORKER_MESSAGE}' &`,
+        "exit 0",
+      ];
+    }, async (directory) => {
+      const outcome = await settleWithin(workerTestReader({
+        initial: null,
+        workerLimits: { observeTimeoutMs: 400, inputTimeoutMs: 10, timeoutMs: 200, closeTimeoutMs: 100, headroomMs: 100 },
+      }).read(true), 300);
+      const writerPid = Number(readFileSync(path.join(directory, "late-writer-pid"), "utf8"));
+
+      expect(outcome === CLEANUP_DEADLINE).toBeFalse();
+      if (outcome === CLEANUP_DEADLINE) return;
+      expect(outcome.diagnostic.degradedReason).toBeUndefined();
+      expect(outcome.diagnostic.status).toBe("complete");
+      expect(processExists(writerPid)).toBeFalse();
+    });
+  });
+
   test("a successful read settles after a TERM-resistant redirected process group is absent", async () => {
     await withResourceWorkerScript((directory) => {
       const descendantPid = path.join(directory, "redirected-descendant-pid");
@@ -979,6 +1037,274 @@ describe("resource recurring reads", () => {
         });
       }
     }
+  });
+
+  test("cleanup has a terminal deadline and preserves every primary failure through persistent EPERM", async () => {
+    const fixtures = [
+      {
+        name: "parse",
+        lines: ["printf 'parse-trace\\n' >&2", "printf '{invalid}\\n'", "while :; do sleep 0.01; done"],
+        expectedCause: "worker-output-invalid",
+        expectedStderr: "parse-trace",
+        limits: { timeoutMs: 80, outputMaxBytes: 256 },
+      },
+      {
+        name: "crash",
+        lines: ["printf 'crash-trace\\n' >&2", "exit 7"],
+        expectedCause: "worker-exit",
+        expectedStderr: "crash-trace",
+        limits: { timeoutMs: 80, outputMaxBytes: 256 },
+      },
+      {
+        name: "output",
+        lines: ["printf 'output-trace\\n' >&2", "printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n'", "while :; do sleep 0.01; done"],
+        expectedCause: "worker-output-limit",
+        expectedStderr: "output-trace",
+        limits: { timeoutMs: 80, outputMaxBytes: 24 },
+      },
+      {
+        name: "timeout",
+        lines: ["printf 'timeout-trace\\n' >&2", "while :; do sleep 0.01; done"],
+        expectedCause: "worker-timeout",
+        expectedStderr: "timeout-trace",
+        limits: { timeoutMs: 20, outputMaxBytes: 256 },
+      },
+    ] as const;
+
+    for (const fixture of fixtures) {
+      await withResourceWorkerScript((directory) => [
+        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        "trap 'exit 0' TERM INT",
+        ...fixture.lines,
+      ], async (directory) => {
+        const realKill = process.kill.bind(process);
+        const kill = spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+          if (pid < 0) throw errno("EPERM");
+          return realKill(pid, signal as NodeJS.Signals | number | undefined);
+        }) as typeof process.kill);
+        const baseline = referencedHandles();
+        const read = workerTestReader({
+          initial: null,
+          workerLimits: { observeTimeoutMs: 300, inputTimeoutMs: 10, closeTimeoutMs: 10, headroomMs: 40, ...fixture.limits },
+        }).read(true);
+        let initial: Awaited<typeof read> | typeof CLEANUP_DEADLINE;
+        try {
+          initial = await settleWithin(read, 120);
+        } finally {
+          kill.mockRestore();
+        }
+        const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
+        try {
+          realKill(-workerPid, "SIGKILL");
+        } catch {}
+        const final = await settleWithin(read, 300);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const handles = newReferencedHandleCount(baseline);
+
+        expect(initial === CLEANUP_DEADLINE, fixture.name).toBeFalse();
+        if (initial === CLEANUP_DEADLINE) return;
+        expect(initial.diagnostic.failure, fixture.name).toMatchObject({
+          cause: fixture.expectedCause,
+          stderr: expect.stringContaining(fixture.expectedStderr),
+          causes: expect.arrayContaining(["resource collector worker cleanup deadline expired"]),
+        });
+        expect(final === CLEANUP_DEADLINE, `${fixture.name} final settlement`).toBeFalse();
+        expect(handles, `${fixture.name} referenced handles`).toBe(0);
+      });
+    }
+  });
+
+  test("ineffective TERM and SIGKILL settle once with cleanup failure and zero referenced handles", async () => {
+    await withResourceWorkerScript((directory) => [
+      `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+      "trap '' TERM INT",
+      "printf 'ineffective-signal-trace\\n' >&2",
+      `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+      "while :; do sleep 0.01; done",
+    ], async (directory) => {
+      const realKill = process.kill.bind(process);
+      const kill = spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+        if (pid !== process.pid) return true;
+        return realKill(pid, signal as NodeJS.Signals | number | undefined);
+      }) as typeof process.kill);
+      const baseline = referencedHandles();
+      const read = workerTestReader({
+        initial: null,
+        workerLimits: { observeTimeoutMs: 300, inputTimeoutMs: 10, timeoutMs: 80, closeTimeoutMs: 10, headroomMs: 40 },
+      }).read(true);
+      let initial: Awaited<typeof read> | typeof CLEANUP_DEADLINE;
+      let handles = -1;
+      try {
+        initial = await settleWithin(read, 120);
+        if (initial !== CLEANUP_DEADLINE) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          handles = newReferencedHandleCount(baseline);
+        }
+      } finally {
+        kill.mockRestore();
+      }
+      const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
+      try {
+        realKill(-workerPid, "SIGKILL");
+      } catch {}
+      await settleWithin(read, 300);
+
+      expect(initial === CLEANUP_DEADLINE).toBeFalse();
+      if (initial === CLEANUP_DEADLINE) return;
+      expect(initial.diagnostic).toMatchObject({
+        degradedReason: "collector-crash",
+        failure: {
+          cause: "worker-cleanup",
+          stderr: expect.stringContaining("ineffective-signal-trace"),
+          causes: expect.arrayContaining(["resource collector worker cleanup deadline expired"]),
+        },
+      });
+      expect(handles).toBe(0);
+    });
+  });
+
+  test("ESRCH cleanup settles without a secondary failure or referenced handles", async () => {
+    await withResourceWorkerScript((directory) => [
+      `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+      `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+      "exit 0",
+    ], async () => {
+      const realKill = process.kill.bind(process);
+      const kill = spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+        if (pid < 0) throw errno("ESRCH");
+        return realKill(pid, signal as NodeJS.Signals | number | undefined);
+      }) as typeof process.kill);
+      const baseline = referencedHandles();
+      let outcome: Awaited<ReturnType<ReturnType<typeof workerTestReader>["read"]>> | typeof CLEANUP_DEADLINE;
+      try {
+        outcome = await settleWithin(workerTestReader({ initial: null }).read(true), 200);
+      } finally {
+        kill.mockRestore();
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(outcome === CLEANUP_DEADLINE).toBeFalse();
+      if (outcome === CLEANUP_DEADLINE) return;
+      expect(outcome.diagnostic.degradedReason).toBeUndefined();
+      expect(newReferencedHandleCount(baseline)).toBe(0);
+    });
+  });
+
+  test("an owned escaped descendant retaining inherited pipes is supervised to bounded completion", async () => {
+    await withResourceWorkerScript((directory) => {
+      const descendantPid = path.join(directory, "escaped-descendant-pid");
+      const ready = path.join(directory, "escaped-descendant-ready");
+      return [
+        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        `setsid sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" &`,
+        `while [ ! -e "${ready}" ]; do sleep 0.01; done`,
+        `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+        "exit 0",
+      ];
+    }, async (directory) => {
+      const baseline = referencedHandles();
+      const read = workerTestReader({
+        initial: null,
+        workerLimits: { observeTimeoutMs: 400, inputTimeoutMs: 10, timeoutMs: 100, closeTimeoutMs: 30, headroomMs: 80 },
+      }).read(true);
+      const initial = await settleWithin(read, 250);
+      const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
+      const descendantPid = Number(readFileSync(path.join(directory, "escaped-descendant-pid"), "utf8"));
+      if (initial === CLEANUP_DEADLINE) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {}
+        try {
+          process.kill(-workerPid, "SIGKILL");
+        } catch {}
+        await settleWithin(read, 300);
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const handles = newReferencedHandleCount(baseline);
+
+      expect(initial === CLEANUP_DEADLINE).toBeFalse();
+      if (initial === CLEANUP_DEADLINE) return;
+      expect(initial.diagnostic.degradedReason).toBeUndefined();
+      expect(processExists(descendantPid)).toBeFalse();
+      expect(handles).toBe(0);
+    });
+  });
+
+  test("leader-first cleanup sends no signals to recycled or null-identity groups", async () => {
+    for (const identity of ["recycled", "null"] as const) {
+      await withResourceWorkerScript((directory) => [
+        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        "exit 0",
+      ], async () => {
+        const realKill = process.kill.bind(process);
+        let identityReads = 0;
+        const processIdentity = spyOn(procBackend, "processIdentity").mockImplementation((pid) => {
+          if (identity === "null") return null;
+          identityReads += 1;
+          return identityReads === 1 ? `${pid}:owned` : `${pid}:recycled`;
+        });
+        const signals: Array<string | number | undefined> = [];
+        const kill = spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+          if (pid < 0 && signal !== 0 && signal !== undefined) {
+            signals.push(signal);
+            return true;
+          }
+          if (pid < 0) throw errno("ESRCH");
+          return realKill(pid, signal as NodeJS.Signals | number | undefined);
+        }) as typeof process.kill);
+        let outcome: Awaited<ReturnType<ReturnType<typeof workerTestReader>["read"]>> | typeof CLEANUP_DEADLINE;
+        try {
+          outcome = await settleWithin(workerTestReader({
+            initial: null,
+            workerLimits: { observeTimeoutMs: 300, inputTimeoutMs: 10, timeoutMs: 80, closeTimeoutMs: 10, headroomMs: 40 },
+          }).read(true), 150);
+        } finally {
+          kill.mockRestore();
+          processIdentity.mockRestore();
+        }
+
+        expect(outcome === CLEANUP_DEADLINE, identity).toBeFalse();
+        expect(signals, identity).toEqual([]);
+      });
+    }
+  });
+
+  test("individual cleanup revalidates identity after a verified group signal", async () => {
+    await withResourceWorkerScript([
+      `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+      "exit 0",
+    ], async () => {
+      let recycled = false;
+      const groupSignals: NodeJS.Signals[] = [];
+      const individualSignals: NodeJS.Signals[] = [];
+      const outcome = await workerTestReader({
+        initial: null,
+        workerLimits: { observeTimeoutMs: 300, inputTimeoutMs: 10, timeoutMs: 80, closeTimeoutMs: 10, headroomMs: 40 },
+        workerProcessRuntime: {
+          pidAlive: () => !recycled,
+          processIdentity: (pid) => `${pid}:${recycled ? "recycled" : "owned"}`,
+          descendants: (pid) => [pid],
+          processGroupId: (pid) => pid,
+          processGroupMembers: () => [],
+          signal: (pid, signal) => {
+            if (pid < 0 && signal === 0) {
+              if (recycled) throw errno("ESRCH");
+              return;
+            }
+            if (pid < 0) {
+              groupSignals.push(signal as NodeJS.Signals);
+              recycled = true;
+              return;
+            }
+            individualSignals.push(signal as NodeJS.Signals);
+          },
+        },
+      }).read(true);
+
+      expect(outcome.diagnostic.degradedReason).toBeUndefined();
+      expect(groupSignals).toEqual(["SIGTERM"]);
+      expect(individualSignals).toEqual([]);
+    });
   });
 
   test("a near-limit handoff to an immediately exiting worker keeps the parent alive and releases the worker", async () => {

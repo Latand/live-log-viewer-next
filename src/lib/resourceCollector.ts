@@ -12,7 +12,8 @@ export type ResourceFailureCause =
   | "worker-input"
   | "worker-output-limit"
   | "worker-output-invalid"
-  | "worker-failure";
+  | "worker-failure"
+  | "worker-cleanup";
 
 export type ResourceFailureDiagnostic = Readonly<{
   cause: ResourceFailureCause;
@@ -72,6 +73,12 @@ const FAILURE_CAUSE_MAX_BYTES = 512;
 const FAILURE_CAUSE_MAX_DEPTH = 4;
 const DIAGNOSTIC_REDACTION_CONTEXT_CHARS = 256;
 
+type ResourceFailureOptions = {
+  cause?: unknown;
+  stderr?: string;
+  secondaryCauses?: readonly unknown[];
+};
+
 type SensitiveTextMatch = {
   index: number;
   length: number;
@@ -121,6 +128,7 @@ function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
 
 function redactDiagnosticText(value: string): string {
   return value
+    .replace(/\b([A-Z0-9_.-]*AUTHORIZATION[A-Z0-9_.-]*)\s*[:=][^\r\n]*/gi, "$1=<redacted>")
     .replace(/\b(Bearer)\s+[^\s]+/gi, "$1 <redacted>")
     .replace(/\b([A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTHORIZATION|COOKIE)[A-Z0-9_.-]*)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s]+)/gi, "$1=<redacted>")
     .replace(/\b(?:sk|ghp|github_pat|xox[baprs])[-_A-Za-z0-9]{16,}\b/gi, "<redacted>")
@@ -149,7 +157,7 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
 } {
   let sanitizedTail = "";
   let pending = "";
-  let redacting: "unquoted" | "\"" | "'" | null = null;
+  let redacting: "unquoted" | "line" | "\"" | "'" | null = null;
   let carriedCredential: "key" | "authorization-key" | "value" | "authorization" | "bearer" | null = null;
   const appendSanitized = (value: string) => {
     sanitizedTail += value;
@@ -168,25 +176,7 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
     };
     while (pending) {
       if (carriedCredential === "authorization") {
-        const valueStart = pending.search(/\S/);
-        if (valueStart < 0) {
-          pending = "";
-          return;
-        }
-        pending = pending.slice(valueStart);
-        const bearer = /^(Bearer)\s+(?=\S)/i.exec(pending);
-        if (bearer) {
-          pending = pending.slice(bearer[0].length);
-          beginCredentialRedaction();
-          continue;
-        }
-        if ("bearer".startsWith(pending.toLowerCase())) return;
-        if (/^Bearer\s*$/i.test(pending)) {
-          pending = "";
-          carriedCredential = "bearer";
-          return;
-        }
-        redacting = "unquoted";
+        redacting = "line";
         carriedCredential = null;
         continue;
       }
@@ -218,7 +208,10 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
         if (completedKey) {
           appendSanitized("<redacted>");
           pending = pending.slice(completedKey[0].length);
-          if (authorizationKey && completedKey[1] === undefined) carriedCredential = "authorization";
+          if (authorizationKey) {
+            redacting = "line";
+            carriedCredential = null;
+          }
           else {
             redacting = completedKey[1] === "\"" || completedKey[1] === "'" ? completedKey[1] : "unquoted";
             carriedCredential = null;
@@ -239,12 +232,14 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
         carriedCredential = null;
       }
       if (redacting) {
-        const end = redacting === "unquoted" ? pending.search(/\s/) : pending.indexOf(redacting);
+        const end = redacting === "line"
+          ? pending.search(/[\r\n]/)
+          : redacting === "unquoted" ? pending.search(/\s/) : pending.indexOf(redacting);
         if (end < 0) {
           pending = "";
           return;
         }
-        pending = pending.slice(end + (redacting === "unquoted" ? 0 : 1));
+        pending = pending.slice(end + (redacting === "unquoted" || redacting === "line" ? 0 : 1));
         redacting = null;
         continue;
       }
@@ -252,8 +247,8 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
       if (match) {
         appendSanitized(pending.slice(0, match.index) + match.replacement);
         pending = pending.slice(match.index + match.length);
-        if (match.authorization && match.quote === null) {
-          carriedCredential = "authorization";
+        if (match.authorization) {
+          redacting = "line";
           continue;
         }
         if (match.bearer) {
@@ -327,11 +322,22 @@ function diagnosticCauses(error: unknown): string[] {
   return causes;
 }
 
+function combinedDiagnosticCauses(primary: unknown, secondary: readonly unknown[] = []): string[] {
+  const causes: string[] = [];
+  for (const error of [primary, ...secondary]) {
+    for (const cause of diagnosticCauses(error)) {
+      causes.push(cause);
+      if (causes.length === FAILURE_CAUSE_MAX_DEPTH) return causes;
+    }
+  }
+  return causes;
+}
+
 function resourceCollectorFailure(
   reason: ResourceDegradedReason,
   cause: ResourceFailureCause,
   message: string,
-  options: { cause?: unknown; stderr?: string } = {},
+  options: ResourceFailureOptions = {},
 ): ResourceCollectorFailure {
   const stderr = options.stderr === undefined
     ? undefined
@@ -341,7 +347,7 @@ function resourceCollectorFailure(
     diagnostic: {
       cause,
       message: boundedDiagnosticText(message, FAILURE_MESSAGE_MAX_BYTES),
-      causes: diagnosticCauses(options.cause),
+      causes: combinedDiagnosticCauses(options.cause, options.secondaryCauses),
       ...(stderr ? { stderr } : {}),
     },
   });
@@ -354,7 +360,7 @@ export class ResourceCollectorFailureError extends Error {
     reason: ResourceDegradedReason,
     cause: ResourceFailureCause,
     message: string,
-    options: { cause?: unknown; stderr?: string } = {},
+    options: ResourceFailureOptions = {},
   ) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = "ResourceCollectorFailureError";

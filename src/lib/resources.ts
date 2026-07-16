@@ -1,8 +1,8 @@
 import { procBackend } from "@/lib/proc";
 import type { ProcBackend } from "@/lib/proc";
 import crypto from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { completedFileScan, currentFileScan } from "@/lib/scanner/scanCache";
@@ -408,9 +408,111 @@ type ResourceWorkerLimits = Partial<{
   inputTimeoutMs: number;
   timeoutMs: number;
   closeTimeoutMs: number;
+  cleanupTimeoutMs: number;
   headroomMs: number;
   outputMaxBytes: number;
 }>;
+
+type ResourceWorkerProcessRuntime = Readonly<{
+  pidAlive(pid: number): boolean;
+  processIdentity(pid: number): string | null;
+  descendants(pid: number): number[];
+  processGroupId(pid: number): number | null;
+  processGroupMembers(groupId: number): number[];
+  signal(pid: number, signal: NodeJS.Signals | 0): void;
+}>;
+
+function linuxWorkerDescendants(root: number): number[] {
+  const descendants: number[] = [];
+  const seen = new Set<number>([root]);
+  const pending = [root];
+  while (pending.length > 0) {
+    const pid = pending.pop()!;
+    descendants.push(pid);
+    let children: string;
+    try {
+      children = readFileSync(`/proc/${pid}/task/${pid}/children`, "utf8");
+    } catch {
+      continue;
+    }
+    for (const raw of children.trim().split(/\s+/)) {
+      const child = Number(raw);
+      if (!Number.isInteger(child) || child <= 0 || seen.has(child)) continue;
+      seen.add(child);
+      pending.push(child);
+    }
+  }
+  return descendants;
+}
+
+function workerDescendants(root: number): number[] {
+  if (procBackend.name === "linux") return linuxWorkerDescendants(root);
+  return descendantPids(root, procBackend.ppidMap());
+}
+
+function linuxProcessGroupId(pid: number): number | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return null;
+    const group = Number(stat.slice(close + 2).trim().split(/\s+/)[2]);
+    return Number.isInteger(group) && group > 0 ? group : null;
+  } catch {
+    return null;
+  }
+}
+
+function portableProcessGroupId(pid: number): number | null {
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "pgid="], {
+    encoding: "utf8",
+    timeout: 1_000,
+    windowsHide: true,
+  });
+  const group = Number(result.status === 0 ? result.stdout.trim() : "");
+  return Number.isInteger(group) && group > 0 ? group : null;
+}
+
+function linuxProcessGroupMembers(groupId: number): number[] {
+  const members: number[] = [];
+  let names: string[];
+  try {
+    names = readdirSync("/proc");
+  } catch {
+    return members;
+  }
+  for (const name of names) {
+    const pid = Number(name);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    if (linuxProcessGroupId(pid) === groupId) members.push(pid);
+  }
+  return members;
+}
+
+function portableProcessGroupMembers(groupId: number): number[] {
+  const result = spawnSync("ps", ["-axo", "pid=,pgid="], {
+    encoding: "utf8",
+    timeout: 1_000,
+    windowsHide: true,
+  });
+  if (result.status !== 0) return [];
+  const members: number[] = [];
+  for (const line of result.stdout.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (match && Number(match[2]) === groupId) members.push(Number(match[1]));
+  }
+  return members;
+}
+
+const defaultResourceWorkerProcessRuntime: ResourceWorkerProcessRuntime = {
+  pidAlive: (pid) => procBackend.pidAlive(pid),
+  processIdentity: (pid) => procBackend.processIdentity(pid),
+  descendants: workerDescendants,
+  processGroupId: (pid) => procBackend.name === "linux" ? linuxProcessGroupId(pid) : portableProcessGroupId(pid),
+  processGroupMembers: (groupId) => procBackend.name === "linux"
+    ? linuxProcessGroupMembers(groupId)
+    : portableProcessGroupMembers(groupId),
+  signal: (pid, signal) => process.kill(pid, signal),
+};
 
 type ResourceWorkerLaunchOptions = {
   cwd?: string;
@@ -664,13 +766,25 @@ async function collectResourcesInWorker(
   readFiles: (fresh: boolean) => Promise<ResourceWorkerFileObservation[]> = readResourceFileSnapshot,
   limits: ResourceWorkerLimits = {},
   targetEpoch = globalStore.__llvResourceTargetEpoch ?? 0,
+  processRuntime: ResourceWorkerProcessRuntime = defaultResourceWorkerProcessRuntime,
 ): Promise<CollectedResources> {
   const launch = resolveResourceWorkerLaunch();
   const observeTimeoutMs = limits.observeTimeoutMs ?? RESOURCE_OBSERVE_TIMEOUT_MS;
   const inputTimeoutMs = limits.inputTimeoutMs ?? RESOURCE_FILE_HANDOFF_TIMEOUT_MS;
   const closeTimeoutMs = limits.closeTimeoutMs ?? RESOURCE_WORKER_CLOSE_TIMEOUT_MS;
   const headroomMs = limits.headroomMs ?? RESOURCE_OBSERVE_HEADROOM_MS;
-  const workerBudgetMs = Math.max(0, observeTimeoutMs - inputTimeoutMs - closeTimeoutMs - headroomMs);
+  const cleanupTimeoutMs = Math.max(
+    closeTimeoutMs,
+    limits.cleanupTimeoutMs ?? closeTimeoutMs + Math.floor(headroomMs / 2),
+  );
+  const settlementHeadroomMs = Math.max(
+    0,
+    headroomMs - Math.max(0, cleanupTimeoutMs - closeTimeoutMs),
+  );
+  const workerBudgetMs = Math.max(
+    0,
+    observeTimeoutMs - inputTimeoutMs - cleanupTimeoutMs - settlementHeadroomMs,
+  );
   const timeoutMs = Math.min(limits.timeoutMs ?? RESOURCE_WORKER_TIMEOUT_MS, workerBudgetMs);
   const filesTask = readFiles(fresh);
   let inputTimer: ReturnType<typeof setTimeout> | undefined;
@@ -702,122 +816,309 @@ async function collectResourcesInWorker(
   });
   return new Promise<CollectedResources>((resolve, reject) => {
     const pid = worker.pid;
-    const expectedIdentity = typeof pid === "number" ? procBackend.processIdentity(pid) : null;
-    let outcome: (() => void) | null = null;
+    const expectedIdentity = typeof pid === "number" ? processRuntime.processIdentity(pid) : null;
+    const groupEstablished = typeof pid === "number"
+      && expectedIdentity !== null
+      && processRuntime.processGroupId(pid) === pid;
+    type WorkerOutcome =
+      | { type: "success"; value: CollectedResources }
+      | {
+          type: "failure";
+          reason: ResourceDegradedReason;
+          cause: ResourceFailureCause;
+          message: string;
+          error?: unknown;
+        };
+    let outcome: WorkerOutcome | null = null;
+    let exitFailure: Extract<WorkerOutcome, { type: "failure" }> | null = null;
     let outputBytes = 0;
     const stderrTail = createResourceDiagnosticTail();
     const stderrDecoder = new StringDecoder("utf8");
-    let closeTimer: ReturnType<typeof setTimeout> | undefined;
+    const ownedProcesses = new Map<number, string>();
+    if (typeof pid === "number" && expectedIdentity !== null) ownedProcesses.set(pid, expectedIdentity);
+    const ownershipTimers: Array<ReturnType<typeof setTimeout>> = [];
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let cleanupDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
     let cleanupPoll: ReturnType<typeof setTimeout> | undefined;
     let cleanupStarted = false;
     let cleanupComplete = false;
+    let cleanupIssue: unknown;
+    let cleanupFailure: Error | null = null;
     let leaderExited = false;
     let workerClosed = false;
+    let streamsDetached = false;
+    let stderrEnded = false;
     let settled = false;
     const workerFailure = (
       reason: ResourceDegradedReason,
       cause: ResourceFailureCause,
       message: string,
       error?: unknown,
-    ) => new ResourceCollectorFailureError(reason, cause, message, { cause: error, stderr: stderrTail.value() });
-    const sameWorker = () => typeof pid === "number"
-      && (expectedIdentity === null || procBackend.processIdentity(pid) === expectedIdentity);
-    const workerGroupExists = () => {
-      if (typeof pid !== "number") return false;
+    ) => new ResourceCollectorFailureError(reason, cause, message, {
+      cause: error,
+      stderr: stderrTail.value(),
+      secondaryCauses: cleanupFailure ? [cleanupFailure] : [],
+    });
+    const rememberCleanupIssue = (error: unknown) => {
+      cleanupIssue ??= error;
+    };
+    const finishStderr = () => {
+      if (stderrEnded) return;
+      stderrEnded = true;
+      stderrTail.append(stderrDecoder.end());
+    };
+    const clearOwnershipTimers = () => {
+      for (const timer of ownershipTimers) clearTimeout(timer);
+      ownershipTimers.length = 0;
+    };
+    const refreshOwnedProcesses = () => {
+      if (typeof pid !== "number" || expectedIdentity === null) return;
+      if (processRuntime.processIdentity(pid) !== expectedIdentity) return;
       try {
-        process.kill(-pid, 0);
-        return true;
+        for (const descendant of processRuntime.descendants(pid)) {
+          if (ownedProcesses.has(descendant)) continue;
+          const identity = processRuntime.processIdentity(descendant);
+          if (identity !== null) ownedProcesses.set(descendant, identity);
+        }
       } catch (error) {
-        return (error as NodeJS.ErrnoException).code !== "ESRCH";
+        rememberCleanupIssue(error);
       }
     };
-    const signalWorkerGroup = (signal: NodeJS.Signals): boolean => {
-      if (typeof pid !== "number") return false;
-      if (!leaderExited && !sameWorker()) return false;
+    const retainContinuousGroupMembers = () => {
+      if (!leaderExited || !groupEstablished || typeof pid !== "number" || expectedIdentity === null) return;
+      let members: number[];
       try {
-        process.kill(-pid, signal);
+        members = processRuntime.processGroupMembers(pid);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH" && !leaderExited) worker.kill(signal);
+        rememberCleanupIssue(error);
+        return;
       }
-      return true;
+      if (members.includes(pid) && processRuntime.processIdentity(pid) !== expectedIdentity) {
+        rememberCleanupIssue(new Error("resource collector worker group leader identity changed"));
+        return;
+      }
+      const identities = members.map((member) => [member, processRuntime.processIdentity(member)] as const);
+      if (identities.some(([, identity]) => identity === null)) {
+        rememberCleanupIssue(new Error("resource collector worker group member identity is unavailable"));
+        return;
+      }
+      for (const [member, identity] of identities) {
+        if (!ownedProcesses.has(member)) ownedProcesses.set(member, identity!);
+      }
+    };
+    const ownedProcessState = () => {
+      const active: number[] = [];
+      let uncertain = false;
+      for (const [ownedPid, identity] of ownedProcesses) {
+        const currentIdentity = processRuntime.processIdentity(ownedPid);
+        if (currentIdentity === identity) {
+          active.push(ownedPid);
+          continue;
+        }
+        if (currentIdentity === null && processRuntime.pidAlive(ownedPid)) uncertain = true;
+      }
+      return { active, uncertain };
+    };
+    const probeWorkerGroup = (): "absent" | "present" | "unknown" => {
+      if (typeof pid !== "number") return "absent";
+      try {
+        processRuntime.signal(-pid, 0);
+        return "present";
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ESRCH") return "absent";
+        if (code === "EPERM") return "present";
+        rememberCleanupIssue(error);
+        return "unknown";
+      }
+    };
+    const workerGroupOwned = (active: readonly number[]): boolean => {
+      if (typeof pid !== "number" || expectedIdentity === null) return false;
+      for (const ownedPid of active) {
+        if (processRuntime.processGroupId(ownedPid) === pid) return true;
+      }
+      return false;
+    };
+    const signalOwnedCleanup = (signal: NodeJS.Signals) => {
+      refreshOwnedProcesses();
+      retainContinuousGroupMembers();
+      const state = ownedProcessState();
+      const group = probeWorkerGroup();
+      if (group === "present") {
+        if (workerGroupOwned(state.active)) {
+          try {
+            processRuntime.signal(-pid!, signal);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") rememberCleanupIssue(error);
+          }
+        } else {
+          rememberCleanupIssue(new Error("resource collector worker group ownership could not be verified"));
+        }
+      }
+      for (const ownedPid of state.active) {
+        const identity = ownedProcesses.get(ownedPid);
+        if (identity === undefined || processRuntime.processIdentity(ownedPid) !== identity) continue;
+        try {
+          processRuntime.signal(ownedPid, signal);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") rememberCleanupIssue(error);
+        }
+      }
+    };
+    const cleanupIsAbsent = (): boolean => {
+      const state = ownedProcessState();
+      return probeWorkerGroup() === "absent" && state.active.length === 0 && !state.uncertain;
+    };
+    const releaseWorkerHandles = () => {
+      if (streamsDetached) return;
+      streamsDetached = true;
+      finishStderr();
+      worker.removeAllListeners();
+      for (const stream of [worker.stdin, worker.stdout, worker.stderr]) {
+        stream.removeAllListeners();
+        stream.destroy();
+        (stream as typeof stream & { unref?: () => void }).unref?.();
+      }
+      worker.unref();
+    };
+    const clearLifecycleTimers = () => {
+      clearTimeout(workerTimer);
+      if (killTimer) clearTimeout(killTimer);
+      if (cleanupDeadlineTimer) clearTimeout(cleanupDeadlineTimer);
+      if (cleanupPoll) clearTimeout(cleanupPoll);
+      clearOwnershipTimers();
     };
     const settleIfReady = () => {
-      if (settled || !outcome || !workerClosed || !cleanupComplete) return;
+      if (settled || !outcome || (!workerClosed && !streamsDetached) || !cleanupComplete) return;
       settled = true;
-      outcome();
+      const completed = outcome;
+      clearLifecycleTimers();
+      releaseWorkerHandles();
+      if (cleanupFailure) {
+        if (completed.type === "success") {
+          reject(workerFailure(
+            "collector-crash",
+            "worker-cleanup",
+            "resource collector worker cleanup failed",
+          ));
+        } else {
+          reject(workerFailure(
+            completed.reason,
+            completed.cause,
+            completed.message,
+            completed.error,
+          ));
+        }
+        return;
+      }
+      if (completed.type === "success") resolve(completed.value);
+      else reject(workerFailure(completed.reason, completed.cause, completed.message, completed.error));
     };
-    const confirmWorkerGroupAbsent = () => {
+    const confirmCleanup = () => {
       if (!cleanupStarted || cleanupComplete) return;
-      if (!workerGroupExists()) {
+      if (cleanupIsAbsent()) {
         cleanupComplete = true;
-        if (closeTimer) clearTimeout(closeTimer);
+        if (killTimer) clearTimeout(killTimer);
         if (cleanupPoll) clearTimeout(cleanupPoll);
         settleIfReady();
         return;
       }
-      cleanupPoll = setTimeout(confirmWorkerGroupAbsent, 5);
+      cleanupPoll = setTimeout(confirmCleanup, 5);
+      cleanupPoll.unref();
     };
     const terminate = () => {
       if (cleanupStarted) return;
       cleanupStarted = true;
-      if (!signalWorkerGroup("SIGTERM")) {
-        cleanupComplete = true;
-        settleIfReady();
-        return;
-      }
-      closeTimer = setTimeout(() => {
-        if (workerGroupExists()) signalWorkerGroup("SIGKILL");
-        confirmWorkerGroupAbsent();
+      refreshOwnedProcesses();
+      clearOwnershipTimers();
+      signalOwnedCleanup("SIGTERM");
+      killTimer = setTimeout(() => {
+        signalOwnedCleanup("SIGKILL");
+        confirmCleanup();
       }, closeTimeoutMs);
-      confirmWorkerGroupAbsent();
+      killTimer.unref();
+      cleanupDeadlineTimer = setTimeout(() => {
+        if (!outcome && exitFailure) outcome = exitFailure;
+        cleanupFailure = new Error(
+          "resource collector worker cleanup deadline expired",
+          cleanupIssue === undefined ? undefined : { cause: cleanupIssue },
+        );
+        cleanupComplete = true;
+        releaseWorkerHandles();
+        settleIfReady();
+      }, cleanupTimeoutMs);
+      cleanupDeadlineTimer.unref();
+      confirmCleanup();
     };
-    const finish = (next: () => void) => {
+    const finish = (next: WorkerOutcome) => {
       if (outcome) return;
       outcome = next;
-      clearTimeout(timeout);
+      clearTimeout(workerTimer);
       terminate();
     };
-    const timeout = setTimeout(() => finish(() => reject(workerFailure(
-      "timeout",
-      "worker-timeout",
-      "resource collector worker timed out",
-    ))), timeoutMs);
-    worker.once("error", (error) => finish(() => reject(workerFailure(
-      "collector-crash",
-      "worker-spawn",
-      "resource collector worker failed to start",
+    refreshOwnedProcesses();
+    for (const delay of [0, 5, 20]) {
+      const timer = setTimeout(() => {
+        if (!cleanupStarted && !leaderExited) refreshOwnedProcesses();
+      }, delay);
+      timer.unref();
+      ownershipTimers.push(timer);
+    }
+    const workerTimer = setTimeout(() => finish({
+      type: "failure",
+      reason: "timeout",
+      cause: "worker-timeout",
+      message: "resource collector worker timed out",
+    }), timeoutMs);
+    const onWorkerError = (error: Error) => finish({
+      type: "failure",
+      reason: "collector-crash",
+      cause: "worker-spawn",
+      message: "resource collector worker failed to start",
       error,
-    ))));
-    worker.once("exit", () => {
-      leaderExited = true;
-      clearTimeout(timeout);
-      terminate();
     });
-    worker.once("close", (code, signal) => {
-      clearTimeout(timeout);
-      stderrTail.append(stderrDecoder.end());
+    const onWorkerExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      leaderExited = true;
+      clearOwnershipTimers();
+      clearTimeout(workerTimer);
+      exitFailure = {
+        type: "failure",
+        reason: "collector-crash",
+        cause: "worker-exit",
+        message: `resource collector worker exited before observation (${signal ?? code ?? "unknown"})`,
+      };
+      terminate();
+    };
+    const onWorkerClose = (code: number | null, signal: NodeJS.Signals | null) => {
+      clearTimeout(workerTimer);
+      finishStderr();
       workerClosed = true;
       if (!outcome) {
-        outcome = () => reject(workerFailure(
-          "collector-crash",
-          "worker-exit",
-          `resource collector worker closed before observation (${signal ?? code ?? "unknown"})`,
-        ));
+        outcome = exitFailure ?? {
+          type: "failure",
+          reason: "collector-crash",
+          cause: "worker-exit",
+          message: `resource collector worker closed before observation (${signal ?? code ?? "unknown"})`,
+        };
         terminate();
       }
-      confirmWorkerGroupAbsent();
+      confirmCleanup();
       settleIfReady();
-    });
+    };
+    worker.once("error", onWorkerError);
+    worker.once("exit", onWorkerExit);
+    worker.once("close", onWorkerClose);
     let output = "";
     worker.stdout.setEncoding("utf8");
-    worker.stdout.on("data", (chunk: string) => {
+    const onStdout = (chunk: string) => {
       outputBytes += Buffer.byteLength(chunk);
       if (outputBytes > outputMaxBytes) {
-        finish(() => reject(workerFailure(
-          "collector-crash",
-          "worker-output-limit",
-          "resource collector worker exceeded stdout limit",
-        )));
+        finish({
+          type: "failure",
+          reason: "collector-crash",
+          cause: "worker-output-limit",
+          message: "resource collector worker exceeded stdout limit",
+        });
         return;
       }
       output += chunk;
@@ -829,60 +1130,70 @@ async function collectResourcesInWorker(
       try {
         parsed = JSON.parse(raw);
       } catch {
-        finish(() => reject(workerFailure(
-          "collector-crash",
-          "worker-output-invalid",
-          "resource collector worker emitted invalid JSON",
-        )));
+        finish({
+          type: "failure",
+          reason: "collector-crash",
+          cause: "worker-output-invalid",
+          message: "resource collector worker emitted invalid JSON",
+        });
         return;
       }
       const message = resourceWorkerMessage(parsed);
       if (!message) {
-        finish(() => reject(workerFailure(
-          "collector-crash",
-          "worker-output-invalid",
-          "resource collector worker emitted an invalid message",
-        )));
+        finish({
+          type: "failure",
+          reason: "collector-crash",
+          cause: "worker-output-invalid",
+          message: "resource collector worker emitted an invalid message",
+        });
         return;
       }
       if (message.type === "observation" && message.diagnostic.fresh !== fresh) {
-        finish(() => reject(workerFailure(
-          "collector-crash",
-          "worker-output-invalid",
-          "resource collector worker returned mismatched freshness",
-        )));
+        finish({
+          type: "failure",
+          reason: "collector-crash",
+          cause: "worker-output-invalid",
+          message: "resource collector worker returned mismatched freshness",
+        });
         return;
       }
       if (message.type === "failure") {
-        finish(() => reject(workerFailure(
-          "collector-crash",
-          "worker-failure",
-          "resource collector worker reported a failure",
-          new Error(message.error),
-        )));
+        finish({
+          type: "failure",
+          reason: "collector-crash",
+          cause: "worker-failure",
+          message: "resource collector worker reported a failure",
+          error: new Error(message.error),
+        });
         return;
       }
-      finish(() => {
-        resolve(collectedResources(message.payload, message.diagnostic, message.targets, targetEpoch));
+      finish({
+        type: "success",
+        value: collectedResources(message.payload, message.diagnostic, message.targets, targetEpoch),
       });
-    });
-    worker.stderr.on("data", (chunk: Buffer) => {
+    };
+    const onStderr = (chunk: Buffer) => {
       outputBytes += chunk.length;
       stderrTail.append(stderrDecoder.write(chunk));
       if (outputBytes > outputMaxBytes) {
-        finish(() => reject(workerFailure(
-          "collector-crash",
-          "worker-output-limit",
-          "resource collector worker exceeded output limit",
-        )));
+        finish({
+          type: "failure",
+          reason: "collector-crash",
+          cause: "worker-output-limit",
+          message: "resource collector worker exceeded output limit",
+        });
       }
-    });
-    worker.stdin.once("error", (error) => finish(() => reject(workerFailure(
-      "collector-crash",
-      "worker-input",
-      "resource collector worker input failed",
+    };
+    const onStdinError = (error: Error) => finish({
+      type: "failure",
+      reason: "collector-crash",
+      cause: "worker-input",
+      message: "resource collector worker input failed",
       error,
-    ))));
+    });
+    worker.stdout.on("data", onStdout);
+    worker.stderr.on("data", onStderr);
+    worker.stdin.once("error", onStdinError);
     worker.stdin.end(request);
   });
 }
@@ -993,6 +1304,7 @@ export function createResourcesReader(
     persist?: (observation: ResourceObservation<CollectedResources>) => boolean;
     readFiles?: (fresh: boolean) => Promise<ResourceWorkerFileObservation[]>;
     workerLimits?: ResourceWorkerLimits;
+    workerProcessRuntime?: ResourceWorkerProcessRuntime;
   } = {},
 ): ResourcesReader {
   const inProcess = options.inProcess ?? process.env.LLV_RESOURCE_COLLECTOR_IN_PROCESS === "1";
@@ -1010,7 +1322,13 @@ export function createResourcesReader(
       const diagnostic = diagnosticForBuild();
       if (!diagnostic) throw new Error("resource build completed without diagnostics");
       return collectedResources(payload, diagnostic, lastResourceTargetRefs(), targetEpoch);
-    } : (fresh = false) => collectResourcesInWorker(fresh, options.readFiles, options.workerLimits),
+    } : (fresh = false) => collectResourcesInWorker(
+      fresh,
+      options.readFiles,
+      options.workerLimits,
+      globalStore.__llvResourceTargetEpoch ?? 0,
+      options.workerProcessRuntime,
+    ),
   });
   let lastPersistedGeneration = options.initial?.generation ?? 0;
   const persist = (observation: ResourceObservation<CollectedResources>) => {

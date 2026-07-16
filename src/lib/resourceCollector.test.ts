@@ -227,6 +227,103 @@ describe("resource collector", () => {
     }
   });
 
+  test("streaming Authorization redaction covers every scheme, field boundary, split, and terminal flush", async () => {
+    const safeLine = "X-Safe-After: preserved é € 😀";
+    const cases = [
+      {
+        name: "Basic",
+        input: `Authorization: Basic BASICLEAK==\r\n${safeLine}`,
+        fragments: ["BASICLEAK"],
+      },
+      {
+        name: "Digest",
+        input: `Authorization: Digest username="DIGESTUSER", realm="DIGESTREALM", response="DIGESTRESPONSE"\n${safeLine}`,
+        fragments: ["DIGESTUSER", "DIGESTREALM", "DIGESTRESPONSE"],
+      },
+      {
+        name: "Negotiate",
+        input: `Authorization: Negotiate NEGOTIATELEAK FIRSTTAIL SECONDTAIL\r${safeLine}`,
+        fragments: ["NEGOTIATELEAK", "FIRSTTAIL", "SECONDTAIL"],
+      },
+      {
+        name: "custom",
+        input: `Authorization=Custom scheme=CUSTOMLEAK quoted="CUSTOMTAIL VALUE"\n${safeLine}`,
+        fragments: ["CUSTOMLEAK", "CUSTOMTAIL"],
+      },
+      {
+        name: "embedded key",
+        input: `proxy.AUTHORIZATION_trace: Custom EMBEDDEDLEAK tail=EMBEDDEDTAIL\n${safeLine}`,
+        fragments: ["EMBEDDEDLEAK", "EMBEDDEDTAIL"],
+      },
+      {
+        name: "quoted field",
+        input: `Authorization: "Digest username=QUOTEDLEAK response=QUOTEDTAIL" trailing=FIELDTAIL\n${safeLine}`,
+        fragments: ["QUOTEDLEAK", "QUOTEDTAIL", "FIELDTAIL"],
+      },
+    ];
+
+    for (const fixture of cases) {
+      for (let split = 0; split <= fixture.input.length; split += 1) {
+        const tail = createResourceDiagnosticTail();
+        tail.append(fixture.input.slice(0, split));
+        tail.append(fixture.input.slice(split));
+        const diagnostic = tail.value();
+        const label = `${fixture.name} split ${split}`;
+
+        expect(diagnostic.includes("<redacted>"), label).toBeTrue();
+        expect(diagnostic.includes(safeLine), label).toBeTrue();
+        expect(diagnostic.includes("\uFFFD"), label).toBeFalse();
+        expect(Buffer.byteLength(diagnostic), label).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+        for (const fragment of fixture.fragments) {
+          expect(diagnostic.includes(fragment), `${label} fragment ${fragment}`).toBeFalse();
+        }
+      }
+
+      const fieldEnd = fixture.input.search(/[\r\n]/);
+      const terminalInput = fieldEnd < 0 ? fixture.input : fixture.input.slice(0, fieldEnd);
+      for (let split = 0; split <= terminalInput.length; split += 1) {
+        const terminal = createResourceDiagnosticTail();
+        terminal.append(terminalInput.slice(0, split));
+        terminal.append(terminalInput.slice(split));
+        const diagnostic = terminal.value();
+        const label = `${fixture.name} terminal split ${split}`;
+
+        expect(diagnostic.includes("<redacted>"), label).toBeTrue();
+        for (const fragment of fixture.fragments) {
+          expect(diagnostic.includes(fragment), `${label} fragment ${fragment}`).toBeFalse();
+        }
+      }
+    }
+
+    const longCredential = "LONG-AUTHORIZATION-LEAK ".repeat(1_000);
+    const streamed = createResourceDiagnosticTail();
+    streamed.append("discarded safe prefix\n".repeat(300));
+    streamed.append("Authorization: Custom ");
+    for (let offset = 0; offset < longCredential.length; offset += 73) {
+      streamed.append(longCredential.slice(offset, offset + 73));
+    }
+    streamed.append(`\r\n${safeLine}`);
+    const collector = createResourceCollector({
+      collectorId: "long-authorization",
+      collect: async () => {
+        throw new ResourceCollectorFailureError(
+          "collector-crash",
+          "collector-error",
+          "resource collection failed",
+          { stderr: streamed.value() },
+        );
+      },
+    });
+    const result = await collector.observe(0, 1_000);
+    const diagnostic = result.failure?.diagnostic.stderr ?? "";
+
+    expect(diagnostic).toContain("Authorization=<redacted>");
+    expect(diagnostic).toContain(safeLine);
+    expect(diagnostic).not.toContain("LONG-AUTHORIZATION-LEAK");
+    expect(diagnostic).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+  });
+
   test("stderr tail truncation preserves every UTF-8 boundary", async () => {
     for (const character of ["é", "€", "😀"]) {
       const width = Buffer.byteLength(character);
