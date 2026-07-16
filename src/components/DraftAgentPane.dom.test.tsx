@@ -162,6 +162,7 @@ test("malformed capability retry adopts structured image limits for Claude and C
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
   const picker = host.querySelector('button[aria-label="Add images to the prompt"]') as HTMLButtonElement;
+  expect(requests).toBe(2);
   expect(picker.disabled).toBe(false);
 });
 

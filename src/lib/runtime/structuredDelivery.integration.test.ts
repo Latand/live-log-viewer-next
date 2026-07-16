@@ -17,6 +17,7 @@ import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./st
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { structuredContentDigest } from "./structuredContent";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-delivery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
@@ -642,6 +643,58 @@ test("a delivering entry resumes after restart through the host ledger without a
   expect(reopenedJournal.effectBatch()).toEqual([]);
   expect(ledger.writes).toMatchObject([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   reopenedJournal.close();
+});
+
+test("repeated terminal retry clicks produce one replacement engine write", async () => {
+  const filename = path.join(sandbox, "terminal-retry-clicks.sqlite");
+  const journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: "conversation-terminal-retry" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-terminal-retry",
+      sessionKey: { engine: "codex", sessionId: "session-terminal-retry" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/terminal-retry.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "operation-terminal-original",
+    idempotencyKey: "message-terminal-original",
+    conversationId: "conversation-terminal-retry",
+    text: "deliver this once",
+    policy: "queue",
+  });
+  journal.transitionOperation("operation-terminal-original", "delivering");
+  journal.transitionOperation("operation-terminal-original", "failed", { reason: "dead-host" });
+
+  const replacement = journal.retryOperation("operation-terminal-original", "message-terminal-replacement");
+  const repeated = journal.retryOperation("operation-terminal-original", "message-terminal-second-click");
+  const ledger = createFakeDeliveryLedger();
+
+  expect(repeated).toMatchObject({ operationId: replacement.operationId, replayed: true });
+  expect(journal.effectBatch()).toHaveLength(1);
+  await new StructuredDeliveryQueue(journalPort(journal), () => new FakeEngineHost(ledger)).drain();
+
+  const content = { text: "deliver this once", images: [] };
+  expect(ledger.writes).toEqual([{
+    id: replacement.operationId,
+    content,
+    contentDigest: structuredContentDigest(content),
+    text: content.text,
+    images: content.images,
+    expectedTurnId: null,
+  }]);
+  expect(journal.operationResult(replacement.operationId)?.receipt).toMatchObject({
+    status: "delivered",
+    retryOfOperationId: "operation-terminal-original",
+  });
+  journal.close();
 });
 
 test("ledger recovery drains every entry beyond one effect batch", async () => {

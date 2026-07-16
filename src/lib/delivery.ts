@@ -7,6 +7,8 @@ import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome 
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { procBackend } from "@/lib/proc";
+import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
+import type { RuntimeOperationReceipt } from "@/lib/runtime/contracts";
 import { detectBlockingGate, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import {
   buildImagePayload,
@@ -25,10 +27,10 @@ import {
 } from "@/lib/tmux";
 
 /**
- * Conversation-level delivery: every action the tmux API exposes, expressed
- * over transcript paths instead of panes. This module owns the resolution
- * ladder — live pane → resume window → relay through the root conversation —
- * and each per-action guard; the route only maps HTTP to these calls.
+ * Conversation-level delivery for every action exposed by the tmux API.
+ * Structured ownership resolves through its engine host. Legacy operations use
+ * the live pane → resume window → root relay ladder and their per-action guards.
+ * The route maps HTTP to these calls.
  */
 
 export interface DeliveryFailure {
@@ -41,11 +43,14 @@ export interface DeliveryFailure {
 
 export interface DeliverySuccess {
   ok: true;
-  target: string;
-  outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured";
+  target: string | null;
+  outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured" | "queued" | "delivering" | "delivered";
   imagePaths?: string[];
-  /** Set when the message booted a fresh agent window instead of an existing pane. */
+  /** Set when delivery started a successor host for a finished conversation. */
   spawned?: boolean;
+  structured?: true;
+  operationId?: string;
+  receipt?: RuntimeOperationReceipt;
 }
 
 interface ReconfigureConversationOverrides {
@@ -261,20 +266,50 @@ export async function answerDialogKey(filePath: string, key: string, label: unkn
   }
 }
 
-export async function resumeConversation(filePath: string): Promise<DeliveryOutcome> {
-  if (!filePath || !pathAllowed(filePath)) {
+interface ResumeConversationOverrides {
+  pathAllowed?: typeof pathAllowed;
+  listFiles?: typeof listFiles;
+  resumeSpecFor?: typeof resumeSpecFor;
+  registry?: AgentRegistry;
+  recover?: typeof recoverDeadStructuredConversation;
+  deliver?: typeof deliverToTranscriptHost;
+}
+
+export async function resumeConversation(
+  filePath: string,
+  overrides: ResumeConversationOverrides = {},
+): Promise<DeliveryOutcome> {
+  if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) {
     return failure("the conversation path is required to open", 400);
   }
-  const entry = (await listFiles()).find((item) => item.path === filePath);
+  const registry = overrides.registry ?? agentRegistry();
+  try {
+    const recovered = await (overrides.recover ?? recoverDeadStructuredConversation)(
+      { path: filePath },
+      { registry },
+    );
+    if (recovered) {
+      return {
+        ok: true,
+        target: null,
+        outcome: "resumed",
+        spawned: recovered.spawned,
+        structured: true,
+      };
+    }
+  } catch (error) {
+    return failure(error);
+  }
+  const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
   if (!entry) return failure("file is unknown to the viewer", 403);
-  const spec = resumeSpecFor(entry.root, entry.path, {
+  const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
-    allowSubagents: agentRegistry().launchProfileForPath(entry.path)?.allowSubagents,
+    allowSubagents: registry.launchProfileForPath(entry.path)?.allowSubagents,
   });
   if (!spec) return failure("this conversation cannot be resumed", 409);
   try {
-    return await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: "" }));
+    return await hostOutcome((overrides.deliver ?? deliverToTranscriptHost)({ entry, spec, payload: "" }));
   } catch (error) {
     return failure(error);
   }
@@ -368,14 +403,18 @@ interface DeliveryOverrides {
   targetForKnownPid?: typeof targetForKnownPid;
   buildImagePayload?: typeof buildImagePayload;
   sendText?: typeof sendText;
+  recover?: typeof recoverDeadStructuredConversation;
+  enqueueStructured?: typeof import("@/lib/runtime/structuredMessageDelivery")["enqueueStructuredMessage"];
+  pathAllowed?: typeof pathAllowed;
+  listFiles?: typeof listFiles;
+  resumeSpecFor?: typeof resumeSpecFor;
+  deliver?: typeof deliverToTranscriptHost;
 }
 
 /**
- * The send ladder: a known live pid delivers straight into its pane; a
- * conversation without one reopens through its resume spec; subagents and
- * other child records, which have no resumable session of their own, relay
- * through the root conversation — into its live pane when it runs, through a
- * resume window otherwise.
+ * Structured sends resolve or recover their engine host first. The legacy send
+ * ladder delivers a known live pid into its pane, reopens a root conversation
+ * through its resume spec, and relays child records through that root.
  */
 export async function deliverConversationMessage(message: ConversationMessage, overrides: DeliveryOverrides = {}): Promise<DeliveryOutcome> {
   const { pid, images } = message;
@@ -386,6 +425,49 @@ export async function deliverConversationMessage(message: ConversationMessage, o
   const conversation = message.conversationId?.startsWith("conversation_")
     ? registry.conversation(message.conversationId as `conversation_${string}`)
     : registry.conversationForPath(message.path);
+  if (conversation) {
+    try {
+      const recovered = await (overrides.recover ?? recoverDeadStructuredConversation)(
+        { path: message.path, conversationId: conversation.id },
+        { registry },
+      );
+      if (recovered) {
+        const enqueue = overrides.enqueueStructured
+          ?? (await import("@/lib/runtime/structuredMessageDelivery")).enqueueStructuredMessage;
+        const structured = await enqueue({
+          path: recovered.path,
+          conversationId: recovered.conversationId,
+          clientMessageId: message.clientMessageId,
+          text,
+          hasImages: images.length > 0,
+        }, {
+          registry: () => registry,
+        });
+        if (!structured) return failure("structured delivery ownership is unavailable", 503);
+        if (!structured.ok) return failure(structured.error, structured.status);
+        if (structured.outcome === "held") {
+          return {
+            ok: true,
+            target: recovered.spawned ? null : structured.target,
+            outcome: "held",
+            spawned: recovered.spawned,
+            structured: true,
+          };
+        }
+        return {
+          ok: true,
+          target: recovered.spawned ? null : structured.target,
+          outcome: structured.outcome,
+          spawned: recovered.spawned,
+          structured: true,
+          operationId: structured.operationId,
+          receipt: structured.receipt,
+        };
+      }
+    } catch (error) {
+      return failure(error);
+    }
+  }
   let filePath = conversation?.generations.at(-1)?.path ?? message.path;
   let deliveryId: string | null = null;
   let retryArtifactPaths: string[] = [];
@@ -479,24 +561,24 @@ export async function deliverConversationMessage(message: ConversationMessage, o
 
     /* No live pane: reopen the conversation as a fresh agent window in the
        user's current tmux session and type the prompt there. */
-    if (!filePath || !pathAllowed(filePath)) {
+    if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) {
       return settle(failure("process is not in a tmux session", 409));
     }
-    const all = await listFiles();
+    const all = await (overrides.listFiles ?? listFiles)();
     const entry = all.find((item) => item.path === filePath);
     if (!entry) {
       return settle(failure("file is unknown to the viewer", 403));
     }
-    const spec = resumeSpecFor(entry.root, entry.path, {
+    const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
       model: entry.launchModel ?? entry.model,
       effort: entry.effort,
-      allowSubagents: agentRegistry().launchProfileForPath(entry.path)?.allowSubagents,
+      allowSubagents: registry.launchProfileForPath(entry.path)?.allowSubagents,
     });
     if (spec) {
       const bundle = materializePayload();
       imagePaths = bundle.imagePaths;
       recordArtifacts();
-      const outcome = await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: bundle.payload }));
+      const outcome = await hostOutcome((overrides.deliver ?? deliverToTranscriptHost)({ entry, spec, payload: bundle.payload }));
       if (!outcome.ok) { actuation = outcome.actuation === "started" ? "started" : "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
       actuation = "completed";
       return settle({ ...outcome, ...(imagePaths.length ? { imagePaths } : {}) });
@@ -514,10 +596,10 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     }
     /* Resolved before saving anything: the root's live pane or resume spec
        must exist, or the request is rejected without ever writing an image. */
-    const rootSpec = resumeSpecFor(root.root, root.path, {
+    const rootSpec = (overrides.resumeSpecFor ?? resumeSpecFor)(root.root, root.path, {
       model: root.launchModel ?? root.model,
       effort: root.effort,
-      allowSubagents: agentRegistry().launchProfileForPath(root.path)?.allowSubagents,
+      allowSubagents: registry.launchProfileForPath(root.path)?.allowSubagents,
     });
     if (!rootSpec) {
       return settle(failure("root session is unavailable for messaging", 409));
@@ -527,7 +609,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     recordArtifacts();
     const relayText = `User message for your branch «${entry.title.slice(0, 100)}» — forward it or handle it yourself:\n${bundle.payload}`;
     const imageField = imagePaths.length ? { imagePaths } : {};
-    const outcome = await hostOutcome(deliverToTranscriptHost({ entry: root, spec: rootSpec, payload: relayText }));
+    const outcome = await hostOutcome((overrides.deliver ?? deliverToTranscriptHost)({ entry: root, spec: rootSpec, payload: relayText }));
     if (!outcome.ok) { actuation = outcome.actuation === "started" ? "started" : "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
     actuation = "completed";
     return settle({ ...outcome, ...imageField });

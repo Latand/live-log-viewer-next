@@ -9,6 +9,7 @@ import type { RuntimeOperationReceipt } from "./contracts";
 import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "./runtimeImageStore";
 import { admitRuntimeImagePayload } from "./runtimeImageAdmission";
 import { structuredContent, type StructuredImageRef } from "./structuredContent";
+import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { didStructuredHostStartupFail, markStructuredHostStartupReady } from "./startupStatus";
 
@@ -27,8 +28,8 @@ export interface StructuredMessageRequest {
 }
 
 export type StructuredMessageResult =
-  | { ok: true; structured: true; target: string; outcome: "queued" | "delivering" | "delivered"; operationId: string; receipt: RuntimeOperationReceipt }
-  | { ok: true; structured: true; target: string; outcome: "held" }
+  | { ok: true; structured: true; target: string | null; outcome: "queued" | "delivering" | "delivered"; operationId: string; receipt: RuntimeOperationReceipt; spawned?: boolean }
+  | { ok: true; structured: true; target: string | null; outcome: "held"; spawned?: boolean }
   | { ok: false; structured: true; outcome: "failed"; error: string; status: number; operationId?: string; receipt?: RuntimeOperationReceipt };
 
 export interface StructuredMessageDependencies {
@@ -40,6 +41,7 @@ export interface StructuredMessageDependencies {
   startupFailed?: () => boolean;
   startupRecovered?: () => void;
   storeImages?: (images: readonly RuntimeImageUpload[]) => StructuredImageRef[];
+  recover?: typeof recoverDeadStructuredConversation;
 }
 
 export interface HeldStructuredMessageRequest {
@@ -162,7 +164,7 @@ export async function enqueueStructuredMessage(
     return (dependencies.startupFailed ?? didStructuredHostStartupFail)() ? null : ownershipUnavailable();
   }
   recordStructuredRuntimeRecovery(snapshot, dependencies.startupRecovered ?? markStructuredHostStartupReady);
-  const session = (request.conversationId
+  let session = (request.conversationId
     ? snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     : undefined)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
@@ -170,6 +172,49 @@ export async function enqueueStructuredMessage(
   if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return null;
   const suppliedRefs = request.imageRefs ?? [];
   const wantsImages = request.hasImages === true || rawImages.length > 0 || suppliedRefs.length > 0;
+  if (request.hasImages && rawImages.length === 0 && suppliedRefs.length === 0) {
+    return { ok: false, structured: true, outcome: "failed", error: "structured image payload is unavailable", status: 409 };
+  }
+  if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
+  const sessionConversationId = session.conversationId;
+  const registry = (dependencies.registry ?? agentRegistry)();
+  let recoveredHost = false;
+  if (session.host === "dead" || session.host === "unhosted") {
+    let recovered;
+    try {
+      recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({
+        path: request.path || session.artifactPath || "",
+        conversationId: sessionConversationId as ViewerConversationId,
+      }, { registry, client });
+    } catch (error) {
+      return {
+        ok: false,
+        structured: true,
+        outcome: "failed",
+        error: error instanceof Error ? error.message : "structured host recovery failed",
+        status: 503,
+      };
+    }
+    if (!recovered) return ownershipUnavailable();
+    recoveredHost = recovered.spawned;
+    if (wantsImages) {
+      let recoveredSnapshot: Awaited<ReturnType<RuntimeHostClient["snapshot"]>>;
+      try {
+        recoveredSnapshot = await client.snapshot();
+      } catch (error) {
+        console.error("[structured delivery] recovered runtime snapshot failed", error);
+        return ownershipUnavailable();
+      }
+      recordStructuredRuntimeRecovery(recoveredSnapshot, dependencies.startupRecovered ?? markStructuredHostStartupReady);
+      const recoveredSession = recoveredSnapshot.sessions.find((candidate) => candidate.conversationId === sessionConversationId)
+        ?? recoveredSnapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
+      if (!recoveredSession
+        || (recoveredSession.hostKind !== "codex-app-server" && recoveredSession.hostKind !== "claude-broker")) {
+        return ownershipUnavailable();
+      }
+      session = recoveredSession;
+    }
+  }
   const imageCapability = session.capabilities.imageInput
     ?? runtimeImageCapability(session.sessionKey.engine, false);
   if (wantsImages && !imageCapability.supported) {
@@ -179,11 +224,6 @@ export async function enqueueStructuredMessage(
   if (encodedImageBytes > imageCapability.maxEncodedBytesPerRequest) {
     return { ok: false, structured: true, outcome: "failed", error: "runtime image request encoding is too large", status: 413 };
   }
-  if (request.hasImages && rawImages.length === 0 && suppliedRefs.length === 0) {
-    return { ok: false, structured: true, outcome: "failed", error: "structured image payload is unavailable", status: 409 };
-  }
-  if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
-  const registry = (dependencies.registry ?? agentRegistry)();
   const conversation = registry.conversation(session.conversationId as ViewerConversationId);
   if (!conversation) return ownershipUnavailable();
   try {
@@ -207,14 +247,26 @@ export async function enqueueStructuredMessage(
     }
     if (reservation.state === "held") {
       (dependencies.requestMigrationTick ?? requestAccountMigrationTick)();
-      return { ok: true, structured: true, target: conversation.id, outcome: "held" };
+      return {
+        ok: true,
+        structured: true,
+        target: recoveredHost ? null : conversation.id,
+        outcome: "held",
+        ...(recoveredHost ? { spawned: true } : {}),
+      };
     }
     if (reservation.state === "assigned" && reservation.generationId) {
       const claimed = registry.beginDeliveryAttempt(reservation.id, reservation.generationId);
       if (!claimed) {
         registry.requeueHeldDelivery(reservation.id);
         (dependencies.requestMigrationTick ?? requestAccountMigrationTick)();
-        return { ok: true, structured: true, target: conversation.id, outcome: "held" };
+        return {
+          ok: true,
+          structured: true,
+          target: recoveredHost ? null : conversation.id,
+          outcome: "held",
+          ...(recoveredHost ? { spawned: true } : {}),
+        };
       }
       claimedReservationId = claimed.id;
     } else if (reservation.state !== "delivered") {
@@ -259,7 +311,15 @@ export async function enqueueStructuredMessage(
     }
     (dependencies.kick ?? kickStructuredDeliveryQueue)();
     const outcome = receipt.status === "delivering" || receipt.status === "delivered" ? receipt.status : "queued";
-    return { ok: true, structured: true, target: conversation.id, outcome, operationId: result.operationId, receipt };
+    return {
+      ok: true,
+      structured: true,
+      target: recoveredHost ? null : conversation.id,
+      outcome,
+      operationId: result.operationId,
+      receipt,
+      ...(recoveredHost ? { spawned: true } : {}),
+    };
   } catch (error) {
     return {
       ok: false,

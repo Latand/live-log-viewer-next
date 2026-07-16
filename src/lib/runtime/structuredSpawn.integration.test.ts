@@ -18,6 +18,7 @@ import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./struct
 import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { STRUCTURED_IMAGE_CAPABILITY, structuredContentDigest, type StructuredImageRef } from "./structuredContent";
 import { recoverPendingStructuredSpawns, spawnStructuredConversation, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
 
@@ -124,7 +125,12 @@ class RoundTripHost implements SpawnedStructuredHost {
   private released = false;
   releaseCount = 0;
 
-  constructor(readonly engine: "codex" | "claude", readonly artifactPath: string, sessionId: string) {
+  constructor(
+    readonly engine: "codex" | "claude",
+    readonly artifactPath: string,
+    sessionId: string,
+    private readonly hostFlags: string[] = [],
+  ) {
     this.identity = engine === "codex" ? { threadId: sessionId, path: artifactPath } : { sessionId };
   }
 
@@ -134,19 +140,20 @@ class RoundTripHost implements SpawnedStructuredHost {
   }
 
   attach(afterSeq: number): AsyncIterable<RuntimeEvent> {
-    // eslint-disable-next-line @typescript-eslint/no-this-alias -- the generator receiver is the iterable wrapper
-    const host = this;
+    const isReleased = () => this.released;
+    const eventAfter = (cursor: number) => this.events.find((candidate) => candidate.seq > cursor);
+    const waitForEvent = () => new Promise<void>((resolve) => this.waiters.add(resolve));
     return {
       async *[Symbol.asyncIterator]() {
         let cursor = afterSeq;
-        while (!host.released) {
-          const event = host.events.find((candidate) => candidate.seq > cursor);
+        while (!isReleased()) {
+          const event = eventAfter(cursor);
           if (event) {
             cursor = event.seq;
             yield event;
             continue;
           }
-          await new Promise<void>((resolve) => host.waiters.add(resolve));
+          await waitForEvent();
         }
       },
     };
@@ -212,7 +219,7 @@ class RoundTripHost implements SpawnedStructuredHost {
       protocolVersion: "fake-v1",
       activeTurnRef: this.activeTurnRef,
       pendingAttention: [...this.pendingAttention],
-      activeFlags: [],
+      activeFlags: [...this.hostFlags],
       account: { type: this.engine === "codex" ? "chatgpt" : "claude.ai", planType: "subscription" },
     };
   }
@@ -332,11 +339,16 @@ test("a concurrent structured spawn replay stays pending until durable host setu
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   await bindStructuredDeliveryQueue([], { registry, client });
+  const parent = registry.ensureConversation("codex", path.join(cwd, "parent.jsonl"), "codex-subscription");
+  const child = registry.ensureConversation("codex", artifactPath, "codex-subscription");
   const request = {
     engine: "codex" as const,
     cwd,
     accountId: "codex-subscription",
-    launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" }),
+    parentConversationId: parent.id,
+    conversationId: child.id,
+    purpose: "resume-successor" as const,
+    launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-luna", parentConversationId: parent.id }),
     clientAttemptId: `attempt_${id}`,
     requestDigest: id.replaceAll("-", "").padEnd(64, "0").slice(0, 64),
   };
@@ -383,6 +395,10 @@ test("a concurrent structured spawn replay stays pending until durable host setu
 
   allowBind.resolve();
   await expect(spawning).resolves.toMatchObject({ launched: true, state: "settled", path: artifactPath });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId))
+    .toMatchObject({ parentConversationId: parent.id });
+  expect(journal.snapshot().edges.filter((edge) => edge.childConversationId === begun.receipt.conversationId))
+    .toEqual([expect.objectContaining({ parentConversationId: parent.id })]);
 });
 
 describe.each(["bind", "publish", "first-message"] as const)("structured spawn %s failure", (barrier) => {
@@ -395,11 +411,16 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
     const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
     const client = runtimeClient(journal);
     await bindStructuredDeliveryQueue([], { registry, client });
+    const parent = registry.ensureConversation("codex", path.join(cwd, "reviewed.jsonl"), "codex-subscription");
+    const child = registry.ensureConversation("codex", artifactPath, "codex-subscription");
     const request = {
       engine: "codex" as const,
       cwd,
       accountId: "codex-subscription",
-      launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" }),
+      parentConversationId: parent.id,
+      conversationId: child.id,
+      purpose: "resume-successor" as const,
+      launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-luna", parentConversationId: parent.id }),
       clientAttemptId: `attempt_${id}`,
       requestDigest: id.replaceAll("-", "").padEnd(64, "0").slice(0, 64),
     };
@@ -468,11 +489,14 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
     expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId)).toMatchObject({
       host: "dead",
       artifactPath,
+      parentConversationId: parent.id,
     });
+    expect(journal.snapshot().edges.filter((edge) => edge.childConversationId === begun.receipt.conversationId))
+      .toEqual([expect.objectContaining({ parentConversationId: parent.id })]);
   });
 });
 
-test("startup recovery finalizes a staged spawn without duplicating its admitted first message", async () => {
+test("startup recovery finalizes a staged image-only spawn without duplicating its admitted first message", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `recovery-${id}`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -481,6 +505,10 @@ test("startup recovery finalizes a staged spawn without duplicating its admitted
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const imageRefs: StructuredImageRef[] = [
+    { sha256: "e".repeat(64), mime: "image/png", bytes: 67 },
+  ];
+  const contentDigest = structuredContentDigest({ text: "", images: imageRefs });
   const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   await client.command({
@@ -490,7 +518,9 @@ test("startup recovery finalizes a staged spawn without duplicating its admitted
     conversationId: begun.receipt.conversationId,
     engine: "codex",
     cwd,
-    prompt: "recover this first prompt",
+    prompt: "",
+    images: imageRefs,
+    contentDigest,
     accountId: "codex-subscription",
     parentConversationId: null,
   });
@@ -532,23 +562,141 @@ test("startup recovery finalizes a staged spawn without duplicating its admitted
     pendingAttention: [],
     activeFlags: [],
   }, "idle", claimed.claimOwner, claimed.claimEpoch);
-  const host = new RoundTripHost("codex", artifactPath, id);
+  const host = new RoundTripHost("codex", artifactPath, id, [STRUCTURED_IMAGE_CAPABILITY]);
   await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
   await enqueueStructuredMessage({
     path: artifactPath,
     conversationId: begun.receipt.conversationId,
     clientMessageId: `spawn_${begun.receipt.launchId}`,
     operationId: `spawn_message_${begun.receipt.launchId}`,
-    text: "recover this first prompt",
-    hasImages: false,
+    text: "",
+    imageRefs,
   }, { client: () => client, registry: () => registry, enabled: () => true });
   await waitFor(() => host.sent.length === 1);
 
   await recoverPendingStructuredSpawns(registry, client);
 
-  expect(host.sent.map((entry) => entry.text)).toEqual(["recover this first prompt"]);
+  expect(host.sent).toEqual([
+    expect.objectContaining({ text: "", images: imageRefs, contentDigest }),
+  ]);
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "completed", artifactPath });
   expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("delivered");
+});
+
+test("startup recovery terminalizes an admitted spawn interrupted before identity staging", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `unstaged-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "codex-subscription" });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn", operationId: begun.receipt.launchId, idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId, engine: "codex", cwd, prompt: "durably admitted", accountId: "codex-subscription", parentConversationId: null,
+  });
+
+  await recoverPendingStructuredSpawns(registry, client);
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "failed", key: null });
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt).toMatchObject({ status: "failed" });
+  expect((await client.effectBatch(["runtime.spawn"], 0)).filter((effect) => effect.payload.operationId === begun.receipt.launchId)).toEqual([]);
+  expect(registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    clientAttemptId: `fresh-${id}`,
+  }).kind).toBe("created");
+});
+
+test("startup recovery settles a structured receipt after a crash before runtime admission", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `pre-admission-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const structured = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+  });
+  const tmux = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "tmux",
+    accountId: "claude-subscription",
+  });
+  if (structured.kind !== "created" || tmux.kind !== "created") throw new Error("spawn receipt was unavailable");
+
+  await recoverPendingStructuredSpawns(registry, client);
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(registry.snapshot().receipts[structured.receipt.launchId]).toMatchObject({
+    state: "failed",
+    key: null,
+    error: `structured spawn interrupted before runtime admission: ${structured.receipt.launchId}`,
+  });
+  expect(registry.snapshot().receipts[tmux.receipt.launchId]).toMatchObject({ state: "starting", key: null });
+  expect(await client.effectBatch(["runtime.spawn"], 0)).toEqual([]);
+  expect(registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    clientAttemptId: `fresh-${id}`,
+  }).kind).toBe("created");
+});
+
+test.each(["failed", "delivered"] as const)("startup recovery settles a keyless receipt after the runtime operation is %s", async (terminalStatus) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `pre-identity-${terminalStatus}-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    cwd,
+    prompt: "durable pre-identity prompt",
+    accountId: "codex-subscription",
+    parentConversationId: null,
+  });
+  await client.transitionOperation(begun.receipt.launchId, terminalStatus, {
+    ...(terminalStatus === "failed" ? { reason: "runtime spawn failed before identity" } : {}),
+  });
+
+  await recoverPendingStructuredSpawns(registry, client);
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    key: null,
+  });
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe(terminalStatus);
+  expect((await client.effectBatch(["runtime.spawn"], 0)).filter((effect) => effect.payload.operationId === begun.receipt.launchId)).toEqual([]);
+  expect(registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    clientAttemptId: `fresh-${id}`,
+  }).kind).toBe("created");
 });
 
 test("startup recovery cleans a staged host whose spawn operation already failed", async () => {

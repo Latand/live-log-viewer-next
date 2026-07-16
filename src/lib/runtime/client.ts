@@ -1,6 +1,6 @@
 import net from "node:net";
 
-import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimePendingEffect, RuntimeReceiptStatus, RuntimeReplay, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
+import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimePendingEffect, RuntimeReceiptStatus, RuntimeReplay, RuntimeRetryOptions, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
 import { runtimeHostSocket } from "./flags";
 
 const MAX_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024;
@@ -19,8 +19,8 @@ export interface RuntimeHostClient {
   append(event: RuntimeEventInput): Promise<unknown>;
   operation(event: RuntimeEventInput): Promise<unknown>;
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult>;
-  operationStatus(operationId: string): Promise<RuntimeOperationResult | null>;
-  retryOperation(operationId: string): Promise<RuntimeOperationResult>;
+  operationStatus(operationId: string, options?: { currentRetryLeaf?: boolean }): Promise<RuntimeOperationResult | null>;
+  retryOperation(operationId: string, nextIdempotencyKey?: string, options?: RuntimeRetryOptions): Promise<RuntimeOperationResult>;
   producerCursor(producerKind: string, eventKeyPrefix: string): Promise<number>;
   effectBatch(kinds?: readonly string[], afterEventSeq?: number): Promise<RuntimePendingEffect[]>;
   transitionOperation(
@@ -45,8 +45,21 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
   append(event: RuntimeEventInput): Promise<unknown> { return this.call("append", { event }); }
   operation(event: RuntimeEventInput): Promise<unknown> { return this.call("operation", { event }); }
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult> { return this.call("command", { command }) as Promise<RuntimeOperationResult>; }
-  operationStatus(operationId: string): Promise<RuntimeOperationResult | null> { return this.call("operation-status", { operationId }) as Promise<RuntimeOperationResult | null>; }
-  retryOperation(operationId: string): Promise<RuntimeOperationResult> { return this.call("operation-retry", { operationId }) as Promise<RuntimeOperationResult>; }
+  operationStatus(operationId: string, options: { currentRetryLeaf?: boolean } = {}): Promise<RuntimeOperationResult | null> {
+    return this.call("operation-status", {
+      operationId,
+      ...(options.currentRetryLeaf ? { currentRetryLeaf: true } : {}),
+    }) as Promise<RuntimeOperationResult | null>;
+  }
+  retryOperation(operationId: string, nextIdempotencyKey?: string, options: RuntimeRetryOptions = {}): Promise<RuntimeOperationResult> {
+    return this.call("operation-retry", {
+      operationId,
+      ...(nextIdempotencyKey !== undefined ? { nextIdempotencyKey } : {}),
+      ...(options.requireHostedConversationId !== undefined
+        ? { requireHostedConversationId: options.requireHostedConversationId }
+        : {}),
+    }) as Promise<RuntimeOperationResult>;
+  }
   producerCursor(producerKind: string, eventKeyPrefix: string): Promise<number> { return this.call("producer-cursor", { producerKind, eventKeyPrefix }) as Promise<number>; }
   effectBatch(kinds?: readonly string[], afterEventSeq = 0): Promise<RuntimePendingEffect[]> {
     const params = {

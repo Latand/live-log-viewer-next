@@ -39,6 +39,9 @@ export async function dispatchStructuredControl(
   if (!entry?.structuredHost) return null;
 
   if (request.action !== "interrupt" && request.action !== "kill") {
+    if (request.action === "resume" && (entry.status === "dead" || entry.status === "unhosted")) {
+      return null;
+    }
     const label = ["compact", "dialog-key", "kill", "reconfigure", "resume"].includes(request.action)
       ? request.action
       : "requested";

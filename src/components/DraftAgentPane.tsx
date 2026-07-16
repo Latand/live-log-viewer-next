@@ -413,7 +413,7 @@ export function DraftAgentPane({
   const [deployConfirm, setDeployConfirmState] = useState(() => readField(draftId, "confirm"));
   const [accounts, setAccounts] = useState<{ id: string; label: string }[]>([]);
   const [dirs, setDirs] = useState<string[]>([]);
-  const spawnImageNegotiationKey = `${project}\n${src ?? ""}\n${engine}`;
+  const spawnImageNegotiationKey = `${project}\n${src ?? ""}`;
   const [storedSpawnImageNegotiation, setSpawnImageNegotiation] = useState<SpawnImageNegotiationState>({
     status: "loading",
     requestKey: spawnImageNegotiationKey,
@@ -454,7 +454,6 @@ export function DraftAgentPane({
     writeField(draftId, "speed", value);
   };
   const setEngine = (value: Engine) => {
-    setSpawnImageNegotiation({ status: "loading", requestKey: `${project}\n${src ?? ""}\n${value}` });
     setEngineState(value);
     writeField(draftId, "engine", value);
     setModel(defaultModelFor(value));
@@ -584,7 +583,7 @@ export function DraftAgentPane({
     return () => {
       cancelled = true;
     };
-  }, [project, draftId, src, engine, spawnImageNegotiationKey, spawnNegotiationAttempt]);
+  }, [project, draftId, src, spawnImageNegotiationKey, spawnNegotiationAttempt]);
 
   useEffect(() => {
     void fetch("/api/accounts").then(async (res) => {

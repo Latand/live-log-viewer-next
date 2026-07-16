@@ -203,7 +203,8 @@ export interface HeldDelivery {
   text: string;
   createdAt: string;
   clientMessageId: string | null;
-  /** Image payload bytes stay request-local; these reservations can only be retried by the client. */
+  /** Raw image bytes stay request-local. runtime-images reservations retain
+      validated content-addressed refs; ephemeral reservations require client retry. */
   payloadKind: "text" | "ephemeral-images" | "ephemeral-text" | "runtime-images";
   runtimeImages: StructuredImageRef[];
   contentDigest: string | null;
