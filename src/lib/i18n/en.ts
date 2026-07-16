@@ -1377,6 +1377,7 @@ export const en = {
   "runtime.receipt.busyRetry": "Couldn’t deliver — agent is busy, we’ll retry",
   "runtime.receipt.summary": "Delivery attempts: {count}",
   "runtime.receipt.pendingCount": "pending: {count}",
+  "runtime.receipt.attemptCount": "attempts: {count}",
   "runtime.receipt.problemCount": "issues: {count}",
   "runtime.receipt.showDetails": "Show delivery details",
   "runtime.receipt.hideDetails": "Hide delivery details",

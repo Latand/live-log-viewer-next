@@ -1335,6 +1335,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "runtime.receipt.busyRetry": "Не вдалося доставити — агент зайнятий, повторимо",
   "runtime.receipt.summary": "Спроб доставки: {count}",
   "runtime.receipt.pendingCount": "очікують: {count}",
+  "runtime.receipt.attemptCount": "спроб: {count}",
   "runtime.receipt.problemCount": "проблем: {count}",
   "runtime.receipt.showDetails": "Показати деталі доставки",
   "runtime.receipt.hideDetails": "Сховати деталі доставки",

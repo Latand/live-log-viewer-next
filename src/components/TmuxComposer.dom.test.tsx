@@ -151,11 +151,86 @@ test("transitive retry composition exposes one current leaf and keeps independen
 
     expect(receipts).toHaveLength(2);
     expect(receipts.map((receipt) => receipt.idempotencyKey).sort()).toEqual(["key-independent", "key-leaf"]);
-    expect(host.querySelectorAll("[data-receipt-message]")).toHaveLength(2);
-    expect([...host.querySelectorAll("button")].map((button) => button.textContent)).toEqual(["Retry", "Edit & resend"]);
+    // Identical text renders once; the queued current attempt owns the row and
+    // the failed leaf survives as counted history without duplicate actions.
+    expect(host.querySelectorAll("[data-receipt-message]")).toHaveLength(1);
+    const attemptCount = host.querySelector("[data-receipt-attempt-count]")!;
+    expect(attemptCount.textContent).toContain("×2");
+    expect(host.querySelector("[data-receipt-history]")?.textContent)
+      .toContain(translate("en", "runtime.receipt.failed", { reason: "dead-host" }));
+    expect(host.querySelectorAll("button")).toHaveLength(0);
     flushSync(() => root.unmount());
     host.remove();
   }
+});
+
+test("repeated identical attempts share one grouped row with counts and final state", () => {
+  setLocale("uk");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const text = "Викинути TDLib history implementation і tests - давай";
+
+  flushSync(() => root.render(
+    <RuntimeComposerReceipts
+      receipts={[
+        {
+          operationId: "op-final",
+          idempotencyKey: "key-final",
+          conversationId: "conv-one",
+          kind: "send",
+          status: "failed",
+          reason: "dead-host",
+          text,
+          at: "2026-07-16T10:00:02.000Z",
+          revision: 1,
+        },
+        ...[1, 0].map((second) => ({
+          operationId: `op-no-claim-${second}`,
+          idempotencyKey: `key-no-claim-${second}`,
+          conversationId: "conv-one",
+          kind: "send" as const,
+          status: "rejected" as const,
+          reason: "no-claim",
+          text,
+          at: `2026-07-16T10:00:0${second}.000Z`,
+          revision: 1,
+        })),
+      ]}
+      onRetry={() => {}}
+      onEdit={() => {}}
+    />,
+  ));
+
+  const summary = host.querySelector("summary")!;
+  expect(summary.textContent).toContain("Спроб доставки: 3");
+  expect(summary.textContent).toContain("проблем: 3");
+
+  // One logical send consumes one row: the text appears once with an attempt
+  // count and the final state, never once per attempt.
+  const details = host.querySelector("[data-runtime-receipt-details]")!;
+  const messages = details.querySelectorAll("[data-receipt-message]");
+  expect(messages).toHaveLength(1);
+  expect(messages[0]?.textContent).toBe(text);
+  const attemptCount = details.querySelector("[data-receipt-attempt-count]")!;
+  expect(attemptCount.textContent).toContain("×3");
+  expect(attemptCount.getAttribute("aria-label")).toBe(translate("uk", "runtime.receipt.attemptCount", { count: 3 }));
+  expect(details.querySelector('[data-receipt-status="failed"]')?.textContent)
+    .toBe(translate("uk", "runtime.receipt.failed", { reason: "dead-host" }));
+  const history = details.querySelector("[data-receipt-history]")!;
+  expect(history.textContent).toBe(`${translate("uk", "runtime.receipt.rejected", { reason: "no-claim" })} ×2`);
+
+  // One action set for the group, owned by the final failed attempt.
+  const actions = [...details.querySelectorAll("button")];
+  expect(actions.map((button) => button.textContent)).toEqual([
+    translate("uk", "runtime.receipt.retry"),
+    translate("uk", "runtime.receipt.edit"),
+  ]);
+
+  const status = host.querySelector("[data-runtime-receipt-status]")!;
+  expect(status.textContent).toContain(translate("uk", "runtime.receipt.failed", { reason: "dead-host" }));
+  expect(status.textContent).toContain(`${translate("uk", "runtime.receipt.rejected", { reason: "no-claim" })} ×2`);
+  flushSync(() => root.unmount());
 });
 
 test("multiple delivery attempts collapse into one bounded accessible receipt stack", () => {
@@ -227,10 +302,16 @@ test("multiple delivery attempts collapse into one bounded accessible receipt st
   const details = stack.querySelector("[data-runtime-receipt-details]") as HTMLElement;
   expect(details.className).toContain("max-h-");
   expect(details.className).toContain("overflow-y-auto");
-  expect(details.querySelectorAll("[data-operation]")).toHaveLength(3);
-  const actions = [...details.querySelectorAll("button")];
-  expect(actions).toHaveLength(2);
-  expect(actions.every((button) => button.textContent?.includes("Змінити й надіслати"))).toBe(true);
+  // Identical attempts share one grouped row: the queued current attempt owns
+  // it (optimistic marker, no duplicate actions) and the stale-turn rejections
+  // stay visible as counted history.
+  expect(details.querySelectorAll("[data-operation]")).toHaveLength(1);
+  expect(details.querySelectorAll("[data-receipt-message]")).toHaveLength(1);
+  expect(details.querySelector("[data-receipt-attempt-count]")?.textContent).toContain("×3");
+  expect(details.querySelector("[data-receipt-history]")?.textContent)
+    .toBe(`${translate("uk", "runtime.receipt.rejected", { reason: "stale-turn" })} ×2`);
+  expect(details.querySelector('[data-optimistic-message="true"]')?.textContent).toContain(text);
+  expect(details.querySelectorAll("button")).toHaveLength(0);
 
   flushSync(() => root.unmount());
 });
