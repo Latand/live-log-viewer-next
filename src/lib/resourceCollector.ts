@@ -84,33 +84,40 @@ type SensitiveTextMatch = {
   length: number;
   replacement: string;
   quote: "\"" | "'" | null;
+  quoteEscapeDepth: number;
   quotedKey: boolean;
   authorization: boolean;
   bearer: boolean;
 };
 
 function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
-  const keyed = /(^|[^A-Z0-9_.-])(["']?)([A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTHORIZATION|COOKIE)[A-Z0-9_.-]*)\2\s*[:=]\s*(?!<redacted>(?:$|[\s,}\]]))(?:(['"])|(?=[^"'\s]))/i.exec(value);
-  const bearer = /\b(Bearer)\s+(?:(["'])|(?=\S))/i.exec(value);
+  const keyed = /(^|[^A-Z0-9_.-])((?:\\+)?["']?)([A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTHORIZATION|COOKIE)[A-Z0-9_.-]*)\2\s*[:=]\s*(?!<redacted>(?:$|[\s,}\]]))(?:((?:\\+)?["'])|(?=[^"'\\\s]))/i.exec(value);
+  const bearer = /\b(Bearer)\s+(?:((?:\\+)?["'])|(?=\S))/i.exec(value);
   const standalone = /\b(?:(?:sk|ghp|github_pat|xox[baprs])[-_A-Za-z0-9]{16,}|[A-Za-z0-9+/_=-]{48,})/i.exec(value);
   const matches: SensitiveTextMatch[] = [];
   if (keyed) {
+    const quoteToken = keyed[4] ?? "";
+    const quote = quoteToken.at(-1);
     matches.push({
       index: keyed.index + keyed[1].length,
       length: keyed[0].length - keyed[1].length,
       replacement: `${keyed[3]}=<redacted>`,
-      quote: keyed[4] === "\"" || keyed[4] === "'" ? keyed[4] : null,
-      quotedKey: keyed[2] === "\"" || keyed[2] === "'",
+      quote: quote === "\"" || quote === "'" ? quote : null,
+      quoteEscapeDepth: Math.max(0, quoteToken.length - 1),
+      quotedKey: keyed[2].endsWith("\"") || keyed[2].endsWith("'"),
       authorization: /AUTHORIZATION/i.test(keyed[3]),
       bearer: false,
     });
   }
   if (bearer) {
+    const quoteToken = bearer[2] ?? "";
+    const quote = quoteToken.at(-1);
     matches.push({
       index: bearer.index,
       length: bearer[0].length,
       replacement: `${bearer[1]} <redacted>`,
-      quote: bearer[2] === "\"" || bearer[2] === "'" ? bearer[2] : null,
+      quote: quote === "\"" || quote === "'" ? quote : null,
+      quoteEscapeDepth: Math.max(0, quoteToken.length - 1),
       quotedKey: false,
       authorization: false,
       bearer: true,
@@ -122,6 +129,7 @@ function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
       length: standalone[0].length,
       replacement: "<redacted>",
       quote: null,
+      quoteEscapeDepth: 0,
       quotedKey: false,
       authorization: false,
       bearer: false,
@@ -130,19 +138,16 @@ function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
   return matches.sort((left, right) => left.index - right.index)[0] ?? null;
 }
 
-function quotedValueEnd(value: string, quote: "\"" | "'", start = 0): number {
-  let escaped = false;
+function quotedValueEnd(value: string, quote: "\"" | "'", escapeDepth: number, start = 0): number {
+  let backslashes = 0;
   for (let index = start; index < value.length; index += 1) {
     const character = value[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
     if (character === "\\") {
-      escaped = true;
+      backslashes += 1;
       continue;
     }
-    if (character === quote) return index;
+    if (character === quote && backslashes === escapeDepth) return index + 1;
+    backslashes = 0;
   }
   return -1;
 }
@@ -164,11 +169,16 @@ function redactDiagnosticText(value: string): string {
       continue;
     }
     if (match.quote) {
-      const end = quotedValueEnd(pending, match.quote);
-      pending = end < 0 ? "" : pending.slice(end + 1);
+      const end = quotedValueEnd(pending, match.quote, match.quoteEscapeDepth);
+      pending = end < 0 ? "" : pending.slice(end);
       continue;
     }
-    if (match.bearer || !match.authorization) {
+    if (match.bearer) {
+      const end = pending.search(/[\r\n]/);
+      pending = end < 0 ? "" : pending.slice(end);
+      continue;
+    }
+    if (!match.authorization) {
       const end = pending.search(/\s/);
       pending = end < 0 ? "" : pending.slice(end);
     }
@@ -178,18 +188,22 @@ function redactDiagnosticText(value: string): string {
     .trim();
 }
 
-function boundedDiagnosticText(value: string, maxBytes: number, tail = false): string {
-  const redacted = redactDiagnosticText(value);
-  const bytes = Buffer.from(redacted);
-  if (bytes.length <= maxBytes) return redacted;
+function boundedUtf8Text(value: string, maxBytes: number, tail = false): string {
+  const bytes = Buffer.from(value);
+  if (bytes.length <= maxBytes) return value;
   if (tail) {
-    let start = bytes.length - maxBytes;
+    const marker = "...";
+    let start = bytes.length - Math.max(0, maxBytes - Buffer.byteLength(marker));
     while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;
-    return bytes.subarray(start).toString("utf8");
+    return marker.slice(0, maxBytes) + bytes.subarray(start).toString("utf8");
   }
   let end = maxBytes;
   while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
   return bytes.subarray(0, end).toString("utf8");
+}
+
+function boundedDiagnosticText(value: string, maxBytes: number, tail = false): string {
+  return boundedUtf8Text(redactDiagnosticText(value), maxBytes, tail);
 }
 
 export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_MAX_BYTES): {
@@ -199,7 +213,8 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
   let sanitizedTail = "";
   let pending = "";
   let redacting: "unquoted" | "line" | "\"" | "'" | null = null;
-  let redactionEscape = false;
+  let redactionQuoteEscapeDepth = 0;
+  let redactionTrailingBackslashes = 0;
   let carriedCredential: "key" | "authorization-key" | "value" | "authorization" | "bearer" | null = null;
   const appendSanitized = (value: string) => {
     sanitizedTail += value;
@@ -210,10 +225,17 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
     sanitizedTail = sanitizedTail.slice(start);
   };
   const sanitizePending = () => {
-    const beginCredentialRedaction = () => {
-      const quote = pending[0];
-      if (quote === "\"" || quote === "'") pending = pending.slice(1);
-      redacting = quote === "\"" || quote === "'" ? quote : "unquoted";
+    const beginCredentialRedaction = (lineWhenUnquoted = false) => {
+      const quoteToken = /^((?:\\+)?["'])/.exec(pending)?.[1] ?? "";
+      const quote = quoteToken.at(-1);
+      if (quote === "\"" || quote === "'") {
+        pending = pending.slice(quoteToken.length);
+        redacting = quote;
+        redactionQuoteEscapeDepth = quoteToken.length - 1;
+        redactionTrailingBackslashes = 0;
+      } else {
+        redacting = lineWhenUnquoted ? "line" : "unquoted";
+      }
       carriedCredential = null;
     };
     while (pending) {
@@ -229,7 +251,7 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
           return;
         }
         pending = pending.slice(valueStart);
-        beginCredentialRedaction();
+        beginCredentialRedaction(true);
         continue;
       }
       if (carriedCredential === "value") {
@@ -238,26 +260,24 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
           pending = "";
           return;
         }
-        const quote = pending[valueStart];
-        pending = pending.slice(valueStart + (quote === "\"" || quote === "'" ? 1 : 0));
-        redacting = quote === "\"" || quote === "'" ? quote : "unquoted";
+        pending = pending.slice(valueStart);
+        beginCredentialRedaction();
         carriedCredential = null;
         continue;
       }
       if (carriedCredential === "key" || carriedCredential === "authorization-key") {
         const authorizationKey = carriedCredential === "authorization-key";
-        const completedKey = /^[A-Z0-9_.-]*\s*[:=]\s*(?:(["'])|(?=[^"'\s]))/i.exec(pending);
+        const completedKey = /^[A-Z0-9_.-]*\s*[:=]\s*(?:((?:\\+)?["'])|(?=[^"'\\\s]))/i.exec(pending);
         if (completedKey) {
           appendSanitized("<redacted>");
           pending = pending.slice(completedKey[0].length);
-          if (authorizationKey) {
-            redacting = "line";
-            carriedCredential = null;
-          }
-          else {
-            redacting = completedKey[1] === "\"" || completedKey[1] === "'" ? completedKey[1] : "unquoted";
-            carriedCredential = null;
-          }
+          const quoteToken = completedKey[1] ?? "";
+          const quote = quoteToken.at(-1);
+          if (quote === "\"" || quote === "'") redacting = quote;
+          else redacting = authorizationKey ? "line" : "unquoted";
+          redactionQuoteEscapeDepth = quoteToken.length > 0 ? quoteToken.length - 1 : 0;
+          redactionTrailingBackslashes = 0;
+          carriedCredential = null;
           continue;
         }
         const delimiter = /^[A-Z0-9_.-]*\s*[:=]\s*$/i.exec(pending);
@@ -279,21 +299,20 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
         else if (redacting === "unquoted") end = pending.search(/\s/);
         else {
           end = -1;
+          let backslashes = redactionTrailingBackslashes;
           for (let index = 0; index < pending.length; index += 1) {
             const character = pending[index];
-            if (redactionEscape) {
-              redactionEscape = false;
-              continue;
-            }
             if (character === "\\") {
-              redactionEscape = true;
+              backslashes += 1;
               continue;
             }
-            if (character === redacting) {
+            if (character === redacting && backslashes === redactionQuoteEscapeDepth) {
               end = index;
               break;
             }
+            backslashes = 0;
           }
+          redactionTrailingBackslashes = backslashes;
         }
         if (end < 0) {
           pending = "";
@@ -301,7 +320,8 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
         }
         pending = pending.slice(end + (redacting === "unquoted" || redacting === "line" ? 0 : 1));
         redacting = null;
-        redactionEscape = false;
+        redactionQuoteEscapeDepth = 0;
+        redactionTrailingBackslashes = 0;
         continue;
       }
       const match = sensitiveTextMatch(pending);
@@ -310,13 +330,16 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
         pending = pending.slice(match.index + match.length);
         if (match.authorization) {
           redacting = match.quotedKey && match.quote ? match.quote : "line";
+          redactionQuoteEscapeDepth = match.quoteEscapeDepth;
           continue;
         }
         if (match.bearer) {
-          redacting = match.quote ?? "unquoted";
+          redacting = match.quote ?? "line";
+          redactionQuoteEscapeDepth = match.quoteEscapeDepth;
           continue;
         }
         redacting = match.quote ?? "unquoted";
+        redactionQuoteEscapeDepth = match.quoteEscapeDepth;
         continue;
       }
       if (pending.length <= DIAGNOSTIC_REDACTION_CONTEXT_CHARS) return;
@@ -331,19 +354,18 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
           return;
         }
       }
-      const carriedKey = /(?:^|[^A-Z0-9_.-])([A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTHORIZATION|COOKIE)[A-Z0-9_.-]*)(\s*)(?:([:=])(\s*))?$/i.exec(pending);
+      const carriedKey = /(^|[^A-Z0-9_.-])((?:\\+)?["']?)([A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTHORIZATION|COOKIE)[A-Z0-9_.-]*)\2(\s*)(?:([:=])(\s*))?$/i.exec(pending);
       if (carriedKey) {
-        const keyStart = carriedKey.index + carriedKey[0].length
-          - carriedKey.slice(1).reduce((length, part) => length + (part?.length ?? 0), 0);
+        const keyStart = carriedKey.index + carriedKey[1].length;
         if (keyStart < pending.length - DIAGNOSTIC_REDACTION_CONTEXT_CHARS) {
           appendSanitized(pending.slice(0, keyStart));
-          if (carriedKey[3]) {
+          if (carriedKey[5]) {
             appendSanitized("<redacted>");
             pending = "";
-            carriedCredential = /AUTHORIZATION/i.test(carriedKey[1]) ? "authorization" : "value";
+            carriedCredential = /AUTHORIZATION/i.test(carriedKey[3]) ? "authorization" : "value";
           } else {
-            pending = (carriedKey[1] + carriedKey[2]).slice(-DIAGNOSTIC_REDACTION_CONTEXT_CHARS);
-            carriedCredential = /AUTHORIZATION/i.test(carriedKey[1]) ? "authorization-key" : "key";
+            pending = (carriedKey[3] + carriedKey[4]).slice(-DIAGNOSTIC_REDACTION_CONTEXT_CHARS);
+            carriedCredential = /AUTHORIZATION/i.test(carriedKey[3]) ? "authorization-key" : "key";
           }
           return;
         }
@@ -361,7 +383,7 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
     },
     value() {
       const suffix = redacting ? "" : pending;
-      return redactDiagnosticText(sanitizedTail + suffix);
+      return boundedDiagnosticText(sanitizedTail + suffix, maxBytes, true);
     },
   };
 }

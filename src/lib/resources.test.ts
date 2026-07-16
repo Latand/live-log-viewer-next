@@ -722,30 +722,51 @@ describe("resource observation", () => {
     expect(snapshot.canonicalFor(secondPath)).toBeNull();
   });
 
-  test("worker launch selection preserves Docker Bun and supports a Node-only bundle", () => {
-    const cwd = "/package";
-    const sourceWorker = "/package/src/lib/resourceCollector.worker.ts";
-    const bundledWorker = "/package/.next/server/resource-collector-worker.js";
+  test("worker launch selection pairs existing workers with source, standalone, and prepack runtimes", () => {
+    const sourceCwd = "/checkout";
+    const standaloneCwd = "/checkout/.next/standalone";
+    const prepackCwd = "/extracted/dist/standalone";
+    const sourceWorker = `${sourceCwd}/src/lib/resourceCollector.worker.ts`;
+    const sourceBundle = `${sourceCwd}/.next/server/resource-collector-worker.js`;
+    const standaloneBundle = `${standaloneCwd}/.next/server/resource-collector-worker.js`;
+    const prepackBundle = `${prepackCwd}/.next/server/resource-collector-worker.js`;
     const bunContainer = "/usr/local/bin/bun-container";
+    const resolve = (cwd: string, present: string[], env: NodeJS.ProcessEnv = { NODE_ENV: "test" }) => resolveResourceWorkerLaunch({
+      cwd,
+      env,
+      execPath: "/usr/bin/node",
+      exists: (pathname) => present.includes(pathname),
+    });
 
-    expect(resolveResourceWorkerLaunch({
-      cwd,
-      env: { NODE_ENV: "test", LLV_RESOURCE_COLLECTOR_EXECUTABLE: "/fixture/worker" },
-      execPath: "/usr/bin/node",
-      exists: () => false,
+    expect(resolve(sourceCwd, [sourceWorker, sourceBundle, bunContainer])).toEqual({ executable: bunContainer, workerPath: sourceWorker });
+    expect(resolve(sourceCwd, [sourceWorker, sourceBundle])).toEqual({ executable: "/usr/bin/node", workerPath: sourceBundle });
+    expect(resolve(sourceCwd, [sourceWorker])).toEqual({ executable: "bun", workerPath: sourceWorker });
+    expect(resolve(sourceCwd, [sourceWorker], {
+      NODE_ENV: "test",
+      LLV_RESOURCE_COLLECTOR_EXECUTABLE: "/fixture/worker",
     })).toEqual({ executable: "/fixture/worker", workerPath: sourceWorker });
-    expect(resolveResourceWorkerLaunch({
-      cwd,
-      env: { NODE_ENV: "test" },
-      execPath: "/usr/bin/node",
-      exists: (pathname) => pathname === bunContainer || pathname === bundledWorker,
-    })).toEqual({ executable: bunContainer, workerPath: sourceWorker });
-    expect(resolveResourceWorkerLaunch({
-      cwd,
-      env: { NODE_ENV: "test" },
-      execPath: "/usr/bin/node",
-      exists: (pathname) => pathname === bundledWorker,
-    })).toEqual({ executable: "/usr/bin/node", workerPath: bundledWorker });
+    expect(resolve(sourceCwd, [sourceWorker, sourceBundle], {
+      NODE_ENV: "test",
+      LLV_RESOURCE_COLLECTOR_EXECUTABLE: "/usr/bin/node",
+    })).toEqual({ executable: "/usr/bin/node", workerPath: sourceBundle });
+
+    for (const [layout, cwd, bundle] of [
+      ["standalone", standaloneCwd, standaloneBundle],
+      ["prepack", prepackCwd, prepackBundle],
+    ] as const) {
+      expect(resolve(cwd, [bundle, bunContainer]), `${layout} with bun-container`).toEqual({
+        executable: "/usr/bin/node",
+        workerPath: bundle,
+      });
+      expect(resolve(cwd, [bundle]), `${layout} without bun-container`).toEqual({
+        executable: "/usr/bin/node",
+        workerPath: bundle,
+      });
+      expect(resolve(cwd, [bundle], {
+        NODE_ENV: "test",
+        LLV_RESOURCE_COLLECTOR_EXECUTABLE: "/fixture/worker",
+      }), `${layout} executable override`).toEqual({ executable: "/fixture/worker", workerPath: bundle });
+    }
   });
 });
 
@@ -1389,9 +1410,7 @@ describe("resource recurring reads", () => {
             '  const stdio = pipes === "inherited" ? ["ignore", "inherit", "inherit"] : "ignore";',
             '  const child = spawn(process.execPath, [escapedScript, escapedPid, escapedReady], { detached: true, stdio });',
             '  child.unref();',
-            '  const deadline = Date.now() + 100;',
-            '  while (!fs.existsSync(escapedReady) && Date.now() < deadline) {}',
-            '  setTimeout(() => process.exit(0), 20);',
+            '  process.exit(0);',
             '});',
             'setInterval(() => {}, 1_000);',
             '',
@@ -2390,15 +2409,20 @@ describe("resource recurring reads", () => {
     expect(builds).toBe(3);
   });
 
-  test("a failed ordinary rebuild leaves the cached snapshot available and later polls retry", async () => {
+  test("failed ordinary rebuilds retain their latest sanitized diagnostic until recovery", async () => {
     let now = 0;
     let builds = 0;
     const recovered = deferred<ResourcesPayload>();
     const cached: ResourcesPayload = { system: null, sessions: [] };
+    const recoveredPayload: ResourcesPayload = {
+      system: null,
+      sessions: [{ target: "agents:4.0", panePid: 4, path: null, engine: "codex", hostConflict: false, title: null, project: null, activity: null, lastActiveAt: null, cwd: "/repo", rssBytes: 4, swapBytes: 0, procCount: 1 }],
+    };
     const reader = createResourcesReader(async () => {
       builds += 1;
       if (builds === 1) return cached;
-      if (builds === 2) throw new Error("transient resource build failure");
+      if (builds === 2) throw new Error("Authorization: Bearer FIRST_BACKGROUND_LEAK FIRST_TAIL");
+      if (builds === 3) throw new Error("PASSWORD=SECOND_BACKGROUND_LEAK");
       return recovered.promise;
     }, () => null, () => now, () => ({ fresh: true, status: "complete", durationMs: 0, phases: {
       systemMemory: 0, readFiles: 0, readHosts: 0, ppidMap: 0, processMemory: 0, attach: 0, serialization: 0,
@@ -2410,10 +2434,43 @@ describe("resource recurring reads", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     await Promise.resolve();
     expect(builds).toBe(2);
-    expect((await reader.read()).payload).toEqual(cached);
+
+    const firstFailure = await reader.read();
+    expect(firstFailure.payload).toEqual(cached);
+    expect(firstFailure.diagnostic).toMatchObject({
+      fresh: false,
+      status: "failed",
+      degradedReason: "collector-crash",
+      cache: { status: "memory", generation: 1 },
+      failure: { cause: "collector-error", causes: ["Authorization=<redacted>"] },
+    });
+    expect(JSON.stringify(firstFailure.diagnostic)).not.toContain("FIRST_BACKGROUND_LEAK");
+    expect(JSON.stringify(firstFailure.diagnostic)).not.toContain("FIRST_TAIL");
+    await new Promise<void>((resolve) => setImmediate(resolve));
     await Promise.resolve();
     expect(builds).toBe(3);
-    recovered.resolve(cached);
+
+    const secondFailure = await reader.read();
+    expect(secondFailure.payload).toEqual(cached);
+    expect(secondFailure.diagnostic).toMatchObject({
+      fresh: false,
+      status: "failed",
+      degradedReason: "collector-crash",
+      failure: { cause: "collector-error", causes: ["PASSWORD=<redacted>"] },
+    });
+    expect(JSON.stringify(secondFailure.diagnostic)).not.toContain("SECOND_BACKGROUND_LEAK");
+    const overlapping = await reader.read();
+    expect(overlapping.diagnostic.failure).toEqual(secondFailure.diagnostic.failure);
+    expect(builds).toBe(4);
+
+    recovered.resolve(recoveredPayload);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     await Promise.resolve();
+    const healthy = await reader.read();
+    expect(healthy.payload).toEqual(recoveredPayload);
+    expect(healthy.diagnostic.status).toBe("complete");
+    expect(healthy.diagnostic.degradedReason).toBeUndefined();
+    expect(healthy.diagnostic.failure).toBeUndefined();
+    expect(builds).toBe(4);
   });
 });

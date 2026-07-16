@@ -444,6 +444,7 @@ type ResourceWorkerProcessRuntime = Readonly<{
   descendants(pid: number): number[];
   processGroupId(pid: number): number | null;
   processGroupMembers(groupId: number): number[];
+  namespaceMembers?(owner: string): number[] | null;
   signal(pid: number, signal: NodeJS.Signals | 0): void;
 }>;
 
@@ -528,6 +529,57 @@ function portableProcessGroupMembers(groupId: number): number[] {
   return members;
 }
 
+const RESOURCE_WORKER_OWNER_ENV = "LLV_RESOURCE_COLLECTOR_OWNER";
+
+function linuxWorkerNamespaceMembers(owner: string): number[] | null {
+  let names: string[];
+  try {
+    names = readdirSync("/proc");
+  } catch {
+    return null;
+  }
+  const marker = `${RESOURCE_WORKER_OWNER_ENV}=${owner}`;
+  const members: number[] = [];
+  for (const name of names) {
+    const pid = Number(name);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    let environment: string;
+    try {
+      environment = readFileSync(`/proc/${pid}/environ`, "utf8");
+    } catch {
+      continue;
+    }
+    if (!environment.split("\0").includes(marker)) continue;
+    const identity = procBackend.processIdentity(pid);
+    if (identity === null) continue;
+    try {
+      environment = readFileSync(`/proc/${pid}/environ`, "utf8");
+    } catch {
+      continue;
+    }
+    if (environment.split("\0").includes(marker)
+      && procBackend.processIdentity(pid) === identity) members.push(pid);
+  }
+  return members;
+}
+
+function portableWorkerNamespaceMembers(owner: string): number[] | null {
+  const marker = `${RESOURCE_WORKER_OWNER_ENV}=${owner}`;
+  const result = spawnSync("ps", ["eww", "-axo", "pid=,command="], {
+    encoding: "utf8",
+    timeout: 1_000,
+    windowsHide: true,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (result.status !== 0) return null;
+  const members: number[] = [];
+  for (const line of result.stdout.split("\n")) {
+    const match = /^\s*(\d+)\s+/.exec(line);
+    if (match && line.includes(marker)) members.push(Number(match[1]));
+  }
+  return members;
+}
+
 const defaultResourceWorkerProcessRuntime: ResourceWorkerProcessRuntime = {
   pidAlive: (pid) => procBackend.pidAlive(pid),
   processIdentity: (pid) => procBackend.processIdentity(pid),
@@ -536,6 +588,9 @@ const defaultResourceWorkerProcessRuntime: ResourceWorkerProcessRuntime = {
   processGroupMembers: (groupId) => procBackend.name === "linux"
     ? linuxProcessGroupMembers(groupId)
     : portableProcessGroupMembers(groupId),
+  namespaceMembers: (owner) => procBackend.name === "linux"
+    ? linuxWorkerNamespaceMembers(owner)
+    : portableWorkerNamespaceMembers(owner),
   signal: (pid, signal) => process.kill(pid, signal),
 };
 
@@ -554,13 +609,19 @@ export function resolveResourceWorkerLaunch(options: ResourceWorkerLaunchOptions
   const env = options.env ?? process.env;
   const exists = options.exists ?? existsSync;
   const sourceWorker = path.join(cwd, "src/lib/resourceCollector.worker.ts");
+  const bundledWorker = path.join(cwd, ".next/server/resource-collector-worker.js");
+  const sourceWorkerExists = exists(sourceWorker);
+  const bundledWorkerExists = exists(bundledWorker);
+  const availableWorker = sourceWorkerExists || !bundledWorkerExists ? sourceWorker : bundledWorker;
   if (env.LLV_RESOURCE_COLLECTOR_EXECUTABLE) {
-    return { executable: env.LLV_RESOURCE_COLLECTOR_EXECUTABLE, workerPath: sourceWorker };
+    return {
+      executable: env.LLV_RESOURCE_COLLECTOR_EXECUTABLE,
+      workerPath: bundledWorkerExists ? bundledWorker : availableWorker,
+    };
   }
   const bunContainer = "/usr/local/bin/bun-container";
-  if (exists(bunContainer)) return { executable: bunContainer, workerPath: sourceWorker };
-  const bundledWorker = path.join(cwd, ".next/server/resource-collector-worker.js");
-  if (exists(bundledWorker)) {
+  if (sourceWorkerExists && exists(bunContainer)) return { executable: bunContainer, workerPath: sourceWorker };
+  if (bundledWorkerExists) {
     return { executable: options.execPath ?? process.execPath, workerPath: bundledWorker };
   }
   return { executable: "bun", workerPath: sourceWorker };
@@ -798,21 +859,25 @@ async function collectResourcesInWorker(
   const inputTimeoutMs = limits.inputTimeoutMs ?? RESOURCE_FILE_HANDOFF_TIMEOUT_MS;
   const closeTimeoutMs = limits.closeTimeoutMs ?? RESOURCE_WORKER_CLOSE_TIMEOUT_MS;
   const headroomMs = limits.headroomMs ?? RESOURCE_OBSERVE_HEADROOM_MS;
+  const cleanupAbsenceConfirmationMs = Math.min(25, Math.max(5, closeTimeoutMs));
   const cleanupTimeoutMs = Math.max(
-    closeTimeoutMs,
+    closeTimeoutMs + cleanupAbsenceConfirmationMs + 5,
     limits.cleanupTimeoutMs ?? closeTimeoutMs + Math.floor(headroomMs / 2),
   );
-  const cleanupAbsenceConfirmationMs = Math.min(25, Math.max(5, closeTimeoutMs));
+  const successCleanupTimeoutMs = Math.max(
+    cleanupTimeoutMs,
+    closeTimeoutMs + cleanupAbsenceConfirmationMs + 60,
+  );
   const settlementHeadroomMs = Math.max(
     Math.min(250, Math.ceil(observeTimeoutMs * 0.2)),
     RESOURCE_WORKER_SUPERVISOR_EXIT_GRACE_MS + cleanupAbsenceConfirmationMs + Math.max(
       0,
-      headroomMs - Math.max(0, cleanupTimeoutMs - closeTimeoutMs),
+      headroomMs - Math.max(0, successCleanupTimeoutMs - closeTimeoutMs),
     ),
   );
   const workerBudgetMs = Math.max(
     0,
-    observeTimeoutMs - inputTimeoutMs - cleanupTimeoutMs - settlementHeadroomMs,
+    observeTimeoutMs - inputTimeoutMs - successCleanupTimeoutMs - settlementHeadroomMs,
   );
   const timeoutMs = Math.min(limits.timeoutMs ?? RESOURCE_WORKER_TIMEOUT_MS, workerBudgetMs);
   const filesTask = readFiles(fresh);
@@ -840,6 +905,7 @@ async function collectResourcesInWorker(
   }
   const superviseWorker = processRuntime === defaultResourceWorkerProcessRuntime
     && resourceWorkerExecutableCanBeSupervised(launch.executable);
+  const workerOwner = crypto.randomUUID();
   const worker = spawn(
     superviseWorker ? process.execPath : launch.executable,
     superviseWorker ? ["-e", RESOURCE_WORKER_SUPERVISOR, launch.executable, launch.workerPath] : [launch.workerPath],
@@ -847,6 +913,7 @@ async function collectResourcesInWorker(
       cwd: process.cwd(),
       detached: true,
       stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, [RESOURCE_WORKER_OWNER_ENV]: workerOwner },
     },
   );
   return new Promise<CollectedResources>((resolve, reject) => {
@@ -882,6 +949,7 @@ async function collectResourcesInWorker(
     let cleanupIssue: unknown;
     let cleanupFailure: Error | null = null;
     let cleanupVerificationFailed = false;
+    let namespaceScanComplete = processRuntime.namespaceMembers === undefined;
     let groupContinuityLost = false;
     let groupSignalSent = false;
     let leaderExited = false;
@@ -961,7 +1029,38 @@ async function collectResourcesInWorker(
         ownedProcesses.set(member, identity);
       }
     };
-    const refreshOwnedProcesses = (): boolean => {
+    const retainLiveNamespaceMembers = (): boolean => {
+      if (!processRuntime.namespaceMembers) return false;
+      let members: number[] | null;
+      try {
+        members = processRuntime.namespaceMembers(workerOwner);
+      } catch (error) {
+        namespaceScanComplete = false;
+        rememberCleanupIssue(error);
+        return false;
+      }
+      namespaceScanComplete = members !== null;
+      if (members === null) {
+        rememberCleanupIssue(new Error("resource collector worker namespace could not be inspected"));
+        return false;
+      }
+      let discovered = false;
+      for (const member of members) {
+        const identity = processRuntime.processIdentity(member);
+        if (identity === null || processRuntime.processIdentity(member) !== identity) continue;
+        const prior = ownedProcesses.get(member);
+        if (prior !== undefined && prior !== identity) {
+          failCleanupVerification("resource collector namespace member identity was recycled");
+          continue;
+        }
+        if (prior === undefined) {
+          ownedProcesses.set(member, identity);
+          discovered = true;
+        }
+      }
+      return discovered;
+    };
+    const refreshOwnedProcesses = (includeNamespace = true): boolean => {
       let discovered = false;
       const pending = [...ownedProcesses.keys()];
       const inspected = new Set<number>();
@@ -998,7 +1097,7 @@ async function collectResourcesInWorker(
         }
       }
       retainLiveGroupMembers();
-      return discovered;
+      return (includeNamespace && retainLiveNamespaceMembers()) || discovered;
     };
     const ownedProcessState = () => {
       const active: number[] = [];
@@ -1038,8 +1137,8 @@ async function collectResourcesInWorker(
       }
       return false;
     };
-    const signalOwnedCleanup = (signal: NodeJS.Signals) => {
-      refreshOwnedProcesses();
+    const signalOwnedCleanup = (signal: NodeJS.Signals, includeNamespace = true) => {
+      refreshOwnedProcesses(includeNamespace);
       const state = ownedProcessState();
       const group = probeWorkerGroup();
       if (group === "present") {
@@ -1075,7 +1174,10 @@ async function collectResourcesInWorker(
     };
     const cleanupIsAbsent = (): boolean => {
       const state = ownedProcessState();
-      const absent = probeWorkerGroup() === "absent" && state.active.length === 0 && !state.uncertain;
+      const absent = namespaceScanComplete
+        && probeWorkerGroup() === "absent"
+        && state.active.length === 0
+        && !state.uncertain;
       if (absent && cleanupVerificationFailed && cleanupFailure === null) {
         cleanupFailure = new Error(
           "resource collector worker cleanup ownership verification failed",
@@ -1148,14 +1250,8 @@ async function collectResourcesInWorker(
     const terminate = () => {
       if (cleanupStarted) return;
       cleanupStarted = true;
-      refreshOwnedProcesses();
       clearOwnershipTimers();
-      signalOwnedCleanup("SIGTERM");
-      killTimer = setTimeout(() => {
-        signalOwnedCleanup("SIGKILL");
-        confirmCleanup();
-      }, closeTimeoutMs);
-      killTimer.unref();
+      const cleanupDeadlineMs = outcome?.type === "success" ? successCleanupTimeoutMs : cleanupTimeoutMs;
       cleanupDeadlineTimer = setTimeout(() => {
         if (!outcome && exitFailure) outcome = exitFailure;
         cleanupFailure = new Error(
@@ -1165,8 +1261,14 @@ async function collectResourcesInWorker(
         cleanupComplete = true;
         releaseWorkerHandles();
         settleIfReady();
-      }, cleanupTimeoutMs);
+      }, cleanupDeadlineMs);
       cleanupDeadlineTimer.unref();
+      signalOwnedCleanup("SIGTERM", false);
+      killTimer = setTimeout(() => {
+        signalOwnedCleanup("SIGKILL");
+        confirmCleanup();
+      }, closeTimeoutMs);
+      killTimer.unref();
       confirmCleanup();
     };
     const finish = (next: WorkerOutcome) => {
@@ -1456,6 +1558,33 @@ export function createResourcesReader(
     if (succeeded) lastPersistedGeneration = observation.generation;
   };
   let freshFlight: Promise<ResourcesRead> | null = null;
+  let backgroundFlight: Promise<void> | null = null;
+  let latestBackgroundFailure: ResourceCollectorResult<CollectedResources> | null = null;
+  const observeTimeoutMs = options.workerLimits?.observeTimeoutMs ?? RESOURCE_OBSERVE_TIMEOUT_MS;
+
+  const clearBackgroundFailure = (observation: ResourceObservation<CollectedResources>) => {
+    if (latestBackgroundFailure && observation.generation >= latestBackgroundFailure.generation) {
+      latestBackgroundFailure = null;
+    }
+  };
+
+  const revalidateInBackground = (latest: ResourceObservation<CollectedResources>) => {
+    if (backgroundFlight) return;
+    const task = collector.observe(latest.generation, observeTimeoutMs, false)
+      .then((result) => {
+        if (result.failure) {
+          latestBackgroundFailure = result;
+          return;
+        }
+        if (result.observation) {
+          clearBackgroundFailure(result.observation);
+        }
+      })
+      .finally(() => {
+        if (backgroundFlight === task) backgroundFlight = null;
+      });
+    backgroundFlight = task;
+  };
 
   const readOnce = async (fresh: boolean): Promise<ResourcesRead> => {
     const latest = collector.latest();
@@ -1464,9 +1593,12 @@ export function createResourcesReader(
         /* The completed file snapshot remains the response while a bounded
            current scan revalidates in the collector. Its rejection is held
            by the collector, so polling never leaks an unhandled rejection. */
-        void collector.observe(latest.generation, 0, false);
+        revalidateInBackground(latest);
       }
       persist(latest);
+      if (latestBackgroundFailure) {
+        return resourceReadFromResult(latestBackgroundFailure, captureSystem, false, true);
+      }
       return resourceReadFromResult({
         observation: latest,
         generation: latest.generation,
@@ -1478,10 +1610,13 @@ export function createResourcesReader(
     const fence = fresh ? collector.fence() : -1;
     const result = await collector.observe(
       fence,
-      options.workerLimits?.observeTimeoutMs ?? RESOURCE_OBSERVE_TIMEOUT_MS,
+      observeTimeoutMs,
       fresh,
     );
-    if (result.observation && !result.failure) persist(result.observation);
+    if (result.observation && !result.failure) {
+      persist(result.observation);
+      clearBackgroundFailure(result.observation);
+    }
     return resourceReadFromResult(result, captureSystem, fresh);
   };
 

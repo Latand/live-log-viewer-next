@@ -420,6 +420,119 @@ describe("resource collector", () => {
     expect(Buffer.byteLength(longDiagnostic)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
   });
 
+  test("stringified Authorization diagnostics redact every scheme and multi-token Bearer value", async () => {
+    const stringifiedAuthorization = (authorization: string, safe: string) => JSON.stringify(JSON.stringify({ Authorization: authorization, safe }));
+    const cases = [
+      {
+        name: "Basic",
+        input: stringifiedAuthorization("Basic BASIC_STRINGIFIED_LEAK==", "SAFE_BASIC_é€😀"),
+        safe: "SAFE_BASIC_é€😀",
+        secrets: ["BASIC_STRINGIFIED_LEAK"],
+      },
+      {
+        name: "Digest",
+        input: stringifiedAuthorization('Digest username="DIGEST_USER_LEAK", response="DIGEST_RESPONSE_LEAK"', "SAFE_DIGEST_é€😀"),
+        safe: "SAFE_DIGEST_é€😀",
+        secrets: ["DIGEST_USER_LEAK", "DIGEST_RESPONSE_LEAK"],
+      },
+      {
+        name: "Negotiate",
+        input: stringifiedAuthorization("Negotiate NEGOTIATE_LEAK FIRST_TAIL SECOND_TAIL", "SAFE_NEGOTIATE_é€😀"),
+        safe: "SAFE_NEGOTIATE_é€😀",
+        secrets: ["NEGOTIATE_LEAK", "FIRST_TAIL", "SECOND_TAIL"],
+      },
+      {
+        name: "custom",
+        input: stringifiedAuthorization("Custom scheme=CUSTOM_LEAK tail=CUSTOM_TAIL", "SAFE_CUSTOM_é€😀"),
+        safe: "SAFE_CUSTOM_é€😀",
+        secrets: ["CUSTOM_LEAK", "CUSTOM_TAIL"],
+      },
+      {
+        name: "Bearer",
+        input: stringifiedAuthorization('Bearer "BEARER_FIRST_LEAK BEARER_SECOND_LEAK"', "SAFE_BEARER_é€😀"),
+        safe: "SAFE_BEARER_é€😀",
+        secrets: ["BEARER_FIRST_LEAK", "BEARER_SECOND_LEAK"],
+      },
+      {
+        name: "bare multi-token Bearer",
+        input: "Bearer BARE_FIRST_LEAK BARE_SECOND_LEAK\nSAFE_BARE_é€😀",
+        safe: "SAFE_BARE_é€😀",
+        secrets: ["BARE_FIRST_LEAK", "BARE_SECOND_LEAK"],
+      },
+    ];
+
+    for (const fixture of cases) {
+      for (let split = 0; split <= fixture.input.length; split += 1) {
+        const tail = createResourceDiagnosticTail();
+        tail.append(fixture.input.slice(0, split));
+        tail.append(fixture.input.slice(split));
+        const diagnostic = tail.value();
+        const label = `${fixture.name} split ${split}`;
+
+        expect(diagnostic.includes("<redacted>"), label).toBeTrue();
+        expect(diagnostic.includes(fixture.safe), `${label} safe`).toBeTrue();
+        expect(diagnostic.includes("\uFFFD"), `${label} UTF-8`).toBeFalse();
+        expect(Buffer.byteLength(diagnostic), `${label} size`).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+        for (const secret of fixture.secrets) {
+          expect(diagnostic.includes(secret), `${label} secret ${secret}`).toBeFalse();
+        }
+      }
+
+      const collector = createResourceCollector({
+        collectorId: `stringified-static-${fixture.name}`,
+        collect: async () => {
+          throw new ResourceCollectorFailureError(
+            "collector-crash",
+            "collector-error",
+            "resource collection failed",
+            { cause: new Error(fixture.input), stderr: fixture.input },
+          );
+        },
+      });
+      const result = await collector.observe(0, 1_000);
+      const cause = result.failure?.diagnostic.causes[0] ?? "";
+      const stderr = result.failure?.diagnostic.stderr ?? "";
+
+      expect(cause.includes(fixture.safe), `${fixture.name} static cause safe`).toBeTrue();
+      expect(stderr.includes(fixture.safe), `${fixture.name} static stderr safe`).toBeTrue();
+      for (const secret of fixture.secrets) {
+        expect(cause.includes(secret), `${fixture.name} static cause ${secret}`).toBeFalse();
+        expect(stderr.includes(secret), `${fixture.name} static stderr ${secret}`).toBeFalse();
+      }
+    }
+
+    const evicted = createResourceDiagnosticTail();
+    evicted.append("old safe prefix é€😀\n".repeat(300));
+    const longSecret = "LONG_STRINGIFIED_BEARER_LEAK ".repeat(1_000);
+    const serialized = stringifiedAuthorization(`Bearer "${longSecret}"`, "SAFE_EVICTION_é€😀");
+    const secretAt = serialized.indexOf(longSecret);
+    evicted.append(serialized.slice(0, secretAt));
+    for (let offset = 0; offset < longSecret.length; offset += 67) {
+      evicted.append(longSecret.slice(offset, offset + 67));
+    }
+    evicted.append(serialized.slice(secretAt + longSecret.length));
+    const diagnostic = evicted.value();
+
+    expect(diagnostic).toContain("<redacted>");
+    expect(diagnostic).toContain("SAFE_EVICTION_é€😀");
+    expect(diagnostic).not.toContain("LONG_STRINGIFIED_BEARER_LEAK");
+    expect(diagnostic).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+
+    const keyEvicted = createResourceDiagnosticTail();
+    const encoded = stringifiedAuthorization("Basic EVICTED_KEY_LEAK==", "SAFE_KEY_EVICTION_é€😀");
+    const delimiterAt = encoded.indexOf(":");
+    keyEvicted.append(encoded.slice(0, delimiterAt) + " ".repeat(5_000));
+    keyEvicted.append(encoded.slice(delimiterAt));
+    const keyEvictedDiagnostic = keyEvicted.value();
+
+    expect(keyEvictedDiagnostic).toContain("<redacted>");
+    expect(keyEvictedDiagnostic).toContain("SAFE_KEY_EVICTION_é€😀");
+    expect(keyEvictedDiagnostic).not.toContain("EVICTED_KEY_LEAK");
+    expect(keyEvictedDiagnostic).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(keyEvictedDiagnostic)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+  });
+
   test("stderr tail truncation preserves every UTF-8 boundary", async () => {
     for (const character of ["é", "€", "😀"]) {
       const width = Buffer.byteLength(character);
