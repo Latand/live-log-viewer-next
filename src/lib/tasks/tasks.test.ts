@@ -362,6 +362,24 @@ describe("task delivery assembly", () => {
       expect(res.task.assignments.some((a) => a.conversationId === "conv-a")).toBe(false);
     });
 
+    test("uses the strongest supplied identity without matching weaker stale fields", () => {
+      const before = task({
+        assignments: [
+          { path: "/current-a.jsonl", conversationId: "conv-a", panePid: 11, state: "delivered", error: null, at: "old" },
+          { path: "/stale-a.jsonl", conversationId: "conv-b", panePid: 42, state: "delivered", error: null, at: "old" },
+        ],
+      });
+      const res = removeAssignment(
+        [before],
+        "task-1",
+        { conversationId: "conv-a", path: "/stale-a.jsonl", panePid: 42 },
+        "now",
+      );
+      expect(res.ok).toBe(true);
+      if (!res.ok) throw new Error(res.error);
+      expect(res.task.assignments.map((a) => a.conversationId)).toEqual(["conv-b"]);
+    });
+
     test("a handle matching nothing is an idempotent no-op success", () => {
       const before = seed();
       const res = removeAssignment([before], "task-1", { panePid: 999 }, "now");

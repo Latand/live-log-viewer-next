@@ -310,9 +310,9 @@ export function assignmentRefFromBody(body: unknown): AssignmentRef | null {
     detachable by the handle the card holds (issue #292). A bare string handle is
     read as a path, preserving the original by-path contract. */
 function assignmentMatchesRef(assignment: TaskAssignment, ref: AssignmentRef): boolean {
-  if (ref.conversationId != null && assignment.conversationId === ref.conversationId) return true;
-  if (ref.path != null && assignment.path === ref.path) return true;
-  if (ref.panePid != null && assignment.panePid === ref.panePid) return true;
+  if (ref.conversationId != null) return assignment.conversationId === ref.conversationId;
+  if (ref.path != null) return assignment.path === ref.path;
+  if (ref.panePid != null) return assignment.panePid === ref.panePid;
   return false;
 }
 
