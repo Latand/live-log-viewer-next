@@ -13,7 +13,7 @@ function tone(status: ReceiptStatus): BadgeTone {
   return "neutral";
 }
 
-function statusText(t: TFunction, receipt: RuntimeReceipt): string {
+export function runtimeReceiptStatusText(t: TFunction, receipt: RuntimeReceipt): string {
   switch (receipt.status) {
     case "queued":
       return typeof receipt.queuePosition === "number"
@@ -53,7 +53,7 @@ export function ReceiptChip({ receipt, actionsDisabled = false, onRetry, onEdit 
         data-receipt-status={receipt.status}
         {...(failed ? { role: "status", "aria-live": "polite" as const } : {})}
       >
-        {statusText(t, receipt)}
+        {runtimeReceiptStatusText(t, receipt)}
       </Badge>
       {failed && onRetry ? (
         <button

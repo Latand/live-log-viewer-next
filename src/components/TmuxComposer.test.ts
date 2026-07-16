@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import { translate } from "@/lib/i18n";
 
@@ -66,6 +67,149 @@ test("an immediate retry receipt supersedes an older failed bus receipt", () => 
   expect(mergeRuntimeReceipts([failed], [queued])).toEqual([queued]);
 });
 
+test("the highest receipt revision wins before wall-clock ordering", () => {
+  const delivering: RuntimeReceipt = {
+    operationId: "op-clock-rollback",
+    idempotencyKey: "key-clock-rollback",
+    conversationId: "conv-one",
+    kind: "send",
+    status: "delivering",
+    reason: null,
+    text: "keep the authoritative state",
+    at: "2026-07-16T10:00:00.000Z",
+    revision: 2,
+  };
+  const staleQueued: RuntimeReceipt = {
+    ...delivering,
+    status: "queued",
+    at: "2026-07-16T10:00:01.000Z",
+    revision: 1,
+  };
+
+  expect(mergeRuntimeReceipts([staleQueued], [delivering])).toEqual([delivering]);
+  expect(mergeRuntimeReceipts([delivering], [staleQueued])).toEqual([delivering]);
+});
+
+test("a delivered durable retry leaf outlives its stale queued projection", () => {
+  type RetryReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
+  const parent: RetryReceipt = {
+    operationId: "op-A",
+    idempotencyKey: "key-A",
+    conversationId: "conv-one",
+    kind: "send",
+    status: "failed",
+    reason: "dead-host",
+    text: "deliver exactly once",
+    at: "2026-07-16T10:00:00.000Z",
+    revision: 3,
+  };
+  // The immediate retry response projects the new attempt onto the parent
+  // operation id with the fresh idempotency key and a bumped revision.
+  const projection: RetryReceipt = {
+    ...parent,
+    idempotencyKey: "key-A2",
+    status: "queued",
+    reason: null,
+    at: "2026-07-16T10:00:01.000Z",
+    revision: 4,
+    retryOfOperationId: parent.operationId,
+  };
+  // The durable bus later carries the real retry leaf under its own operation
+  // id with its own (lower) per-scope revision counter.
+  const leaf: RetryReceipt = {
+    ...projection,
+    operationId: "op-A-retry",
+    status: "delivered",
+    at: "2026-07-16T10:00:02.000Z",
+    revision: 3,
+  };
+
+  expect(mergeRuntimeReceipts([parent, leaf], [projection])).toEqual([leaf]);
+});
+
+test("the receipt live status pluralizes pending and issue counts in both locales", () => {
+  expect(translate("en", "runtime.receipt.statusPending", { count: 1 })).toBe("1 pending message");
+  expect(translate("en", "runtime.receipt.statusPending", { count: 2 })).toBe("2 pending messages");
+  expect(translate("en", "runtime.receipt.statusProblems", { count: 1 })).toBe("1 issue");
+  expect(translate("en", "runtime.receipt.statusProblems", { count: 2 })).toBe("2 issues");
+  expect(translate("uk", "runtime.receipt.statusPending", { count: 1 })).toBe("1 повідомлення очікує");
+  expect(translate("uk", "runtime.receipt.statusPending", { count: 3 })).toBe("3 повідомлення очікують");
+  expect(translate("uk", "runtime.receipt.statusPending", { count: 5 })).toBe("5 повідомлень очікують");
+  expect(translate("uk", "runtime.receipt.statusProblems", { count: 1 })).toBe("1 проблема");
+  expect(translate("uk", "runtime.receipt.statusProblems", { count: 2 })).toBe("2 проблеми");
+  expect(translate("uk", "runtime.receipt.statusProblems", { count: 5 })).toBe("5 проблем");
+});
+
+test("retry supersession is independent of input and timestamp order", () => {
+  type RetryReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
+  const parent: RetryReceipt = {
+    operationId: "op-parent",
+    idempotencyKey: "key-parent",
+    conversationId: "conv-one",
+    kind: "send",
+    status: "failed",
+    reason: "dead-host",
+    text: "retry me",
+    at: "2026-07-16T10:00:02.000Z",
+    revision: 3,
+  };
+  const child: RetryReceipt = {
+    ...parent,
+    operationId: "op-child",
+    idempotencyKey: "key-child",
+    retryOfOperationId: parent.operationId,
+    status: "queued",
+    reason: null,
+    at: "2026-07-16T10:00:01.000Z",
+    revision: 1,
+  };
+
+  expect(mergeRuntimeReceipts([parent, child], [])).toEqual([child]);
+  expect(mergeRuntimeReceipts([child], [parent])).toEqual([child]);
+});
+
+test("cyclic and missing retry ancestry remain visible without looping", () => {
+  type RetryReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
+  const base: RetryReceipt = {
+    operationId: "op-cycle-a",
+    idempotencyKey: "key-cycle-a",
+    conversationId: "conv-one",
+    kind: "send",
+    status: "failed",
+    reason: "delivery failed",
+    text: "preserve corrupt lineage evidence",
+    at: "2026-07-16T10:00:04.000Z",
+    revision: 1,
+    retryOfOperationId: "op-cycle-b",
+  };
+  const cyclePeer: RetryReceipt = {
+    ...base,
+    operationId: "op-cycle-b",
+    idempotencyKey: "key-cycle-b",
+    at: "2026-07-16T10:00:03.000Z",
+    revision: 4,
+    retryOfOperationId: base.operationId,
+  };
+  const missingParent: RetryReceipt = {
+    ...base,
+    operationId: "op-missing-parent",
+    idempotencyKey: "key-missing-parent",
+    at: "2026-07-16T10:00:02.000Z",
+    retryOfOperationId: "op-absent",
+  };
+  const independent: RetryReceipt = {
+    ...base,
+    operationId: "op-independent",
+    idempotencyKey: "key-independent",
+    at: "2026-07-16T10:00:01.000Z",
+    retryOfOperationId: null,
+  };
+
+  expect(mergeRuntimeReceipts([cyclePeer, missingParent], [independent, base])
+    .map((receipt) => receipt.operationId))
+    .toEqual(["op-cycle-a", "op-cycle-b", "op-missing-parent", "op-independent"]);
+});
+
 test("the production runtime receipt list exposes recovery actions for failures", () => {
   const html = renderToStaticMarkup(
     createElement(RuntimeComposerReceipts, {
@@ -88,7 +232,7 @@ test("the production runtime receipt list exposes recovery actions for failures"
   expect(html).toContain("engine write failed");
   expect(html).toContain(">Retry<");
   expect(html).toContain("Edit &amp; resend");
-  expect(html.match(/min-h-11/g)?.length).toBe(2);
+  expect(html.match(/min-h-11/g)?.length).toBe(3);
 });
 
 test("a queued structured send renders as a quiet optimistic user message", () => {
