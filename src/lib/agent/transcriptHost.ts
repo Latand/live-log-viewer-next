@@ -127,6 +127,7 @@ interface HostReconciliation {
 export interface TranscriptHostRegistryReconciliationDependencies {
   registry: Pick<AgentRegistry,
     | "snapshot"
+    | "readOnlySnapshot"
     | "confirmSpawnPaneAlive"
     | "completeObservedSpawn"
     | "upsert"
@@ -618,7 +619,7 @@ export function reconcileObservedTranscriptHosts(
   },
 ): HostReconciliation {
   const { registry, evidenceForHost } = dependencies;
-  let snapshot = registry.snapshot();
+  let snapshot = registry.readOnlySnapshot();
   let mutated = false;
   const seen = new Set<string>();
   const quarantinedPaneIds = new Set<string>();
@@ -689,7 +690,7 @@ async function registryResumeRecords(): ReturnType<typeof resumePaneRecords> {
   const serverPid = await tmuxServerPid();
   if (serverPid === null) return null;
   const registry = agentRegistry();
-  const snapshot = registry.snapshot();
+  const snapshot = registry.readOnlySnapshot();
   if (!snapshot.importedResumePanes) {
     const legacy = await resumePaneRecords();
     if (legacy) {

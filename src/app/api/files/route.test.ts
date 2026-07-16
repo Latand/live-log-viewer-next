@@ -1468,9 +1468,10 @@ test("lineage projection uses one registry revision during provisional parent ad
   scannedFiles = [file(parentPath), file(childPath)];
 
   const originalSnapshot = registry.snapshot.bind(registry);
+  const originalReadOnlySnapshot = registry.readOnlySnapshot.bind(registry);
   let adopted = false;
-  registry.snapshot = () => {
-    const snapshot = originalSnapshot();
+  registry.readOnlySnapshot = () => {
+    const snapshot = originalReadOnlySnapshot();
     if (!adopted) {
       adopted = true;
       registry.settleSpawn(migration.receipt.launchId, {

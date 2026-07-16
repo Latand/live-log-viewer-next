@@ -89,7 +89,7 @@ function registryProjection(registry: Registry, surfaceUnexpectedError = false):
   if (cached?.signature === signature) return cached;
   let snapshot: RegistrySnapshot;
   try {
-    snapshot = registry.snapshot();
+    snapshot = registry.readOnlySnapshot();
   } catch (error) {
     if (surfaceUnexpectedError && !(error instanceof RegistryReadError)) throw error;
     return null;

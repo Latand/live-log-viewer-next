@@ -1279,6 +1279,16 @@ function readFile(filename: string): RegistryFile {
   return readFileWithPayload(filename).file;
 }
 
+function registryFileSignature(filename: string): string {
+  try {
+    const stat = fs.statSync(filename, { bigint: true });
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw new RegistryReadError(`agent registry cannot be stated: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function compactLaunchProfile(profile: LaunchProfile): Partial<LaunchProfile> {
   const compact: Partial<LaunchProfile> = { ...profile };
   for (const key of Object.keys(compact) as Array<keyof LaunchProfile>) {
@@ -1384,6 +1394,7 @@ export class AgentRegistry {
   private readonly sqliteMode: AgentRegistrySqliteMode;
   private readonly sqliteStore: SqliteAgentRegistryStore | null;
   private readonly beforeDualWriteMutationReplace: (() => void) | undefined;
+  private readOnlyCache: { signature: string; snapshot: RegistryFile } | null = null;
 
   constructor(
     readonly filename = statePath("agent-registry.json"),
@@ -1899,6 +1910,23 @@ export class AgentRegistry {
     return this.sqliteMode === "read" || this.sqliteMode === "sqlite"
       ? this.sqliteStore!.snapshot().file
       : readFile(this.filename);
+  }
+
+  /** Shared process-local snapshot for projections that never mutate registry
+      objects. Atomic writers change the inode/signature, including writers in
+      the runtime-host process, so the next reader reparses immediately. */
+  readOnlySnapshot(): RegistryFile {
+    if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") return this.sqliteStore!.snapshot().file;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = registryFileSignature(this.filename);
+      if (this.readOnlyCache?.signature === before) return this.readOnlyCache.snapshot;
+      const snapshot = readFile(this.filename);
+      const after = registryFileSignature(this.filename);
+      if (before !== after) continue;
+      this.readOnlyCache = { signature: after, snapshot };
+      return snapshot;
+    }
+    return readFile(this.filename);
   }
 
   conversationIdForSpawnCapabilityDigest(digest: string): ViewerConversationId | null {

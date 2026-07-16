@@ -77,7 +77,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   // A scan is a read model. Runtime reconciliation and notifications belong to
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
-  const registrySnapshot = registry.snapshot();
+  const registrySnapshot = registry.readOnlySnapshot();
   const conversationLookup = conversationLookupFromSnapshot(registrySnapshot);
   const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
   const filesByPath = new Map(files.map((file) => [file.path, file]));

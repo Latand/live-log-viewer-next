@@ -44,6 +44,29 @@ describe("agent registry", () => {
     expect(lookup.conversation("conversation_alias")?.id).toBe(first.id);
   });
 
+  test("read-only snapshots reuse one parse until an atomic registry replacement", () => {
+    const store = registry();
+    store.setEngineRouting("codex", "work");
+    const reads = spyOn(fs, "readFileSync");
+    let first: ReturnType<AgentRegistry["snapshot"]>;
+    let second: ReturnType<AgentRegistry["snapshot"]>;
+    try {
+      first = store.readOnlySnapshot();
+      second = store.readOnlySnapshot();
+      expect(reads.mock.calls.filter(([filename]) => filename === store.filename)).toHaveLength(1);
+    } finally {
+      reads.mockRestore();
+    }
+    expect(second!).toBe(first!);
+
+    store.setEngineRouting("codex", "default");
+    const replacement = store.readOnlySnapshot();
+
+    expect(replacement).not.toBe(first!);
+    expect(replacement.engineRouting.codex.activeAccountId).toBe("default");
+    expect(store.snapshot()).not.toBe(replacement);
+  });
+
   test("startup compaction bounds legacy delivered reservations per conversation", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/legacy-deliveries.jsonl", "default");

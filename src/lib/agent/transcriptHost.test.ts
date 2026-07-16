@@ -59,6 +59,11 @@ test("stable tmux host reconciliation reads one snapshot without registry mutati
       return super.snapshot();
     }
 
+    override readOnlySnapshot() {
+      this.snapshotCalls += 1;
+      return super.readOnlySnapshot();
+    }
+
     override upsert(value: Parameters<AgentRegistry["upsert"]>[0]) {
       this.upsertCalls += 1;
       return super.upsert(value);
