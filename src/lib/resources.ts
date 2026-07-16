@@ -461,6 +461,7 @@ type ResourceWorkerProcessRuntime = Readonly<{
   kernelContainment?: "proven" | "unavailable";
   pidAlive(pid: number): boolean;
   processIdentity(pid: number): string | null;
+  processExited?(pid: number): boolean;
   descendants(pid: number): number[];
   processGroupId(pid: number): number | null;
   processGroupMembers(groupId: number): number[];
@@ -623,6 +624,16 @@ function linuxProcessNamespacePid(pid: number): number | null {
   }
 }
 
+function linuxProcessExited(pid: number): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const state = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/, 1)[0];
+    return state === "Z" || state === "X" || state === "x";
+  } catch {
+    return false;
+  }
+}
+
 function openLinuxProcessNamespaceReference(pid: number, namespaceId: string): ResourceWorkerNamespaceReference | null {
   let fd: number;
   try {
@@ -673,6 +684,7 @@ function openLinuxProcessNamespaceReference(pid: number, namespaceId: string): R
 const defaultResourceWorkerProcessRuntime: ResourceWorkerProcessRuntime = {
   pidAlive: (pid) => procBackend.pidAlive(pid),
   processIdentity: (pid) => procBackend.processIdentity(pid),
+  processExited: (pid) => procBackend.name === "linux" && linuxProcessExited(pid),
   descendants: workerDescendants,
   processGroupId: (pid) => procBackend.name === "linux" ? linuxProcessGroupId(pid) : portableProcessGroupId(pid),
   processGroupMembers: (groupId) => procBackend.name === "linux"
@@ -953,6 +965,7 @@ async function collectResourcesInWorker(
   const observeTimeoutMs = limits.observeTimeoutMs ?? RESOURCE_OBSERVE_TIMEOUT_MS;
   const inputTimeoutMs = limits.inputTimeoutMs ?? RESOURCE_FILE_HANDOFF_TIMEOUT_MS;
   const closeTimeoutMs = limits.closeTimeoutMs ?? RESOURCE_WORKER_CLOSE_TIMEOUT_MS;
+  const memberCleanupPhaseMs = Math.max(0, Math.min(100, Math.floor(closeTimeoutMs * 0.75)));
   const headroomMs = limits.headroomMs ?? RESOURCE_OBSERVE_HEADROOM_MS;
   const cleanupAbsenceConfirmationMs = Math.min(25, Math.max(5, closeTimeoutMs));
   const cleanupTimeoutMs = Math.max(
@@ -1061,6 +1074,7 @@ async function collectResourcesInWorker(
     const ownedProcesses = new Map<number, string>();
     if (typeof pid === "number" && expectedIdentity !== null) ownedProcesses.set(pid, expectedIdentity);
     const ownershipTimers: Array<ReturnType<typeof setTimeout>> = [];
+    let rootCleanupTimer: ReturnType<typeof setTimeout> | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     let cleanupDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
     let cleanupPoll: ReturnType<typeof setTimeout> | undefined;
@@ -1105,6 +1119,14 @@ async function collectResourcesInWorker(
       cleanupVerificationFailed = true;
       rememberCleanupIssue(new Error(message));
     };
+    const processExitVerified = (ownedPid: number, identity: string): boolean => {
+      const currentIdentity = processRuntime.processIdentity(ownedPid);
+      if (currentIdentity === null) return !processRuntime.pidAlive(ownedPid);
+      if (currentIdentity !== identity || !processRuntime.processExited?.(ownedPid)) return false;
+      const confirmedIdentity = processRuntime.processIdentity(ownedPid);
+      return confirmedIdentity === currentIdentity
+        || (confirmedIdentity === null && !processRuntime.pidAlive(ownedPid));
+    };
     const finishStderr = () => {
       if (stderrEnded) return;
       stderrEnded = true;
@@ -1123,14 +1145,21 @@ async function collectResourcesInWorker(
         if (!containmentRootRetired && containmentRootPid !== null && containmentRootIdentity !== null) {
           const currentRootIdentity = processRuntime.processIdentity(containmentRootPid);
           if (currentRootIdentity === containmentRootIdentity) {
-            const namespaceId = processRuntime.processNamespaceId?.(containmentRootPid);
-            const namespacePid = processRuntime.processNamespacePid?.(containmentRootPid);
-            const confirmedIdentity = processRuntime.processIdentity(containmentRootPid);
-            if (confirmedIdentity !== currentRootIdentity) containmentRootRetired = true;
-            else if (namespaceId !== containmentNamespaceId || namespacePid !== 1) {
-              failCleanupVerification("resource collector PID namespace root identity changed");
+            if (processExitVerified(containmentRootPid, containmentRootIdentity)) {
+              containmentRootRetired = true;
+            } else {
+              const namespaceId = processRuntime.processNamespaceId?.(containmentRootPid);
+              const namespacePid = processRuntime.processNamespacePid?.(containmentRootPid);
+              const confirmedIdentity = processRuntime.processIdentity(containmentRootPid);
+              if (confirmedIdentity !== currentRootIdentity) containmentRootRetired = true;
+              else if (namespaceId !== containmentNamespaceId || namespacePid !== 1) {
+                failCleanupVerification("resource collector PID namespace root identity changed");
+              }
             }
-          } else if (currentRootIdentity !== null || !processRuntime.pidAlive(containmentRootPid)) {
+          } else if (currentRootIdentity !== null) {
+            containmentRootRetired = true;
+            failCleanupVerification("resource collector PID namespace root identity was recycled");
+          } else if (!processRuntime.pidAlive(containmentRootPid)) {
             containmentRootRetired = true;
           }
         }
@@ -1291,14 +1320,23 @@ async function collectResourcesInWorker(
       for (const [ownedPid, identity] of ownedProcesses) {
         const currentIdentity = processRuntime.processIdentity(ownedPid);
         if (currentIdentity === identity) {
-          active.push(ownedPid);
+          if (processExitVerified(ownedPid, identity)) continue;
+          const confirmedIdentity = processRuntime.processIdentity(ownedPid);
+          if (confirmedIdentity === identity) active.push(ownedPid);
+          else if (confirmedIdentity === null && processRuntime.pidAlive(ownedPid)) uncertain = true;
+          else if (confirmedIdentity !== null && containmentNamespaceId !== null) {
+            failCleanupVerification("resource collector contained process identity was recycled");
+          }
           continue;
         }
         if (currentIdentity === null && processRuntime.pidAlive(ownedPid)) uncertain = true;
+        else if (currentIdentity !== null && containmentNamespaceId !== null) {
+          failCleanupVerification("resource collector contained process identity was recycled");
+        }
       }
       return { active, uncertain };
     };
-    const probeWorkerGroup = (): "absent" | "present" | "unknown" => {
+    const probeWorkerGroup = (): "absent" | "present" | "denied" | "unknown" => {
       if (typeof pid !== "number") return "absent";
       try {
         processRuntime.signal(-pid, 0);
@@ -1309,7 +1347,7 @@ async function collectResourcesInWorker(
           if (!groupSignalSent) groupContinuityLost = true;
           return "absent";
         }
-        if (code === "EPERM") return "present";
+        if (code === "EPERM") return "denied";
         rememberCleanupIssue(error);
         return "unknown";
       }
@@ -1323,13 +1361,33 @@ async function collectResourcesInWorker(
       }
       return false;
     };
-    const signalOwnedCleanup = (signal: NodeJS.Signals, includeNamespace = true) => {
+    const signalOwnedCleanup = (
+      signal: NodeJS.Signals,
+      includeNamespace = true,
+      containmentPhase: "members" | "root" | "all" = "all",
+    ) => {
       refreshOwnedProcesses(includeNamespace);
       if (containmentNamespaceId !== null && containmentRootPid !== null && containmentRootIdentity !== null) {
-        const containmentTargets = signal === "SIGTERM"
-          ? ownedProcessState().active.filter((ownedPid) => ownedPid !== containmentRootPid
-            && processRuntime.processNamespaceId?.(ownedPid) === containmentNamespaceId)
-          : [];
+        const containmentMembers = ownedProcessState().active.filter((ownedPid) => ownedPid !== containmentRootPid
+          && processRuntime.processNamespaceId?.(ownedPid) === containmentNamespaceId);
+        const containmentMemberSet = new Set(containmentMembers);
+        let containmentTargets = signal === "SIGTERM" ? containmentMembers : [];
+        if (signal === "SIGTERM" && containmentPhase === "members") {
+          containmentTargets = containmentMembers.filter((ownedPid) => {
+            const identity = ownedProcesses.get(ownedPid);
+            if (identity === undefined || processRuntime.processIdentity(ownedPid) !== identity) return false;
+            let descendants: number[];
+            try {
+              descendants = processRuntime.descendants(ownedPid);
+            } catch (error) {
+              rememberCleanupIssue(error);
+              return false;
+            }
+            if (processRuntime.processIdentity(ownedPid) !== identity) return false;
+            return !descendants.some((descendant) => descendant !== ownedPid
+              && containmentMemberSet.has(descendant));
+          });
+        }
         for (const ownedPid of containmentTargets) {
           const identity = ownedProcesses.get(ownedPid);
           if (identity === undefined) continue;
@@ -1347,20 +1405,48 @@ async function collectResourcesInWorker(
             if ((error as NodeJS.ErrnoException).code !== "ESRCH") rememberCleanupIssue(error);
           }
         }
-        if (containmentRootRetired) return;
+        if (containmentPhase === "members") return;
+        const signalWorkerWrapper = () => {
+          if (typeof pid !== "number" || expectedIdentity === null || pid === containmentRootPid) return;
+          const wrapperIdentity = processRuntime.processIdentity(pid);
+          if (wrapperIdentity === null) return;
+          if (wrapperIdentity !== expectedIdentity || processRuntime.processIdentity(pid) !== wrapperIdentity) {
+            failCleanupVerification("resource collector worker wrapper identity changed before cleanup");
+            return;
+          }
+          if (processExitVerified(pid, expectedIdentity)) return;
+          try {
+            processRuntime.signal(pid, signal);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") rememberCleanupIssue(error);
+          }
+        };
+        if (containmentRootRetired) {
+          signalWorkerWrapper();
+          return;
+        }
         const currentIdentity = processRuntime.processIdentity(containmentRootPid);
         if (currentIdentity === null) {
           if (!processRuntime.pidAlive(containmentRootPid)) containmentRootRetired = true;
+          signalWorkerWrapper();
+          return;
+        }
+        if (processExitVerified(containmentRootPid, containmentRootIdentity)) {
+          containmentRootRetired = true;
+          signalWorkerWrapper();
           return;
         }
         if (currentIdentity !== containmentRootIdentity) {
           containmentRootRetired = true;
+          failCleanupVerification("resource collector PID namespace root identity changed before cleanup");
+          signalWorkerWrapper();
           return;
         }
         if (processRuntime.processNamespaceId?.(containmentRootPid) !== containmentNamespaceId
           || processRuntime.processNamespacePid?.(containmentRootPid) !== 1
           || processRuntime.processIdentity(containmentRootPid) !== currentIdentity) {
           failCleanupVerification("resource collector PID namespace root identity changed before cleanup");
+          signalWorkerWrapper();
           return;
         }
         try {
@@ -1368,6 +1454,7 @@ async function collectResourcesInWorker(
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ESRCH") rememberCleanupIssue(error);
         }
+        signalWorkerWrapper();
         return;
       }
       const state = ownedProcessState();
@@ -1405,8 +1492,17 @@ async function collectResourcesInWorker(
     };
     const cleanupIsAbsent = (): boolean => {
       const state = ownedProcessState();
+      const wrapperExited = typeof pid === "number" && expectedIdentity !== null
+        && processExitVerified(pid, expectedIdentity);
+      let group = probeWorkerGroup();
+      if (containmentNamespaceId !== null
+        && containmentMembershipEmpty
+        && wrapperExited
+        && group === "present") {
+        group = "absent";
+      }
       const processChecksAbsent = namespaceScanComplete
-        && probeWorkerGroup() === "absent"
+        && group === "absent"
         && state.active.length === 0
         && !state.uncertain;
       const absent = processChecksAbsent && containmentScanComplete && containmentMembershipEmpty;
@@ -1487,6 +1583,7 @@ async function collectResourcesInWorker(
     }
     const clearLifecycleTimers = () => {
       clearTimeout(workerTimer);
+      if (rootCleanupTimer) clearTimeout(rootCleanupTimer);
       if (killTimer) clearTimeout(killTimer);
       if (cleanupDeadlineTimer) clearTimeout(cleanupDeadlineTimer);
       if (cleanupPoll) clearTimeout(cleanupPoll);
@@ -1540,6 +1637,14 @@ async function collectResourcesInWorker(
       clearOwnershipTimers();
       const cleanupDeadlineMs = outcome?.type === "success" ? successCleanupTimeoutMs : cleanupTimeoutMs;
       cleanupDeadlineTimer = setTimeout(() => {
+        refreshOwnedProcesses();
+        const absentAtDeadline = cleanupIsAbsent();
+        if (absentAtDeadline && cleanupIssue === undefined) {
+          cleanupComplete = true;
+          releaseWorkerHandles();
+          settleIfReady();
+          return;
+        }
         if (!outcome && exitFailure) outcome = exitFailure;
         cleanupFailure = new Error(
           "resource collector worker cleanup deadline expired",
@@ -1550,7 +1655,17 @@ async function collectResourcesInWorker(
         settleIfReady();
       }, cleanupDeadlineMs);
       cleanupDeadlineTimer.unref();
-      signalOwnedCleanup("SIGTERM", false);
+      if (containmentNamespaceId === null) {
+        signalOwnedCleanup("SIGTERM", false);
+      } else {
+        signalOwnedCleanup("SIGTERM", false, "members");
+        rootCleanupTimer = setTimeout(() => {
+          if (cleanupComplete) return;
+          signalOwnedCleanup("SIGTERM", false, "root");
+          confirmCleanup();
+        }, memberCleanupPhaseMs);
+        rootCleanupTimer.unref();
+      }
       killTimer = setTimeout(() => {
         signalOwnedCleanup("SIGKILL");
         confirmCleanup();
@@ -1559,7 +1674,12 @@ async function collectResourcesInWorker(
       confirmCleanup();
     };
     const finish = (next: WorkerOutcome) => {
-      if (outcome) return;
+      if (outcome) {
+        if (outcome.type === "success" && next.type === "failure" && next.cause === "worker-output-limit") {
+          outcome = next;
+        }
+        return;
+      }
       outcome = next;
       clearTimeout(workerTimer);
       terminate();
@@ -1637,6 +1757,7 @@ async function collectResourcesInWorker(
         });
         return;
       }
+      if (outcome) return;
       output += chunk;
       while (!outcome) {
         const newline = output.indexOf("\n");
@@ -1709,6 +1830,7 @@ async function collectResourcesInWorker(
           type: "success",
           value: collectedResources(message.payload, message.diagnostic, message.targets, targetEpoch),
         });
+        output = "";
       }
     };
     const onStderr = (chunk: Buffer) => {

@@ -1109,6 +1109,129 @@ describe("resource recurring reads", () => {
     });
   });
 
+  test("a delayed post-observation stdout flood overrides provisional success with zero residue", async () => {
+    await withResourceWorkerScript((directory) => [
+      `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
+      `readlink /proc/self/ns/pid > "${path.join(directory, "namespace")}"`,
+      "trap '' TERM INT",
+      `while [ ! -e "${path.join(directory, "release")}" ]; do sleep 0.005; done`,
+      `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+      "sleep 0.03",
+      "printf '%2048s' ''",
+      "while :; do sleep 0.01; done",
+    ], async (directory) => {
+      const baseline = referencedHandles();
+      const read = workerTestReader({
+        initial: null,
+        workerLimits: {
+          observeTimeoutMs: 1_000,
+          inputTimeoutMs: 10,
+          timeoutMs: 500,
+          closeTimeoutMs: 150,
+          cleanupTimeoutMs: 350,
+          headroomMs: 500,
+          outputMaxBytes: 1_024,
+        },
+      }).read(true);
+      const pidFile = path.join(directory, "pid");
+      const namespaceFile = path.join(directory, "namespace");
+      for (let attempt = 0; attempt < 100
+        && (!fileHasText(pidFile) || !fileHasText(namespaceFile)); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const workerPid = Number(readFileSync(pidFile, "utf8"));
+      const namespaceId = readFileSync(namespaceFile, "utf8").trim();
+      const namespaceReference = retainPidNamespaceReference(workerPid, namespaceId);
+      writeFileSync(path.join(directory, "release"), "release");
+      try {
+        const outcome = await read;
+
+        expect(outcome.diagnostic).toMatchObject({
+          degradedReason: "collector-crash",
+          failure: { cause: "worker-output-limit" },
+        });
+        expect(Buffer.byteLength(outcome.diagnostic.failure?.stderr ?? "")).toBeLessThanOrEqual(
+          RESOURCE_FAILURE_STDERR_MAX_BYTES,
+        );
+        expect(processExists(workerPid), "worker identity").toBeFalse();
+        expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker")), "worker groups").toEqual([]);
+        expect(pidNamespaceMembers(namespaceId), "PID namespace members").toEqual([]);
+        expect(retainedPidNamespaceReferences(namespaceId), "production namespace references").toBe(1);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(processExists(workerPid), "sustained worker identity").toBeFalse();
+        expect(pidNamespaceMembers(namespaceId), "sustained PID namespace members").toEqual([]);
+      } finally {
+        closeSync(namespaceReference);
+      }
+      expect(retainedPidNamespaceReferences(namespaceId), "namespace references").toBe(0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(newReferencedHandleCount(baseline), "referenced handles").toBe(0);
+    });
+  });
+
+  test("a delayed post-observation stderr flood overrides provisional success with bounded diagnostics", async () => {
+    await withResourceWorkerScript((directory) => [
+      `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
+      `readlink /proc/self/ns/pid > "${path.join(directory, "namespace")}"`,
+      "trap '' TERM INT",
+      `while [ ! -e "${path.join(directory, "release")}" ]; do sleep 0.005; done`,
+      `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+      "sleep 0.03",
+      "printf '%2048s' '' >&2",
+      "printf '\nPASSWORD=post-frame-secret\nsafe post-frame suffix\n' >&2",
+      "while :; do sleep 0.01; done",
+    ], async (directory) => {
+      const baseline = referencedHandles();
+      const read = workerTestReader({
+        initial: null,
+        workerLimits: {
+          observeTimeoutMs: 1_000,
+          inputTimeoutMs: 10,
+          timeoutMs: 500,
+          closeTimeoutMs: 150,
+          cleanupTimeoutMs: 350,
+          headroomMs: 500,
+          outputMaxBytes: 1_024,
+        },
+      }).read(true);
+      const pidFile = path.join(directory, "pid");
+      const namespaceFile = path.join(directory, "namespace");
+      for (let attempt = 0; attempt < 100
+        && (!fileHasText(pidFile) || !fileHasText(namespaceFile)); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const workerPid = Number(readFileSync(pidFile, "utf8"));
+      const namespaceId = readFileSync(namespaceFile, "utf8").trim();
+      const namespaceReference = retainPidNamespaceReference(workerPid, namespaceId);
+      writeFileSync(path.join(directory, "release"), "release");
+      try {
+        const outcome = await read;
+        const stderr = outcome.diagnostic.failure?.stderr ?? "";
+
+        expect(outcome.diagnostic).toMatchObject({
+          degradedReason: "collector-crash",
+          failure: { cause: "worker-output-limit" },
+        });
+        expect(Buffer.byteLength(stderr)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+        expect(stderr).toContain("PASSWORD=<redacted>");
+        expect(stderr).toContain("safe post-frame suffix");
+        expect(stderr).not.toContain("post-frame-secret");
+        expect(processExists(workerPid), "worker identity").toBeFalse();
+        expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker")), "worker groups").toEqual([]);
+        expect(pidNamespaceMembers(namespaceId), "PID namespace members").toEqual([]);
+        expect(retainedPidNamespaceReferences(namespaceId), "production namespace references").toBe(1);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(processExists(workerPid), "sustained worker identity").toBeFalse();
+        expect(pidNamespaceMembers(namespaceId), "sustained PID namespace members").toEqual([]);
+      } finally {
+        closeSync(namespaceReference);
+      }
+      expect(retainedPidNamespaceReferences(namespaceId), "namespace references").toBe(0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(newReferencedHandleCount(baseline), "referenced handles").toBe(0);
+    });
+  });
+
   test("a successful read settles after a TERM-resistant redirected process group is absent", async () => {
     await withResourceWorkerScript((directory) => {
       const descendantPid = path.join(directory, "redirected-descendant-pid");
@@ -1551,7 +1674,7 @@ describe("resource recurring reads", () => {
     }
   });
 
-  test("owner-mutating TERM descendants cannot escape settlement", async () => {
+  test("pre-armed owner-mutating TERM descendants observe member-before-root cleanup", async () => {
     const fixtures = [
       {
         name: "success",
@@ -1594,6 +1717,8 @@ describe("resource recurring reads", () => {
           const escapedNamespace = path.join(directory, "owner-escaped-namespace");
           const escapedReady = path.join(directory, "owner-escaped-ready");
           const memberReady = path.join(directory, "owner-member-ready");
+          const transitionArmed = path.join(directory, "owner-transition-armed");
+          const transitionOrder = path.join(directory, "owner-transition-order");
           writeFileSync(escapedScript, [
             '#!/usr/bin/node',
             'const fs = require("node:fs");',
@@ -1611,11 +1736,12 @@ describe("resource recurring reads", () => {
             '#!/usr/bin/node',
             'const fs = require("node:fs");',
             'const { spawn } = require("node:child_process");',
-            'const [escapedScript, escapedPid, escapedNamespace, escapedReady, memberReady, ownerMode] = process.argv.slice(2);',
+            'const [escapedScript, escapedPid, escapedNamespace, escapedReady, memberReady, ownerMode, transitionOrder] = process.argv.slice(2);',
             'let handled = false;',
             'process.on("SIGTERM", () => {',
             '  if (handled) return;',
             '  handled = true;',
+            '  fs.appendFileSync(transitionOrder, "member\\n");',
             '  const env = { ...process.env };',
             '  if (ownerMode === "deleted") delete env.LLV_RESOURCE_COLLECTOR_OWNER;',
             '  else env.LLV_RESOURCE_COLLECTOR_OWNER = "changed-owner";',
@@ -1632,10 +1758,11 @@ describe("resource recurring reads", () => {
           return [
             `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
             `readlink /proc/self/ns/pid > "${path.join(directory, "root-namespace")}"`,
-            "trap 'exit 0' TERM INT",
-            `/usr/bin/node "${memberScript}" "${escapedScript}" "${escapedPid}" "${escapedNamespace}" "${escapedReady}" "${memberReady}" "${owner}" &`,
+            `trap 'printf "root\\n" >> "${transitionOrder}"; exit 0' TERM INT`,
+            `/usr/bin/node "${memberScript}" "${escapedScript}" "${escapedPid}" "${escapedNamespace}" "${escapedReady}" "${memberReady}" "${owner}" "${transitionOrder}" &`,
             "member_pid=$!",
             `while [ ! -e "${memberReady}" ]; do sleep 0.005; done`,
+            `: > "${transitionArmed}"`,
             `while [ ! -e "${path.join(directory, "release")}" ]; do sleep 0.005; done`,
             "sleep 0.08",
             fixture.name === "crash"
@@ -1659,10 +1786,14 @@ describe("resource recurring reads", () => {
           }).read(true);
           const rootPidFile = path.join(directory, "pid");
           const rootNamespaceFile = path.join(directory, "root-namespace");
+          const transitionArmedFile = path.join(directory, "owner-transition-armed");
+          const transitionOrderFile = path.join(directory, "owner-transition-order");
           for (let attempt = 0; attempt < 100
-            && (!fileHasText(rootPidFile) || !fileHasText(rootNamespaceFile)); attempt += 1) {
+            && (!fileHasText(rootPidFile) || !fileHasText(rootNamespaceFile)
+              || !existsSync(transitionArmedFile)); attempt += 1) {
             await new Promise((resolve) => setTimeout(resolve, 5));
           }
+          expect(existsSync(transitionArmedFile), `${owner} ${fixture.name} owner transition armed`).toBeTrue();
           const rootPid = Number(readFileSync(rootPidFile, "utf8"));
           const rootNamespaceId = readFileSync(rootNamespaceFile, "utf8").trim();
           const namespaceReference = retainPidNamespaceReference(rootPid, rootNamespaceId);
@@ -1676,6 +1807,10 @@ describe("resource recurring reads", () => {
             }
             expect(fileHasText(escapedPidFile) && fileHasText(escapedNamespaceFile),
               `${owner} ${fixture.name} spawn: ${JSON.stringify(diagnostic)}`).toBeTrue();
+            expect(readFileSync(transitionOrderFile, "utf8").trim().split("\n"),
+              `${owner} ${fixture.name} transition order`).toEqual(
+              fixture.name === "crash" ? ["member"] : ["member", "root"],
+            );
             const escapedPid = Number(readFileSync(escapedPidFile, "utf8"));
             namespaceId = readFileSync(escapedNamespaceFile, "utf8").trim();
             const descendantAliveAtSettlement = processExists(escapedPid);
@@ -1709,7 +1844,7 @@ describe("resource recurring reads", () => {
       result.descendantAliveAtSettlement
       && result.diagnostic.failure?.cause !== "worker-cleanup"
     )), `uncontained outcomes: ${JSON.stringify(results)}`).toEqual([]);
-  });
+  }, 15_000);
 
   test("retains PID namespace membership authority through init disappearance", async () => {
     await withResourceWorkerScript((directory) => {
@@ -1800,7 +1935,7 @@ describe("resource recurring reads", () => {
     });
   });
 
-  test("concurrent containment verification reaches exact zero for every TERM descendant", async () => {
+  test("six pre-armed concurrent containment cleanups stay healthy and reach exact zero", async () => {
     await withResourceWorkerScript((directory) => {
       const memberScript = path.join(directory, "concurrent-term-member.cjs");
       writeFileSync(memberScript, [
@@ -1856,11 +1991,13 @@ describe("resource recurring reads", () => {
       }).read(true));
       for (let attempt = 0; attempt < 200
         && readdirSync(directory).filter((name) => /^\d+\.root-namespace$/.test(name)
-          && fileHasText(path.join(directory, name))).length < 6; attempt += 1) {
+          && fileHasText(path.join(directory, name))
+          && fileHasText(path.join(directory, name.replace(".root-namespace", ".member")))).length < 6; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
       const rootNamespaceFiles = readdirSync(directory).filter((name) => /^\d+\.root-namespace$/.test(name)
-        && fileHasText(path.join(directory, name)));
+        && fileHasText(path.join(directory, name))
+        && fileHasText(path.join(directory, name.replace(".root-namespace", ".member"))));
       expect(rootNamespaceFiles).toHaveLength(6);
       const namespaceReferences = rootNamespaceFiles.map((filename) => {
         const key = filename.slice(0, -".root-namespace".length);
@@ -1873,10 +2010,8 @@ describe("resource recurring reads", () => {
         const pidFiles = readdirSync(directory).filter((name) => /^\d+\.pid$/.test(name));
         expect(outcomes).toHaveLength(6);
         expect(outcomes.every((outcome) => (
-          (outcome.diagnostic.status === "complete" && outcome.diagnostic.degradedReason === undefined)
-          || outcome.diagnostic.failure?.cause === "worker-cleanup"
+          outcome.diagnostic.status === "complete" && outcome.diagnostic.degradedReason === undefined
         )), JSON.stringify(outcomes.map((outcome) => outcome.diagnostic))).toBeTrue();
-        expect(outcomes.some((outcome) => outcome.diagnostic.status === "complete")).toBeTrue();
         expect(pidFiles).toHaveLength(6);
         for (const pidFile of pidFiles) {
           const key = pidFile.slice(0, -4);
@@ -1907,7 +2042,7 @@ describe("resource recurring reads", () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(newReferencedHandleCount(baseline)).toBe(0);
     });
-  });
+  }, 15_000);
 
   test("leader-first cleanup sends no signals to recycled or null-identity groups", async () => {
     for (const identity of ["recycled", "null"] as const) {
