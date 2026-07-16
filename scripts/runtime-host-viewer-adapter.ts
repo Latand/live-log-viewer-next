@@ -255,8 +255,18 @@ function releasesEqual(left: ViewerReleaseIdentity, right: ViewerReleaseIdentity
 }
 
 function readCurrentRelease(): ViewerReleaseIdentity | null {
-  try { return readTarget(); }
-  catch { return null; }
+  let raw: string;
+  try {
+    raw = fs.readFileSync(targetFile, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error("current release target is unreadable", { cause: error });
+  }
+  try {
+    return release(JSON.parse(raw));
+  } catch (error) {
+    throw new Error("current release target is invalid", { cause: error });
+  }
 }
 
 function switchTarget(target: ViewerReleaseIdentity): void {
@@ -296,8 +306,8 @@ async function main(): Promise<unknown> {
   if (action === "current-release") {
     const current = readCurrentRelease();
     if (current === null) return null;
-    const health = await verify(current, stableEndpoint, current.endpoint);
-    if (!health.ok) throw new Error("current release health verification failed");
+    const state = await containerState(current.container);
+    if (state !== "running") throw new Error(`current release container is ${state}`);
     return current;
   }
   if (action === "verify-candidate") { const candidate = release(input.candidate); return verify(candidate, candidate.endpoint); }
