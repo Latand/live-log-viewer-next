@@ -4,8 +4,10 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
+import { primeTranscriptTurnEvidence } from "@/lib/scanner/activity";
 import { globalCache } from "@/lib/scanner/caches";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, PendingQuestion } from "@/lib/types";
+import type { TurnState } from "@/lib/accounts/migration/contracts";
 
 type FileScanSnapshot = Awaited<ReturnType<typeof listFilesWithProjectCatalog>>;
 type FileScanRefresh = {
@@ -105,11 +107,30 @@ function isFileScanSnapshot(value: unknown): value is FileScanSnapshot {
   return filesValid && catalogValid;
 }
 
-function persistedTurnState(entry: FileEntry): string | null | undefined {
-  if (entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled") return "busy";
-  if (entry.activityReason === "jsonl_turn_completed") return "done";
-  if (entry.activityReason === "mtime_fresh" || entry.activityReason === "mtime_recent" || entry.activityReason === "mtime_old") return null;
+function persistedTurnState(entry: FileEntry): TurnState | undefined {
+  if (entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled" || entry.activityReason === "pane_at_composer") {
+    return { state: "busy", source: "lifecycle", terminalAt: null };
+  }
+  if (entry.activityReason === "jsonl_turn_completed") {
+    const endedAt = entry.lastTurn?.endedAt;
+    return {
+      state: "terminal",
+      source: "lifecycle",
+      terminalAt: typeof endedAt === "number" && Number.isFinite(endedAt) ? new Date(endedAt).toISOString() : null,
+    };
+  }
+  if (entry.activityReason === "mtime_fresh" || entry.activityReason === "mtime_recent" || entry.activityReason === "mtime_old") {
+    return { state: "unknown", source: "empty", terminalAt: null };
+  }
   return undefined;
+}
+
+function persistedQuestionDraft(entry: FileEntry): Omit<PendingQuestion, "pid" | "paneTarget"> | null {
+  if (!entry.pendingQuestion) return null;
+  const { pid, paneTarget, ...draft } = entry.pendingQuestion;
+  void pid;
+  void paneTarget;
+  return draft;
 }
 
 function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
@@ -124,7 +145,29 @@ function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
     if (current.size !== entry.size || current.mtimeMs / 1000 !== entry.mtime) continue;
     const mtimeMs = entry.mtime * 1000;
     const turnState = persistedTurnState(entry);
-    if (turnState !== undefined) globalCache<[number, number, string | null]>("turn").set(entry.path, [entry.size, mtimeMs, turnState]);
+    if (turnState !== undefined && entry.path.endsWith(".jsonl") && (entry.engine === "claude" || entry.engine === "codex")) {
+      primeTranscriptTurnEvidence(
+        entry.path,
+        entry.size,
+        mtimeMs,
+        entry.engine === "codex",
+        turnState,
+        {
+          authoritative: false,
+          composerReleased: entry.activityReason === "pane_at_composer",
+        },
+      );
+      if (entry.engine === "codex" || turnState.state !== "terminal") {
+        primeTranscriptTurnEvidence(
+          entry.path,
+          entry.size,
+          mtimeMs,
+          entry.engine === "codex",
+          turnState,
+          { composerReleased: entry.activityReason === "pane_at_composer" },
+        );
+      }
+    }
     if (!(entry.root === "claude-projects" && entry.path.includes(`${path.sep}subagents${path.sep}`))) {
       globalCache<[number, number, { display: string | null; launch: string | null }]>("model")
         .set(entry.path, [entry.size, mtimeMs, { display: entry.model, launch: entry.launchModel ?? null }]);
@@ -140,6 +183,10 @@ function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
     }
     if (Object.hasOwn(entry, "pendingWakeup")) {
       globalCache<[number, number, FileEntry["pendingWakeup"]]>("wakeup-v2").set(entry.path, [entry.size, mtimeMs, entry.pendingWakeup]);
+    }
+    if (entry.root === "claude-projects" && entry.path.endsWith(".jsonl")) {
+      globalCache<[number, number, Omit<PendingQuestion, "pid" | "paneTarget"> | null]>("questions-v3")
+        .set(entry.path, [entry.size, mtimeMs, persistedQuestionDraft(entry)]);
     }
   }
 }

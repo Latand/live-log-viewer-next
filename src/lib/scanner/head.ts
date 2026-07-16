@@ -23,7 +23,7 @@ interface HeadReadOptions {
 }
 
 const headCache = globalCache<CachedHead>("scanner-head-v1");
-const HEAD_CACHE_CAP = 64;
+const HEAD_CACHE_CAP = 2_048;
 const HEAD_CACHE_BYTE_CAP = 32 * 1024 * 1024;
 
 export function headFingerprint(bytes: Uint8Array): string {

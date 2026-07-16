@@ -25,6 +25,9 @@ const { entryModels } = await import("@/lib/scanner/model");
 const { planFor, goalFor } = await import("@/lib/scanner/plan");
 const { ctxFor } = await import("@/lib/scanner/context");
 const { lastTurnFor } = await import("@/lib/scanner/turnDuration");
+const { pendingQuestionFor } = await import("@/lib/scanner/questions");
+const { AgentRegistry } = await import("@/lib/agent/registry");
+const { reconcileMigrationInventory } = await import("@/lib/accounts/migration/coordinator");
 
 function writeSession(filename: string, cwd: string): string {
   const pathname = path.join(sessions, filename);
@@ -139,7 +142,14 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
     expect(persisted).toBeDefined();
     const mtimeMs = persisted!.mtime * 1000;
     const caches = cacheStore.__llvCaches ?? {};
-    expect(caches.turn?.get(transcript)).toEqual([persisted!.size, mtimeMs, "done"]);
+    expect(caches["turn-evidence-v1"]?.get(`authoritative:${transcript}`)).toMatchObject({
+      size: persisted!.size,
+      mtimeMs,
+      codex: true,
+      authoritative: true,
+      turn: { state: "terminal", source: "lifecycle" },
+      composerReleased: false,
+    });
     expect(caches.model?.get(transcript)).toEqual([
       persisted!.size,
       mtimeMs,
@@ -173,6 +183,151 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
     fs.rmSync(testStateDir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("persisted Claude question state hydrates without transcript reads and stays retryable", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "durable-claude-questions-state");
+  const projectDir = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo-claude-question-hydration");
+  const pendingPath = path.join(projectDir, "pending-question.jsonl");
+  const quietPath = path.join(projectDir, "quiet-question.jsonl");
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const tracked = new Map<number, string>();
+  let transcriptReads = 0;
+  let failPath: string | null = null;
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(pendingPath, [
+      JSON.stringify({ type: "user", timestamp: "2026-07-16T12:00:00.000Z", cwd: "/repo", message: { role: "user", content: "Choose" } }),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-07-16T12:00:01.000Z",
+        message: {
+          model: "claude-sonnet-4-20250514",
+          content: [{
+            type: "tool_use",
+            id: "toolu_persisted_question",
+            name: "AskUserQuestion",
+            input: {
+              questions: [{
+                header: "Choice",
+                question: "Which path?",
+                options: [
+                  { label: "Safe (Recommended)", description: "Keep the durable state." },
+                  { label: "Fast", description: "Prefer speed." },
+                ],
+              }],
+            },
+          }],
+        },
+      }),
+      "",
+    ].join("\n"));
+    fs.writeFileSync(quietPath, [
+      JSON.stringify({ type: "user", timestamp: "2026-07-16T12:00:00.000Z", cwd: "/repo", message: { role: "user", content: "Done" } }),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-07-16T12:00:01.000Z",
+        message: { model: "claude-sonnet-4-20250514", stop_reason: "end_turn", content: [{ type: "text", text: "Complete" }] },
+      }),
+      "",
+    ].join("\n"));
+    resetFilesRouteCacheForTests();
+    const initial = await currentFileScan({ fresh: true });
+    const pendingEntry = initial.snapshot.files.find((entry) => entry.path === pendingPath);
+    const quietEntry = initial.snapshot.files.find((entry) => entry.path === quietPath);
+    expect(pendingEntry).toBeDefined();
+    expect(quietEntry).toBeDefined();
+    const snapshotPath = path.join(testStateDir, "files-scan-snapshot.json");
+    const persisted = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as {
+      version: number;
+      snapshot: { files: typeof initial.snapshot.files };
+    };
+    const persistedPending = persisted.snapshot.files.find((entry) => entry.path === pendingPath)!;
+    Object.assign(persistedPending, {
+      proc: "running",
+      pid: process.pid,
+      pendingQuestion: {
+        kind: "question",
+        toolUseId: "toolu_persisted_question",
+        transcriptPath: pendingPath,
+        askedAt: "2026-07-16T12:00:01.000Z",
+        pid: process.pid,
+        paneTarget: "%7",
+        questions: [{
+          header: "Choice",
+          question: "Which path?",
+          multiSelect: false,
+          options: [
+            { label: "Safe", description: "Keep the durable state.", recommended: true },
+            { label: "Fast", description: "Prefer speed.", recommended: false },
+          ],
+        }],
+      },
+    });
+    fs.writeFileSync(snapshotPath, JSON.stringify(persisted) + "\n");
+
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      const resolved = path.resolve(String(filename));
+      if (resolved === pendingPath || resolved === quietPath) tracked.set(fd, resolved);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      const pathname = tracked.get(fd);
+      if (pathname) {
+        transcriptReads += 1;
+        if (pathname === failPath) {
+          const error = new Error("persisted Claude question EIO") as NodeJS.ErrnoException;
+          error.code = "EIO";
+          throw error;
+        }
+      }
+      return originalRead(fd, buffer, offset, length, position);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    const restarted = await cachedFileScan(undefined, undefined, 0);
+    const restartedPending = restarted.snapshot.files.find((entry) => entry.path === pendingPath)!;
+    const restartedQuiet = restarted.snapshot.files.find((entry) => entry.path === quietPath)!;
+    expect(pendingQuestionFor(restartedPending)).toMatchObject({
+      kind: "question",
+      toolUseId: "toolu_persisted_question",
+      pid: process.pid,
+      paneTarget: null,
+      questions: [{ question: "Which path?", options: [{ label: "Safe", recommended: true }, { label: "Fast", recommended: false }] }],
+    });
+    expect(pendingQuestionFor(restartedQuiet)).toBeNull();
+    const warm = transcriptReads;
+
+    fs.appendFileSync(pendingPath, "\n");
+    const changedStat = fs.statSync(pendingPath);
+    const changedPending = { ...restartedPending, size: changedStat.size, mtime: changedStat.mtimeMs / 1000 };
+    failPath = pendingPath;
+    expect(pendingQuestionFor(changedPending)).toBeNull();
+    const failed = transcriptReads;
+    failPath = null;
+    expect(pendingQuestionFor(changedPending)).toMatchObject({ toolUseId: "toolu_persisted_question" });
+
+    expect({ warm, failed, recovered: transcriptReads }).toEqual({ warm: 0, failed: 1, recovered: 2 });
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+  }
+}, 30_000);
 
 test("a same-size rewrite after restart invalidates persisted tail derivations", async () => {
   const previousTestStateDir = process.env.LLV_STATE_DIR;
@@ -318,8 +473,20 @@ test("one file generation reads each transcript tail once beyond the tail-cache 
     }) as typeof fs.closeSync;
 
     const scan = await currentFileScan({ fresh: true });
+    const migrationFiles = scan.snapshot.files.filter((entry) => entry.path.startsWith(fixtureDir + path.sep));
+    const migrationRegistry = new AgentRegistry(path.join(testStateDir, "migration-registry.json"));
+    await reconcileMigrationInventory(migrationRegistry, migrationFiles);
+    await reconcileMigrationInventory(migrationRegistry, migrationFiles);
 
-    expect(scan.snapshot.files.filter((entry) => entry.path.startsWith(fixtureDir + path.sep))).toHaveLength(65);
+    expect(migrationFiles).toHaveLength(65);
+    expect(tailReads).toBe(65);
+
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    const restarted = await cachedFileScan(undefined, undefined, 0);
+    const restartedFiles = restarted.snapshot.files.filter((entry) => entry.path.startsWith(fixtureDir + path.sep));
+    const restartedRegistry = new AgentRegistry(path.join(testStateDir, "restarted-migration-registry.json"));
+    await reconcileMigrationInventory(restartedRegistry, restartedFiles);
     expect(tailReads).toBe(65);
   } finally {
     fs.openSync = originalOpen;

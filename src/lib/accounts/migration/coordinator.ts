@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 
 import { accountManager } from "@/lib/accounts/manager";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
@@ -11,7 +12,7 @@ import {
 } from "@/lib/board/store";
 import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { listFiles } from "@/lib/scanner";
-import { tailRecordsResult } from "@/lib/scanner/activity";
+import { recordTranscriptComposerRelease, transcriptTurnResult } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -29,7 +30,6 @@ import {
 } from "./contracts";
 import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
 import { safeProviderDiagnostic, sanitizeProviderError } from "./safeHistoryCopy";
-import { turnStateFromRecords } from "./turnState";
 import { AUTO_BALANCE_COOLDOWN_MS } from "./quotaPolicy";
 
 export interface MigrationPreview {
@@ -98,18 +98,23 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const existing = conversationByPath.get(entry.path) ?? null;
     const parentConversation = entry.parent ? conversationByPath.get(entry.parent) ?? null : null;
     const owner = accountManager.resolveTranscriptOwner(engine, entry.path);
-    const tail = tailRecordsResult(entry.path, entry.size, entry.mtime * 1000);
-    const parsed = tail.complete ? turnStateFromRecords(tail.records, engine === "codex", true) : null;
+    const mtimeMs = entry.mtime * 1000;
+    const observedTurn = transcriptTurnResult(entry.path, entry.size, mtimeMs, engine === "codex");
+    const parsed = observedTurn.complete ? observedTurn.turn : null;
+    if (observedTurn.complete && entry.derivationComplete !== false && entry.activityReason === "pane_at_composer") {
+      recordTranscriptComposerRelease(entry.path, entry.size, mtimeMs, engine === "codex");
+    }
     const turn = projectedInventoryTurn(entry, parsed, existing);
     const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
     const configuredRoot = process.env.LLV_ROOT_CONVERSATION_ID;
+    const transcriptIdentity = { size: entry.size, mtimeMs };
     observations.push({
       engine,
       path: entry.path,
       accountId: owner?.accountId ?? null,
       launchProfile: emptyLaunchProfile({
-        cwd: currentProfile?.cwd || headCwd(entry.path, { maxLines: 40 }) || "",
+        cwd: currentProfile?.cwd || headCwd(entry.path, { maxLines: 40, identity: transcriptIdentity }) || "",
         model: currentProfile?.model ?? entry.launchModel ?? entry.model,
         effort: currentProfile?.effort ?? entry.effort ?? null,
         fast: currentProfile?.fast ?? null,
@@ -124,8 +129,8 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       }),
       turn,
       expectedTurnObservedAt: existing?.turn.observedAt ?? null,
-      startedAt: headSessionStartedAt(entry.path),
-      observedAt: !tail.complete && existing?.turn.observedAt
+      startedAt: headSessionStartedAt(entry.path, transcriptIdentity),
+      observedAt: !observedTurn.complete && existing?.turn.observedAt
         ? existing.turn.observedAt
         : new Date(Math.max(entry.mtime * 1000, inventoryStartedAt)).toISOString(),
     });
@@ -222,6 +227,29 @@ function terminalMigrationPhase(phase: string): boolean {
 function successorCreationReady(conversation: RegistryConversation, registry: AgentRegistry): boolean {
   if (conversation.turn.state !== "terminal" && conversation.turn.state !== "idle") return false;
   return !registry.pendingDeliveries(conversation.id).some((delivery) => delivery.state === "delivery-uncertain");
+}
+
+function completeProviderTurnObservation(
+  conversation: RegistryConversation,
+  source: RegistryConversation["generations"][number],
+): boolean {
+  let before: fs.Stats;
+  try {
+    before = fs.statSync(source.path);
+  } catch (error) {
+    // Legacy adapters and registry fixtures can carry virtual source paths.
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  const observed = transcriptTurnResult(source.path, before.size, before.mtimeMs, conversation.engine === "codex");
+  if (!observed.complete) return false;
+  let after: fs.Stats;
+  try {
+    after = fs.statSync(source.path);
+  } catch {
+    return false;
+  }
+  if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return false;
+  return observed.turn.state === "terminal" || observed.composerReleased;
 }
 
 export interface MigrationCoordinatorOptions {
@@ -384,6 +412,24 @@ export async function advanceConversationMigration(
       receipt = migration.providerReceipt;
     } else {
       if (!successorCreationReady(conversation, registry)) return conversation;
+      const creationFencePhase = migration.phase;
+      const restoreCreationFence = (current: RegistryConversation): RegistryConversation => {
+        const currentMigration = current.migration ?? migration;
+        if (currentMigration.phase !== creationFencePhase
+          && (currentMigration.phase === "preparing" || currentMigration.phase === "successor-starting")) {
+          return registry.transitionConversationMigration(
+            current.id,
+            currentMigration.revision,
+            [currentMigration.phase],
+            { phase: creationFencePhase },
+          );
+        }
+        return current;
+      };
+      let source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
+        ?? conversation.generations.at(-1);
+      if (!source) throw new Error("conversation has no source generation");
+      if (!completeProviderTurnObservation(conversation, source)) return conversation;
       if (migration.phase === "requested") {
         conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["requested"], { phase: "preparing" });
         migration = conversation.migration!;
@@ -392,10 +438,13 @@ export async function advanceConversationMigration(
         conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["preparing"], { phase: "successor-starting" });
         migration = conversation.migration!;
       }
-      if (!successorCreationReady(conversation, registry)) return conversation;
-      const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
+      conversation = registry.conversation(conversation.id) ?? conversation;
+      migration = conversation.migration ?? migration;
+      if (!successorCreationReady(conversation, registry)) return restoreCreationFence(conversation);
+      source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
+      if (!completeProviderTurnObservation(conversation, source)) return restoreCreationFence(conversation);
       const conversationId = conversation.id;
       receipt = await successorProvider.create({
         engine: conversation.engine,

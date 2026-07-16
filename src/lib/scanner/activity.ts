@@ -1,12 +1,24 @@
 import fs from "node:fs";
 
+import type { TurnState } from "@/lib/accounts/migration/contracts";
 import type { Activity, RootKey } from "../types";
 import { globalCache } from "./caches";
 import { readHead } from "./head";
 import { outputHolders } from "./process";
 import { turnStateFromRecords as structuredTurnStateFromRecords } from "@/lib/accounts/migration/turnState";
 
-const turnCache = globalCache<[number, number, string | null]>("turn");
+type CachedTurnEvidence = {
+  size: number;
+  mtimeMs: number;
+  codex: boolean;
+  authoritative: boolean;
+  turn: TurnState;
+  composerReleased: boolean;
+};
+
+globalCache<unknown>("turn").clear();
+const turnEvidenceCache = globalCache<CachedTurnEvidence>("turn-evidence-v1");
+const TURN_EVIDENCE_CACHE_CAP = 4_096;
 
 /** Shared tail read+parse, keyed by path and file identity. Within one
     /api/files scan the per-entry derivations (turn state, model, context, plan,
@@ -103,6 +115,88 @@ export interface TailRecordsResult {
   complete: boolean;
 }
 
+function storeTurnEvidence(pathname: string, evidence: CachedTurnEvidence): void {
+  const key = `${evidence.authoritative ? "authoritative" : "activity"}:${pathname}`;
+  turnEvidenceCache.delete(key);
+  while (turnEvidenceCache.size >= TURN_EVIDENCE_CACHE_CAP) {
+    const oldest = turnEvidenceCache.keys().next().value;
+    if (oldest === undefined) break;
+    turnEvidenceCache.delete(oldest);
+  }
+  turnEvidenceCache.set(key, evidence);
+}
+
+export interface TranscriptTurnResult {
+  turn: TurnState;
+  complete: boolean;
+  composerReleased: boolean;
+}
+
+/** Complete, identity-bound turn evidence shared by scanner and migration
+    consumers. The compact cache retains production-sized inventories without
+    retaining every parsed tail record. */
+export function transcriptTurnResult(
+  pathname: string,
+  size: number,
+  mtimeMs: number,
+  codex: boolean,
+  authoritative = true,
+): TranscriptTurnResult {
+  const key = `${authoritative ? "authoritative" : "activity"}:${pathname}`;
+  const cached = turnEvidenceCache.get(key);
+  if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.codex === codex) {
+    storeTurnEvidence(pathname, cached);
+    return { turn: { ...cached.turn }, complete: true, composerReleased: cached.composerReleased };
+  }
+  const tail = tailRecordsResult(pathname, size, mtimeMs);
+  const turn = structuredTurnStateFromRecords(tail.records, codex, authoritative);
+  if (tail.complete) {
+    storeTurnEvidence(pathname, { size, mtimeMs, codex, authoritative, turn, composerReleased: false });
+    const companionAuthoritative = !authoritative;
+    const companionKey = `${companionAuthoritative ? "authoritative" : "activity"}:${pathname}`;
+    const cachedCompanion = turnEvidenceCache.get(companionKey);
+    const companionComposerReleased = cachedCompanion?.size === size
+      && cachedCompanion.mtimeMs === mtimeMs
+      && cachedCompanion.codex === codex
+      && cachedCompanion.composerReleased;
+    const companionTurn = structuredTurnStateFromRecords(tail.records, codex, companionAuthoritative);
+    storeTurnEvidence(pathname, {
+      size,
+      mtimeMs,
+      codex,
+      authoritative: companionAuthoritative,
+      turn: companionTurn,
+      composerReleased: companionComposerReleased,
+    });
+  }
+  return { turn, complete: tail.complete, composerReleased: false };
+}
+
+export function primeTranscriptTurnEvidence(
+  pathname: string,
+  size: number,
+  mtimeMs: number,
+  codex: boolean,
+  turn: TurnState,
+  options: { authoritative?: boolean; composerReleased?: boolean } = {},
+): void {
+  const authoritative = options.authoritative ?? true;
+  const composerReleased = options.composerReleased ?? false;
+  storeTurnEvidence(pathname, { size, mtimeMs, codex, authoritative, turn: { ...turn }, composerReleased });
+}
+
+export function recordTranscriptComposerRelease(
+  pathname: string,
+  size: number,
+  mtimeMs: number,
+  codex: boolean,
+): void {
+  const key = `authoritative:${pathname}`;
+  const cached = turnEvidenceCache.get(key);
+  if (!cached || cached.size !== size || cached.mtimeMs !== mtimeMs || cached.codex !== codex) return;
+  storeTurnEvidence(pathname, { ...cached, composerReleased: true });
+}
+
 export function tailRecordsResult(pathname: string, size: number, mtimeMs: number, nbytes = 131_072): TailRecordsResult {
   const cached = tailCache.get(pathname);
   if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.nbytes === nbytes) {
@@ -163,15 +257,6 @@ function readTail(pathname: string, size: number, nbytes: number): TailRecordsRe
   return { records: out, complete };
 }
 
-function jsonlTurnState(pathname: string, size: number, mtimeMs: number, codex: boolean) {
-  const result = tailRecordsResult(pathname, size, mtimeMs);
-  const state = structuredTurnStateFromRecords(result.records, codex).state;
-  return {
-    state: state === "terminal" ? "done" : state === "busy" ? "busy" : null,
-    complete: result.complete,
-  };
-}
-
 /** Compatibility projection retained for scanner callers. */
 export function turnStateFromRecords(records: Record<string, unknown>[], codex: boolean): "done" | "busy" | null {
   const state = structuredTurnStateFromRecords(records, codex).state;
@@ -201,15 +286,9 @@ export function activityVerdict(
   let complete = true;
   if (pathname.endsWith(".jsonl")) {
     const mtimeMs = mtime * 1000;
-    const cached = turnCache.get(pathname);
-    let state: string | null;
-    if (cached?.[0] === size && cached[1] === mtimeMs) state = cached[2];
-    else {
-      const turn = jsonlTurnState(pathname, size, mtimeMs, root.startsWith("codex"));
-      state = turn.state;
-      complete = turn.complete;
-      if (turn.complete) turnCache.set(pathname, [size, mtimeMs, state]);
-    }
+    const turn = transcriptTurnResult(pathname, size, mtimeMs, root.startsWith("codex"), false);
+    const state = turn.turn.state === "terminal" ? "done" : turn.turn.state === "busy" ? "busy" : null;
+    complete = turn.complete;
     if (state === "busy") {
       return age < 180
         ? { state: "live", reason: "jsonl_turn_open", complete }
