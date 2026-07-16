@@ -9,6 +9,7 @@ import { useComposer } from "@/hooks/useComposer";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
+import { requestFilesRefresh } from "@/lib/filesEvents";
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
 import type { RoleDefinition } from "@/lib/roles/types";
 import type { FileEntry } from "@/lib/types";
@@ -583,12 +584,13 @@ export function DraftAgentPane({
         json = null;
       }
       const outcome = classifySpawnResponse(res.status, res.ok, json);
+      if (typeof json?.launchId === "string" && typeof json.conversationId === "string") requestFilesRefresh();
       if (outcome.kind === "launched") {
         setAttempt(applySpawnOutcome(candidate, outcome));
       } else if (outcome.kind === "failed-launch") {
         setAttempt(applySpawnFailure(candidate, outcome));
       } else if (outcome.kind === "failed-preflight") {
-        /* The server proved that no pane opened. Restore the exact durable
+        /* The server released worker ownership. Restore the exact durable
            payload so editing and retrying cannot lose an attachment. */
         setAttempt(null);
         setText(candidate.request.prompt);
@@ -650,9 +652,7 @@ export function DraftAgentPane({
       }
     }
     if (!payloadText.trim() && !attachments.images.length) return;
-    /* eslint-disable-next-line react-hooks/purity -- `send` only runs from
-       user events (submit/keydown), never during render; the id and timestamp
-       must be minted at click time. */
+    /* Mint attempt identity when the user submits the draft. */
     const candidate = createSpawnAttempt(newAttemptId(), Date.now(), {
       engine,
       model,

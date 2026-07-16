@@ -192,6 +192,7 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
         conversationId: conversation.id,
         launched: true,
         retrySafe: false,
+        initialMessage: "delivered" as const,
         state: "settled",
       };
     },
@@ -321,6 +322,7 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
         conversationId: conversation.id,
         launched: true,
         retrySafe: false,
+        initialMessage: "delivered" as const,
         state: "settled",
       };
     },
@@ -420,6 +422,7 @@ test("Codex and Claude worker and root recovery retain their original lineage sh
           conversationId: conversation.id,
           launched: true,
           retrySafe: false,
+          initialMessage: "delivered" as const,
           state: "settled",
         }),
       });
@@ -623,6 +626,7 @@ test.each(["codex", "claude"] as const)("concurrent %s sends wait for recovery p
           conversationId: conversation.id,
           launched: true,
           retrySafe: false,
+          initialMessage: "delivered" as const,
           state: "settled",
         };
       },

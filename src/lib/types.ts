@@ -13,6 +13,16 @@ export type Engine = "codex" | "claude" | "shell";
 export type Activity = "live" | "recent" | "stalled" | "idle";
 export type Fmt = "codex" | "claude" | "plain";
 
+export interface StructuredSpawnCardState {
+  launchId: string;
+  clientAttemptId: string | null;
+  accountId: string | null;
+  state: "starting" | "binding" | "queued" | "failed" | "recovered";
+  initialMessage: "pending" | "queued" | "delivered" | "failed";
+  retrySafe: boolean;
+  error: string | null;
+}
+
 /** Current quota wall affecting a hosted conversation. Account provenance
     joins the existing conversation identity at the read-model boundary. */
 export interface RateLimitState {
@@ -158,6 +168,8 @@ export interface FileEntry {
   /** Live per-session migration annotation while an intent drains. Absent for
       every session not currently migrating. */
   migration?: ConversationMigration;
+  /** Durable launch projection shown before its transcript enters the scan. */
+  spawn?: StructuredSpawnCardState;
 }
 
 /** Per-session migration annotation carried on a {@link FileEntry} while an

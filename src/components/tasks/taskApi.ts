@@ -27,9 +27,16 @@ export interface TaskSendResult {
 
 export interface TaskSpawnResult {
   task: BoardTask;
-  target: string;
+  target: string | null;
   path: string | null;
   panePid: number | null;
+  launchId: string;
+  conversationId: string;
+  initialMessage: "pending" | "queued" | "delivered" | "failed";
+  state: "starting" | "path-pending" | "settled" | "failed" | "conflict";
+  retrySafe: boolean;
+  assignment: "delivered" | "failed" | "spawning" | "handoff";
+  error?: string;
 }
 
 type ApiResult<T> = { ok: true; data: T } | { ok: false; error: string; status: number };
@@ -208,6 +215,7 @@ export interface SpawnAgentInput {
   cwd: string;
   effort?: string;
   fast?: boolean;
+  clientAttemptId?: string;
 }
 
 /** Spawns an agent with the task text as the brief; same stale-text guard
