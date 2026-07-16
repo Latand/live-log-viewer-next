@@ -499,7 +499,8 @@ function persistedProjects(): {
     slugs name it (`projectFromSlug` of the dashed path). One naming scheme
     means a codex session, a claude session, and any worktree of the same repo
     all land in the SAME sidebar group instead of lookalike neighbors. */
-function projectInfoFromCwd(cwd: string): { project: string; worktree?: string; repo?: string } | null {
+export function projectInfoFromCwd(cwd: string): { project: string; worktree?: string; repo?: string } | null {
+  if (!cwd.trim()) return null;
   const scratchpad = projectInfoFromClaudeTaskCwd(cwd);
   if (scratchpad) return scratchpad;
   let worktree =

@@ -191,7 +191,8 @@ export interface SpawnResponseBody {
   conversationId?: string;
   launched?: boolean;
   retrySafe?: boolean;
-  state?: "settled" | "path-pending" | "starting" | "conflict";
+  initialMessage?: "pending" | "queued" | "delivered" | "failed";
+  state?: "settled" | "path-pending" | "starting" | "failed" | "conflict";
   error?: string;
 }
 
@@ -200,8 +201,8 @@ export type SpawnOutcome =
   /** A worker exists (or very likely does). `durable` picks booting when the
       exact transcript path is known, else confirming. */
   | { kind: "launched"; durable: "booting" | "confirming"; target: string; path: string | null; conversationId: string | null; launchId: string | null }
-  /** Proven pre-launch failure: no pane opened, images cleaned up server-side.
-      Safe to retry — the draft re-enables send and shows the reason. */
+  /** Proven retry-safe failure: the server has released worker ownership, so
+      the draft re-enables send and shows the reason. */
   | { kind: "failed-preflight"; message: string | null }
   /** A pane opened, then positive launch verification found a terminal screen. */
   | { kind: "failed-launch"; message: string; target: string; conversationId: string | null; launchId: string | null }
@@ -217,11 +218,14 @@ export const CONFIRM_ATTENTION_MS = 90_000;
 
 /**
  * Map the spawn POST result to a card outcome. The duplicate-prevention
- * invariant lives here: only an outcome the client can *prove* is pre-launch
- * (`failed-preflight`) re-enables send; every uncertain result is `ambiguous`
- * and keeps the card frozen. A `200 {ok:true}` is always trusted as launched.
+ * invariant lives here: only an outcome the server marks retry-safe re-enables
+ * send; every uncertain result is `ambiguous` and keeps the card frozen. A
+ * `200 {ok:true}` is trusted as a durable launch receipt.
  */
 export function classifySpawnResponse(status: number, ok: boolean, body: SpawnResponseBody | null): SpawnOutcome {
+  /* A terminal replay retains its durable card identity while releasing the
+     draft guard for a fresh clientAttemptId. */
+  if (body?.retrySafe) return { kind: "failed-preflight", message: body.error ?? null };
   if (ok && body?.ok) {
     const path = typeof body.path === "string" ? body.path : null;
     const conversationId = typeof body.conversationId === "string" ? body.conversationId : null;
@@ -243,8 +247,6 @@ export function classifySpawnResponse(status: number, ok: boolean, body: SpawnRe
       launchId,
     };
   }
-  /* A replay of a receipt that failed before launch is explicitly retry-safe. */
-  if (body?.retrySafe) return { kind: "failed-preflight", message: body?.error ?? null };
   /* A conflicting attempt (same key, different request) can leave the
      original worker alive. Send stays disabled. */
   if (status === 409) return { kind: "ambiguous" };

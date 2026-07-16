@@ -320,6 +320,42 @@ describe("task delivery assembly", () => {
     expect(result.task.assignments).toEqual([{ path: "/one", panePid: null, state: "delivered", error: null, at: "new" }]);
   });
 
+  test("task launch replay updates one assignment by durable launch identity", () => {
+    const launchId = "9173e9a2-2f14-4a70-818a-bd4052a1ad4a";
+    const conversationId = "conversation_ac6029b9";
+    const pending = mergeAssignments([], [{
+      launchId,
+      clientAttemptId: "task_282_post_launch_write",
+      conversationId,
+      path: null,
+      panePid: null,
+      state: "spawning",
+      error: null,
+      at: "admitted",
+    }]);
+    const attributed = mergeAssignments(pending, [{
+      launchId,
+      clientAttemptId: "task_282_post_launch_write",
+      conversationId,
+      path: "/sessions/recovered.jsonl",
+      panePid: 3627416,
+      state: "delivered",
+      error: null,
+      at: "replayed",
+    }]);
+
+    expect(attributed).toEqual([{
+      launchId,
+      clientAttemptId: "task_282_post_launch_write",
+      conversationId,
+      path: "/sessions/recovered.jsonl",
+      panePid: 3627416,
+      state: "delivered",
+      error: null,
+      at: "replayed",
+    }]);
+  });
+
   test("pins retries to the account owned by the requested engine", () => {
     const assignments = [
       { path: "/claude", panePid: 1, state: "failed" as const, error: "retry", at: "now", engine: "claude" as const, accountId: "claude-work" },

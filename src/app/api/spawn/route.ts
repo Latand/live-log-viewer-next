@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
@@ -25,7 +25,7 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
-import { spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
+import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
@@ -47,12 +47,14 @@ interface SpawnRouteDependencies {
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
   runtimeHostClient: typeof runtimeHostClient;
   spawnStructuredConversation: typeof spawnStructuredConversation;
+  defer(work: () => Promise<void>): void;
 }
 
 const productionSpawnRouteDependencies: SpawnRouteDependencies = {
   resolveHealthySpawnAccount,
   runtimeHostClient,
   spawnStructuredConversation,
+  defer: (work) => after(work),
 };
 
 interface SuggestResponse {
@@ -256,8 +258,19 @@ async function postSpawn(
       const structured = begun.receipt.transport === "structured"
         || (begun.receipt.transport === null
           && Boolean(begun.receipt.key && registry.snapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost));
-      const response = spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured });
-      if (begun.receipt.state === "failed") return NextResponse.json({ error: "original spawn failed before launch", retrySafe: true }, { status: 409 });
+      let receipt = begun.receipt;
+      let initialMessage: SpawnResponse["initialMessage"] | undefined;
+      const runtimeClient = structured ? dependencies.runtimeHostClient() : null;
+      if (runtimeClient) {
+        try {
+          const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, runtimeClient);
+          receipt = reconciled;
+          initialMessage = reconciled.initialMessage;
+        } catch {
+          /* The durable registry receipt remains available during runtime resynchronization. */
+        }
+      }
+      const response = spawnResponseForReceipt(receipt, receipt.artifactPath, { structured, initialMessage });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
     launchId = begun.receipt.launchId;
@@ -273,20 +286,45 @@ async function postSpawn(
     if (transport === "structured") {
       const runtimeClient = dependencies.runtimeHostClient();
       if (!runtimeClient) throw new Error("structured spawn runtime host is unavailable");
-      const response = await dependencies.spawnStructuredConversation({
-        engine,
-        receipt: begun.receipt,
-        spec,
-        account,
-        prompt,
-        registry,
-        client: runtimeClient,
+      dependencies.defer(async () => {
+        let response: SpawnResponse;
+        try {
+          response = await dependencies.spawnStructuredConversation({
+            engine,
+            receipt: begun.receipt,
+            spec,
+            account,
+            prompt,
+            registry,
+            client: runtimeClient,
+          });
+        } catch (error) {
+          console.error("[spawn] structured launch failed", {
+            launchId: begun.receipt.launchId,
+            conversationId: begun.receipt.conversationId,
+            error,
+          });
+          return;
+        }
+        if (parentArtifactPath && response.path) {
+          try {
+            rememberHandoffChild(response.path, parentArtifactPath);
+            persistHandoffLineage();
+          } catch (error) {
+            console.error("[spawn] handoff lineage persistence failed", {
+              launchId: begun.receipt.launchId,
+              conversationId: begun.receipt.conversationId,
+              childArtifactPath: response.path,
+              parentArtifactPath,
+              error,
+            });
+          }
+        }
       });
-      if (parentArtifactPath && response.path) {
-        rememberHandoffChild(response.path, parentArtifactPath);
-        persistHandoffLineage();
-      }
-      return NextResponse.json(response);
+      return NextResponse.json(
+        spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured: true }),
+        { status: 202 },
+      );
     }
     /* Pasted images land in the inbox and reach the fresh agent as file paths
        appended to its first prompt — the same contract the pane composer uses. */

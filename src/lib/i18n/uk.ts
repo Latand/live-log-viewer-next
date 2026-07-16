@@ -292,6 +292,18 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.quickAckAria": "Надіслати агенту швидке «Так, продовжуй»",
   "composer.quickAckTitle": "Швидка відповідь — так, продовжуй",
 
+  "spawnCard.starting": "Запуск прийнято. Агент запускається.",
+  "spawnCard.binding": "Ідентифікатор агента створено. Під’єднуємо структурований хост.",
+  "spawnCard.queued": "Структурований хост готовий. Перше повідомлення в черзі.",
+  "spawnCard.failed": "Запуск завершився з помилкою.",
+  "spawnCard.recovered": "Запуск відновлено за збереженими даними.",
+  "spawnCard.initial.pending": "Перше повідомлення: очікує на під’єднання хоста",
+  "spawnCard.initial.queued": "Перше повідомлення: у черзі",
+  "spawnCard.initial.delivered": "Перше повідомлення: доставлено",
+  "spawnCard.initial.failed": "Перше повідомлення: помилка доставки",
+  "spawnCard.retrySafe": "Цей запуск завершено. Можна створити нову спробу.",
+  "spawnCard.launch": "Запуск {id}",
+
   "draft.readPrompt": "Прочитай розмову агента у файлі {src} і продовж роботу звідти: ",
   "draft.needDir": "вкажи робочу директорію",
   "draft.launchFailed": "не вдалося запустити",

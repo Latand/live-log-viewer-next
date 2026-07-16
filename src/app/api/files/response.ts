@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
 import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
+import { preallocatedStructuredSpawnCards } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
@@ -22,7 +23,7 @@ import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
-import { projectRootForCwd } from "@/lib/scanner/describe";
+import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryFallbacks } from "@/lib/scanner/projectDirectories";
 import type { FilesResponse, ProjectCatalogEntry } from "@/lib/types";
 
@@ -44,7 +45,8 @@ function projectedProjectCatalog(
   for (const conversation of Object.values(snapshot.conversations)) {
     const latest = conversation.generations.at(-1);
     if (!latest) continue;
-    if (latest.launchProfile.project) projectByPath.set(latest.path, latest.launchProfile.project);
+    const project = projectInfoFromCwd(latest.launchProfile.cwd)?.project ?? latest.launchProfile.project;
+    if (project) projectByPath.set(latest.path, project);
     for (const generation of conversation.generations) {
       if (generation.path !== latest.path) archivedPaths.add(generation.path);
     }
@@ -78,6 +80,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
   const registrySnapshot = registry.snapshot();
+  files.push(...preallocatedStructuredSpawnCards(files, registrySnapshot));
   const conversationLookup = conversationLookupFromSnapshot(registrySnapshot);
   const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
   const filesByPath = new Map(files.map((file) => [file.path, file]));
@@ -108,7 +111,9 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       path: parentPath,
       root: parentConversation.engine === "codex" ? "codex-sessions" as const : "claude-projects" as const,
       name: rootPath ? path.relative(rootPath, parentPath) : path.basename(parentPath),
-      project: parentGeneration.launchProfile.project ?? child.project,
+      project: projectInfoFromCwd(parentGeneration.launchProfile.cwd)?.project
+        ?? parentGeneration.launchProfile.project
+        ?? child.project,
       cwd: parentGeneration.launchProfile.cwd,
       projectRoot: parentGeneration.launchProfile.cwd ? projectRootForCwd(parentGeneration.launchProfile.cwd) : null,
       title: parentGeneration.launchProfile.title ?? path.basename(parentPath, path.extname(parentPath)),
@@ -140,6 +145,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     || conversation.continuityPaths.includes(pathname);
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
+    if (file.spawn) continue;
     const conversation = Object.values(registrySnapshot.conversations).find((candidate) =>
       candidate.engine === file.engine && ownsPath(candidate, file.path));
     if (!conversation) continue;
@@ -158,7 +164,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     if (latest?.path === file.path) {
       const profile = latest.launchProfile;
       file.title = profile.title ?? file.title;
-      file.project = profile.project ?? file.project;
+      file.project = projectInfoFromCwd(profile.cwd)?.project ?? profile.project ?? file.project;
       file.launchModel = profile.model ?? file.launchModel;
       file.effort = profile.effort ?? file.effort;
       file.goal = profile.goal ?? file.goal;

@@ -301,6 +301,18 @@ export const en = {
   "composer.quickAckTitle": "Quick reply — yes, continue",
 
   // DraftAgentPane
+  "spawnCard.starting": "Launch admitted. Starting the agent.",
+  "spawnCard.binding": "Agent identity allocated. Binding the structured host.",
+  "spawnCard.queued": "The structured host is ready. The initial message is queued.",
+  "spawnCard.failed": "The launch ended with an error.",
+  "spawnCard.recovered": "Durable evidence recovered this launch.",
+  "spawnCard.initial.pending": "Initial message: waiting for host binding",
+  "spawnCard.initial.queued": "Initial message: queued",
+  "spawnCard.initial.delivered": "Initial message: delivered",
+  "spawnCard.initial.failed": "Initial message: failed",
+  "spawnCard.retrySafe": "This launch is closed. You can start a new attempt.",
+  "spawnCard.launch": "Launch {id}",
+
   "draft.readPrompt": "Read the agent conversation in file {src} and continue from there: ",
   "draft.needDir": "specify a working directory",
   "draft.launchFailed": "couldn't launch",

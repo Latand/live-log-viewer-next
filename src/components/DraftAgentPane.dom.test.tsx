@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { FileEntry } from "@/lib/types";
+import { FILES_CHANGED_EVENT } from "@/lib/filesEvents";
 
 import { DraftAgentPane } from "./DraftAgentPane";
 
@@ -61,6 +62,9 @@ afterEach(() => {
 
 test("Reviewer role persists and submits the reviewed conversation", async () => {
   const posts: Record<string, unknown>[] = [];
+  let filesRefreshes = 0;
+  const onFilesChanged = () => { filesRefreshes += 1; };
+  window.addEventListener(FILES_CHANGED_EVENT, onFilesChanged);
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
     if (url === "/api/spawn" && init?.method === "POST") {
@@ -68,7 +72,7 @@ test("Reviewer role persists and submits the reviewed conversation", async () =>
       return {
         ok: true,
         status: 202,
-        json: async () => ({ ok: true, state: "starting", launched: false, path: null, launchId: "launch-reviewer" }),
+        json: async () => ({ ok: true, state: "starting", launched: false, path: null, launchId: "launch-reviewer", conversationId: "conversation_reviewer" }),
       } as Response;
     }
     if (url.startsWith("/api/spawn?")) return { ok: true, json: async () => ({ dirs: ["/repo"] }) } as Response;
@@ -123,4 +127,6 @@ test("Reviewer role persists and submits the reviewed conversation", async () =>
     reviews: implementer.conversationId,
     prompt: "Review the durable membership work",
   });
+  expect(filesRefreshes).toBe(1);
+  window.removeEventListener(FILES_CHANGED_EVENT, onFilesChanged);
 });

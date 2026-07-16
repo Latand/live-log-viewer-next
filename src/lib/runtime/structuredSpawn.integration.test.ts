@@ -18,7 +18,7 @@ import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./struct
 import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
-import { recoverPendingStructuredSpawns, spawnStructuredConversation, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, type SpawnedStructuredHost } from "./structuredSpawn";
+import { INITIAL_MESSAGE_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
 
 type UnsequencedEvent = RuntimeEvent extends infer Event
@@ -91,6 +91,238 @@ test("fresh managed Claude structured spawns select the shared settings snapshot
     .toBe("/shared/claude/settings.json");
   expect(structuredClaudeSpawnPolicyBaseSettingsPath(legacy, () => "/shared/claude/settings.json"))
     .toBeNull();
+});
+
+test("attempt e9e8a4b4 terminalizes a queued initial message after the bounded host timeout", async () => {
+  let now = 0;
+  let polls = 0;
+  const client = {
+    operationStatus: async () => {
+      polls += 1;
+      return {
+        receipt: {
+          operationId: "spawn_message_e9e8a4b4",
+          idempotencyKey: "spawn_e9e8a4b4",
+          conversationId: "conversation_e9e8a4b4",
+          kind: "send" as const,
+          status: "queued" as const,
+          at: new Date(0).toISOString(),
+          revision: polls,
+        },
+        replayed: polls > 1,
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  await expect(waitForStructuredInitialMessage(client, "spawn_message_e9e8a4b4", {
+    now: () => now,
+    sleep: async (ms) => { now += ms; },
+  })).rejects.toThrow(`initial message remained queued for ${INITIAL_MESSAGE_TIMEOUT_MS}ms`);
+  expect(now).toBe(INITIAL_MESSAGE_TIMEOUT_MS);
+  expect(polls).toBeGreaterThan(1);
+});
+
+test("initial-message confirmation survives a transient runtime status read", async () => {
+  let now = 0;
+  let polls = 0;
+  const client = {
+    operationStatus: async () => {
+      polls += 1;
+      if (polls === 1) throw new Error("runtime socket is resynchronizing");
+      return {
+        receipt: {
+          operationId: "spawn_message_transient",
+          idempotencyKey: "spawn_transient",
+          conversationId: "conversation_transient",
+          kind: "send" as const,
+          status: "delivered" as const,
+          at: new Date(0).toISOString(),
+          revision: polls,
+        },
+        replayed: true,
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  await waitForStructuredInitialMessage(client, "spawn_message_transient", {
+    now: () => now,
+    sleep: async (ms) => { now += ms; },
+  });
+
+  expect(polls).toBe(2);
+  expect(now).toBe(250);
+});
+
+test("attempt 93c42855 recovers a failed registry receipt from transcript evidence", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `transcript-replay-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "stikon",
+    clientAttemptId: "attempt_93c42855_stikon",
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: id },
+    artifactPath,
+    cwd,
+    accountId: "stikon",
+    status: "unhosted",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  registry.failStructuredSpawn(begun.receipt.launchId, "structured host ownership is unavailable");
+  fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Own issue #282" } })}\n`);
+
+  const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, runtimeClient(journal));
+
+  expect(reconciled).toMatchObject({ state: "completed", initialMessage: "delivered" });
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "completed",
+    completionMode: "route-recovered",
+    error: null,
+  });
+});
+
+test("clientAttemptId replay materializes its reserved conversation from runtime evidence", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `runtime-replay-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "terra",
+    clientAttemptId: "p0_282_runtime_replay_20260716_a1",
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const client = {
+    snapshot: async () => ({
+      schemaVersion: 1,
+      snapshotSeq: 4,
+      retentionFloorSeq: 0,
+      serverTime: new Date().toISOString(),
+      runtime: { hostEpoch: 1, health: "ready" },
+      filesRevision: 0,
+      sessions: [{
+        conversationId: begun.receipt.conversationId,
+        sessionKey: { engine: "codex" as const, sessionId: id },
+        hostKind: "codex-app-server" as const,
+        host: "hosted" as const,
+        turn: "running" as const,
+        provenance: "structured" as const,
+        revision: 4,
+        attentionIds: [],
+        recentReceipts: [],
+        accountId: "terra",
+        parentConversationId: null,
+        flowId: null,
+        workflowId: null,
+        cwd,
+        artifactPath,
+        capabilities: { steer: true, structuredAttention: true },
+        activeTurnId: "turn-initial",
+      }],
+      attentions: [],
+      recentOperations: [],
+      edges: [],
+      flows: [],
+      workflows: [],
+      tasks: [],
+      deployments: [],
+    }),
+    operationStatus: async (operationId: string) => operationId === `spawn_message_${begun.receipt.launchId}` ? {
+      receipt: {
+        operationId,
+        idempotencyKey: `spawn_${begun.receipt.launchId}`,
+        conversationId: begun.receipt.conversationId,
+        kind: "send" as const,
+        status: "delivered" as const,
+        at: new Date().toISOString(),
+        revision: 2,
+      },
+      replayed: true,
+    } : null,
+  } as unknown as RuntimeHostClient;
+
+  const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client);
+
+  expect(reconciled).toMatchObject({
+    state: "completed",
+    conversationId: begun.receipt.conversationId,
+    artifactPath,
+    key: { engine: "codex", sessionId: id },
+    initialMessage: "delivered",
+  });
+  expect(registry.snapshot().conversations[begun.receipt.conversationId]?.generations).toHaveLength(1);
+});
+
+test("p0_282 empty-host replay terminalizes the receipt and releases its stale guard", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `empty-host-replay-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "terra",
+    clientAttemptId: "p0_282_spawn_visibility_20260716_a1",
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: id },
+    artifactPath,
+    cwd,
+    accountId: "terra",
+    status: "unhosted",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  const client = {
+    snapshot: async () => ({ sessions: [] }),
+    operationStatus: async (operationId: string) => ({
+      receipt: {
+        operationId,
+        idempotencyKey: operationId,
+        conversationId: begun.receipt.conversationId,
+        kind: operationId === begun.receipt.launchId ? "spawn" as const : "send" as const,
+        status: operationId === begun.receipt.launchId ? "delivered" as const : "queued" as const,
+        at: begun.receipt.createdAt,
+        revision: 1,
+      },
+      replayed: true,
+    }),
+  } as unknown as RuntimeHostClient;
+  let released = 0;
+
+  const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
+    now: () => Date.parse(begun.receipt.createdAt) + INITIAL_MESSAGE_TIMEOUT_MS,
+    releaseHost: async () => { released += 1; return true; },
+  });
+
+  expect(reconciled).toMatchObject({ state: "failed", initialMessage: "failed" });
+  expect(registry.snapshot().entries[`codex:${id}`]).toMatchObject({
+    status: "dead",
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(released).toBe(1);
 });
 
 function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {

@@ -307,6 +307,9 @@ export function removeAssignment(existing: BoardTask[], id: string, path: string
 }
 
 export interface AssignmentPatch {
+  launchId?: string | null;
+  clientAttemptId?: string | null;
+  conversationId?: string | null;
   path: string | null;
   panePid: number | null;
   state: TaskAssignment["state"];
@@ -325,12 +328,19 @@ export function mergeAssignments(assignments: TaskAssignment[], patches: Assignm
   let next = assignments.slice();
   for (const patch of patches) {
     const index = next.findIndex((assignment) => {
+      if (patch.launchId && assignment.launchId === patch.launchId) return true;
       if (patch.path !== null && assignment.path === patch.path) return true;
       return patch.path === null && patch.panePid !== null && assignment.path === null && assignment.panePid === patch.panePid;
-    });
+      });
+    const previous = index >= 0 ? next[index] : undefined;
+    const launchId = patch.launchId !== undefined ? patch.launchId : previous?.launchId;
+    const clientAttemptId = patch.clientAttemptId !== undefined ? patch.clientAttemptId : previous?.clientAttemptId;
+    const conversationId = patch.conversationId !== undefined ? patch.conversationId : previous?.conversationId;
     const merged: TaskAssignment = {
+      ...(launchId !== undefined ? { launchId } : {}),
+      ...(clientAttemptId !== undefined ? { clientAttemptId } : {}),
       path: patch.path,
-      ...(index >= 0 && next[index]?.conversationId ? { conversationId: next[index]?.conversationId } : {}),
+      ...(conversationId !== undefined ? { conversationId } : {}),
       panePid: patch.panePid,
       state: patch.state,
       error: patch.error,

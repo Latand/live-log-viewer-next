@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 import { agentRegistry, RegistryReadError } from "@/lib/agent/registry";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { projectInfoFromCwd } from "@/lib/scanner/describe";
 import type { FileEntry } from "@/lib/types";
 
 import { isRenameableSessionEntry } from "./renameEligibility";
@@ -65,7 +66,8 @@ function registryProjection(registry: Registry, surfaceUnexpectedError = false):
     for (const pathname of owned) if (!conversationByPath.has(pathname)) conversationByPath.set(pathname, conversation.id);
     const latest = conversation.generations.at(-1);
     if (!latest) continue;
-    if (latest.launchProfile.project) projectByPath.set(latest.path, latest.launchProfile.project);
+    const project = projectInfoFromCwd(latest.launchProfile.cwd)?.project ?? latest.launchProfile.project;
+    if (project) projectByPath.set(latest.path, project);
     for (const generation of conversation.generations) {
       if (generation.path !== latest.path) archivedPaths.add(generation.path);
     }
@@ -120,6 +122,10 @@ function sessionTitleProjector(): (entry: FileEntry) => void {
 
   return (entry) => {
     if (entry.engine !== "claude" && entry.engine !== "codex") return;
+    if (entry.spawn) {
+      entry.renamable = false;
+      return;
+    }
     const owner = conversationByPath.get(entry.path);
     if (!entry.conversationId) {
       if (owner) entry.conversationId = owner;
@@ -128,7 +134,9 @@ function sessionTitleProjector(): (entry: FileEntry) => void {
     const latest = conversation?.generations.at(-1);
     if (latest?.path === entry.path) {
       entry.title = latest.launchProfile.title ?? entry.title;
-      entry.project = latest.launchProfile.project ?? entry.project;
+      entry.project = projectInfoFromCwd(latest.launchProfile.cwd)?.project
+        ?? latest.launchProfile.project
+        ?? entry.project;
     }
     entry.renamable = isRenameableSessionEntry(entry);
     if (index.size > 0) {

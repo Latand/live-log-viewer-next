@@ -1469,7 +1469,7 @@ test("discoverFilesWithProjectCatalog keeps quiet projects in the recent cap", a
   }
 });
 
-test("registry launch projects govern scheme caps and the uncapped project catalog", async () => {
+test("registry launch cwd governs scheme caps and the uncapped project catalog", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-launch-project-cap-"));
   const previousStateDir = process.env.LLV_STATE_DIR;
   process.env.LLV_STATE_DIR = path.join(base, "state");
@@ -1483,6 +1483,7 @@ test("registry launch projects govern scheme caps and the uncapped project catal
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const paths: string[] = [];
+    const canonicalProject = projectForCwd(base)!;
     for (let index = 0; index < DEFAULT_SCHEME_CARDS_PER_PROJECT * 2; index += 1) {
       const scannerProject = index % 2 === 0 ? "scanner-a" : "scanner-b";
       const pathname = path.join(roots["claude-projects"], scannerProject, `session-${index}.jsonl`);
@@ -1500,9 +1501,9 @@ test("registry launch projects govern scheme caps and the uncapped project catal
 
     const scan = await discoverFilesWithProjectCatalog(roots);
 
-    expect(scan.files.filter((entry) => entry.project === "effective-project")).toHaveLength(DEFAULT_SCHEME_CARDS_PER_PROJECT);
+    expect(scan.files.filter((entry) => entry.project === canonicalProject)).toHaveLength(DEFAULT_SCHEME_CARDS_PER_PROJECT);
     expect(scan.projectCatalog).toEqual([{
-      project: "effective-project",
+      project: canonicalProject,
       conversations: DEFAULT_SCHEME_CARDS_PER_PROJECT * 2,
       smt: 1_700_030_000 + DEFAULT_SCHEME_CARDS_PER_PROJECT * 2 - 1,
     }]);
