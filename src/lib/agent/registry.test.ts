@@ -118,6 +118,87 @@ describe("agent registry", () => {
     expect(retained.map((delivery) => delivery.id)).toContain("legacy-104");
   });
 
+  test("compaction retains explicit operation ownership after its delivery tombstone expires", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/operation-owner-compaction.jsonl", "default");
+    const command = {
+      operationId: "operation-owner-before-compaction",
+      kind: "steer" as const,
+      policy: "steer-if-active" as const,
+      turnId: "turn-before-compaction",
+    };
+    const original = store.holdDelivery(
+      conversation.id,
+      "retain operation ownership",
+      "operation-owner-client",
+      "text",
+      command,
+    );
+    const claimed = store.beginDeliveryAttempt(original.id, original.generationId!);
+    expect(claimed).not.toBeNull();
+    store.recordDeliveryOutcome(original.id, "delivered");
+    for (let index = 0; index < 101; index += 1) {
+      const delivery = store.holdDelivery(
+        conversation.id,
+        `later delivery ${index}`,
+        `later-delivery-${index}`,
+      );
+      store.recordDeliveryOutcome(delivery.id, "delivered");
+    }
+    expect(store.snapshot().heldDeliveries[original.id]).toBeUndefined();
+
+    const reopened = new AgentRegistry(store.filename);
+    expect(() => reopened.holdDelivery(
+      conversation.id,
+      "retain operation ownership",
+      "second-operation-owner-client",
+      "text",
+      command,
+    )).toThrow("operation id is already reserved for another client message");
+    expect(reopened.holdDelivery(
+      conversation.id,
+      "retain operation ownership",
+      "operation-owner-client",
+      "text",
+      command,
+    )).toMatchObject({
+      id: original.id,
+      command,
+      requestDigest: original.requestDigest,
+      state: "delivered",
+      attempts: claimed!.attempts,
+    });
+  });
+
+  test("discarding an unactuated explicit reservation releases its operation ownership", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/operation-owner-discard.jsonl", "default");
+    const command = { operationId: "operation-owner-before-discard", kind: "send" as const, policy: "queue" as const };
+    const original = store.holdDelivery(
+      conversation.id,
+      "discard before actuation",
+      "operation-owner-before-discard-client",
+      "text",
+      command,
+    );
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]?.deliveryId).toBe(original.id);
+
+    store.discardDelivery(original.id);
+
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]).toBeUndefined();
+    const replacement = store.holdDelivery(
+      conversation.id,
+      "reuse after discard",
+      "operation-owner-after-discard-client",
+      "text",
+      command,
+    );
+    expect(replacement).toMatchObject({ clientMessageId: "operation-owner-after-discard-client", command });
+    expect(store.beginDeliveryAttempt(replacement.id, replacement.generationId!)).not.toBeNull();
+    store.discardDelivery(replacement.id);
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]?.deliveryId).toBe(replacement.id);
+  });
+
   test("reopening an old text-only reservation applies safe command defaults", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/legacy-text-only-delivery.jsonl", "default");

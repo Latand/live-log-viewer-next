@@ -231,6 +231,15 @@ export interface RegistryConversation {
   updatedAt: string;
 }
 
+export interface DeliveryOperationOwner {
+  conversationId: ViewerConversationId;
+  clientMessageId: string | null;
+  deliveryId: string;
+  command: HeldDeliveryCommand;
+  requestDigest: string;
+  settledDelivery?: HeldDelivery;
+}
+
 export interface RegistryFile {
   version: 2;
   entries: Record<string, AgentRegistryEntry>;
@@ -251,6 +260,7 @@ export interface RegistryFile {
   autoBalance: Record<Extract<AgentEngine, "claude" | "codex">, AutoBalancePolicy>;
   quotaObservations: Record<Extract<AgentEngine, "claude" | "codex">, Record<string, DurableQuotaObservation>>;
   heldDeliveries: Record<string, HeldDelivery>;
+  deliveryOperationOwners: Record<string, DeliveryOperationOwner>;
   pendingSuccessorCleanups: Record<string, { conversationId: ViewerConversationId; receipt: ProviderReceipt; createdAt: string; lastError: string | null }>;
 }
 
@@ -608,6 +618,7 @@ const EMPTY: RegistryFile = {
   autoBalance: { claude: emptyPolicy(), codex: emptyPolicy() },
   quotaObservations: { claude: {}, codex: {} },
   heldDeliveries: {},
+  deliveryOperationOwners: {},
   pendingSuccessorCleanups: {},
 };
 
@@ -944,7 +955,61 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
   };
 }
 
+function normalizeDeliveryOperationOwners(
+  value: unknown,
+  heldDeliveries: RegistryFile["heldDeliveries"],
+): RegistryFile["deliveryOperationOwners"] {
+  const owners: RegistryFile["deliveryOperationOwners"] = {};
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [operationId, candidate] of Object.entries(value)) {
+      if (!operationId || !candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+      const owner = candidate as Partial<DeliveryOperationOwner>;
+      if (typeof owner.conversationId !== "string" || !owner.conversationId.startsWith("conversation_")
+        || (owner.clientMessageId !== null && typeof owner.clientMessageId !== "string")
+        || typeof owner.deliveryId !== "string" || !owner.deliveryId
+        || typeof owner.requestDigest !== "string" || !owner.requestDigest) continue;
+      owners[operationId] = {
+        conversationId: owner.conversationId as ViewerConversationId,
+        clientMessageId: owner.clientMessageId,
+        deliveryId: owner.deliveryId,
+        command: { ...canonicalHeldDeliveryCommand(owner.command, operationId), operationId },
+        requestDigest: owner.requestDigest,
+      };
+      if (owner.settledDelivery && typeof owner.settledDelivery === "object") {
+        const settledDelivery = normalizeHeldDelivery(owner.settledDelivery);
+        if (settledDelivery.id === owner.deliveryId
+          && settledDelivery.command.operationId === operationId
+          && settledDelivery.requestDigest === owner.requestDigest
+          && ["delivered", "failed"].includes(settledDelivery.state)) {
+          owners[operationId].settledDelivery = settledDelivery;
+        }
+      }
+    }
+  }
+  for (const delivery of Object.values(heldDeliveries)) {
+    if (delivery.command.operationId === delivery.id || !delivery.requestDigest) continue;
+    owners[delivery.command.operationId] ??= {
+      conversationId: delivery.conversationId,
+      clientMessageId: delivery.clientMessageId,
+      deliveryId: delivery.id,
+      command: delivery.command,
+      requestDigest: delivery.requestDigest,
+    };
+  }
+  return owners;
+}
+
 function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: ViewerConversationId): number {
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.command.operationId === delivery.id || !delivery.requestDigest) continue;
+    file.deliveryOperationOwners[delivery.command.operationId] ??= {
+      conversationId: delivery.conversationId,
+      clientMessageId: delivery.clientMessageId,
+      deliveryId: delivery.id,
+      command: delivery.command,
+      requestDigest: delivery.requestDigest,
+    };
+  }
   const deliveredGroups = new Map<ViewerConversationId, HeldDelivery[]>();
   const failedGroups = new Map<ViewerConversationId, HeldDelivery[]>();
   for (const delivery of Object.values(file.heldDeliveries)) {
@@ -962,9 +1027,14 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
     }
   }
   let removed = 0;
+  const retainSettledOwner = (delivery: HeldDelivery): void => {
+    const owner = file.deliveryOperationOwners[delivery.command.operationId];
+    if (owner?.deliveryId === delivery.id) owner.settledDelivery = clone(delivery);
+  };
   for (const deliveries of deliveredGroups.values()) {
     deliveries.sort((left, right) => (right.deliveredAt ?? right.createdAt).localeCompare(left.deliveredAt ?? left.createdAt) || right.id.localeCompare(left.id));
     for (const expired of deliveries.slice(100)) {
+      retainSettledOwner(expired);
       delete file.heldDeliveries[expired.id];
       removed += 1;
     }
@@ -976,6 +1046,7 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
     const retainedFailed = Math.max(0, Math.min(50, 99 - activeCount));
     deliveries.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
     for (const expired of deliveries.slice(retainedFailed)) {
+      retainSettledOwner(expired);
       delete file.heldDeliveries[expired.id];
       removed += 1;
     }
@@ -1021,6 +1092,7 @@ function conversationDurabilityScore(file: RegistryFile, conversation: RegistryC
   for (const edge of Object.values(file.lineageEdges)) if (edge.parentConversationId === conversation.id) score += 5;
   if (file.memberships[conversation.id]?.length) score += 10;
   for (const delivery of Object.values(file.heldDeliveries)) if (delivery.conversationId === conversation.id) score += 5;
+  for (const owner of Object.values(file.deliveryOperationOwners)) if (owner.conversationId === conversation.id) score += 5;
   return score;
 }
 
@@ -1189,6 +1261,12 @@ function adoptProvisionalOwner(
   for (const delivery of Object.values(file.heldDeliveries)) {
     if (delivery.conversationId === owner.id) delivery.conversationId = target.id;
   }
+  for (const operationOwner of Object.values(file.deliveryOperationOwners)) {
+    if (operationOwner.conversationId === owner.id) {
+      operationOwner.conversationId = target.id;
+      if (operationOwner.settledDelivery) operationOwner.settledDelivery.conversationId = target.id;
+    }
+  }
   for (const entry of Object.values(file.entries)) {
     if (entry.launchProfile?.parentConversationId === owner.id) {
       entry.launchProfile = { ...entry.launchProfile, parentConversationId: target.id };
@@ -1285,6 +1363,9 @@ export function normalizeRegistry(value: unknown): RegistryFile {
     throw new RegistryReadError("agent registry schema is unsupported");
   }
   const legacy = parsed.legacyResumePanes;
+  const heldDeliveries = parsed.heldDeliveries && typeof parsed.heldDeliveries === "object"
+    ? Object.fromEntries(Object.entries(parsed.heldDeliveries).map(([id, delivery]) => [id, normalizeHeldDelivery(delivery)]))
+    : {};
   return {
       version: 2,
       entries: Object.fromEntries(Object.entries(parsed.entries).map(([id, entry]) => [id, normalizeEntry(entry)])),
@@ -1317,9 +1398,8 @@ export function normalizeRegistry(value: unknown): RegistryFile {
       quotaObservations: parsed.quotaObservations && typeof parsed.quotaObservations === "object"
         ? { ...EMPTY.quotaObservations, ...parsed.quotaObservations }
         : clone(EMPTY.quotaObservations),
-      heldDeliveries: parsed.heldDeliveries && typeof parsed.heldDeliveries === "object"
-        ? Object.fromEntries(Object.entries(parsed.heldDeliveries).map(([id, delivery]) => [id, normalizeHeldDelivery(delivery)]))
-        : {},
+      heldDeliveries,
+      deliveryOperationOwners: normalizeDeliveryOperationOwners(parsed.deliveryOperationOwners, heldDeliveries),
       pendingSuccessorCleanups: parsed.pendingSuccessorCleanups && typeof parsed.pendingSuccessorCleanups === "object"
         ? parsed.pendingSuccessorCleanups
         : {},
@@ -3735,14 +3815,31 @@ export class AgentRegistry {
         && item.clientMessageId === clientMessageId) : undefined;
       const requestedCommand = canonicalHeldDeliveryCommand(commandInput, existing?.id ?? "pending-delivery");
       const requestDigest = heldDeliveryRequestDigest(canonicalId, text, requestedCommand);
-      if (existing && !heldDeliveryRequestDigests(file, canonicalId, text, requestedCommand).has(existing.requestDigest ?? "")) {
+      const requestedDigests = heldDeliveryRequestDigests(file, canonicalId, text, requestedCommand);
+      let settledOperationRetry: HeldDelivery | null = null;
+      if (existing && !requestedDigests.has(existing.requestDigest ?? "")) {
         throw new DeliveryReservationConflictError();
       }
       if (!existing && commandInput.operationId) {
-        const operationOwner = Object.values(file.heldDeliveries).find((item) =>
+        const ownedDelivery = Object.values(file.heldDeliveries).find((item) =>
           item.command.operationId === requestedCommand.operationId);
-        if (operationOwner) {
+        const operationOwner = file.deliveryOperationOwners[requestedCommand.operationId]
+          ?? (ownedDelivery?.requestDigest ? {
+            conversationId: ownedDelivery.conversationId,
+            clientMessageId: ownedDelivery.clientMessageId,
+            deliveryId: ownedDelivery.id,
+            command: ownedDelivery.command,
+            requestDigest: ownedDelivery.requestDigest,
+          } : null);
+        const matchingOwner = operationOwner
+          && resolveConversationAlias(file, operationOwner.conversationId) === canonicalId
+          && operationOwner.clientMessageId === clientMessageId
+          && requestedDigests.has(operationOwner.requestDigest);
+        if (operationOwner && !matchingOwner) {
           throw new DeliveryReservationConflictError("operation id is already reserved for another client message");
+        }
+        if (matchingOwner && operationOwner.settledDelivery) {
+          settledOperationRetry = clone(operationOwner.settledDelivery);
         }
       }
       const conversation = file.conversations[canonicalId];
@@ -3773,6 +3870,10 @@ export class AgentRegistry {
         return clone(delivery);
       };
       if (existing) return place(existing);
+      if (settledOperationRetry) {
+        file.heldDeliveries[settledOperationRetry.id] = settledOperationRetry;
+        return place(settledOperationRetry);
+      }
       const deliveryId = crypto.randomUUID();
       const held: HeldDelivery = {
         id: deliveryId,
@@ -3795,6 +3896,15 @@ export class AgentRegistry {
       const count = Object.values(file.heldDeliveries).filter((item) => item.conversationId === canonicalId && item.state !== "delivered").length;
       if (count >= 100) throw new Error("held delivery limit reached for conversation");
       file.heldDeliveries[held.id] = held;
+      if (commandInput.operationId) {
+        file.deliveryOperationOwners[held.command.operationId] ??= {
+          conversationId: canonicalId,
+          clientMessageId,
+          deliveryId: held.id,
+          command: held.command,
+          requestDigest: held.requestDigest!,
+        };
+      }
       return place(held);
     });
   }
@@ -3894,6 +4004,12 @@ export class AgentRegistry {
       const conversation = delivery ? file.conversations[resolveConversationAlias(file, delivery.conversationId)] : undefined;
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+      if (delivery) {
+        const operationOwner = file.deliveryOperationOwners[delivery.command.operationId];
+        if (delivery.attempts === 0 && operationOwner?.deliveryId === delivery.id) {
+          delete file.deliveryOperationOwners[delivery.command.operationId];
+        }
+      }
       delete file.heldDeliveries[id];
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
     });

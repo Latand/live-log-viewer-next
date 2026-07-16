@@ -15,6 +15,7 @@ const ROW_COLLECTIONS = [
   "conversationAliases",
   "migrationIntents",
   "heldDeliveries",
+  "deliveryOperationOwners",
   "pendingSuccessorCleanups",
 ] as const satisfies ReadonlyArray<keyof RegistryFile>;
 
@@ -222,10 +223,13 @@ export class SqliteAgentRegistryStore {
         }
         const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
         input[collection] = storedValue;
+        if (collection === "deliveryOperationOwners") input.heldDeliveries = file.heldDeliveries;
         value = this.normalize(input)[collection] as typeof value;
         loaded = true;
         loadedCollections.set(collection, value);
-        baselineCollections.set(collection, structuredClone(value));
+        baselineCollections.set(collection, structuredClone(
+          collection === "deliveryOperationOwners" ? storedValue : value,
+        ) as typeof value);
       };
       Object.defineProperty(file, collection, {
         configurable: true,
