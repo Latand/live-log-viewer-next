@@ -1213,7 +1213,7 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.setSessionStatus("dead", activeFlags);
     this.closeSubscribers();
-    this.startTermination();
+    this.startFailureCleanup();
   }
 
   private failWithoutLedger(error: Error): void {
@@ -1233,7 +1233,13 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.notifyStateListeners();
     this.closeSubscribers();
-    this.startTermination();
+    this.startFailureCleanup();
+  }
+
+  private startFailureCleanup(): void {
+    void this.release().catch(() => {
+      // Persistent unknown ownership keeps the dead host claimed for a later fenced retry.
+    });
   }
 
   private rejectPendingAnswers(error: Error): void {

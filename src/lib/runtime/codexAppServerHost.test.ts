@@ -1463,6 +1463,39 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("protocol failure retries TERM when identity recovers after one read", async () => {
+    const server = new FakeAppServer("failed-transient-identity-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let failureIdentityReads = 0;
+    let injectIdentityFailure = false;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => {
+        if (!injectIdentityFailure) return "4242:owned";
+        failureIdentityReads += 1;
+        return failureIdentityReads === 2 ? null : "4242:owned";
+      },
+      pidAlive: () => true,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGKILL") queueMicrotask(() => server.emit("close", 0, signal));
+      },
+    });
+    injectIdentityFailure = true;
+
+    server.stdout.write("malformed\n");
+    await Bun.sleep(10);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "dead", pid: null });
+  });
+
   test("an asynchronous stdin EPIPE fails and reaps the host", async () => {
     const server = new FakeAppServer("epipe-thread", "epipe-thread", false, [], undefined, null, ["turn/start"]);
     const host = await CodexAppServerHost.start({
@@ -1647,6 +1680,66 @@ describe("CodexAppServerHost", () => {
     expect((await stream.next()).done).toBeTrue();
     expect(server.signals).toContain("SIGTERM");
     await host.release();
+  });
+
+  test("ledger failure converges without close and releases the writer claim", async () => {
+    const store = new FailingEventStore();
+    const server = new FakeAppServer("ledger-missing-close-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let alive = true;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: store,
+      spawnProcess: fakeSpawn(server),
+      processIdentity: ownedFakeProcess.processIdentity,
+      pidAlive: () => alive,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGKILL") alive = false;
+      },
+    });
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-failed-ledger-registry-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const key = { engine: "codex" as const, sessionId: "ledger-missing-close-thread" };
+    registry.upsert({
+      key,
+      artifactPath: "/sessions/ledger-missing-close-thread.jsonl",
+      cwd: "/repo",
+      accountId: null,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:4242",
+        process: { pid: 4242, startIdentity: "4242:owned" },
+        eventCursor: 1,
+        protocolVersion: "0.144.1",
+        writerClaimEpoch: 8,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 8,
+      claimOwner: "failed-owner",
+      pendingAction: null,
+    });
+    await bindCodexHostPersistence(registry, key, host, "failed-owner", 8);
+
+    server.notify("account/rateLimits/updated", { rateLimits: {} });
+    await Bun.sleep(10);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "dead", pid: null });
+    expect(registry.snapshot().entries["codex:ledger-missing-close-thread"]).toMatchObject({
+      status: "dead",
+      claimOwner: null,
+      structuredHost: { process: null, endpoint: "stdio:released" },
+    });
+    fs.rmSync(directory, { recursive: true, force: true });
   });
 
   test("a shutdown ledger failure still releases the bound registry claim", async () => {
