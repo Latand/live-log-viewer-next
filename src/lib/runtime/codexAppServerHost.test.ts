@@ -1227,6 +1227,53 @@ describe("CodexAppServerHost", () => {
     await expect(host.release()).resolves.toBeUndefined();
   });
 
+  test("release converges when the owned child exits without a close event", async () => {
+    const server = new FakeAppServer("missing-close-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let processIdentity: string | null = "4242:owned";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => processIdentity,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGKILL") processIdentity = null;
+      },
+    });
+
+    await expect(host.release()).resolves.toBeUndefined();
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "unhosted", pid: null, endpoint: "stdio:released" });
+    expect(server.signals).toEqual([]);
+  });
+
+  test("release never signals a recycled child pid", async () => {
+    const server = new FakeAppServer("recycled-pid-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let processIdentity = "4242:owned";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => processIdentity,
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+    });
+    processIdentity = "4242:recycled";
+
+    await expect(host.release()).resolves.toBeUndefined();
+
+    expect(signals).toEqual([]);
+    expect(server.signals).toEqual([]);
+    expect(await host.health()).toMatchObject({ status: "unhosted", pid: null, endpoint: "stdio:released" });
+  });
+
   test("protocol failure starts bounded TERM and KILL cleanup", async () => {
     const server = new FakeAppServer("failed-thread", "failed-thread", true);
     const host = await CodexAppServerHost.start({

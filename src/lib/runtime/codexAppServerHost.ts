@@ -80,6 +80,7 @@ export interface CodexAppServerHostOptions {
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   eventStore?: RuntimeEventStore;
   signalProcess?: ProcessSignal;
+  processIdentity?: (pid: number) => string | null;
 }
 
 export interface CodexThreadIdentity {
@@ -248,6 +249,8 @@ export class CodexAppServerHost implements EngineHost {
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
   private readonly signalProcess: ProcessSignal;
+  private readonly processIdentity: (pid: number) => string | null;
+  private readonly childStartIdentity: string | null;
   private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly pending = new Map<number, PendingRpc>();
   private readonly lateThreadReadResponses = new Map<number, number>();
@@ -292,6 +295,8 @@ export class CodexAppServerHost implements EngineHost {
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
     this.signalProcess = options.signalProcess ?? process.kill;
+    this.processIdentity = options.processIdentity ?? ((pid) => procBackend.processIdentity(pid));
+    this.childStartIdentity = child.pid ? this.processIdentity(child.pid) : null;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
@@ -512,7 +517,10 @@ export class CodexAppServerHost implements EngineHost {
 
   private currentState(): HostState {
     const pid = this.reaped || this.released ? null : this.child.pid ?? null;
-    const processStartIdentity = pid ? procBackend.processIdentity(pid) : null;
+    const observedIdentity = pid ? this.processIdentity(pid) : null;
+    const processStartIdentity = this.childStartIdentity === null || observedIdentity === this.childStartIdentity
+      ? observedIdentity
+      : null;
     const status: HostState["status"] = this.dead ? "dead"
       : this.released ? "unhosted"
       : this.attentions.size > 0 ? "attention"
@@ -556,9 +564,16 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.startTermination();
     if (!await this.waitForReap(this.shutdownGraceMs)) {
-      if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
-      else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      if (!this.reaped && !this.unreapedChildStillOwned()) {
+        this.finishRelease();
+        return;
+      }
+      this.signalTermination("SIGKILL");
       if (!await this.waitForReap(this.shutdownGraceMs)) {
+        if (!this.reaped && !this.unreapedChildStillOwned()) {
+          this.finishRelease();
+          return;
+        }
         throw new Error("Codex app-server child could not be reaped");
       }
     }
@@ -580,13 +595,24 @@ export class CodexAppServerHost implements EngineHost {
     if (this.terminationStarted) return;
     this.terminationStarted = true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
-    if (this.reaped) signalProcessGroup(this.child.pid, "SIGTERM", this.signalProcess);
-    else signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
+    this.signalTermination("SIGTERM");
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
-      if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
-      else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      this.signalTermination("SIGKILL");
     }, this.shutdownGraceMs);
+  }
+
+  private unreapedChildStillOwned(): boolean {
+    const pid = this.child.pid;
+    if (this.reaped || !pid || !Number.isInteger(pid) || pid <= 0) return false;
+    if (this.childStartIdentity === null) return true;
+    return this.processIdentity(pid) === this.childStartIdentity;
+  }
+
+  private signalTermination(signal: NodeJS.Signals): boolean {
+    if (this.reaped) return signalProcessGroup(this.child.pid, signal, this.signalProcess);
+    if (!this.unreapedChildStillOwned()) return false;
+    return signalDetachedProcessGroup(this.child, signal, this.signalProcess);
   }
 
   private async waitForReap(timeoutMs: number): Promise<boolean> {
