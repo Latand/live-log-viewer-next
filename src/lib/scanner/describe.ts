@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -8,6 +7,7 @@ import { stateDir } from "@/lib/configDir";
 import type { Engine, Fmt, RootKey } from "../types";
 import { cleanTitle } from "../title";
 import { globalCache } from "./caches";
+import { HEAD_READ_CHUNK_BYTES, headFingerprint, readHead, type HeadReadResult } from "./head";
 import { readJsonResult, recordValue, recordsValue, stringValue } from "./json";
 import { projectResolutionStateKey } from "./projectState";
 
@@ -74,7 +74,7 @@ const repoSlugCache = globalCache<[number, string | null]>("repo-path-from-slug-
 /* The cwd follows the same append-only head reuse and rewrite invalidation. */
 const cwdCache = globalCache<HeadMetadataCache<string | null>>("claude-cwd-v3");
 
-const HEAD_BYTES = 131_072;
+const HEAD_BYTES = HEAD_READ_CHUNK_BYTES;
 
 function subagentSidecarPath(rootName: RootKey, pathname: string): string | null {
   if (rootName !== "claude-projects" || !path.basename(pathname).startsWith("agent-") || !pathname.endsWith(".jsonl")) {
@@ -117,31 +117,6 @@ function sameFileDescriptionIdentity(left: FileDescriptionIdentity, right: FileD
     && left.mtimeMs === right.mtimeMs
     && left.sidecarSize === right.sidecarSize
     && left.sidecarMtimeMs === right.sidecarMtimeMs;
-}
-
-interface HeadReadResult {
-  value: { bytes: Buffer; text: string; read: number } | null;
-  complete: boolean;
-}
-
-function headFingerprint(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("base64url");
-}
-
-function readHead(pathname: string, size: number): HeadReadResult {
-  try {
-    const fd = fs.openSync(pathname, "r");
-    try {
-      const buf = Buffer.alloc(Math.min(size, HEAD_BYTES));
-      const read = fs.readSync(fd, buf, 0, buf.length, 0);
-      const bytes = buf.subarray(0, read);
-      return { value: { bytes, text: bytes.toString("utf8"), read }, complete: true };
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return { value: null, complete: false };
-  }
 }
 
 function readSearchHead(pathname: string, size: number): { text: string; read: number } | null {
@@ -734,7 +709,7 @@ function transcriptCwd(pathname: string, st: fs.Stats): MetadataReadResult<strin
   if (cached?.size === st.size && cached.mtimeMs === st.mtimeMs) {
     return { value: cached.value, complete: true, headPreserved: true };
   }
-  const head = readHead(pathname, st.size);
+  const head = readHead(pathname, st.size, st.mtimeMs, { maxBytes: HEAD_BYTES });
   if (!head.complete || !head.value) return { value: cached?.value ?? null, complete: false, headPreserved: false };
   if (cached) {
     const reused = reusableGrowingHead(cached, st, head);
@@ -761,7 +736,7 @@ function scanJsonlTitle(pathname: string, st: fs.Stats, wantCodex: boolean): Met
   if (cached?.size === st.size && cached.mtimeMs === st.mtimeMs) {
     return { value: cached.value, complete: true, headPreserved: true };
   }
-  const head = readHead(pathname, st.size);
+  const head = readHead(pathname, st.size, st.mtimeMs, { maxBytes: HEAD_BYTES });
   if (!head.complete || !head.value) return { value: cached?.value ?? null, complete: false, headPreserved: false };
   if (cached) {
     const reused = reusableGrowingHead(cached, st, head);

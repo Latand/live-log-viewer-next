@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 import type { Activity, RootKey } from "../types";
 import { globalCache } from "./caches";
+import { readHead } from "./head";
 import { outputHolders } from "./process";
 import { turnStateFromRecords as structuredTurnStateFromRecords } from "@/lib/accounts/migration/turnState";
 
@@ -14,11 +15,20 @@ const turnCache = globalCache<[number, string | null]>("turn");
     grows. Unlike its siblings this cache holds whole parsed record arrays, so
     it is bounded: only actively-growing transcripts benefit from it anyway
     (idle files resolve through the small derived caches and never come back). */
-const tailCache = globalCache<[number, number, Record<string, unknown>[]]>("tail");
+const tailCache = globalCache<[number, number | null, number, Record<string, unknown>[]]>("tail");
 const TAIL_CACHE_CAP = 64;
-const headCache = globalCache<[number, number, number, Record<string, unknown>[]]>("head-records-v1");
+type CachedHeadRecords = {
+  size: number;
+  mtimeMs: number;
+  nbytes: number;
+  recordLimit: number;
+  sourceBytes: number;
+  records: Record<string, unknown>[];
+};
+const headCache = globalCache<CachedHeadRecords>("head-records-v2");
 const HEAD_CACHE_CAP = 64;
-export const HEAD_RECORD_BYTES = 128 * 1024;
+const HEAD_CACHE_BYTE_CAP = 16 * 1024 * 1024;
+export const HEAD_RECORD_BYTES = 4 * 1024 * 1024;
 const HEAD_RECORD_LIMIT = 41;
 
 /** Shared bounded head read for launch metadata that does not survive in the
@@ -26,29 +36,25 @@ const HEAD_RECORD_LIMIT = 41;
     complete file before selecting its first rows creates work proportional to
     conversation history on every poll. Model and effort projections share this
     size-keyed prefix instead. */
-export function headRecords(
+export interface HeadRecordsResult {
+  records: Record<string, unknown>[];
+  complete: boolean;
+}
+
+export function headRecordsResult(
   pathname: string,
   size: number,
+  mtimeMs: number,
   nbytes = HEAD_RECORD_BYTES,
   recordLimit = HEAD_RECORD_LIMIT,
-): Record<string, unknown>[] {
+): HeadRecordsResult {
   const cached = headCache.get(pathname);
-  if (cached && cached[0] === size && cached[1] === nbytes && cached[2] === recordLimit) return cached[3].slice();
-
-  let data: string;
-  let read = 0;
-  try {
-    const fd = fs.openSync(pathname, "r");
-    try {
-      const buf = Buffer.alloc(Math.min(size, nbytes));
-      read = fs.readSync(fd, buf, 0, buf.length, 0);
-      data = buf.toString("utf8", 0, read);
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return [];
+  if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.nbytes === nbytes && cached.recordLimit === recordLimit) {
+    return { records: cached.records.slice(), complete: true };
   }
+  const head = readHead(pathname, size, mtimeMs, { maxBytes: nbytes, lineLimit: recordLimit });
+  if (!head.complete || !head.value) return { records: [], complete: false };
+  const { text: data, read, bytes } = head.value;
 
   let lines = data.split("\n");
   if (read < size && !data.endsWith("\n")) lines = lines.slice(0, -1);
@@ -63,23 +69,40 @@ export function headRecords(
       // A truncated or malformed row carries no usable launch metadata.
     }
   }
-  if (headCache.size >= HEAD_CACHE_CAP && !headCache.has(pathname)) {
+  headCache.delete(pathname);
+  let cachedBytes = 0;
+  for (const entry of headCache.values()) cachedBytes += entry.sourceBytes;
+  while (headCache.size > 0 && (headCache.size >= HEAD_CACHE_CAP || cachedBytes + bytes.length > HEAD_CACHE_BYTE_CAP)) {
     const oldest = headCache.keys().next().value;
-    if (oldest !== undefined) headCache.delete(oldest);
+    if (oldest === undefined) break;
+    cachedBytes -= headCache.get(oldest)?.sourceBytes ?? 0;
+    headCache.delete(oldest);
   }
-  headCache.set(pathname, [size, nbytes, recordLimit, records]);
-  return records.slice();
+  headCache.set(pathname, { size, mtimeMs, nbytes, recordLimit, sourceBytes: bytes.length, records });
+  return { records: records.slice(), complete: true };
 }
 
-export function tailRecords(pathname: string, size: number, nbytes = 131_072) {
+export function headRecords(
+  pathname: string,
+  size: number,
+  mtimeMs: number,
+  nbytes = HEAD_RECORD_BYTES,
+  recordLimit = HEAD_RECORD_LIMIT,
+): Record<string, unknown>[] {
+  return headRecordsResult(pathname, size, mtimeMs, nbytes, recordLimit).records;
+}
+
+export function tailRecords(pathname: string, size: number, nbytes = 131_072, mtimeMs: number | null = null) {
   const cached = tailCache.get(pathname);
-  if (cached && cached[0] === size && cached[1] === nbytes) return cached[2].slice();
+  if (cached && cached[0] === size && cached[2] === nbytes && (mtimeMs === null || cached[1] === mtimeMs)) {
+    return cached[3].slice();
+  }
   const records = readTail(pathname, size, nbytes);
   if (tailCache.size >= TAIL_CACHE_CAP && !tailCache.has(pathname)) {
     const oldest = tailCache.keys().next().value;
     if (oldest !== undefined) tailCache.delete(oldest);
   }
-  tailCache.set(pathname, [size, nbytes, records]);
+  tailCache.set(pathname, [size, mtimeMs, nbytes, records]);
   /* Hand out a fresh copy every call: consumers reverse() the result in place,
      which must never reorder the shared cached array under the next consumer. */
   return records.slice();

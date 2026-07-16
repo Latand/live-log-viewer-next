@@ -1,10 +1,10 @@
 import type { FileEntry } from "../types";
-import { headRecords, tailRecords } from "./activity";
+import { headRecordsResult, tailRecords } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
 import { readArgv } from "./process";
 
-const effortCache = globalCache<[number, string | null]>("effort");
+const effortCache = globalCache<[number, number, string | null]>("effort");
 
 /** Union of both CLI scales: codex minimal…ultra, claude low…max. */
 const TIERS = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
@@ -56,20 +56,24 @@ export function entryEffort(entry: FileEntry): string | null {
   }
   const argv = normalizeEffort(argvEffort(entry));
   if (entry.root === "claude-projects" && argv) return argv;
+  const mtimeMs = entry.mtime * 1000;
   const cached = effortCache.get(entry.path);
-  if (cached?.[0] === entry.size) return cached[1] ?? argv;
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return cached[2] ?? argv;
   let effort: string | null = null;
-  for (const obj of tailRecords(entry.path, entry.size).reverse()) {
+  for (const obj of tailRecords(entry.path, entry.size, 131_072, mtimeMs).reverse()) {
     effort = normalizeEffort(pickEffort(entry, obj));
     if (effort) break;
   }
+  let complete = true;
   if (!effort) {
-    for (const obj of headRecords(entry.path, entry.size)) {
+    const head = headRecordsResult(entry.path, entry.size, mtimeMs);
+    complete = head.complete;
+    for (const obj of head.records) {
       effort = normalizeEffort(pickEffort(entry, obj));
       if (effort) break;
     }
   }
-  effortCache.set(entry.path, [entry.size, effort]);
+  if (complete) effortCache.set(entry.path, [entry.size, mtimeMs, effort]);
   return effort ?? argv;
 }
 

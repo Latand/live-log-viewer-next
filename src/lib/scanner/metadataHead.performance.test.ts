@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { FileEntry } from "../types";
+import { describeFile } from "./describe";
 import { entryEffort } from "./effort";
 import { entryModels } from "./model";
 
@@ -11,15 +12,15 @@ const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-metadata-head-test-")
 
 afterAll(() => fs.rmSync(SANDBOX, { recursive: true, force: true }));
 
-function entry(pathname: string): FileEntry {
+function entry(pathname: string, engine: "codex" | "claude" = "codex"): FileEntry {
   const stat = fs.statSync(pathname);
   return {
     path: pathname,
-    root: "codex-sessions",
+    root: engine === "codex" ? "codex-sessions" : "claude-projects",
     name: path.basename(pathname),
     project: "proj",
     title: "session",
-    engine: "codex",
+    engine,
     kind: "session",
     fmt: "codex",
     parent: null,
@@ -33,6 +34,194 @@ function entry(pathname: string): FileEntry {
     waitingInput: null,
   };
 }
+
+function splitUtf8Row(): string {
+  const prefix = '{"type":"response_item","payload":{"content":"';
+  const suffix = '"}}\n';
+  const filler = "x".repeat(128 * 1024 - Buffer.byteLength(prefix) - 2);
+  return prefix + filler + "💚" + suffix;
+}
+
+function largeTail(): string {
+  return JSON.stringify({ type: "response_item", payload: { content: "z".repeat(256 * 1024) } }) + "\n";
+}
+
+test("metadata after a large UTF-8-splitting early row preserves Codex and Claude projections", () => {
+  const codexPath = path.join(SANDBOX, "large-first-row-codex.jsonl");
+  fs.writeFileSync(codexPath, splitUtf8Row() + [
+    JSON.stringify({ type: "session_meta", payload: { model: "gpt-5.6-sol" } }),
+    JSON.stringify({ type: "turn_context", payload: { effort: "xhigh" } }),
+  ].join("\n") + "\n" + largeTail());
+
+  expect(entryModels(entry(codexPath))).toEqual({ display: "gpt-5.6-sol", launch: "gpt-5.6-sol" });
+  expect(entryEffort(entry(codexPath))).toBe("xhigh");
+
+  const claudePath = path.join(SANDBOX, "large-first-row-claude.jsonl");
+  fs.writeFileSync(claudePath, splitUtf8Row() + JSON.stringify({
+    type: "assistant",
+    message: {
+      model: "claude-sonnet-4-20250514",
+      content: [{ type: "thinking", thinking: "", signature: "sig" }],
+    },
+  }) + "\n" + largeTail());
+
+  expect(entryModels(entry(claudePath, "claude"))).toEqual({
+    display: "sonnet-4",
+    launch: "claude-sonnet-4-20250514",
+  });
+  expect(entryEffort(entry(claudePath, "claude"))).toBe("high");
+});
+
+test("one shared prefix serves cold, append, and same-size rewrite projections", () => {
+  const pathname = path.join(SANDBOX, "shared-prefix.jsonl");
+  const transcript = (model: string, effort: string) => [
+    JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/shared", model } }),
+    JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: "Shared title" } }),
+    JSON.stringify({ type: "turn_context", payload: { effort } }),
+    largeTail().trimEnd(),
+  ].join("\n") + "\n";
+  fs.writeFileSync(pathname, transcript("gpt-5.6-sol", "xhigh"));
+
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const targetFds = new Set<number>();
+  let positionZeroReads = 0;
+  fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+    const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+    if (path.resolve(String(target)) === pathname) targetFds.add(fd);
+    return fd;
+  }) as typeof fs.openSync;
+  fs.readSync = ((fd: number, ...args: unknown[]) => {
+    if (targetFds.has(fd) && args[3] === 0) positionZeroReads += 1;
+    return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+  }) as typeof fs.readSync;
+  fs.closeSync = ((fd: number) => {
+    targetFds.delete(fd);
+    return originalCloseSync(fd);
+  }) as typeof fs.closeSync;
+
+  const derive = () => {
+    const stat = fs.statSync(pathname);
+    describeFile("codex-sessions", SANDBOX, pathname, stat);
+    return { model: entryModels(entry(pathname)), effort: entryEffort(entry(pathname)) };
+  };
+
+  try {
+    expect(derive()).toEqual({
+      model: { display: "gpt-5.6-sol", launch: "gpt-5.6-sol" },
+      effort: "xhigh",
+    });
+
+    const rewritten = transcript("gpt-5.5-sol", "ultra");
+    fs.writeFileSync(pathname, rewritten);
+    const nextMtime = Date.now() / 1000 + 2;
+    fs.utimesSync(pathname, nextMtime, nextMtime);
+    expect(derive()).toEqual({
+      model: { display: "gpt-5.5-sol", launch: "gpt-5.5-sol" },
+      effort: "ultra",
+    });
+
+    fs.appendFileSync(pathname, JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant" } }) + "\n");
+    expect(derive().effort).toBe("ultra");
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
+
+  expect(positionZeroReads).toBe(3);
+});
+
+test("legal short reads fill the bounded metadata prefix", () => {
+  const pathname = path.join(SANDBOX, "short-read-codex.jsonl");
+  const rows: unknown[] = [
+    { type: "session_meta", payload: { model: "gpt-5.6-sol" } },
+    { type: "turn_context", payload: { effort: "xhigh" } },
+  ];
+  while (rows.length < 41) rows.push({ type: "response_item", payload: { type: "message", role: "assistant" } });
+  fs.writeFileSync(pathname, rows.map((row) => JSON.stringify(row)).join("\n") + "\n" + largeTail());
+
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const targetFds = new Set<number>();
+  let headBytesRead = 0;
+  let shortReadCalls = 0;
+  fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+    const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+    if (path.resolve(String(target)) === pathname) targetFds.add(fd);
+    return fd;
+  }) as typeof fs.openSync;
+  fs.readSync = ((fd: number, ...args: unknown[]) => {
+    const position = typeof args[3] === "number" ? args[3] : -1;
+    if (!targetFds.has(fd) || position < 0 || position >= 128 * 1024) {
+      return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+    }
+    const requested = args[2] as number;
+    const returned = Reflect.apply(originalReadSync, fs, [fd, args[0], args[1], Math.min(requested, 7), position]) as number;
+    headBytesRead += returned;
+    shortReadCalls += 1;
+    return returned;
+  }) as typeof fs.readSync;
+  fs.closeSync = ((fd: number) => {
+    targetFds.delete(fd);
+    return originalCloseSync(fd);
+  }) as typeof fs.closeSync;
+
+  try {
+    expect(entryModels(entry(pathname))).toEqual({ display: "gpt-5.6-sol", launch: "gpt-5.6-sol" });
+    expect(entryEffort(entry(pathname))).toBe("xhigh");
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
+
+  expect(shortReadCalls).toBeGreaterThan(1);
+  expect(headBytesRead).toBeLessThanOrEqual(4 * 1024 * 1024);
+});
+
+test("a transient head read failure remains retryable for the same file identity", () => {
+  const pathname = path.join(SANDBOX, "transient-head-codex.jsonl");
+  fs.writeFileSync(pathname, [
+    JSON.stringify({ type: "session_meta", payload: { model: "gpt-5.6-sol" } }),
+    largeTail().trimEnd(),
+  ].join("\n") + "\n");
+
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const targetFds = new Set<number>();
+  let failed = false;
+  fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+    const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+    if (path.resolve(String(target)) === pathname) targetFds.add(fd);
+    return fd;
+  }) as typeof fs.openSync;
+  fs.readSync = ((fd: number, ...args: unknown[]) => {
+    if (targetFds.has(fd) && args[3] === 0 && !failed) {
+      failed = true;
+      const error = new Error("transient head failure") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    }
+    return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+  }) as typeof fs.readSync;
+  fs.closeSync = ((fd: number) => {
+    targetFds.delete(fd);
+    return originalCloseSync(fd);
+  }) as typeof fs.closeSync;
+
+  try {
+    expect(entryModels(entry(pathname))).toEqual({ display: null, launch: null });
+    expect(entryModels(entry(pathname))).toEqual({ display: "gpt-5.6-sol", launch: "gpt-5.6-sol" });
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
+});
 
 test("large append-only transcripts keep model and effort head reads bounded", () => {
   const pathname = path.join(SANDBOX, "large-codex.jsonl");
