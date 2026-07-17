@@ -1,0 +1,194 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, expect, test } from "bun:test";
+
+import type { ClaudeAccount } from "./claude";
+import { claudeOauthMetadata, refreshClaudeOauth } from "./claudeOauth";
+
+const NOW = Date.parse("2026-07-17T09:00:00.000Z");
+const homes: string[] = [];
+
+afterEach(() => {
+  for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true });
+});
+
+function account(id: string): ClaudeAccount {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), `llv-claude-oauth-${id}-`));
+  homes.push(home);
+  fs.writeFileSync(path.join(home, ".credentials.json"), JSON.stringify({
+    claudeAiOauth: {
+      accessToken: crypto.randomUUID(),
+      refreshToken: crypto.randomUUID(),
+      expiresAt: NOW - 1,
+      scopes: ["user:inference"],
+      subscriptionType: "max",
+    },
+  }), { mode: 0o600 });
+  return { id, label: id, kind: "managed", home, projectsDir: path.join(home, "projects"), authPresent: true, createdAt: 0 };
+}
+
+test("a successful bounded OAuth refresh persists current launch metadata", async () => {
+  const candidate = account("refreshable");
+  let signal: AbortSignal | null = null;
+
+  const result = await refreshClaudeOauth(candidate, {
+    now: () => NOW,
+    fetch: async (_input, init) => {
+      signal = init?.signal ?? null;
+      return Response.json({
+        access_token: crypto.randomUUID(),
+        refresh_token: crypto.randomUUID(),
+        expires_in: 3_600,
+        scope: "user:inference",
+      });
+    },
+  });
+
+  expect(result).toBe("refreshed");
+  expect(signal).toBeInstanceOf(AbortSignal);
+  expect(claudeOauthMetadata(candidate)).toEqual({ expiresAt: NOW + 3_600_000, refreshable: true });
+  expect(fs.statSync(path.join(candidate.home, ".credentials.json")).mode & 0o777).toBe(0o600);
+});
+
+test("a rejected refresh is fenced while server failures remain transient", async () => {
+  const rejected = account("rejected");
+  const invalidGrant = account("invalid-grant");
+  const invalidScope = account("invalid-scope");
+  const transient = account("transient");
+
+  await expect(refreshClaudeOauth(rejected, {
+    now: () => NOW,
+    fetch: async () => new Response(null, { status: 401 }),
+  })).resolves.toBe("invalid");
+  await expect(refreshClaudeOauth(transient, {
+    now: () => NOW,
+    fetch: async () => new Response(null, { status: 503 }),
+  })).resolves.toBe("unknown");
+  await expect(refreshClaudeOauth(invalidGrant, {
+    now: () => NOW,
+    fetch: async () => Response.json({ error: "invalid_grant" }, { status: 400 }),
+  })).resolves.toBe("invalid");
+  await expect(refreshClaudeOauth(invalidScope, {
+    now: () => NOW,
+    fetch: async () => Response.json({ error: "invalid_scope" }, { status: 400 }),
+  })).resolves.toBe("unknown");
+
+  expect(claudeOauthMetadata(rejected)?.expiresAt).toBe(NOW - 1);
+  expect(claudeOauthMetadata(transient)?.expiresAt).toBe(NOW - 1);
+});
+
+test("a late refresh rejection observes a concurrent native credential rotation", async () => {
+  const candidate = account("native-race");
+
+  const result = await refreshClaudeOauth(candidate, {
+    now: () => NOW,
+    fetch: async () => {
+      fs.writeFileSync(path.join(candidate.home, ".credentials.json"), JSON.stringify({
+        claudeAiOauth: {
+          accessToken: crypto.randomUUID(),
+          refreshToken: crypto.randomUUID(),
+          expiresAt: NOW + 60_000,
+          scopes: ["user:inference"],
+        },
+      }), { mode: 0o600 });
+      return new Response(null, { status: 401 });
+    },
+  });
+
+  expect(result).toBe("refreshed");
+  expect(claudeOauthMetadata(candidate)?.expiresAt).toBe(NOW + 60_000);
+});
+
+test("a native refresh lock bounds Viewer admission without starting duplicate refresh work", async () => {
+  const candidate = account("native-lock");
+  fs.mkdirSync(path.join(candidate.home, ".oauth_refresh.lock"), { mode: 0o700 });
+  let fetchCalls = 0;
+
+  const result = await refreshClaudeOauth(candidate, {
+    now: () => NOW,
+    lockWaitMs: 1,
+    fetch: async () => {
+      fetchCalls += 1;
+      return new Response(null, { status: 503 });
+    },
+  });
+
+  expect(result).toBe("unknown");
+  expect(fetchCalls).toBe(0);
+});
+
+test("Viewer reuses a native rotation completed while waiting for the refresh lock", async () => {
+  const candidate = account("native-winner");
+  const lock = path.join(candidate.home, ".oauth_refresh.lock");
+  fs.mkdirSync(lock, { mode: 0o700 });
+  let fetchCalls = 0;
+  setTimeout(() => {
+    fs.writeFileSync(path.join(candidate.home, ".credentials.json"), JSON.stringify({
+      claudeAiOauth: {
+        accessToken: crypto.randomUUID(),
+        refreshToken: crypto.randomUUID(),
+        expiresAt: NOW + 60_000,
+        scopes: ["user:inference"],
+      },
+    }), { mode: 0o600 });
+    fs.rmdirSync(lock);
+  }, 5);
+
+  const result = await refreshClaudeOauth(candidate, {
+    now: () => NOW,
+    lockWaitMs: 100,
+    fetch: async () => {
+      fetchCalls += 1;
+      return new Response(null, { status: 503 });
+    },
+  });
+
+  expect(result).toBe("refreshed");
+  expect(fetchCalls).toBe(0);
+});
+
+test("custom OAuth credentials stay on a CLI-approved issuer", async () => {
+  const candidate = account("custom-origin");
+  const previous = process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL;
+  process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL = "https://claude.fedstart.com";
+  let requestedUrl = "";
+  try {
+    const result = await refreshClaudeOauth(candidate, {
+      now: () => NOW,
+      fetch: async (input) => {
+        requestedUrl = String(input);
+        return Response.json({ access_token: crypto.randomUUID(), expires_in: 3_600 });
+      },
+    });
+
+    expect(result).toBe("refreshed");
+    expect(requestedUrl).toBe("https://claude.fedstart.com/v1/oauth/token");
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL;
+    else process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL = previous;
+  }
+});
+
+test("an unapproved custom OAuth origin never receives credential content", async () => {
+  const candidate = account("unapproved-origin");
+  const previous = process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL;
+  process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL = "https://example.test";
+  let fetchCalls = 0;
+  try {
+    const result = await refreshClaudeOauth(candidate, {
+      now: () => NOW,
+      fetch: async () => {
+        fetchCalls += 1;
+        return new Response(null, { status: 503 });
+      },
+    });
+
+    expect(result).toBe("unknown");
+    expect(fetchCalls).toBe(0);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL;
+    else process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL = previous;
+  }
+});
