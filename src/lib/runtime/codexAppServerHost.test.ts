@@ -56,6 +56,7 @@ class FakeAppServer extends EventEmitter {
   readTurns: unknown[] | null = null;
   readError: string | null = null;
   modelList: unknown[] = [{ id: "gpt-5.3-codex-spark", isDefault: true, inputModalities: ["text"] }];
+  modelListFailuresRemaining = 0;
   private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
 
@@ -114,7 +115,13 @@ class FakeAppServer extends EventEmitter {
     if (typeof method === "string" && this.ignoredMethods.includes(method)) return;
     if (method === "initialize") return this.respond(message.id, { userAgent: "codex_desktop_app/0.144.1 (Linux)" });
     if (method === "account/read") return this.respond(message.id, { account: { type: "chatgpt", planType: "pro" }, requiresOpenaiAuth: false });
-    if (method === "model/list") return this.respond(message.id, { data: this.modelList });
+    if (method === "model/list") {
+      if (this.modelListFailuresRemaining > 0) {
+        this.modelListFailuresRemaining -= 1;
+        return this.respondError(message.id, "model list probe timed out");
+      }
+      return this.respond(message.id, { data: this.modelList });
+    }
     if (method === "config/read") return this.respond(message.id, {
       config: {
         mcp_servers: {
@@ -281,6 +288,49 @@ describe("CodexAppServerHost", () => {
     })).rejects.toThrow("does not advertise image input");
     expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
     await host.release();
+  });
+
+  test("a transient capability probe fault stays fail-closed and recovers on the next image send", async () => {
+    const server = new FakeAppServer("probe-thread");
+    server.modelList = [{ id: "gpt-5.6-sol", isDefault: true, inputModalities: ["text", "image"] }];
+    /* Startup probe and the first on-demand retry both fault. */
+    server.modelListFailuresRemaining = 2;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      model: "gpt-5.6-sol",
+      eventStore: new MemoryEventStore(),
+      resolveImagePath: (ref) => `/runtime-images/${ref.sha256}`,
+      spawnProcess: fakeSpawn(server),
+    });
+    const imageEntry = (id: string) => ({
+      id,
+      content: { text: "inspect", images: [{ sha256: "4".repeat(64), mime: "image/png" as const, bytes: 67 }] },
+    });
+
+    /* Probe-unavailable: fail closed with a retryable reason, never the
+       model-incompatible verdict, and never actuate the turn. */
+    expect((await host.health()).activeFlags).not.toContain(STRUCTURED_IMAGE_CAPABILITY);
+    await expect(host.send(imageEntry("probe-image-one"))).rejects.toThrow("temporarily unavailable");
+    expect(server.requests.some((request) => request.method === "turn/start")).toBeFalse();
+
+    /* The probe recovers: the next image send re-discovers capability inside
+       the same host lifetime and delivers. */
+    expect(await host.send(imageEntry("probe-image-two"))).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+    expect((await host.health()).activeFlags).toContain(STRUCTURED_IMAGE_CAPABILITY);
+
+    /* A genuine text-only verdict still rejects with the model reason. */
+    await host.release();
+    const textOnlyServer = new FakeAppServer("probe-verdict-thread");
+    textOnlyServer.modelListFailuresRemaining = 1;
+    const textOnlyHost = await CodexAppServerHost.start({
+      cwd: "/repo",
+      model: "gpt-5.3-codex-spark",
+      eventStore: new MemoryEventStore(),
+      resolveImagePath: () => { throw new Error("image path must stay unresolved"); },
+      spawnProcess: fakeSpawn(textOnlyServer),
+    });
+    await expect(textOnlyHost.send(imageEntry("probe-image-three"))).rejects.toThrow("does not advertise image input");
+    await textOnlyHost.release();
   });
 
   test("fans out replay, fences steering, answers attention, and persists host columns", async () => {

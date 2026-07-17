@@ -298,7 +298,12 @@ export class CodexAppServerHost implements EngineHost {
   private account: HostState["account"] = null;
   private engineStatus: "active" | "idle" | "unhosted" | "dead" = "idle";
   private activeFlags: string[] = [];
-  private imageInputSupported = false;
+  /** Image capability learned from `model/list`. "unknown" means the probe
+      itself failed (RPC fault, not a model verdict): admission stays fail-
+      closed, but the probe is retried on the next image send instead of
+      condemning the host to text-only for its lifetime. */
+  private imageInputSupport: "supported" | "unsupported" | "unknown" = "unknown";
+  private requestedModel: string | undefined;
   private releasing = false;
   private released = false;
   private dead = false;
@@ -389,13 +394,16 @@ export class CodexAppServerHost implements EngineHost {
       const accountType = stringField(account, "type");
       if (accountType !== "chatgpt") throw new Error("Codex app-server requires a ChatGPT subscription login");
       provisional.account = { type: accountType, planType: stringField(account, "planType") };
+      provisional.requestedModel = options.model;
       try {
-        provisional.imageInputSupported = modelSupportsImageInput(
+        provisional.imageInputSupport = modelSupportsImageInput(
           await provisional.rpc("model/list", {}),
           options.model,
-        );
+        ) ? "supported" : "unsupported";
       } catch {
-        provisional.imageInputSupported = false;
+        /* A probe fault is not a model verdict: stay unknown (fail-closed
+           for admission) and retry discovery when an image send arrives. */
+        provisional.imageInputSupport = "unknown";
       }
       const config = headlessCodexThreadConfig(
         await provisional.rpc("config/read", { cwd: options.cwd, includeLayers: false }),
@@ -469,13 +477,33 @@ export class CodexAppServerHost implements EngineHost {
     };
   }
 
+  /** On-demand retry of capability discovery after a probe fault. A verdict
+      (either way) sticks; another fault stays unknown and fail-closed. A
+      transition to supported re-advertises the capability flag. */
+  private async refreshImageInputSupport(): Promise<void> {
+    try {
+      this.imageInputSupport = modelSupportsImageInput(await this.rpc("model/list", {}), this.requestedModel)
+        ? "supported"
+        : "unsupported";
+    } catch {
+      return;
+    }
+    if (this.imageInputSupport === "supported") this.setSessionStatus(this.engineStatus, this.activeFlags);
+  }
+
   async send(entry: QueueEntry): Promise<DeliveryReceipt> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       return { outcome: "rejected", reason: "dead-host" };
     }
     const normalized = normalizeQueueEntry(entry);
-    if (normalized.content.images.length && !this.imageInputSupported) {
-      throw new Error("The selected Codex model does not advertise image input through app-server.");
+    if (normalized.content.images.length) {
+      if (this.imageInputSupport === "unknown") await this.refreshImageInputSupport();
+      if (this.imageInputSupport === "unsupported") {
+        throw new Error("The selected Codex model does not advertise image input through app-server.");
+      }
+      if (this.imageInputSupport !== "supported") {
+        throw new Error("Codex image capability discovery is temporarily unavailable; retry shortly.");
+      }
     }
     entry = {
       id: normalized.id,
@@ -1105,7 +1133,7 @@ export class CodexAppServerHost implements EngineHost {
 
   private setSessionStatus(status: "active" | "idle" | "unhosted" | "dead", activeFlags: string[]): void {
     const advertisedFlags = activeFlags.filter((flag) => flag !== STRUCTURED_IMAGE_CAPABILITY);
-    if (this.imageInputSupported && status !== "unhosted" && status !== "dead") {
+    if (this.imageInputSupport === "supported" && status !== "unhosted" && status !== "dead") {
       advertisedFlags.push(STRUCTURED_IMAGE_CAPABILITY);
     }
     this.engineStatus = status;
