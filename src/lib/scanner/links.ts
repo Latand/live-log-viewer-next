@@ -304,7 +304,9 @@ function attachNativeCodexSubagentParents(entries: FileEntry[], persist: boolean
   }
   for (const entry of entries) {
     if (entry.root !== "codex-sessions" || entry.parent) continue;
-    const parentThreadId = nativeCodexParentThreadId(entry.path, entry.size);
+    const parentThreadId = entry.nativeParentThreadId === undefined
+      ? nativeCodexParentThreadId(entry.path, entry.size, entry.mtime * 1000)
+      : entry.nativeParentThreadId;
     const parent = parentThreadId ? (pathByThreadId.get(parentThreadId) ?? null) : null;
     if (parent && parent !== entry.path) {
       entry.parent = parent;

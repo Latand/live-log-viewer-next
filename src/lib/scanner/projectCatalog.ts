@@ -31,6 +31,8 @@ type CachedProjectFile = {
   session: boolean;
   worktree?: string;
   cwd?: string | null;
+  sessionStartedAt?: string | null;
+  nativeParentThreadId?: string | null;
   title?: string;
   engine?: "codex" | "claude" | "shell";
   fmt?: "codex" | "claude" | "plain";
@@ -102,6 +104,12 @@ function readState(): ProjectCatalogState {
       const engine = file.engine === "codex" || file.engine === "claude" || file.engine === "shell" ? file.engine : undefined;
       const fmt = file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" ? file.fmt : undefined;
       const cwd = typeof file.cwd === "string" ? file.cwd : file.cwd === null ? null : undefined;
+      const sessionStartedAt = typeof file.sessionStartedAt === "string"
+        ? file.sessionStartedAt
+        : file.sessionStartedAt === null ? null : undefined;
+      const nativeParentThreadId = typeof file.nativeParentThreadId === "string"
+        ? file.nativeParentThreadId
+        : file.nativeParentThreadId === null ? null : undefined;
       const sidecarSize = typeof file.sidecarSize === "number" ? file.sidecarSize : file.sidecarSize === null ? null : undefined;
       const sidecarMtimeMs = typeof file.sidecarMtimeMs === "number"
         ? file.sidecarMtimeMs
@@ -111,6 +119,8 @@ function readState(): ProjectCatalogState {
         && engine !== undefined
         && fmt !== undefined
         && cwd !== undefined
+        && sessionStartedAt !== undefined
+        && nativeParentThreadId !== undefined
         && file.projectRoot !== undefined
         && sidecarSize !== undefined
         && sidecarMtimeMs !== undefined;
@@ -129,6 +139,8 @@ function readState(): ProjectCatalogState {
         session: isConversation(file.rootName, file.kind),
         worktree: typeof file.worktree === "string" ? file.worktree : undefined,
         cwd,
+        sessionStartedAt,
+        nativeParentThreadId,
         title: typeof file.title === "string" ? file.title : undefined,
         engine,
         fmt,
@@ -233,6 +245,8 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
         session: isConversation(raw.rootName, refreshProjectMetadata ? meta.kind : cached.kind),
         worktree: refreshProjectMetadata ? meta.worktree : cached.worktree,
         cwd: meta.cwd,
+        sessionStartedAt: meta.sessionStartedAt,
+        nativeParentThreadId: meta.nativeParentThreadId,
         title: meta.title,
         titleCached: true,
         engine: meta.engine,
@@ -244,6 +258,8 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
       ...cached,
       session: isConversation(raw.rootName, cached.kind),
       cwd: cached.cwd ?? undefined,
+      sessionStartedAt: cached.sessionStartedAt,
+      nativeParentThreadId: cached.nativeParentThreadId,
       title: cached.title ?? fallbackTitle(raw, cached.kind),
       titleCached: typeof cached.title === "string",
       engine: cached.engine ?? engineForRoot(raw.rootName),
@@ -252,6 +268,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
   }
   const described = describeFile(raw.rootName, raw.root, raw.path, raw.st, stateKey, identity);
   const meta = described.description;
+  const prior = !described.complete && cached?.summaryVersion === 2 ? cached : undefined;
   const file: ProjectCatalogFile = {
     summaryVersion: described.complete ? 2 : undefined,
     summaryIncomplete: described.complete ? undefined : true,
@@ -262,12 +279,14 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     sidecarSize: identity.sidecarSize,
     sidecarMtimeMs: identity.sidecarMtimeMs,
     stateKey,
-    project: meta.project || "other",
-    projectRoot: meta.projectRoot ?? null,
+    project: prior?.project ?? (meta.project || "other"),
+    projectRoot: prior ? prior.projectRoot ?? null : meta.projectRoot ?? null,
     kind: meta.kind,
     session: isConversation(raw.rootName, meta.kind),
-    worktree: meta.worktree,
-    cwd: meta.cwd,
+    worktree: prior?.worktree ?? meta.worktree,
+    cwd: prior ? prior.cwd ?? undefined : meta.cwd,
+    sessionStartedAt: prior ? prior.sessionStartedAt : meta.sessionStartedAt,
+    nativeParentThreadId: prior ? prior.nativeParentThreadId : meta.nativeParentThreadId,
     title: meta.title,
     titleCached: true,
     engine: meta.engine,
@@ -288,6 +307,8 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     session: file.session,
     worktree: file.worktree,
     cwd: file.cwd ?? null,
+    sessionStartedAt: file.sessionStartedAt ?? null,
+    nativeParentThreadId: file.nativeParentThreadId ?? null,
     title: file.titleCached ? file.title : undefined,
     engine: file.engine,
     fmt: file.fmt,
@@ -380,6 +401,8 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
       session: file.session,
       worktree: file.worktree,
       cwd: file.cwd ?? null,
+      sessionStartedAt: file.sessionStartedAt ?? null,
+      nativeParentThreadId: file.nativeParentThreadId ?? null,
       title: file.titleCached ? file.title : undefined,
       engine: file.engine,
       fmt: file.fmt,
@@ -426,6 +449,8 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
       project: file.project || "other",
       worktree: file.worktree,
       cwd: file.cwd ?? undefined,
+      sessionStartedAt: file.sessionStartedAt,
+      nativeParentThreadId: file.nativeParentThreadId,
       projectRoot: file.projectRoot,
       title: file.title,
       engine: file.engine,

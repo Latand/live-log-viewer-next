@@ -576,7 +576,7 @@ test("first-ever repeated transcript read failures publish and persist only afte
     const publishedBeforeFailure = structuredClone(conversationCatalogSnapshot());
 
     const originalOpen = fs.openSync;
-    let failures = 4;
+    let failures = 2;
     fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
       if (filename === transcript && failures > 0) {
         failures -= 1;

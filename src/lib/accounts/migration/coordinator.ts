@@ -114,7 +114,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       path: entry.path,
       accountId: owner?.accountId ?? null,
       launchProfile: emptyLaunchProfile({
-        cwd: currentProfile?.cwd || headCwd(entry.path, { maxLines: 40, identity: transcriptIdentity }) || "",
+        cwd: currentProfile?.cwd || entry.cwd || headCwd(entry.path, { maxLines: 40, identity: transcriptIdentity }) || "",
         model: currentProfile?.model ?? entry.launchModel ?? entry.model,
         effort: currentProfile?.effort ?? entry.effort ?? null,
         fast: currentProfile?.fast ?? null,
@@ -129,7 +129,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       }),
       turn,
       expectedTurnObservedAt: existing?.turn.observedAt ?? null,
-      startedAt: headSessionStartedAt(entry.path, transcriptIdentity),
+      startedAt: entry.sessionStartedAt ?? headSessionStartedAt(entry.path, transcriptIdentity),
       observedAt: !observedTurn.complete && existing?.turn.observedAt
         ? existing.turn.observedAt
         : new Date(Math.max(entry.mtime * 1000, inventoryStartedAt)).toISOString(),

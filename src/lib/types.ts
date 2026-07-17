@@ -33,6 +33,10 @@ export interface FileEntry {
   project: string;
   /** Working directory recorded by the conversation transcript. */
   cwd?: string | null;
+  /** Identity-bound session creation time parsed from the transcript header. */
+  sessionStartedAt?: string | null;
+  /** Native Codex parent thread parsed from the identity-bound transcript header. */
+  nativeParentThreadId?: string | null;
   /** Canonical parent-repository root when cwd belongs to a linked worktree. */
   projectRoot?: string | null;
   /** Git worktree name when cwd lives under <repo>/.claude/worktrees/<name>. */
