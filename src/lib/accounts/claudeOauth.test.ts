@@ -92,6 +92,7 @@ test("only positive invalid_grant evidence is fenced while other failures remain
   const unclassified401 = account("unclassified-401");
   const invalidGrant = account("invalid-grant");
   const invalidGrant401 = account("invalid-grant-401");
+  const unauthorizedClient = account("unauthorized-client");
   const invalidScope = account("invalid-scope");
   const transient = account("transient");
 
@@ -111,6 +112,10 @@ test("only positive invalid_grant evidence is fenced while other failures remain
     now: () => NOW,
     fetch: async () => Response.json({ error: "invalid_grant" }, { status: 401 }),
   })).resolves.toBe("invalid");
+  await expect(refreshClaudeOauth(unauthorizedClient, {
+    now: () => NOW,
+    fetch: async () => Response.json({ error: "unauthorized_client" }, { status: 401 }),
+  })).resolves.toBe("unknown");
   await expect(refreshClaudeOauth(invalidScope, {
     now: () => NOW,
     fetch: async () => Response.json({ error: "invalid_scope" }, { status: 400 }),
@@ -193,11 +198,13 @@ test("a native refresh lock bounds Viewer admission without starting duplicate r
 
   expect(result).toBe("unknown");
   expect(fetchCalls).toBe(0);
+  expect(fs.existsSync(path.join(candidate.home, ".oauth_refresh.lock"))).toBeTrue();
 });
 
 test("a legacy native refresh lock bounds Viewer admission without starting duplicate refresh work", async () => {
   const candidate = account("legacy-native-lock");
-  fs.mkdirSync(`${fs.realpathSync(candidate.home)}.lock`, { mode: 0o700 });
+  const legacyLock = `${fs.realpathSync(candidate.home)}.lock`;
+  fs.mkdirSync(legacyLock, { mode: 0o700 });
   let fetchCalls = 0;
 
   const result = await refreshClaudeOauth(candidate, {
@@ -211,7 +218,29 @@ test("a legacy native refresh lock bounds Viewer admission without starting dupl
 
   expect(result).toBe("unknown");
   expect(fetchCalls).toBe(0);
+  expect(fs.existsSync(legacyLock)).toBeTrue();
   expect(fs.existsSync(path.join(candidate.home, ".oauth_refresh.lock"))).toBeFalse();
+});
+
+test("Viewer release preserves native lock directories replaced by another owner", async () => {
+  const candidate = account("replaced-native-locks");
+  const currentLock = path.join(candidate.home, ".oauth_refresh.lock");
+  const legacyLock = `${fs.realpathSync(candidate.home)}.lock`;
+
+  const result = await refreshClaudeOauth(candidate, {
+    now: () => NOW,
+    fetch: async () => {
+      fs.rmdirSync(legacyLock);
+      fs.rmdirSync(currentLock);
+      fs.mkdirSync(currentLock, { mode: 0o700 });
+      fs.mkdirSync(legacyLock, { mode: 0o700 });
+      return new Response(null, { status: 503 });
+    },
+  });
+
+  expect(result).toBe("unknown");
+  expect(fs.existsSync(currentLock)).toBeTrue();
+  expect(fs.existsSync(legacyLock)).toBeTrue();
 });
 
 test("Viewer reuses a native rotation completed while waiting for the refresh lock", async () => {

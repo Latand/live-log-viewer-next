@@ -100,8 +100,14 @@ async function acquireDirectoryLock(lock: string, startedAt: number, waitMs: num
   for (;;) {
     try {
       fs.mkdirSync(lock, { mode: 0o700 });
+      const descriptor = fs.openSync(lock, "r");
+      const owned = fs.fstatSync(descriptor);
       return () => {
-        try { fs.rmdirSync(lock); } catch { /* Claude may have cleared a stale lock after the bounded refresh window. */ }
+        try {
+          const current = fs.statSync(lock);
+          if (current.dev === owned.dev && current.ino === owned.ino) fs.rmdirSync(lock);
+        } catch { /* Claude may have cleared or replaced the lock after the bounded refresh window. */ }
+        finally { fs.closeSync(descriptor); }
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
