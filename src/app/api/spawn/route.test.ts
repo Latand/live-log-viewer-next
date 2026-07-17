@@ -94,6 +94,7 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
   const runtimeClientPath = path.join(import.meta.dir, "../../../lib/runtime/client.ts");
   const source = `
     const { mock } = await import("bun:test");
+    const deferred = [];
     let refreshRequests = 0;
     let usageRequests = 0;
     let structuredSpawns = 0;
@@ -115,6 +116,11 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
       }
       throw new Error("unexpected synthetic upstream request");
     };
+    const nextServer = await import("next/server");
+    mock.module("next/server", () => ({
+      ...nextServer,
+      after: (work) => { deferred.push(work); },
+    }));
     const structured = await import(${JSON.stringify(structuredSpawnPath)});
     mock.module("@/lib/runtime/structuredSpawn", () => ({
       ...structured,
@@ -148,6 +154,7 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
       },
       body: JSON.stringify({ engine: "claude", cwd: ${JSON.stringify(cwd)}, prompt: "resume work", accountId: "rebooted" }),
     }));
+    await Promise.all(deferred.map((work) => work()));
     const body = await response.json();
     const credentials = JSON.parse(await Bun.file(${JSON.stringify(path.join(home, ".credentials.json"))}).text());
     process.stdout.write(JSON.stringify({
