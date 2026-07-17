@@ -540,6 +540,66 @@ test("structured spawn maps operational image storage failures to 503", async ()
   }
 });
 
+test("an oversized structured spawn prompt returns 413 before receipts, blobs, or deferral", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "oversized-spawn-prompt-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  let stores = 0;
+  let deferred = 0;
+  const dependencies: SpawnRouteTestDependencies = {
+    ...structuredRouteDependencies(cwd),
+    defer: () => { deferred += 1; },
+    storeImages: () => { stores += 1; return []; },
+  };
+  const beforeReceipts = Object.keys(agentRegistry().snapshot().receipts).sort();
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  try {
+    /* 10667 three-byte characters = 32001 UTF-8 bytes in 10667 UTF-16 units:
+       a length-measured gate would have admitted this prompt. */
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        engine: "claude",
+        cwd,
+        prompt: "€".repeat(10_667),
+        clientAttemptId: `attempt_${crypto.randomUUID()}`,
+        images: [{ base64: png, mime: "image/png" }],
+      }),
+    }), dependencies);
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: expect.stringContaining("32000-byte envelope") });
+    expect(stores).toBe(0);
+    expect(deferred).toBe(0);
+    expect(Object.keys(agentRegistry().snapshot().receipts).sort()).toEqual(beforeReceipts);
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
 test("an orphan replay whose image storage fails releases its admission lease for the retry", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "replay-storage-release-"));
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;

@@ -28,7 +28,7 @@ import { runtimeScope } from "@/lib/runtime/contracts";
 import { publishFilesRevision } from "@/lib/runtime/filesRevision";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
-import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
+import { assertStructuredTextEnvelope, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
@@ -197,6 +197,15 @@ async function postSpawn(
       fast: reasoning.fast,
     });
     if (gap) return NextResponse.json({ error: gap }, { status: 409 });
+    /* The scaffold-composed prompt rides structured first-message delivery,
+       so its UTF-8 envelope bound must reject HERE — before the durable
+       receipt, blob storage, and the deferred launch — not asynchronously
+       after a 202 already promised the spawn. */
+    try {
+      assertStructuredTextEnvelope(prompt);
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 413 });
+    }
   }
 
   const registry = dependencies.registry();
