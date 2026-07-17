@@ -1275,6 +1275,31 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
   };
 }
 
+function backfillMaterializedSpawnArtifacts(file: RegistryFile): RegistryFile {
+  for (const receipt of Object.values(file.receipts)) {
+    if (receipt.transport !== "structured"
+      || receipt.state !== "completed"
+      || receipt.artifactLifecycle !== "pending"
+      || !receipt.artifactPath) continue;
+    const conversation = file.conversations[resolveConversationAlias(file, receipt.conversationId)];
+    const generation = conversation?.generations.find((candidate) => candidate.path === receipt.artifactPath);
+    const observedCompletion = receipt.completionMode === "observed-completed" || receipt.completionMode === "route-recovered";
+    const singleGenerationLaunchObservedAfterSettlement = receipt.purpose === "launch"
+      && conversation?.generations.length === 1
+      && conversation.continuityPaths.length === 0
+      && conversation.migration === null
+      && conversation.turn.observedAt !== null
+      && generation !== undefined
+      && observationIsCurrent(generation.createdAt, conversation.turn.observedAt);
+    if (conversation?.engine === receipt.engine
+      && generation
+      && (observedCompletion || singleGenerationLaunchObservedAfterSettlement)) {
+      receipt.artifactLifecycle = "materialized";
+    }
+  }
+  return file;
+}
+
 function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile {
   const legacy = parsed.legacyResumePanes;
   return {
@@ -1302,7 +1327,7 @@ export function normalizeRegistry(value: unknown): RegistryFile {
     throw new RegistryReadError("agent registry schema is unsupported");
   }
   const legacy = parsed.legacyResumePanes;
-  return {
+  return backfillMaterializedSpawnArtifacts({
       version: 2,
       entries: Object.fromEntries(Object.entries(parsed.entries).map(([id, entry]) => [id, normalizeEntry(entry)])),
       receipts: Object.fromEntries(Object.entries(parsed.receipts).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
@@ -1340,7 +1365,7 @@ export function normalizeRegistry(value: unknown): RegistryFile {
       pendingSuccessorCleanups: parsed.pendingSuccessorCleanups && typeof parsed.pendingSuccessorCleanups === "object"
         ? parsed.pendingSuccessorCleanups
         : {},
-  };
+  });
 }
 
 function readFileWithPayload(filename: string): { file: RegistryFile; payload: string | null } {
