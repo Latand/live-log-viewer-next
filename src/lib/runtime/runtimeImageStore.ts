@@ -278,6 +278,23 @@ function openReadonlyDatabase(filename: string): BunDatabase {
   return new sqlite.Database(filename, { readonly: true, strict: true });
 }
 
+/** Receipt statuses meaning the payload terminally reached the agent: the
+    request's images have been consumed and its refs may retire on the same
+    bounded grace as delivered reservations. Pending statuses and retryable
+    terminals (failed/rejected) keep pinning their refs. */
+const TERMINAL_DELIVERED_RECEIPT_STATUSES = new Set(["delivered", "turn-started", "steered"]);
+
+function journalOperationRetired(receiptJson: unknown, retireBefore: number): boolean {
+  if (typeof receiptJson !== "string" || !receiptJson.trim()) return false;
+  let receipt: unknown;
+  try { receipt = JSON.parse(receiptJson); } catch { return false; }
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return false;
+  const record = receipt as Record<string, unknown>;
+  if (typeof record.status !== "string" || !TERMINAL_DELIVERED_RECEIPT_STATUSES.has(record.status)) return false;
+  const at = typeof record.at === "string" ? Date.parse(record.at) : Number.NaN;
+  return Number.isFinite(at) && at <= retireBefore;
+}
+
 function collectJournalDigests(filename: string, digests: Set<string>, retireBefore: number): void {
   if (!fs.existsSync(filename)) return;
   const db = openReadonlyDatabase(filename);
@@ -295,6 +312,11 @@ function collectJournalDigests(filename: string, digests: Set<string>, retireBef
       if (!tables.has(table)) continue;
       const rows = db.query(`SELECT ${columns.join(", ")} FROM ${table}`).all() as Array<Record<string, unknown>>;
       for (const row of rows) {
+        /* Journal operations correlate each request with its terminal
+           receipt: a delivered-terminal operation past the retirement grace
+           stops pinning its request's image refs, so quota can breathe long
+           before event-count compaction trims the journal. */
+        if (table === "operations" && journalOperationRetired(row.receipt_json, retireBefore)) continue;
         for (const column of columns) {
           const raw = row[column];
           if (typeof raw === "string" && raw.trim()) collectDigests(JSON.parse(raw), digests, retireBefore);
@@ -432,7 +454,23 @@ export class RuntimeImageStore {
     if (total > MAX_STRUCTURED_IMAGE_TOTAL_BYTES) throw new Error("runtime image request is too large");
     return this.withWriterLock("write", (root) => {
       this.assertQuota(root, decoded);
-      return decoded.map(({ data, mime }) => this.put(root, data, mime));
+      /* Batch rollback: a failure on image N must not strand the images this
+         call newly published before it. Blobs that already existed (dedup
+         hits) are someone else's and stay. */
+      const published: string[] = [];
+      const refs: StructuredImageRef[] = [];
+      try {
+        for (const { data, mime } of decoded) {
+          const { ref, created } = this.put(root, data, mime);
+          if (created) published.push(path.join(root.path, path.basename(this.pathFor(ref))));
+          refs.push(ref);
+        }
+      } catch (error) {
+        for (const filename of published) fs.rmSync(filename, { force: true });
+        if (published.length) syncDirectory(root.path);
+        throw error;
+      }
+      return refs;
     });
   }
 
@@ -497,6 +535,10 @@ export class RuntimeImageStore {
             acquired = true;
             break;
           } catch (error) {
+            /* EEXIST means the directory under this path is no longer the one
+               this process created (a reclamation restored a displaced lock):
+               it belongs to someone else, so wait instead of destroying it. */
+            if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
             fs.rmSync(lock, { recursive: true, force: true });
             throw error;
           }
@@ -505,7 +547,7 @@ export class RuntimeImageStore {
           const stat = fs.lstatSync(lock);
           if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("runtime image writer lock is unsafe");
           if (this.now() - stat.mtimeMs > this.writerLockStaleMs && !writerLockOwnerIsAlive(readWriterLockOwner(lock))) {
-            fs.rmSync(lock, { recursive: true, force: true });
+            this.reclaimStaleWriterLock(root, lock, stat);
             continue;
           }
         } catch (statError) {
@@ -515,12 +557,50 @@ export class RuntimeImageStore {
         if (this.now() >= deadline) throw new Error("runtime image writer lock timed out");
         sleepSync(5);
       }
+      /* Final ownership verification before the quota-critical section: only
+         the process whose exact token sits in owner.json may enter. */
+      if (readWriterLockOwner(lock)?.token !== owner.token) {
+        throw new Error("runtime image writer lock was lost before entry");
+      }
       return run(root);
     } finally {
       if (acquired && readWriterLockOwner(lock)?.token === owner.token) {
         fs.rmSync(lock, { recursive: true, force: true });
       }
       fs.closeSync(root.fd);
+    }
+  }
+
+  /** Single-winner reclamation of a stale writer lock. The atomic rename
+      admits exactly one reclaimer among contenders that observed the SAME
+      dead lock (the losers see ENOENT); the inode comparison then detects the
+      time-of-check/time-of-use case where the lock was replaced between the
+      staleness check and the rename, and restores the displaced lock instead
+      of destroying a possibly live owner's tenure. */
+  private reclaimStaleWriterLock(root: OpenRoot, lock: string, observed: fs.Stats): void {
+    const graveyard = path.join(root.path, `.writer-lock-reclaim.${crypto.randomUUID()}`);
+    try {
+      fs.renameSync(lock, graveyard);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    let stolen: fs.Stats;
+    try {
+      stolen = fs.lstatSync(graveyard);
+    } catch {
+      return;
+    }
+    if (stolen.ino === observed.ino && stolen.dev === observed.dev) {
+      fs.rmSync(graveyard, { recursive: true, force: true });
+      return;
+    }
+    try {
+      fs.renameSync(graveyard, lock);
+    } catch (error) {
+      /* A third contender created a fresh lock inside the displacement gap.
+         Failing loudly is the only outcome that cannot admit a second writer. */
+      throw new Error("runtime image writer lock reclamation raced", { cause: error });
     }
   }
 
@@ -647,7 +727,7 @@ export class RuntimeImageStore {
     }
   }
 
-  private put(root: OpenRoot, data: Buffer, mime: StructuredImageMime): StructuredImageRef {
+  private put(root: OpenRoot, data: Buffer, mime: StructuredImageMime): { ref: StructuredImageRef; created: boolean } {
     this.assertRootPinned(root);
     const sha256 = crypto.createHash("sha256").update(data).digest("hex");
     const ref = { sha256, mime, bytes: data.byteLength };
@@ -655,7 +735,7 @@ export class RuntimeImageStore {
     if (fs.existsSync(filename)) {
       this.readFromRoot(root, ref);
       fs.chmodSync(filename, 0o600);
-      return ref;
+      return { ref, created: false };
     }
     const temporary = path.join(root.path, `.${sha256}.${crypto.randomUUID()}.partial`);
     let published = false;
@@ -678,18 +758,18 @@ export class RuntimeImageStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
         this.readFromRoot(root, ref);
-      } else {
-        if (published) {
-          fs.rmSync(filename, { force: true });
-          syncDirectory(root.path);
-        }
-        throw error;
+        return { ref, created: false };
       }
+      if (published) {
+        fs.rmSync(filename, { force: true });
+        syncDirectory(root.path);
+      }
+      throw error;
     } finally {
       fs.rmSync(temporary, { force: true });
       syncDirectory(root.path);
     }
-    return ref;
+    return { ref, created: published };
   }
 }
 

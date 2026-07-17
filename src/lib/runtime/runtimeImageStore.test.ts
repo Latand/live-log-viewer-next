@@ -260,6 +260,98 @@ test("sequential completed deliveries outlive one store cap while pending refs s
   expect(blobs).toContain(path.basename(store.pathFor(pendingRef)));
 });
 
+test("terminal journal operations retire request refs while pending and retryable ones stay", () => {
+  const state = sandbox();
+  const now = Date.parse("2026-07-17T12:00:00.000Z");
+  const grace = 60 * 60 * 1000;
+  const retired = new Date(now - grace - 1_000).toISOString();
+  const fresh = new Date(now - 1_000).toISOString();
+  const sha = (letter: string) => letter.repeat(64);
+  const request = (letter: string) => JSON.stringify({ images: [{ sha256: sha(letter), mime: "image/png", bytes: PNG.byteLength }] });
+  const receipt = (status: string, at: string) => JSON.stringify({ status, at });
+  const db = new Database(path.join(state, "runtime-events.sqlite"), { create: true });
+  db.exec("CREATE TABLE operations (request_json TEXT, receipt_json TEXT)");
+  const insert = db.query("INSERT INTO operations VALUES (?, ?)");
+  insert.run(request("1"), receipt("delivered", retired));
+  insert.run(request("2"), receipt("turn-started", retired));
+  insert.run(request("3"), receipt("delivered", fresh));
+  insert.run(request("4"), receipt("failed", retired));
+  insert.run(request("5"), receipt("queued", retired));
+  insert.run(request("6"), "{}");
+  db.close();
+
+  const reachable = collectRuntimeImageReachableDigests(state, { now, retiredGraceMs: grace });
+
+  expect([...reachable].sort()).toEqual(["3", "4", "5", "6"].map(sha));
+});
+
+test("a multi-image batch failure rolls back its newly published blobs and keeps dedup hits", () => {
+  const root = sandbox();
+  const preexisting = taggedPng("batch-preexisting");
+  const rolledBack = taggedPng("batch-rolled-back");
+  const failing = taggedPng("batch-failing");
+  new RuntimeImageStore(root).putMany([{ base64: preexisting.toString("base64"), mime: "image/png" }]);
+  let links = 0;
+  const store = new RuntimeImageStore(root, {
+    fault(stage) {
+      if (stage !== "link") return;
+      links += 1;
+      /* The batch's FIRST publication (rolledBack) succeeds; its second
+         (failing) dies mid-batch. preexisting is a dedup hit with no link. */
+      if (links === 2) throw new Error("injected link failure");
+    },
+  });
+
+  expect(() => store.putMany([
+    { base64: preexisting.toString("base64"), mime: "image/png" },
+    { base64: rolledBack.toString("base64"), mime: "image/png" },
+    { base64: failing.toString("base64"), mime: "image/png" },
+  ])).toThrow("injected link failure");
+
+  const sha = (data: Buffer) => crypto.createHash("sha256").update(data).digest("hex");
+  expect(fs.readdirSync(root).filter((entry) => !entry.startsWith("."))).toEqual([`${sha(preexisting)}.png`]);
+});
+
+test("stale-lock reclamation restores a lock that was replaced behind its back", () => {
+  const root = sandbox();
+  const lock = path.join(root, ".writer-lock");
+  const replacementOwner = {
+    pid: 2_147_483_646,
+    startIdentity: "replacement-owner",
+    token: crypto.randomUUID(),
+  };
+  fs.mkdirSync(lock, { mode: 0o700 });
+  fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+    pid: 2_147_483_647,
+    startIdentity: "original-dead-owner",
+    token: crypto.randomUUID(),
+  }), { mode: 0o600 });
+  fs.utimesSync(lock, new Date(1), new Date(1));
+  const base = Date.now();
+  let calls = 0;
+  const swapLock = () => {
+    /* Another contender reclaims and replaces the lock between this
+       process's lstat and its rename: same path, different inode. */
+    fs.rmSync(lock, { recursive: true, force: true });
+    fs.mkdirSync(lock, { mode: 0o700 });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(replacementOwner), { mode: 0o600 });
+    fs.utimesSync(lock, new Date(base), new Date(base));
+  };
+
+  expect(() => new RuntimeImageStore(root, {
+    writerLockStaleMs: 30_000,
+    writerLockWaitMs: 10,
+    now: () => {
+      calls += 1;
+      if (calls === 2) swapLock();
+      return base + calls;
+    },
+  })).toThrow("runtime image writer lock timed out");
+
+  /* The displaced replacement lock was restored intact, never destroyed. */
+  expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8"))).toEqual(replacementOwner);
+});
+
 test("concurrent runtime image writers cannot exceed the global byte quota", async () => {
   const root = sandbox();
   const controls = sandbox();
