@@ -171,9 +171,14 @@ test("an engine event burst preserves every projection without polling the deliv
     pendingAction: null,
   });
   let effectBatchCalls = 0;
+  let snapshotCalls = 0;
   let deltaProjections = 0;
   let sessionStatusProjections = 0;
   const client = {
+    snapshot: async () => {
+      snapshotCalls += 1;
+      return { filesRevision: 0 };
+    },
     append: async (event: { kind: string }) => {
       if (event.kind === "delta") deltaProjections += 1;
       if (event.kind === "session-status") sessionStatusProjections += 1;
@@ -192,6 +197,7 @@ test("an engine event burst preserves every projection without polling the deliv
     await Bun.sleep(50);
     expect(burst.attachedAfter()).toBe(17);
     const baselineEffects = effectBatchCalls;
+    const baselineSnapshots = snapshotCalls;
     const baselineStatuses = sessionStatusProjections;
 
     for (let index = 18; index <= 57; index += 1) {
@@ -203,6 +209,7 @@ test("an engine event burst preserves every projection without polling the deliv
     expect(deltaProjections).toBe(40);
     expect(sessionStatusProjections - baselineStatuses).toBeLessThanOrEqual(1);
     expect(effectBatchCalls - baselineEffects).toBeLessThanOrEqual(1);
+    expect(snapshotCalls - baselineSnapshots).toBeLessThanOrEqual(1);
   } finally {
     await bindStructuredDeliveryQueue([], { registry, client: null });
   }

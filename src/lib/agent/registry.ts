@@ -1310,8 +1310,7 @@ function backfillMaterializedSpawnArtifacts(file: RegistryFile): RegistryFile {
       && conversation.continuityPaths.length === 0
       && conversation.migration === null
       && conversation.turn.observedAt !== null
-      && generation !== undefined
-      && observationIsCurrent(generation.createdAt, conversation.turn.observedAt);
+      && generation !== undefined;
     if (conversation?.engine === receipt.engine
       && generation
       && (observedCompletion || singleGenerationLaunchObservedAfterSettlement)) {
