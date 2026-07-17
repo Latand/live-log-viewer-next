@@ -12,6 +12,8 @@ import {
   type ConversationMigration,
   type DurableQuotaObservation,
   type HeldDelivery,
+  type HeldDeliveryCommand,
+  type HeldDeliveryCommandInput,
   type LaunchProfile,
   type MigrationIntent,
   type MigrationOrigin,
@@ -114,6 +116,9 @@ export interface SpawnReceipt {
   requestDigest: string | null;
   /** Launch transport fixed when the idempotent reservation is created. */
   transport: "tmux" | "structured" | null;
+  /** Process that owns pre-host structured admission. A replacement may take
+      this fence only after the recorded process identity is no longer live. */
+  admissionOwner: ProcessIdentity | null;
   /** One-way binding for the caller credential injected into this worker. */
   spawnCapabilityDigest: string | null;
   /** Reserved at receipt birth so path discovery cannot choose the identity. */
@@ -132,6 +137,8 @@ export interface SpawnReceipt {
   createdAt: string;
   state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
   artifactPath: string | null;
+  /** Tracks whether inventory has ever materialized the reserved artifact. */
+  artifactLifecycle: "pending" | "materialized";
   key: SessionKey | null;
   pane: TmuxSpawnBinding | null;
   verifiedHost: TmuxHostEvidence | null;
@@ -567,6 +574,13 @@ export class MigrationRevisionError extends Error {
   }
 }
 
+export class DeliveryReservationConflictError extends Error {
+  constructor() {
+    super("client message id is already reserved for another request");
+    this.name = "DeliveryReservationConflictError";
+  }
+}
+
 const LEGACY_POLICY_RESTARTED_AT = "1970-01-01T00:00:00.000Z";
 
 function emptyPolicy(restartedAt = now()): AutoBalancePolicy {
@@ -863,16 +877,69 @@ function normalizePolicy(value: AutoBalancePolicy | undefined): AutoBalancePolic
   };
 }
 
+function canonicalHeldDeliveryCommand(
+  value: HeldDeliveryCommandInput | HeldDeliveryCommand | undefined,
+  deliveryId: string,
+): HeldDeliveryCommand {
+  const command: HeldDeliveryCommand = {
+    operationId: value?.operationId || deliveryId,
+    kind: value?.kind === "steer" ? "steer" : "send",
+    policy: value?.policy === "queue" || value?.policy === "steer-if-active"
+      ? value.policy
+      : "interrupt-active",
+  };
+  if (value?.turnId === null || typeof value?.turnId === "string") command.turnId = value.turnId;
+  return command;
+}
+
+function heldDeliveryRequestDigest(
+  conversationId: ViewerConversationId,
+  text: string,
+  command: Pick<HeldDeliveryCommand, "kind" | "policy" | "turnId">,
+): string {
+  const turnFence = command.turnId === undefined
+    ? ["absent"]
+    : ["present", command.turnId];
+  return crypto.createHash("sha256").update(JSON.stringify([
+    "held-delivery-request-v1",
+    conversationId,
+    text,
+    command.kind,
+    command.policy,
+    turnFence,
+  ])).digest("hex");
+}
+
+function heldDeliveryRequestDigests(
+  file: RegistryFile,
+  conversationId: ViewerConversationId,
+  text: string,
+  command: Pick<HeldDeliveryCommand, "kind" | "policy" | "turnId">,
+): Set<string> {
+  const identities = new Set<ViewerConversationId>([conversationId]);
+  for (const alias of Object.keys(file.conversationAliases) as ViewerConversationId[]) {
+    if (resolveConversationAlias(file, alias) === conversationId) identities.add(alias);
+  }
+  return new Set([...identities].map((identity) => heldDeliveryRequestDigest(identity, text, command)));
+}
+
 function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
   const state = value.state ?? "held";
+  const text = typeof value.text === "string" ? value.text : "";
+  const command = canonicalHeldDeliveryCommand(value.command, value.id);
+  const legacyDigest = text
+    ? heldDeliveryRequestDigest(value.conversationId, text, command)
+    : null;
   return {
     ...value,
-    text: state === "delivered" ? "" : value.text,
+    text: state === "delivered" ? "" : text,
     clientMessageId: value.clientMessageId ?? null,
     payloadKind: value.payloadKind ?? "text",
     artifactPaths: Array.isArray(value.artifactPaths)
       ? value.artifactPaths.filter((pathname): pathname is string => typeof pathname === "string")
       : [],
+    command,
+    requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : legacyDigest,
     state,
     generationId: value.generationId ?? null,
     attempts: Number.isInteger(value.attempts) ? value.attempts : 0,
@@ -1040,7 +1107,10 @@ function recordMembership(
   const rows = file.memberships[canonicalConversationId] ?? [];
   const existing = rows.find((row) => row.kind === membership.kind && row.containerId === membership.containerId && row.slot === membership.slot);
   if (existing) {
-    const immutableShape = ({ createdAt: _createdAt, ...row }: DurableConversationMembership) => row;
+    const immutableShape = ({ createdAt, ...row }: DurableConversationMembership) => {
+      void createdAt;
+      return row;
+    };
     if (JSON.stringify(immutableShape(existing)) !== JSON.stringify(immutableShape(membership))) {
       throw new Error("durable membership is immutable");
     }
@@ -1169,6 +1239,14 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     clientAttemptId: typeof value.clientAttemptId === "string" ? value.clientAttemptId : null,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : null,
     transport: value.transport === "tmux" || value.transport === "structured" ? value.transport : null,
+    admissionOwner: value.admissionOwner
+      && Number.isInteger(value.admissionOwner.pid)
+      && value.admissionOwner.pid > 0
+      ? {
+          pid: value.admissionOwner.pid,
+          startIdentity: typeof value.admissionOwner.startIdentity === "string" ? value.admissionOwner.startIdentity : null,
+        }
+      : null,
     spawnCapabilityDigest: typeof value.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(value.spawnCapabilityDigest)
       ? value.spawnCapabilityDigest
       : null,
@@ -1187,6 +1265,7 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
       ? value.parentConversationId as ViewerConversationId
       : null,
     state,
+    artifactLifecycle: value.artifactLifecycle === "materialized" ? "materialized" : "pending",
     key: value.key && typeof value.key === "object" && (value.key.engine === "claude" || value.key.engine === "codex") && typeof value.key.sessionId === "string" ? value.key : null,
     pane,
     verifiedHost: value.verifiedHost && typeof value.verifiedHost === "object" && value.verifiedHost.kind === "tmux" ? value.verifiedHost : null,
@@ -1194,6 +1273,31 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     completionMode: value.completionMode === "route-completed" || value.completionMode === "observed-completed" || value.completionMode === "route-recovered" ? value.completionMode : null,
     launchProfile: emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }),
   };
+}
+
+function backfillMaterializedSpawnArtifacts(file: RegistryFile): RegistryFile {
+  for (const receipt of Object.values(file.receipts)) {
+    if (receipt.transport !== "structured"
+      || receipt.state !== "completed"
+      || receipt.artifactLifecycle !== "pending"
+      || !receipt.artifactPath) continue;
+    const conversation = file.conversations[resolveConversationAlias(file, receipt.conversationId)];
+    const generation = conversation?.generations.find((candidate) => candidate.path === receipt.artifactPath);
+    const observedCompletion = receipt.completionMode === "observed-completed" || receipt.completionMode === "route-recovered";
+    const singleGenerationLaunchObservedAfterSettlement = receipt.purpose === "launch"
+      && conversation?.generations.length === 1
+      && conversation.continuityPaths.length === 0
+      && conversation.migration === null
+      && conversation.turn.observedAt !== null
+      && generation !== undefined
+      && observationIsCurrent(generation.createdAt, conversation.turn.observedAt);
+    if (conversation?.engine === receipt.engine
+      && generation
+      && (observedCompletion || singleGenerationLaunchObservedAfterSettlement)) {
+      receipt.artifactLifecycle = "materialized";
+    }
+  }
+  return file;
 }
 
 function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile {
@@ -1223,7 +1327,7 @@ export function normalizeRegistry(value: unknown): RegistryFile {
     throw new RegistryReadError("agent registry schema is unsupported");
   }
   const legacy = parsed.legacyResumePanes;
-  return {
+  return backfillMaterializedSpawnArtifacts({
       version: 2,
       entries: Object.fromEntries(Object.entries(parsed.entries).map(([id, entry]) => [id, normalizeEntry(entry)])),
       receipts: Object.fromEntries(Object.entries(parsed.receipts).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
@@ -1261,7 +1365,7 @@ export function normalizeRegistry(value: unknown): RegistryFile {
       pendingSuccessorCleanups: parsed.pendingSuccessorCleanups && typeof parsed.pendingSuccessorCleanups === "object"
         ? parsed.pendingSuccessorCleanups
         : {},
-  };
+  });
 }
 
 function readFileWithPayload(filename: string): { file: RegistryFile; payload: string | null } {
@@ -1929,6 +2033,12 @@ export class AgentRegistry {
     return readFile(this.filename);
   }
 
+  spawnReceiptForClientAttempt(clientAttemptId: string): SpawnReceipt | null {
+    const receipt = Object.values(this.readOnlySnapshot().receipts)
+      .find((candidate) => candidate.clientAttemptId === clientAttemptId);
+    return receipt ? clone(receipt) : null;
+  }
+
   conversationIdForSpawnCapabilityDigest(digest: string): ViewerConversationId | null {
     if (!/^[0-9a-f]{64}$/.test(digest)) return null;
     const file = this.readOnlySnapshot();
@@ -2024,6 +2134,9 @@ export class AgentRegistry {
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
         transport: input.transport ?? null,
+        admissionOwner: input.transport === "structured"
+          ? { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }
+          : null,
         spawnCapabilityDigest: typeof input.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(input.spawnCapabilityDigest)
           ? input.spawnCapabilityDigest
           : null,
@@ -2040,6 +2153,7 @@ export class AgentRegistry {
         createdAt,
         state: "starting",
         artifactPath: input.expectedArtifactPath ?? null,
+        artifactLifecycle: "pending",
         key: null,
         pane: null,
         verifiedHost: null,
@@ -2089,6 +2203,26 @@ export class AgentRegistry {
         recordMembership(file, receipt.conversationId, membership, receipt.createdAt);
       }
       return { kind: "created", receipt: clone(receipt) };
+    });
+  }
+
+  /** Atomically adopts a structured receipt whose pre-host owner exited.
+      A live owner keeps responsibility for its process-local deferred work. */
+  claimStartingStructuredSpawn(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.transport !== "structured" || receipt.state !== "starting" || receipt.key || receipt.pane) {
+        return { claimed: false, receipt: clone(receipt) };
+      }
+      if (receipt.admissionOwner && this.ownerAlive(receipt.admissionOwner)) {
+        return { claimed: false, receipt: clone(receipt) };
+      }
+      receipt.admissionOwner = {
+        pid: process.pid,
+        startIdentity: procBackend.processIdentity(process.pid),
+      };
+      return { claimed: true, receipt: clone(receipt) };
     });
   }
 
@@ -2499,6 +2633,40 @@ export class AgentRegistry {
       receipt.completionMode = receipt.completionMode ?? "route-recovered";
       advanceMigrationScopeRevision(file, receipt.key.engine, readinessBefore, changedHostPaths);
       return { kind: "settled", receipt: clone(receipt), entry: clone(entry), conversation: clone(conversation) };
+    });
+  }
+
+  /** Strong runtime or transcript evidence may arrive after host cleanup marks
+      a structured launch failed. Restore the same reserved conversation and
+      generation while preserving its launch identity. */
+  recoverStructuredSpawnFromEvidence(
+    launchId: string,
+    evidence?: Omit<AgentRegistryEntry, "updatedAt">,
+  ): SpawnSettlement {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.state === "conflicted") {
+        return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
+      }
+      const stored = receipt.key ? file.entries[sessionKeyId(receipt.key)] : null;
+      let storedEvidence: Omit<AgentRegistryEntry, "updatedAt"> | null = null;
+      if (stored) {
+        const { updatedAt, ...entry } = stored;
+        void updatedAt;
+        storedEvidence = entry;
+      }
+      const candidate = evidence ?? storedEvidence;
+      if (!candidate
+        || (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(candidate.key))
+        || (receipt.artifactPath && receipt.artifactPath !== candidate.artifactPath)) {
+        return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
+      }
+      if (receipt.state === "failed") {
+        receipt.state = receipt.key ? "path-pending" : "starting";
+        receipt.error = null;
+      }
+      return this.settleSpawnInFile(file, launchId, candidate, "route-recovered");
     });
   }
 
@@ -2929,7 +3097,18 @@ export class AgentRegistry {
           migrationReceiptByPath.set(receiptPath, receipt);
         }
       }
+      const pendingStructuredReceiptsByPath = new Map<string, SpawnReceipt[]>();
+      for (const receipt of Object.values(file.receipts)) {
+        if (receipt.transport !== "structured" || receipt.artifactLifecycle !== "pending" || !receipt.artifactPath) continue;
+        const pathKey = `${receipt.engine}:${receipt.artifactPath}`;
+        const receipts = pendingStructuredReceiptsByPath.get(pathKey) ?? [];
+        receipts.push(receipt);
+        pendingStructuredReceiptsByPath.set(pathKey, receipts);
+      }
       for (const observation of observations) {
+        for (const receipt of pendingStructuredReceiptsByPath.get(`${observation.engine}:${observation.path}`) ?? []) {
+          receipt.artifactLifecycle = "materialized";
+        }
         const nativeId = sessionKeyFromTranscript(observation.engine, observation.path)?.sessionId ?? null;
         const pathPendingLaunchId = pathPendingLaunches.get(observation.path);
         if (nativeId && pathPendingLaunchId) {
@@ -3663,11 +3842,17 @@ export class AgentRegistry {
     text: string,
     clientMessageId: string | null = null,
     payloadKind: HeldDelivery["payloadKind"] = "text",
+    commandInput: HeldDeliveryCommandInput = {},
   ): HeldDelivery {
     if (payloadKind === "text" && (!text || text.length > 32_000)) throw new Error("held delivery must contain at most 32000 characters");
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, conversationId);
       const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;
+      const requestedCommand = canonicalHeldDeliveryCommand(commandInput, existing?.id ?? "pending-delivery");
+      const requestDigest = heldDeliveryRequestDigest(canonicalId, text, requestedCommand);
+      if (existing && !heldDeliveryRequestDigests(file, canonicalId, text, requestedCommand).has(existing.requestDigest ?? "")) {
+        throw new DeliveryReservationConflictError();
+      }
       const conversation = file.conversations[canonicalId];
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
@@ -3696,14 +3881,17 @@ export class AgentRegistry {
         return clone(delivery);
       };
       if (existing) return place(existing);
+      const deliveryId = crypto.randomUUID();
       const held: HeldDelivery = {
-        id: crypto.randomUUID(),
+        id: deliveryId,
         conversationId: canonicalId,
         text,
         createdAt: now(),
         clientMessageId,
         payloadKind,
         artifactPaths: [],
+        command: canonicalHeldDeliveryCommand(commandInput, deliveryId),
+        requestDigest,
         state: "held",
         generationId: null,
         attempts: 0,

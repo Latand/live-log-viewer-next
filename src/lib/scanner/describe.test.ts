@@ -46,6 +46,11 @@ test("parseWorktreeGitdir rejects gitdirs that are not linked worktrees", () => 
   expect(parseWorktreeGitdir("/home/u/sub", "gitdir: /home/u/worktrees/x")).toBeNull();
 });
 
+test("an absent cwd cannot inherit the Viewer process project", () => {
+  expect(projectForCwd("")).toBeNull();
+  expect(projectForCwd("   ")).toBeNull();
+});
+
 test("search text hydration retries after a transient filesystem failure", () => {
   const transcript = path.join(SANDBOX, "transient-search.jsonl");
   fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "Recovered search prompt" } }) + "\n");

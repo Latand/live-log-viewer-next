@@ -5,20 +5,19 @@ import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { agentRegistry, conversationLookupFromSnapshot, type AgentRegistry } from "@/lib/agent/registry";
 import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
 import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
-import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/delivery";
 import { loadFlows, reconcileFlowConversationOwnershipCooperatively } from "@/lib/flows/store";
 import { reconcileHandoffConversationOwnershipCooperatively } from "@/lib/handoffLineage";
 import { listFilesWithProjectCatalog, reconcileFileControllers } from "@/lib/scanner";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { runReaperCycle } from "@/lib/reaperRuntime";
 import { runHeadlessProcessReaper } from "@/lib/headlessProcessReaper";
-import { deliverHeldStructuredMessage, type HeldStructuredMessageOutcome } from "@/lib/runtime/structuredMessageDelivery";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { mutateTasks } from "@/lib/tasks/store";
 import { reconcileWorkflowConversationOwnershipCooperatively } from "@/lib/workflows/store";
 import { paneInfo } from "@/lib/tmux";
 
 import { drainHeldDeliveries, reconcileMigrationInventory, reconcileMigrations, type HeldDeliveryPort } from "./coordinator";
+import { createMigrationDeliveryPort } from "./deliveryPort";
 import { registerAccountMigrationTick } from "./controllerSignal";
 import type { SuccessorProviderPort } from "./contracts";
 import { RegisteredSuccessorProvider } from "./provider";
@@ -27,38 +26,7 @@ import { QuotaController } from "./quotaController";
 const CONTROLLER_INTERVAL_MS = 60_000;
 const INITIAL_INVENTORY_DELAY_MS = 1_000;
 
-type HeldDeliveryInput = Parameters<HeldDeliveryPort["deliver"]>[0];
-
-export interface MigrationDeliveryPortDependencies {
-  structuredDelivery?: typeof deliverHeldStructuredMessage;
-  legacyDelivery?: (input: HeldDeliveryInput) => Promise<Exclude<HeldStructuredMessageOutcome, null> | "held">;
-}
-
-export function createMigrationDeliveryPort(
-  dependencies: MigrationDeliveryPortDependencies = {},
-): HeldDeliveryPort {
-  const structuredDelivery = dependencies.structuredDelivery ?? deliverHeldStructuredMessage;
-  const legacyDelivery = dependencies.legacyDelivery ?? (async ({ delivery, path, clientMessageId }) => {
-    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId, reservedDeliveryId: delivery.id });
-    return migrationDeliveryOutcome(result);
-  });
-  const deliverStructured = ({ delivery, path, clientMessageId }: HeldDeliveryInput) => structuredDelivery({
-    conversationId: delivery.conversationId,
-    path,
-    deliveryId: delivery.id,
-    clientMessageId,
-    text: delivery.text,
-  });
-  return {
-    async deliver(input) {
-      const outcome = await deliverStructured(input);
-      return outcome ?? legacyDelivery(input);
-    },
-    async reconcileUncertain(input) {
-      return await deliverStructured(input) ?? "delivery-uncertain";
-    },
-  };
-}
+export { createMigrationDeliveryPort } from "./deliveryPort";
 
 const deliveryPort = createMigrationDeliveryPort();
 

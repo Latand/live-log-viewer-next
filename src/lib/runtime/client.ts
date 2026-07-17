@@ -4,6 +4,7 @@ import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult
 import { runtimeHostSocket } from "./flags";
 
 const MAX_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024;
+export const RUNTIME_SNAPSHOT_REQUEST_TIMEOUT_MS = 10_000;
 export const VIEWER_DEPLOYMENT_REQUEST_TIMEOUT_MS = 120_000;
 
 export class RuntimeHostUnavailableError extends Error {
@@ -37,9 +38,10 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
     private readonly socketPath: string,
     private readonly timeoutMs = 3_000,
     private readonly deploymentTimeoutMs = VIEWER_DEPLOYMENT_REQUEST_TIMEOUT_MS,
+    private readonly snapshotTimeoutMs = RUNTIME_SNAPSHOT_REQUEST_TIMEOUT_MS,
   ) {}
 
-  snapshot(): Promise<RuntimeSnapshot> { return this.call("snapshot") as Promise<RuntimeSnapshot>; }
+  snapshot(): Promise<RuntimeSnapshot> { return this.call("snapshot", undefined, this.snapshotTimeoutMs) as Promise<RuntimeSnapshot>; }
   events(after: number): Promise<RuntimeReplay> { return this.call("events", { after }) as Promise<RuntimeReplay>; }
   waitEvents(after: number, timeoutMs = 15_000, signal?: AbortSignal): Promise<RuntimeReplay> { return this.call("wait", { after, timeoutMs }, timeoutMs + 1_000, signal) as Promise<RuntimeReplay>; }
   append(event: RuntimeEventInput): Promise<unknown> { return this.call("append", { event }); }

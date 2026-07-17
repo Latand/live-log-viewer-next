@@ -196,6 +196,20 @@ export interface DurableQuotaObservation {
   bootId: string;
 }
 
+export interface HeldDeliveryCommand {
+  operationId: string;
+  kind: "send" | "steer";
+  policy: "queue" | "steer-if-active" | "interrupt-active";
+  turnId?: string | null;
+}
+
+export interface HeldDeliveryCommandInput {
+  operationId?: string;
+  kind?: HeldDeliveryCommand["kind"];
+  policy?: HeldDeliveryCommand["policy"];
+  turnId?: string | null;
+}
+
 export interface HeldDelivery {
   id: string;
   conversationId: ViewerConversationId;
@@ -206,6 +220,8 @@ export interface HeldDelivery {
   payloadKind: "text" | "ephemeral-images" | "ephemeral-text";
   /** Inbox files already materialized for an ambiguous request-local attempt. */
   artifactPaths: string[];
+  command: HeldDeliveryCommand;
+  requestDigest: string | null;
   state: "held" | "assigned" | "delivered" | "failed" | "delivery-uncertain";
   generationId: string | null;
   attempts: number;

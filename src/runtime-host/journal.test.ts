@@ -233,6 +233,76 @@ test("send operations converge by idempotency key and persist one receipt and ef
   journal.close();
 });
 
+test("operation idempotency keys are scoped to their conversation", () => {
+  const dir = sandbox("operation-conversation-dedupe");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  const first = journal.executeOperation({
+    kind: "send",
+    operationId: "op-conversation-one",
+    idempotencyKey: "composer-message-one",
+    conversationId: "conversation-one",
+    text: "first conversation",
+    policy: "queue",
+  });
+  const second = journal.executeOperation({
+    kind: "send",
+    operationId: "op-conversation-two",
+    idempotencyKey: "composer-message-one",
+    conversationId: "conversation-two",
+    text: "second conversation",
+    policy: "queue",
+  });
+
+  expect(first.replayed).toBe(false);
+  expect(second.replayed).toBe(false);
+  expect(first.receipt.idempotencyKey).toBe(second.receipt.idempotencyKey);
+  expect(journal.snapshot().recentOperations).toHaveLength(2);
+  journal.close();
+});
+
+test("runtime restart upgrades global operation idempotency without losing receipts", () => {
+  const dir = sandbox("operation-idempotency-upgrade");
+  const filename = path.join(dir, "events.sqlite");
+  const originalCommand = {
+    kind: "send" as const,
+    operationId: "op-before-idempotency-upgrade",
+    idempotencyKey: "composer-message-one",
+    conversationId: "conversation-before-upgrade",
+    text: "persist through upgrade",
+    policy: "queue" as const,
+  };
+  const initial = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
+  const original = initial.executeOperation(originalCommand);
+  initial.close();
+
+  const db = new Database(filename);
+  db.exec(`
+    BEGIN IMMEDIATE;
+    ALTER TABLE operations RENAME TO operations_scoped_idempotency;
+    CREATE TABLE operations (
+      operation_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+      request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
+      receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL
+    );
+    INSERT INTO operations(operation_id, idempotency_key, request_hash, request_json, receipt_json, event_seq)
+    SELECT operation_id, idempotency_key, request_hash, request_json, receipt_json, event_seq
+    FROM operations_scoped_idempotency;
+    DROP TABLE operations_scoped_idempotency;
+    COMMIT;
+  `);
+  db.close();
+
+  const restarted = new RuntimeJournal(filename, { maxEvents: 100, now: () => 101 });
+  expect(restarted.executeOperation(originalCommand)).toEqual({ ...original, replayed: true });
+  expect(restarted.executeOperation({
+    ...originalCommand,
+    operationId: "op-after-idempotency-upgrade",
+    conversationId: "conversation-after-upgrade",
+    text: "reuse the composer id in another conversation",
+  }).replayed).toBe(false);
+  restarted.close();
+});
+
 test("structured send receipts advance through the durable delivery lifecycle", () => {
   const dir = sandbox("structured-delivery-lifecycle");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), {
@@ -1492,6 +1562,38 @@ test("concurrent socket replays keep maximum-size command output byte-bounded an
 
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   journal.close();
+});
+
+test("a production-sized snapshot has a bounded read budget independent from controls", async () => {
+  const dir = sandbox("socket-large-snapshot-budget");
+  const socketPath = path.join(dir, "runtime.sock");
+  const server = net.createServer((socket) => {
+    let frame = "";
+    socket.on("data", (chunk) => {
+      frame += String(chunk);
+      const newline = frame.indexOf("\n");
+      if (newline < 0) return;
+      const request = JSON.parse(frame.slice(0, newline)) as { id: string; method: string };
+      setTimeout(() => {
+        const result = request.method === "snapshot"
+          ? { snapshotSeq: 1, transportPadding: "x".repeat(950 * 1024) }
+          : { reset: false, floorSeq: 0, events: [] };
+        socket.end(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
+      }, 60);
+    });
+  });
+  server.listen(socketPath);
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const client = new UnixRuntimeHostClient(socketPath, 20, 100, 250);
+
+  try {
+    const snapshot = await client.snapshot() as unknown as { transportPadding: string };
+    expect(Buffer.byteLength(snapshot.transportPadding)).toBe(950 * 1024);
+    await expect(client.events(0)).rejects.toThrow("runtime host request timed out");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("structured queue controls cross the local runtime socket", async () => {

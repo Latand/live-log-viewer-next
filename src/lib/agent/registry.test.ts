@@ -104,7 +104,7 @@ describe("agent registry", () => {
         assignedAt: null,
         deliveredAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
         error: null,
-      };
+      } as unknown as (typeof snapshot.heldDeliveries)[string];
     }
     fs.writeFileSync(store.filename, JSON.stringify(snapshot));
 
@@ -116,6 +116,36 @@ describe("agent registry", () => {
     expect(retained.every((delivery) => delivery.text === "")).toBe(true);
     expect(retained.map((delivery) => delivery.id)).not.toContain("legacy-000");
     expect(retained.map((delivery) => delivery.id)).toContain("legacy-104");
+  });
+
+  test("reopening an old text-only reservation applies safe command defaults", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/legacy-text-only-delivery.jsonl", "default");
+    const reserved = store.holdDelivery(conversation.id, "continue after upgrade", "legacy-text-only-message");
+    const snapshot = store.snapshot();
+    const legacy = snapshot.heldDeliveries[reserved.id]! as Partial<typeof reserved>;
+    delete legacy.command;
+    delete legacy.requestDigest;
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const reopened = new AgentRegistry(store.filename);
+    const normalized = reopened.pendingDeliveries(conversation.id)[0]!;
+
+    expect(normalized).toMatchObject({
+      id: reserved.id,
+      text: "continue after upgrade",
+      command: {
+        operationId: reserved.id,
+        kind: "send",
+        policy: "interrupt-active",
+      },
+      requestDigest: expect.any(String),
+    });
+    expect(reopened.holdDelivery(
+      conversation.id,
+      "continue after upgrade",
+      "legacy-text-only-message",
+    ).id).toBe(reserved.id);
   });
 
   test("startup compaction bounds abandoned failed reservations and leaves capacity", () => {
@@ -1123,6 +1153,42 @@ describe("agent registry", () => {
       launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "default" }),
     }).kind).toBe("conflict");
     expect(store.beginSpawnRequest({ ...request, transport: "tmux" }).kind).toBe("conflict");
+  });
+
+  test("structured admission recovery fences a live owner and adopts a recycled pid", () => {
+    const store = registry((owner) =>
+      owner.pid === process.pid || (owner.pid === 987_654 && owner.startIdentity === "987654:new"));
+    const begun = store.beginSpawnRequest({
+      engine: "claude",
+      cwd: "/repo",
+      accountId: "work",
+      clientAttemptId: "attempt_admission_owner",
+      requestDigest: "digest",
+      transport: "structured",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const snapshot = store.snapshot();
+    snapshot.receipts[begun.receipt.launchId]!.admissionOwner = {
+      pid: 987_654,
+      startIdentity: "987654:new",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    expect(store.claimStartingStructuredSpawn(begun.receipt.launchId)).toMatchObject({
+      claimed: false,
+      receipt: { admissionOwner: { pid: 987_654, startIdentity: "987654:new" } },
+    });
+
+    snapshot.receipts[begun.receipt.launchId]!.admissionOwner = {
+      pid: 987_654,
+      startIdentity: "987654:old",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    expect(store.claimStartingStructuredSpawn(begun.receipt.launchId)).toMatchObject({
+      claimed: true,
+      receipt: { admissionOwner: { pid: process.pid } },
+    });
   });
 
   test("spawn capability digest durably resolves its reserved conversation", () => {
@@ -2519,7 +2585,7 @@ describe("agent registry", () => {
       role: "reviewer",
       reviewsConversationId: provisional.id,
     });
-    const held = store.holdDelivery(provisional.id, "deliver after migration");
+    const held = store.holdDelivery(provisional.id, "deliver after migration", "provisional-migration-message");
     store.reconcileConversations([{
       engine: "claude",
       path: "/child.jsonl",
@@ -2561,6 +2627,7 @@ describe("agent registry", () => {
       reviewsConversationId: original.id,
     });
     expect(snapshot.heldDeliveries[held.id]).toMatchObject({ conversationId: original.id });
+    expect(store.holdDelivery(original.id, "deliver after migration", "provisional-migration-message").id).toBe(held.id);
     expect(store.conversationForPath("/child.jsonl")?.generations[0]?.launchProfile.parentConversationId).toBe(original.id);
     expect(snapshot.conversationAliases[provisional.id]).toBe(original.id);
     expect(store.canonicalConversationId(provisional.id)).toBe(original.id);
@@ -2576,7 +2643,7 @@ describe("agent registry", () => {
     }));
     const restarted = new AgentRegistry(store.filename).snapshot();
     expect(restarted.version).toBe(2);
-    expect(restarted.receipts.legacy).toMatchObject({ clientAttemptId: null, pane: null, key: null, state: "starting" });
+    expect(restarted.receipts.legacy).toMatchObject({ clientAttemptId: null, pane: null, key: null, state: "starting", artifactLifecycle: "pending" });
     expect(restarted.receipts.legacy?.conversationId.startsWith("conversation_")).toBe(true);
   });
 

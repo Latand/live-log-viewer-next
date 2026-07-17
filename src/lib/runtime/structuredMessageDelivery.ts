@@ -1,14 +1,19 @@
 import crypto from "node:crypto";
 
-import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import {
+  agentRegistry,
+  DeliveryReservationConflictError,
+  type AgentRegistry,
+  type RegistryConversation,
+} from "@/lib/agent/registry";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
-import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import type { HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt } from "./contracts";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
-import { didStructuredHostStartupFail, markStructuredHostStartupReady } from "./startupStatus";
+import { markStructuredHostStartupReady } from "./startupStatus";
 
 export interface StructuredMessageRequest {
   path: string;
@@ -44,11 +49,13 @@ export interface HeldStructuredMessageRequest {
   deliveryId: string;
   clientMessageId: string;
   text: string;
+  command?: HeldDeliveryCommand;
 }
 
 export interface HeldStructuredMessageDependencies {
   enabled?: () => boolean;
   client?: () => RuntimeHostClient | null;
+  registry?: () => AgentRegistry;
   kick?: () => void | Promise<void>;
   startupFailed?: () => boolean;
   startupRecovered?: () => void;
@@ -68,6 +75,108 @@ function ownershipUnavailable(): StructuredMessageResult {
     error: "structured host ownership is unavailable; retry after runtime synchronization",
     status: 503,
   };
+}
+
+function legacyCommandUnavailable(): StructuredMessageResult {
+  return {
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: "legacy delivery cannot preserve structured command semantics",
+    status: 409,
+  };
+}
+
+function requiresStructuredCommand(request: StructuredMessageRequest): boolean {
+  return request.operationId !== undefined
+    || (request.kind ?? "send") !== "send"
+    || (request.policy ?? "interrupt-active") !== "interrupt-active"
+    || request.turnId !== undefined;
+}
+
+function requiresStructuredHeldCommand(request: HeldStructuredMessageRequest): boolean {
+  const command = request.command;
+  return command !== undefined
+    && (command.operationId !== request.deliveryId
+      || command.kind !== "send"
+      || command.policy !== "interrupt-active"
+      || command.turnId !== undefined);
+}
+
+function deliveryFailure(error: unknown): StructuredMessageResult {
+  return {
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: error instanceof Error ? error.message : "structured host delivery failed",
+    status: error instanceof DeliveryReservationConflictError ? 409 : 503,
+  };
+}
+
+function commandInput(request: StructuredMessageRequest) {
+  return {
+    ...(request.operationId ? { operationId: request.operationId } : {}),
+    ...(request.kind ? { kind: request.kind } : {}),
+    ...(request.policy ? { policy: request.policy } : {}),
+    ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
+  };
+}
+
+type PersistedMessageOwner = {
+  kind: "structured" | "legacy";
+  conversation: RegistryConversation;
+};
+
+function persistedCurrentOwner(
+  request: Pick<StructuredMessageRequest, "conversationId" | "path">,
+  registry: AgentRegistry,
+): PersistedMessageOwner | null {
+  const conversation = request.conversationId?.startsWith("conversation_")
+    ? registry.conversation(request.conversationId as ViewerConversationId)
+    : registry.conversationForPath(request.path);
+  const generation = conversation?.generations.at(-1);
+  if (!conversation || !generation) return null;
+  const entry = registry.snapshot().entries[`${conversation.engine}:${generation.id}`];
+  if (!entry || entry.artifactPath !== generation.path) return null;
+  const structured = entry.structuredHost !== null && entry.structuredHost !== undefined;
+  const legacy = entry.host !== null;
+  if (structured === legacy) return null;
+  return { kind: structured ? "structured" : "legacy", conversation };
+}
+
+function heldOutcomeDuringRuntimeSynchronization(
+  request: HeldStructuredMessageRequest,
+  registry: AgentRegistry,
+): HeldStructuredMessageOutcome {
+  if (persistedCurrentOwner(request, registry)?.kind !== "legacy") return "delivery-uncertain";
+  return requiresStructuredHeldCommand(request) ? "failed" : null;
+}
+
+function holdDuringRuntimeSynchronization(
+  request: StructuredMessageRequest,
+  registry: AgentRegistry,
+  requestTick: () => void,
+): StructuredMessageResult | null {
+  const owner = persistedCurrentOwner(request, registry);
+  if (!owner) return ownershipUnavailable();
+  if (owner.kind === "legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
+  const { conversation } = owner;
+  if (request.hasImages) {
+    return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
+  }
+  try {
+    const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
+    registry.holdDelivery(conversation.id, request.text, idempotencyKey, "text", commandInput(request));
+    requestTick();
+    return {
+      ok: true,
+      structured: true,
+      target: conversation.id,
+      outcome: "held",
+    };
+  } catch (error) {
+    return deliveryFailure(error);
+  }
 }
 
 function recordStructuredRuntimeRecovery(
@@ -94,27 +203,36 @@ export async function deliverHeldStructuredMessage(
 ): Promise<HeldStructuredMessageOutcome> {
   if (!(dependencies.enabled ?? structuredHostsEnabled)()) return null;
   const client = (dependencies.client ?? runtimeHostClient)();
-  if (!client) return (dependencies.startupFailed ?? didStructuredHostStartupFail)() ? null : "delivery-uncertain";
+  if (!client) {
+    return heldOutcomeDuringRuntimeSynchronization(request, (dependencies.registry ?? agentRegistry)());
+  }
   let snapshot: Awaited<ReturnType<RuntimeHostClient["snapshot"]>>;
   try {
     snapshot = await client.snapshot();
   } catch (error) {
     console.error("[structured delivery] runtime snapshot failed", error);
-    return (dependencies.startupFailed ?? didStructuredHostStartupFail)() ? null : "delivery-uncertain";
+    return heldOutcomeDuringRuntimeSynchronization(request, (dependencies.registry ?? agentRegistry)());
   }
   recordStructuredRuntimeRecovery(snapshot, dependencies.startupRecovered ?? markStructuredHostStartupReady);
   const session = snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
-  if (!session || session.hostKind === "tmux-legacy") return null;
-  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return null;
+  if (!session) return heldOutcomeDuringRuntimeSynchronization(request, (dependencies.registry ?? agentRegistry)());
+  if (session.hostKind === "tmux-legacy") return requiresStructuredHeldCommand(request) ? "failed" : null;
+  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return "delivery-uncertain";
   try {
-    const result = await client.command({
-      kind: "send",
+    const command = request.command ?? {
       operationId: request.deliveryId,
+      kind: "send" as const,
+      policy: "interrupt-active" as const,
+    };
+    const result = await client.command({
+      kind: command.kind,
+      operationId: command.operationId,
       conversationId: request.conversationId,
       idempotencyKey: request.clientMessageId,
       text: request.text,
-      policy: "interrupt-active",
+      policy: command.policy,
+      ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
     });
     try {
       await (dependencies.kick ?? kickStructuredDeliveryQueue)();
@@ -136,21 +254,38 @@ export async function enqueueStructuredMessage(
 ): Promise<StructuredMessageResult | null> {
   if (!(dependencies.enabled ?? structuredHostsEnabled)()) return null;
   const client = (dependencies.client ?? runtimeHostClient)();
-  if (!client) return (dependencies.startupFailed ?? didStructuredHostStartupFail)() ? null : ownershipUnavailable();
+  if (!client) {
+    return holdDuringRuntimeSynchronization(
+      request,
+      (dependencies.registry ?? agentRegistry)(),
+      dependencies.requestMigrationTick ?? requestAccountMigrationTick,
+    );
+  }
   let snapshot: Awaited<ReturnType<RuntimeHostClient["snapshot"]>>;
   try {
     snapshot = await client.snapshot();
   } catch (error) {
     console.error("[structured delivery] runtime snapshot failed", error);
-    return (dependencies.startupFailed ?? didStructuredHostStartupFail)() ? null : ownershipUnavailable();
+    return holdDuringRuntimeSynchronization(
+      request,
+      (dependencies.registry ?? agentRegistry)(),
+      dependencies.requestMigrationTick ?? requestAccountMigrationTick,
+    );
   }
   recordStructuredRuntimeRecovery(snapshot, dependencies.startupRecovered ?? markStructuredHostStartupReady);
   const session = (request.conversationId
     ? snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     : undefined)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
-  if (!session || session.hostKind === "tmux-legacy") return null;
-  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return null;
+  if (!session) {
+    return holdDuringRuntimeSynchronization(
+      request,
+      (dependencies.registry ?? agentRegistry)(),
+      dependencies.requestMigrationTick ?? requestAccountMigrationTick,
+    );
+  }
+  if (session.hostKind === "tmux-legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
+  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return ownershipUnavailable();
   if (request.hasImages) {
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }
@@ -180,7 +315,7 @@ export async function enqueueStructuredMessage(
   if (!conversation) return ownershipUnavailable();
   try {
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
-    let reservation = registry.holdDelivery(conversation.id, request.text, idempotencyKey);
+    let reservation = registry.holdDelivery(conversation.id, request.text, idempotencyKey, "text", commandInput(request));
     let claimedReservationId: string | null = null;
     if (reservation.state === "delivery-uncertain") {
       reservation = registry.retryUncertainDelivery(reservation.id);
@@ -219,13 +354,13 @@ export async function enqueueStructuredMessage(
       };
     }
     const result = await client.command({
-      kind: request.kind ?? "send",
-      ...(request.operationId ? { operationId: request.operationId } : {}),
+      kind: reservation.command.kind,
+      operationId: reservation.command.operationId,
       conversationId: conversation.id,
       idempotencyKey,
       text: request.text,
-      policy: request.policy ?? "interrupt-active",
-      ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
+      policy: reservation.command.policy,
+      ...(reservation.command.turnId !== undefined ? { turnId: reservation.command.turnId } : {}),
     });
     const receipt = result.receipt;
     if (receipt.status === "rejected" || receipt.status === "failed" || receipt.status === "uncertain") {
@@ -259,12 +394,6 @@ export async function enqueueStructuredMessage(
       ...(recoveredHost ? { spawned: true } : {}),
     };
   } catch (error) {
-    return {
-      ok: false,
-      structured: true,
-      outcome: "failed",
-      error: error instanceof Error ? error.message : "structured host delivery failed",
-      status: 503,
-    };
+    return deliveryFailure(error);
   }
 }

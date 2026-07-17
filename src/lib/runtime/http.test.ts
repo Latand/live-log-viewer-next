@@ -74,6 +74,41 @@ test("runtime command routes fail closed while activation is disabled", async ()
   expect(await response.json()).toEqual({ error: "runtime events are disabled" });
 });
 
+test("direct runtime send reaches durable admission while the runtime socket synchronizes", async () => {
+  const admissions: unknown[] = [];
+  const response = await handleRuntimeCommand(
+    request({
+      conversationId: "conversation_sync_window",
+      text: "retain this first message",
+      idempotencyKey: "sync-window-send",
+    }),
+    "send",
+    {
+      enabled: () => true,
+      structuredEnabled: () => true,
+      client: () => null,
+      enqueue: async (input) => {
+        admissions.push(input);
+        return {
+          ok: true,
+          structured: true,
+          target: "conversation_sync_window",
+          outcome: "held",
+        };
+      },
+    },
+  );
+
+  expect(response.status).toBe(202);
+  expect(await response.json()).toEqual({ held: true });
+  expect(admissions).toMatchObject([{
+    conversationId: "conversation_sync_window",
+    clientMessageId: "sync-window-send",
+    kind: "send",
+    text: "retain this first message",
+  }]);
+});
+
 test("direct structured commands stop before runtime admission when hosting is disabled", async () => {
   const commands: unknown[] = [];
   const client = {

@@ -6,6 +6,7 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
+import { projectForCwd } from "@/lib/scanner/describe";
 import { writeSessionTitle } from "@/lib/session/titleStore";
 
 import { GET } from "./route";
@@ -144,11 +145,11 @@ test("search finds a capped-out conversation by its registry launch title", asyn
   expect(body.items).toEqual([expect.objectContaining({
     path: transcript,
     title: "Launch amber orchard",
-    project: "launch-project",
+    project: projectForCwd(sandbox),
   })]);
 });
 
-test("an empty-query project list uses the registry launch project", async () => {
+test("an empty-query project list uses the registry launch cwd", async () => {
   const transcript = path.join(sandbox, "launch-project.jsonl");
   fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "Launch project prompt" } }) + "\n");
   const stat = fs.statSync(transcript);
@@ -174,14 +175,15 @@ test("an empty-query project list uses the registry launch project", async () =>
     observedAt: "2026-07-13T00:00:00.000Z",
   }]);
 
-  const response = await GET(new Request("http://127.0.0.1/api/conversations?project=launch-project"));
+  const canonicalProject = projectForCwd(sandbox)!;
+  const response = await GET(new Request(`http://127.0.0.1/api/conversations?project=${encodeURIComponent(canonicalProject)}`));
   const body = await response.json() as { items: Array<{ path: string; title: string; project: string }> };
 
   expect(response.status).toBe(200);
   expect(body.items).toEqual([expect.objectContaining({
     path: transcript,
     title: "Launch title",
-    project: "launch-project",
+    project: canonicalProject,
   })]);
 });
 
