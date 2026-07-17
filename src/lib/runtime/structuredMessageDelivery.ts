@@ -45,6 +45,7 @@ export interface StructuredMessageDependencies {
 
 export interface HeldStructuredMessageRequest {
   conversationId: string;
+  runtimeConversationId?: string;
   path: string;
   deliveryId: string;
   clientMessageId: string;
@@ -206,7 +207,7 @@ function deliveredReservationReplay(
   const receipt: RuntimeOperationReceipt = {
     operationId: reservation.command.operationId,
     idempotencyKey,
-    conversationId: reservation.conversationId,
+    conversationId: reservation.runtimeConversationId,
     kind: reservation.command.kind,
     status: "delivered",
     ...(reservation.command.turnId !== undefined ? { turnId: reservation.command.turnId } : {}),
@@ -256,7 +257,7 @@ export async function deliverHeldStructuredMessage(
     const result = await client.command({
       kind: command.kind,
       operationId: command.operationId,
-      conversationId: request.conversationId,
+      conversationId: request.runtimeConversationId ?? request.conversationId,
       idempotencyKey: request.clientMessageId,
       text: request.text,
       policy: command.policy,
@@ -392,7 +393,7 @@ export async function enqueueStructuredMessage(
     const result = await client.command({
       kind: reservation.command.kind,
       operationId: reservation.command.operationId,
-      conversationId: conversation.id,
+      conversationId: reservation.runtimeConversationId,
       idempotencyKey,
       text: request.text,
       policy: reservation.command.policy,

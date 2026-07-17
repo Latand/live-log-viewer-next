@@ -75,6 +75,7 @@ test("controller drains a migration-held structured message through the runtime 
   expect(outcome).toBe("delivered");
   expect(structured).toEqual([{
     conversationId: conversation.id,
+    runtimeConversationId: conversation.id,
     path: "/structured-successor.jsonl",
     deliveryId: claimed.id,
     clientMessageId: "migration-message",
@@ -96,6 +97,7 @@ test("controller keeps an uncertain structured claim fenced when ownership canno
   const delivery = {
     id: "held-one",
     conversationId: "conversation_11111111-1111-4111-8111-111111111111" as const,
+    runtimeConversationId: "conversation_11111111-1111-4111-8111-111111111111" as const,
     text: "continue",
     createdAt: "2026-07-13T00:00:00.000Z",
     clientMessageId: "migration-message",

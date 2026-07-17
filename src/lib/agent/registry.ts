@@ -233,6 +233,7 @@ export interface RegistryConversation {
 
 export interface DeliveryOperationOwner {
   conversationId: ViewerConversationId;
+  runtimeConversationId: ViewerConversationId;
   clientMessageId: string | null;
   deliveryId: string;
   command: HeldDeliveryCommand;
@@ -938,6 +939,9 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
     : null;
   return {
     ...value,
+    runtimeConversationId: typeof value.runtimeConversationId === "string" && value.runtimeConversationId.startsWith("conversation_")
+      ? value.runtimeConversationId as ViewerConversationId
+      : value.conversationId,
     text: state === "delivered" ? "" : text,
     clientMessageId: value.clientMessageId ?? null,
     payloadKind: value.payloadKind ?? "text",
@@ -970,6 +974,9 @@ function normalizeDeliveryOperationOwners(
         || typeof owner.requestDigest !== "string" || !owner.requestDigest) continue;
       owners[operationId] = {
         conversationId: owner.conversationId as ViewerConversationId,
+        runtimeConversationId: typeof owner.runtimeConversationId === "string" && owner.runtimeConversationId.startsWith("conversation_")
+          ? owner.runtimeConversationId as ViewerConversationId
+          : heldDeliveries[owner.deliveryId]?.runtimeConversationId ?? owner.conversationId as ViewerConversationId,
         clientMessageId: owner.clientMessageId,
         deliveryId: owner.deliveryId,
         command: { ...canonicalHeldDeliveryCommand(owner.command, operationId), operationId },
@@ -990,6 +997,7 @@ function normalizeDeliveryOperationOwners(
     if (delivery.command.operationId === delivery.id || !delivery.requestDigest) continue;
     owners[delivery.command.operationId] ??= {
       conversationId: delivery.conversationId,
+      runtimeConversationId: delivery.runtimeConversationId,
       clientMessageId: delivery.clientMessageId,
       deliveryId: delivery.id,
       command: delivery.command,
@@ -1004,6 +1012,7 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
     if (delivery.command.operationId === delivery.id || !delivery.requestDigest) continue;
     file.deliveryOperationOwners[delivery.command.operationId] ??= {
       conversationId: delivery.conversationId,
+      runtimeConversationId: delivery.runtimeConversationId,
       clientMessageId: delivery.clientMessageId,
       deliveryId: delivery.id,
       command: delivery.command,
@@ -3826,6 +3835,7 @@ export class AgentRegistry {
         const operationOwner = file.deliveryOperationOwners[requestedCommand.operationId]
           ?? (ownedDelivery?.requestDigest ? {
             conversationId: ownedDelivery.conversationId,
+            runtimeConversationId: ownedDelivery.runtimeConversationId,
             clientMessageId: ownedDelivery.clientMessageId,
             deliveryId: ownedDelivery.id,
             command: ownedDelivery.command,
@@ -3878,6 +3888,7 @@ export class AgentRegistry {
       const held: HeldDelivery = {
         id: deliveryId,
         conversationId: canonicalId,
+        runtimeConversationId: canonicalId,
         text,
         createdAt: now(),
         clientMessageId,
@@ -3899,6 +3910,7 @@ export class AgentRegistry {
       if (commandInput.operationId) {
         file.deliveryOperationOwners[held.command.operationId] ??= {
           conversationId: canonicalId,
+          runtimeConversationId: held.runtimeConversationId,
           clientMessageId,
           deliveryId: held.id,
           command: held.command,

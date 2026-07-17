@@ -30,6 +30,7 @@ export function createMigrationDeliveryPort(
   });
   const deliverStructured = ({ delivery, path, clientMessageId }: HeldDeliveryInput) => structuredDelivery({
     conversationId: delivery.conversationId,
+    runtimeConversationId: delivery.runtimeConversationId,
     path,
     deliveryId: delivery.id,
     clientMessageId,
