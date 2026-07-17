@@ -966,6 +966,11 @@ function terminalDeliveryState(
   return delivery?.state === "delivered" || delivery?.state === "failed" ? delivery.state : null;
 }
 
+function syncDeliveryOperationOwnerState(file: RegistryFile, delivery: HeldDelivery): void {
+  const owner = file.deliveryOperationOwners[delivery.command.operationId];
+  if (owner?.deliveryId === delivery.id) owner.terminalState = terminalDeliveryState(delivery);
+}
+
 function normalizeDeliveryOperationOwners(
   value: unknown,
   heldDeliveries: RegistryFile["heldDeliveries"],
@@ -988,10 +993,16 @@ function normalizeDeliveryOperationOwners(
         && terminalDeliveryState(settledCandidate) !== null
         ? settledCandidate
         : null;
-      const referencedDelivery = heldDeliveries[owner.deliveryId];
-      const terminalState = owner.terminalState === "delivered" || owner.terminalState === "failed"
-        ? owner.terminalState
-        : terminalDeliveryState(settledDelivery) ?? terminalDeliveryState(referencedDelivery);
+      const referencedCandidate = heldDeliveries[owner.deliveryId];
+      const referencedDelivery = referencedCandidate?.command.operationId === operationId
+        && referencedCandidate.requestDigest === owner.requestDigest
+        ? referencedCandidate
+        : null;
+      const terminalState = referencedDelivery
+        ? terminalDeliveryState(referencedDelivery)
+        : owner.terminalState === "delivered" || owner.terminalState === "failed"
+          ? owner.terminalState
+          : terminalDeliveryState(settledDelivery);
       owners[operationId] = {
         conversationId: owner.conversationId as ViewerConversationId,
         runtimeConversationId: typeof owner.runtimeConversationId === "string" && owner.runtimeConversationId.startsWith("conversation_")
@@ -1048,7 +1059,7 @@ function compactDeliveryOperationOwners(file: RegistryFile, onlyConversationId?:
 function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: ViewerConversationId): number {
   for (const delivery of Object.values(file.heldDeliveries)) {
     if (delivery.command.operationId === delivery.id || !delivery.requestDigest) continue;
-    const owner = file.deliveryOperationOwners[delivery.command.operationId] ??= {
+    file.deliveryOperationOwners[delivery.command.operationId] ??= {
       conversationId: delivery.conversationId,
       runtimeConversationId: delivery.runtimeConversationId,
       clientMessageId: delivery.clientMessageId,
@@ -1058,9 +1069,7 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
       createdAt: delivery.createdAt,
       terminalState: null,
     };
-    if (owner.deliveryId === delivery.id && (delivery.state === "delivered" || delivery.state === "failed")) {
-      owner.terminalState = delivery.state;
-    }
+    syncDeliveryOperationOwnerState(file, delivery);
   }
   const deliveredGroups = new Map<ViewerConversationId, HeldDelivery[]>();
   const failedGroups = new Map<ViewerConversationId, HeldDelivery[]>();
@@ -3360,6 +3369,7 @@ export class AgentRegistry {
             delivery.generationId = source.id;
             delivery.assignedAt = changedAt;
             delivery.error = null;
+            syncDeliveryOperationOwnerState(file, delivery);
           }
         }
         conversation.migration = null;
@@ -3433,6 +3443,7 @@ export class AgentRegistry {
               delivery.generationId = source.id;
               delivery.assignedAt = changedAt;
               delivery.error = null;
+              syncDeliveryOperationOwnerState(file, delivery);
             }
             conversation.migration = null;
             conversation.updatedAt = changedAt;
@@ -3719,6 +3730,7 @@ export class AgentRegistry {
         delivery.generationId = generation.id;
         delivery.assignedAt = committedAt;
         delivery.error = null;
+        syncDeliveryOperationOwnerState(file, delivery);
       }
       file.conversationRevision[conversation.engine] += 1;
       file.engineRouting[conversation.engine].revision += 1;
@@ -3759,6 +3771,7 @@ export class AgentRegistry {
             delivery.generationId = source.id;
             delivery.assignedAt = intent.updatedAt;
             delivery.error = null;
+            syncDeliveryOperationOwnerState(file, delivery);
           }
         }
       }
@@ -3896,7 +3909,10 @@ export class AgentRegistry {
         && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
       const current = conversation?.generations.at(-1);
       const place = (delivery: HeldDelivery): HeldDelivery => {
-        if (delivery.state === "delivered" || delivery.state === "delivery-uncertain") return clone(delivery);
+        if (delivery.state === "delivered" || delivery.state === "delivery-uncertain") {
+          syncDeliveryOperationOwnerState(file, delivery);
+          return clone(delivery);
+        }
         delivery.deliveredAt = null;
         delivery.error = null;
         if (migrationBlocksDelivery) {
@@ -3913,6 +3929,7 @@ export class AgentRegistry {
           delivery.assignedAt = null;
           delivery.error = "delivery target is unavailable and remains recoverable";
         }
+        syncDeliveryOperationOwnerState(file, delivery);
         if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
         return clone(delivery);
       };
@@ -4023,6 +4040,7 @@ export class AgentRegistry {
       delivery.state = "delivery-uncertain";
       delivery.attempts += 1;
       delivery.error = "delivery started; recovery requires an explicit outcome";
+      syncDeliveryOperationOwnerState(file, delivery);
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(delivery);
     });
@@ -4118,6 +4136,7 @@ export class AgentRegistry {
         delivery.assignedAt = null;
         delivery.deliveredAt = null;
         delivery.error = null;
+        syncDeliveryOperationOwnerState(file, delivery);
         if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
         return clone(delivery);
       }
@@ -4126,6 +4145,7 @@ export class AgentRegistry {
         delivery.state = "failed";
         delivery.deliveredAt = null;
         delivery.error = "delivery target is unavailable and remains recoverable";
+        syncDeliveryOperationOwnerState(file, delivery);
         if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
         return clone(delivery);
       }
@@ -4134,6 +4154,7 @@ export class AgentRegistry {
       delivery.assignedAt = now();
       delivery.deliveredAt = null;
       delivery.error = null;
+      syncDeliveryOperationOwnerState(file, delivery);
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(delivery);
     });
@@ -4165,6 +4186,7 @@ export class AgentRegistry {
         delivery.generationId = source.id;
         delivery.assignedAt = rolledAt;
         delivery.error = null;
+        syncDeliveryOperationOwnerState(file, delivery);
       }
       conversation.migration = { ...conversation.migration, phase: "rolled-back", error: null, errorCode: null, updatedAt: rolledAt };
       conversation.updatedAt = rolledAt;

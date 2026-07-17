@@ -213,6 +213,41 @@ describe("agent registry", () => {
     )).toMatchObject({ id: original.id, state: "assigned" });
   });
 
+  test("retrying a failed explicit operation restores active ownership across compaction and restart", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/operation-owner-failed-retry.jsonl", "default");
+    const command = { operationId: "operation-owner-failed-retry", kind: "send" as const, policy: "queue" as const };
+    const original = store.holdDelivery(
+      conversation.id,
+      "retry this operation",
+      "operation-owner-failed-retry-client",
+      "text",
+      command,
+    );
+    expect(store.beginDeliveryAttempt(original.id, original.generationId!)).not.toBeNull();
+    store.recordDeliveryOutcome(original.id, "failed", "host unavailable");
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]?.terminalState).toBe("failed");
+
+    expect(store.holdDelivery(
+      conversation.id,
+      "retry this operation",
+      "operation-owner-failed-retry-client",
+      "text",
+      command,
+    )).toMatchObject({ id: original.id, state: "assigned" });
+    store.compactDeliveryReservations();
+
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]).toMatchObject({
+      deliveryId: original.id,
+      terminalState: null,
+    });
+    const reopened = new AgentRegistry(store.filename);
+    expect(reopened.snapshot().deliveryOperationOwners[command.operationId]).toMatchObject({
+      deliveryId: original.id,
+      terminalState: null,
+    });
+  });
+
   test("discarding an unactuated explicit reservation releases its operation ownership", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/operation-owner-discard.jsonl", "default");
