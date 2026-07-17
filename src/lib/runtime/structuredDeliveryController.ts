@@ -28,6 +28,7 @@ interface ControllerState {
   activeQueue: StructuredDeliveryQueue | null;
   activeHosts: Map<string, EngineHost> | null;
   registerActiveHost: ((item: StructuredDeliveryHost) => Promise<() => Promise<void>>) | null;
+  republishActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   releaseActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   terminateActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   stopActive: () => void;
@@ -37,6 +38,7 @@ const state: ControllerState = controllerStore.__llvStructuredDeliveryController
   activeQueue: null,
   activeHosts: null,
   registerActiveHost: null,
+  republishActiveHost: null,
   releaseActiveHost: null,
   terminateActiveHost: null,
   stopActive: () => {},
@@ -132,6 +134,7 @@ export async function bindStructuredDeliveryQueue(
   state.activeQueue = null;
   state.activeHosts = null;
   state.registerActiveHost = null;
+  state.republishActiveHost = null;
   state.releaseActiveHost = null;
   state.terminateActiveHost = null;
   setStructuredDeliveryKick(null);
@@ -244,26 +247,32 @@ export async function bindStructuredDeliveryQueue(
   const publishChains = new Map<string, Promise<void>>();
   const projectionEpoch = crypto.randomUUID();
   let projectionRevision = 0;
+  const republishRegistration = async (
+    registration: { key: SessionKey; host: ObservableEngineHost },
+  ): Promise<string | null> => {
+    const entry = entryForHost(registry, registration);
+    if (!entry) return null;
+    const conversationId = conversationIdForEntry(registry, entry);
+    if (!conversationId) return null;
+    const conversation = registry.conversation(conversationId as `conversation_${string}`);
+    const generation = conversation?.generations.at(-1);
+    if (!conversation || !generation) return null;
+    if (sessionKeyId({ engine: conversation.engine, sessionId: generation.id }) !== sessionKeyId(registration.key)) return null;
+    projectionRevision += 1;
+    await publishHostState(
+      client,
+      registry,
+      registration,
+      await registration.host.health(),
+      `projection:${projectionEpoch}:${projectionRevision}`,
+    );
+    return conversationId;
+  };
   const republishCurrentHosts = async (): Promise<Set<string>> => {
     const republished = new Set<string>();
     for (const registration of registrations.values()) {
-      const entry = entryForHost(registry, registration);
-      if (!entry) continue;
-      const conversationId = conversationIdForEntry(registry, entry);
-      if (!conversationId) continue;
-      const conversation = registry.conversation(conversationId as `conversation_${string}`);
-      const generation = conversation?.generations.at(-1);
-      if (!conversation || !generation) continue;
-      if (sessionKeyId({ engine: conversation.engine, sessionId: generation.id }) !== sessionKeyId(registration.key)) continue;
-      projectionRevision += 1;
-      await publishHostState(
-        client,
-        registry,
-        registration,
-        await registration.host.health(),
-        `projection:${projectionEpoch}:${projectionRevision}`,
-      );
-      republished.add(conversationId);
+      const conversationId = await republishRegistration(registration);
+      if (conversationId) republished.add(conversationId);
     }
     return republished;
   };
@@ -410,6 +419,11 @@ export async function bindStructuredDeliveryQueue(
   };
   state.activeHosts = hosts;
   state.registerActiveHost = register;
+  state.republishActiveHost = async (key) => {
+    const registration = registrations.get(sessionKeyId(key));
+    if (!registration) return false;
+    return await republishRegistration(registration) !== null;
+  };
   state.releaseActiveHost = async (key) => {
     const id = sessionKeyId(key);
     const registered = registrations.get(id);
@@ -468,6 +482,7 @@ export async function bindStructuredDeliveryQueue(
       state.activeQueue = null;
       state.activeHosts = null;
       state.registerActiveHost = null;
+      state.republishActiveHost = null;
       state.releaseActiveHost = null;
       state.terminateActiveHost = null;
       setStructuredDeliveryKick(null);
@@ -483,6 +498,10 @@ export function hasStructuredDeliveryHost(key: SessionKey): boolean {
 export async function publishStructuredDeliveryHost(item: StructuredDeliveryHost): Promise<() => Promise<void>> {
   if (!state.registerActiveHost) throw new Error("structured delivery controller is unavailable");
   return state.registerActiveHost(item);
+}
+
+export async function republishStructuredDeliveryHost(key: SessionKey): Promise<boolean> {
+  return await state.republishActiveHost?.(key) ?? false;
 }
 
 export async function releaseStructuredDeliveryHost(key: SessionKey): Promise<boolean> {

@@ -11,7 +11,8 @@ import { requestAccountMigrationTick } from "@/lib/accounts/migration/controller
 import type { HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
-import type { RuntimeOperationReceipt } from "./contracts";
+import type { RuntimeOperationReceipt, RuntimeSession } from "./contracts";
+import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { runtimeImageCapability, runtimeImageRefsForUploads, runtimeImageStore, type RuntimeImageUpload } from "./runtimeImageStore";
 import { admitRuntimeImagePayload } from "./runtimeImageAdmission";
@@ -52,6 +53,7 @@ export interface StructuredMessageDependencies {
   startupFailed?: () => boolean;
   startupRecovered?: () => void;
   recover?: typeof recoverDeadStructuredConversation;
+  republish?: (key: RuntimeSession["sessionKey"]) => Promise<boolean>;
   storeImages?: (images: readonly RuntimeImageUpload[]) => StructuredImageRef[];
   /** The refs `storeImages` would publish, computed without writing — used by
       the same-key conflict preflight so a changed payload rejects blob-free. */
@@ -93,6 +95,7 @@ export interface HeldStructuredMessageDependencies {
   kick?: () => void | Promise<void>;
   startupFailed?: () => boolean;
   startupRecovered?: () => void;
+  republish?: (key: RuntimeSession["sessionKey"]) => Promise<boolean>;
 }
 
 export type HeldStructuredMessageOutcome = "delivered" | "failed" | "delivery-uncertain" | null;
@@ -233,6 +236,22 @@ function recordStructuredRuntimeRecovery(
   }
 }
 
+async function refreshRepublishedSession(
+  session: RuntimeSession,
+  client: RuntimeHostClient,
+  republish: (key: RuntimeSession["sessionKey"]) => Promise<boolean>,
+): Promise<{ session: RuntimeSession; republished: boolean }> {
+  if (session.host !== "dead" && session.host !== "unhosted") return { session, republished: false };
+  if (!await republish(session.sessionKey)) return { session, republished: false };
+  const refreshed = await client.snapshot();
+  return {
+    session: refreshed.sessions.find((candidate) => candidate.conversationId === session.conversationId)
+      ?? refreshed.sessions.find((candidate) => candidate.artifactPath === session.artifactPath)
+      ?? session,
+    republished: true,
+  };
+}
+
 function requestMigrationProgress(
   registry: AgentRegistry,
   conversationId: ViewerConversationId,
@@ -259,9 +278,20 @@ export async function deliverHeldStructuredMessage(
     return heldOutcomeDuringRuntimeSynchronization(request, (dependencies.registry ?? agentRegistry)());
   }
   recordStructuredRuntimeRecovery(snapshot, dependencies.startupRecovered ?? markStructuredHostStartupReady);
-  const session = snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
+  let session = snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
   if (!session) return heldOutcomeDuringRuntimeSynchronization(request, (dependencies.registry ?? agentRegistry)());
+  try {
+    const refreshed = await refreshRepublishedSession(
+      session,
+      client,
+      dependencies.republish ?? republishStructuredDeliveryHost,
+    );
+    session = refreshed.session;
+    if (refreshed.republished && (session.host === "dead" || session.host === "unhosted")) return "delivery-uncertain";
+  } catch {
+    return "delivery-uncertain";
+  }
   if (session.hostKind === "tmux-legacy") return requiresStructuredHeldCommand(request) ? "failed" : null;
   if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return "delivery-uncertain";
   try {
@@ -330,7 +360,7 @@ export async function enqueueStructuredMessage(
     );
   }
   recordStructuredRuntimeRecovery(snapshot, dependencies.startupRecovered ?? markStructuredHostStartupReady);
-  const session = (request.conversationId
+  let session = (request.conversationId
     ? snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     : undefined)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
@@ -340,6 +370,18 @@ export async function enqueueStructuredMessage(
       (dependencies.registry ?? agentRegistry)(),
       dependencies.requestMigrationTick ?? requestAccountMigrationTick,
     );
+  }
+  const registry = (dependencies.registry ?? agentRegistry)();
+  try {
+    const refreshed = await refreshRepublishedSession(
+      session,
+      client,
+      dependencies.republish ?? republishStructuredDeliveryHost,
+    );
+    session = refreshed.session;
+    if (refreshed.republished && (session.host === "dead" || session.host === "unhosted")) return ownershipUnavailable();
+  } catch (error) {
+    return deliveryFailure(error);
   }
   if (session.hostKind === "tmux-legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return ownershipUnavailable();
@@ -354,7 +396,6 @@ export async function enqueueStructuredMessage(
     return { ok: false, structured: true, outcome: "failed", error: "structured image payload is unavailable", status: 409 };
   }
   if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
-  const registry = (dependencies.registry ?? agentRegistry)();
   let recoveredHost = false;
   /* Ownership recovery comes BEFORE capability evaluation: a dead projection
      carries no image capability, and judging the payload against it would 409

@@ -13,7 +13,7 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 import type { RuntimeHostClient } from "./client";
 import type { EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
-import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./structuredDeliveryController";
+import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -205,6 +205,77 @@ test("an engine event burst preserves every projection without polling the deliv
     expect(effectBatchCalls - baselineEffects).toBeLessThanOrEqual(1);
   } finally {
     await bindStructuredDeliveryQueue([], { registry, client: null });
+  }
+});
+
+test("the controller republishes a live host into a restarted runtime journal", async () => {
+  const directory = path.join(sandbox, "controller-runtime-restart");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "8f25d04a-8f94-44bb-a6f2-bf987f2ded41";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "claude",
+    path: artifactPath,
+    accountId: "runtime-restart-account",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-17T20:40:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const key = { engine: "claude" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "runtime-restart-account",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "fake:runtime-restart-host",
+      process: null,
+      eventCursor: 7,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  let journal = new RuntimeJournal(path.join(directory, "runtime-before.sqlite"), { structuredHosts: true });
+  const client = {
+    snapshot: async () => journal.snapshot(),
+    append: async (event: Parameters<RuntimeHostClient["append"]>[0]) => journal.append(event),
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => journal.executeOperation(command),
+    operationStatus: async (operationId: string) => journal.operationResult(operationId),
+    producerCursor: async (producerKind: string, eventKeyPrefix: string) => journal.producerCursor(producerKind, eventKeyPrefix),
+    effectBatch: async (kinds?: readonly string[], afterEventSeq?: number) => journal.effectBatch(100, kinds, afterEventSeq),
+    transitionOperation: async (operationId: string, status: Parameters<RuntimeHostClient["transitionOperation"]>[1], details?: Parameters<RuntimeHostClient["transitionOperation"]>[2]) => journal.transitionOperation(operationId, status, details),
+  } as RuntimeHostClient;
+  const host = observableFakeHost(new FakeEngineHost(createFakeDeliveryLedger()));
+
+  try {
+    await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.host).toBe("hosted");
+
+    journal.close();
+    journal = new RuntimeJournal(path.join(directory, "runtime-after.sqlite"), { structuredHosts: true });
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toBeUndefined();
+
+    expect(await republishStructuredDeliveryHost(key)).toBeTrue();
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+      host: "hosted",
+      hostKind: "claude-broker",
+      sessionKey: key,
+    });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
   }
 });
 

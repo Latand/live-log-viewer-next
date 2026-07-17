@@ -1489,6 +1489,72 @@ test("structured recovery failures remain admitted, avoid delivery, and allow a 
   expect(commands).toHaveLength(1);
 });
 
+test("structured message republishes an in-process host after runtime restart before recovery", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  const deadSnapshot = snapshot(conversation.id);
+  deadSnapshot.sessions[0] = { ...deadSnapshot.sessions[0]!, host: "dead" };
+  const hostedSnapshot = snapshot(conversation.id);
+  let currentSnapshot = deadSnapshot;
+  let republishCalls = 0;
+  let recoveryCalls = 0;
+  const commands: unknown[] = [];
+  const client = {
+    snapshot: async () => currentSnapshot,
+    command: async (command: unknown) => {
+      commands.push(command);
+      return {
+        operationId: "runtime-restart-message",
+        replayed: false,
+        receipt: {
+          operationId: "runtime-restart-message",
+          idempotencyKey: "runtime-restart-message",
+          conversationId: conversation.id,
+          kind: "send" as const,
+          status: "queued" as const,
+          queuePosition: 1,
+          at: "2026-07-17T20:47:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "runtime-restart-message",
+    text: "continue the same conversation",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    republish: async (key) => {
+      republishCalls += 1;
+      expect(key).toEqual({ engine: "codex", sessionId: conversation.generations.at(-1)!.id });
+      currentSnapshot = hostedSnapshot;
+      return true;
+    },
+    recover: async () => {
+      recoveryCalls += 1;
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({
+    ok: true,
+    structured: true,
+    outcome: "queued",
+    operationId: "runtime-restart-message",
+  });
+  expect(result).not.toHaveProperty("spawned");
+  expect(republishCalls).toBe(1);
+  expect(recoveryCalls).toBe(0);
+  expect(commands).toHaveLength(1);
+});
+
 test("structured ownership stays fenced while its registry projection is missing", async () => {
   const client = {
     snapshot: async () => snapshot(),
