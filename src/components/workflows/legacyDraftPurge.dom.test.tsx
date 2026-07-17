@@ -245,8 +245,10 @@ test("a task card agent action seeds the task prompt and canonical project direc
     placement: "pinned",
     pos: { x: 120, y: 120 },
     assignments: [],
-    createdAt: "2026-07-13T10:00:00.000Z",
-    updatedAt: "2026-07-13T10:00:00.000Z",
+    /* Freshly touched: a quiet old card folds into the status stack strip
+       (taskStacks.ts), and this test drives the FULL card's agent action. */
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   };
   const previousMatchMedia = G.matchMedia;
   G.matchMedia = (query: string) => ({ ...mobileMatchMedia(query), matches: false });

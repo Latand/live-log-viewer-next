@@ -909,3 +909,162 @@ test("receipt editing stays disabled while a newer send is in flight", async () 
   expect(textarea.value).toBe("");
   flushSync(() => root.unmount());
 });
+
+test("an idempotent retry whose first attempt already landed clears the draft", async () => {
+  const sentKeys: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/tmux/targets") {
+      return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+    }
+    if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+    const body = JSON.parse(String(init?.body)) as { clientMessageId: string };
+    sentKeys.push(body.clientMessageId);
+    if (sentKeys.length === 1) {
+      /* The server accepted and delivers, yet the response is lost: a hard
+         failure without a receipt keeps the draft for the retry. */
+      return { ok: false, status: 503, json: async () => ({ ok: false, error: "runtime host request timed out" }) } as Response;
+    }
+    /* The retry replays the same key; the conflict carries the original
+       delivered receipt — the message reached the agent and the turn runs. */
+    return {
+      ok: false,
+      status: 409,
+      json: async () => ({
+        ok: false,
+        structured: true,
+        error: "idempotency key already delivered",
+        receipt: {
+          operationId: "op-replayed",
+          idempotencyKey: body.clientMessageId,
+          conversationId: "conv-replay",
+          kind: "send",
+          status: "delivered",
+          text: "deploy the hotfix",
+          at: "2026-07-17T00:00:01.000Z",
+          revision: 2,
+        },
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  const file = {
+    path: "/codex-replay.jsonl",
+    root: "codex-sessions",
+    name: "codex-replay.jsonl",
+    project: "viewer",
+    title: "Codex replay",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    parent: null,
+    mtime: 1,
+    size: 1,
+    activity: "idle",
+    proc: "running",
+    pid: null,
+    conversationId: "conv-replay",
+    pendingQuestion: null,
+    waitingInput: null,
+  } as FileEntry;
+  sessionStorage.setItem("llvDraft:conv-replay", "deploy the hotfix");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<TmuxComposer file={file} />));
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const form = textarea.closest("form")!;
+
+  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(textarea.value).toBe("deploy the hotfix");
+
+  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  /* Idempotent retry: the same delivery key both times, and the accepted
+     delivery clears the draft from storage and the input. */
+  expect(sentKeys).toHaveLength(2);
+  expect(sentKeys[1]).toBe(sentKeys[0]);
+  expect(textarea.value).toBe("");
+  expect(sessionStorage.getItem("llvDraft:conv-replay")).toBe(null);
+  flushSync(() => root.unmount());
+});
+
+test("a stale delivered replay never wipes a draft rewritten for the next turn", async () => {
+  let requests = 0;
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/tmux/targets") {
+      return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+    }
+    if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+    requests += 1;
+    const body = JSON.parse(String(init?.body)) as { clientMessageId: string };
+    if (requests === 1) {
+      return { ok: false, status: 503, json: async () => ({ ok: false, error: "runtime host request timed out" }) } as Response;
+    }
+    return {
+      ok: false,
+      status: 409,
+      json: async () => ({
+        ok: false,
+        structured: true,
+        error: "idempotency key already delivered",
+        receipt: {
+          operationId: "op-stale-replay",
+          idempotencyKey: body.clientMessageId,
+          conversationId: "conv-stale",
+          kind: "send",
+          status: "delivered",
+          text: "old turn ask",
+          at: "2026-07-17T00:00:01.000Z",
+          revision: 2,
+        },
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  const file = {
+    path: "/codex-stale.jsonl",
+    root: "codex-sessions",
+    name: "codex-stale.jsonl",
+    project: "viewer",
+    title: "Codex stale",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    parent: null,
+    mtime: 1,
+    size: 1,
+    activity: "idle",
+    proc: "running",
+    pid: null,
+    conversationId: "conv-stale",
+    pendingQuestion: null,
+    waitingInput: null,
+  } as FileEntry;
+  sessionStorage.setItem("llvDraft:conv-stale", "old turn ask");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<TmuxComposer file={file} />));
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const form = textarea.closest("form")!;
+
+  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  /* The user gives up on the old ask and rewrites the draft for a new turn. */
+  sessionStorage.setItem("llvDraft:conv-stale", "");
+  flushSync(() => appendComposerDraft("conv-stale", "brand new ask"));
+  expect(textarea.value).toBe("brand new ask");
+
+  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  /* The second submit sends the NEW text under a fresh key; the delivered
+     replay of the OLD turn must not clear the new draft's storage beyond what
+     the accepted delivery covers. The new ask stays intact. */
+  expect(textarea.value).toBe("brand new ask");
+  expect(sessionStorage.getItem("llvDraft:conv-stale")).toBe("brand new ask");
+  flushSync(() => root.unmount());
+});

@@ -39,6 +39,23 @@ export function isDirectReviewFlow(flow: Pick<Flow, "id">): boolean {
   return flow.id.startsWith(DIRECT_REVIEW_FLOW_PREFIX);
 }
 
+/**
+ * Split direct review groups into the ones that still carry an actionable
+ * latest round (they place a deck + loop beside the reviewed conversation)
+ * and terminal HISTORY groups — every round ended with a verdict or a
+ * failure. A history group renders NO deck at all: its reviewers fold into a
+ * compact per-group worker stack (the terminal review-history stack), leaving
+ * the board layout and minimap until one is explicitly expanded. Both halves
+ * keep claiming their reviewers, so a folded round never resurfaces as a
+ * standalone card.
+ */
+export function splitDirectReviewGroups(groups: readonly Flow[]): { active: Flow[]; history: Flow[] } {
+  const active: Flow[] = [];
+  const history: Flow[] = [];
+  for (const group of groups) (group.state === "reviewing" ? active : history).push(group);
+  return { active, history };
+}
+
 export interface DirectReviewGroupsInput {
   files: readonly FileEntry[];
   /** Real (server) flows — used only to exclude reviewers they already claim. */

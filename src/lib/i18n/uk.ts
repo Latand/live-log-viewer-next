@@ -839,6 +839,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "roundDeck.spawningReviewer": "запускаю ревʼюера — транскрипт зʼявиться за мить…",
   "roundDeck.moreRounds": "ще {count} раунд(и) — клікни чипи на стрічці флоу",
   "roundDeck.findings": { one: "{count} знахідка", few: "{count} знахідки", many: "{count} знахідок", other: "{count} знахідок" },
+  "roundDeck.roundsCount": { one: "{count} раунд", few: "{count} раунди", many: "{count} раундів", other: "{count} раундів" },
+  "roundDeck.collapseStack": "Згорнути стек ревʼю ({count} раундів)",
+  "roundDeck.expandStack": "Розгорнути стек ревʼю ({count} раундів)",
 
   "flowState.waiting_ready": "чекає READY",
   "flowState.spawn_pending": "готовий спавнити ревʼюера",
@@ -1215,6 +1218,18 @@ export const uk: Record<keyof typeof en, Message> = {
 
   "tree.quiet": "Тихі розмови й задачі",
 
+  "taskStacks.title": "Складені задачі",
+  "taskStacks.aria": "Картки задач, згорнуті в стеки за статусом",
+  "taskStacks.statusAria": "Задачі «{status}» · {count}",
+  "taskStacks.open": "Розгорнути задачу на дошці: {title}",
+  "taskStacks.assignments": "Призначень: {count}",
+  "taskStacks.collapse": "Згорнути картку назад у стек статусу",
+  "launchHistory.title": "Історія запусків",
+  "launchHistory.aria": "Термінальні квитанції запусків",
+  "launchHistory.failed": "невдалий",
+  "launchHistory.recovered": "відновлений",
+  "launchHistory.retryLabel": "Повторити",
+  "launchHistory.retry": "Повторити запуск: {title}",
   "workerStack.title": "Згорнуті воркери",
   "workerStack.aria": "Згорнуті розмови воркерів",
   "workerStack.flow": "Потік",
