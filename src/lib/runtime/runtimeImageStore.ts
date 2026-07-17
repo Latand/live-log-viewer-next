@@ -5,6 +5,7 @@ import path from "node:path";
 import type { Database as BunDatabase } from "bun:sqlite";
 
 import { stateDir, statePath } from "@/lib/configDir";
+import { procBackend } from "@/lib/proc";
 
 import {
   normalizeStructuredImageMime,
@@ -108,6 +109,9 @@ export interface RuntimeImageStoreOptions {
   afterRootOpen?: (operation: "read" | "write" | "maintenance") => void;
   writerLockStaleMs?: number;
   writerLockWaitMs?: number;
+  /** Route file operations through the pinned `/proc/self/fd` handle. Defaults
+      to runtime detection; tests force `false` to exercise the Darwin path. */
+  procSelfFdPaths?: boolean;
 }
 
 const REF_DIGEST = /^[a-f0-9]{64}$/;
@@ -226,24 +230,18 @@ function configuredMaxBytes(): number {
 interface OpenRoot {
   fd: number;
   path: string;
+  /** True when `path` routes through `/proc/self/fd` and is therefore pinned
+      to the validated directory regardless of later renames of the root. */
+  pinned: boolean;
 }
 
 interface WriterLockOwner {
   pid: number;
-  processStartTime: string;
+  /** Portable process start identity from the proc backend (`/proc` stat on
+      Linux, libproc via Bun FFI on Darwin); null where the backend cannot
+      produce one, in which case fencing degrades to pid liveness alone. */
+  startIdentity: string | null;
   token: string;
-}
-
-function processStartTime(pid: number): string | null {
-  let stat: string;
-  try { stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8"); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-  const commandEnd = stat.lastIndexOf(") ");
-  if (commandEnd < 0) throw new Error("process identity is malformed");
-  return stat.slice(commandEnd + 2).trim().split(/\s+/)[19] ?? null;
 }
 
 function readWriterLockOwner(lock: string): WriterLockOwner | null {
@@ -260,13 +258,19 @@ function readWriterLockOwner(lock: string): WriterLockOwner | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const owner = value as Partial<WriterLockOwner>;
   if (!Number.isSafeInteger(owner.pid) || owner.pid! <= 0
-    || typeof owner.processStartTime !== "string" || !owner.processStartTime
+    || (owner.startIdentity !== null && (typeof owner.startIdentity !== "string" || !owner.startIdentity))
     || typeof owner.token !== "string" || !owner.token) return null;
   return owner as WriterLockOwner;
 }
 
 function writerLockOwnerIsAlive(owner: WriterLockOwner | null): boolean {
-  return owner !== null && processStartTime(owner.pid) === owner.processStartTime;
+  if (owner === null) return false;
+  if (!procBackend.pidAlive(owner.pid)) return false;
+  return owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity;
+}
+
+function procSelfFdAvailable(): boolean {
+  return fs.existsSync("/proc/self/fd");
 }
 
 export class RuntimeImageStore {
@@ -279,6 +283,7 @@ export class RuntimeImageStore {
   private readonly afterRootOpen: NonNullable<RuntimeImageStoreOptions["afterRootOpen"]>;
   private readonly writerLockStaleMs: number;
   private readonly writerLockWaitMs: number;
+  private readonly procSelfFdPaths: boolean;
 
   constructor(
     private readonly root = statePath("runtime-images"),
@@ -293,6 +298,7 @@ export class RuntimeImageStore {
     this.afterRootOpen = options.afterRootOpen ?? (() => {});
     this.writerLockStaleMs = options.writerLockStaleMs ?? WRITER_LOCK_STALE_MS;
     this.writerLockWaitMs = options.writerLockWaitMs ?? WRITER_LOCK_WAIT_MS;
+    this.procSelfFdPaths = options.procSelfFdPaths ?? procSelfFdAvailable();
     this.ensurePrivateRoot();
     this.withWriterLock("maintenance", (root) => this.removeAgedPartials(root));
   }
@@ -350,20 +356,19 @@ export class RuntimeImageStore {
   }
 
   private withWriterLock<T>(operation: "write" | "maintenance", run: (root: OpenRoot) => T): T {
-    const ownProcessStartTime = processStartTime(process.pid);
-    if (!ownProcessStartTime) throw new Error("runtime image writer identity is unavailable");
     this.ensurePrivateRoot();
     const root = this.openRoot(operation);
     const lock = path.join(root.path, ".writer-lock");
     const deadline = this.now() + this.writerLockWaitMs;
     const owner: WriterLockOwner = {
       pid: process.pid,
-      processStartTime: ownProcessStartTime,
+      startIdentity: procBackend.processIdentity(process.pid),
       token: crypto.randomUUID(),
     };
     let acquired = false;
     try {
       while (true) {
+        this.assertRootPinned(root);
         let created = false;
         try {
           fs.mkdirSync(lock, { mode: 0o700 });
@@ -405,6 +410,7 @@ export class RuntimeImageStore {
   }
 
   private removeAgedPartials(root: OpenRoot): void {
+    this.assertRootPinned(root);
     for (const entry of fs.readdirSync(root.path, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".partial")) continue;
       const filename = path.join(root.path, entry.name);
@@ -416,6 +422,7 @@ export class RuntimeImageStore {
   }
 
   private storedBytes(root: OpenRoot): number {
+    this.assertRootPinned(root);
     let total = 0;
     for (const entry of fs.readdirSync(root.path, { withFileTypes: true })) {
       if (!entry.isFile() || !BLOB_NAME.test(entry.name)) continue;
@@ -426,6 +433,7 @@ export class RuntimeImageStore {
   }
 
   private collectGarbage(root: OpenRoot, reachable: ReadonlySet<string>): void {
+    this.assertRootPinned(root);
     for (const entry of fs.readdirSync(root.path, { withFileTypes: true })) {
       const match = entry.isFile() ? BLOB_NAME.exec(entry.name) : null;
       if (!match || reachable.has(match[1]!)) continue;
@@ -472,14 +480,35 @@ export class RuntimeImageStore {
       if (!pathStat.isDirectory() || pathStat.isSymbolicLink() || pathStat.dev !== stat.dev || pathStat.ino !== stat.ino) {
         throw new Error("runtime image root changed during operation");
       }
-      return { fd, path: `/proc/self/fd/${fd}` };
+      /* Linux pins every subsequent operation to the validated directory via
+         the fd itself. Darwin has no /proc, so operations go through the real
+         path and re-validate the root's device/inode against the held fd
+         (assertRootPinned) before each directory-relative step. */
+      return this.procSelfFdPaths
+        ? { fd, path: `/proc/self/fd/${fd}`, pinned: true }
+        : { fd, path: this.root, pinned: false };
     } catch (error) {
       fs.closeSync(fd);
       throw error;
     }
   }
 
+  /** Re-checks that the root path still names the directory the held fd was
+      validated against. A no-op on the pinned `/proc/self/fd` path; on the
+      portable (Darwin) path it fails closed when the root was swapped. */
+  private assertRootPinned(root: OpenRoot): void {
+    if (root.pinned) return;
+    const fdStat = fs.fstatSync(root.fd);
+    let pathStat: fs.Stats;
+    try { pathStat = fs.lstatSync(this.root); }
+    catch (error) { throw new Error("runtime image root changed during operation", { cause: error }); }
+    if (!pathStat.isDirectory() || pathStat.isSymbolicLink() || pathStat.dev !== fdStat.dev || pathStat.ino !== fdStat.ino) {
+      throw new Error("runtime image root changed during operation");
+    }
+  }
+
   private readFromRoot(root: OpenRoot, ref: StructuredImageRef): Buffer {
+    this.assertRootPinned(root);
     const filename = path.join(root.path, path.basename(this.pathFor(ref)));
     let fd: number;
     try { fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); }
@@ -504,6 +533,7 @@ export class RuntimeImageStore {
   }
 
   private put(root: OpenRoot, data: Buffer, mime: StructuredImageMime): StructuredImageRef {
+    this.assertRootPinned(root);
     const sha256 = crypto.createHash("sha256").update(data).digest("hex");
     const ref = { sha256, mime, bytes: data.byteLength };
     const filename = path.join(root.path, path.basename(this.pathFor(ref)));

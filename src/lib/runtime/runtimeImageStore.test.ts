@@ -6,6 +6,8 @@ import { Database } from "bun:sqlite";
 
 import { expect, test } from "bun:test";
 
+import { procBackend } from "@/lib/proc";
+
 import {
   MAX_STRUCTURED_IMAGES,
   MAX_STRUCTURED_IMAGE_ENCODED_BYTES,
@@ -28,13 +30,8 @@ function taggedPng(tag: string): Buffer {
   return Buffer.concat([PNG, Buffer.from(tag)]);
 }
 
-function currentProcessStartTime(): string {
-  const stat = fs.readFileSync("/proc/self/stat", "utf8");
-  const commandEnd = stat.lastIndexOf(") ");
-  if (commandEnd < 0) throw new Error("process identity is malformed");
-  const startTime = stat.slice(commandEnd + 2).trim().split(/\s+/)[19];
-  if (!startTime) throw new Error("process start time is unavailable");
-  return startTime;
+function currentProcessIdentity(): string | null {
+  return procBackend.processIdentity(process.pid);
 }
 
 test("runtime images are validated and stored as private content-addressed blobs", () => {
@@ -173,7 +170,25 @@ test("an aged writer lock stays owned while its exact process identity is alive"
   fs.mkdirSync(lock, { mode: 0o700 });
   fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
     pid: process.pid,
-    processStartTime: currentProcessStartTime(),
+    startIdentity: currentProcessIdentity(),
+    token: crypto.randomUUID(),
+  }), { mode: 0o600 });
+  fs.utimesSync(lock, new Date(1), new Date(1));
+
+  expect(() => new RuntimeImageStore(root, { writerLockStaleMs: 0, writerLockWaitMs: 10 }))
+    .toThrow("runtime image writer lock timed out");
+  expect(fs.existsSync(lock)).toBe(true);
+});
+
+test("an aged writer lock with a backend that cannot fingerprint still respects pid liveness", () => {
+  // A null startIdentity is what the portable (Darwin without FFI) backend
+  // records; fencing then degrades to pid liveness and a live pid keeps the lock.
+  const root = sandbox();
+  const lock = path.join(root, ".writer-lock");
+  fs.mkdirSync(lock, { mode: 0o700 });
+  fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+    pid: process.pid,
+    startIdentity: null,
     token: crypto.randomUUID(),
   }), { mode: 0o600 });
   fs.utimesSync(lock, new Date(1), new Date(1));
@@ -189,7 +204,7 @@ test("an aged writer lock is recovered after its owning process exits", () => {
   fs.mkdirSync(lock, { mode: 0o700 });
   fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
     pid: 2_147_483_647,
-    processStartTime: "1",
+    startIdentity: "1",
     token: crypto.randomUUID(),
   }), { mode: 0o600 });
   fs.utimesSync(lock, new Date(1), new Date(1));
@@ -197,6 +212,45 @@ test("an aged writer lock is recovered after its owning process exits", () => {
   new RuntimeImageStore(root, { writerLockStaleMs: 0, writerLockWaitMs: 10 });
 
   expect(fs.existsSync(lock)).toBe(false);
+});
+
+test("an aged writer lock is recovered when its pid was reused by another process", () => {
+  // PID-reuse fence: the pid is alive (it is this test process) but its start
+  // identity does not match the recorded owner, so the lock must break.
+  const identity = currentProcessIdentity();
+  if (identity === null) return;
+  const root = sandbox();
+  const lock = path.join(root, ".writer-lock");
+  fs.mkdirSync(lock, { mode: 0o700 });
+  fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+    pid: process.pid,
+    startIdentity: `${identity}-reused`,
+    token: crypto.randomUUID(),
+  }), { mode: 0o600 });
+  fs.utimesSync(lock, new Date(1), new Date(1));
+
+  new RuntimeImageStore(root, { writerLockStaleMs: 0, writerLockWaitMs: 10 });
+
+  expect(fs.existsSync(lock)).toBe(false);
+});
+
+test("the writer lock records the portable backend identity of its owner", () => {
+  const root = sandbox();
+  let owner: unknown = null;
+  const store = new RuntimeImageStore(root, {
+    fault(stage) {
+      if (stage !== "write") return;
+      owner = JSON.parse(fs.readFileSync(path.join(root, ".writer-lock", "owner.json"), "utf8"));
+    },
+  });
+
+  store.putMany([{ base64: PNG.toString("base64"), mime: "image/png" }]);
+
+  expect(owner).toMatchObject({
+    pid: process.pid,
+    startIdentity: currentProcessIdentity(),
+    token: expect.any(String),
+  });
 });
 
 test("runtime image writes remove partial and published files after every injected failure", () => {
@@ -267,6 +321,88 @@ test("runtime image reads reject a symlink substituted for a blob", () => {
   fs.symlinkSync(target, filename);
 
   expect(() => store.read(ref)).toThrow("runtime image ref is unsafe");
+});
+
+test("the Darwin path stores, reads, dedupes, and GCs without /proc/self/fd", () => {
+  // procSelfFdPaths: false is the exact code path a Darwin (Bun) host takes.
+  const first = taggedPng("darwin-first");
+  const second = taggedPng("darwin-second");
+  const root = sandbox();
+  let reachable = new Set<string>();
+  const store = new RuntimeImageStore(root, {
+    procSelfFdPaths: false,
+    maxBytes: Math.max(first.byteLength, second.byteLength),
+    gcGraceMs: 0,
+    reachableDigests: () => reachable,
+  });
+
+  const [firstRef] = store.putMany([{ base64: first.toString("base64"), mime: "image/png" }]);
+  const [firstAgain] = store.putMany([{ base64: first.toString("base64"), mime: "image/png" }]);
+  if (!firstRef) throw new Error("first image ref missing");
+  expect(firstAgain).toEqual(firstRef);
+  expect(store.read(firstRef)).toEqual(first);
+  expect(fs.statSync(store.pathFor(firstRef)).mode & 0o777).toBe(0o600);
+
+  const [secondRef] = store.putMany([{ base64: second.toString("base64"), mime: "image/png" }]);
+  if (!secondRef) throw new Error("second image ref missing");
+  expect(fs.existsSync(store.pathFor(firstRef))).toBe(false);
+  reachable = new Set([secondRef.sha256]);
+  expect(() => store.putMany([{ base64: first.toString("base64"), mime: "image/png" }]))
+    .toThrow("runtime image storage quota exceeded");
+  expect(store.read(secondRef)).toEqual(second);
+});
+
+test("the Darwin path removes partial and published files after injected failures", () => {
+  for (const failedStage of ["write", "fsync", "link", "directory-fsync"] as const) {
+    const root = sandbox();
+    const store = new RuntimeImageStore(root, {
+      procSelfFdPaths: false,
+      fault(stage) {
+        if (stage === failedStage) throw new Error(`injected ${stage} failure`);
+      },
+    });
+
+    expect(() => store.putMany([{ base64: taggedPng(failedStage).toString("base64"), mime: "image/png" }]))
+      .toThrow(`injected ${failedStage} failure`);
+    expect(fs.readdirSync(root)).toEqual([]);
+  }
+});
+
+test("the Darwin path rejects a symlink substituted for a blob", () => {
+  const root = sandbox();
+  const store = new RuntimeImageStore(root, { procSelfFdPaths: false });
+  const [ref] = store.putMany([{ base64: PNG.toString("base64"), mime: "image/png" }]);
+  if (!ref) throw new Error("image ref missing");
+  const filename = store.pathFor(ref);
+  const target = path.join(sandbox(), "attacker.png");
+  fs.writeFileSync(target, PNG);
+  fs.rmSync(filename);
+  fs.symlinkSync(target, filename);
+
+  expect(() => store.read(ref)).toThrow("runtime image ref is unsafe");
+});
+
+test("the Darwin path rejects a root path replacement race via device/inode validation", () => {
+  const parent = sandbox();
+  const root = path.join(parent, "runtime-images");
+  const movedRoot = path.join(parent, "runtime-images-original");
+  const attackerRoot = path.join(parent, "attacker");
+  const writer = new RuntimeImageStore(root, { procSelfFdPaths: false });
+  const [ref] = writer.putMany([{ base64: PNG.toString("base64"), mime: "image/png" }]);
+  if (!ref) throw new Error("image ref missing");
+  fs.mkdirSync(attackerRoot, { mode: 0o700 });
+  let replaced = false;
+  const reader = new RuntimeImageStore(root, {
+    procSelfFdPaths: false,
+    afterRootOpen(operation) {
+      if (operation !== "read" || replaced) return;
+      replaced = true;
+      fs.renameSync(root, movedRoot);
+      fs.symlinkSync(attackerRoot, root);
+    },
+  });
+
+  expect(() => reader.read(ref)).toThrow("runtime image root changed during operation");
 });
 
 test("runtime image reads reject a root path replacement race", () => {
