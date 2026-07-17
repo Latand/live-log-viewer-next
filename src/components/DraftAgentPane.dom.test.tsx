@@ -130,3 +130,78 @@ test("Reviewer role persists and submits the reviewed conversation", async () =>
   expect(filesRefreshes).toBe(1);
   window.removeEventListener(FILES_CHANGED_EVENT, onFilesChanged);
 });
+
+test("an admitted structured spawn adopts its provisional card in the same mount", async () => {
+  const posts: Record<string, unknown>[] = [];
+  const spawned: FileEntry[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/spawn" && init?.method === "POST") {
+      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({
+          ok: true,
+          state: "starting",
+          launched: false,
+          path: null,
+          launchId: "launch-fast",
+          conversationId: "conversation_fast",
+          initialMessage: "pending",
+        }),
+      } as Response;
+    }
+    if (url.startsWith("/api/spawn?")) return { ok: true, json: async () => ({ dirs: ["/repo"] }) } as Response;
+    if (url === "/api/accounts") return { ok: true, json: async () => ({ codex: { active: "terra", accounts: [] } }) } as Response;
+    if (url === "/api/roles") return { ok: true, json: async () => ({ roles: [] }) } as Response;
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  const render = (files: FileEntry[]) => flushSync(() => root!.render(
+    <DraftAgentPane
+      draftId="fast-draft"
+      project="proj"
+      files={files}
+      onClose={() => {}}
+      onSpawned={(file) => spawned.push(file)}
+    />,
+  ));
+  render([]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, { onChange: (event: unknown) => void }>)[propsKey]!;
+  flushSync(() => props.onChange({ target: { value: "Start immediately" } }));
+  flushSync(() => host.querySelector("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(posts).toHaveLength(1);
+  const provisional = {
+    ...implementer,
+    path: "spawn:launch-fast",
+    name: "spawn:launch-fast",
+    title: "Codex",
+    conversationId: "conversation_fast",
+    spawn: {
+      launchId: "launch-fast",
+      clientAttemptId: null,
+      accountId: "terra",
+      state: "starting",
+      initialMessage: "pending",
+      retrySafe: false,
+      error: null,
+    },
+  } satisfies FileEntry;
+  render([provisional]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(spawned).toEqual([provisional]);
+  expect(posts).toHaveLength(1);
+});
