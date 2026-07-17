@@ -148,8 +148,12 @@ test("post-reboot spawn refreshes an expired Claude account before structured la
       body: JSON.stringify({ engine: "claude", cwd, prompt: "resume work", accountId: account.id }),
     }), dependencies);
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ launched: true, state: "settled" });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      launched: false,
+      state: "starting",
+      conversationId: expect.stringMatching(/^conversation_/),
+    });
     expect(structuredSpawns).toBe(1);
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
