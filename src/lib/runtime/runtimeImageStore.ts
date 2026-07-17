@@ -117,9 +117,28 @@ export interface RuntimeImageStoreOptions {
 const REF_DIGEST = /^[a-f0-9]{64}$/;
 const BLOB_NAME = /^([a-f0-9]{64})\.(png|jpg|gif|webp)$/;
 
-function collectDigests(value: unknown, digests: Set<string>): void {
+/** How long a terminally delivered reservation's refs stay reachable after
+    delivery. Bounded retirement is what lets the store's quota breathe: an
+    append-only ledger or delivered tombstone must not pin its blobs forever,
+    while the grace still covers the delivered-replay window. Non-terminal
+    reservations (held/assigned/uncertain/pending) never retire. */
+export const DELIVERED_REF_RETIREMENT_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/** The moment a delivered reservation record became terminal, or null for any
+    record that is not a terminally delivered image reservation. */
+function deliveredRecordTerminalAt(record: Record<string, unknown>): number | null {
+  if (record.state !== "delivered" || !Array.isArray(record.runtimeImages)) return null;
+  const at = typeof record.deliveredAt === "string"
+    ? Date.parse(record.deliveredAt)
+    : typeof record.createdAt === "string"
+      ? Date.parse(record.createdAt)
+      : Number.NaN;
+  return Number.isFinite(at) ? at : null;
+}
+
+function collectDigests(value: unknown, digests: Set<string>, retireBefore: number): void {
   if (Array.isArray(value)) {
-    for (const item of value) collectDigests(item, digests);
+    for (const item of value) collectDigests(item, digests, retireBefore);
     return;
   }
   if (!value || typeof value !== "object") return;
@@ -129,10 +148,36 @@ function collectDigests(value: unknown, digests: Set<string>): void {
     && Number.isSafeInteger(record.bytes) && Number(record.bytes) > 0) {
     digests.add(record.sha256);
   }
-  for (const nested of Object.values(record)) collectDigests(nested, digests);
+  const terminalAt = deliveredRecordTerminalAt(record);
+  for (const [key, nested] of Object.entries(record)) {
+    /* Lifecycle-aware retirement: a delivered reservation past its grace no
+       longer pins its image refs; every other field (and every non-terminal
+       reservation) keeps its refs reachable for crash recovery and replay. */
+    if (key === "runtimeImages" && terminalAt !== null && terminalAt <= retireBefore) continue;
+    collectDigests(nested, digests, retireBefore);
+  }
 }
 
-function collectJsonFile(filename: string, digests: Set<string>): void {
+/** JSONL parse with the delivery-ledger tail contract: an invalid FINAL record
+    of an unterminated file is an interrupted append and is skipped, while
+    interior corruption is real damage and throws (disabling GC fail-closed). */
+function readJsonlRecords(contents: string, source: string): unknown[] {
+  const lines = contents.split("\n");
+  const terminated = contents.endsWith("\n");
+  const records: unknown[] = [];
+  for (const [index, line] of lines.entries()) {
+    if (!line.trim()) continue;
+    try {
+      records.push(JSON.parse(line));
+    } catch (error) {
+      if (index === lines.length - 1 && !terminated) break;
+      throw new Error(`${source} contains malformed JSON`, { cause: error });
+    }
+  }
+  return records;
+}
+
+function collectJsonFile(filename: string, digests: Set<string>, retireBefore: number): void {
   let contents: string;
   try { contents = fs.readFileSync(filename, "utf8"); }
   catch (error) {
@@ -141,15 +186,13 @@ function collectJsonFile(filename: string, digests: Set<string>): void {
   }
   if (!contents.trim()) return;
   if (filename.endsWith(".jsonl") || filename.endsWith(".ndjson")) {
-    for (const line of contents.split("\n")) {
-      if (line.trim()) collectDigests(JSON.parse(line), digests);
-    }
+    for (const record of readJsonlRecords(contents, filename)) collectDigests(record, digests, retireBefore);
     return;
   }
-  collectDigests(JSON.parse(contents), digests);
+  collectDigests(JSON.parse(contents), digests, retireBefore);
 }
 
-function collectJsonDirectory(directory: string, digests: Set<string>): void {
+function collectJsonDirectory(directory: string, digests: Set<string>, retireBefore: number): void {
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(directory, { withFileTypes: true }); }
   catch (error) {
@@ -158,7 +201,55 @@ function collectJsonDirectory(directory: string, digests: Set<string>): void {
   }
   for (const entry of entries) {
     if (!entry.isFile() || (!entry.name.endsWith(".json") && !entry.name.endsWith(".jsonl") && !entry.name.endsWith(".ndjson"))) continue;
-    collectJsonFile(path.join(directory, entry.name), digests);
+    collectJsonFile(path.join(directory, entry.name), digests, retireBefore);
+  }
+}
+
+/** Claude delivery ledgers are append-only queued/delivered pairs: a queued
+    entry's refs stay reachable until its delivered marker ages past the
+    retirement grace. Undelivered (crash-pending) entries never retire. */
+function collectClaudeLedgerDigests(directory: string, digests: Set<string>, retireBefore: number): void {
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(directory, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+    const filename = path.join(directory, entry.name);
+    let contents: string;
+    try { contents = fs.readFileSync(filename, "utf8"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (!contents.trim()) continue;
+    const queued = new Map<string, Set<string>>();
+    const deliveredAt = new Map<string, number>();
+    for (const record of readJsonlRecords(contents, filename)) {
+      const row = record && typeof record === "object" && !Array.isArray(record) ? record as Record<string, unknown> : null;
+      const queuedEntry = row?.kind === "queued" && row.entry && typeof row.entry === "object"
+        ? (row.entry as Record<string, unknown>)
+        : null;
+      if (queuedEntry && typeof queuedEntry.id === "string") {
+        const bucket = queued.get(queuedEntry.id) ?? new Set<string>();
+        collectDigests(row, bucket, retireBefore);
+        queued.set(queuedEntry.id, bucket);
+        continue;
+      }
+      if (row?.kind === "delivered" && typeof row.entryId === "string") {
+        const at = typeof row.deliveredAt === "string" ? Date.parse(row.deliveredAt) : Number.NaN;
+        if (Number.isFinite(at)) deliveredAt.set(row.entryId, at);
+        continue;
+      }
+      collectDigests(record, digests, retireBefore);
+    }
+    for (const [id, bucket] of queued) {
+      const terminalAt = deliveredAt.get(id);
+      if (terminalAt !== undefined && terminalAt <= retireBefore) continue;
+      for (const digest of bucket) digests.add(digest);
+    }
   }
 }
 
@@ -168,7 +259,7 @@ function openReadonlyDatabase(filename: string): BunDatabase {
   return new sqlite.Database(filename, { readonly: true, strict: true });
 }
 
-function collectJournalDigests(filename: string, digests: Set<string>): void {
+function collectJournalDigests(filename: string, digests: Set<string>, retireBefore: number): void {
   if (!fs.existsSync(filename)) return;
   const db = openReadonlyDatabase(filename);
   try {
@@ -187,7 +278,7 @@ function collectJournalDigests(filename: string, digests: Set<string>): void {
       for (const row of rows) {
         for (const column of columns) {
           const raw = row[column];
-          if (typeof raw === "string" && raw.trim()) collectDigests(JSON.parse(raw), digests);
+          if (typeof raw === "string" && raw.trim()) collectDigests(JSON.parse(raw), digests, retireBefore);
         }
       }
     }
@@ -196,26 +287,35 @@ function collectJournalDigests(filename: string, digests: Set<string>): void {
   }
 }
 
-function collectRegistrySqliteDigests(filename: string, digests: Set<string>): void {
+function collectRegistrySqliteDigests(filename: string, digests: Set<string>, retireBefore: number): void {
   if (!fs.existsSync(filename)) return;
   const db = openReadonlyDatabase(filename);
   try {
     const table = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'registry_rows'").get();
     if (!table) return;
     const rows = db.query("SELECT value_json FROM registry_rows").all() as Array<{ value_json: string }>;
-    for (const row of rows) collectDigests(JSON.parse(row.value_json), digests);
+    for (const row of rows) collectDigests(JSON.parse(row.value_json), digests, retireBefore);
   } finally {
     db.close();
   }
 }
 
-export function collectRuntimeImageReachableDigests(root = stateDir()): ReadonlySet<string> {
+export interface RuntimeImageReachabilityOptions {
+  now?: number;
+  retiredGraceMs?: number;
+}
+
+export function collectRuntimeImageReachableDigests(
+  root = stateDir(),
+  options: RuntimeImageReachabilityOptions = {},
+): ReadonlySet<string> {
+  const retireBefore = (options.now ?? Date.now()) - (options.retiredGraceMs ?? DELIVERED_REF_RETIREMENT_GRACE_MS);
   const digests = new Set<string>();
-  collectJsonFile(path.join(root, "agent-registry.json"), digests);
-  collectRegistrySqliteDigests(path.join(root, "agent-registry.sqlite"), digests);
-  collectJsonDirectory(path.join(root, "claude-delivery-ledger"), digests);
-  collectJsonDirectory(path.join(root, "structured-host-events"), digests);
-  collectJournalDigests(path.join(root, "runtime-events.sqlite"), digests);
+  collectJsonFile(path.join(root, "agent-registry.json"), digests, retireBefore);
+  collectRegistrySqliteDigests(path.join(root, "agent-registry.sqlite"), digests, retireBefore);
+  collectClaudeLedgerDigests(path.join(root, "claude-delivery-ledger"), digests, retireBefore);
+  collectJsonDirectory(path.join(root, "structured-host-events"), digests, retireBefore);
+  collectJournalDigests(path.join(root, "runtime-events.sqlite"), digests, retireBefore);
   return digests;
 }
 
@@ -294,7 +394,8 @@ export class RuntimeImageStore {
     this.now = options.now ?? Date.now;
     this.abandonedPartialMaxAgeMs = options.abandonedPartialMaxAgeMs ?? ABANDONED_PARTIAL_MAX_AGE_MS;
     this.gcGraceMs = options.gcGraceMs ?? GC_GRACE_MS;
-    this.reachableDigests = options.reachableDigests ?? (() => collectRuntimeImageReachableDigests(path.dirname(this.root)));
+    this.reachableDigests = options.reachableDigests
+      ?? (() => collectRuntimeImageReachableDigests(path.dirname(this.root), { now: this.now() }));
     this.afterRootOpen = options.afterRootOpen ?? (() => {});
     this.writerLockStaleMs = options.writerLockStaleMs ?? WRITER_LOCK_STALE_MS;
     this.writerLockWaitMs = options.writerLockWaitMs ?? WRITER_LOCK_WAIT_MS;

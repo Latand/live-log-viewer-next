@@ -212,6 +212,29 @@ describe("agent registry", () => {
     ).id).toBe(held.id);
   });
 
+  test("a retirement-aged delivered reservation still replays exactly and conflicts by digest", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("claude", "/retired-tombstone.jsonl", "default");
+    const refs = [{ sha256: "a".repeat(64), mime: "image/png" as const, bytes: 67 }];
+    const content = structuredContent("retired but idempotent", refs);
+    const held = store.holdDelivery(conversation.id, content.content.text, "retired-key", "runtime-images", refs, content.contentDigest);
+    store.beginDeliveryAttempt(held.id, conversation.generations.at(-1)!.id);
+    store.recordDeliveryOutcome(held.id, "delivered");
+    /* Age the tombstone far past the reachability retirement grace: blob refs
+       may retire from quota accounting, but the digest tombstone itself keeps
+       replay and conflict semantics untouched. */
+    const snapshot = store.snapshot();
+    snapshot.heldDeliveries[held.id]!.deliveredAt = "2026-01-01T00:00:00.000Z";
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+    const restarted = new AgentRegistry(store.filename);
+
+    expect(restarted.holdDelivery(conversation.id, content.content.text, "retired-key", "runtime-images", refs, content.contentDigest))
+      .toMatchObject({ id: held.id, state: "delivered" });
+    const changed = structuredContent("retired but idempotent", [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }]);
+    expect(() => restarted.holdDelivery(conversation.id, changed.content.text, "retired-key", "runtime-images", changed.content.images, changed.contentDigest))
+      .toThrow(DeliveryReservationConflictError);
+  });
+
   test("startup compaction bounds abandoned failed reservations and leaves capacity", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/failed-deliveries.jsonl", "default");

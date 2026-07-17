@@ -9,6 +9,7 @@ import { expect, test } from "bun:test";
 import { procBackend } from "@/lib/proc";
 
 import {
+  DELIVERED_REF_RETIREMENT_GRACE_MS,
   MAX_STRUCTURED_IMAGES,
   MAX_STRUCTURED_IMAGE_ENCODED_BYTES,
   collectRuntimeImageReachableDigests,
@@ -133,6 +134,130 @@ test("runtime image reachability scans registry backends, Claude ledger, host ev
   registryDb.close();
 
   expect([...collectRuntimeImageReachableDigests(state)].sort()).toEqual(refs.map((ref) => ref.sha256));
+});
+
+function reservationRow(sha: string, state: string, at: string | null): Record<string, unknown> {
+  return {
+    id: `delivery-${sha.slice(0, 8)}`,
+    conversationId: "conversation_lifecycle",
+    text: "",
+    payloadKind: "runtime-images",
+    runtimeImages: [{ sha256: sha, mime: "image/png", bytes: PNG.byteLength }],
+    state,
+    deliveredAt: state === "delivered" ? at : null,
+    createdAt: "2026-07-16T00:00:00.000Z",
+  };
+}
+
+test("delivered reservations and ledger entries retire after the bounded grace while pending refs stay", () => {
+  const state = sandbox();
+  const now = Date.parse("2026-07-17T12:00:00.000Z");
+  const grace = 60 * 60 * 1000;
+  const retired = new Date(now - grace - 1_000).toISOString();
+  const fresh = new Date(now - 1_000).toISOString();
+  const sha = (letter: string) => letter.repeat(64);
+  fs.writeFileSync(path.join(state, "agent-registry.json"), JSON.stringify({
+    heldDeliveries: {
+      retired: reservationRow(sha("1"), "delivered", retired),
+      fresh: reservationRow(sha("2"), "delivered", fresh),
+      held: reservationRow(sha("3"), "held", null),
+      assigned: reservationRow(sha("4"), "assigned", null),
+      uncertain: reservationRow(sha("5"), "delivery-uncertain", null),
+    },
+  }));
+  fs.mkdirSync(path.join(state, "claude-delivery-ledger"));
+  const ledgerImage = (letter: string) => ({ sha256: sha(letter), mime: "image/png", bytes: PNG.byteLength });
+  fs.writeFileSync(path.join(state, "claude-delivery-ledger", "session.jsonl"), [
+    JSON.stringify({ kind: "queued", entry: { id: "e-retired", images: [ledgerImage("6")] }, disposition: "turn-started", queuedAt: retired }),
+    JSON.stringify({ kind: "delivered", entryId: "e-retired", engineMessageId: null, deliveredAt: retired }),
+    JSON.stringify({ kind: "queued", entry: { id: "e-fresh", images: [ledgerImage("7")] }, disposition: "turn-started", queuedAt: fresh }),
+    JSON.stringify({ kind: "delivered", entryId: "e-fresh", engineMessageId: null, deliveredAt: fresh }),
+    JSON.stringify({ kind: "queued", entry: { id: "e-pending", images: [ledgerImage("8")] }, disposition: "queued-next-turn", queuedAt: retired }),
+    "",
+  ].join("\n"));
+
+  const reachable = collectRuntimeImageReachableDigests(state, { now, retiredGraceMs: grace });
+
+  expect([...reachable].sort()).toEqual(["2", "3", "4", "5", "7", "8"].map(sha));
+  /* The default bound is finite: even without options the collector retires. */
+  expect(DELIVERED_REF_RETIREMENT_GRACE_MS).toBeLessThanOrEqual(7 * 24 * 60 * 60 * 1000);
+});
+
+test("reachability tolerates a torn ledger tail and rejects interior corruption", () => {
+  const state = sandbox();
+  const now = Date.parse("2026-07-17T12:00:00.000Z");
+  const sha = (letter: string) => letter.repeat(64);
+  const queued = (id: string, letter: string) => JSON.stringify({
+    kind: "queued",
+    entry: { id, images: [{ sha256: sha(letter), mime: "image/png", bytes: PNG.byteLength }] },
+    disposition: "turn-started",
+    queuedAt: "2026-07-17T11:00:00.000Z",
+  });
+  fs.mkdirSync(path.join(state, "claude-delivery-ledger"));
+  /* An interrupted final append: complete records stay reachable, quota GC
+     stays enabled, and a later ledger repair/replay can finish the record. */
+  fs.writeFileSync(
+    path.join(state, "claude-delivery-ledger", "torn.jsonl"),
+    `${queued("e-one", "a")}\n${queued("e-two", "b").slice(0, 25)}`,
+  );
+  fs.mkdirSync(path.join(state, "structured-host-events"));
+  fs.writeFileSync(
+    path.join(state, "structured-host-events", "torn.jsonl"),
+    `${JSON.stringify({ effect: { images: [{ sha256: sha("c"), mime: "image/png", bytes: PNG.byteLength }] } })}\n{"effect": {"images`,
+  );
+
+  expect([...collectRuntimeImageReachableDigests(state, { now })].sort()).toEqual([sha("a"), sha("c")]);
+
+  /* Interior corruption is real damage, not an interrupted append: fail
+     closed so GC cannot run against a partial reachability picture. */
+  fs.writeFileSync(
+    path.join(state, "claude-delivery-ledger", "torn.jsonl"),
+    `${queued("e-one", "a").slice(0, 25)}\n${queued("e-two", "b")}\n`,
+  );
+  expect(() => collectRuntimeImageReachableDigests(state, { now })).toThrow("malformed JSON");
+});
+
+test("sequential completed deliveries outlive one store cap while pending refs stay readable", () => {
+  const state = sandbox();
+  const root = path.join(state, "runtime-images");
+  const grace = 60 * 60 * 1000;
+  let clock = Date.now();
+  const registry: Record<string, Record<string, unknown>> = {};
+  const writeRegistry = () => fs.writeFileSync(path.join(state, "agent-registry.json"), JSON.stringify({ heldDeliveries: registry }));
+  const pending = taggedPng("crash-pend");
+  const deliveries = ["delivery-1", "delivery-2", "delivery-3"].map(taggedPng);
+  const store = new RuntimeImageStore(root, {
+    maxBytes: pending.byteLength + deliveries[0]!.byteLength,
+    gcGraceMs: 0,
+    now: () => clock,
+    reachableDigests: () => collectRuntimeImageReachableDigests(state, { now: clock, retiredGraceMs: grace }),
+  });
+
+  const [pendingRef] = store.putMany([{ base64: pending.toString("base64"), mime: "image/png" }]);
+  if (!pendingRef) throw new Error("pending ref missing");
+  registry["crash-pending"] = { ...reservationRow(pendingRef.sha256, "held", null), runtimeImages: [pendingRef] };
+  writeRegistry();
+
+  /* Three completed deliveries push 3 payloads through a store that can only
+     hold one beside the pending blob — more total delivered bytes than one
+     store-cap lifetime. Each becomes admissible because its retired
+     predecessor stopped pinning quota. */
+  for (const [index, image] of deliveries.entries()) {
+    const [ref] = store.putMany([{ base64: image.toString("base64"), mime: "image/png" }]);
+    if (!ref) throw new Error(`delivery ref ${index} missing`);
+    registry[`delivered-${index}`] = {
+      ...reservationRow(ref.sha256, "delivered", new Date(clock).toISOString()),
+      runtimeImages: [ref],
+    };
+    writeRegistry();
+    clock += grace + 60_000;
+  }
+
+  /* The crash-pending blob never retired and stays readable. */
+  expect(store.read(pendingRef)).toEqual(pending);
+  const blobs = fs.readdirSync(root).filter((entry) => !entry.startsWith("."));
+  expect(blobs).toHaveLength(2);
+  expect(blobs).toContain(path.basename(store.pathFor(pendingRef)));
 });
 
 test("concurrent runtime image writers cannot exceed the global byte quota", async () => {
