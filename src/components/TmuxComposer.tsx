@@ -592,7 +592,20 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         receipt?: RuntimeReceipt;
       } = structuredSession
         ? attachments.images.length > 0
-          ? { ok: false, structured: true, error: t("composer.structuredImagesUnavailable") }
+          ? await fetch("/api/tmux", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                path: file.path,
+                conversationId: structuredSession.session.conversationId,
+                text: payloadText,
+                clientMessageId,
+                images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
+              }),
+            }).then(async (response) => {
+              const body = await response.json() as typeof json;
+              return { ...body, ok: response.ok && body.ok === true };
+            })
           : await sendRuntimeMessage({
               conversationId: structuredSession.session.conversationId,
               text: payloadText.trim(),

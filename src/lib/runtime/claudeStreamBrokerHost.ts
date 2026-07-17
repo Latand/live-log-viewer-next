@@ -8,6 +8,8 @@ import { StringDecoder } from "node:string_decoder";
 import { statePath } from "@/lib/configDir";
 import { applyClaudeSpawnPolicy } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
+import { inboxImageRef } from "@/lib/inbox";
+import { MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { procBackend } from "@/lib/proc";
 import { hardenedRedact } from "@/lib/view/compactText";
 
@@ -216,14 +218,65 @@ function stringField(value: unknown, key: string): string | null {
 function sameQueueEntry(left: QueueEntry, right: QueueEntry): boolean {
   return left.id === right.id
     && left.text === right.text
+    && JSON.stringify(left.images ?? []) === JSON.stringify(right.images ?? [])
     && left.expectedTurnId === right.expectedTurnId;
+}
+
+function validImageSignature(data: Buffer, mime: string): boolean {
+  if (mime === "image/png") {
+    return data.length >= 24
+      && data.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))
+      && data.subarray(12, 16).toString("ascii") === "IHDR";
+  }
+  if (mime === "image/jpeg") {
+    return data.length >= 4
+      && data[0] === 0xff
+      && data[1] === 0xd8
+      && data[2] === 0xff
+      && data.at(-2) === 0xff
+      && data.at(-1) === 0xd9;
+  }
+  if (mime === "image/gif") {
+    const header = data.subarray(0, 6).toString("ascii");
+    return data.length >= 10 && (header === "GIF87a" || header === "GIF89a");
+  }
+  return data.length >= 12
+    && data.subarray(0, 4).toString("ascii") === "RIFF"
+    && data.subarray(8, 12).toString("ascii") === "WEBP";
+}
+
+function claudeImageBlock(imagePath: string): JsonObject {
+  const ref = inboxImageRef(path.basename(imagePath));
+  if (!ref || path.resolve(ref.path) !== path.resolve(imagePath)) {
+    throw new Error("Claude structured image path is outside the Viewer inbox");
+  }
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
+  const fd = fs.openSync(ref.path, flags);
+  let data: Buffer;
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_INBOX_IMAGE_BYTES) {
+      throw new Error("Claude structured image file is invalid");
+    }
+    data = fs.readFileSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (!validImageSignature(data, ref.mime)) throw new Error("Claude structured image signature is invalid");
+  return {
+    type: "image",
+    source: { type: "base64", media_type: ref.mime, data: data.toString("base64") },
+  };
 }
 
 function deliveryRecord(value: unknown): ClaudeDeliveryRecord | null {
   const candidate = record(value);
   if (candidate?.kind === "queued") {
     const entry = record(candidate.entry);
-    if (typeof entry?.id !== "string" || !entry.id || typeof entry.text !== "string" || !entry.text) return null;
+    const images = entry?.images;
+    if (typeof entry?.id !== "string" || !entry.id || typeof entry.text !== "string") return null;
+    if (images !== undefined && (!Array.isArray(images) || images.length > 16 || images.some((image) => typeof image !== "string"))) return null;
+    if (!entry.text && (!Array.isArray(images) || images.length === 0)) return null;
     if (candidate.disposition !== "turn-started" && candidate.disposition !== "queued-next-turn") return null;
     if (typeof candidate.queuedAt !== "string") return null;
     return candidate as unknown as ClaudeDeliveryRecord;
@@ -502,7 +555,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
 
   async send(entry: QueueEntry): Promise<DeliveryReceipt> {
     if (this.unavailable()) return { outcome: "rejected", reason: "dead-host" };
-    if (!entry.id || !entry.text) throw new Error("queue entry id and text are required");
+    if (!entry.id || (!entry.text && !entry.images?.length)) throw new Error("queue entry id and content are required");
     const duplicate = this.deliveries.find((state) => state.entry.id === entry.id);
     if (duplicate && !sameQueueEntry(duplicate.entry, entry)) {
       throw new Error("Claude queue entry id belongs to a different payload");
@@ -517,6 +570,8 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (existingPending) return existingPending.promise;
     const disposition: ClaudeDeliveryState["disposition"] = duplicate?.disposition
       ?? (this.activeTurnId ? "queued-next-turn" : "turn-started");
+    const content: JsonObject[] = (entry.images ?? []).map(claudeImageBlock);
+    if (entry.text) content.push({ type: "text", text: entry.text });
     try {
       this.deliveryLedger.recordQueued(this.identity.sessionId, entry, disposition);
     } catch (error) {
@@ -546,7 +601,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.write({
       type: "user",
       session_id: this.identity.sessionId,
-      message: { role: "user", content: [{ type: "text", text: entry.text }] },
+      message: { role: "user", content },
     });
     this.turnQueue.push(entry.id);
     if (!this.activeTurnId) {

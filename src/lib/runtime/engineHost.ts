@@ -1,6 +1,8 @@
 export interface QueueEntry {
   id: string;
   text: string;
+  /** Viewer-owned inbox paths carried by structured Claude deliveries. */
+  images?: string[];
   /** Optional caller fence. A mismatch is rejected before any engine write. */
   expectedTurnId?: string | null;
 }

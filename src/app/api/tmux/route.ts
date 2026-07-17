@@ -21,6 +21,8 @@ import { dispatchStructuredControl } from "@/lib/runtime/structuredControls";
 import {
   captureTmuxAttachReference,
   collectImagePayloads,
+  buildImagePayload,
+  deleteInboxImages,
   killPane,
   panePidOf,
   resolveRequestedTmuxTarget,
@@ -244,17 +246,28 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
 
   if (process.env.LLV_STRUCTURED_HOSTS === "1") {
     const { enqueueStructuredMessage } = await import("@/lib/runtime/structuredMessageDelivery");
+    let imagePaths: string[] = [];
+    if (images.length) {
+      try {
+        imagePaths = buildImagePayload("", images).imagePaths;
+      } catch (error) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : "image storage failed" }, { status: 500 });
+      }
+    }
     const structured = await enqueueStructuredMessage({
       path: filePath,
       ...(conversationId ? { conversationId } : {}),
       ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
       text: text.trim(),
       hasImages: images.length > 0,
+      ...(imagePaths.length ? { images: imagePaths } : {}),
     });
     if (structured) {
+      if (!structured.ok) deleteInboxImages(imagePaths);
       const { status, ...response } = structured.ok ? { ...structured, status: 200 } : structured;
-      return NextResponse.json(response, { status });
+      return NextResponse.json(structured.ok && imagePaths.length ? { ...response, imagePaths } : response, { status });
     }
+    deleteInboxImages(imagePaths);
   }
 
   return respond(await deliverConversationMessage({

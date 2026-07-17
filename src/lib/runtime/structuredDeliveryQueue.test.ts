@@ -356,9 +356,9 @@ test("an unavailable host keeps the conversation head queued", async () => {
   expect(transitions).toEqual([["op-waiting", "queued", "dead-host"]]);
 });
 
-test("structured delivery fails image effects before engine actuation", async () => {
+test("structured delivery preserves image paths for engine actuation", async () => {
   const transitions: Array<[string, string, string | null | undefined]> = [];
-  let sends = 0;
+  const entries: QueueEntry[] = [];
   const queue = new StructuredDeliveryQueue({
     effects: async () => [{
       id: "effect:op-image",
@@ -377,15 +377,23 @@ test("structured delivery fails image effects before engine actuation", async ()
     transition: async (operationId, status, details) => {
       transitions.push([operationId, status, details?.reason]);
     },
-  }, () => host(async () => {
-    sends += 1;
+  }, () => host(async (entry) => {
+    entries.push(entry);
     return { outcome: "turn-started", turnId: "turn-image" };
   }));
 
   await queue.drain();
 
-  expect(sends).toBe(0);
-  expect(transitions).toEqual([["op-image", "failed", "structured host image delivery is unavailable"]]);
+  expect(entries).toEqual([{
+    id: "op-image",
+    text: "see image",
+    images: ["/inbox/image.png"],
+    expectedTurnId: null,
+  }]);
+  expect(transitions).toEqual([
+    ["op-image", "delivering", undefined],
+    ["op-image", "delivered", undefined],
+  ]);
 });
 
 test("structured delivery retries the same durable entry after a host race", async () => {

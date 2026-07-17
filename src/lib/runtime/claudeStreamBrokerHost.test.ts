@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
+import { INBOX_DIR } from "@/lib/inbox";
 import { procBackend } from "@/lib/proc";
 
 import {
@@ -293,6 +295,49 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(await nextEvent(late)).toEqual({ kind: "delta", turnId: "delivery-one", text: "done", seq: 4 });
     expect((await host.health()).account).toEqual({ type: "claude.ai", planType: "max" });
     await host.release();
+  });
+
+  test("delivers validated Viewer inbox images as native Claude blocks", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const filename = path.join(INBOX_DIR, `test-structured-${crypto.randomUUID()}.png`);
+    fs.mkdirSync(INBOX_DIR, { recursive: true });
+    fs.writeFileSync(filename, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    try {
+      const sent = host.send({ id: "image-delivery", text: "inspect", images: [filename] });
+      const input = child.inputs.find((candidate) => candidate.type === "user") as {
+        message: { content: Array<Record<string, unknown>> };
+      };
+      expect(input.message.content).toEqual([
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/png",
+            data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+          },
+        },
+        { type: "text", text: "inspect" },
+      ]);
+      child.emitJson({
+        type: "user",
+        isReplay: true,
+        session_id: host.identity.sessionId,
+        uuid: "image-user",
+        message: { role: "user", content: input.message.content },
+      });
+      expect(await sent).toEqual({ outcome: "turn-started", turnId: "image-delivery" });
+    } finally {
+      await host.release();
+      fs.unlinkSync(filename);
+    }
   });
 
   test("structured Claude hosts install the deny profile and preserve the explicit escape", async () => {

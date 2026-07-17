@@ -82,6 +82,7 @@ export async function handleRuntimeCommand(
         ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
         text: command.text,
         hasImages: Boolean(command.images?.length),
+        ...(command.images?.length ? { images: command.images } : {}),
       }, {
         enabled: dependencies.structuredEnabled ?? (() => process.env.LLV_STRUCTURED_HOSTS === "1"),
         client: () => client,

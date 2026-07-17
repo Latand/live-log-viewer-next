@@ -25,6 +25,7 @@ export interface StructuredMessageRequest {
   turnId?: string | null;
   text: string;
   hasImages: boolean;
+  images?: string[];
 }
 
 export type StructuredMessageResult =
@@ -161,7 +162,7 @@ function holdDuringRuntimeSynchronization(
   if (!owner) return ownershipUnavailable();
   if (owner.kind === "legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   const { conversation } = owner;
-  if (request.hasImages) {
+  if (request.hasImages || request.images?.length) {
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }
   try {
@@ -286,7 +287,15 @@ export async function enqueueStructuredMessage(
   }
   if (session.hostKind === "tmux-legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return ownershipUnavailable();
-  if (request.hasImages) {
+  if (request.hasImages || request.images?.length) {
+    if (session.sessionKey.engine !== "claude") {
+      return { ok: false, structured: true, outcome: "failed", error: "structured image delivery requires Claude", status: 409 };
+    }
+    if (!request.images?.length) {
+      return { ok: false, structured: true, outcome: "failed", error: "structured image payload is unavailable", status: 409 };
+    }
+  }
+  if (request.images && request.images.length > 16) {
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }
   if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
@@ -315,6 +324,44 @@ export async function enqueueStructuredMessage(
   if (!conversation) return ownershipUnavailable();
   try {
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
+    if (request.images?.length) {
+      if (conversation.migration && !["committed", "rolled-back"].includes(conversation.migration.phase)) {
+        return { ok: false, structured: true, outcome: "failed", error: "image delivery is waiting for account migration to settle", status: 409 };
+      }
+      const result = await client.command({
+        kind: request.kind ?? "send",
+        ...(request.operationId ? { operationId: request.operationId } : {}),
+        conversationId: conversation.id,
+        idempotencyKey,
+        text: request.text,
+        images: request.images,
+        policy: request.policy ?? "interrupt-active",
+        ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
+      });
+      const receipt = result.receipt;
+      if (receipt.status === "rejected" || receipt.status === "failed" || receipt.status === "uncertain") {
+        return {
+          ok: false,
+          structured: true,
+          outcome: "failed",
+          error: receipt.reason || "structured host delivery failed",
+          status: 409,
+          operationId: result.operationId,
+          receipt,
+        };
+      }
+      (dependencies.kick ?? kickStructuredDeliveryQueue)();
+      const outcome = receipt.status === "delivering" || receipt.status === "delivered" ? receipt.status : "queued";
+      return {
+        ok: true,
+        structured: true,
+        target: recoveredHost ? null : conversation.id,
+        outcome,
+        operationId: result.operationId,
+        receipt,
+        ...(recoveredHost ? { spawned: true } : {}),
+      };
+    }
     let reservation = registry.holdDelivery(conversation.id, request.text, idempotencyKey, "text", commandInput(request));
     let claimedReservationId: string | null = null;
     if (reservation.state === "delivery-uncertain") {
