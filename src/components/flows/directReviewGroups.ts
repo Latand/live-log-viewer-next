@@ -1,11 +1,12 @@
 import type { Flow, Round } from "@/lib/flows/types";
+import { groupDirectReviewers } from "@/lib/flows/directReviewGrouping";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
-import { canonicalizeConversationId, currentConversationFile, withoutArchivedPredecessors } from "@/lib/accounts/identity";
+import { currentConversationFile, withoutArchivedPredecessors } from "@/lib/accounts/identity";
 
 import { projectKey } from "@/components/projectModel";
 
-import { claimedReviewerPaths, isActiveFlow } from "./flowModel";
+import { isActiveFlow } from "./flowModel";
 
 /*
  * Direct one-shot review groups (issue #325).
@@ -18,13 +19,11 @@ import { claimedReviewerPaths, isActiveFlow } from "./flowModel";
  * spines, verdict chips, loop placement, worker-collapse, mobile deck chips,
  * minimap rects — applies unchanged.
  *
- * Grouping identity, in the issue's precedence order:
- *   1. a shared board task, resolved from the reviewer's own assignment first
- *      and the reviewed conversation's assignment second;
- *   2. the alias-resolved `reviewsConversationId` review subject;
- *   3. managed flow/pipeline ownership stays with #112's machinery — any
- *      conversation carrying a container membership (or claimed by a real
- *      flow round) never enters this projection.
+ * Group membership and round order come from the shared grouping core in
+ * lib/flows/directReviewGrouping (task first, alias-resolved review subject
+ * second, managed flow/pipeline ownership excluded) — the same core the
+ * server's role-title projection numbers review rounds with, so a deck spine
+ * and its card title can never disagree.
  *
  * The projection is a pure function of the scan + tasks + alias map, so
  * restart, migration, generation changes and project relocation follow the
@@ -61,68 +60,12 @@ function reviewerStillWorking(file: FileEntry): boolean {
   );
 }
 
-/** Newest matching assignment timestamp for a conversation across a task. */
-function assignmentAt(task: BoardTask, conversationId: string, path: string | null): string | null {
-  let newest: string | null = null;
-  for (const assignment of task.assignments) {
-    const matches = assignment.conversationId === conversationId || (path !== null && assignment.path === path);
-    if (!matches) continue;
-    if (newest === null || assignment.at > newest) newest = assignment.at;
-  }
-  return newest;
-}
-
 export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
-  const aliases = input.conversationAliases ?? {};
-  const canonical = (id: string) => canonicalizeConversationId(id, aliases);
   const visible = withoutArchivedPredecessors([...input.files]);
-  const claimed = claimedReviewerPaths([...input.flows]);
-  const tasks = input.tasks ?? [];
-
-  /* The board task owning a conversation: the task with the NEWEST matching
-     assignment wins, so a re-assigned conversation follows its latest task. */
-  const taskFor = (conversationId: string | null, path: string | null): BoardTask | null => {
-    if (!conversationId && !path) return null;
-    let best: BoardTask | null = null;
-    let bestAt = "";
-    for (const task of tasks) {
-      const at = assignmentAt(task, conversationId ?? "", path);
-      if (at === null) continue;
-      if (best === null || at > bestAt || (at === bestAt && task.updatedAt > best.updatedAt)) {
-        best = task;
-        bestAt = at;
-      }
-    }
-    return best;
-  };
-
-  interface Candidate {
-    file: FileEntry;
-    reviewedId: string;
-  }
-  const groups = new Map<string, Candidate[]>();
-  for (const file of visible) {
-    const lineage = file.durableLineage;
-    if (!lineage || lineage.role !== "reviewer" || !lineage.reviewsConversationId) continue;
-    /* Managed ownership wins (#112): container members and round-claimed paths
-       stay with their flow/pipeline projection. */
-    if (lineage.memberships.length || claimed.has(file.path)) continue;
-    const reviewedId = canonical(lineage.reviewsConversationId);
-    const reviewerId = file.conversationId ? canonical(file.conversationId) : null;
-    if (reviewerId !== null && reviewerId === reviewedId) continue; // degenerate self-review edge
-    const owner = taskFor(reviewerId, file.path) ?? taskFor(reviewedId, null);
-    const key = owner ? `task::${owner.id}` : `subject::${reviewedId}`;
-    const list = groups.get(key);
-    const candidate: Candidate = { file, reviewedId };
-    if (list) list.push(candidate);
-    else groups.set(key, [candidate]);
-  }
+  const groups = groupDirectReviewers(input);
 
   const out: Flow[] = [];
-  for (const [key, members] of groups) {
-    /* Round order is transcript age: terminal history first, the freshest —
-       the actionable round — last, exactly where the deck's front card looks. */
-    members.sort((a, b) => a.file.mtime - b.file.mtime || (a.file.path < b.file.path ? -1 : 1));
+  for (const { key, members } of groups) {
     const latest = members[members.length - 1]!;
     /* The deck anchors beside the reviewed conversation of the newest round,
        at its CURRENT generation. No anchor in the scan → nothing to attach the
