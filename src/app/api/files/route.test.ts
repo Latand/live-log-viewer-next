@@ -91,8 +91,9 @@ let pipelinesStore: () => unknown[] = () => [];
 mock.module("@/lib/flows/store", () => ({ loadFlows: () => [] }));
 mock.module("@/lib/pipelines/store", () => ({ loadPipelines: () => pipelinesStore() }));
 mock.module("@/lib/pipelines/visibility", () => ({ filterPipelinesForFileScan: () => [] }));
+let boardTasksStore: () => unknown[] = () => [];
 mock.module("@/lib/tasks/store", () => ({
-  loadTasks: () => [],
+  loadTasks: () => boardTasksStore(),
   mutateTasks: () => { throw new Error("files route attempted a task mutation"); },
 }));
 mock.module("@/lib/workflows/store", () => ({ loadWorkflows: () => [] }));
@@ -1901,4 +1902,101 @@ test("a confirmed-gone transcript (ENOENT) is certified by its immutable snapsho
   const body = await response.json() as { files: FileEntry[] };
   const gone = body.files.find((entry) => entry.path === gonePath);
   expect(gone?.authorshipUnverified).toBeUndefined();
+});
+
+test("role titles (issue #325): spawned builder/reviewer present task + role instead of boilerplate", async () => {
+  const registry = agentRegistry();
+  const orchestratorPath = "/sessions/orchestrator-019f4906-3f67-7b72-9fbc-9ec3b5ad1501.jsonl";
+  const builderPath = "/sessions/builder-019f4906-3f67-7b72-9fbc-9ec3b5ad1502.jsonl";
+  const reviewerPath = "/sessions/reviewer-019f4906-3f67-7b72-9fbc-9ec3b5ad1503.jsonl";
+  const orchestrator = registry.ensureConversation("codex", orchestratorPath, null);
+  const builderSpawn = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    parentConversationId: orchestrator.id,
+    parentArtifactPath: orchestratorPath,
+    role: "builder",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: orchestrator.id }),
+  });
+  if (builderSpawn.kind !== "created") throw new Error("expected a fresh builder receipt");
+  registry.settleSpawn(builderSpawn.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1502" },
+    artifactPath: builderPath,
+    cwd: "/repo",
+    accountId: null,
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const reviewerSpawn = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    parentConversationId: orchestrator.id,
+    parentArtifactPath: orchestratorPath,
+    role: "reviewer",
+    reviewsConversationId: builderSpawn.receipt.conversationId,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: orchestrator.id }),
+  });
+  if (reviewerSpawn.kind !== "created") throw new Error("expected a fresh reviewer receipt");
+  registry.settleSpawn(reviewerSpawn.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1503" },
+    artifactPath: reviewerPath,
+    cwd: "/repo",
+    accountId: null,
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  boardTasksStore = () => [{
+    id: "task-325",
+    project: "repo",
+    status: "assigned",
+    text: "🧩 #325 — Group review rounds per task\n\nDetails…",
+    placement: "unplaced",
+    assignments: [{
+      path: null,
+      conversationId: builderSpawn.receipt.conversationId,
+      panePid: null,
+      state: "delivered",
+      error: null,
+      at: "2026-07-16T00:00:00.000Z",
+    }],
+    createdAt: "2026-07-16T00:00:00.000Z",
+    updatedAt: "2026-07-16T00:00:00.000Z",
+  }];
+  try {
+    // An explicit user rename on the builder must keep final precedence; the
+    // role title becomes its Reset base instead of clobbering the rename.
+    writeSessionTitle(
+      [`conversation:${builderSpawn.receipt.conversationId}`],
+      `conversation:${builderSpawn.receipt.conversationId}`,
+      "My builder",
+      undefined,
+      "2026-07-16T00:00:00.000Z",
+    );
+    scannedFiles = [
+      { ...file(orchestratorPath), title: "Codex session" },
+      { ...file(builderPath), title: "Codex session", mtime: 2 },
+      { ...file(reviewerPath), title: "Codex session", mtime: 3 },
+    ];
+
+    const response = await GET(new Request("http://127.0.0.1/api/files"));
+    const body = await response.json() as { files: FileEntry[] };
+    const builder = body.files.find((entry) => entry.path === builderPath);
+    const reviewer = body.files.find((entry) => entry.path === reviewerPath);
+    const orchestratorEntry = body.files.find((entry) => entry.path === orchestratorPath);
+
+    expect(builder?.title).toBe("My builder");
+    expect(builder?.autoTitle).toBe("#325 — Group review rounds per task — builder");
+    expect(reviewer?.title).toBe("#325 — Group review rounds per task — reviewer R1");
+    expect(reviewer?.autoTitle).toBeUndefined();
+    // A role-less session keeps its scanner title untouched.
+    expect(orchestratorEntry?.title).toBe("Codex session");
+  } finally {
+    boardTasksStore = () => [];
+  }
 });

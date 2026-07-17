@@ -67,6 +67,10 @@ interface Props {
   manual: FileEntry[];
   files: FileEntry[];
   flows: Flow[];
+  /** Synthetic direct one-shot review groups (issue #325): joined with `flows`
+      for the layout so their decks/loops render, but excluded from every
+      PATCH-backed flow control (FlowStrip, FlowHub, renderableFlows, halos). */
+  reviewGroups?: Flow[];
   pipelines?: Pipeline[];
   /** This project's board tasks — sticky cards over the panes. */
   tasks: BoardTask[];
@@ -157,6 +161,7 @@ export function SchemeBoard({
   manual,
   files,
   flows,
+  reviewGroups = [],
   pipelines = [],
   tasks,
   workerStacks = [],
@@ -196,7 +201,11 @@ export function SchemeBoard({
   }, [focus]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines, surfacePipelines, favorites), [groups, manual, files, flows, drafts, pipelines, surfacePipelines, favorites]);
+  /* Direct review groups join the layout's flow list so their decks place
+     beside the reviewed conversation exactly like managed loops (issue #325);
+     flowsByImpl and every strip/hub below keep reading the real `flows`. */
+  const deckFlows = useMemo(() => (reviewGroups.length ? [...flows, ...reviewGroups] : flows), [flows, reviewGroups]);
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, deckFlows, drafts, pipelines, surfacePipelines, favorites), [groups, manual, files, deckFlows, drafts, pipelines, surfacePipelines, favorites]);
 
   /* Selection keys are transcript paths, so the 10s poll relayout keeps the
      set for free; nodes that left the board are pruned out of the state

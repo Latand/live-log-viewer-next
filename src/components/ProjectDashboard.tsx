@@ -22,6 +22,7 @@ import { TaskStrip } from "./BranchPane";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
+import { directReviewFlows, isDirectReviewFlow } from "./flows/directReviewGroups";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { createDraftPipeline, pipelinesForProject, type PipelineTemplate } from "./pipelines/pipelineModel";
 import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
@@ -67,6 +68,9 @@ interface Props {
   pipelinesError?: string;
   workflows: Workflow[];
   tasks: BoardTask[];
+  /** Durable conversation-id aliases (old id → canonical id) from /api/files:
+      direct review grouping resolves `reviewsConversationId` through them. */
+  conversationAliases?: Record<string, string>;
   projectCatalog?: ProjectCatalogEntry[];
   projectCwd?: string;
   project: string;
@@ -282,6 +286,7 @@ export function ProjectDashboard({
   pipelinesError,
   workflows,
   tasks,
+  conversationAliases,
   projectCatalog: projectCatalogEntries = [],
   projectCwd,
   project,
@@ -481,6 +486,19 @@ export function ProjectDashboard({
     [],
   );
 
+  /* Direct one-shot review groups (issue #325): Viewer-managed reviewers with a
+     durable role=reviewer edge + alias-resolved reviewsConversationId, outside
+     any managed flow/pipeline, projected into SYNTHETIC review-loop flows.
+     `deckFlows` is what the deck grammar consumes (folding, layout, worker
+     collapse); every PATCH-backed control surface keeps the real `flows`. */
+  const directReviewGroups = useMemo(
+    () => directReviewFlows({ files, flows, tasks, conversationAliases }),
+    [files, flows, tasks, conversationAliases],
+  );
+  const deckFlows = useMemo(
+    () => (directReviewGroups.length ? [...flows, ...directReviewGroups] : flows),
+    [flows, directReviewGroups],
+  );
   /* Reviewer transcripts of active flows live inside their round decks:
      they never build their own groups, quiet trees or residual chips. */
   const expandedFlowConversations = useMemo(() => {
@@ -489,11 +507,18 @@ export function ProjectDashboard({
        but promoting its idle reviewer descendants would re-open the whole
        implementer→reviewer→subtask tree as an active group — a closed flow must
        stay quiet history. So gate expansion on active ownership. */
-    const activeFlows = flows.filter(isActiveFlow);
+    const activeFlows = deckFlows.filter(isActiveFlow);
     const paths = claimedReviewerDescendantPaths(files, activeFlows);
-    for (const flow of activeFlows) paths.add(flow.implementerPath);
+    for (const flow of activeFlows) {
+      /* A direct group whose rounds are ALL terminal is compact history: it must
+         never force a quiet reviewed conversation back onto the board just to
+         host its deck. Its deck still renders whenever the reviewed conversation
+         is on the board for its own reasons. */
+      if (isDirectReviewFlow(flow) && flow.state !== "reviewing") continue;
+      paths.add(flow.implementerPath);
+    }
     return paths;
-  }, [files, flows]);
+  }, [files, deckFlows]);
   /* Flow-driven expansions plus the ones the user opened by hand from a
      collapsed view: a connected conversation the user expanded renders as a
      node wired below its parent, just like an active-group child. */
@@ -514,15 +539,15 @@ export function ProjectDashboard({
      one carrying authorship protection — are recovered by protectedReviewerNodes
      and materialized as standalone nodes (issue #112), so folding is
      unconditional here. */
-  const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
+  const groupFiles = useMemo(() => foldClaimedReviewers(files, deckFlows), [files, deckFlows]);
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
      full-size cards (a spawned worker stays a column under an active parent
      otherwise). Reviewers of active flows stay in their round deck and are
      kept out of the stacks after layout via deckReviewerPaths. */
   const collapsibleWorkers = useMemo(
-    () => collapsibleWorkerFiles({ files, project, flows, pipelines, pinnedPaths, nowMs }),
-    [files, project, flows, pipelines, pinnedPaths, nowMs],
+    () => collapsibleWorkerFiles({ files, project, flows: deckFlows, pipelines, pinnedPaths, nowMs }),
+    [files, project, deckFlows, pipelines, pinnedPaths, nowMs],
   );
   const collapsedPaths = useMemo(() => new Set(collapsibleWorkers.map((file) => file.path)), [collapsibleWorkers]);
   /* Per-origin stack grouping inputs (issue #136): a worker folds under its
@@ -620,11 +645,11 @@ export function ProjectDashboard({
       ...manualPaths,
       ...extra.map((file) => file.path),
     ]);
-    const protectedNodes = protectedReviewerNodes({ files, flows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths })
+    const protectedNodes = protectedReviewerNodes({ files, flows: deckFlows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths })
       .filter((file) => projectKey(file) === project);
     const extras = [...extra, ...protectedNodes];
     return extras.length ? [...manualNodes, ...extras] : manualNodes;
-  }, [ephemeral, groupFiles, files, flows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
+  }, [ephemeral, groupFiles, files, deckFlows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
   const liveCount = useMemo(
     () =>
       groups.reduce(
@@ -1008,7 +1033,7 @@ export function ProjectDashboard({
      exists only for an implementer placed as a board node — the same layout the
      scheme draws. Derive availability from that layout's nodes, so a scanned but
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
-  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? visibleDrafts : [], pipelines);
+  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, deckFlows, hasNodes ? visibleDrafts : [], pipelines);
   /* Worker rows the scheme still draws in a retained form — an active flow's
      reviewer round deck keeps its finished rounds as deck tabs. Those are
      re-admitted here so a folded reviewer is never listed twice (its deck AND a
@@ -1023,7 +1048,7 @@ export function ProjectDashboard({
      exclude set: a closed worker is a tombstone — it must not resurface as a
      stack member (its manual/expanded pin was dropped on close, so it would
      otherwise re-qualify as a plain collapse candidate). */
-  const workerStacks = groupWorkerStacks(collapsibleWorkers, flows, new Set([...deckReviewerPaths, ...hiddenSet]), {
+  const workerStacks = groupWorkerStacks(collapsibleWorkers, deckFlows, new Set([...deckReviewerPaths, ...hiddenSet]), {
     pipelineIdOf,
     originOf: spawnerRootOf,
   });
@@ -1219,6 +1244,7 @@ export function ProjectDashboard({
               manual={hasNodes ? schemeManual : []}
               files={files}
               flows={flows}
+              reviewGroups={directReviewGroups}
               pipelines={pipelines}
               surfacePipelines={activePipelines}
               workerStacks={workerStacks}
@@ -1260,6 +1286,7 @@ export function ProjectDashboard({
                 manual={hasNodes ? schemeManual : []}
                 files={files}
                 flows={flows}
+                reviewGroups={directReviewGroups}
                 pipelines={pipelines}
                 surfacePipelines={activePipelines}
                 tasks={hasNodes ? projectTasks : []}
@@ -1339,7 +1366,10 @@ export function ProjectDashboard({
 
       {/* The corner pill would sit on the focused pane's composer; on the
           phone the strip, the map and the toast cover its job. */}
-      {!isMobile && boardReady ? <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} /> : null}
+      {/* deckFlows here folds direct reviewers out of the switchboard exactly
+          like managed rounds (claimedReviewerPaths); the hook keeps flow status
+          lines to REAL flows itself. */}
+      {!isMobile && boardReady ? <Switchboard files={files} flows={deckFlows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} /> : null}
 
       {/* Worker-class cards that have auto-collapsed fold into one stack per
           origin — flow / pipeline / spawner (issue #112, #136) — instead of
@@ -1357,7 +1387,7 @@ export function ProjectDashboard({
         const quietTotal = !hasArchiveNodes ? residual.length : 0;
         const strips = (
           <>
-            <WorkerStacks stacks={workerStacks} files={files} flows={flows} pipelines={pipelines} onSelect={openSwitchboardFile} />
+            <WorkerStacks stacks={workerStacks} files={files} flows={deckFlows} pipelines={pipelines} onSelect={openSwitchboardFile} />
             {!hasArchiveNodes && residual.length ? (
               <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
             ) : null}
