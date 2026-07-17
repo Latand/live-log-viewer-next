@@ -178,6 +178,7 @@ export interface ClaudeStreamBrokerHostOptions {
   claudeProjectsDir?: string;
   spawnPolicyBaseSettingsPath?: string | null;
   allowSubagents?: boolean;
+  readOnly?: boolean;
   binary?: string;
   model?: string;
   effort?: string;
@@ -519,7 +520,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       "--permission-prompt-tool", "stdio",
       "--permission-mode", options.permissionMode ?? "default",
     ];
-    if (!options.allowSubagents) args.push("--disallowedTools", "Task,Agent");
+    const disallowedTools = [
+      ...(!options.allowSubagents ? ["Task", "Agent"] : []),
+      ...(options.readOnly ? ["Edit", "Write", "NotebookEdit"] : []),
+    ];
+    if (disallowedTools.length > 0) args.push("--disallowedTools", disallowedTools.join(","));
     if (options.claudeConfigDir) {
       const profileId = `structured-${crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 24)}`;
       const settings = applyClaudeSpawnPolicy(options.claudeConfigDir, {

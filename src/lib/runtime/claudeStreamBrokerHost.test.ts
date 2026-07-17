@@ -317,6 +317,25 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test("read-only hosts deny mutation and native sub-agent tools", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const captured: { args?: string[] } = {};
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      readOnly: true,
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: fakeSpawn(child, captured),
+    });
+
+    const index = captured.args!.indexOf("--disallowedTools");
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(captured.args![index + 1]).toBe("Task,Agent,Edit,Write,NotebookEdit");
+    await host.release();
+  });
+
   test("writes native image blocks first and confirms text and image-only digests", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);

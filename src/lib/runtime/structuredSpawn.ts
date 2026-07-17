@@ -600,6 +600,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     claudeProjectsDir: input.account.transcriptRoot,
     spawnPolicyBaseSettingsPath: structuredClaudeSpawnPolicyBaseSettingsPath(input.account),
     allowSubagents: profile.allowSubagents,
+    readOnly: profile.readOnly === true,
     model: profile.model ?? undefined,
     effort: profile.effort ?? undefined,
     permissionMode: profile.permissionMode ?? "default",
