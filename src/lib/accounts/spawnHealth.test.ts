@@ -47,6 +47,25 @@ test("spawn selection skips an unrefreshable expired preferred Claude account an
   expect(probed).toEqual(["healthy"]);
 });
 
+test("spawn selection does not await an expired account when a current account can launch", async () => {
+  const expired = account("expired", NOW - 1);
+  const healthy = account("healthy", NOW + 60_000);
+  let refreshCalls = 0;
+
+  const selected = await selectHealthyClaudeAccount([expired, healthy], "healthy", {
+    now: () => NOW,
+    probe: async () => "valid",
+    refresh: async () => {
+      refreshCalls += 1;
+      await new Promise(() => {});
+      return "unknown";
+    },
+  });
+
+  expect(selected.id).toBe("healthy");
+  expect(refreshCalls).toBe(0);
+});
+
 test("live usage evidence retains spawn validity classifications", () => {
   expect(claudeValidityFromLimitRead({ source: "live", reason: null })).toBe("valid");
   expect(claudeValidityFromLimitRead({ source: "unavailable", reason: LIMITS_RATE_LIMITED_REASON })).toBe("valid");
@@ -92,6 +111,7 @@ test("concurrent admissions coalesce refresh validation for one account", async 
 
   const first = selectHealthyClaudeAccount([expired], expired.id, dependencies);
   const second = selectHealthyClaudeAccount([expired], expired.id, dependencies);
+  await Promise.resolve();
   await Promise.resolve();
 
   expect(refreshCalls).toBe(1);

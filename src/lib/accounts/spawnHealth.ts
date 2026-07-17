@@ -94,20 +94,27 @@ export async function selectHealthyClaudeAccount(
   dependencies: ClaudeSpawnHealthDependencies = productionDependencies,
 ): Promise<ClaudeAccount> {
   const now = dependencies.now();
-  const candidates = await Promise.all(accounts.map(async (account) => {
+  const classified = accounts.map((account) => {
     const oauth = claudeOauthMetadata(account);
-    if (oauth === null) return { account, health: "invalid" as const };
-    if (oauth.expiresAt <= now) {
-      return { account, health: oauth.refreshable ? await refreshSingleFlight(account, dependencies.refresh) : "invalid" as const };
-    }
-    return { account, health: await dependencies.probe(account) };
-  }));
+    return { account, oauth };
+  });
   const rank = (health: ClaudeValidityProbeResult) => health === "valid" ? 2 : health === "unknown" ? 1 : 0;
-  const selected = candidates
+  const select = (candidates: Array<{ account: ClaudeAccount; health: ClaudeValidityProbeResult }>) => candidates
     .filter((candidate) => rank(candidate.health) > 0)
     .sort((left, right) => rank(right.health) - rank(left.health)
       || Number(right.account.id === preferredId) - Number(left.account.id === preferredId)
       || left.account.id.localeCompare(right.account.id))[0];
-  if (selected) return selected.account;
-  throw new NoHealthyClaudeAccountError(candidates.map((candidate) => candidate.account.id));
+
+  const current = await Promise.all(classified
+    .filter((candidate) => candidate.oauth && candidate.oauth.expiresAt > now)
+    .map(async ({ account }) => ({ account, health: await dependencies.probe(account) })));
+  const currentSelection = select(current);
+  if (currentSelection) return currentSelection.account;
+
+  const refreshed = await Promise.all(classified
+    .filter((candidate) => candidate.oauth?.expiresAt && candidate.oauth.expiresAt <= now && candidate.oauth.refreshable)
+    .map(async ({ account }) => ({ account, health: await refreshSingleFlight(account, dependencies.refresh) })));
+  const refreshedSelection = select(refreshed);
+  if (refreshedSelection) return refreshedSelection.account;
+  throw new NoHealthyClaudeAccountError(accounts.map((candidate) => candidate.id));
 }
