@@ -11,7 +11,10 @@ const NOW = Date.parse("2026-07-17T09:00:00.000Z");
 const homes: string[] = [];
 
 afterEach(() => {
-  for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true });
+  for (const home of homes.splice(0)) {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(`${home}.lock`, { recursive: true, force: true });
+  }
 });
 
 function account(id: string): ClaudeAccount {
@@ -52,16 +55,17 @@ test("a successful bounded OAuth refresh persists current launch metadata", asyn
   expect(fs.statSync(path.join(candidate.home, ".credentials.json")).mode & 0o777).toBe(0o600);
 });
 
-test("a rejected refresh is fenced while server failures remain transient", async () => {
-  const rejected = account("rejected");
+test("only positive invalid_grant evidence is fenced while other failures remain transient", async () => {
+  const unclassified401 = account("unclassified-401");
   const invalidGrant = account("invalid-grant");
+  const invalidGrant401 = account("invalid-grant-401");
   const invalidScope = account("invalid-scope");
   const transient = account("transient");
 
-  await expect(refreshClaudeOauth(rejected, {
+  await expect(refreshClaudeOauth(unclassified401, {
     now: () => NOW,
     fetch: async () => new Response(null, { status: 401 }),
-  })).resolves.toBe("invalid");
+  })).resolves.toBe("unknown");
   await expect(refreshClaudeOauth(transient, {
     now: () => NOW,
     fetch: async () => new Response(null, { status: 503 }),
@@ -70,13 +74,52 @@ test("a rejected refresh is fenced while server failures remain transient", asyn
     now: () => NOW,
     fetch: async () => Response.json({ error: "invalid_grant" }, { status: 400 }),
   })).resolves.toBe("invalid");
+  await expect(refreshClaudeOauth(invalidGrant401, {
+    now: () => NOW,
+    fetch: async () => Response.json({ error: "invalid_grant" }, { status: 401 }),
+  })).resolves.toBe("invalid");
   await expect(refreshClaudeOauth(invalidScope, {
     now: () => NOW,
     fetch: async () => Response.json({ error: "invalid_scope" }, { status: 400 }),
   })).resolves.toBe("unknown");
 
-  expect(claudeOauthMetadata(rejected)?.expiresAt).toBe(NOW - 1);
+  expect(claudeOauthMetadata(unclassified401)?.expiresAt).toBe(NOW - 1);
   expect(claudeOauthMetadata(transient)?.expiresAt).toBe(NOW - 1);
+});
+
+test("HTTP 401 invalid_client remains a transient compatibility failure", async () => {
+  const candidate = account("invalid-client");
+
+  const result = await refreshClaudeOauth(candidate, {
+    now: () => NOW,
+    fetch: async () => Response.json({ error: "invalid_client" }, { status: 401 }),
+  });
+
+  expect(result).toBe("unknown");
+  expect(claudeOauthMetadata(candidate)?.expiresAt).toBe(NOW - 1);
+});
+
+test("a first-party invalid_scope response retries with the stored inference scopes", async () => {
+  const candidate = account("invalid-scope-fallback");
+  const requestedScopes: string[] = [];
+
+  const result = await refreshClaudeOauth(candidate, {
+    now: () => NOW,
+    fetch: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { scope: string };
+      requestedScopes.push(body.scope);
+      if (requestedScopes.length === 1) {
+        return Response.json({ error: "invalid_scope" }, { status: 400 });
+      }
+      return Response.json({ access_token: crypto.randomUUID(), expires_in: 3_600, scope: body.scope });
+    },
+  });
+
+  expect(result).toBe("refreshed");
+  expect(requestedScopes).toEqual([
+    "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+    "user:inference",
+  ]);
 });
 
 test("a late refresh rejection observes a concurrent native credential rotation", async () => {
@@ -117,6 +160,25 @@ test("a native refresh lock bounds Viewer admission without starting duplicate r
 
   expect(result).toBe("unknown");
   expect(fetchCalls).toBe(0);
+});
+
+test("a legacy native refresh lock bounds Viewer admission without starting duplicate refresh work", async () => {
+  const candidate = account("legacy-native-lock");
+  fs.mkdirSync(`${fs.realpathSync(candidate.home)}.lock`, { mode: 0o700 });
+  let fetchCalls = 0;
+
+  const result = await refreshClaudeOauth(candidate, {
+    now: () => NOW,
+    lockWaitMs: 1,
+    fetch: async () => {
+      fetchCalls += 1;
+      return new Response(null, { status: 503 });
+    },
+  });
+
+  expect(result).toBe("unknown");
+  expect(fetchCalls).toBe(0);
+  expect(fs.existsSync(path.join(candidate.home, ".oauth_refresh.lock"))).toBeFalse();
 });
 
 test("Viewer reuses a native rotation completed while waiting for the refresh lock", async () => {
