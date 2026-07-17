@@ -246,7 +246,9 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      downstream (cards, lists, attention, push). The pre-override title survives
      on `autoTitle`; the `renamable` flag is projected too so the client never
      imports the Node-only store. */
+  const flowsStartedAt = performance.now();
   overlaySessionTitles(files);
+  markTiming("files-session-titles");
   /* Durable project affinity: a Viewer-launched family whose root transcript
      recorded a bare directory above the repository its lineage works in (an
      orchestrator opened from a project board with cwd=$HOME) regroups under
@@ -254,11 +256,16 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      grouping survives every refresh without rewriting transcripts; sessions
      with no such lineage are untouched. */
   overlayLineageProjectAffinity(files);
-  const flows = projectRestoredFlows(loadFlows(), files, {
+  markTiming("files-project-affinity");
+  const storedFlows = loadFlows();
+  markTiming("files-flow-store");
+  const flows = projectRestoredFlows(storedFlows, files, {
     pinnedPaths: visibilityPinnedPaths,
     memberships: registrySnapshot.memberships,
   });
+  markTiming("files-flow-restore");
   const storedTasks = loadTasks();
+  markTiming("files-task-store");
   /* Role titles (issue #325): a Viewer-spawned worker whose scan/launch title
      is machine boilerplate («Codex session», the spawn prompt head) presents
      its durable identity instead — task subject + role for builders, reviewed
@@ -266,7 +273,8 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      explicit user rename keeps final precedence (the role title becomes its
      Reset base), and never rewrites native transcripts. */
   overlayRoleSessionTitles({ files, flows, tasks: storedTasks, conversationAliases: registrySnapshot.conversationAliases });
-  markTiming("files-flows");
+  markTiming("files-role-titles");
+  timings.push(`files-flows;dur=${(performance.now() - flowsStartedAt).toFixed(1)}`);
   /* Human-authorship pin for the board's worker-class auto-collapse (issue
      #112): the reaper's sticky evidence (PR #125) marks any transcript that
      carries a real user message. Both authorship and fail-closed freshness span

@@ -135,6 +135,12 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(first.headers.get("server-timing")).toMatch(/files-project-rate-limits;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-project-catalog;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-project-cwds;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-session-titles;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-project-affinity;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-flow-store;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-flow-restore;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-task-store;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
 });
 
 test("files API surfaces degraded tmux endpoint health", async () => {
