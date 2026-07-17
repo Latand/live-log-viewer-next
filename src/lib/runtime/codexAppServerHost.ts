@@ -128,6 +128,7 @@ const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_THREAD_READ_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
+const MAX_STDERR_TAIL_BYTES = 16 * 1024;
 const MAX_PRE_RESTORE_FRAMES = 256;
 const MAX_PRE_RESTORE_BYTES = 4 * 1024 * 1024;
 const MUTATING_RPC_METHODS = new Set(["thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt"]);
@@ -141,14 +142,29 @@ function stringField(value: unknown, key: string): string | null {
   return object && typeof object[key] === "string" ? object[key] as string : null;
 }
 
-export function redactCodexHostDiagnostic(value: unknown): string {
+function redactCodexHostDiagnosticText(value: unknown): string {
   const message = value instanceof Error ? value.message : String(value);
   return hardenedRedact(message)
-    .replace(/(["']?(?:cookie|set-cookie)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, "$1[redacted]")
-    .slice(0, 500);
+    .replace(/(["']?(?:cookie|set-cookie)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, "$1[redacted]");
+}
+
+export function redactCodexHostDiagnostic(value: unknown): string {
+  return redactCodexHostDiagnosticText(value).slice(0, 500);
 }
 
 const safeError = redactCodexHostDiagnostic;
+
+function stderrExitDiagnostic(value: string): string {
+  return redactCodexHostDiagnosticText(value)
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(-4)
+    .reverse()
+    .map((line) => line.slice(-240))
+    .join(" | ")
+    .slice(0, 430);
+}
 
 function subscriptionEnv(source: NodeJS.ProcessEnv, codexHome?: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV };
@@ -290,6 +306,7 @@ export class CodexAppServerHost implements EngineHost {
   private bufferedNotificationOverlap: string[] = [];
   private nextRpcId = 1;
   private stdoutBuffer = "";
+  private stderrTail = "";
   private preRestoreBytes = 0;
   private eventLedgerRestored = false;
   private cursor: number;
@@ -339,7 +356,7 @@ export class CodexAppServerHost implements EngineHost {
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
-    child.stderr.on("data", () => { /* stderr can contain authentication details; keep it out of output */ });
+    child.stderr.on("data", (chunk: Buffer | string) => this.acceptStderr(String(chunk)));
     child.stdin.on("error", (error) => {
       if (!this.releasing && !this.released) this.fail(new Error(`Codex app-server stdin failed: ${safeError(error)}`));
     });
@@ -352,7 +369,10 @@ export class CodexAppServerHost implements EngineHost {
         this.startFailureCleanup();
       } else if (!this.released) {
         if (this.dead) this.notifyStateListeners();
-        else this.fail(new Error("Codex app-server child exited"));
+        else {
+          const diagnostic = stderrExitDiagnostic(this.stderrTail);
+          this.fail(new Error(`Codex app-server child exited${diagnostic ? `: ${diagnostic}` : ""}`));
+        }
       }
     });
   }
@@ -1218,6 +1238,13 @@ export class CodexAppServerHost implements EngineHost {
       newline = this.stdoutBuffer.indexOf("\n");
     }
     if (Buffer.byteLength(this.stdoutBuffer) > MAX_LINE_BYTES) this.fail(new Error("Codex app-server emitted an oversized JSONL frame"));
+  }
+
+  private acceptStderr(chunk: string): void {
+    this.stderrTail += chunk;
+    while (Buffer.byteLength(this.stderrTail, "utf8") > MAX_STDERR_TAIL_BYTES) {
+      this.stderrTail = this.stderrTail.slice(Math.max(1, Math.floor(this.stderrTail.length / 4)));
+    }
   }
 
   private acceptMessage(line: string): void {

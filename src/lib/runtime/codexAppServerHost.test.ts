@@ -1980,6 +1980,36 @@ describe("CodexAppServerHost", () => {
     for (const secret of secrets) expect(redacted).not.toContain(secret);
   });
 
+  test("reports a bounded redacted stderr diagnostic when the app-server exits during startup", async () => {
+    const server = new FakeAppServer(
+      "startup-exit-thread",
+      "startup-exit-thread",
+      false,
+      [],
+      undefined,
+      null,
+      ["initialize"],
+    );
+    const started = CodexAppServerHost.start({
+      cwd: "/repo",
+      requestTimeoutMs: 100,
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    await Bun.sleep(0);
+    server.stderr.write(`${"x".repeat(20 * 1024)}\nYour authentication token has been invalidated oauth_token=must-stay-private\n`);
+    server.emit("close", 1, null);
+
+    const failure: unknown = await started.then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("expected Codex startup to fail");
+    expect(failure.message).toContain("Codex app-server child exited");
+    expect(failure.message).toContain("Your authentication token has been invalidated");
+    expect(failure.message).not.toContain("must-stay-private");
+    expect(failure.message.length).toBeLessThanOrEqual(500);
+  });
+
   test("requires an exact opt-in value", async () => {
     expect(structuredHostsEnabled({ NODE_ENV: "test" })).toBeFalse();
     expect(structuredHostsEnabled({ NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "true" })).toBeFalse();
