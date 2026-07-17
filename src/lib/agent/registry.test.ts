@@ -146,6 +146,11 @@ describe("agent registry", () => {
       store.recordDeliveryOutcome(delivery.id, "delivered");
     }
     expect(store.snapshot().heldDeliveries[original.id]).toBeUndefined();
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]).toMatchObject({
+      terminalState: "delivered",
+      requestDigest: original.requestDigest,
+    });
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]).not.toHaveProperty("settledDelivery");
 
     const reopened = new AgentRegistry(store.filename);
     expect(() => reopened.holdDelivery(
@@ -166,8 +171,46 @@ describe("agent registry", () => {
       command,
       requestDigest: original.requestDigest,
       state: "delivered",
-      attempts: claimed!.attempts,
     });
+  });
+
+  test("legacy terminal owner normalization rejects a mismatched settled snapshot", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/operation-owner-legacy-mismatch.jsonl", "default");
+    const command = { operationId: "operation-owner-legacy-mismatch", kind: "send" as const, policy: "queue" as const };
+    const original = store.holdDelivery(
+      conversation.id,
+      "keep this operation active",
+      "operation-owner-legacy-mismatch-client",
+      "text",
+      command,
+    );
+    const unrelated = store.holdDelivery(conversation.id, "unrelated terminal payload", "unrelated-terminal-client");
+    store.recordDeliveryOutcome(unrelated.id, "delivered");
+    const snapshot = store.snapshot();
+    const legacyOwner = snapshot.deliveryOperationOwners[command.operationId] as unknown as {
+      createdAt?: string;
+      terminalState?: string | null;
+      settledDelivery?: typeof unrelated;
+    };
+    delete legacyOwner.createdAt;
+    delete legacyOwner.terminalState;
+    legacyOwner.settledDelivery = snapshot.heldDeliveries[unrelated.id];
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const reopened = new AgentRegistry(store.filename);
+
+    expect(reopened.snapshot().deliveryOperationOwners[command.operationId]).toMatchObject({
+      deliveryId: original.id,
+      terminalState: null,
+    });
+    expect(reopened.holdDelivery(
+      conversation.id,
+      "keep this operation active",
+      "operation-owner-legacy-mismatch-client",
+      "text",
+      command,
+    )).toMatchObject({ id: original.id, state: "assigned" });
   });
 
   test("discarding an unactuated explicit reservation releases its operation ownership", () => {
