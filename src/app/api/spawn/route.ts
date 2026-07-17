@@ -25,6 +25,7 @@ import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineag
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
+import { publishFilesRevision } from "@/lib/runtime/filesRevision";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
@@ -49,6 +50,7 @@ interface SpawnRouteDependencies {
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
   resolveSpawnAccount: typeof accountManager.resolveSpawn;
   runtimeHostClient: typeof runtimeHostClient;
+  publishFilesRevision?: typeof publishFilesRevision;
   spawnStructuredConversation: typeof spawnStructuredConversation;
   assertStructuredRuntime: typeof assertDarwinStructuredRuntime;
   defer(work: () => Promise<void>): void;
@@ -59,6 +61,7 @@ const productionSpawnRouteDependencies: SpawnRouteDependencies = {
   resolveHealthySpawnAccount,
   resolveSpawnAccount: (engine, accountId) => accountManager.resolveSpawn(engine, accountId),
   runtimeHostClient,
+  publishFilesRevision,
   spawnStructuredConversation,
   assertStructuredRuntime: assertDarwinStructuredRuntime,
   defer: (work) => after(work),
@@ -305,6 +308,18 @@ async function postSpawn(
               conversationId: receipt.conversationId,
               childArtifactPath: response.path,
               parentArtifactPath,
+              error,
+            });
+          }
+        }
+        if (response.path && fs.existsSync(response.path)) {
+          try {
+            await dependencies.publishFilesRevision?.(runtimeClient);
+          } catch (error) {
+            console.error("[spawn] transcript materialization refresh failed", {
+              launchId: receipt.launchId,
+              conversationId: receipt.conversationId,
+              artifactPath: response.path,
               error,
             });
           }

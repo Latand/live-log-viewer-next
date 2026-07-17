@@ -919,16 +919,22 @@ test("admitted structured spawn returns its reserved card identity while host bi
   let releaseBinding!: () => void;
   const binding = new Promise<void>((resolve) => { releaseBinding = resolve; });
   let launchStarted = false;
+  let publishedArtifacts = 0;
   const dependencies = {
     ...structuredRouteDependencies(cwd),
     defer: (work: () => Promise<void>) => { deferred = work; },
+    publishFilesRevision: async () => {
+      publishedArtifacts += 1;
+    },
     spawnStructuredConversation: async (input: Parameters<NonNullable<Parameters<typeof POST.withDependencies>[1]>["spawnStructuredConversation"]>[0]) => {
       launchStarted = true;
       await binding;
+      const artifactPath = path.join(cwd, "delayed.jsonl");
+      fs.writeFileSync(artifactPath, JSON.stringify({ type: "user", message: input.prompt }) + "\n");
       return {
         ok: true as const,
         target: null,
-        path: path.join(cwd, "delayed.jsonl"),
+        path: artifactPath,
         launchId: input.receipt.launchId,
         conversationId: input.receipt.conversationId,
         launched: true,
@@ -977,6 +983,7 @@ test("admitted structured spawn returns its reserved card identity while host bi
     expect(deferred).not.toBeNull();
     await runDeferred(deferred);
     expect(launchStarted).toBeTrue();
+    expect(publishedArtifacts).toBe(1);
   } finally {
     releaseBinding();
     if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
