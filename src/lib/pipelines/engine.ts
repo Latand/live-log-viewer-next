@@ -66,6 +66,7 @@ export interface PipelinePorts {
   }, onReserved: (reservation: PipelineStageLaunchReservation) => void): Promise<PipelineStageSpawn>;
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
   paneAgentAlive(paneId: string): Promise<boolean>;
+  conversationAgentActive(conversationId: string): Promise<boolean | null>;
   headCwd(transcriptPath: string): string | null;
   lastMessage(entry: FileEntry): { text: string; ts: number } | null;
   pathForConversation(conversationId: string): string | null;
@@ -184,6 +185,7 @@ async function spawnPipelineAgent(
 }
 
 export function defaultPipelinePorts(): PipelinePorts {
+  let runtimeSnapshot: ReturnType<NonNullable<ReturnType<typeof runtimeHostClient>>["snapshot"]> | null = null;
   return {
     exec: realExec,
     roleLookup: pipelineRoleLookup,
@@ -203,6 +205,23 @@ export function defaultPipelinePorts(): PipelinePorts {
     paneAgentAlive: async (paneId) => {
       const info = await paneInfo(paneId);
       return info !== null && !isShellCommand(info.command);
+    },
+    conversationAgentActive: async (conversationId) => {
+      const client = runtimeHostClient();
+      if (!client) return null;
+      runtimeSnapshot ??= client.snapshot();
+      let snapshot;
+      try {
+        snapshot = await runtimeSnapshot;
+      } catch {
+        return null;
+      }
+      const session = snapshot.sessions.find((item) => item.conversationId === conversationId);
+      if (!session) return null;
+      if (["dead", "unhosted", "conflict"].includes(session.host)) return false;
+      if (session.turn === "idle") return false;
+      if (session.turn === "running" || session.turn === "interrupt_requested" || session.attentionIds.length > 0) return true;
+      return null;
     },
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
@@ -463,19 +482,26 @@ async function tickRunStage(
   }
 
   updateAttemptIdentity(pipeline, attempt, entries, ports);
+  const structuredActive = !attempt.paneId && attempt.conversationId
+    ? await ports.conversationAgentActive(attempt.conversationId)
+    : null;
   if (!attempt.agentPath) {
-    if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited before its session was discovered", attempt);
+    if (structuredActive === false) park(pipeline, "structured stage ended before its session was discovered", attempt);
+    else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited before its session was discovered", attempt);
     return;
   }
   const entry = entries.find((candidate) => candidate.path === attempt!.agentPath);
   if (!entry) {
-    if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited after its transcript disappeared from the scan", attempt);
+    if (structuredActive === false) park(pipeline, "structured stage ended after its transcript disappeared from the scan", attempt);
+    else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited after its transcript disappeared from the scan", attempt);
     return;
   }
-  if (entry.activity === "live" || entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled") return;
+  if (structuredActive === true) return;
+  if (structuredActive !== false && (entry.activity === "live" || entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled")) return;
   const message = ports.lastMessage(entry);
   if (!message || message.ts <= unixMs(attempt.startedAt)) {
-    if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited without producing a verdict", attempt);
+    if (structuredActive === false) park(pipeline, "structured stage ended without producing a verdict", attempt);
+    else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited without producing a verdict", attempt);
     return;
   }
   const parsed = parseStageVerdict(message.text);
