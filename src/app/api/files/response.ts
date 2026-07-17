@@ -88,9 +88,18 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   markTiming("files-source");
   const storedFlows = loadFlows();
   const presentPaths = new Set(files.map((file) => file.path));
-  for (const pathname of activeFlowTranscriptPaths(storedFlows, selectedProject)) {
+  const exactFlowEntries = new Map<string, ReturnType<typeof conversationEntryForPath>>();
+  const exactFlowEntry = (pathname: string) => {
+    if (!exactFlowEntries.has(pathname)) exactFlowEntries.set(pathname, conversationEntryForPath(pathname));
+    return exactFlowEntries.get(pathname) ?? null;
+  };
+  for (const pathname of activeFlowTranscriptPaths(
+    storedFlows,
+    selectedProject,
+    (implementerPath) => exactFlowEntry(implementerPath)?.project ?? null,
+  )) {
     if (presentPaths.has(pathname)) continue;
-    const entry = conversationEntryForPath(pathname);
+    const entry = exactFlowEntry(pathname);
     if (!entry) continue;
     files.push(entry);
     presentPaths.add(pathname);

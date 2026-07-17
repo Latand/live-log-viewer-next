@@ -35,10 +35,16 @@ test("active flow participants remain present on their project board", () => {
     rounds: [{ reviewerPath: "/sessions/reviewer.jsonl" } as Flow["rounds"][number]],
   });
   const closed = flow({ id: "closed", implementerPath: "/sessions/closed.jsonl", state: "closed", closedAt: "2026-07-17T01:00:00.000Z" });
+  const staleProject = flow({ id: "stale", project: "latand", implementerPath: "/sessions/stale.jsonl" });
   const other = flow({ id: "other", project: "other", implementerPath: "/sessions/other.jsonl" });
 
-  expect(activeFlowTranscriptPaths([active, closed, other], "viewer")).toEqual([
+  expect(activeFlowTranscriptPaths(
+    [active, closed, staleProject, other],
+    "viewer",
+    (pathname) => pathname === "/sessions/stale.jsonl" ? "viewer" : null,
+  )).toEqual([
     "/sessions/implementer.jsonl",
     "/sessions/reviewer.jsonl",
+    "/sessions/stale.jsonl",
   ]);
 });

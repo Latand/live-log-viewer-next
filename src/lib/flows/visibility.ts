@@ -3,11 +3,16 @@ import type { FileEntry } from "@/lib/types";
 
 import type { Flow } from "./types";
 
-/** Transcript rows that keep every active flow materialized on its project board. */
-export function activeFlowTranscriptPaths(flows: readonly Flow[], selectedProject?: string): string[] {
+/** Transcript rows that keep every active flow materialized on its canonical project board. */
+export function activeFlowTranscriptPaths(
+  flows: readonly Flow[],
+  selectedProject?: string,
+  projectForPath: (pathname: string) => string | null = () => null,
+): string[] {
   const paths = new Set<string>();
   for (const flow of flows) {
-    if (flow.state === "closed" || (selectedProject && flow.project !== selectedProject)) continue;
+    const project = projectForPath(flow.implementerPath) ?? flow.project;
+    if (flow.state === "closed" || (selectedProject && project !== selectedProject)) continue;
     paths.add(flow.implementerPath);
     for (const round of flow.rounds) {
       if (round.reviewerPath) paths.add(round.reviewerPath);
@@ -21,6 +26,7 @@ export function projectRestoredFlows(
   files: readonly FileEntry[],
   context: { pinnedPaths: ReadonlySet<string>; memberships: RegistryFile["memberships"] },
 ): Flow[] {
+  const fileByPath = new Map(files.map((file) => [file.path, file] as const));
   const pinnedConversationIds = new Set(files
     .filter((file) => context.pinnedPaths.has(file.path) && file.conversationId)
     .map((file) => file.conversationId!));
@@ -30,7 +36,11 @@ export function projectRestoredFlows(
       if (membership.kind === "flow") restoredFlowIds.add(membership.containerId);
     }
   }
-  return flows.map((flow) => {
+  return flows.map((storedFlow) => {
+    const canonicalProject = fileByPath.get(storedFlow.implementerPath)?.project;
+    const flow = canonicalProject && canonicalProject !== storedFlow.project
+      ? { ...storedFlow, project: canonicalProject }
+      : storedFlow;
     if (flow.state !== "closed") return flow;
     const restored = restoredFlowIds.has(flow.id)
       || Boolean(flow.implementerConversationId && pinnedConversationIds.has(flow.implementerConversationId))

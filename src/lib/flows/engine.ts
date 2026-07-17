@@ -664,6 +664,7 @@ async function tickFlow(
     flow.stateDetail = "implementer transcript is missing";
     return JSON.stringify(flow) !== before;
   }
+  if (flow.project !== implementer.project) flow.project = implementer.project;
 
   if (flow.state === "waiting_ready" || flow.state === "fixing") {
     const note = detectReadyMarker(flow, implementer);
