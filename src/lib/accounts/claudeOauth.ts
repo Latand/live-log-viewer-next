@@ -15,6 +15,7 @@ const REFRESH_TIMEOUT_MS = 8_000;
 const REFRESH_LOCK_WAIT_MS = 8_000;
 const REFRESH_LOCK_POLL_MS = 25;
 const DEFAULT_SCOPES = ["user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload"];
+const PRESERVABLE_EXPANSION_SCOPES = new Set(["user:projects:read", "user:projects:write"]);
 
 export type ClaudeOauthRefreshResult = "refreshed" | "invalid" | "unknown";
 type ClaudeOauthFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -95,9 +96,7 @@ function concurrentRotationIsCurrent(account: ClaudeAccount, originalAccessToken
   return metadata !== null && metadata.expiresAt > now;
 }
 
-async function acquireRefreshLock(account: ClaudeAccount, waitMs: number): Promise<(() => void) | null> {
-  const lock = path.join(account.home, ".oauth_refresh.lock");
-  const startedAt = Date.now();
+async function acquireDirectoryLock(lock: string, startedAt: number, waitMs: number): Promise<(() => void) | null> {
   for (;;) {
     try {
       fs.mkdirSync(lock, { mode: 0o700 });
@@ -113,8 +112,26 @@ async function acquireRefreshLock(account: ClaudeAccount, waitMs: number): Promi
   }
 }
 
+async function acquireRefreshLocks(account: ClaudeAccount, waitMs: number): Promise<(() => void) | null> {
+  const startedAt = Date.now();
+  const releaseCurrent = await acquireDirectoryLock(path.join(account.home, ".oauth_refresh.lock"), startedAt, waitMs);
+  if (!releaseCurrent) return null;
+
+  let realHome: string;
+  try { realHome = fs.realpathSync(account.home); } catch { realHome = account.home; }
+  const releaseLegacy = await acquireDirectoryLock(`${realHome}.lock`, startedAt, waitMs);
+  if (!releaseLegacy) {
+    releaseCurrent();
+    return null;
+  }
+
+  return () => {
+    releaseLegacy();
+    releaseCurrent();
+  };
+}
+
 async function rejectedRefreshResult(response: Response): Promise<ClaudeOauthRefreshResult> {
-  if (response.status === 401) return "invalid";
   try {
     const payload = await response.json() as { error?: unknown };
     return payload?.error === "invalid_grant" ? "invalid" : "unknown";
@@ -123,12 +140,22 @@ async function rejectedRefreshResult(response: Response): Promise<ClaudeOauthRef
   }
 }
 
+async function isInvalidScopeResponse(response: Response): Promise<boolean> {
+  if (response.status !== 400) return false;
+  try {
+    const payload = await response.clone().json() as { error?: unknown };
+    return payload?.error === "invalid_scope";
+  } catch {
+    return false;
+  }
+}
+
 /** Rotates an expired Claude OAuth credential without surfacing credential content. */
 export async function refreshClaudeOauth(
   account: ClaudeAccount,
   dependencies: ClaudeOauthRefreshDependencies = productionDependencies,
 ): Promise<ClaudeOauthRefreshResult> {
-  const release = await acquireRefreshLock(account, dependencies.lockWaitMs ?? REFRESH_LOCK_WAIT_MS);
+  const release = await acquireRefreshLocks(account, dependencies.lockWaitMs ?? REFRESH_LOCK_WAIT_MS);
   if (!release) return "unknown";
   try {
     return await refreshClaudeOauthLocked(account, dependencies);
@@ -151,28 +178,47 @@ async function refreshClaudeOauthLocked(
   }
 
   const originalAccessToken = oauth.accessToken;
-  const scopes = Array.isArray(oauth.scopes) && oauth.scopes.every((scope) => typeof scope === "string")
+  const storedScopes = Array.isArray(oauth.scopes) && oauth.scopes.every((scope) => typeof scope === "string")
     ? oauth.scopes as string[]
-    : DEFAULT_SCOPES;
-  const clientId = typeof oauth.clientId === "string" && oauth.clientId.length > 0
-    ? oauth.clientId
+    : [];
+  const hasStoredClientId = typeof oauth.clientId === "string" && oauth.clientId.length > 0;
+  const clientId = hasStoredClientId
+    ? oauth.clientId as string
     : process.env.CLAUDE_CODE_OAUTH_CLIENT_ID || CLAUDE_CODE_CLIENT_ID;
+  const isDefaultFirstPartyClient = !hasStoredClientId
+    && (storedScopes.includes("user:inference") || Boolean(oauth.subscriptionType));
+  let initialScopes = storedScopes.length > 0 ? storedScopes : DEFAULT_SCOPES;
+  if (isDefaultFirstPartyClient) {
+    initialScopes = [...new Set([
+      ...DEFAULT_SCOPES,
+      ...storedScopes.filter((scope) => PRESERVABLE_EXPANSION_SCOPES.has(scope)),
+    ])];
+  }
   const tokenUrl = oauthTokenUrl();
   if (!tokenUrl) return "unknown";
 
+  const signal = AbortSignal.timeout(REFRESH_TIMEOUT_MS);
+  const requestRefresh = (requestedScopes: string[]) => dependencies.fetch(tokenUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      refresh_token: oauth.refreshToken,
+      client_id: clientId,
+      scope: requestedScopes.join(" "),
+    }),
+    signal,
+  });
+
   let response: Response;
   try {
-    response = await dependencies.fetch(tokenUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        grant_type: "refresh_token",
-        refresh_token: oauth.refreshToken,
-        client_id: clientId,
-        scope: scopes.join(" "),
-      }),
-      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
-    });
+    response = await requestRefresh(initialScopes);
+    if (isDefaultFirstPartyClient
+      && storedScopes.length > 0
+      && storedScopes.includes("user:inference")
+      && await isInvalidScopeResponse(response)) {
+      response = await requestRefresh(storedScopes);
+    }
   } catch {
     return "unknown";
   }
