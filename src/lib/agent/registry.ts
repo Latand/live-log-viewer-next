@@ -924,17 +924,27 @@ function heldDeliveryRequestDigests(
   return new Set([...identities].map((identity) => heldDeliveryRequestDigest(identity, text, command)));
 }
 
+export const CORRUPT_HELD_DELIVERY_IMAGES_ERROR =
+  "held delivery image references are corrupt; send the message again to re-admit its images";
+
 function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
-  const state = value.state ?? "held";
+  let state = value.state ?? "held";
   const text = typeof value.text === "string" ? value.text : "";
   const command = canonicalHeldDeliveryCommand(value.command, value.id);
   const legacyDigest = text
     ? heldDeliveryRequestDigest(value.conversationId, text, command)
     : null;
   const payloadKind = value.payloadKind ?? "text";
-  const runtimeImages = parseStructuredImageRefs(value.runtimeImages ?? [], 16) ?? [];
+  const parsedImages = parseStructuredImageRefs(value.runtimeImages ?? [], 16);
+  /* Malformed persisted refs must never quietly reclassify an image message
+     as text: the reservation enters a visible, recoverable failed state with
+     zero host actuation instead of delivering the bare caption. Delivered
+     tombstones keep their terminal state — nothing actuates from them. */
+  const imagesCorrupt = parsedImages === null && state !== "delivered";
+  if (imagesCorrupt) state = "failed";
+  const runtimeImages = parsedImages ?? [];
   let contentDigest = typeof value.contentDigest === "string" ? value.contentDigest : null;
-  if (!contentDigest && state !== "delivered" && (payloadKind === "text" || payloadKind === "runtime-images")) {
+  if (!contentDigest && !imagesCorrupt && state !== "delivered" && (payloadKind === "text" || payloadKind === "runtime-images")) {
     try { contentDigest = structuredContent(text, runtimeImages).contentDigest; } catch { /* legacy invalid records stay recoverable */ }
   }
   return {
@@ -950,11 +960,11 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
     command,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : legacyDigest,
     state,
-    generationId: value.generationId ?? null,
+    generationId: imagesCorrupt ? null : value.generationId ?? null,
     attempts: Number.isInteger(value.attempts) ? value.attempts : 0,
-    assignedAt: value.assignedAt ?? null,
+    assignedAt: imagesCorrupt ? null : value.assignedAt ?? null,
     deliveredAt: value.deliveredAt ?? null,
-    error: value.error ?? null,
+    error: imagesCorrupt ? CORRUPT_HELD_DELIVERY_IMAGES_ERROR : value.error ?? null,
   };
 }
 
@@ -3920,6 +3930,9 @@ export class AgentRegistry {
         if (existing.contentDigest && contentDigest && contentDigest !== existing.contentDigest) {
           throw new DeliveryReservationConflictError();
         }
+        /* A corrupt-image reservation stays a visible recoverable failure: a
+           replay must not revive it into an assignable text-only delivery. */
+        if (existing.error === CORRUPT_HELD_DELIVERY_IMAGES_ERROR) return clone(existing);
         return place(existing);
       }
       const deliveryId = crypto.randomUUID();

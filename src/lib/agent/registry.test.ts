@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
 
-import { AgentRegistry, conversationLookupFromSnapshot, DeliveryReservationConflictError, SPAWN_STARTING_ADMISSION_LEASE_MS } from "@/lib/agent/registry";
+import { AgentRegistry, conversationLookupFromSnapshot, CORRUPT_HELD_DELIVERY_IMAGES_ERROR, DeliveryReservationConflictError, SPAWN_STARTING_ADMISSION_LEASE_MS } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { structuredContent } from "@/lib/runtime/structuredContent";
 
@@ -232,6 +232,41 @@ describe("agent registry", () => {
       .toMatchObject({ id: held.id, state: "delivered" });
     const changed = structuredContent("retired but idempotent", [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }]);
     expect(() => restarted.holdDelivery(conversation.id, changed.content.text, "retired-key", "runtime-images", changed.content.images, changed.contentDigest))
+      .toThrow(DeliveryReservationConflictError);
+  });
+
+  test("corrupt persisted image refs become a visible recoverable failure with zero actuation", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("claude", "/corrupt-image-refs.jsonl", "default");
+    const refs = [{ sha256: "a".repeat(64), mime: "image/png" as const, bytes: 67 }];
+    const content = structuredContent("annotate the diagram", refs);
+    const held = store.holdDelivery(conversation.id, content.content.text, "corrupt-image-key", "runtime-images", refs, content.contentDigest);
+    expect(held.state).toBe("assigned");
+    const snapshot = store.snapshot();
+    (snapshot.heldDeliveries[held.id] as { runtimeImages: unknown }).runtimeImages =
+      [{ sha256: "not-a-digest", mime: "image/png", bytes: 67 }];
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    /* Normalization must not silently reclassify the image message as text:
+       the reservation surfaces as a recoverable failure instead. */
+    const restarted = new AgentRegistry(store.filename);
+    expect(restarted.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      runtimeImages: [],
+      generationId: null,
+      error: CORRUPT_HELD_DELIVERY_IMAGES_ERROR,
+      contentDigest: content.contentDigest,
+    });
+
+    /* No delivery attempt can claim it, and an exact replay cannot revive it
+       into an assignable text-only delivery — it stays visibly failed. */
+    expect(restarted.beginDeliveryAttempt(held.id, conversation.generations.at(-1)!.id)).toBeNull();
+    expect(restarted.holdDelivery(conversation.id, content.content.text, "corrupt-image-key", "runtime-images", refs, content.contentDigest))
+      .toMatchObject({ id: held.id, state: "failed", error: CORRUPT_HELD_DELIVERY_IMAGES_ERROR });
+
+    /* A changed payload under the same key still raises the typed conflict. */
+    const changed = structuredContent("annotate the diagram", [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }]);
+    expect(() => restarted.holdDelivery(conversation.id, changed.content.text, "corrupt-image-key", "runtime-images", changed.content.images, changed.contentDigest))
       .toThrow(DeliveryReservationConflictError);
   });
 
