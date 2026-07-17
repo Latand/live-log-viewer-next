@@ -52,6 +52,15 @@ function reconciledInitialMessage(
   return "pending";
 }
 
+function settleInitialMessageReservation(registry: AgentRegistry, launchId: string): void {
+  const clientMessageId = `spawn_${launchId}`;
+  const reservation = Object.values(registry.snapshot().heldDeliveries)
+    .find((delivery) => delivery.clientMessageId === clientMessageId);
+  if (reservation && reservation.state !== "delivered") {
+    registry.recordDeliveryOutcome(reservation.id, "delivered");
+  }
+}
+
 export async function waitForStructuredInitialMessage(
   client: RuntimeHostClient,
   operationId: string,
@@ -473,6 +482,10 @@ export async function recoverPendingStructuredSpawns(
       });
       if (!delivered?.ok) throw new Error(delivered?.error ?? `structured spawn recovery could not admit ${receipt.launchId}`);
       if (delivered.outcome === "held") continue;
+      if (delivered.outcome !== "delivered") {
+        await waitForStructuredInitialMessage(client, delivered.operationId);
+        settleInitialMessageReservation(registry, receipt.launchId);
+      }
     }
     await client.transitionOperation(receipt.launchId, "delivered");
     const finalized = registry.finalizeStructuredSpawn(receipt.launchId);
@@ -619,6 +632,7 @@ async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: st
   if (delivered.outcome === "held") return "held";
   if (delivered.outcome !== "delivered") {
     await waitForStructuredInitialMessage(input.client, delivered.operationId);
+    settleInitialMessageReservation(input.registry, input.receipt.launchId);
   }
 }
 

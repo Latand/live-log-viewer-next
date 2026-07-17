@@ -941,6 +941,9 @@ test("a runtime synchronization hold preserves the staged spawn until recovery d
     error: null,
   });
   expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("delivered");
+  expect(Object.values(registry.snapshot().heldDeliveries)
+    .filter((delivery) => delivery.clientMessageId === `spawn_${begun.receipt.launchId}`))
+    .toMatchObject([{ state: "delivered", text: "" }]);
   expect(host.releaseCount).toBe(0);
 });
 
