@@ -8,10 +8,11 @@ import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
 import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { preallocatedStructuredSpawnCards } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
+import { conversationEntryForPath } from "@/lib/scanner/conversationEntry";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
-import { projectRestoredFlows } from "@/lib/flows/visibility";
+import { activeFlowTranscriptPaths, projectRestoredFlows } from "@/lib/flows/visibility";
 import { loadPipelines } from "@/lib/pipelines/store";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
@@ -85,6 +86,16 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const pinnedPath = url.searchParams.get("path")?.trim() || undefined;
   const { files, projectCatalog, pinOverlayPaths } = await dependencies.listFilesWithProjectCatalog(selectedProject, pinnedPath);
   markTiming("files-source");
+  const storedFlows = loadFlows();
+  const presentPaths = new Set(files.map((file) => file.path));
+  for (const pathname of activeFlowTranscriptPaths(storedFlows, selectedProject)) {
+    if (presentPaths.has(pathname)) continue;
+    const entry = conversationEntryForPath(pathname);
+    if (!entry) continue;
+    files.push(entry);
+    presentPaths.add(pathname);
+  }
+  markTiming("files-active-flow-entries");
   const responsePinOverlayPaths = new Set(pinOverlayPaths ?? []);
   const visibilityPinnedPaths = new Set([...pinnedPathsFor(pinnedPath), ...responsePinOverlayPaths]);
   // A scan is a read model. Runtime reconciliation and notifications belong to
@@ -257,7 +268,6 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      with no such lineage are untouched. */
   overlayLineageProjectAffinity(files);
   markTiming("files-project-affinity");
-  const storedFlows = loadFlows();
   markTiming("files-flow-store");
   const flows = projectRestoredFlows(storedFlows, files, {
     pinnedPaths: visibilityPinnedPaths,

@@ -916,6 +916,34 @@ export async function tickFlows(entries: FileEntry[]): Promise<TickResult> {
   }
 }
 
+/**
+ * Advances one operator-selected flow from its exact transcript. This keeps
+ * route-triggered reviewer launches independent from the global history scan.
+ * A concurrent full tick owns the state temporarily; the durable state remains
+ * eligible for its next controller pass.
+ */
+export async function tickFlowById(id: string, entries: FileEntry[]): Promise<TickResult> {
+  if (store.__llvFlowTick) {
+    const flows = cloneFlows(loadFlows()).filter((flow) => flow.id === id);
+    annotateFlowEntries(entries, flows);
+    return { flows, changed: false };
+  }
+  store.__llvFlowTick = true;
+  const flows = cloneFlows(loadFlows()).filter((flow) => flow.id === id);
+  const base = flowTickBase(flows);
+  try {
+    const flow = flows[0];
+    if (!flow || TERMINAL_STATES.has(flow.state)) return { flows, changed: false };
+    const entriesByPath = new Map(entries.map((entry) => [entry.path, entry]));
+    const changed = await tickFlow(flow, entries, entriesByPath, () => persistTickFlows(flows, base));
+    if (changed) persistTickFlows(flows, base);
+    annotateFlowEntries(entries, flows);
+    return { flows, changed };
+  } finally {
+    store.__llvFlowTick = false;
+  }
+}
+
 export function annotateFlowEntries(entries: FileEntry[], flows: Flow[]): void {
   for (const entry of entries) delete entry.flow;
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));

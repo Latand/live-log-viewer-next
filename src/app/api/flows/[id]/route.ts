@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
+import { requestFlowTick } from "@/lib/flows/controllerSignal";
 import type { Flow, PatchFlowRequest } from "@/lib/flows/types";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
@@ -29,5 +30,6 @@ export async function PATCH(
   const result =
     body.action === "cancel-round" ? await cancelRound(id) : body.action === "close" ? await closeFlow(id) : patchFlow(id, body);
   if (!result.flow) return NextResponse.json({ error: result.error ?? "could not update flow" }, { status: result.status ?? 400 });
+  if (body.action !== "cancel-round" && body.action !== "close" && body.action !== "pause") requestFlowTick(id);
   return NextResponse.json({ ok: true, flow: result.flow });
 }

@@ -3,6 +3,19 @@ import type { FileEntry } from "@/lib/types";
 
 import type { Flow } from "./types";
 
+/** Transcript rows that keep every active flow materialized on its project board. */
+export function activeFlowTranscriptPaths(flows: readonly Flow[], selectedProject?: string): string[] {
+  const paths = new Set<string>();
+  for (const flow of flows) {
+    if (flow.state === "closed" || (selectedProject && flow.project !== selectedProject)) continue;
+    paths.add(flow.implementerPath);
+    for (const round of flow.rounds) {
+      if (round.reviewerPath) paths.add(round.reviewerPath);
+    }
+  }
+  return [...paths];
+}
+
 export function projectRestoredFlows(
   flows: readonly Flow[],
   files: readonly FileEntry[],
