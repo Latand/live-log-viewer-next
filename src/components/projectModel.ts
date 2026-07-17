@@ -209,9 +209,21 @@ function rootOf(file: FileEntry, byPath: Map<string, FileEntry>): FileEntry {
     seen.add(cur.path);
     const parent = byPath.get(cur.parent);
     if (!parent) break;
+    /* Lineage can deliberately cross project ownership (for example, an LLV
+       builder spawned by a home-root orchestrator). Each project board owns
+       its own visual root; following the foreign parent would duplicate the
+       complete tree on both boards. The durable parent pointer remains on the
+       file for explicit cross-project navigation. */
+    if (projectKey(parent) !== projectKey(file)) break;
     cur = parent;
   }
   return cur;
+}
+
+function beginsProjectSegment(file: FileEntry, byPath: Map<string, FileEntry>): boolean {
+  if (!file.parent || !isChildConversation(file)) return false;
+  const parent = byPath.get(file.parent);
+  return Boolean(parent && projectKey(parent) !== projectKey(file));
 }
 
 export function kidsIndex(files: FileEntry[]): Map<string, FileEntry[]> {
@@ -233,6 +245,23 @@ export function subtree(root: FileEntry, kids: Map<string, FileEntry[]>): FileEn
     const node = stack.pop()!;
     if (seen.has(node.path)) continue;
     seen.add(node.path);
+    out.push(node);
+    stack.push(...(kids.get(node.path) ?? []));
+  }
+  return out;
+}
+
+/** Descendants reachable without crossing the root's project boundary. */
+function projectSubtree(root: FileEntry, kids: Map<string, FileEntry[]>): FileEntry[] {
+  const out: FileEntry[] = [];
+  const stack = [...(kids.get(root.path) ?? [])];
+  const seen = new Set<string>([root.path]);
+  const project = projectKey(root);
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (seen.has(node.path)) continue;
+    seen.add(node.path);
+    if (projectKey(node) !== project) continue;
     out.push(node);
     stack.push(...(kids.get(node.path) ?? []));
   }
@@ -267,7 +296,9 @@ function assembleGroup(
   kids: Map<string, FileEntry[]>,
   expandedConversationPaths?: ReadonlySet<string>,
 ): BranchGroup {
-  const descendants = subtree(root, kids);
+  /* Stop traversal at the first foreign owner so a later same-project node
+     cannot leak through that foreign branch and appear twice. */
+  const descendants = projectSubtree(root, kids);
   const liveRank = (file: FileEntry) => (file.activity === "live" ? 0 : 1);
   /* Every child conversation in an active group renders as a connected node
      below its parent — a claude subagent, a codex child session, a reviewer
@@ -324,6 +355,13 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
   const { expandedConversationPaths } = options;
   for (const file of files) {
     if (projectKey(file) !== project) continue;
+    /* A cross-project child starts an independently owned visual segment. Keep
+       its root card after the child becomes quiet while the durable parent
+       pointer continues to support explicit cross-project navigation. */
+    if (beginsProjectSegment(file, byPath)) {
+      roots.set(file.path, file);
+      continue;
+    }
     const expanded = expandedConversationPaths?.has(file.path) === true;
     if (
       file.activity === "live" ||
@@ -394,7 +432,7 @@ export function buildArchiveBranchGroups(files: FileEntry[], project: string, li
 
   const groups: BranchGroup[] = [];
   for (const root of roots.values()) {
-    const descendants = subtree(root, kids)
+    const descendants = projectSubtree(root, kids)
       .filter((file) => keep.has(file.path) && projectKey(file) === project)
       .sort((a, b) => activityBand(a) - activityBand(b) || b.mtime - a.mtime || a.path.localeCompare(b.path));
     const fullNodes = descendants.filter((file) => !isAuxTask(file) && isChildConversation(file));
@@ -526,8 +564,11 @@ export interface DescendantRow {
   depth: number;
 }
 
-/** Depth-first subtree of a node: children stay under their parent, siblings ordered by state then recency. */
-export function descendantsOf(file: FileEntry | null, files: FileEntry[]): DescendantRow[] {
+function collectDescendants(
+  file: FileEntry | null,
+  files: FileEntry[],
+  include: (child: FileEntry) => boolean,
+): DescendantRow[] {
   if (!file) return [];
   const kids = kidsIndex(files);
   const out: DescendantRow[] = [];
@@ -538,10 +579,23 @@ export function descendantsOf(file: FileEntry | null, files: FileEntry[]): Desce
       .sort((a, b) => activityBand(a) - activityBand(b) || b.mtime - a.mtime);
     for (const child of children) {
       seen.add(child.path);
+      if (!include(child)) continue;
       out.push({ file: child, depth });
       walk(child, depth + 1);
     }
   };
   walk(file, 1);
   return out;
+}
+
+/** Depth-first subtree of a node: children stay under their parent, siblings ordered by state then recency. */
+export function descendantsOf(file: FileEntry | null, files: FileEntry[]): DescendantRow[] {
+  return collectDescendants(file, files, () => true);
+}
+
+/** Descendants owned by the root's project, stopping traversal at every foreign boundary. */
+export function projectDescendantsOf(file: FileEntry | null, files: FileEntry[]): DescendantRow[] {
+  if (!file) return [];
+  const project = projectKey(file);
+  return collectDescendants(file, files, (child) => projectKey(child) === project);
 }

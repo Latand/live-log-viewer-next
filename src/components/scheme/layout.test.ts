@@ -3,9 +3,12 @@ import { describe, expect, test } from "bun:test";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
+import type { BoardProjectStateV1 } from "@/lib/view/types";
 
 import { directReviewFlows } from "@/components/flows/directReviewGroups";
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
+import { planRootReconciliation } from "@/components/projectBoardMutations";
+import { applyBoardMutations } from "@/lib/board/mutations";
 
 import { deckKey, flowLinkKey } from "./agentLinks";
 import { INDENT, buildSchemeLayout } from "./layout";
@@ -33,6 +36,14 @@ function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
 }
 
 const roleConfig = { engine: "claude" as const, model: null, effort: null };
+
+const boardOf = (manual: string[] = []): BoardProjectStateV1 => ({
+  schemaVersion: 1,
+  revision: 1,
+  updatedAt: new Date(0).toISOString(),
+  pathAliases: {},
+  prefs: { manual, hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false },
+});
 
 function flow(overrides: Partial<Flow> & { id: string; implementerPath: string }): Flow {
   return {
@@ -69,6 +80,55 @@ function flow(overrides: Partial<Flow> & { id: string; implementerPath: string }
 }
 
 describe("buildSchemeLayout byPath", () => {
+  test("an idle reconciled root excludes every descendant beyond a foreign project boundary", () => {
+    const root = entry({ path: "/a-root", project: "project-a", activity: "live" });
+    const foreignChild = entry({
+      path: "/b-child",
+      project: "project-b",
+      parent: root.path,
+      kind: "subagent",
+      activity: "live",
+    });
+    const localLeaf = entry({
+      path: "/a-leaf",
+      project: "project-a",
+      parent: foreignChild.path,
+      kind: "subagent",
+      activity: "idle",
+    });
+    const activeFiles = [root, foreignChild, localLeaf];
+    const activeGroups = buildBranchGroups(activeFiles, "project-a");
+    const catalog = new Map(activeFiles.map((file) => [file.path, file]));
+    const activeBoard = applyBoardMutations(boardOf(), [planRootReconciliation({
+      groups: activeGroups,
+      manual: [],
+      catalog,
+    })]);
+    expect(activeBoard.prefs.manual).toContain(root.path);
+
+    const idleRoot = { ...root, activity: "idle" as const };
+    const idleFiles = [idleRoot, foreignChild, localLeaf];
+    const idleGroups = buildBranchGroups(idleFiles, "project-a");
+    expect(idleGroups.map((group) => group.key)).toEqual([localLeaf.path]);
+    const idleBoard = applyBoardMutations(activeBoard, [planRootReconciliation({
+      groups: idleGroups,
+      manual: activeBoard.prefs.manual,
+      catalog: new Map(idleFiles.map((file) => [file.path, file])),
+    })]);
+    const autoPaths = new Set(idleGroups.flatMap((group) => group.columns.map((column) => column.file.path)));
+    const manual = idleBoard.prefs.manual
+      .filter((path) => !autoPaths.has(path))
+      .flatMap((path) => idleFiles.filter((file) => file.path === path));
+    const layout = buildSchemeLayout(idleGroups, manual, idleFiles);
+
+    expect(layout.nodes.map((node) => node.file.path).sort()).toEqual([localLeaf.path, root.path].sort());
+    const stackedPaths = layout.stacks.flatMap((stack) => stack.items.map((item) => item.file.path));
+    expect(stackedPaths).toEqual([]);
+    expect(layout.byPath.has(foreignChild.path)).toBeFalse();
+    expect(layout.nodes.filter((node) => node.file.path === localLeaf.path)).toHaveLength(1);
+    expect(stackedPaths.filter((path) => path === localLeaf.path)).toHaveLength(0);
+  });
+
   test("carries stacks and decks as glide/edge targets alongside nodes", () => {
     const root = entry({ path: "/root", activity: "live" });
     const quiet = entry({ path: "/root/quiet", parent: "/root", kind: "subagent" });

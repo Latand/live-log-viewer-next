@@ -19,7 +19,7 @@ import {
   type AgentLink,
   type SchemeGroupSpec,
 } from "./agentLinks";
-import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex } from "@/components/projectModel";
+import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex, projectDescendantsOf } from "@/components/projectModel";
 import { cleanTitle, engineColor } from "@/components/utils";
 import { conversationIdentity } from "@/lib/accounts/identity";
 
@@ -488,7 +488,7 @@ export function buildSchemeLayout(
   };
 
   const placeManual = (file: FileEntry, bandTop: number) => {
-    const descendants = descendantsOf(file, files)
+    const descendants = projectDescendantsOf(file, files)
       .map((row) => row.file)
       .filter((entry) => !claimed.has(entry.path));
     const quiet = descendants.filter((entry) => isChildConversation(entry));
