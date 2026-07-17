@@ -1,8 +1,3 @@
-import { conversationEntryForPath } from "@/lib/scanner/conversationEntry";
-
-import { tickFlowById } from "./engine";
-import { loadFlows } from "./store";
-
 type FlowTick = (id: string) => Promise<void>;
 
 interface FlowSignalState {
@@ -16,11 +11,21 @@ const signalHost = globalThis as typeof globalThis & {
 };
 
 async function tickCurrentFlow(id: string): Promise<void> {
-  const flow = loadFlows().find((candidate) => candidate.id === id);
-  if (!flow) return;
-  const entry = conversationEntryForPath(flow.implementerPath);
-  if (!entry) return;
-  await tickFlowById(id, [entry]);
+  const [{ conversationEntryForPath }, { tickFlowById }, { loadFlows }] = await Promise.all([
+    import("@/lib/scanner/conversationEntry"),
+    import("./engine"),
+    import("./store"),
+  ]);
+  for (let transition = 0; transition < 4; transition += 1) {
+    const flow = loadFlows().find((candidate) => candidate.id === id);
+    if (!flow) return;
+    const entry = conversationEntryForPath(flow.implementerPath);
+    if (!entry) return;
+    const result = await tickFlowById(id, [entry]);
+    if (!result.changed) return;
+    const state = loadFlows().find((candidate) => candidate.id === id)?.state;
+    if (state !== "spawning" && state !== "relaying") return;
+  }
 }
 
 const signal = signalHost.__llvFlowSignal ??= {

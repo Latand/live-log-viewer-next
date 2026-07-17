@@ -9,6 +9,7 @@ import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt } from "@/lib/agent/spawnPolicy";
 import { procBackend } from "@/lib/proc";
 
+import { requestFlowTick } from "./controllerSignal";
 import type { FlowEngine, RoleConfig, Round } from "./types";
 import { outputPathFor, stderrPathFor, stdoutPathFor } from "./store";
 
@@ -311,11 +312,13 @@ export function startHeadlessReview(
     clearTimeout(run.timer);
     run.exit = { code: null, signal: null };
     killOwnedRun(run);
+    requestFlowTick(flowId);
   });
   child.on("close", (code, signal) => {
     clearTimeout(run.timer);
     run.exit = { code, signal };
     killOwnedRun(run);
+    requestFlowTick(flowId);
   });
   return { pid: child.pid ?? null, identity, sessionId: built.sessionId, reviewerPath: built.reviewerPath };
 }

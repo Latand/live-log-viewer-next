@@ -10,6 +10,7 @@ import { procBackend } from "@/lib/proc";
    module-level constants, so exec/store load dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-exec-test-"));
 const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventStream, startHeadlessReview, terminateHeadlessReviewerGroup } = await import("./exec");
+const { registerFlowTick } = await import("./controllerSignal");
 const { reviewerPrompt } = await import("./prompts");
 const { outputPathFor, stdoutPathFor } = await import("./store");
 
@@ -192,6 +193,39 @@ test("headless Codex launch flushes the complete prompt and closes stdin", async
   expect(captured.prompt).toContain("Viewer spawn policy:");
   expect(captured.eof).toBe(true);
   forgetHeadlessReview("flow-stdin-eof", 1);
+});
+
+test("headless reviewer completion requests immediate flow progress", async () => {
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-complete-codex");
+  fs.writeFileSync(
+    executablePath,
+    `#!${process.execPath}\nawait Bun.stdin.text();\n`,
+    { mode: 0o700 },
+  );
+  const requested: string[] = [];
+  const unregister = registerFlowTick(async (id) => {
+    requested.push(id);
+  });
+  try {
+    startHeadlessReview(
+      "flow-completion-signal",
+      1,
+      { engine: "codex", model: null, effort: null },
+      process.cwd(),
+      "review prompt",
+      5_000,
+      null,
+      null,
+      { command: executablePath },
+    );
+    for (let attempt = 0; attempt < 100 && requested.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(requested).toEqual(["flow-completion-signal"]);
+  } finally {
+    unregister();
+    forgetHeadlessReview("flow-completion-signal", 1);
+  }
 });
 
 test("an owned reviewer stays running when process identity is briefly unavailable at spawn", async () => {
