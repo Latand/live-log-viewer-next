@@ -6,12 +6,10 @@ import { projectForCwd, projectRootForCwd } from "./describe";
 import { globalCache } from "./caches";
 
 const PROJECT_DIR_ROOTS = ["Projects", path.join(".agents", "tools")];
-const PROJECT_DIRECTORY_CACHE_TTL_MS = 60_000;
 
 type ProjectDirectory = { cwd: string; project: string; projectRoot: string };
 type ProjectDirectoryCacheEntry = {
   directories: ProjectDirectory[];
-  expiresAt: number;
   rootsIdentity: string;
 };
 
@@ -40,8 +38,7 @@ function localProjectDirectories(): ProjectDirectory[] {
   const rootsIdentity = projectDirectoryRootsIdentity(roots);
   const cacheKey = os.homedir();
   const cached = projectDirectoryCache.get(cacheKey);
-  const now = Date.now();
-  if (cached && cached.expiresAt > now && cached.rootsIdentity === rootsIdentity) {
+  if (cached && cached.rootsIdentity === rootsIdentity) {
     return cached.directories;
   }
 
@@ -67,7 +64,6 @@ function localProjectDirectories(): ProjectDirectory[] {
   }
   projectDirectoryCache.set(cacheKey, {
     directories,
-    expiresAt: now + PROJECT_DIRECTORY_CACHE_TTL_MS,
     rootsIdentity,
   });
   return directories;

@@ -19,8 +19,10 @@ test("reuses the directory snapshot until a project root changes", () => {
   ]);
   let rootVersion = 1;
   let rootReads = 0;
+  let now = Date.now();
   const originalStat = fs.statSync.bind(fs);
   const originalRead = fs.readdirSync.bind(fs);
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
   const stat = spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike, options?: unknown) => {
     if (roots.has(String(target))) {
       return {
@@ -44,6 +46,8 @@ test("reuses the directory snapshot until a project root changes", () => {
   try {
     expect(projectDirectoryFallbacks([])).toEqual({});
     expect(rootReads).toBe(2);
+
+    now += 60 * 60 * 1_000;
     expect(projectDirectoryFallbacks([])).toEqual({});
     expect(rootReads).toBe(2);
 
@@ -51,6 +55,7 @@ test("reuses the directory snapshot until a project root changes", () => {
     expect(projectDirectoryFallbacks([])).toEqual({});
     expect(rootReads).toBe(4);
   } finally {
+    clock.mockRestore();
     stat.mockRestore();
     read.mockRestore();
     resetProjectDirectoryCacheForTests();
