@@ -6,10 +6,10 @@ PORT="${PORT:-8898}"
 REVISION="${LLV_DEPLOY_REVISION:-origin/main}"
 IDEMPOTENCY_KEY="${LLV_DEPLOY_IDEMPOTENCY_KEY:-deploy-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
-case "$REVISION" in
-  origin/main|[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-  *) echo "invalid revision: use origin/main or a full lowercase commit SHA" >&2; exit 1 ;;
-esac
+if [[ "$REVISION" != "origin/main" && ! "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "invalid revision: use origin/main or a full lowercase commit SHA" >&2
+  exit 1
+fi
 case "$IDEMPOTENCY_KEY" in
   *$'\n'*|*$'\r'*|'') echo "invalid deployment idempotency key" >&2; exit 1 ;;
 esac
