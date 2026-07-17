@@ -1378,6 +1378,7 @@ export function ProjectDashboard({
                 onDraftClose={removeDraft}
                 onDraftSpawned={draftSpawned}
                 onHandoff={addHandoffDraft}
+                onSpawnRetry={retryLaunch}
                 onTaskDraft={openTaskDraft}
                 placeTaskId={placeTask?.id ?? null}
                 onTaskPlaced={() => setPlaceTask(null)}

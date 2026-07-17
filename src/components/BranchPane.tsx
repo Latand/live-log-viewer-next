@@ -121,9 +121,11 @@ interface Props {
       Only the board node and the mobile focus pane opt in — reviewer decks,
       pipeline placeholders and other embeds render the pane without it. */
   showFavorite?: boolean;
+  /** Opens a fresh editable draft from a terminal structured launch receipt. */
+  onSpawnRetry?: (file: FileEntry) => void;
 }
 
-export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, headerActions, onToggleExpand, expanded, dormant, autoEditToken, showFavorite }: Props) {
+export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, headerActions, onToggleExpand, expanded, dormant, autoEditToken, showFavorite, onSpawnRetry }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const paneRef = useRef<HTMLElement | null>(null);
@@ -397,7 +399,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
           </FlipRow>
         ) : null}
         {file.spawn ? (
-          <StructuredSpawnStatus spawn={file.spawn} />
+          <StructuredSpawnStatus spawn={file.spawn} onRetry={onSpawnRetry ? () => onSpawnRetry(file) : undefined} />
         ) : (
           <>
             {/* The "done" seam of a committed migration names the account this

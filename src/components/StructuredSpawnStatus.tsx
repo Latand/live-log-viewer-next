@@ -1,6 +1,6 @@
 "use client";
 
-import { CircleCheck, CircleX, Clock3, LoaderCircle } from "lucide-react";
+import { CircleCheck, CircleX, Clock3, LoaderCircle, RotateCcw } from "lucide-react";
 
 import { type TFunction, useLocale } from "@/lib/i18n";
 import type { StructuredSpawnCardState } from "@/lib/types";
@@ -19,7 +19,7 @@ function iconTone(state: StructuredSpawnCardState["state"]): string {
   return "text-success";
 }
 
-export function StructuredSpawnStatusView({ spawn, t }: { spawn: StructuredSpawnCardState; t: TFunction }) {
+export function StructuredSpawnStatusView({ spawn, t, onRetry }: { spawn: StructuredSpawnCardState; t: TFunction; onRetry?: () => void }) {
   const Icon = stateIcon[spawn.state];
 
   return (
@@ -38,6 +38,15 @@ export function StructuredSpawnStatusView({ spawn, t }: { spawn: StructuredSpawn
         <p className="mt-2 text-xs text-muted-foreground">{t(`spawnCard.initial.${spawn.initialMessage}`)}</p>
         {spawn.error && <p className="mt-3 break-words text-xs text-danger">{spawn.error}</p>}
         {spawn.retrySafe && <p className="mt-3 text-xs text-muted-foreground">{t("spawnCard.retrySafe")}</p>}
+        {spawn.state === "failed" && spawn.retrySafe && onRetry ? (
+          <button
+            type="button"
+            className="mx-auto mt-4 inline-flex h-8 items-center gap-1.5 rounded-full border border-border bg-card px-3 text-xs font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            onClick={onRetry}
+          >
+            <RotateCcw className="h-3.5 w-3.5" aria-hidden /> {t("launchHistory.retryLabel")}
+          </button>
+        ) : null}
         <p className="mt-4 font-mono text-[10px] text-muted-foreground/70">
           {t("spawnCard.launch", { id: spawn.launchId.slice(0, 8) })}
         </p>
@@ -46,7 +55,7 @@ export function StructuredSpawnStatusView({ spawn, t }: { spawn: StructuredSpawn
   );
 }
 
-export function StructuredSpawnStatus({ spawn }: { spawn: StructuredSpawnCardState }) {
+export function StructuredSpawnStatus({ spawn, onRetry }: { spawn: StructuredSpawnCardState; onRetry?: () => void }) {
   const { t } = useLocale();
-  return <StructuredSpawnStatusView spawn={spawn} t={t} />;
+  return <StructuredSpawnStatusView spawn={spawn} t={t} onRetry={onRetry} />;
 }
