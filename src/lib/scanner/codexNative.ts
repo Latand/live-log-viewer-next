@@ -66,6 +66,6 @@ export function nativeCodexParentThreadId(pathname: string, size: number, mtimeM
   return nativeCodexParentThreadIdResult(pathname, size, identityMtime).value;
 }
 
-export function isNativeCodexSubagentTranscript(pathname: string, size: number): boolean {
-  return nativeCodexParentThreadId(pathname, size) !== null;
+export function isNativeCodexSubagentTranscript(pathname: string, size: number, mtimeMs?: number): boolean {
+  return nativeCodexParentThreadId(pathname, size, mtimeMs) !== null;
 }
