@@ -167,6 +167,7 @@ export interface ClaudeSessionIdentity { sessionId: string }
 export interface ClaudeStreamBrokerHostOptions {
   cwd: string;
   sessionId?: string;
+  resumeTranscriptPath?: string;
   claudeConfigDir?: string;
   claudeProjectsDir?: string;
   spawnPolicyBaseSettingsPath?: string | null;
@@ -353,8 +354,7 @@ function userText(message: JsonObject): string {
   return textContent(record(message.message)?.content);
 }
 
-function defaultTranscriptUsers(cwd: string, sessionId: string, projectsRoot?: string): ClaudeTranscriptUser[] {
-  const filename = claudeTranscriptPath(cwd, sessionId, projectsRoot);
+function transcriptUsers(filename: string): ClaudeTranscriptUser[] {
   let contents: string;
   try { contents = fs.readFileSync(filename, "utf8"); }
   catch (error) {
@@ -374,6 +374,26 @@ function defaultTranscriptUsers(cwd: string, sessionId: string, projectsRoot?: s
     });
   }
   return users;
+}
+
+function defaultTranscriptUsers(cwd: string, sessionId: string, projectsRoot?: string): ClaudeTranscriptUser[] {
+  return transcriptUsers(claudeTranscriptPath(cwd, sessionId, projectsRoot));
+}
+
+function validatedResumeTranscriptPath(sessionId: string, filename: string): string {
+  if (!path.isAbsolute(filename)) throw new Error("Claude resume transcript path must be absolute");
+  const resolved = path.resolve(filename);
+  if (path.basename(resolved) !== `${sessionId}.jsonl`) {
+    throw new Error("Claude resume transcript identity does not match the session");
+  }
+  const metadata = fs.lstatSync(resolved);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error("Claude resume transcript must be a regular file");
+  }
+  if (fs.realpathSync(resolved) !== resolved) {
+    throw new Error("Claude resume transcript path must resolve directly");
+  }
+  return resolved;
 }
 
 /** One durable writer around a long-lived Claude stream-json process. */
@@ -477,6 +497,9 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (!auth.loggedIn || auth.authMethod !== "claude.ai" || !auth.subscriptionType) {
       throw new Error("Claude stream hosting requires a claude.ai subscription login");
     }
+    const resumeTranscriptPath = resume && options.resumeTranscriptPath
+      ? validatedResumeTranscriptPath(sessionId, options.resumeTranscriptPath)
+      : undefined;
     const args = [
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--safe-mode", "--include-partial-messages", "--replay-user-messages",
@@ -493,7 +516,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       });
       args.push("--settings", settings.settingsPath);
     }
-    if (resume) args.push("--resume", sessionId);
+    if (resume) args.push("--resume", resumeTranscriptPath ?? sessionId);
     else args.push("--session-id", sessionId);
     if (options.model) args.push("--model", options.model);
     if (options.effort) args.push("--effort", options.effort);
@@ -507,7 +530,9 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       host.restore();
       host.reconcileTranscript(options.readTranscript
         ? options.readTranscript(options.cwd, sessionId)
-        : defaultTranscriptUsers(options.cwd, sessionId, options.claudeProjectsDir));
+        : resumeTranscriptPath
+          ? transcriptUsers(resumeTranscriptPath)
+          : defaultTranscriptUsers(options.cwd, sessionId, options.claudeProjectsDir));
       host.emit({ kind: "session-status", status: "idle" });
       return host;
     } catch (error) {

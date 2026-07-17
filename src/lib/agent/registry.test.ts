@@ -1542,6 +1542,61 @@ describe("agent registry", () => {
     }
   });
 
+  test("same-transcript Claude resume moves generation ownership to the selected account", () => {
+    const store = registry();
+    const sessionId = "93e9055b-f399-4a6d-b823-2a9e8ea69761";
+    const transcriptPath = `/sessions/${sessionId}.jsonl`;
+    const conversation = store.ensureConversation("claude", transcriptPath, "exhausted-account");
+    const launchProfile = emptyLaunchProfile({ cwd: "/repo", model: "fable-5" });
+    store.upsert({
+      key: { engine: "claude", sessionId },
+      artifactPath: transcriptPath,
+      cwd: "/repo",
+      accountId: "exhausted-account",
+      launchProfile,
+      status: "unhosted",
+      host: null,
+      structuredHost: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    const begun = store.beginSpawnRequest({
+      engine: "claude",
+      cwd: "/repo",
+      accountId: "selected-account",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+      expectedArtifactPath: transcriptPath,
+      launchProfile,
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+
+    const settled = store.stageStructuredSpawn(begun.receipt.launchId, {
+      key: { engine: "claude", sessionId },
+      artifactPath: transcriptPath,
+      cwd: "/repo",
+      accountId: "selected-account",
+      launchProfile,
+      status: "idle",
+      host: null,
+      structuredHost: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: "spawn",
+    });
+
+    expect(settled).toMatchObject({
+      kind: "settled",
+      conversation: {
+        id: conversation.id,
+        generations: [{ id: sessionId, path: transcriptPath, accountId: "selected-account" }],
+      },
+    });
+    expect(store.conversation(conversation.id)?.generations).toHaveLength(1);
+    expect(store.snapshot().entries[`claude:${sessionId}`]?.accountId).toBe("selected-account");
+  });
+
   test("freezes a resume receipt after its first successor settlement", () => {
     const store = registry();
     const firstPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";

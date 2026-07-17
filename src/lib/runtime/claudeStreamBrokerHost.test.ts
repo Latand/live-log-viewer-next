@@ -599,6 +599,62 @@ describe("ClaudeStreamBrokerHost", () => {
     await confirmed.release();
   });
 
+  test("adopts the same Claude session through an absolute transcript path", async () => {
+    const sessionId = crypto.randomUUID();
+    const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-account-rebind-"));
+    const transcriptPath = path.join(transcriptDir, `${sessionId}.jsonl`);
+    fs.writeFileSync(transcriptPath, `${JSON.stringify({
+      type: "user",
+      uuid: "history-user",
+      timestamp: "2026-07-17T00:00:00.000Z",
+      message: { role: "user", content: "history from the previous account" },
+    })}\n`);
+    const ledger = new RecordingDeliveryLedger();
+    ledger.recordQueued(sessionId, {
+      id: "history-user",
+      text: "history from the previous account",
+    }, "turn-started");
+    const child = new FakeClaude(ledger);
+    const captured: { args?: string[] } = {};
+
+    const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
+      cwd: transcriptDir,
+      resumeTranscriptPath: transcriptPath,
+      deliveryLedger: ledger,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: fakeSpawn(child, captured),
+    });
+
+    expect(host.identity.sessionId).toBe(sessionId);
+    expect(captured.args?.at(captured.args.indexOf("--resume") + 1)).toBe(transcriptPath);
+    expect(await host.send({ id: "history-user", text: "history from the previous account" }))
+      .toEqual({ outcome: "turn-started", turnId: "history-user" });
+    expect(child.inputs).toHaveLength(0);
+    await host.release();
+    fs.rmSync(transcriptDir, { recursive: true, force: true });
+  });
+
+  test("rejects a resume transcript whose basename belongs to another Claude session", async () => {
+    const sessionId = crypto.randomUUID();
+    const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-account-rebind-mismatch-"));
+    const transcriptPath = path.join(transcriptDir, `${crypto.randomUUID()}.jsonl`);
+    fs.writeFileSync(transcriptPath, "");
+    let spawned = false;
+
+    await expect(ClaudeStreamBrokerHost.adopt(sessionId, {
+      cwd: transcriptDir,
+      resumeTranscriptPath: transcriptPath,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: () => {
+        spawned = true;
+        return new FakeClaude(new RecordingDeliveryLedger()) as never;
+      },
+    })).rejects.toThrow("Claude resume transcript identity does not match the session");
+
+    expect(spawned).toBe(false);
+    fs.rmSync(transcriptDir, { recursive: true, force: true });
+  });
+
   test("rejects a changed payload before retrying an undelivered ledger entry", async () => {
     const sessionId = "immutable-pending-session";
     const ledger = new RecordingDeliveryLedger();

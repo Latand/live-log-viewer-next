@@ -13,6 +13,7 @@ import { spawnTransport } from "./spawnTransport";
 export interface StructuredRecoveryRequest {
   path: string;
   conversationId?: string | null;
+  preferredAccountId?: string | null;
 }
 
 export interface StructuredRecoveryResult {
@@ -85,7 +86,7 @@ function candidateFor(
     engine: conversation.engine,
     key,
     path: generation.path,
-    accountId: generation.accountId ?? entry.accountId,
+    accountId: request.preferredAccountId ?? generation.accountId ?? entry.accountId,
     parentConversationId: parentConversationId === conversation.id ? null : parentConversationId,
     spec: {
       command: "",
@@ -162,7 +163,7 @@ export async function recoverDeadStructuredConversation(
   const registry = dependencies.registry ?? agentRegistry();
   const candidate = candidateFor(registry, request);
   if (!candidate) return null;
-  const recoveryKey = `${registry.filename}:${candidate.conversationId}`;
+  const recoveryKey = `${registry.filename}:${candidate.conversationId}:${candidate.accountId ?? ""}`;
   const pending = recoveries.get(recoveryKey);
   if (pending) return pending;
   if (candidate.publishReady) {

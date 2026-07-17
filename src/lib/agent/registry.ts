@@ -2486,6 +2486,19 @@ export class AgentRegistry {
         }
       }
     }
+    if (receipt.purpose === "resume-successor" && conversationOwnsPath(conversation, entry.artifactPath)) {
+      const continued = conversation.generations.find((generation) => generation.path === entry.artifactPath);
+      if (continued) {
+        const accountChanged = continued.accountId !== receipt.accountId;
+        const profileChanged = JSON.stringify(continued.launchProfile) !== JSON.stringify(receipt.launchProfile);
+        continued.accountId = receipt.accountId ?? continued.accountId;
+        continued.launchProfile = { ...continued.launchProfile, ...receipt.launchProfile };
+        if (accountChanged || profileChanged) {
+          file.conversationRevision[conversation.engine] += 1;
+          file.engineRouting[conversation.engine].revision += 1;
+        }
+      }
+    }
     if (receipt.purpose !== "migration-successor" && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
       conversation.generations.push({
         id: nativeGenerationId(entry.artifactPath),

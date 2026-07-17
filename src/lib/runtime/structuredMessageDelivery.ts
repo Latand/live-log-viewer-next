@@ -300,13 +300,33 @@ export async function enqueueStructuredMessage(
   }
   if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
   const registry = (dependencies.registry ?? agentRegistry)();
+  const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
+  const recoveryConversation = registry.conversation(session.conversationId as ViewerConversationId);
+  let reservedBeforeRecovery: ReturnType<AgentRegistry["holdDelivery"]> | null = null;
+  if (!request.images?.length && recoveryConversation) {
+    try {
+      reservedBeforeRecovery = registry.holdDelivery(
+        recoveryConversation.id,
+        request.text,
+        idempotencyKey,
+        "text",
+        commandInput(request),
+      );
+    } catch (error) {
+      return deliveryFailure(error);
+    }
+  }
   let recoveredHost = false;
   if (session.host === "dead" || session.host === "unhosted") {
+    const preferredAccountId = recoveryConversation
+      ? registry.engineRouting(recoveryConversation.engine).activeAccountId
+      : null;
     let recovered;
     try {
       recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({
         path: request.path || session.artifactPath || "",
         conversationId: session.conversationId as ViewerConversationId,
+        preferredAccountId,
       }, { registry, client });
     } catch (error) {
       return {
@@ -323,7 +343,6 @@ export async function enqueueStructuredMessage(
   const conversation = registry.conversation(session.conversationId as ViewerConversationId);
   if (!conversation) return ownershipUnavailable();
   try {
-    const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
     if (request.images?.length) {
       if (conversation.migration && !["committed", "rolled-back"].includes(conversation.migration.phase)) {
         return { ok: false, structured: true, outcome: "failed", error: "image delivery is waiting for account migration to settle", status: 409 };
@@ -362,7 +381,8 @@ export async function enqueueStructuredMessage(
         ...(recoveredHost ? { spawned: true } : {}),
       };
     }
-    let reservation = registry.holdDelivery(conversation.id, request.text, idempotencyKey, "text", commandInput(request));
+    let reservation = reservedBeforeRecovery
+      ?? registry.holdDelivery(conversation.id, request.text, idempotencyKey, "text", commandInput(request));
     let claimedReservationId: string | null = null;
     if (reservation.state === "delivery-uncertain") {
       reservation = registry.retryUncertainDelivery(reservation.id);

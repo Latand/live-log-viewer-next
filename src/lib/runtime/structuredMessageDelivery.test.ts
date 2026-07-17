@@ -8,6 +8,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot } from "./contracts";
+import type { StructuredRecoveryRequest } from "./structuredRecovery";
 
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 
@@ -699,8 +700,9 @@ test("structured message routing only falls through for an explicit legacy owner
   expect(result).toBeNull();
 });
 
-test("dead structured message routing recovers the host before admitting the send", async () => {
+test("dead structured message routing uses the selected account before admitting the send", async () => {
   const { registry, conversation } = registryWithConversation();
+  registry.setEngineRouting("codex", "selected-account");
   const deadSnapshot = snapshot(conversation.id);
   deadSnapshot.sessions[0] = { ...deadSnapshot.sessions[0]!, host: "dead" };
   let recovered = false;
@@ -745,7 +747,8 @@ test("dead structured message routing recovers the host before admitting the sen
       enabled: () => true,
       client: () => client,
       registry: () => registry,
-      recover: async () => {
+      recover: async (request: StructuredRecoveryRequest) => {
+        expect(request.preferredAccountId).toBe("selected-account");
         recovered = true;
         return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
       },
@@ -817,7 +820,11 @@ test("structured recovery failures remain admitted, avoid delivery, and allow a 
     status: 503,
   });
   expect(commands).toEqual([]);
-  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "recovery-retry-message",
+    text: "retain this draft through recovery failure",
+    state: "assigned",
+  }]);
 
   await expect(enqueueStructuredMessage(request, dependencies)).resolves.toMatchObject({
     ok: true,
@@ -826,6 +833,7 @@ test("structured recovery failures remain admitted, avoid delivery, and allow a 
     outcome: "queued",
   });
   expect(commands).toHaveLength(1);
+  expect(registry.pendingDeliveries(conversation.id)).toHaveLength(1);
 });
 
 test("structured ownership stays fenced while its registry projection is missing", async () => {

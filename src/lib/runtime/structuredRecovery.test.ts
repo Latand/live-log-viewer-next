@@ -350,6 +350,89 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
   });
 });
 
+test("dead Claude recovery rebinds the same conversation to the selected account", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `claude-account-rebind-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const conversation = registry.ensureConversation("claude", artifactPath, "exhausted-account");
+  const profile = emptyLaunchProfile({ cwd, model: "fable", effort: "high" });
+  registry.upsert({
+    key: { engine: "claude", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "exhausted-account",
+    launchProfile: profile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 4,
+      protocolVersion: "v2",
+      writerClaimEpoch: 2,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 2,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const selectedAccount: AccountContext = {
+    engine: "claude",
+    accountId: "selected-account",
+    kind: "managed",
+    home: path.join(cwd, "selected-home"),
+    transcriptRoot: path.join(cwd, "selected-home", "projects"),
+    env: { NODE_ENV: "test" },
+  };
+
+  const result = await recoverDeadStructuredConversation({
+    path: artifactPath,
+    conversationId: conversation.id,
+    preferredAccountId: selectedAccount.accountId,
+  }, {
+    registry,
+    client: {} as RuntimeHostClient,
+    transport: () => "structured",
+    resolveAccount: (engine, accountId) => {
+      expect(engine).toBe("claude");
+      expect(accountId).toBe(selectedAccount.accountId);
+      return selectedAccount;
+    },
+    spawn: async (input) => {
+      expect(input.receipt).toMatchObject({
+        conversationId: conversation.id,
+        purpose: "resume-successor",
+        accountId: selectedAccount.accountId,
+      });
+      expect(input.spec.transcript).toBe(artifactPath);
+      expect(structuredResumeSessionId(input)).toBe(sessionId);
+      return {
+        ok: true,
+        target: null,
+        path: artifactPath,
+        launchId: input.receipt.launchId,
+        conversationId: conversation.id,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "delivered" as const,
+        state: "settled",
+      };
+    },
+  });
+
+  expect(result).toMatchObject({
+    path: artifactPath,
+    conversationId: conversation.id,
+    spawned: true,
+  });
+});
+
 test("Codex and Claude worker and root recovery retain their original lineage shape", async () => {
   for (const engine of ["codex", "claude"] as const) {
     for (const role of ["worker", "root"] as const) {

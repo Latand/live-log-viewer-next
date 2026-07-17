@@ -581,6 +581,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
   const sessionId = resumeSessionId ?? (input.spec.transcript ? path.basename(input.spec.transcript, ".jsonl") : undefined);
   const options = {
     cwd: input.spec.cwd,
+    ...(resumeSessionId && input.spec.transcript ? { resumeTranscriptPath: input.spec.transcript } : {}),
     claudeConfigDir: input.account.home,
     claudeProjectsDir: input.account.transcriptRoot,
     spawnPolicyBaseSettingsPath: structuredClaudeSpawnPolicyBaseSettingsPath(input.account),
