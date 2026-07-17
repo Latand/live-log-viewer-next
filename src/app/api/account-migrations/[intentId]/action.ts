@@ -2,16 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
+import { createMigrationDeliveryPort } from "@/lib/accounts/migration/deliveryPort";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
-import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/delivery";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
-const deliveryPort = {
-  async deliver({ delivery, path, clientMessageId }: { delivery: { id: string; text: string }; path: string; clientMessageId: string }) {
-    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId, reservedDeliveryId: delivery.id });
-    return migrationDeliveryOutcome(result);
-  },
-};
+const deliveryPort = createMigrationDeliveryPort();
 
 export async function updateMigrationAction(
   req: NextRequest,

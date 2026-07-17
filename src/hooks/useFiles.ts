@@ -8,6 +8,7 @@ import { PIPELINES_CHANGED_EVENT, PIPELINES_PATCHED_EVENT } from "@/components/p
 import { SESSION_TITLES_CHANGED_EVENT } from "@/components/session/sessionTitleApi";
 import { TASKS_CHANGED_EVENT } from "@/components/tasks/taskApi";
 import { WORKFLOWS_CHANGED_EVENT } from "@/components/workflows/workflowModel";
+import { FILES_CHANGED_EVENT } from "@/lib/filesEvents";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -598,6 +599,7 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
     window.addEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
     window.addEventListener(TASKS_CHANGED_EVENT, onChanged);
     window.addEventListener(SESSION_TITLES_CHANGED_EVENT, onChanged);
+    window.addEventListener(FILES_CHANGED_EVENT, onChanged);
 
     let unsubBus = () => {};
     let unsubFiles = () => {};
@@ -649,6 +651,7 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
       window.removeEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
       window.removeEventListener(TASKS_CHANGED_EVENT, onChanged);
       window.removeEventListener(SESSION_TITLES_CHANGED_EVENT, onChanged);
+      window.removeEventListener(FILES_CHANGED_EVENT, onChanged);
     };
   }, [pinnedPath]);
   return data.requestScope === requestScope ? data : filesClientCache.readScope(pinnedPath);

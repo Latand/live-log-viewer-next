@@ -1,12 +1,12 @@
 import type { FileEntry, TurnBoundary } from "../types";
 import { turnStateFromRecords as structuredTurnStateFromRecords } from "@/lib/accounts/migration/turnState";
-import { tailRecords } from "./activity";
+import { tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
 
 type RecordLike = Record<string, unknown>;
 
-const turnBoundaryCache = globalCache<[number, TurnBoundary | null]>("last-turn");
+const turnBoundaryCache = globalCache<[number, number, TurnBoundary | null]>("last-turn-v2");
 
 function parseMillis(value: unknown): number | null {
   if (typeof value !== "string") return null;
@@ -77,15 +77,17 @@ export function lastTurnFromRecords(records: RecordLike[], codex: boolean): Turn
   return { startedAt, endedAt: Math.max(endedAt, startedAt) };
 }
 
-/** Last-turn boundaries for a transcript entry, cached by size like the sibling
+/** Last-turn boundaries for a transcript entry, cached by file identity like the sibling
     tail derivations (context, effort). Only conversation transcripts carry the
     per-message timestamps this needs. */
 export function lastTurnFor(entry: FileEntry): TurnBoundary | null {
   const conversationRoot = entry.root === "claude-projects" || entry.root === "codex-sessions";
   if (!conversationRoot || !entry.path.endsWith(".jsonl")) return null;
+  const mtimeMs = entry.mtime * 1000;
   const cached = turnBoundaryCache.get(entry.path);
-  if (cached?.[0] === entry.size) return cached[1];
-  const boundary = lastTurnFromRecords(tailRecords(entry.path, entry.size), entry.root === "codex-sessions");
-  turnBoundaryCache.set(entry.path, [entry.size, boundary]);
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return cached[2];
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
+  const boundary = lastTurnFromRecords(tail.records, entry.root === "codex-sessions");
+  if (tail.complete) turnBoundaryCache.set(entry.path, [entry.size, mtimeMs, boundary]);
   return boundary;
 }

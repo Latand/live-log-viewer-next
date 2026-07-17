@@ -4,6 +4,7 @@ import type { FileEntry } from "@/lib/types";
 
 import type { DeckRound } from "@/components/flows/RoundDeck";
 import { draftSrc } from "@/components/DraftAgentPane";
+import { isDirectReviewFlow } from "@/components/flows/directReviewGroups";
 import { claimedReviewerPaths, flowByImplementer, reviewerFilesForRound } from "@/components/flows/flowModel";
 import { pipelinePlaceholderStages } from "@/components/pipelines/pipelineModel";
 
@@ -240,6 +241,12 @@ export function buildSchemeLayout(
   const loops: FlowLoop[] = [];
   const deckFor = flowByImplementer(flows);
   const claimed = claimedReviewerPaths(flows);
+  /* Direct one-shot review groups (issue #325) are synthetic client-side flows:
+     they place a deck, a loop and folded reviewers exactly like a managed flow,
+     but no /api/flows PATCH may ever target them — so every interactive control
+     surface (flow links → FlowHub, group halos → override panel, sibling halo
+     spacing) derives from the REAL flows only. */
+  const actionableFlows = flows.filter((flow) => !isDirectReviewFlow(flow));
   let cursor = PAD;
 
   /* Which flow/pipeline group owns each placed path (issue #136 spacing). Two
@@ -263,7 +270,7 @@ export function buildSchemeLayout(
       }
     }
   }
-  for (const flow of flows) {
+  for (const flow of actionableFlows) {
     const key = "flow:" + flow.id;
     if (!groupKeyOfPath.has(flow.implementerPath)) groupKeyOfPath.set(flow.implementerPath, key);
     for (const round of flow.rounds) {
@@ -706,7 +713,7 @@ export function buildSchemeLayout(
     return spec.key;
   };
   const groupHalos: SchemeGroup[] = [];
-  for (const spec of deriveGroups(flows, pipelines, (key) => anchors.get(key) ?? null, flowImplementerPath)) {
+  for (const spec of deriveGroups(actionableFlows, pipelines, (key) => anchors.get(key) ?? null, flowImplementerPath)) {
     /* A pipeline halo also encloses its dashed stage placeholders (issue #196),
        so live windows and upcoming slots read as one region. */
     const members = spec.kind === "pipeline"
@@ -781,7 +788,7 @@ export function buildSchemeLayout(
     loops,
     groups: groupHalos,
     links: [
-      ...deriveFlowLinks(flows, (key) => anchors.get(key) ?? null),
+      ...deriveFlowLinks(actionableFlows, (key) => anchors.get(key) ?? null),
       ...derivePipelineLinks(pipelines, (key) => anchors.get(key) ?? null, flowImplementerPath),
     ],
     drafts,

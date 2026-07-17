@@ -161,6 +161,22 @@ describe("classifySpawnResponse — server → card outcome", () => {
     expect(classifySpawnResponse(409, false, { error: "original spawn failed before launch", retrySafe: true }).kind).toBe("failed-preflight");
   });
 
+  test("terminal replay with reserved identity releases the stale draft guard", () => {
+    expect(classifySpawnResponse(200, true, {
+      ok: true,
+      state: "failed",
+      launched: false,
+      retrySafe: true,
+      initialMessage: "failed",
+      launchId: "9173e9a2",
+      conversationId: "conversation_ac6029b9",
+      error: "structured host ownership is unavailable",
+    })).toEqual({
+      kind: "failed-preflight",
+      message: "structured host ownership is unavailable",
+    });
+  });
+
   test("409 without retrySafe (conflicting attempt) → ambiguous, keeps the card frozen", () => {
     expect(classifySpawnResponse(409, false, { error: "spawn attempt conflicts with its original request" })).toEqual({ kind: "ambiguous" });
   });

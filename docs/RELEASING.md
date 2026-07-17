@@ -34,6 +34,12 @@ and process-start identity durably, launches it with a parent-death signal, and
 reconciles that exact process group before replaying a journaled phase after a
 restart.
 
+The serving candidate remains running after promotion. The immediate rollback
+container stays stopped with its image, Compose snapshot, and reserved port
+preserved. Rollback starts that container, passes its direct health gate, and
+then atomically changes the stable target. This keeps rollback durable without
+duplicating Viewer scanner memory and CPU between releases.
+
 The adapter protocol invokes one fixed executable with one action argument and
 sends one JSON object on stdin. Every action must be idempotent because restart
 recovery can replay it.

@@ -788,6 +788,7 @@ function NodeShell({
   onClose,
   onFocusRound,
   onHandoff,
+  onSpawnRetry,
   onExpand,
 }: {
   node: SchemeNode;
@@ -823,6 +824,7 @@ function NodeShell({
   onClose: (path: string) => void;
   onFocusRound: (flowId: string, round: number) => void;
   onHandoff?: (file: FileEntry) => void;
+  onSpawnRetry?: (file: FileEntry) => void;
   /** Header control: open this conversation as the full-window overlay. */
   onExpand: (path: string) => void;
 }) {
@@ -935,6 +937,7 @@ function NodeShell({
           showFavorite
           onClose={() => onClose(node.file.path)}
           onToggleExpand={() => onExpand(node.file.path)}
+          onSpawnRetry={onSpawnRetry}
         />
       </div>
       {flow ? <RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /> : null}
@@ -1151,6 +1154,7 @@ export const NodesLayer = memo(function NodesLayer({
   onDraftClose,
   onDraftSpawned,
   onHandoff,
+  onSpawnRetry,
   onExpand,
 }: {
   layout: SchemeLayout;
@@ -1182,6 +1186,7 @@ export const NodesLayer = memo(function NodesLayer({
   onDraftClose: (id: string) => void;
   onDraftSpawned: (id: string, file: FileEntry) => void;
   onHandoff?: (file: FileEntry) => void;
+  onSpawnRetry?: (file: FileEntry) => void;
   /** Opens a conversation as the full-window overlay (desktop panes only). */
   onExpand: (path: string) => void;
 }) {
@@ -1320,6 +1325,7 @@ export const NodesLayer = memo(function NodesLayer({
             onClose={onClose}
             onFocusRound={onFocusRound}
             onHandoff={onHandoff}
+            onSpawnRetry={onSpawnRetry}
             onExpand={onExpand}
           />
         );

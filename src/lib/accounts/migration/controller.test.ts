@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import type { CodexAccount } from "@/lib/accounts/codex";
+import { structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 import { emptyLaunchProfile, type SuccessorProviderPort } from "./contracts";
 import { QuotaController, type QuotaProbePort } from "./quotaController";
 
@@ -30,6 +31,7 @@ test("controller migration cycle reconciles and ticks both durable quota policy 
   const conversation = registry.conversationForPath("/source.jsonl")!;
   registry.commitMigrationIntent({ engine: "codex", targetId: "target", origin: "manual", requestId: "controller-cycle", expectedRevision: registry.engineRouting("codex").revision });
   const provider: SuccessorProviderPort = {
+    virtualSource: true,
     async create(input) { return { operationId: input.operationId, nativeId: "successor", path: "/target.jsonl", continuityPaths: [], historyHash: "hash", host: { kind: "codex-app-server", identity: "successor", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" } }; },
     async verify() {},
   };
@@ -40,10 +42,10 @@ test("controller migration cycle reconciles and ticks both durable quota policy 
   expect(registry.conversation(conversation.id)?.migration?.phase).toBe("committed");
 }, 20_000);
 
-test("controller drains a migration-held structured message through the runtime journal adapter", async () => {
+test("controller preserves durable image refs while draining a migration-held structured message", async () => {
   const registry = new AgentRegistry(path.join(stateDir, "structured-delivery-registry.json"));
   registry.reconcileConversations([{
-    engine: "codex",
+    engine: "claude",
     path: "/structured-successor.jsonl",
     accountId: "target",
     launchProfile: emptyLaunchProfile(),
@@ -51,7 +53,9 @@ test("controller drains a migration-held structured message through the runtime 
     observedAt: "2026-07-10T12:00:00.000Z",
   }]);
   const conversation = registry.conversationForPath("/structured-successor.jsonl")!;
-  const assigned = registry.holdDelivery(conversation.id, "continue", "migration-message");
+  const imageRef: StructuredImageRef = { sha256: "a".repeat(64), mime: "image/png", bytes: 67 };
+  const content = structuredContent("continue", [imageRef]);
+  const assigned = registry.holdDelivery(conversation.id, "continue", "migration-message", "runtime-images", [imageRef], content.contentDigest);
   const claimed = registry.beginDeliveryAttempt(assigned.id, assigned.generationId!)!;
   const structured: unknown[] = [];
   let legacyCalls = 0;
@@ -79,6 +83,8 @@ test("controller drains a migration-held structured message through the runtime 
     deliveryId: claimed.id,
     clientMessageId: "migration-message",
     text: "continue",
+    command: claimed.command,
+    imageRefs: [imageRef],
   }]);
   expect(legacyCalls).toBe(0);
 });
@@ -99,7 +105,15 @@ test("controller keeps an uncertain structured claim fenced when ownership canno
     createdAt: "2026-07-13T00:00:00.000Z",
     clientMessageId: "migration-message",
     payloadKind: "text" as const,
+    runtimeImages: [],
+    contentDigest: null,
     artifactPaths: [],
+    command: {
+      operationId: "held-one",
+      kind: "send" as const,
+      policy: "interrupt-active" as const,
+    },
+    requestDigest: "held-one-request-digest",
     state: "delivery-uncertain" as const,
     generationId: "generation-one",
     attempts: 1,
@@ -272,6 +286,7 @@ test("quota controller cycles preserve routing and transcript ownership", async 
     const conversationId = registry.conversationForPath("/main.jsonl")!.id;
     let successorStarts = 0;
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         successorStarts += 1;
         return {

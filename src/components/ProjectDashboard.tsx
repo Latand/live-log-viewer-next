@@ -22,11 +22,17 @@ import { TaskStrip } from "./BranchPane";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
+import { directReviewFlows, isDirectReviewFlow, splitDirectReviewGroups } from "./flows/directReviewGroups";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { createDraftPipeline, pipelinesForProject, type PipelineTemplate } from "./pipelines/pipelineModel";
 import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
+import { launchHistoryFor } from "./launchHistoryModel";
+import { LaunchHistory } from "./LaunchHistory";
+import { isPlacedTask } from "./scheme/taskGeometry";
+import { loadExpandedTasks, partitionTaskStacks, persistExpandedTasks } from "./scheme/taskStacks";
+import { TaskStacksStrip } from "./TaskStacksStrip";
 import { WorkerStacks } from "./WorkerStacks";
 import { MobileBottomShelf } from "./MobileBottomShelf";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
@@ -67,6 +73,9 @@ interface Props {
   pipelinesError?: string;
   workflows: Workflow[];
   tasks: BoardTask[];
+  /** Durable conversation-id aliases (old id → canonical id) from /api/files:
+      direct review grouping resolves `reviewsConversationId` through them. */
+  conversationAliases?: Record<string, string>;
   projectCatalog?: ProjectCatalogEntry[];
   projectCwd?: string;
   project: string;
@@ -282,6 +291,7 @@ export function ProjectDashboard({
   pipelinesError,
   workflows,
   tasks,
+  conversationAliases,
   projectCatalog: projectCatalogEntries = [],
   projectCwd,
   project,
@@ -481,6 +491,29 @@ export function ProjectDashboard({
     [],
   );
 
+  /* Direct one-shot review groups (issue #325): Viewer-managed reviewers with a
+     durable role=reviewer edge + alias-resolved reviewsConversationId, outside
+     any managed flow/pipeline, projected into SYNTHETIC review-loop flows.
+     `deckFlows` is what the deck grammar consumes (folding, layout, worker
+     collapse); every PATCH-backed control surface keeps the real `flows`. */
+  const directReviewGroups = useMemo(
+    () => directReviewFlows({ files, flows, tasks, conversationAliases }),
+    [files, flows, tasks, conversationAliases],
+  );
+  const deckFlows = useMemo(
+    () => (directReviewGroups.length ? [...flows, ...directReviewGroups] : flows),
+    [flows, directReviewGroups],
+  );
+  /* Terminal review-history stacks: a direct group whose every round is
+     terminal renders NO deck — its reviewers fold into a per-group worker
+     stack instead, leaving the layout and minimap until explicitly expanded.
+     Only ACTIVE groups reach the layout as deck flows; the full `deckFlows`
+     keeps claiming/folding every reviewer so none resurfaces as a card. */
+  const activeReviewGroups = useMemo(() => splitDirectReviewGroups(directReviewGroups).active, [directReviewGroups]);
+  const layoutDeckFlows = useMemo(
+    () => (activeReviewGroups.length ? [...flows, ...activeReviewGroups] : flows),
+    [flows, activeReviewGroups],
+  );
   /* Reviewer transcripts of active flows live inside their round decks:
      they never build their own groups, quiet trees or residual chips. */
   const expandedFlowConversations = useMemo(() => {
@@ -489,11 +522,18 @@ export function ProjectDashboard({
        but promoting its idle reviewer descendants would re-open the whole
        implementer→reviewer→subtask tree as an active group — a closed flow must
        stay quiet history. So gate expansion on active ownership. */
-    const activeFlows = flows.filter(isActiveFlow);
+    const activeFlows = deckFlows.filter(isActiveFlow);
     const paths = claimedReviewerDescendantPaths(files, activeFlows);
-    for (const flow of activeFlows) paths.add(flow.implementerPath);
+    for (const flow of activeFlows) {
+      /* A direct group whose rounds are ALL terminal is compact history: it must
+         never force a quiet reviewed conversation back onto the board just to
+         host its deck. Its deck still renders whenever the reviewed conversation
+         is on the board for its own reasons. */
+      if (isDirectReviewFlow(flow) && flow.state !== "reviewing") continue;
+      paths.add(flow.implementerPath);
+    }
     return paths;
-  }, [files, flows]);
+  }, [files, deckFlows]);
   /* Flow-driven expansions plus the ones the user opened by hand from a
      collapsed view: a connected conversation the user expanded renders as a
      node wired below its parent, just like an active-group child. */
@@ -514,15 +554,15 @@ export function ProjectDashboard({
      one carrying authorship protection — are recovered by protectedReviewerNodes
      and materialized as standalone nodes (issue #112), so folding is
      unconditional here. */
-  const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
+  const groupFiles = useMemo(() => foldClaimedReviewers(files, deckFlows), [files, deckFlows]);
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
      full-size cards (a spawned worker stays a column under an active parent
      otherwise). Reviewers of active flows stay in their round deck and are
      kept out of the stacks after layout via deckReviewerPaths. */
   const collapsibleWorkers = useMemo(
-    () => collapsibleWorkerFiles({ files, project, flows, pipelines, pinnedPaths, nowMs }),
-    [files, project, flows, pipelines, pinnedPaths, nowMs],
+    () => collapsibleWorkerFiles({ files, project, flows: deckFlows, pipelines, pinnedPaths, nowMs }),
+    [files, project, deckFlows, pipelines, pinnedPaths, nowMs],
   );
   const collapsedPaths = useMemo(() => new Set(collapsibleWorkers.map((file) => file.path)), [collapsibleWorkers]);
   /* Per-origin stack grouping inputs (issue #136): a worker folds under its
@@ -553,12 +593,20 @@ export function ProjectDashboard({
     },
     [filesByPath],
   );
+  /* Terminal spawn receipts past the recent horizon (compact launch history):
+     they leave the board layout and minimap entirely and render in the
+     launch-history strip instead — a pathless receipt has no transcript to
+     mount as a pane. */
+  const launchHistory = useMemo(() => launchHistoryFor(files, project, nowMs), [files, project, nowMs]);
+  const launchHistoryPaths = useMemo(() => new Set(launchHistory.map((file) => file.path)), [launchHistory]);
   /* The board layout's file set with collapsed workers removed. Kept separate
      from `groupFiles` so board-membership reconciliation still sees the full
      catalog and never retires a collapsed worker's durable placement. */
   const sceneFiles = useMemo(
-    () => (collapsedPaths.size ? groupFiles.filter((file) => !collapsedPaths.has(file.path)) : groupFiles),
-    [groupFiles, collapsedPaths],
+    () => (collapsedPaths.size || launchHistoryPaths.size
+      ? groupFiles.filter((file) => !collapsedPaths.has(file.path) && !launchHistoryPaths.has(file.path))
+      : groupFiles),
+    [groupFiles, collapsedPaths, launchHistoryPaths],
   );
   const groups = useMemo(
     () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations }),
@@ -580,6 +628,38 @@ export function ProjectDashboard({
   );
   const hiddenSet = useMemo(() => new Set(prefs.hidden), [prefs.hidden]);
   const projectTasks = useMemo(() => tasks.filter((task) => task.project === project), [tasks, project]);
+  /* Compact default Kanban/status stacks: quiet placed cards fold off the
+     canvas (layout, edges, minimap) into the status strip; active, attention,
+     focused and explicitly expanded cards stay full-size. Explicit expansion
+     is a durable per-project pin, so it survives reloads. */
+  const [expandedTasks, setExpandedTasks] = useState<ReadonlySet<string>>(() => loadExpandedTasks(project));
+  /* eslint-disable-next-line react-hooks/set-state-in-effect -- re-reads the durable pin set on project switch */
+  useEffect(() => { setExpandedTasks(loadExpandedTasks(project)); }, [project]);
+  const setTaskExpanded = (id: string, expanded: boolean) => {
+    setExpandedTasks((prev) => {
+      if (prev.has(id) === expanded) return prev;
+      const next = new Set(prev);
+      if (expanded) next.add(id);
+      else next.delete(id);
+      persistExpandedTasks(project, next);
+      return next;
+    });
+  };
+  const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
+  const taskPartition = useMemo(
+    () => partitionTaskStacks(projectTasks.filter(isPlacedTask), { files, nowMs, focusedTaskId, expandedIds: expandedTasks }),
+    [projectTasks, files, nowMs, focusedTaskId, expandedTasks],
+  );
+  const stackedTaskIds = useMemo(
+    () => new Set(taskPartition.stacks.flatMap((stack) => stack.items.map((item) => item.id))),
+    [taskPartition],
+  );
+  /* What the canvas mounts: everything minus the stacked cards (unplaced
+     tasks pass through — they were never on the canvas to begin with). */
+  const boardTasks = useMemo(
+    () => (stackedTaskIds.size ? projectTasks.filter((task) => !stackedTaskIds.has(task.id)) : projectTasks),
+    [projectTasks, stackedTaskIds],
+  );
   const manualNodes = useMemo(() => {
     const byPath = new Map(sceneFiles.map((file) => [file.path, file]));
     return prefs.manual
@@ -620,11 +700,11 @@ export function ProjectDashboard({
       ...manualPaths,
       ...extra.map((file) => file.path),
     ]);
-    const protectedNodes = protectedReviewerNodes({ files, flows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths })
+    const protectedNodes = protectedReviewerNodes({ files, flows: layoutDeckFlows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths })
       .filter((file) => projectKey(file) === project);
     const extras = [...extra, ...protectedNodes];
     return extras.length ? [...manualNodes, ...extras] : manualNodes;
-  }, [ephemeral, groupFiles, files, flows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
+  }, [ephemeral, groupFiles, files, layoutDeckFlows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
   const liveCount = useMemo(
     () =>
       groups.reduce(
@@ -647,8 +727,17 @@ export function ProjectDashboard({
   const flashNode = (path: string) => {
     onUserNavigate?.();
     setHighlight(path);
+    /* A focused task card stays full-size while it is the focus target. */
+    setFocusedTaskId(path.startsWith("task::") ? path.slice("task::".length) : null);
     if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
     highlightTimer.current = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
+  };
+
+  /* Opening a task by intent (panel row, cross-project jump, stack chip)
+     expands it back onto the canvas as a durable pin, then glides to it. */
+  const openTaskOnBoard = (id: string) => {
+    setTaskExpanded(id, true);
+    flashNode("task::" + id);
   };
 
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -683,7 +772,7 @@ export function ProjectDashboard({
     if (!pending || !projectTasks.some((task) => task.id === pending)) return;
     sessionStorage.removeItem("llvTaskFocus");
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
-    flashNode("task::" + pending);
+    openTaskOnBoard(pending);
   });
 
   const openTask = (task: BoardTask) => {
@@ -692,7 +781,7 @@ export function ProjectDashboard({
       gotoProject(task.project);
       return;
     }
-    flashNode("task::" + task.id);
+    openTaskOnBoard(task.id);
   };
 
   /* Desktop `+ Task`: drop the inline sticky composer in a free slot near the
@@ -787,6 +876,19 @@ export function ProjectDashboard({
     setDraftText(id, task.text);
     if (initialDraftCwdVerified) setDraftCwd(id, initialDraftCwd);
     else requireDraftCwdConfirmation(id, initialDraftCwd);
+    persistDrafts([...drafts, id]);
+    pendingFocusRef.current = "draft::" + id;
+  };
+
+  /* Retry affordance for a failed pathless launch receipt: a fresh draft pane
+     prefilled from the receipt's launch profile (goal text, launch directory).
+     Nothing launches until the user reviews and sends it — the receipt itself
+     stays in the history strip as registry evidence. */
+  const retryLaunch = (file: FileEntry) => {
+    onUserNavigate?.();
+    const id = newDraftId();
+    if (file.goal?.objective) setDraftText(id, file.goal.objective);
+    requireDraftCwdConfirmation(id, file.cwd?.trim() || initialDraftCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -996,11 +1098,11 @@ export function ProjectDashboard({
     () => (hasNodes
       ? []
       : buildArchiveBranchGroups(
-        groupFiles.filter((file) => !hiddenSet.has(file.path) && !collapsedPaths.has(file.path)),
+        groupFiles.filter((file) => !hiddenSet.has(file.path) && !collapsedPaths.has(file.path) && !launchHistoryPaths.has(file.path)),
         project,
         100,
       )),
-    [hasNodes, groupFiles, hiddenSet, collapsedPaths, project],
+    [hasNodes, groupFiles, hiddenSet, collapsedPaths, launchHistoryPaths, project],
   );
   const hasArchiveNodes = archiveGroups.length > 0;
   const schemeAvailable = hasNodes || hasArchiveNodes;
@@ -1008,7 +1110,7 @@ export function ProjectDashboard({
      exists only for an implementer placed as a board node — the same layout the
      scheme draws. Derive availability from that layout's nodes, so a scanned but
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
-  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? visibleDrafts : [], pipelines);
+  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, layoutDeckFlows, hasNodes ? visibleDrafts : [], pipelines);
   /* Worker rows the scheme still draws in a retained form — an active flow's
      reviewer round deck keeps its finished rounds as deck tabs. Those are
      re-admitted here so a folded reviewer is never listed twice (its deck AND a
@@ -1023,7 +1125,7 @@ export function ProjectDashboard({
      exclude set: a closed worker is a tombstone — it must not resurface as a
      stack member (its manual/expanded pin was dropped on close, so it would
      otherwise re-qualify as a plain collapse candidate). */
-  const workerStacks = groupWorkerStacks(collapsibleWorkers, flows, new Set([...deckReviewerPaths, ...hiddenSet]), {
+  const workerStacks = groupWorkerStacks(collapsibleWorkers, deckFlows, new Set([...deckReviewerPaths, ...hiddenSet, ...launchHistoryPaths]), {
     pipelineIdOf,
     originOf: spawnerRootOf,
   });
@@ -1219,10 +1321,12 @@ export function ProjectDashboard({
               manual={hasNodes ? schemeManual : []}
               files={files}
               flows={flows}
+              reviewGroups={activeReviewGroups}
               pipelines={pipelines}
               surfacePipelines={activePipelines}
               workerStacks={workerStacks}
-              tasks={hasNodes ? projectTasks : []}
+              tasks={hasNodes ? boardTasks : []}
+              sheetTasks={projectTasks}
               drafts={hasNodes ? visibleDrafts : []}
               favorites={favoriteIdSet}
               loaded={loaded}
@@ -1260,9 +1364,10 @@ export function ProjectDashboard({
                 manual={hasNodes ? schemeManual : []}
                 files={files}
                 flows={flows}
+                reviewGroups={activeReviewGroups}
                 pipelines={pipelines}
                 surfacePipelines={activePipelines}
-                tasks={hasNodes ? projectTasks : []}
+                tasks={hasNodes ? boardTasks : []}
                 workerStacks={workerStacks}
                 drafts={hasNodes ? visibleDrafts : []}
                 favorites={favoriteIdSet}
@@ -1273,10 +1378,12 @@ export function ProjectDashboard({
                 onDraftClose={removeDraft}
                 onDraftSpawned={draftSpawned}
                 onHandoff={addHandoffDraft}
+                onSpawnRetry={retryLaunch}
                 onTaskDraft={openTaskDraft}
                 placeTaskId={placeTask?.id ?? null}
                 onTaskPlaced={() => setPlaceTask(null)}
                 newTaskNonce={newTaskNonce}
+                onTaskCollapse={(task) => setTaskExpanded(task.id, false)}
                 builderPipelineId={builderPipelineId}
                 onBuilderOpened={() => setBuilderPipelineId(null)}
               />
@@ -1339,7 +1446,10 @@ export function ProjectDashboard({
 
       {/* The corner pill would sit on the focused pane's composer; on the
           phone the strip, the map and the toast cover its job. */}
-      {!isMobile && boardReady ? <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} /> : null}
+      {/* deckFlows here folds direct reviewers out of the switchboard exactly
+          like managed rounds (claimedReviewerPaths); the hook keeps flow status
+          lines to REAL flows itself. */}
+      {!isMobile && boardReady ? <Switchboard files={files} flows={deckFlows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} /> : null}
 
       {/* Worker-class cards that have auto-collapsed fold into one stack per
           origin — flow / pipeline / spawner (issue #112, #136) — instead of
@@ -1353,11 +1463,14 @@ export function ProjectDashboard({
           beside a single disclosure that folds both strips. Desktop renders the
           two strips directly, side by side. */}
       {boardReady && (() => {
-        const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0);
+        const stackedTaskTotal = taskPartition.stacks.reduce((sum, stack) => sum + stack.items.length, 0);
+        const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0) + launchHistory.length + stackedTaskTotal;
         const quietTotal = !hasArchiveNodes ? residual.length : 0;
         const strips = (
           <>
-            <WorkerStacks stacks={workerStacks} files={files} flows={flows} pipelines={pipelines} onSelect={openSwitchboardFile} />
+            <TaskStacksStrip stacks={taskPartition.stacks} onOpen={(task) => openTaskOnBoard(task.id)} />
+            <LaunchHistory items={launchHistory} onRetry={retryLaunch} />
+            <WorkerStacks stacks={workerStacks} files={files} flows={deckFlows} pipelines={pipelines} onSelect={openSwitchboardFile} />
             {!hasArchiveNodes && residual.length ? (
               <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
             ) : null}

@@ -56,7 +56,7 @@ function freshEntry(entry: FileEntry): FileEntry | null {
 function transcriptResult(entry: FileEntry, toolUseId: string): string | null {
   const fresh = freshEntry(entry);
   if (!fresh) return null;
-  return recordedToolResult(fresh.path, fresh.size, toolUseId);
+  return recordedToolResult(fresh.path, fresh.size, fresh.mtime * 1000, toolUseId);
 }
 
 async function knownState(pathname: string, toolUseId: string): Promise<{ entry: FileEntry; pending: PendingQuestion | null; result: string | null } | null> {
@@ -64,7 +64,7 @@ async function knownState(pathname: string, toolUseId: string): Promise<{ entry:
   if (!entry || entry.proc !== "running" || entry.pid === null) return null;
   const fresh = freshEntry(entry);
   if (!fresh) return null;
-  const result = recordedToolResult(fresh.path, fresh.size, toolUseId);
+  const result = recordedToolResult(fresh.path, fresh.size, fresh.mtime * 1000, toolUseId);
   if (result) return { entry: fresh, pending: null, result };
   const pending = pendingQuestionFor(fresh);
   return { entry: fresh, pending: pending?.toolUseId === toolUseId ? pending : null, result: null };

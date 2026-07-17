@@ -3,6 +3,10 @@ export type TaskStatus = "inbox" | "assigned" | "blocked" | "done";
 export type AssignmentState = "delivered" | "failed" | "spawning" | "handoff";
 
 export interface TaskAssignment {
+  /** Durable Viewer launch identity used to replay attribution safely. */
+  launchId?: string | null;
+  /** Client idempotency key paired with launchId. */
+  clientAttemptId?: string | null;
   /** Transcript path; null while a codex spawn awaits scanner attribution. */
   path: string | null;
   /** Stable Viewer owner; paths remain native-generation provenance. */

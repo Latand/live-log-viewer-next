@@ -1,5 +1,10 @@
 import type { DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import type { RuntimeHostClient } from "./client";
+import {
+  parseStructuredImageRefs,
+  structuredContent,
+  type StructuredMessageContent,
+} from "./structuredContent";
 
 export interface StructuredDeliveryEffect {
   id: string;
@@ -36,11 +41,11 @@ export function runtimeClientDeliveryPort(client: RuntimeHostClient): Structured
 interface SendEffect {
   operationId: string;
   conversationId: string;
-  text: string;
+  content: StructuredMessageContent;
+  contentDigest: string;
   turnId?: string | null;
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   kind: "send" | "steer";
-  hasImages: boolean;
   eventSeq: number;
 }
 
@@ -66,7 +71,11 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
   const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
   const conversationId = typeof effect.payload.conversationId === "string" ? effect.payload.conversationId : "";
   const text = typeof effect.payload.text === "string" ? effect.payload.text : "";
-  if (!operationId || !conversationId || !text) return null;
+  const images = effect.payload.images === undefined ? [] : parseStructuredImageRefs(effect.payload.images, 16);
+  if (!operationId || !conversationId || !images) return null;
+  let content;
+  try { content = structuredContent(text, images); } catch { return null; }
+  if (typeof effect.payload.contentDigest === "string" && effect.payload.contentDigest !== content.contentDigest) return null;
   const turnId = typeof effect.payload.turnId === "string" || effect.payload.turnId === null
     ? effect.payload.turnId
     : undefined;
@@ -78,9 +87,9 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
   return {
     operationId,
     conversationId,
-    text,
+    content: content.content,
+    contentDigest: content.contentDigest,
     kind: effect.kind === "runtime.steer" ? "steer" : "send",
-    hasImages: Array.isArray(effect.payload.images) && effect.payload.images.length > 0,
     eventSeq: effect.eventSeq,
     ...(turnId !== undefined ? { turnId } : {}),
     ...(policy ? { policy } : {}),
@@ -187,10 +196,18 @@ export class StructuredDeliveryQueue {
         throw new Error("structured delivery effect page did not advance");
       }
       const grouped = new Map<string, DeliveryEffect[]>();
-      const effects = rawEffects
-        .map(deliveryEffect)
-        .filter((effect): effect is DeliveryEffect => effect !== null)
-        .sort((left, right) => {
+      const effects: DeliveryEffect[] = [];
+      for (const rawEffect of rawEffects) {
+        const effect = deliveryEffect(rawEffect);
+        if (effect) {
+          effects.push(effect);
+          continue;
+        }
+        const operationId = typeof rawEffect.payload.operationId === "string" ? rawEffect.payload.operationId : "";
+        if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
+        await this.port.transition(operationId, "failed", { reason: "structured delivery effect is invalid" });
+      }
+      effects.sort((left, right) => {
           const leftControl = isControlEffect(left);
           const rightControl = isControlEffect(right);
           return Number(rightControl) - Number(leftControl) || left.eventSeq - right.eventSeq;
@@ -216,10 +233,6 @@ export class StructuredDeliveryQueue {
       if (isControlEffect(effect)) {
         const blocked = await this.drainControl(effect);
         if (blocked) return true;
-        continue;
-      }
-      if (effect.hasImages) {
-        await this.port.transition(effect.operationId, "failed", { reason: "structured host image delivery is unavailable" });
         continue;
       }
       const host = this.resolveHost(effect.conversationId);
@@ -248,7 +261,10 @@ export class StructuredDeliveryQueue {
             : health.activeTurnRef;
       const entry: QueueEntry = {
         id: effect.operationId,
-        text: effect.text,
+        content: effect.content,
+        contentDigest: effect.contentDigest,
+        text: effect.content.text,
+        images: effect.content.images,
         expectedTurnId: effect.policy === "interrupt-active" ? null : deliveryFence,
       };
       await this.port.transition(

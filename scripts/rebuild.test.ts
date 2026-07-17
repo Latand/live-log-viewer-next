@@ -45,8 +45,8 @@ fi
   return { root, bin, home, capture, args };
 }
 
-function runRebuild(idempotencyKey: string, setup: ReturnType<typeof fixture>) {
-  return Bun.spawnSync(["bash", rebuildScript], {
+function runRebuild(idempotencyKey: string, setup: ReturnType<typeof fixture>, revision?: string) {
+  return Bun.spawnSync(["bash", rebuildScript, ...(revision ? [revision] : [])], {
     cwd: setup.root,
     env: {
       ...process.env,
@@ -61,6 +61,18 @@ function runRebuild(idempotencyKey: string, setup: ReturnType<typeof fixture>) {
     stderr: "pipe",
   });
 }
+
+test("rebuild accepts an exact revision as its positional argument", () => {
+  const setup = fixture();
+  const revision = "a".repeat(40);
+  const result = runRebuild("exact-revision", setup, revision);
+
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({
+    revision,
+    idempotencyKey: "exact-revision",
+  });
+});
 
 test("rebuild serializes a quoted 200-character idempotency key as JSON", () => {
   const setup = fixture();

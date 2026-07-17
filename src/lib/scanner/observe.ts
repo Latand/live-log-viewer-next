@@ -3,16 +3,16 @@ import { resolveTarget } from "../tmux";
 import { ctxFor } from "./context";
 import { lastTurnFor } from "./turnDuration";
 import { discoverFiles } from "./discover";
-import { entryEffort, entryFast } from "./effort";
+import { entryEffort, entryEffortResult, entryFast } from "./effort";
 import { linkEntries } from "./links";
-import { entryModels } from "./model";
+import { entryModelsResult } from "./model";
 import { outputHolders } from "./process";
 import { goalFor, planFor } from "./plan";
 import { pendingQuestionFor } from "./questions";
 import { pendingWakeupFor } from "./wakeup";
 import { assignTranscriptPids } from "./transcripts";
 import { waitingInputProbe } from "./waitingInput";
-import { activityVerdict } from "./activity";
+import { activityVerdict, transcriptTurnResult } from "./activity";
 
 const YIELD_EVERY = 75;
 const NO_HOLDERS: Map<string, number> = new Map();
@@ -31,8 +31,19 @@ export async function observeFiles(): Promise<FileEntry[]> {
   const holders = entries.some((entry) => entry.root === "claude-tasks" && entry.path.endsWith(".output")) ? outputHolders() : NO_HOLDERS;
   await each(entries, (entry) => {
     const verdict = activityVerdict(entry.root, entry.path, entry.mtime, entry.size);
-    entry.activity = verdict.state; entry.activityReason = verdict.reason;
-    const models = entryModels(entry); entry.model = models.display; entry.launchModel = models.launch;
+    entry.activity = verdict.state; entry.activityReason = verdict.reason; entry.derivationComplete = verdict.complete;
+    if (entry.path.endsWith(".jsonl") && (entry.engine === "claude" || entry.engine === "codex")) {
+      const authoritative = transcriptTurnResult(entry.path, entry.size, entry.mtime * 1000, entry.engine === "codex");
+      entry.derivationComplete &&= authoritative.complete;
+      if (authoritative.complete) entry.authoritativeTurn = authoritative.turn;
+    }
+    const models = entryModelsResult(entry);
+    entry.model = models.value.display;
+    entry.launchModel = models.value.launch;
+    entry.derivationComplete &&= models.complete;
+    const effort = entryEffortResult(entry);
+    entry.effort = effort.value;
+    entry.derivationComplete &&= effort.complete;
     if (entry.root === "claude-tasks" && entry.path.endsWith(".output")) {
       const holder = holders.get(entry.path) ?? null; entry.pid = holder; entry.proc = holder === null ? "done" : "running";
       if (holder !== null) { entry.activity = "live"; entry.activityReason = "output_held"; }

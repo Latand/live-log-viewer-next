@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
-import { reconcileMigrations } from "@/lib/accounts/migration/coordinator";
+import { drainHeldDeliveries, reconcileMigrations } from "@/lib/accounts/migration/coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "@/lib/accounts/migration/contracts";
 import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
 import { RuntimeJournal } from "@/runtime-host/journal";
@@ -13,10 +13,11 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 import type { RuntimeHostClient } from "./client";
 import type { EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
-import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./structuredDeliveryController";
+import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { structuredContentDigest } from "./structuredContent";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-delivery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
@@ -170,9 +171,14 @@ test("an engine event burst preserves every projection without polling the deliv
     pendingAction: null,
   });
   let effectBatchCalls = 0;
+  let snapshotCalls = 0;
   let deltaProjections = 0;
   let sessionStatusProjections = 0;
   const client = {
+    snapshot: async () => {
+      snapshotCalls += 1;
+      return { filesRevision: 0 };
+    },
     append: async (event: { kind: string }) => {
       if (event.kind === "delta") deltaProjections += 1;
       if (event.kind === "session-status") sessionStatusProjections += 1;
@@ -191,6 +197,7 @@ test("an engine event burst preserves every projection without polling the deliv
     await Bun.sleep(50);
     expect(burst.attachedAfter()).toBe(17);
     const baselineEffects = effectBatchCalls;
+    const baselineSnapshots = snapshotCalls;
     const baselineStatuses = sessionStatusProjections;
 
     for (let index = 18; index <= 57; index += 1) {
@@ -202,8 +209,80 @@ test("an engine event burst preserves every projection without polling the deliv
     expect(deltaProjections).toBe(40);
     expect(sessionStatusProjections - baselineStatuses).toBeLessThanOrEqual(1);
     expect(effectBatchCalls - baselineEffects).toBeLessThanOrEqual(1);
+    expect(snapshotCalls - baselineSnapshots).toBeLessThanOrEqual(1);
   } finally {
     await bindStructuredDeliveryQueue([], { registry, client: null });
+  }
+});
+
+test("the controller republishes a live host into a restarted runtime journal", async () => {
+  const directory = path.join(sandbox, "controller-runtime-restart");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "8f25d04a-8f94-44bb-a6f2-bf987f2ded41";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "claude",
+    path: artifactPath,
+    accountId: "runtime-restart-account",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-17T20:40:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const key = { engine: "claude" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "runtime-restart-account",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "fake:runtime-restart-host",
+      process: null,
+      eventCursor: 7,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  let journal = new RuntimeJournal(path.join(directory, "runtime-before.sqlite"), { structuredHosts: true });
+  const client = {
+    snapshot: async () => journal.snapshot(),
+    append: async (event: Parameters<RuntimeHostClient["append"]>[0]) => journal.append(event),
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => journal.executeOperation(command),
+    operationStatus: async (operationId: string) => journal.operationResult(operationId),
+    producerCursor: async (producerKind: string, eventKeyPrefix: string) => journal.producerCursor(producerKind, eventKeyPrefix),
+    effectBatch: async (kinds?: readonly string[], afterEventSeq?: number) => journal.effectBatch(100, kinds, afterEventSeq),
+    transitionOperation: async (operationId: string, status: Parameters<RuntimeHostClient["transitionOperation"]>[1], details?: Parameters<RuntimeHostClient["transitionOperation"]>[2]) => journal.transitionOperation(operationId, status, details),
+  } as RuntimeHostClient;
+  const host = observableFakeHost(new FakeEngineHost(createFakeDeliveryLedger()));
+
+  try {
+    await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.host).toBe("hosted");
+
+    journal.close();
+    journal = new RuntimeJournal(path.join(directory, "runtime-after.sqlite"), { structuredHosts: true });
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toBeUndefined();
+
+    expect(await republishStructuredDeliveryHost(key)).toBeTrue();
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+      host: "hosted",
+      hostKind: "claude-broker",
+      sessionKey: key,
+    });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
   }
 });
 
@@ -627,7 +706,7 @@ test("a delivering entry resumes after restart through the host ledger without a
   await expect(firstQueue.drain()).rejects.toThrow("runtime stopped before confirmation commit");
   expect(firstJournal.operationResult("operation-one")?.receipt.status).toBe("delivering");
   expect(firstJournal.effectBatch()).toHaveLength(1);
-  expect(ledger.writes).toEqual([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
+  expect(ledger.writes).toMatchObject([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   firstJournal.close();
 
   const reopenedJournal = new RuntimeJournal(filename, { structuredHosts: true });
@@ -640,24 +719,71 @@ test("a delivering entry resumes after restart through the host ledger without a
     turnId: "turn:operation-one",
   });
   expect(reopenedJournal.effectBatch()).toEqual([]);
-  expect(ledger.writes).toEqual([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
+  expect(ledger.writes).toMatchObject([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   reopenedJournal.close();
 });
 
 test("repeated terminal retry clicks produce one replacement engine write", async () => {
   const filename = path.join(sandbox, "terminal-retry-clicks.sqlite");
+  const sessionId = "12121212-1212-4212-8212-121212121212";
+  const artifactPath = path.join(sandbox, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(sandbox, "terminal-retry-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: sandbox });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-17T19:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: sandbox,
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:terminal-retry",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const held = registry.holdDelivery(
+    conversation.id,
+    "deliver this once",
+    "message-terminal-original",
+    "text",
+    [],
+    structuredContentDigest({ text: "deliver this once", images: [] }),
+    { operationId: "operation-terminal-original", kind: "send", policy: "queue" },
+  );
+  registry.beginDeliveryAttempt(held.id, held.generationId!);
+  registry.recordDeliveryOutcome(held.id, "failed", "dead-host");
   const journal = new RuntimeJournal(filename, { structuredHosts: true });
   journal.append({
-    scope: { type: "session", id: "conversation-terminal-retry" },
+    scope: { type: "session", id: conversation.id },
     kind: "session-status",
     payload: {
-      conversationId: "conversation-terminal-retry",
-      sessionKey: { engine: "codex", sessionId: "session-terminal-retry" },
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId },
       hostKind: "codex-app-server",
       host: "hosted",
       turn: "idle",
       provenance: "structured",
-      artifactPath: "/sessions/terminal-retry.jsonl",
+      artifactPath,
       capabilities: { steer: true, structuredAttention: true },
     },
   });
@@ -665,7 +791,7 @@ test("repeated terminal retry clicks produce one replacement engine write", asyn
     kind: "send",
     operationId: "operation-terminal-original",
     idempotencyKey: "message-terminal-original",
-    conversationId: "conversation-terminal-retry",
+    conversationId: conversation.id,
     text: "deliver this once",
     policy: "queue",
   });
@@ -678,9 +804,13 @@ test("repeated terminal retry clicks produce one replacement engine write", asyn
 
   expect(repeated).toMatchObject({ operationId: replacement.operationId, replayed: true });
   expect(journal.effectBatch()).toHaveLength(1);
-  await new StructuredDeliveryQueue(journalPort(journal), () => new FakeEngineHost(ledger)).drain();
+  await bindStructuredDeliveryQueue([{
+    key: { engine: "codex", sessionId },
+    host: observableFakeHost(new FakeEngineHost(ledger)),
+  }], { registry, client: runtimeJournalClient(journal) });
+  await kickStructuredDeliveryQueue();
 
-  expect(ledger.writes).toEqual([{
+  expect(ledger.writes).toMatchObject([{
     id: replacement.operationId,
     text: "deliver this once",
     expectedTurnId: null,
@@ -689,6 +819,8 @@ test("repeated terminal retry clicks produce one replacement engine write", asyn
     status: "delivered",
     retryOfOperationId: "operation-terminal-original",
   });
+  expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({ state: "delivered", text: "" });
+  await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
 });
 
@@ -875,6 +1007,399 @@ test("a failed idle send retry keeps its null turn fence when another turn start
   journal.close();
 });
 
+test("runtime recovery drains one durable synchronization hold into one engine command", async () => {
+  const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const directory = path.join(sandbox, "runtime-synchronization-hold");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-16T20:07:01.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:runtime-before-restart",
+      process: null,
+      eventCursor: 42,
+      protocolVersion: "v2",
+      writerClaimEpoch: 5,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 5,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const request = {
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "runtime-sync-held-message",
+    operationId: "operation-runtime-sync-held-message",
+    kind: "send" as const,
+    policy: "queue" as const,
+    turnId: null,
+    text: "deliver exactly once after runtime recovery",
+    hasImages: false,
+  };
+  let requestedDrains = 0;
+
+  const first = await enqueueStructuredMessage(request, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => { requestedDrains += 1; },
+  });
+  const refreshedRegistry = new AgentRegistry(registry.filename);
+  const duplicate = await enqueueStructuredMessage(request, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => refreshedRegistry,
+    requestMigrationTick: () => { requestedDrains += 1; },
+  });
+  const held = Object.values(registry.snapshot().heldDeliveries)
+    .filter((delivery) => delivery.clientMessageId === request.clientMessageId);
+
+  expect(first).toMatchObject({ ok: true, structured: true, outcome: "held" });
+  expect(duplicate).toMatchObject({ ok: true, structured: true, outcome: "held" });
+  expect(requestedDrains).toBe(2);
+  expect(held).toMatchObject([{
+    text: request.text,
+    command: {
+      operationId: request.operationId,
+      kind: request.kind,
+      policy: request.policy,
+      turnId: request.turnId,
+    },
+    requestDigest: expect.any(String),
+    state: "assigned",
+    generationId: sessionId,
+  }]);
+
+  await drainHeldDeliveries(conversation.id, {
+    async deliver({ delivery, path: deliveryPath, clientMessageId }) {
+      return await deliverHeldStructuredMessage({
+        conversationId: conversation.id,
+        path: deliveryPath,
+        deliveryId: delivery.id,
+        clientMessageId,
+        text: delivery.text,
+        command: delivery.command,
+      }, {
+        enabled: () => true,
+        client: () => null,
+        registry: () => registry,
+        startupFailed: () => true,
+      }) ?? "delivery-uncertain";
+    },
+  }, registry);
+  expect(registry.snapshot().heldDeliveries[held[0]!.id]).toMatchObject({
+    state: "delivery-uncertain",
+    clientMessageId: request.clientMessageId,
+    text: request.text,
+  });
+
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const ledger = createFakeDeliveryLedger();
+  await bindStructuredDeliveryQueue([{
+    key: { engine: "codex", sessionId },
+    host: observableFakeHost(new FakeEngineHost(ledger)),
+  }], { registry, client });
+
+  await client.command({
+    kind: held[0]!.command.kind,
+    operationId: held[0]!.command.operationId,
+    conversationId: conversation.id,
+    idempotencyKey: request.clientMessageId,
+    text: request.text,
+    contentDigest: structuredContentDigest({ text: request.text, images: [] }),
+    policy: held[0]!.command.policy,
+    turnId: held[0]!.command.turnId,
+  });
+  await kickStructuredDeliveryQueue();
+
+  expect(ledger.writes).toMatchObject([{
+    id: request.operationId,
+    text: request.text,
+    expectedTurnId: null,
+  }]);
+  expect(registry.snapshot().heldDeliveries[held[0]!.id]).toMatchObject({
+    state: "delivered",
+    clientMessageId: request.clientMessageId,
+    text: "",
+  });
+  expect(journal.operationResult(request.operationId)?.receipt.status).toBe("delivered");
+
+  const recoveredDuplicate = await enqueueStructuredMessage(request, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: kickStructuredDeliveryQueue,
+  });
+  expect(recoveredDuplicate).toMatchObject({ ok: true, structured: true, outcome: "delivered" });
+  expect(ledger.writes).toHaveLength(1);
+
+  const afterDeliveryDuplicate = await enqueueStructuredMessage(request, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => { requestedDrains += 1; },
+  });
+  expect(afterDeliveryDuplicate).toMatchObject({ ok: true, structured: true, outcome: "held" });
+  expect(ledger.writes).toHaveLength(1);
+  expect(Object.values(registry.snapshot().heldDeliveries)
+    .filter((delivery) => delivery.clientMessageId === request.clientMessageId)).toHaveLength(1);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+});
+
+test("queue binding settles an uncertain reservation from a terminal journal receipt", async () => {
+  const sessionId = "abababab-abab-4bab-8bab-abababababab";
+  const directory = path.join(sandbox, "terminal-journal-registry-reconciliation");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-17T19:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const operationId = "operation-terminal-before-registry-settlement";
+  const held = registry.holdDelivery(
+    conversation.id,
+    "already delivered",
+    "terminal-before-registry-settlement",
+    "text",
+    [],
+    structuredContentDigest({ text: "already delivered", images: [] }),
+    { operationId, kind: "send", policy: "queue", turnId: null },
+  );
+  expect(held.state).toBe("assigned");
+  expect(registry.beginDeliveryAttempt(held.id, held.generationId!)?.state).toBe("delivery-uncertain");
+  let statusReads = 0;
+  const client = {
+    operationStatus: async (requestedId: string) => {
+      statusReads += 1;
+      expect(requestedId).toBe(operationId);
+      return {
+        operationId,
+        replayed: true,
+        receipt: {
+          operationId,
+          idempotencyKey: "terminal-before-registry-settlement",
+          conversationId: conversation.id,
+          kind: "send" as const,
+          status: "delivered" as const,
+        },
+      };
+    },
+    effectBatch: async () => [],
+  } as unknown as RuntimeHostClient;
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect(statusReads).toBe(1);
+  expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
+    state: "delivered",
+    text: "",
+    error: null,
+  });
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+});
+
+test("queue binding settles a rejected journal receipt as a recoverable failure", async () => {
+  const sessionId = "acacacac-acac-4cac-8cac-acacacacacac";
+  const directory = path.join(sandbox, "rejected-journal-registry-reconciliation");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-17T19:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const operationId = "operation-rejected-before-registry-settlement";
+  const held = registry.holdDelivery(
+    conversation.id,
+    "rejected before settlement",
+    "rejected-before-registry-settlement",
+    "text",
+    [],
+    structuredContentDigest({ text: "rejected before settlement", images: [] }),
+    { operationId, kind: "send", policy: "queue", turnId: null },
+  );
+  registry.beginDeliveryAttempt(held.id, held.generationId!);
+  const client = {
+    operationStatus: async () => ({
+      operationId,
+      replayed: true,
+      receipt: {
+        operationId,
+        idempotencyKey: "rejected-before-registry-settlement",
+        conversationId: conversation.id,
+        kind: "send" as const,
+        status: "rejected" as const,
+        reason: "no-claim",
+      },
+    }),
+    effectBatch: async () => [],
+  } as unknown as RuntimeHostClient;
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
+    state: "failed",
+    error: "no-claim",
+  });
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+});
+
+test("a stale synchronization-held steer fails safely across Codex and Claude recovery", async () => {
+  const cases = [
+    {
+      engine: "codex" as const,
+      hostKind: "codex-app-server" as const,
+      sessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    },
+    {
+      engine: "claude" as const,
+      hostKind: "claude-broker" as const,
+      sessionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    },
+  ];
+
+  for (const scenario of cases) {
+    const directory = path.join(sandbox, `stale-synchronization-hold-${scenario.engine}`);
+    const artifactPath = path.join(directory, `${scenario.sessionId}.jsonl`);
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const profile = emptyLaunchProfile({ cwd: directory });
+    registry.reconcileConversations([{
+      engine: scenario.engine,
+      path: artifactPath,
+      accountId: "default",
+      launchProfile: profile,
+      turn: { state: "busy", source: "assistant", terminalAt: null },
+      observedAt: "2026-07-16T20:07:01.000Z",
+    }]);
+    const conversation = registry.conversationForPath(artifactPath)!;
+    registry.upsert({
+      key: { engine: scenario.engine, sessionId: scenario.sessionId },
+      artifactPath,
+      cwd: directory,
+      accountId: "default",
+      launchProfile: profile,
+      status: "live",
+      host: null,
+      structuredHost: {
+        kind: scenario.hostKind,
+        endpoint: `stdio:${scenario.engine}-before-restart`,
+        process: null,
+        eventCursor: 23,
+        protocolVersion: "v2",
+        writerClaimEpoch: 3,
+        activeTurnRef: "turn-before-restart",
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 3,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    const request = {
+      path: artifactPath,
+      conversationId: conversation.id,
+      clientMessageId: `stale-held-steer-${scenario.engine}`,
+      operationId: `operation-stale-held-steer-${scenario.engine}`,
+      kind: "steer" as const,
+      policy: "steer-if-active" as const,
+      turnId: "turn-before-restart",
+      text: `retain the ${scenario.engine} turn fence`,
+      hasImages: false,
+    };
+
+    expect(await enqueueStructuredMessage(request, {
+      enabled: () => true,
+      client: () => null,
+      registry: () => registry,
+      requestMigrationTick: () => {},
+    })).toMatchObject({ ok: true, structured: true, outcome: "held" });
+
+    const reopened = new AgentRegistry(registry.filename);
+    const held = reopened.pendingDeliveries(conversation.id)[0]!;
+    const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+    journal.append({
+      scope: { type: "session", id: conversation.id },
+      kind: "session-status",
+      payload: {
+        conversationId: conversation.id,
+        sessionKey: { engine: scenario.engine, sessionId: scenario.sessionId },
+        hostKind: scenario.hostKind,
+        host: "hosted",
+        turn: "running",
+        activeTurnId: "turn-after-restart",
+        provenance: "structured",
+        artifactPath,
+        capabilities: { steer: true, structuredAttention: true },
+      },
+    });
+    const client = runtimeJournalClient(journal);
+
+    await drainHeldDeliveries(conversation.id, {
+      async deliver({ delivery, path: deliveryPath, clientMessageId }) {
+        return await deliverHeldStructuredMessage({
+          conversationId: conversation.id,
+          path: deliveryPath,
+          deliveryId: delivery.id,
+          clientMessageId,
+          text: delivery.text,
+          command: delivery.command,
+        }, {
+          enabled: () => true,
+          client: () => client,
+          kick: () => {},
+        }) ?? "delivery-uncertain";
+      },
+    }, reopened);
+
+    expect(journal.operationResult(request.operationId)?.receipt).toMatchObject({
+      kind: request.kind,
+      status: "rejected",
+      reason: "stale-turn",
+      turnId: request.turnId,
+    });
+    expect(journal.effectBatch()).toEqual([]);
+    expect(reopened.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      command: held.command,
+      requestDigest: held.requestDigest,
+    });
+    journal.close();
+  }
+});
+
 test("a migration-held delivery switches from the source host to the published Codex successor", async () => {
   const sourceId = "11111111-1111-4111-8111-111111111111";
   const successorId = "22222222-2222-4222-8222-222222222222";
@@ -931,7 +1456,20 @@ test("a migration-held delivery switches from the source host to the published C
     requestId: "publish-successor-before-drain",
     expectedRevision: registry.engineRouting("codex").revision,
   });
-  const held = registry.holdDelivery(conversation.id, "continue on the successor", "migration-successor-message");
+  const held = registry.holdDelivery(
+    conversation.id,
+    "continue on the successor",
+    "migration-successor-message",
+    "text",
+    [],
+    null,
+    {
+      operationId: "operation-migration-successor-message",
+      kind: "send",
+      policy: "queue",
+      turnId: null,
+    },
+  );
   expect(held.state).toBe("held");
 
   const order: string[] = [];
@@ -941,6 +1479,7 @@ test("a migration-held delivery switches from the source host to the published C
     return commitSuccessor(...args);
   }) as AgentRegistry["commitSuccessor"];
   const provider: SuccessorProviderPort = {
+    virtualSource: true,
     async create(input) {
       input.recordContinuityPath(successorPath);
       return {
@@ -993,6 +1532,7 @@ test("a migration-held delivery switches from the source host to the published C
         deliveryId: delivery.id,
         clientMessageId,
         text: delivery.text,
+        command: delivery.command,
       }, {
         enabled: () => true,
         client: () => client,
@@ -1003,13 +1543,13 @@ test("a migration-held delivery switches from the source host to the published C
 
   expect(order.slice(0, 3)).toEqual(["verify", "publish", "commit"]);
   expect(sourceLedger.writes).toEqual([]);
-  expect(successorLedger.writes).toEqual([{
-    id: held.id,
+  expect(successorLedger.writes).toMatchObject([{
+    id: held.command.operationId,
     text: "continue on the successor",
     expectedTurnId: null,
   }]);
   expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
-  expect(journal.operationResult(held.id)?.receipt.status).toBe("delivered");
+  expect(journal.operationResult(held.command.operationId)?.receipt.status).toBe("delivered");
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
@@ -1114,7 +1654,20 @@ test("a migration-held delivery switches from the source host to the published C
     phase: "verifying",
     providerReceipt: receipt,
   });
-  const held = registry.holdDelivery(conversation.id, "continue on the Claude successor", "claude-migration-message");
+  const held = registry.holdDelivery(
+    conversation.id,
+    "continue on the Claude successor",
+    "claude-migration-message",
+    "text",
+    [],
+    null,
+    {
+      operationId: "operation-claude-migration-message",
+      kind: "send",
+      policy: "queue",
+      turnId: null,
+    },
+  );
   expect(held.state).toBe("held");
 
   const sourceAccount = {
@@ -1186,6 +1739,7 @@ test("a migration-held delivery switches from the source host to the published C
         deliveryId: delivery.id,
         clientMessageId,
         text: delivery.text,
+        command: delivery.command,
       }, {
         enabled: () => true,
         client: () => client,
@@ -1196,13 +1750,13 @@ test("a migration-held delivery switches from the source host to the published C
 
   expect(publications).toBe(1);
   expect(sourceLedger.writes).toEqual([]);
-  expect(successorLedger.writes).toEqual([{
-    id: held.id,
+  expect(successorLedger.writes).toMatchObject([{
+    id: held.command.operationId,
     text: "continue on the Claude successor",
     expectedTurnId: null,
   }]);
   expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
-  expect(journal.operationResult(held.id)?.receipt.status).toBe("delivered");
+  expect(journal.operationResult(held.command.operationId)?.receipt.status).toBe("delivered");
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
@@ -1351,7 +1905,7 @@ test("successor cleanup drains a delayed publication before restoring path-only 
   await kickStructuredDeliveryQueue();
 
   expect(result).toMatchObject({ ok: true, structured: true, target: conversation.id });
-  expect(sourceLedger.writes).toEqual([{
+  expect(sourceLedger.writes).toMatchObject([{
     id: expect.any(String),
     text: "continue after rollback",
     expectedTurnId: null,
@@ -1593,7 +2147,7 @@ test("late discarded-successor cleanup republishes the committed retarget host",
   await kickStructuredDeliveryQueue();
 
   expect(result).toMatchObject({ ok: true, structured: true, target: conversation.id });
-  expect(committedLedger.writes).toEqual([{
+  expect(committedLedger.writes).toMatchObject([{
     id: expect.any(String),
     text: "continue after retarget",
     expectedTurnId: null,

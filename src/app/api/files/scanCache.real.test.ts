@@ -19,6 +19,15 @@ fs.mkdirSync(sessions, { recursive: true });
 const { listFilesWithProjectCatalog } = await import("@/lib/scanner");
 const { ROOTS } = await import("@/lib/scanner/roots");
 const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
+const { activityVerdict, transcriptTurnResult } = await import("@/lib/scanner/activity");
+const { entryEffort } = await import("@/lib/scanner/effort");
+const { entryModels } = await import("@/lib/scanner/model");
+const { planFor, goalFor } = await import("@/lib/scanner/plan");
+const { ctxFor } = await import("@/lib/scanner/context");
+const { lastTurnFor } = await import("@/lib/scanner/turnDuration");
+const { pendingQuestionFor } = await import("@/lib/scanner/questions");
+const { AgentRegistry } = await import("@/lib/agent/registry");
+const { reconcileMigrationInventory } = await import("@/lib/accounts/migration/coordinator");
 
 function writeSession(filename: string, cwd: string): string {
   const pathname = path.join(sessions, filename);
@@ -98,7 +107,7 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
   const originalClose = fs.closeSync;
   const originalRead = fs.readSync;
   const tracked = new Set<number>();
-  let tailReads = 0;
+  let transcriptReads = 0;
   try {
     process.env.LLV_STATE_DIR = testStateDir;
     resetFilesRouteCacheForTests();
@@ -120,7 +129,7 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
       return fd;
     }) as typeof fs.openSync;
     fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
-      if (tracked.has(fd) && typeof position === "number" && position > 0) tailReads += 1;
+      if (tracked.has(fd)) transcriptReads += 1;
       return originalRead(fd, buffer, offset, length, position);
     }) as typeof fs.readSync;
     fs.closeSync = ((fd: number) => {
@@ -128,10 +137,42 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
       return originalClose(fd);
     }) as typeof fs.closeSync;
 
-    const restarted = await currentFileScan({ fresh: true });
+    const restarted = await cachedFileScan(undefined, undefined, 0);
+    const persisted = restarted.snapshot.files.find((entry) => entry.path === transcript);
+    expect(persisted).toBeDefined();
+    const mtimeMs = persisted!.mtime * 1000;
+    const caches = cacheStore.__llvCaches ?? {};
+    expect(caches["turn-evidence-v1"]?.get(`authoritative:${transcript}`)).toMatchObject({
+      size: persisted!.size,
+      mtimeMs,
+      codex: true,
+      authoritative: true,
+      turn: { state: "terminal", source: "lifecycle" },
+      composerReleased: false,
+    });
+    expect(caches.model?.get(transcript)).toEqual([
+      persisted!.size,
+      mtimeMs,
+      { display: persisted!.model, launch: persisted!.launchModel ?? null },
+    ]);
+    if (Object.hasOwn(persisted!, "effort")) {
+      expect(caches.effort?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.effort ?? null]);
+    }
+    if (Object.hasOwn(persisted!, "plan")) expect(caches["plan-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.plan]);
+    if (Object.hasOwn(persisted!, "goal")) expect(caches["goal-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.goal]);
+    if (Object.hasOwn(persisted!, "ctx")) expect(caches["ctx-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.ctx]);
+    if (Object.hasOwn(persisted!, "lastTurn")) {
+      expect(caches["last-turn-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.lastTurn]);
+    }
 
-    expect(restarted.snapshot.files.find((entry) => entry.path === transcript)).toBeDefined();
-    expect(tailReads).toBe(0);
+    activityVerdict(persisted!.root, transcript, persisted!.mtime, persisted!.size);
+    entryModels(persisted!);
+    entryEffort(persisted!);
+    planFor(persisted!);
+    goalFor(persisted!);
+    ctxFor(persisted!);
+    lastTurnFor(persisted!);
+    expect(transcriptReads).toBe(0);
   } finally {
     fs.openSync = originalOpen;
     fs.closeSync = originalClose;
@@ -142,6 +183,247 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
     fs.rmSync(testStateDir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("persisted Claude question state hydrates without transcript reads and stays retryable", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "durable-claude-questions-state");
+  const projectDir = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo-claude-question-hydration");
+  const pendingPath = path.join(projectDir, "pending-question.jsonl");
+  const quietPath = path.join(projectDir, "quiet-question.jsonl");
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const tracked = new Map<number, string>();
+  let transcriptReads = 0;
+  let failPath: string | null = null;
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(pendingPath, [
+      JSON.stringify({ type: "user", timestamp: "2026-07-16T12:00:00.000Z", cwd: "/repo", message: { role: "user", content: "Choose" } }),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-07-16T12:00:01.000Z",
+        message: {
+          model: "claude-sonnet-4-20250514",
+          content: [{
+            type: "tool_use",
+            id: "toolu_persisted_question",
+            name: "AskUserQuestion",
+            input: {
+              questions: [{
+                header: "Choice",
+                question: "Which path?",
+                options: [
+                  { label: "Safe (Recommended)", description: "Keep the durable state." },
+                  { label: "Fast", description: "Prefer speed." },
+                ],
+              }],
+            },
+          }],
+        },
+      }),
+      "",
+    ].join("\n"));
+    fs.writeFileSync(quietPath, [
+      JSON.stringify({ type: "user", timestamp: "2026-07-16T12:00:00.000Z", cwd: "/repo", message: { role: "user", content: "Done" } }),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-07-16T12:00:01.000Z",
+        message: { model: "claude-sonnet-4-20250514", stop_reason: "end_turn", content: [{ type: "text", text: "Complete" }] },
+      }),
+      "",
+    ].join("\n"));
+    resetFilesRouteCacheForTests();
+    const initial = await currentFileScan({ fresh: true });
+    const pendingEntry = initial.snapshot.files.find((entry) => entry.path === pendingPath);
+    const quietEntry = initial.snapshot.files.find((entry) => entry.path === quietPath);
+    expect(pendingEntry).toBeDefined();
+    expect(quietEntry).toBeDefined();
+    const snapshotPath = path.join(testStateDir, "files-scan-snapshot.json");
+    const persisted = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as {
+      version: number;
+      snapshot: { files: typeof initial.snapshot.files };
+    };
+    const persistedPending = persisted.snapshot.files.find((entry) => entry.path === pendingPath)!;
+    Object.assign(persistedPending, {
+      proc: "running",
+      pid: process.pid,
+      pendingQuestion: {
+        kind: "question",
+        toolUseId: "toolu_persisted_question",
+        transcriptPath: pendingPath,
+        askedAt: "2026-07-16T12:00:01.000Z",
+        pid: process.pid,
+        paneTarget: "%7",
+        questions: [{
+          header: "Choice",
+          question: "Which path?",
+          multiSelect: false,
+          options: [
+            { label: "Safe", description: "Keep the durable state.", recommended: true },
+            { label: "Fast", description: "Prefer speed.", recommended: false },
+          ],
+        }],
+      },
+    });
+    fs.writeFileSync(snapshotPath, JSON.stringify(persisted) + "\n");
+
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      const resolved = path.resolve(String(filename));
+      if (resolved === pendingPath || resolved === quietPath) tracked.set(fd, resolved);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      const pathname = tracked.get(fd);
+      if (pathname) {
+        transcriptReads += 1;
+        if (pathname === failPath) {
+          const error = new Error("persisted Claude question EIO") as NodeJS.ErrnoException;
+          error.code = "EIO";
+          throw error;
+        }
+      }
+      return originalRead(fd, buffer, offset, length, position);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    const restarted = await cachedFileScan(undefined, undefined, 0);
+    const restartedPending = restarted.snapshot.files.find((entry) => entry.path === pendingPath)!;
+    const restartedQuiet = restarted.snapshot.files.find((entry) => entry.path === quietPath)!;
+    expect(pendingQuestionFor(restartedPending)).toMatchObject({
+      kind: "question",
+      toolUseId: "toolu_persisted_question",
+      pid: process.pid,
+      paneTarget: null,
+      questions: [{ question: "Which path?", options: [{ label: "Safe", recommended: true }, { label: "Fast", recommended: false }] }],
+    });
+    expect(pendingQuestionFor(restartedQuiet)).toBeNull();
+    const warm = transcriptReads;
+
+    fs.appendFileSync(pendingPath, "\n");
+    const changedStat = fs.statSync(pendingPath);
+    const changedPending = { ...restartedPending, size: changedStat.size, mtime: changedStat.mtimeMs / 1000 };
+    failPath = pendingPath;
+    expect(pendingQuestionFor(changedPending)).toBeNull();
+    const failed = transcriptReads;
+    failPath = null;
+    expect(pendingQuestionFor(changedPending)).toMatchObject({ toolUseId: "toolu_persisted_question" });
+
+    expect({ warm, failed, recovered: transcriptReads }).toEqual({ warm: 0, failed: 1, recovered: 2 });
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("a persisted Claude result hydrates authoritative turn evidence without transcript reads", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "durable-claude-result-state");
+  const projectDir = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo-claude-result-hydration");
+  const resultPath = path.join(projectDir, "authoritative-result.jsonl");
+  const assistantPath = path.join(projectDir, "assistant-only.jsonl");
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const tracked = new Map<number, string>();
+  let transcriptReads = 0;
+  let failPath: string | null = null;
+  const assistant = JSON.stringify({
+    type: "assistant",
+    timestamp: "2026-07-16T12:00:01.000Z",
+    message: { model: "claude-sonnet-4-20250514", stop_reason: "end_turn", content: [{ type: "text", text: "Complete" }] },
+  });
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(resultPath, [
+      JSON.stringify({ type: "user", timestamp: "2026-07-16T12:00:00.000Z", cwd: "/repo", message: { role: "user", content: "Done" } }),
+      assistant,
+      JSON.stringify({ type: "result", timestamp: "2026-07-16T12:00:02.000Z", subtype: "success", result: "Complete" }),
+      "",
+    ].join("\n"));
+    fs.writeFileSync(assistantPath, [
+      JSON.stringify({ type: "user", timestamp: "2026-07-16T12:00:00.000Z", cwd: "/repo", message: { role: "user", content: "Done" } }),
+      assistant,
+      "",
+    ].join("\n"));
+    resetFilesRouteCacheForTests();
+    const initial = await currentFileScan({ fresh: true });
+    expect(initial.snapshot.files.find((entry) => entry.path === resultPath)?.activityReason).toBe("jsonl_turn_completed");
+    expect(initial.snapshot.files.find((entry) => entry.path === assistantPath)?.activityReason).toBe("jsonl_turn_completed");
+
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      const resolved = path.resolve(String(filename));
+      if (resolved === resultPath || resolved === assistantPath) tracked.set(fd, resolved);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      const pathname = tracked.get(fd);
+      if (pathname) {
+        transcriptReads += 1;
+        if (pathname === failPath) {
+          const error = new Error("persisted Claude result EIO") as NodeJS.ErrnoException;
+          error.code = "EIO";
+          throw error;
+        }
+      }
+      return originalRead(fd, buffer, offset, length, position);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    const restarted = await cachedFileScan(undefined, undefined, 0);
+    const restartedResult = restarted.snapshot.files.find((entry) => entry.path === resultPath)!;
+    const restartedAssistant = restarted.snapshot.files.find((entry) => entry.path === assistantPath)!;
+    expect(transcriptTurnResult(resultPath, restartedResult.size, restartedResult.mtime * 1000, false)).toMatchObject({
+      complete: true,
+      turn: { state: "terminal", source: "lifecycle" },
+    });
+    expect(transcriptTurnResult(assistantPath, restartedAssistant.size, restartedAssistant.mtime * 1000, false)).toMatchObject({
+      complete: true,
+      turn: { state: "busy", source: "assistant" },
+    });
+    expect(transcriptReads).toBe(0);
+
+    fs.appendFileSync(resultPath, "\n");
+    const changed = fs.statSync(resultPath);
+    failPath = resultPath;
+    expect(transcriptTurnResult(resultPath, changed.size, changed.mtimeMs, false).complete).toBe(false);
+    failPath = null;
+    expect(transcriptTurnResult(resultPath, changed.size, changed.mtimeMs, false)).toMatchObject({
+      complete: true,
+      turn: { state: "terminal", source: "lifecycle" },
+    });
+    expect(transcriptReads).toBe(2);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+  }
+}, 30_000);
 
 test("a same-size rewrite after restart invalidates persisted tail derivations", async () => {
   const previousTestStateDir = process.env.LLV_STATE_DIR;
@@ -175,37 +457,44 @@ test("a same-size rewrite after restart invalidates persisted tail derivations",
   }
 }, 20_000);
 
-test("one file generation reads each transcript tail once beyond the tail-cache cap", async () => {
+test("an incomplete tail generation stays unpersisted and rereads the same identity after restart", async () => {
   const previousTestStateDir = process.env.LLV_STATE_DIR;
-  const testStateDir = path.join(sandbox, "single-tail-read-state");
-  const fixtureDir = path.join(sessions, "single-tail-read");
+  const testStateDir = path.join(sandbox, "incomplete-tail-restart-state");
+  const transcript = path.join(sessions, "incomplete-tail-restart.jsonl");
   const originalOpen = fs.openSync;
   const originalClose = fs.closeSync;
   const originalRead = fs.readSync;
   const tracked = new Set<number>();
+  let failTail = true;
   let tailReads = 0;
   try {
     process.env.LLV_STATE_DIR = testStateDir;
-    fs.mkdirSync(fixtureDir, { recursive: true });
-    for (let index = 0; index < 65; index += 1) {
-      fs.writeFileSync(path.join(fixtureDir, `rollout-${String(index).padStart(3, "0")}.jsonl`), [
-        JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/tail-cache" } }),
-        "x".repeat(140_000),
-        JSON.stringify({ type: "turn_context", payload: { model: "gpt-5", effort: "high" } }),
-        JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }),
-        "",
-      ].join("\n"));
-    }
+    fs.writeFileSync(transcript, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/incomplete-tail", model: "gpt-5.6-sol" } }),
+      "x".repeat(150_000),
+      JSON.stringify({ type: "event_msg", payload: { type: "task_started" } }),
+      "",
+    ].join("\n"));
+    fs.utimesSync(transcript, 1_700_000_000, 1_700_000_000);
+    const stat = fs.statSync(transcript);
+    const tailPosition = Math.max(0, stat.size - 131_072);
     const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
-    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.delete(transcript);
     resetFilesRouteCacheForTests();
     fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
       const fd = originalOpen(filename, flags, mode);
-      if (typeof filename === "string" && filename.startsWith(fixtureDir + path.sep)) tracked.add(fd);
+      if (filename === transcript) tracked.add(fd);
       return fd;
     }) as typeof fs.openSync;
     fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
-      if (tracked.has(fd) && typeof position === "number" && position > 0) tailReads += 1;
+      if (tracked.has(fd) && position === tailPosition) {
+        tailReads += 1;
+        if (failTail) {
+          const error = new Error("injected scanner tail EIO") as NodeJS.ErrnoException;
+          error.code = "EIO";
+          throw error;
+        }
+      }
       return originalRead(fd, buffer, offset, length, position);
     }) as typeof fs.readSync;
     fs.closeSync = ((fd: number) => {
@@ -213,22 +502,280 @@ test("one file generation reads each transcript tail once beyond the tail-cache 
       return originalClose(fd);
     }) as typeof fs.closeSync;
 
-    const scan = await currentFileScan({ fresh: true });
+    await expect(currentFileScan({ fresh: true })).rejects.toThrow("filesystem scan incomplete");
+    expect(fs.existsSync(path.join(testStateDir, "files-scan-snapshot.json"))).toBe(false);
 
-    expect(scan.snapshot.files.filter((entry) => entry.path.startsWith(fixtureDir + path.sep))).toHaveLength(65);
-    expect(tailReads).toBe(65);
+    failTail = false;
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.delete(transcript);
+    resetFilesRouteCacheForTests();
+    const restarted = await currentFileScan({ fresh: true });
+    const recovered = restarted.snapshot.files.find((entry) => entry.path === transcript);
+
+    expect(tailReads).toBeGreaterThanOrEqual(2);
+    expect(recovered).toMatchObject({
+      activity: "stalled",
+      activityReason: "jsonl_turn_stalled",
+      derivationComplete: true,
+    });
   } finally {
     fs.openSync = originalOpen;
     fs.closeSync = originalClose;
     fs.readSync = originalRead;
-    fs.rmSync(fixtureDir, { recursive: true, force: true });
+    fs.rmSync(transcript, { force: true });
     process.env.LLV_STATE_DIR = previousTestStateDir;
     resetFilesRouteCacheForTests();
     fs.rmSync(testStateDir, { recursive: true, force: true });
     const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.delete(transcript);
+  }
+}, 20_000);
+
+test("a head-model EIO preserves the last complete snapshot until same-identity recovery", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "incomplete-head-model-state");
+  const transcript = path.join(sessions, "incomplete-head-model.jsonl");
+  const nullTranscript = path.join(sessions, "complete-null-model.jsonl");
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const tracked = new Set<number>();
+  let failExtension = false;
+  let extensionReads = 0;
+  const contents = (model: string) => [
+    JSON.stringify({ type: "response_item", payload: { type: "message", text: "x".repeat(140_000) } }),
+    JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/head-model", model } }),
+    "x".repeat(150_000),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }),
+    "",
+  ].join("\n");
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    resetFilesRouteCacheForTests();
+    fs.writeFileSync(transcript, contents("gpt-alpha"));
+    fs.utimesSync(transcript, 1_700_000_000, 1_700_000_000);
+    const initial = await currentFileScan({ fresh: true });
+    expect(initial.snapshot.files.find((entry) => entry.path === transcript)).toMatchObject({
+      launchModel: "gpt-alpha",
+      derivationComplete: true,
+    });
+    const snapshotPath = path.join(testStateDir, "files-scan-snapshot.json");
+    const completeSnapshot = fs.readFileSync(snapshotPath);
+
+    fs.writeFileSync(transcript, contents("gpt-bravo"));
+    fs.utimesSync(transcript, 1_700_000_001, 1_700_000_001);
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.delete(transcript);
+    resetFilesRouteCacheForTests();
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      if (filename === transcript) tracked.add(fd);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      if (tracked.has(fd) && position === 128 * 1024) {
+        extensionReads += 1;
+        if (failExtension) {
+          const error = new Error("injected scanner head extension EIO") as NodeJS.ErrnoException;
+          error.code = "EIO";
+          throw error;
+        }
+      }
+      return originalRead(fd, buffer, offset, length, position);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    failExtension = true;
+    await expect(currentFileScan({ fresh: true })).rejects.toThrow("filesystem scan incomplete");
+    expect(fs.readFileSync(snapshotPath)).toEqual(completeSnapshot);
+
+    failExtension = false;
+    const recovered = await currentFileScan({ fresh: true });
+    expect(extensionReads).toBeGreaterThanOrEqual(2);
+    expect(recovered.snapshot.files.find((entry) => entry.path === transcript)).toMatchObject({
+      launchModel: "gpt-bravo",
+      derivationComplete: true,
+    });
+
+    fs.writeFileSync(nullTranscript, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/no-model" } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }),
+      "",
+    ].join("\n"));
+    const completeNull = await currentFileScan({ fresh: true });
+    expect(completeNull.snapshot.files.find((entry) => entry.path === nullTranscript)).toMatchObject({
+      launchModel: null,
+      derivationComplete: true,
+    });
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    fs.rmSync(transcript, { force: true });
+    fs.rmSync(nullTranscript, { force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) {
+      cache.delete(transcript);
+      cache.delete(nullTranscript);
+    }
+  }
+}, 20_000);
+
+test("65- and 505-file scans share bounded prefixes with migration reconciliation", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const tracked = new Map<number, string>();
+  let fixtureDir = "";
+  let failPath: string | null = null;
+  let failuresRemaining = 0;
+  let prefixReads = 0;
+  let tailReads = 0;
+  let maxReadLength = 0;
+  try {
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      if (typeof filename === "string" && filename.startsWith(fixtureDir + path.sep)) tracked.set(fd, filename);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      const pathname = tracked.get(fd);
+      if (pathname && typeof position === "number") {
+        maxReadLength = Math.max(maxReadLength, length);
+        if (position === 0) {
+          prefixReads += 1;
+        }
+        else if (position === Math.max(0, fs.fstatSync(fd).size - 131_072)) tailReads += 1;
+        if (pathname === failPath && position === 0 && failuresRemaining > 0) {
+          failuresRemaining -= 1;
+          const error = new Error("injected prefix EIO") as NodeJS.ErrnoException;
+          error.code = "EIO";
+          throw error;
+        }
+      }
+      return originalRead(fd, buffer, offset, length, position);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const count of [65, 505]) {
+      const testStateDir = path.join(sandbox, `bounded-prefix-${count}-state`);
+      fixtureDir = path.join(sessions, `bounded-prefix-${count}`);
+      process.env.LLV_STATE_DIR = testStateDir;
+      fs.mkdirSync(fixtureDir, { recursive: true });
+      const sessionBody = (index: number, timestamp = "2026-07-16T12:00:00.000Z") => [
+        JSON.stringify({
+          type: "session_meta",
+          payload: { cwd: `/repo/bounded-prefix-${index % 7}`, timestamp, model: "gpt-5" },
+        }),
+        "x".repeat(140_000),
+        JSON.stringify({ type: "turn_context", payload: { model: "gpt-5", effort: "high" } }),
+        JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }),
+        "",
+      ].join("\n");
+      const paths = Array.from({ length: count }, (_, index) => path.join(
+        fixtureDir,
+        `rollout-${String(index).padStart(3, "0")}.jsonl`,
+      ));
+      for (let index = 0; index < count; index += 1) fs.writeFileSync(paths[index]!, sessionBody(index));
+      for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+      resetFilesRouteCacheForTests();
+      prefixReads = 0;
+      tailReads = 0;
+      maxReadLength = 0;
+
+      const scan = await currentFileScan({ fresh: true });
+      const migrationFiles = scan.snapshot.files.filter((entry) => entry.path.startsWith(fixtureDir + path.sep));
+      const migrationRegistry = new AgentRegistry(path.join(testStateDir, "migration-registry.json"));
+      const scannedPrefixes = prefixReads;
+      await reconcileMigrationInventory(migrationRegistry, migrationFiles);
+      const reconciledPrefixes = prefixReads;
+      await reconcileMigrationInventory(migrationRegistry, migrationFiles);
+
+      expect(migrationFiles).toHaveLength(count);
+      expect({ scannedPrefixes, reconciledPrefixes, warmPrefixes: prefixReads }).toEqual({
+        scannedPrefixes: count,
+        reconciledPrefixes: count,
+        warmPrefixes: count,
+      });
+      expect(tailReads).toBe(count);
+
+      for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+      resetFilesRouteCacheForTests();
+      const restarted = await cachedFileScan(undefined, undefined, 0);
+      const restartedFiles = restarted.snapshot.files.filter((entry) => entry.path.startsWith(fixtureDir + path.sep));
+      const restartedRegistry = new AgentRegistry(path.join(testStateDir, "restarted-migration-registry.json"));
+      await reconcileMigrationInventory(restartedRegistry, restartedFiles);
+      expect({ prefixReads, tailReads }).toEqual({ prefixReads: count, tailReads: count });
+
+      const changedPath = paths[0]!;
+      const changedMtime = fs.statSync(changedPath).mtimeMs + 2_000;
+      fs.writeFileSync(changedPath, sessionBody(0, "2026-07-16T13:00:00.000Z"));
+      fs.utimesSync(changedPath, changedMtime / 1000, changedMtime / 1000);
+      const changed = await currentFileScan({ fresh: true });
+      const changedFiles = changed.snapshot.files.filter((entry) => entry.path.startsWith(fixtureDir + path.sep));
+      await reconcileMigrationInventory(restartedRegistry, changedFiles);
+      expect(prefixReads).toBe(count + 1);
+
+      const retryPath = paths[1]!;
+      const retryMtime = fs.statSync(retryPath).mtimeMs + 2_000;
+      fs.writeFileSync(retryPath, sessionBody(1, "2026-07-16T14:00:00.000Z"));
+      fs.utimesSync(retryPath, retryMtime / 1000, retryMtime / 1000);
+      const expectedRetryMtime = fs.statSync(retryPath).mtimeMs / 1000;
+      failPath = retryPath;
+      failuresRemaining = 1;
+      let recovered: Awaited<ReturnType<typeof currentFileScan>>;
+      let observedFailure: unknown;
+      try {
+        recovered = await currentFileScan({ fresh: true });
+      } catch (error) {
+        observedFailure = error;
+        recovered = await currentFileScan({ fresh: true });
+      }
+      expect(observedFailure).toMatchObject({ message: "filesystem scan incomplete" });
+      if (recovered.snapshot.files.find((entry) => entry.path === retryPath)?.mtime !== expectedRetryMtime) {
+        recovered = await currentFileScan({ fresh: true });
+      }
+      failPath = null;
+      const recoveredFiles = recovered.snapshot.files.filter((entry) => entry.path.startsWith(fixtureDir + path.sep));
+      await reconcileMigrationInventory(restartedRegistry, recoveredFiles);
+      expect(recoveredFiles.find((entry) => entry.path === retryPath)?.mtime).toBe(expectedRetryMtime);
+      expect(prefixReads).toBe(count + 3);
+      expect(maxReadLength).toBeLessThanOrEqual(128 * 1024);
+
+      const rawHeadCache = cacheStore.__llvCaches?.["scanner-head-v1"];
+      let rawHeadBytes = 0;
+      for (const value of rawHeadCache?.values() ?? []) {
+        const bytes = (value as { bytes?: Buffer }).bytes;
+        if (bytes) rawHeadBytes += bytes.length;
+      }
+      expect(rawHeadBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+
+      fs.rmSync(fixtureDir, { recursive: true, force: true });
+      fs.rmSync(testStateDir, { recursive: true, force: true });
+      for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+      resetFilesRouteCacheForTests();
+    }
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    if (fixtureDir) fs.rmSync(fixtureDir, { recursive: true, force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
     for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
   }
-}, 30_000);
+}, 120_000);
 
 test("a transient real scanner failure preserves the completed route snapshot until recovery", async () => {
   resetFilesRouteCacheForTests();

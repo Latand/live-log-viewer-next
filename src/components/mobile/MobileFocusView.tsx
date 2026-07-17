@@ -53,6 +53,10 @@ interface Props {
   manual: FileEntry[];
   files: FileEntry[];
   flows: Flow[];
+  /** Synthetic direct one-shot review groups (issue #325): joined with `flows`
+      for the layout so their decks render, but excluded from every PATCH-backed
+      flow control (renderableFlows and the pipeline focus row read real flows). */
+  reviewGroups?: Flow[];
   pipelines: Pipeline[];
   /** Active project pipelines needing a scheme surface with no placed stage node
       yet (issue #136): docked as placeholder groups in the map layout. */
@@ -60,8 +64,12 @@ interface Props {
   /** Collapsed worker stacks (issue #136): one dot per origin on the full-map
       minimap, so folded workers read as a handful of dots there too. */
   workerStacks?: WorkerStack[];
-  /** This project's board tasks: mini-cards on the map, editable in the sheet. */
+  /** Board-mounted tasks: mini-cards on the map (status-stacked cards are
+      filtered out upstream and live in the compact strip). */
   tasks: BoardTask[];
+  /** The project's FULL task list for the sheet and the count badge, so a
+      status-stacked card stays reachable on the phone. Defaults to `tasks`. */
+  sheetTasks?: BoardTask[];
   /** Ids of not-yet-spawned conversation drafts, focusable like nodes. */
   drafts: string[];
   /** Durable identities the user has crowned (issue #224): their roots lift into
@@ -100,7 +108,7 @@ export function pipelinesToDock(groups: SchemeGroup[]): Pipeline[] {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, pipelines, surfacePipelines = [], workerStacks = [], tasks, drafts, favorites, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -124,7 +132,11 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
     setChipFade((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
   }, []);
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines, surfacePipelines, favorites), [groups, manual, files, flows, drafts, pipelines, surfacePipelines, favorites]);
+  /* Direct review groups join the layout's flow list so their decks place
+     beside the reviewed conversation exactly like managed loops (issue #325);
+     everything action-backed below keeps reading the real `flows`. */
+  const deckFlows = useMemo(() => (reviewGroups.length ? [...flows, ...reviewGroups] : flows), [flows, reviewGroups]);
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, deckFlows, drafts, pipelines, surfacePipelines, favorites), [groups, manual, files, deckFlows, drafts, pipelines, surfacePipelines, favorites]);
   /* Scheme order (depth-first, groups left to right) becomes the strip order,
      so chips and the map agree on what "next" means. */
   const entries = useMemo<Entry[]>(
@@ -364,9 +376,9 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
             onClick={() => setTaskSheet("list")}
           >
             <ListTodo className="h-4 w-4 text-accent" aria-hidden />
-            {tasks.filter((task) => task.status !== "done").length ? (
+            {(sheetTasks ?? tasks).filter((task) => task.status !== "done").length ? (
               <span className="rounded-full bg-accent/10 px-1 text-[10px] font-bold text-accent">
-                {tasks.filter((task) => task.status !== "done").length}
+                {(sheetTasks ?? tasks).filter((task) => task.status !== "done").length}
               </span>
             ) : null}
           </button>
@@ -495,7 +507,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
       ) : null}
 
       {taskSheet ? (
-        <TaskSheet project={project} tasks={tasks} files={files} initialView={taskSheet} onClose={() => setTaskSheet(null)} />
+        <TaskSheet project={project} tasks={sheetTasks ?? tasks} files={files} initialView={taskSheet} onClose={() => setTaskSheet(null)} />
       ) : null}
     </div>
   );

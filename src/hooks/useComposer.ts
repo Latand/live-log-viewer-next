@@ -6,6 +6,7 @@ import { useImageAttachments } from "@/components/imageAttachments";
 import { useAutosizePinned } from "@/hooks/useAutosizePinned";
 import { useDictation } from "@/hooks/useDictation";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 /* The pane / draft / bulk / task-create composers grow to ~6 rows, then scroll
    internally pinned to the newest text. */
@@ -47,6 +48,7 @@ export interface UseComposerOptions {
       a draft pane waiting on the agent it just spawned). Folds into
       `fieldsDisabled` and `canSend` exactly like the in-flight flags. */
   disabled?: boolean;
+  imageCapability?: RuntimeImageCapability | null;
 }
 
 /**
@@ -57,7 +59,7 @@ export interface UseComposerOptions {
  * own delivery (`submit`) and its own surrounding chrome; everything below the
  * text lives in `ComposerBar`.
  */
-export function useComposer({ initialText, persistText, submit, disabled = false }: UseComposerOptions) {
+export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null }: UseComposerOptions) {
   /* A remount mid-typing (column reshuffles, draft handovers) restores the
      draft from storage; the ref always holds the latest text so async
      dictation callbacks append to what the user typed meanwhile instead of
@@ -86,6 +88,7 @@ export function useComposer({ initialText, persistText, submit, disabled = false
   const attachments = useImageAttachments({
     onError: (message) => setStatus({ kind: "err", text: message }),
     onAdded: () => setStatus(null),
+    imageCapability,
   });
 
   const insertSpoken = (spoken: string) => {

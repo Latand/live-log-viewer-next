@@ -103,11 +103,13 @@ test.skipIf(!isolatedHome)("real Codex subscription supports late attach, steeri
     expect(pathIsInside(isolatedHome.codexHome, recovered.identity.path ?? "")).toBeTrue();
     const restartReplay = recovered.attach(releasedCursor - 1)[Symbol.asyncIterator]();
     expect((await restartReplay.next()).value).toEqual({ kind: "session-status", status: "unhosted", seq: releasedCursor });
-    const recoveredCursor = (await recovered.health()).eventCursor;
-    const reconciledIdle = await waitFor(restartReplay, (event) => event.seq === recoveredCursor);
-    expect(reconciledIdle).toEqual({ kind: "session-status", status: "idle", seq: recoveredCursor });
-    expect(recoveredCursor).toBeGreaterThan(releasedCursor);
-    const recoveryEvents = recovered.attach(recoveredCursor)[Symbol.asyncIterator]();
+    expect((await restartReplay.next()).value).toEqual({
+      kind: "session-status",
+      status: "idle",
+      activeFlags: ["structured-image-v1"],
+      seq: releasedCursor + 1,
+    });
+    const recoveryEvents = recovered.attach(releasedCursor + 1)[Symbol.asyncIterator]();
     const recall = await recovered.send({
       id: `issue-149-recall-${crypto.randomUUID()}`,
       text: "Reply with only the marker I asked you to remember.",

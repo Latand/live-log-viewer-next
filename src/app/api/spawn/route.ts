@@ -2,16 +2,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import { resolveHealthySpawnAccount } from "@/lib/accounts/manager";
+import { accountManager, resolveHealthySpawnAccount } from "@/lib/accounts/manager";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
-import { modelFromBody } from "@/lib/agent/models";
+import { codexModelSupportsImages, modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
@@ -25,8 +25,11 @@ import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineag
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
+import { publishFilesRevision } from "@/lib/runtime/filesRevision";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
-import { spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
+import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
+import { assertStructuredTextEnvelope, type StructuredImageRef } from "@/lib/runtime/structuredContent";
+import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
@@ -47,17 +50,27 @@ const SUGGEST_MAX = 10;
 interface SpawnRouteDependencies {
   registry: typeof agentRegistry;
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
+  resolveSpawnAccount: typeof accountManager.resolveSpawn;
   runtimeHostClient: typeof runtimeHostClient;
+  publishFilesRevision?: typeof publishFilesRevision;
   spawnStructuredConversation: typeof spawnStructuredConversation;
   assertStructuredRuntime: typeof assertDarwinStructuredRuntime;
+  defer(work: () => Promise<void>): void;
+  storeImages(images: readonly RuntimeImageUpload[]): StructuredImageRef[];
 }
+
+class RuntimeImageStorageError extends Error {}
 
 const productionSpawnRouteDependencies: SpawnRouteDependencies = {
   registry: agentRegistry,
   resolveHealthySpawnAccount,
+  resolveSpawnAccount: (engine, accountId) => accountManager.resolveSpawn(engine, accountId),
   runtimeHostClient,
+  publishFilesRevision,
   spawnStructuredConversation,
   assertStructuredRuntime: assertDarwinStructuredRuntime,
+  defer: (work) => after(work),
+  storeImages: (images) => runtimeImageStore().putMany(images),
 };
 
 interface SuggestResponse {
@@ -66,6 +79,11 @@ interface SuggestResponse {
   cwd: string | null;
   /** Whether the recorded source directory currently exists. */
   cwdExists: boolean;
+  spawnTransport: "tmux" | "structured";
+  imageInput: {
+    claude: ReturnType<typeof runtimeImageCapability>;
+    codex: ReturnType<typeof runtimeImageCapability>;
+  };
 }
 
 function addDir(dirs: string[], cwd: string | null, project: string): void {
@@ -98,7 +116,17 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
     addDir(dirs, cwd, project);
   }
   if (!dirs.length) dirs.push(os.homedir());
-  return NextResponse.json({ dirs, cwd: srcCwd, cwdExists });
+  const transport = spawnTransport();
+  return NextResponse.json({
+    dirs,
+    cwd: srcCwd,
+    cwdExists,
+    spawnTransport: transport,
+    imageInput: {
+      claude: runtimeImageCapability("claude", transport === "structured"),
+      codex: runtimeImageCapability("codex", transport === "structured" && codexModelSupportsImages(null)),
+    },
+  });
 }
 
 async function postSpawn(
@@ -162,8 +190,21 @@ async function postSpawn(
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 503 });
     }
-    const gap = structuredSpawnGap({ engine, hasImages: images.length > 0, fast: reasoning.fast });
+    const gap = structuredSpawnGap({
+      engine,
+      model: selectedModel.model,
+      hasImages: images.length > 0,
+      fast: reasoning.fast,
+    });
     if (gap) return NextResponse.json({ error: gap }, { status: 409 });
+    /* The scaffold-composed prompt rides structured first-message delivery.
+       Enforce its UTF-8 envelope before the durable receipt, blob storage,
+       deferred launch, and 202 response. */
+    try {
+      assertStructuredTextEnvelope(prompt);
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 413 });
+    }
   }
 
   const registry = dependencies.registry();
@@ -195,7 +236,11 @@ async function postSpawn(
   let imagePaths: string[] = [];
   let launchId: string | null = null;
   try {
-    const account = await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
+    const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
+    const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
+    const account = existingAttempt && body.accountId === undefined && existingAttempt.accountId !== null
+      ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
+      : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
     const lineage = resolveSpawnLineage(spawnLineageSelectorForCaller(authenticatedCaller, {
       ...body,
       role: role.value?.role,
@@ -259,16 +304,96 @@ async function postSpawn(
       reviewsConversationId: reviewedConversationId,
       liveChildrenCap: authenticatedCaller?.liveChildrenCap,
       launchProfile: spec.launchProfile,
-      clientAttemptId: body.clientAttemptId ?? null,
+      clientAttemptId,
       requestDigest: digest,
     });
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
+    const deferStructuredSpawn = (
+      receipt: typeof begun.receipt,
+      runtimeClient: NonNullable<ReturnType<typeof dependencies.runtimeHostClient>>,
+      imageRefs: StructuredImageRef[],
+    ): void => {
+      dependencies.defer(async () => {
+        let response: SpawnResponse;
+        try {
+          response = await dependencies.spawnStructuredConversation({
+            engine,
+            receipt,
+            spec,
+            account,
+            prompt,
+            imageRefs,
+            registry,
+            client: runtimeClient,
+          });
+        } catch (error) {
+          console.error("[spawn] structured launch failed", {
+            launchId: receipt.launchId,
+            conversationId: receipt.conversationId,
+            error,
+          });
+          return;
+        }
+        if (parentArtifactPath && response.path) {
+          try {
+            rememberHandoffChild(response.path, parentArtifactPath);
+            persistHandoffLineage();
+          } catch (error) {
+            console.error("[spawn] handoff lineage persistence failed", {
+              launchId: receipt.launchId,
+              conversationId: receipt.conversationId,
+              childArtifactPath: response.path,
+              parentArtifactPath,
+              error,
+            });
+          }
+        }
+        if (response.path && fs.existsSync(response.path)) {
+          try {
+            await dependencies.publishFilesRevision?.(runtimeClient);
+          } catch (error) {
+            console.error("[spawn] transcript materialization refresh failed", {
+              launchId: receipt.launchId,
+              conversationId: receipt.conversationId,
+              artifactPath: response.path,
+              error,
+            });
+          }
+        }
+      });
+    };
     if (begun.kind === "replay") {
       const structured = begun.receipt.transport === "structured"
         || (begun.receipt.transport === null
           && Boolean(begun.receipt.key && registry.snapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost));
-      const response = spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured });
-      if (begun.receipt.state === "failed") return NextResponse.json({ error: "original spawn failed before launch", retrySafe: true }, { status: 409 });
+      let receipt = begun.receipt;
+      let initialMessage: SpawnResponse["initialMessage"] | undefined;
+      const runtimeClient = structured ? dependencies.runtimeHostClient() : null;
+      if (runtimeClient) {
+        try {
+          const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, runtimeClient);
+          receipt = reconciled;
+          initialMessage = reconciled.initialMessage;
+        } catch {
+          /* The durable registry receipt remains available during runtime resynchronization. */
+        }
+        const admission = registry.claimStartingStructuredSpawn(receipt.launchId);
+        receipt = admission.receipt;
+        if (admission.claimed) {
+          let imageRefs;
+          try { imageRefs = dependencies.storeImages(images); }
+          catch (error) {
+            /* No deferred work exists after this rejection. A compare-and-set
+               release lets the next retry claim the lease immediately. */
+            if (admission.receipt.admissionOwner) {
+              registry.releaseStartingStructuredSpawn(receipt.launchId, admission.receipt.admissionOwner);
+            }
+            throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error));
+          }
+          deferStructuredSpawn(receipt, runtimeClient, imageRefs);
+        }
+      }
+      const response = spawnResponseForReceipt(receipt, receipt.artifactPath, { structured, initialMessage });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
     launchId = begun.receipt.launchId;
@@ -284,20 +409,14 @@ async function postSpawn(
     if (transport === "structured") {
       const runtimeClient = dependencies.runtimeHostClient();
       if (!runtimeClient) throw new Error("structured spawn runtime host is unavailable");
-      const response = await dependencies.spawnStructuredConversation({
-        engine,
-        receipt: begun.receipt,
-        spec,
-        account,
-        prompt,
-        registry,
-        client: runtimeClient,
-      });
-      if (parentArtifactPath && response.path) {
-        rememberHandoffChild(response.path, parentArtifactPath);
-        persistHandoffLineage();
-      }
-      return NextResponse.json(response);
+      let imageRefs;
+      try { imageRefs = dependencies.storeImages(images); }
+      catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
+      deferStructuredSpawn(begun.receipt, runtimeClient, imageRefs);
+      return NextResponse.json(
+        spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured: true }),
+        { status: 202 },
+      );
     }
     /* Pasted images land in the inbox and reach the fresh agent as file paths
        appended to its first prompt — the same contract the pane composer uses. */
@@ -388,6 +507,7 @@ async function postSpawn(
     }
     if (error instanceof SpawnParentError) return NextResponse.json({ error: error.message }, { status: error.status });
     if (error instanceof SpawnChildLimitError) return NextResponse.json({ error: error.message }, { status: 429 });
+    if (error instanceof RuntimeImageStorageError) return NextResponse.json({ error: error.message }, { status: 503 });
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
     const accountError = spawnAccountErrorResponse(error);
     if (accountError) return accountError;

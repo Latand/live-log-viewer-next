@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { readHead } from "@/lib/scanner/head";
+
 /**
  * The one home for "where does an agent conversation live on disk":
  * the claude project-slug transform, the transcript path a session with a
@@ -22,8 +24,17 @@ export function claudeTranscriptPath(cwd: string, sessionId: string, projectsRoo
 
 const HEAD_BYTES = 65_536;
 
+export interface TranscriptFileIdentity {
+  size: number;
+  mtimeMs: number;
+}
+
 /** First `bytes` of a file decoded as utf-8, without reading the rest; "" when unreadable. */
-export function readTranscriptHead(pathname: string, bytes = HEAD_BYTES): string {
+export function readTranscriptHead(pathname: string, bytes = HEAD_BYTES, identity?: TranscriptFileIdentity): string {
+  if (identity) {
+    const head = readHead(pathname, identity.size, identity.mtimeMs, { maxBytes: bytes });
+    return head.complete ? head.value?.text ?? "" : "";
+  }
   try {
     const fd = fs.openSync(pathname, "r");
     try {
@@ -47,6 +58,8 @@ export interface HeadCwdOptions {
       directory to cd into, while lineage matching wants the recorded value
       even after the directory is gone. */
   requireDir?: boolean;
+  /** Known scanner identity enables the shared bounded prefix cache. */
+  identity?: TranscriptFileIdentity;
 }
 
 /**
@@ -56,7 +69,7 @@ export interface HeadCwdOptions {
  * are skipped and the scan continues.
  */
 export function headCwd(pathname: string, options: HeadCwdOptions = {}): string | null {
-  const head = readTranscriptHead(pathname, options.bytes ?? HEAD_BYTES);
+  const head = readTranscriptHead(pathname, options.bytes ?? HEAD_BYTES, options.identity);
   if (!head) return null;
   let lines = head.split("\n");
   if (options.maxLines !== undefined) lines = lines.slice(0, options.maxLines);
@@ -77,8 +90,8 @@ export function headCwd(pathname: string, options: HeadCwdOptions = {}): string 
 
 /** Session creation time persisted in the transcript header. Codex stores it
     under session_meta.payload while Claude uses the top-level timestamp. */
-export function headSessionStartedAt(pathname: string): string | null {
-  const head = readTranscriptHead(pathname);
+export function headSessionStartedAt(pathname: string, identity?: TranscriptFileIdentity): string | null {
+  const head = readTranscriptHead(pathname, HEAD_BYTES, identity);
   if (!head) return null;
   for (const line of head.split("\n").slice(0, 10)) {
     if (!line.trim()) continue;

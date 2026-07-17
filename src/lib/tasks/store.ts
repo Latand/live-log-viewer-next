@@ -52,6 +52,8 @@ export function isTaskAssignment(value: unknown): value is TaskAssignment {
   const assignment = value as Partial<TaskAssignment>;
   return (
     (typeof assignment.path === "string" || assignment.path === null) &&
+    (assignment.launchId === undefined || typeof assignment.launchId === "string" || assignment.launchId === null) &&
+    (assignment.clientAttemptId === undefined || typeof assignment.clientAttemptId === "string" || assignment.clientAttemptId === null) &&
     (assignment.conversationId === undefined || typeof assignment.conversationId === "string" || assignment.conversationId === null) &&
     (typeof assignment.panePid === "number" || assignment.panePid === null) &&
     (assignment.panePid === null || (Number.isInteger(assignment.panePid) && assignment.panePid > 0)) &&

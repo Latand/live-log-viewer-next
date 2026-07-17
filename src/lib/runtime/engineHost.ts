@@ -1,8 +1,36 @@
+import {
+  structuredContent,
+  type StructuredImageRef,
+  type StructuredMessageContent,
+} from "./structuredContent";
+
 export interface QueueEntry {
   id: string;
-  text: string;
+  content?: StructuredMessageContent;
+  contentDigest?: string;
+  /** Compatibility input for text-only host callers during journal migration. */
+  text?: string;
+  images?: StructuredImageRef[];
   /** Optional caller fence. A mismatch is rejected before any engine write. */
   expectedTurnId?: string | null;
+}
+
+export interface NormalizedQueueEntry {
+  id: string;
+  content: StructuredMessageContent;
+  contentDigest: string;
+  expectedTurnId?: string | null;
+}
+
+export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
+  const envelope = structuredContent(entry.content?.text ?? entry.text ?? "", entry.content?.images ?? entry.images ?? []);
+  if (entry.contentDigest && entry.contentDigest !== envelope.contentDigest) throw new Error("queue entry content digest mismatch");
+  return {
+    id: entry.id,
+    content: envelope.content,
+    contentDigest: envelope.contentDigest,
+    ...(entry.expectedTurnId !== undefined ? { expectedTurnId: entry.expectedTurnId } : {}),
+  };
 }
 
 export type DeliveryReceipt =

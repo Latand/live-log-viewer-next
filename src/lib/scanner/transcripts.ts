@@ -117,7 +117,7 @@ function projectKey(entry: FileEntry): string | null {
     const slug = claudeSlug(entry.path);
     return slug ? "claude:" + slug : null;
   }
-  const cwd = codexSessionCwd(entry.path);
+  const cwd = entry.cwd ?? codexSessionCwd(entry.path);
   return cwd ? "codex:" + cwd : null;
 }
 

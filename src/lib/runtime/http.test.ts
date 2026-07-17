@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -64,6 +65,66 @@ test("runtime command HTTP handling preserves validation, CSRF, status, and conf
   expect(conflict.status).toBe(409);
 });
 
+test("runtime image admission returns typed statuses before commands or delivery reservations", async () => {
+  const commands: unknown[] = [];
+  const enqueues: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      throw new Error("rejected image reached runtime command");
+    },
+  } as unknown as RuntimeHostClient;
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => client,
+    enqueue: async (input) => {
+      enqueues.push(input);
+      throw new Error("rejected image reached delivery reservation");
+    },
+  };
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  const cases = [
+    { images: [{ base64: "a===", mime: "image/png" }], status: 400 },
+    { images: Array.from({ length: 17 }, () => ({ base64: png, mime: "image/png" })), status: 413 },
+    { images: [{ base64: png, mime: "image/svg+xml" }], status: 415 },
+    { images: [{ base64: Buffer.from("plain").toString("base64"), mime: "image/png" }], status: 415 },
+  ];
+
+  for (const candidate of cases) {
+    const response = await handleRuntimeCommand(request({
+      conversationId: "conv-images",
+      text: "inspect",
+      idempotencyKey: `image-${candidate.status}-${crypto.randomUUID()}`,
+      images: candidate.images,
+    }), "send", dependencies);
+    expect(response.status).toBe(candidate.status);
+  }
+  expect(commands).toEqual([]);
+  expect(enqueues).toEqual([]);
+});
+
+test("runtime image storage failures return 503 without issuing a runtime command", async () => {
+  const commands: unknown[] = [];
+  const client = { command: async (command: unknown) => { commands.push(command); } } as unknown as RuntimeHostClient;
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  const response = await handleRuntimeCommand(request({
+    conversationId: "conv-storage",
+    text: "inspect",
+    idempotencyKey: "image-storage-failure",
+    images: [{ base64: png, mime: "image/png" }],
+  }), "send", {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => client,
+    enqueue: async () => { throw new Error("runtime image storage is unavailable"); },
+  });
+
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual({ error: "runtime image storage is unavailable" });
+  expect(commands).toEqual([]);
+});
+
 test("runtime command routes fail closed while activation is disabled", async () => {
   const response = await handleRuntimeCommand(
     request({ conversationId: "conv-one", text: "continue", idempotencyKey: "send-one" }),
@@ -72,6 +133,41 @@ test("runtime command routes fail closed while activation is disabled", async ()
   );
   expect(response.status).toBe(503);
   expect(await response.json()).toEqual({ error: "runtime events are disabled" });
+});
+
+test("direct runtime send reaches durable admission while the runtime socket synchronizes", async () => {
+  const admissions: unknown[] = [];
+  const response = await handleRuntimeCommand(
+    request({
+      conversationId: "conversation_sync_window",
+      text: "retain this first message",
+      idempotencyKey: "sync-window-send",
+    }),
+    "send",
+    {
+      enabled: () => true,
+      structuredEnabled: () => true,
+      client: () => null,
+      enqueue: async (input) => {
+        admissions.push(input);
+        return {
+          ok: true,
+          structured: true,
+          target: "conversation_sync_window",
+          outcome: "held",
+        };
+      },
+    },
+  );
+
+  expect(response.status).toBe(202);
+  expect(await response.json()).toEqual({ held: true });
+  expect(admissions).toMatchObject([{
+    conversationId: "conversation_sync_window",
+    clientMessageId: "sync-window-send",
+    kind: "send",
+    text: "retain this first message",
+  }]);
 });
 
 test("direct structured commands stop before runtime admission when hosting is disabled", async () => {
@@ -681,7 +777,7 @@ test("runtime retry network replay returns the same replacement operation", asyn
       journal.transitionOperation(operationId, status, details);
     },
   }, () => new FakeEngineHost(ledger)).drain();
-  expect(ledger.writes).toEqual([{
+  expect(ledger.writes).toMatchObject([{
     id: firstBody.operationId,
     text: "deliver once after a lost HTTP response",
     expectedTurnId: null,

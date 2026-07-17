@@ -14,6 +14,7 @@ import {
 } from "./instrumentation";
 import { operatorSpawnCapabilityPath } from "@/lib/agent/operatorCapability";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
+import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { didStructuredHostStartupFail, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
 
 test("account controller delay defaults to immediate startup and retains the explicit escape hatch", () => {
@@ -130,6 +131,100 @@ test("structured-host startup logs the thrown adoption error object", async () =
     await runStructuredHostStartup(async () => undefined, (...args) => { logged.push(args); });
     expect(didStructuredHostStartupFail()).toBe(false);
     expect(logged).toHaveLength(1);
+  } finally {
+    markStructuredHostStartupReady();
+  }
+});
+
+test("structured-host startup self-heals after the runtime socket becomes ready", async () => {
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+  const logged: unknown[][] = [];
+  let attempts = 0;
+
+  try {
+    await runStructuredHostStartup(
+      async () => {
+        attempts += 1;
+        if (attempts === 1) throw new RuntimeHostUnavailableError("runtime host is unavailable");
+      },
+      (...args) => { logged.push(args); },
+      {
+        schedule: (callback, delayMs) => {
+          scheduled.push({ callback, delayMs });
+          return { unref() {} };
+        },
+      },
+    );
+
+    expect(attempts).toBe(1);
+    expect(didStructuredHostStartupFail()).toBe(true);
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]!.delayMs).toBe(100);
+
+    scheduled.shift()!.callback();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(attempts).toBe(2);
+    expect(didStructuredHostStartupFail()).toBe(false);
+    expect(scheduled).toHaveLength(0);
+    expect(logged).toEqual([
+      [
+        "[structured hosts] startup adoption failed; retry scheduled",
+        expect.any(RuntimeHostUnavailableError),
+      ],
+      ["[structured hosts] startup adoption recovered", { attempts: 2 }],
+    ]);
+  } finally {
+    markStructuredHostStartupReady();
+  }
+});
+
+test("structured-host startup uses bounded backoff with one pending retry", async () => {
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+  const logged: unknown[][] = [];
+  let attempts = 0;
+
+  try {
+    await runStructuredHostStartup(
+      async () => {
+        attempts += 1;
+        if (attempts < 5) throw new RuntimeHostUnavailableError("runtime host is unavailable");
+      },
+      (...args) => { logged.push(args); },
+      {
+        initialRetryMs: 25,
+        maxRetryMs: 50,
+        schedule: (callback, delayMs) => {
+          scheduled.push({ callback, delayMs });
+          return { unref() {} };
+        },
+      },
+    );
+
+    expect(scheduled.map(({ delayMs }) => delayMs)).toEqual([25]);
+    for (const expectedDelay of [50, 50, 50]) {
+      scheduled.shift()!.callback();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(scheduled).toHaveLength(1);
+      expect(scheduled[0]!.delayMs).toBe(expectedDelay);
+    }
+
+    scheduled.shift()!.callback();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(attempts).toBe(5);
+    expect(scheduled).toHaveLength(0);
+    expect(didStructuredHostStartupFail()).toBe(false);
+    expect(logged).toEqual([
+      [
+        "[structured hosts] startup adoption failed; retry scheduled",
+        expect.any(RuntimeHostUnavailableError),
+      ],
+      ["[structured hosts] startup adoption recovered", { attempts: 5 }],
+    ]);
   } finally {
     markStructuredHostStartupReady();
   }

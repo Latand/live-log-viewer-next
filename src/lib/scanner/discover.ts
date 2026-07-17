@@ -226,6 +226,8 @@ function resourceScopeFromPaths(raw: RawPath[], baseline?: ResourceScopeSnapshot
       name: path.relative(entry.root, entry.path),
       project: previous?.project ?? "other",
       cwd: previous?.cwd,
+      sessionStartedAt: previous?.sessionStartedAt,
+      nativeParentThreadId: previous?.nativeParentThreadId,
       projectRoot: previous?.projectRoot,
       worktree: previous?.worktree,
       title: previous?.title ?? (filename.startsWith("agent-") ? `Subagent ${filename.slice(6).split(".")[0]}` : `${engine === "codex" ? "Codex" : "Claude"} session`),
@@ -311,7 +313,10 @@ async function entriesFromRaw(
   const includeNativeParents = async (entries: RawEntry[], paths: Set<string>) => {
     await forEachCooperatively(entries, (entry) => {
       if (entry.rootName !== "codex-sessions" || !entry.path.endsWith(".jsonl")) return;
-      const parentThreadId = nativeCodexParentThreadId(entry.path, entry.st.size);
+      const persistedParent = summaryByPath?.get(entry.path)?.nativeParentThreadId;
+      const parentThreadId = persistedParent === undefined
+        ? nativeCodexParentThreadId(entry.path, entry.st.size, entry.st.mtimeMs)
+        : persistedParent;
       const parent = parentThreadId ? rawByCodexThread.get(parentThreadId) : undefined;
       if (parent && !paths.has(parent.path)) {
         paths.add(parent.path);
@@ -341,6 +346,8 @@ async function entriesFromRaw(
       project: projectByPath?.get(entry.path) ?? meta.project,
       worktree: meta.worktree,
       cwd: meta.cwd,
+      sessionStartedAt: meta.sessionStartedAt,
+      nativeParentThreadId: meta.nativeParentThreadId,
       projectRoot: meta.projectRoot,
       title: meta.title,
       engine: meta.engine,

@@ -28,6 +28,7 @@ import { SessionTitle } from "./session/SessionTitle";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { RateLimitBadge } from "./RateLimitBadge";
+import { StructuredSpawnStatus } from "./StructuredSpawnStatus";
 import { WakeupChip, wakeupChipKey } from "./WakeupChip";
 import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge, fmtAge } from "./utils";
 
@@ -101,6 +102,8 @@ interface Props {
   noComposer?: boolean;
   /** Slim context bar pinned under the header (e.g. «Round 2 · ✖ REQUEST_CHANGES»). */
   banner?: React.ReactNode;
+  /** Owner-provided controls that belong beside the pane's native header actions. */
+  headerActions?: React.ReactNode;
   /** Header control that opens this conversation full-window; the same control
       collapses it back when the pane already is the overlay (`expanded`). */
   onToggleExpand?: () => void;
@@ -118,9 +121,11 @@ interface Props {
       Only the board node and the mobile focus pane opt in — reviewer decks,
       pipeline placeholders and other embeds render the pane without it. */
   showFavorite?: boolean;
+  /** Opens a fresh editable draft from a terminal structured launch receipt. */
+  onSpawnRetry?: (file: FileEntry) => void;
 }
 
-export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded, dormant, autoEditToken, showFavorite }: Props) {
+export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, headerActions, onToggleExpand, expanded, dormant, autoEditToken, showFavorite, onSpawnRetry }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const paneRef = useRef<HTMLElement | null>(null);
@@ -134,7 +139,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      reasoning into one compact read-only chip below, so the card carries exactly
      one model·reasoning element in all states. Desktop keeps its own chip +
      effort-bar pair. */
-  const showRuntimeControls = file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex");
+  const showRuntimeControls = !file.spawn && file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex");
   const migState = cardMigrationState(file.migration);
   /* The phone metadata row scrolls horizontally to stay one line (issue #177
      item 4); this tracks whether more is clipped to the right so a fade
@@ -196,7 +201,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
   }, [cardId, expanded]);
   /* Link-arrow drop target; re-registers each poll so the pid stays current. */
   useEffect(() => {
-    if (noComposer || expanded) return;
+    if (file.spawn || noComposer || expanded) return;
     if (paneRef.current) return registerLinkTarget(file, paneRef.current);
   }, [file, noComposer, expanded]);
   return (
@@ -254,7 +259,8 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                 {expanded ? <Minimize2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden /> : <Maximize2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />}
               </button>
             ) : null}
-            <DeleteFileButton file={file} onDeleted={onClose} />
+            {headerActions}
+            {file.spawn ? null : <DeleteFileButton file={file} onDeleted={onClose} />}
             {onClose ? (
               <button
                 className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
@@ -354,7 +360,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                   the branch chip. Shell tasks carry no account, so they skip it;
                   the id is read from the live transcript path so a migrated
                   conversation reflects its current account. */}
-              {file.engine === "shell" ? null : <AccountBadge engine={file.engine} accountId={accountIdFromPath(file.path)} />}
+              {file.engine === "shell" ? null : <AccountBadge engine={file.engine} accountId={file.spawn?.accountId ?? accountIdFromPath(file.path)} />}
               {file.plan ? <PlanChip plan={file.plan} /> : null}
               {file.goal ? <GoalChip goal={file.goal} /> : null}
               {isRoot || isMobile ? null : (
@@ -392,20 +398,26 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             ))}
           </FlipRow>
         ) : null}
-        {/* The "done" seam of a committed migration: a divider naming the
-            account this conversation continued from, above its transcript. */}
-        <MigrationDivider predecessorLabel={file.predecessorLabel} />
-        <LogFeed
-          file={file}
-          showSvc={false}
-          lineFilter=""
-          onStatus={noop}
-          paused={feedPaused}
-          follow
-          setFollow={noop}
-          compact
-        />
-        {noComposer ? null : <TmuxComposer file={file} pollPaused={feedPaused} />}
+        {file.spawn ? (
+          <StructuredSpawnStatus spawn={file.spawn} onRetry={onSpawnRetry ? () => onSpawnRetry(file) : undefined} />
+        ) : (
+          <>
+            {/* The "done" seam of a committed migration names the account this
+                conversation continued from, above its transcript. */}
+            <MigrationDivider predecessorLabel={file.predecessorLabel} />
+            <LogFeed
+              file={file}
+              showSvc={false}
+              lineFilter=""
+              onStatus={noop}
+              paused={feedPaused}
+              follow
+              setFollow={noop}
+              compact
+            />
+            {noComposer ? null : <TmuxComposer file={file} pollPaused={feedPaused} />}
+          </>
+        )}
       </section>
     </div>
   );

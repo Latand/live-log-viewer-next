@@ -8,6 +8,22 @@ import { tickWorkflows } from "@/lib/workflows/engine";
 
 import { RuntimeJournal } from "./journal";
 
+/** Stable read-model evidence that drives client /api/files hydration. */
+export function filesEvidence(entries: Awaited<ReturnType<typeof listFiles>>): string {
+  return createHash("sha256").update(JSON.stringify(entries.map((entry) => ({
+    path: entry.path,
+    mtime: entry.mtime,
+    size: entry.size,
+    activity: entry.activity,
+    activityReason: entry.activityReason ?? null,
+    proc: entry.proc,
+    pid: entry.pid,
+    authoritativeTurn: entry.authoritativeTurn ?? null,
+    pendingQuestion: entry.pendingQuestion?.toolUseId ?? null,
+    waitingInput: entry.waitingInput?.since ?? null,
+  })))).digest("hex");
+}
+
 /** The host owns the legacy safety sweep until structured consumers replace it. */
 export function createLegacyRuntimeScheduler(journal: RuntimeJournal): LegacyRuntimeScheduler {
   let previousEvidence: string | null = null;
@@ -17,14 +33,7 @@ export function createLegacyRuntimeScheduler(journal: RuntimeJournal): LegacyRun
     tickWorkflows,
     tickTaskInbox,
     publishFiles(entries) {
-      const evidence = createHash("sha256").update(JSON.stringify(entries.map((entry) => ({
-        path: entry.path,
-        mtime: entry.mtime,
-        size: entry.size,
-        activity: entry.activity,
-        pendingQuestion: entry.pendingQuestion?.toolUseId ?? null,
-        waitingInput: entry.waitingInput?.since ?? null,
-      })))).digest("hex");
+      const evidence = filesEvidence(entries);
       if (evidence === previousEvidence) return;
       previousEvidence = evidence;
       const filesRevision = journal.snapshot().filesRevision + 1;

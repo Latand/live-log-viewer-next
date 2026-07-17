@@ -14,7 +14,7 @@ fs.mkdirSync(process.env.LLV_CLAUDE_HOME, { recursive: true });
 fs.writeFileSync(path.join(process.env.LLV_CLAUDE_HOME, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "test-token", subscriptionType: "max" } }), { mode: 0o600 });
 
 const { createManagedCodexAccount, setActiveCodexAccount } = await import("@/lib/accounts/codex");
-const { mapAppServerRateLimits, readCodexLimits, readLimits } = await import("./limits");
+const { fetchClaudeLimits, mapAppServerRateLimits, readCodexLimits, readLimits } = await import("./limits");
 
 afterAll(() => {
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
@@ -41,6 +41,37 @@ function resetLimitsCache(): void {
 function claudeUsage(usedPercent = 20): Response {
   return Response.json({ five_hour: { utilization: usedPercent } });
 }
+
+test("Claude usage probes honor a caller-specific timeout", async () => {
+  const realFetch = globalThis.fetch;
+  let observedAbort = false;
+  globalThis.fetch = (async (
+    _url: Parameters<typeof fetch>[0],
+    init?: Parameters<typeof fetch>[1],
+  ) => {
+    const signal = init?.signal;
+    if (!signal) throw new Error("missing timeout signal");
+    await new Promise<void>((resolve) => signal.addEventListener("abort", () => {
+      observedAbort = true;
+      resolve();
+    }, { once: true }));
+    throw new Error("probe aborted");
+  }) as unknown as typeof fetch;
+  const startedAt = performance.now();
+  try {
+    const result = await fetchClaudeLimits(
+      path.join(process.env.LLV_CLAUDE_HOME!, ".credentials.json"),
+      Date.now,
+      20,
+    );
+    expect(result).toMatchObject({ source: "unavailable" });
+    expect(result.reason).toContain("probe aborted");
+    expect(observedAbort).toBeTrue();
+    expect(performance.now() - startedAt).toBeLessThan(500);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
 
 test("switching to an account without events never reuses another account's Codex limits", async () => {
   const legacySession = path.join(process.env.LLV_CODEX_HOME!, "sessions", "2026", "07", "09", "rollout.jsonl");

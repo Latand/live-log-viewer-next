@@ -1,6 +1,6 @@
 "use client";
 
-import { Link2, Loader2, Send, Trash2, X } from "lucide-react";
+import { FoldVertical, Link2, Loader2, Send, Trash2, X } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
@@ -45,6 +45,9 @@ export interface TaskCardHandlers {
   /** Detach one assignment — the undo for a wrong handoff. */
   unassign: (task: BoardTask, path: string) => void;
   center: (rect: SchemeRect) => void;
+  /** Fold the card back into its compact status stack (drops its durable
+      expand pin); the stack strip re-lists it immediately. */
+  collapse?: (task: BoardTask) => void;
 }
 
 function AssignmentChip({
@@ -384,6 +387,17 @@ export const TaskCard = memo(function TaskCard({
         >
           {t("tasks.statusPrefix")}: {t(`tasks.status.${task.status}`)}
         </button>
+        {handlers.collapse ? (
+          <button
+            type="button"
+            className="inline-flex h-7 items-center rounded-full border border-border bg-card px-2 text-[10.5px] font-semibold text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            aria-label={t("taskStacks.collapse")}
+            title={t("taskStacks.collapse")}
+            onClick={() => handlers.collapse!(task)}
+          >
+            <FoldVertical className="h-3 w-3" aria-hidden />
+          </button>
+        ) : null}
         <button
           type="button"
           className={`inline-flex h-7 items-center gap-1 rounded-full border px-2 text-[10.5px] font-semibold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${

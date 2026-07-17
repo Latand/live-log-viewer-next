@@ -1,12 +1,10 @@
-import fs from "node:fs";
-
 import type { FileEntry } from "../types";
-import { tailRecords } from "./activity";
+import { headRecordsResult, tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
 import { readArgv } from "./process";
 
-const effortCache = globalCache<[number, string | null]>("effort");
+const effortCache = globalCache<[number, number, string | null]>("effort");
 
 /** Union of both CLI scales: codex minimal…ultra, claude low…max. */
 const TIERS = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
@@ -53,38 +51,40 @@ function argvEffort(entry: FileEntry): string | null {
  * blocks as a transcript-backed fallback.
  */
 export function entryEffort(entry: FileEntry): string | null {
+  return entryEffortResult(entry).value;
+}
+
+export interface EntryEffortResult {
+  value: string | null;
+  complete: boolean;
+}
+
+export function entryEffortResult(entry: FileEntry): EntryEffortResult {
   if ((entry.root !== "claude-projects" && entry.root !== "codex-sessions") || !entry.path.endsWith(".jsonl")) {
-    return null;
+    return { value: null, complete: true };
   }
   const argv = normalizeEffort(argvEffort(entry));
-  if (entry.root === "claude-projects" && argv) return argv;
+  if (entry.root === "claude-projects" && argv) return { value: argv, complete: true };
+  const mtimeMs = entry.mtime * 1000;
   const cached = effortCache.get(entry.path);
-  if (cached?.[0] === entry.size) return cached[1] ?? argv;
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return { value: cached[2] ?? argv, complete: true };
   let effort: string | null = null;
-  for (const obj of tailRecords(entry.path, entry.size).reverse()) {
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
+  let complete = tail.complete;
+  for (const obj of tail.records.reverse()) {
     effort = normalizeEffort(pickEffort(entry, obj));
     if (effort) break;
   }
   if (!effort) {
-    try {
-      const lines = fs.readFileSync(entry.path, "utf8").split("\n").slice(0, 41);
-      for (const line of lines) {
-        try {
-          const obj = JSON.parse(line);
-          if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-            effort = normalizeEffort(pickEffort(entry, obj));
-            if (effort) break;
-          }
-        } catch {
-          /* skip */
-        }
-      }
-    } catch {
-      /* skip */
+    const head = headRecordsResult(entry.path, entry.size, mtimeMs);
+    complete &&= head.complete;
+    for (const obj of head.records) {
+      effort = normalizeEffort(pickEffort(entry, obj));
+      if (effort) break;
     }
   }
-  effortCache.set(entry.path, [entry.size, effort]);
-  return effort ?? argv;
+  if (complete) effortCache.set(entry.path, [entry.size, mtimeMs, effort]);
+  return { value: effort ?? argv, complete };
 }
 
 /** Codex speed tier from the live process argv. Transcript records currently

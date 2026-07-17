@@ -23,7 +23,7 @@ export interface ParsedFindings {
 type TranscriptEntry = Pick<FileEntry, "path" | "root" | "size" | "mtime">;
 
 export function lastAssistantMessage(entry: TranscriptEntry): { text: string; ts: number } | null {
-  const records = tailRecords(entry.path, entry.size);
+  const records = tailRecords(entry.path, entry.size, entry.mtime * 1000);
   for (const obj of records.reverse()) {
     const ts = Date.parse(String(obj.timestamp ?? "")) || entry.mtime * 1000;
     if (entry.root === "codex-sessions") {

@@ -34,6 +34,7 @@ function harness() {
   let clock = 1_000_000;
   let builderEffort = "medium";
   let paneAlive = true;
+  let conversationActive: boolean | null = null;
   const ports: PipelinePorts = {
     exec: (command, args) => {
       calls.push(`${command} ${args.join(" ")}`);
@@ -58,6 +59,7 @@ function harness() {
       return { launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}`, sessionId: `session-${spawn}`, transcript: `/codex/stage-${spawn}.jsonl`, paneId: `%${spawn}` };
     },
     paneAgentAlive: async () => paneAlive,
+    conversationAgentActive: async () => conversationActive,
     headCwd: () => loadPipelines()[0]?.worktreeDir ?? null,
     lastMessage: (item) => messages.get(item.path) ?? null,
     pathForConversation: (id) => id === "conversation_stage_1" ? "/codex/stage-1.jsonl" : id === "conversation_stage_2" ? "/codex/stage-2.jsonl" : null,
@@ -91,6 +93,7 @@ function harness() {
     finish,
     setBuilderEffort: (effort: string) => { builderEffort = effort; },
     setPaneAlive: (alive: boolean) => { paneAlive = alive; },
+    setConversationActive: (active: boolean | null) => { conversationActive = active; },
   };
 }
 
@@ -410,6 +413,26 @@ test("an inactive transcript with no verdict parks after its worker exits", asyn
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
   expect(loadPipelines()[0]!.stateDetail).toContain("without producing a verdict");
+});
+
+test("an ended structured stage overrides a stale live transcript marker", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  const pipeline = loadPipelines()[0]!;
+  pipeline.runs[0]!.attempts[0]!.paneId = null;
+  savePipelines([pipeline]);
+  h.setConversationActive(false);
+
+  await tickPipelines([{
+    ...entry("/codex/stage-1.jsonl"),
+    activity: "live",
+    activityReason: "jsonl_turn_open",
+  }], h.ports);
+
+  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+  expect(loadPipelines()[0]!.stateDetail).toContain("structured stage ended without producing a verdict");
 });
 
 test("role-less run stages persist the Builder registry runtime", async () => {

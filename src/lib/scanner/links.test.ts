@@ -34,6 +34,7 @@ mock.module("./process", () => ({
 }));
 
 const { linkEntries } = await import("./links");
+const { nativeCodexParentThreadId } = await import("./codexNative");
 const { normalizeHandoffLineageStore } = await import("../handoffLineage");
 
 afterAll(() => {
@@ -150,6 +151,26 @@ describe("linkEntries", () => {
     await linkEntries([child, parent]);
 
     expect(child.parent as string | null).toBe(parent.path);
+  });
+
+  test("a larger native Codex transcript rewrite refreshes its parent identity", () => {
+    const firstParentId = "019f421e-02e1-73e0-9b77-bebde063f10c";
+    const secondParentId = "019f421e-02e1-73e0-9b77-bebde063f10d";
+    const childPath = path.join(SANDBOX, ".codex", "sessions", "rewrite", "rollout-child-rewrite.jsonl");
+    writeJsonl(childPath, [{ type: "session_meta", payload: { parent_thread_id: firstParentId } }]);
+    const first = fs.statSync(childPath);
+    expect(nativeCodexParentThreadId(childPath, first.size, first.mtimeMs)).toBe(firstParentId);
+
+    writeJsonl(childPath, [{
+      type: "session_meta",
+      payload: { parent_thread_id: secondParentId, metadata: "expanded rewrite" },
+    }]);
+    const rewrittenMtime = first.mtimeMs + 2_000;
+    fs.utimesSync(childPath, rewrittenMtime / 1000, rewrittenMtime / 1000);
+    const rewritten = fs.statSync(childPath);
+
+    expect(rewritten.size).toBeGreaterThan(first.size);
+    expect(nativeCodexParentThreadId(childPath, rewritten.size, rewritten.mtimeMs)).toBe(secondParentId);
   });
 
   test("links a native Codex spawn_agent child through nested thread_spawn metadata", async () => {

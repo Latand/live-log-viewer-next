@@ -214,12 +214,15 @@ export class SqliteAgentRegistryStore {
       let value = file[collection];
       const load = () => {
         if (loaded) return;
-        value = {} as typeof value;
+        const storedValue = {} as typeof value;
         for (const row of this.db.query<StoredRow, [string]>(
           "SELECT collection, row_key, value_json, row_order FROM registry_rows WHERE collection = ? ORDER BY row_order",
         ).all(collection)) {
-          (value as Record<string, unknown>)[row.row_key] = JSON.parse(row.value_json);
+          (storedValue as Record<string, unknown>)[row.row_key] = JSON.parse(row.value_json);
         }
+        const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
+        input[collection] = storedValue;
+        value = this.normalize(input)[collection] as typeof value;
         loaded = true;
         loadedCollections.set(collection, value);
         baselineCollections.set(collection, structuredClone(value));

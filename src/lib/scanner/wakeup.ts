@@ -1,16 +1,16 @@
 import { redactSecrets } from "../review";
 import { parseScheduleWakeup } from "../wakeup";
 import type { FileEntry, PendingWakeup } from "../types";
-import { tailRecords } from "./activity";
+import { tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { recordsValue, recordValue, stringValue } from "./json";
 
 /* The board timer chip source (issue #161 §3): the newest successful
    `ScheduleWakeup` in a Claude transcript tail whose fire time is still ahead.
-   Cached per (path, size) like the sibling question/plan probes, so the same
+   Cached per file identity like the sibling question/plan probes, so the same
    tail read is shared. */
 
-const wakeupCache = globalCache<[number, PendingWakeup | null]>("wakeup");
+const wakeupCache = globalCache<[number, number, PendingWakeup | null]>("wakeup-v2");
 /* The chip's reason is redacted and bounded before it leaves the scanner, the
    same funnel every exported transcript field passes through (issue #161). */
 const REASON_MAX = 300;
@@ -64,17 +64,19 @@ function scheduleWakeupCalls(obj: Record<string, unknown>): WakeupCall[] {
  */
 export function pendingWakeupFor(entry: FileEntry, now = Date.now()): PendingWakeup | null {
   if (entry.engine !== "claude" || !entry.path.endsWith(".jsonl")) return null;
+  const mtimeMs = entry.mtime * 1000;
   const cached = wakeupCache.get(entry.path);
-  if (cached?.[0] === entry.size) {
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) {
     // An idle sleeping agent writes nothing until it wakes, so a cached pending
     // wakeup keeps the same file size after it fires. Re-check its fire time
     // against the live clock so an expired wakeup stops surfacing (issue #161
     // review).
-    const value = cached[1];
+    const value = cached[2];
     return value && value.fireAt <= now ? null : value;
   }
 
-  const records = tailRecords(entry.path, entry.size);
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
+  const records = tail.records;
   let pending: PendingWakeup | null = null;
   outer: for (let i = records.length - 1; i >= 0; i -= 1) {
     const calls = scheduleWakeupCalls(records[i]);
@@ -94,6 +96,6 @@ export function pendingWakeupFor(entry: FileEntry, now = Date.now()): PendingWak
       break outer;
     }
   }
-  wakeupCache.set(entry.path, [entry.size, pending]);
+  if (tail.complete) wakeupCache.set(entry.path, [entry.size, mtimeMs, pending]);
   return pending;
 }

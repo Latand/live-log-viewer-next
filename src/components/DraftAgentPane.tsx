@@ -7,12 +7,14 @@ import { Play, X } from "@/components/icons";
 import { Select } from "@/components/ui/Select";
 import { useComposer } from "@/hooks/useComposer";
 import { isEngineEffort } from "@/lib/agent/efforts";
-import { defaultModelFor } from "@/lib/agent/models";
+import { codexModelSupportsImages, defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
+import { requestFilesRefresh } from "@/lib/filesEvents";
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
 import type { RoleDefinition } from "@/lib/roles/types";
 import type { FileEntry } from "@/lib/types";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
+import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 import { ComposerBar } from "./ComposerBar";
 import { DraftLaunchStatus } from "./DraftLaunchStatus";
@@ -36,6 +38,40 @@ import { cleanTitle, engineTintOf } from "./utils";
 import { draftWorkingDirectory } from "./projectModel";
 
 type Engine = "claude" | "codex";
+const STRUCTURED_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+type SpawnImageNegotiation = {
+  spawnTransport: "tmux" | "structured";
+  imageInput: Record<Engine, RuntimeImageCapability>;
+};
+type SpawnImageNegotiationState =
+  | { status: "loading"; requestKey: string }
+  | { status: "ready"; requestKey: string; value: SpawnImageNegotiation }
+  | { status: "error"; requestKey: string };
+
+function runtimeImageCapabilityValue(value: unknown): RuntimeImageCapability | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.supported !== "boolean") return null;
+  if (candidate.reason !== null && typeof candidate.reason !== "string") return null;
+  if (!Array.isArray(candidate.formats) || candidate.formats.length === 0
+    || candidate.formats.some((format) => typeof format !== "string" || !STRUCTURED_IMAGE_MIMES.has(format))) return null;
+  if (!Number.isSafeInteger(candidate.maxImages) || Number(candidate.maxImages) <= 0
+    || !Number.isSafeInteger(candidate.maxRawBytesPerImage) || Number(candidate.maxRawBytesPerImage) <= 0
+    || !Number.isSafeInteger(candidate.maxEncodedBytesPerRequest) || Number(candidate.maxEncodedBytesPerRequest) <= 0) return null;
+  return candidate as unknown as RuntimeImageCapability;
+}
+
+function spawnImageNegotiationValue(value: unknown): SpawnImageNegotiation | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.spawnTransport !== "tmux" && candidate.spawnTransport !== "structured") return null;
+  if (!candidate.imageInput || typeof candidate.imageInput !== "object" || Array.isArray(candidate.imageInput)) return null;
+  const imageInput = candidate.imageInput as Record<string, unknown>;
+  const claude = runtimeImageCapabilityValue(imageInput.claude);
+  const codex = runtimeImageCapabilityValue(imageInput.codex);
+  if (!claude || !codex) return null;
+  return { spawnTransport: candidate.spawnTransport, imageInput: { claude, codex } };
+}
 
 const ENGINES: { key: Engine; label: string }[] = [
   { key: "claude", label: "Claude" },
@@ -378,6 +414,15 @@ export function DraftAgentPane({
   const [deployConfirm, setDeployConfirmState] = useState(() => readField(draftId, "confirm"));
   const [accounts, setAccounts] = useState<{ id: string; label: string }[]>([]);
   const [dirs, setDirs] = useState<string[]>([]);
+  const spawnImageNegotiationKey = `${project}\n${src ?? ""}\n${engine}`;
+  const [storedSpawnImageNegotiation, setSpawnImageNegotiation] = useState<SpawnImageNegotiationState>({
+    status: "loading",
+    requestKey: spawnImageNegotiationKey,
+  });
+  const [spawnNegotiationAttempt, setSpawnNegotiationAttempt] = useState(0);
+  const spawnImageNegotiation: SpawnImageNegotiationState = storedSpawnImageNegotiation.requestKey === spawnImageNegotiationKey
+    ? storedSpawnImageNegotiation
+    : { status: "loading", requestKey: spawnImageNegotiationKey };
   const [attempt, setAttemptState] = useState<SpawnAttempt | null>(() => readAttempt(draftId));
   const [slowBoot, setSlowBoot] = useState(false);
   const attentionRef = useRef<HTMLDivElement>(null);
@@ -410,6 +455,7 @@ export function DraftAgentPane({
     writeField(draftId, "speed", value);
   };
   const setEngine = (value: Engine) => {
+    setSpawnImageNegotiation({ status: "loading", requestKey: `${project}\n${src ?? ""}\n${value}` });
     setEngineState(value);
     writeField(draftId, "engine", value);
     setModel(defaultModelFor(value));
@@ -484,6 +530,13 @@ export function DraftAgentPane({
     setAttemptState(value);
     writeField(draftId, "boot", value ? JSON.stringify(value) : "");
   }, [draftId]);
+  const readySpawnImageNegotiation = spawnImageNegotiation.status === "ready" ? spawnImageNegotiation.value : null;
+  const negotiatedSpawnImageCapability = readySpawnImageNegotiation?.spawnTransport === "structured"
+    ? readySpawnImageNegotiation.imageInput[engine]
+    : null;
+  const structuredSpawnImageCapability = negotiatedSpawnImageCapability && engine === "codex" && !codexModelSupportsImages(model)
+    ? { ...negotiatedSpawnImageCapability, supported: false, reason: t("composer.codexImagesTextOnly") }
+    : negotiatedSpawnImageCapability;
 
   /* While a spawn is in flight the whole draft is frozen (boot set), so the
      composer's fields lock alongside the send/voice flags. */
@@ -492,6 +545,7 @@ export function DraftAgentPane({
     persistText: (value) => writeField(draftId, "text", value),
     submit: (overrideText) => send(overrideText),
     disabled: Boolean(attempt),
+    imageCapability: structuredSpawnImageCapability,
   });
   const { text, setText, setStatus, busy, setBusy, voiceSending, attachments } = composer;
 
@@ -499,8 +553,12 @@ export function DraftAgentPane({
      inherits the source transcript's own cwd over everything else. */
   useEffect(() => {
     let cancelled = false;
+    const requestKey = spawnImageNegotiationKey;
     fetch("/api/spawn?project=" + encodeURIComponent(project) + (src ? "&src=" + encodeURIComponent(src) : ""))
-      .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null; cwdExists?: boolean }>)
+      .then(async (res) => {
+        if (!res.ok) throw new Error("spawn capability request failed");
+        return await res.json() as { dirs?: string[]; cwd?: string | null; cwdExists?: boolean; spawnTransport?: unknown; imageInput?: unknown };
+      })
       .then((json) => {
         if (cancelled) return;
         if (Array.isArray(json.dirs)) setDirs(json.dirs);
@@ -517,12 +575,17 @@ export function DraftAgentPane({
           if (next !== prev) writeField(draftId, "cwd", next);
           return next;
         });
+        const negotiation = spawnImageNegotiationValue(json);
+        if (!negotiation) throw new Error("spawn capability response is invalid");
+        setSpawnImageNegotiation({ status: "ready", requestKey, value: negotiation });
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setSpawnImageNegotiation({ status: "error", requestKey });
+      });
     return () => {
       cancelled = true;
     };
-  }, [project, draftId, src]);
+  }, [project, draftId, src, engine, spawnImageNegotiationKey, spawnNegotiationAttempt]);
 
   useEffect(() => {
     void fetch("/api/accounts").then(async (res) => {
@@ -583,20 +646,21 @@ export function DraftAgentPane({
         json = null;
       }
       const outcome = classifySpawnResponse(res.status, res.ok, json);
+      if (typeof json?.launchId === "string" && typeof json.conversationId === "string") requestFilesRefresh();
       if (outcome.kind === "launched") {
         setAttempt(applySpawnOutcome(candidate, outcome));
       } else if (outcome.kind === "failed-launch") {
         setAttempt(applySpawnFailure(candidate, outcome));
       } else if (outcome.kind === "failed-preflight") {
-        /* The server proved that no pane opened. Restore the exact durable
+        /* The server released worker ownership. Restore the exact durable
            payload so editing and retrying cannot lose an attachment. */
         setAttempt(null);
         setText(candidate.request.prompt);
-        attachments.replace(candidate.request.images.map((image) => ({
+        const restored = attachments.replace(candidate.request.images.map((image) => ({
           ...image,
           preview: `data:${image.mime};base64,${image.base64}`,
         })));
-        setStatus({ kind: "err", text: outcome.message ?? t("draft.launchFailed") });
+        if (restored) setStatus({ kind: "err", text: outcome.message ?? t("draft.launchFailed") });
       }
       /* Ambiguous outcomes keep the persisted request and frozen card. A
          future reload can re-POST the identical idempotency key. */
@@ -618,10 +682,26 @@ export function DraftAgentPane({
   }, [attempt, submitAttempt]);
 
   const selectedRole = roles.find((role) => role.id === roleId) ?? null;
+  const spawnImagesDisabled = spawnImageNegotiation.status !== "ready"
+    || (readySpawnImageNegotiation?.spawnTransport === "structured" && !structuredSpawnImageCapability?.supported);
+  const spawnImagesReason = spawnImageNegotiation.status === "loading"
+    ? t("composer.imageCapabilityLoading")
+    : spawnImageNegotiation.status === "error"
+      ? t("composer.imageCapabilityError")
+      : readySpawnImageNegotiation?.spawnTransport === "structured" && engine === "codex" && !codexModelSupportsImages(model)
+        ? t("composer.codexImagesTextOnly")
+        : readySpawnImageNegotiation?.spawnTransport === "structured" && !structuredSpawnImageCapability?.supported
+        ? t("composer.structuredImagesProtocol")
+        : undefined;
 
   const send = async (overrideText?: string) => {
     const payloadText = overrideText ?? text;
     if (busy || voiceSending || attempt) return;
+    if (attachments.images.length && spawnImagesDisabled) {
+      setStatus({ kind: "err", text: spawnImagesReason ?? t("composer.structuredImagesUnavailable") });
+      return;
+    }
+    if (attachments.images.length && !attachments.validate()) return;
     if (cwdNeedsConfirmation) {
       setStatus({ kind: "err", text: t("draft.confirmRecoveredDir") });
       return;
@@ -650,9 +730,6 @@ export function DraftAgentPane({
       }
     }
     if (!payloadText.trim() && !attachments.images.length) return;
-    /* eslint-disable-next-line react-hooks/purity -- `send` only runs from
-       user events (submit/keydown), never during render; the id and timestamp
-       must be minted at click time. */
     const candidate = createSpawnAttempt(newAttemptId(), Date.now(), {
       engine,
       model,
@@ -826,6 +903,21 @@ export function DraftAgentPane({
         className="flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2"
         aria-label={t("draft.promptAria")}
       >
+        {spawnImageNegotiation.status === "error" ? (
+          <div role="alert" className="flex items-center justify-between gap-2 rounded-control bg-danger-soft px-2 py-1 text-caption text-danger">
+            <span>{t("composer.imageCapabilityError")}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded-control border border-danger/30 bg-card px-2 py-1 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/30"
+              onClick={() => {
+                setSpawnImageNegotiation({ status: "loading", requestKey: spawnImageNegotiationKey });
+                setSpawnNegotiationAttempt((attempt) => attempt + 1);
+              }}
+            >
+              {t("composer.imageCapabilityRetry")}
+            </button>
+          </div>
+        ) : null}
         <ComposerBar
           composer={composer}
           placeholder={t("draft.placeholder")}
@@ -835,6 +927,8 @@ export function DraftAgentPane({
           sendLabelRecording={t("draft.stopAndLaunch")}
           sendIdleClassName="hover:opacity-90"
           sendIdleStyle={{ backgroundColor: tint.color, borderColor: tint.color }}
+          imageDisabled={spawnImagesDisabled}
+          imageDisabledReason={spawnImagesReason}
           leftSlot={
             <span
               className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"

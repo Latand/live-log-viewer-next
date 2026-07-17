@@ -22,6 +22,7 @@ import type { BoardTask } from "@/lib/tasks/types";
 import type { Activity } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
+import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 /* ------------------------------------------------------------------ *
  * Vocabulary (frozen)                                                 *
@@ -237,7 +238,7 @@ export interface RuntimeSession {
   workflowId: string | null;
   cwd: string | null;
   artifactPath: string | null;
-  capabilities: { steer: boolean; structuredAttention: boolean };
+  capabilities: { steer: boolean; structuredAttention: boolean; imageInput?: RuntimeImageCapability };
   activeTurnId: string | null;
   /** Unresolved drift notice, if any. */
   drift?: RuntimeDrift | null;

@@ -320,6 +320,93 @@ describe("task delivery assembly", () => {
     expect(result.task.assignments).toEqual([{ path: "/one", panePid: null, state: "delivered", error: null, at: "new" }]);
   });
 
+  test("launch identity upgrades a legacy path assignment without duplicating it", () => {
+    const assignments = mergeAssignments([
+      { path: "/legacy", panePid: null, state: "spawning", error: null, at: "old" },
+    ], [{
+      launchId: "launch-attributed",
+      path: "/legacy",
+      panePid: 42,
+      state: "delivered",
+      error: null,
+      at: "new",
+    }]);
+
+    expect(assignments).toEqual([{
+      launchId: "launch-attributed",
+      path: "/legacy",
+      panePid: 42,
+      state: "delivered",
+      error: null,
+      at: "new",
+    }]);
+  });
+
+  test("failed launch preserves ownership held by another active assignment", () => {
+    for (const state of ["spawning", "delivered", "handoff"] as const) {
+      const existing = task({
+        status: "assigned",
+        assignments: [
+          { launchId: `owner-${state}`, path: `/${state}`, panePid: null, state, error: null, at: "old" },
+          { launchId: "failed-launch", path: null, panePid: null, state: "spawning", error: null, at: "admitted" },
+        ],
+      });
+      const result = applyAssignmentPatches([existing], existing.id, [{
+        launchId: "failed-launch",
+        path: null,
+        panePid: null,
+        state: "failed",
+        error: "process exited before pane creation",
+        at: "failed",
+      }], "failed");
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error);
+      expect(result.task.status).toBe("assigned");
+      expect(result.task.assignments).toContainEqual(expect.objectContaining({
+        launchId: "failed-launch",
+        state: "failed",
+        error: "process exited before pane creation",
+      }));
+    }
+  });
+
+  test("task launch replay updates one assignment by durable launch identity", () => {
+    const launchId = "9173e9a2-2f14-4a70-818a-bd4052a1ad4a";
+    const conversationId = "conversation_ac6029b9";
+    const pending = mergeAssignments([], [{
+      launchId,
+      clientAttemptId: "task_282_post_launch_write",
+      conversationId,
+      path: null,
+      panePid: null,
+      state: "spawning",
+      error: null,
+      at: "admitted",
+    }]);
+    const attributed = mergeAssignments(pending, [{
+      launchId,
+      clientAttemptId: "task_282_post_launch_write",
+      conversationId,
+      path: "/sessions/recovered.jsonl",
+      panePid: 3627416,
+      state: "delivered",
+      error: null,
+      at: "replayed",
+    }]);
+
+    expect(attributed).toEqual([{
+      launchId,
+      clientAttemptId: "task_282_post_launch_write",
+      conversationId,
+      path: "/sessions/recovered.jsonl",
+      panePid: 3627416,
+      state: "delivered",
+      error: null,
+      at: "replayed",
+    }]);
+  });
+
   test("pins retries to the account owned by the requested engine", () => {
     const assignments = [
       { path: "/claude", panePid: 1, state: "failed" as const, error: "retry", at: "now", engine: "claude" as const, accountId: "claude-work" },

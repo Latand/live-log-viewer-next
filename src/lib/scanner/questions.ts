@@ -1,12 +1,12 @@
 import type { FileEntry, PendingQuestion, PendingQuestionItem, PendingQuestionOption } from "../types";
-import { tailRecords } from "./activity";
+import { tailRecords, tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
 
 type PendingQuestionDraft = Omit<PendingQuestion, "pid" | "paneTarget">;
 
 globalCache<unknown>("questions").clear();
-const questionCache = globalCache<[number, PendingQuestionDraft | null]>("questions-v2");
+const questionCache = globalCache<[number, number, PendingQuestionDraft | null]>("questions-v3");
 
 function timestampOf(obj: Record<string, unknown>): string {
   return stringValue(obj.timestamp) ?? stringValue(obj.created_at) ?? new Date().toISOString();
@@ -78,8 +78,8 @@ function assistantToolUse(obj: Record<string, unknown>): { id: string; name: str
   return null;
 }
 
-export function recordedToolResult(pathname: string, size: number, toolUseId: string): string | null {
-  for (const obj of tailRecords(pathname, size).reverse()) {
+export function recordedToolResult(pathname: string, size: number, mtimeMs: number, toolUseId: string): string | null {
+  for (const obj of tailRecords(pathname, size, mtimeMs).reverse()) {
     const text = toolResultText(obj, toolUseId);
     if (text !== null) return text.trim() || "answer is recorded in the transcript";
   }
@@ -88,13 +88,15 @@ export function recordedToolResult(pathname: string, size: number, toolUseId: st
 
 export function pendingQuestionFor(entry: FileEntry): PendingQuestion | null {
   if (entry.root !== "claude-projects" || !entry.path.endsWith(".jsonl")) return null;
+  const mtimeMs = entry.mtime * 1000;
   const cached = questionCache.get(entry.path);
-  let draft = cached?.[0] === entry.size ? cached[1] : undefined;
+  let draft = cached?.[0] === entry.size && cached[1] === mtimeMs ? cached[2] : undefined;
 
   if (draft === undefined) {
     draft = null;
     const answered = new Set<string>();
-    for (const obj of tailRecords(entry.path, entry.size).reverse()) {
+    const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
+    for (const obj of tail.records.reverse()) {
       const result = toolResultId(obj);
       if (result) {
         answered.add(result);
@@ -125,7 +127,7 @@ export function pendingQuestionFor(entry: FileEntry): PendingQuestion | null {
       };
       break;
     }
-    questionCache.set(entry.path, [entry.size, draft]);
+    if (tail.complete) questionCache.set(entry.path, [entry.size, mtimeMs, draft]);
   }
   if (!draft || entry.proc !== "running" || entry.pid === null) return null;
   return { ...draft, pid: entry.pid, paneTarget: null };

@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { AgentRegistry, MigrationRevisionError, type ConversationObservation } from "@/lib/agent/registry";
 import { boardFor, mutateBoard, setBoardFileForTests } from "@/lib/board/store";
+import { tailRecordsResult } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
 
 import { advanceConversationMigration, createMigrationIntent, drainHeldDeliveries, previewMigration, reconcileMigrationInventory, reconcileMigrations } from "./coordinator";
@@ -23,7 +24,7 @@ function registry(): AgentRegistry {
 function observation(
   pathname: string,
   accountId: string | null,
-  state: "idle" | "busy" | "terminal",
+  state: "idle" | "busy" | "terminal" | "unknown",
   role: "root" | "worker" = "worker",
   project = "repo",
 ): ConversationObservation {
@@ -48,8 +49,107 @@ function observation(
   };
 }
 
-function provider(paths: string[], counts = { create: 0, verify: 0 }, continuityPaths: string[][] = []): SuccessorProviderPort {
+async function withIncompleteTailRead<T>(pathname: string, run: () => Promise<T>): Promise<T> {
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const targetFds = new Set<number>();
+  fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+    const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+    if (path.resolve(String(target)) === pathname) targetFds.add(fd);
+    return fd;
+  }) as typeof fs.openSync;
+  fs.readSync = ((fd: number, ...args: unknown[]) => {
+    if (targetFds.has(fd) && typeof args[3] === "number" && args[3] > 0) {
+      const error = new Error("inventory tail EIO") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    }
+    return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+  }) as typeof fs.readSync;
+  fs.closeSync = ((fd: number) => {
+    targetFds.delete(fd);
+    return originalCloseSync(fd);
+  }) as typeof fs.closeSync;
+  try {
+    return await run();
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
+}
+
+async function withInterruptedTailRead<T>(
+  pathname: string,
+  mode: "eio" | "short",
+  run: () => Promise<T>,
+): Promise<T> {
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const targetFds = new Set<number>();
+  fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+    const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+    if (path.resolve(String(target)) === pathname) targetFds.add(fd);
+    return fd;
+  }) as typeof fs.openSync;
+  fs.readSync = ((fd: number, ...args: unknown[]) => {
+    if (targetFds.has(fd) && typeof args[3] === "number" && args[3] > 0) {
+      if (mode === "short") return 0;
+      const error = new Error("provider fence tail EIO") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    }
+    return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+  }) as typeof fs.readSync;
+  fs.closeSync = ((fd: number) => {
+    targetFds.delete(fd);
+    return originalCloseSync(fd);
+  }) as typeof fs.closeSync;
+  try {
+    return await run();
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
+}
+
+function inventoryEntry(pathname: string, overrides: Partial<FileEntry> = {}): FileEntry {
+  const stat = fs.statSync(pathname);
   return {
+    path: pathname,
+    root: "codex-sessions",
+    name: path.basename(pathname),
+    project: "repo",
+    title: path.basename(pathname),
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    parent: null,
+    mtime: stat.mtimeMs / 1000,
+    size: stat.size,
+    activity: "recent",
+    activityReason: "jsonl_turn_completed",
+    derivationComplete: true,
+    proc: null,
+    pid: null,
+    model: "gpt-5.6-sol",
+    pendingQuestion: null,
+    waitingInput: null,
+    ...overrides,
+  };
+}
+
+function provider(
+  paths: string[],
+  counts = { create: 0, verify: 0 },
+  continuityPaths: string[][] = [],
+  virtualSource = true,
+): SuccessorProviderPort {
+  return {
+    ...(virtualSource ? { virtualSource: true as const } : {}),
     async create(input) {
       counts.create += 1;
       const next = paths.shift() ?? `/successor-${counts.create}.jsonl`;
@@ -109,6 +209,781 @@ describe("durable account migration coordinator", () => {
     await reconcileMigrationInventory(store, files);
 
     expect(snapshotCalls).toBe(1);
+  });
+
+  test("an incomplete inventory tail read preserves a busy migration until same-identity recovery", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "incomplete-inventory-tail.jsonl");
+    fs.writeFileSync(pathname, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+      "x".repeat(150_000),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_complete" } }),
+      "",
+    ].join("\n"));
+    store.reconcileConversations([observation(pathname, "a", "busy")]);
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "incomplete-inventory-tail",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "all",
+    });
+    expect(store.conversationForPath(pathname)?.migration?.phase).toBe("waiting-turn");
+
+    const stat = fs.statSync(pathname);
+    const file: FileEntry = {
+      path: pathname,
+      root: "codex-sessions",
+      name: path.basename(pathname),
+      project: "repo",
+      title: "Incomplete inventory tail",
+      engine: "codex",
+      kind: "session",
+      fmt: "codex",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "recent",
+      proc: null,
+      pid: null,
+      model: "gpt-5.6-sol",
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+    const originalOpenSync = fs.openSync;
+    const originalReadSync = fs.readSync;
+    const originalCloseSync = fs.closeSync;
+    const targetFds = new Set<number>();
+    fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+      if (path.resolve(String(target)) === pathname) targetFds.add(fd);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, ...args: unknown[]) => {
+      if (targetFds.has(fd) && typeof args[3] === "number" && args[3] > 0) {
+        const error = new Error("inventory tail EIO") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      targetFds.delete(fd);
+      return originalCloseSync(fd);
+    }) as typeof fs.closeSync;
+    const counts = { create: 0, verify: 0 };
+    try {
+      await reconcileMigrationInventory(store, [file]);
+      expect(store.conversationForPath(pathname)?.turn.state).toBe("busy");
+      await advanceConversationMigration(store.conversationForPath(pathname)!.id, store, provider(["/after-inventory-recovery.jsonl"], counts));
+      expect(counts.create).toBe(0);
+    } finally {
+      fs.openSync = originalOpenSync;
+      fs.readSync = originalReadSync;
+      fs.closeSync = originalCloseSync;
+    }
+
+    await reconcileMigrationInventory(store, [file]);
+    expect(store.conversationForPath(pathname)?.turn.state).toBe("terminal");
+    await advanceConversationMigration(store.conversationForPath(pathname)!.id, store, provider(["/after-inventory-recovery.jsonl"], counts));
+    expect(counts.create).toBe(1);
+    expect(store.conversationForPath("/after-inventory-recovery.jsonl")?.migration?.phase).toBe("committed");
+  });
+
+  for (const priorState of ["idle", "terminal", "busy", "unknown"] as const) {
+    test(`an incomplete busy tail is non-releasable after a durable ${priorState} observation`, async () => {
+      const store = registry();
+      const pathname = path.join(path.dirname(store.filename), `incomplete-current-busy-${priorState}.jsonl`);
+      fs.writeFileSync(pathname, [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+        "x".repeat(150_000),
+        JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_started" } }),
+        "",
+      ].join("\n"));
+      store.reconcileConversations([observation(pathname, "a", priorState)]);
+      const conversation = store.conversationForPath(pathname)!;
+      const intent = store.upsertMigrationIntent("codex", "b", "manual", `incomplete-current-busy-${priorState}`);
+      store.setConversationMigration(conversation.id, {
+        intentId: intent.id,
+        phase: "waiting-turn",
+        targetId: "b",
+        revision: intent.revision,
+        sourceGenerationId: conversation.generations[0]!.id,
+        operationId: `incomplete-current-busy-${priorState}`,
+        error: null,
+        errorCode: null,
+        providerReceipt: null,
+        updatedAt: "2026-07-16T12:00:00.000Z",
+      });
+      const stat = fs.statSync(pathname);
+      const file: FileEntry = {
+        path: pathname,
+        root: "codex-sessions",
+        name: path.basename(pathname),
+        project: "repo",
+        title: `Current busy after ${priorState}`,
+        engine: "codex",
+        kind: "session",
+        fmt: "codex",
+        parent: null,
+        mtime: stat.mtimeMs / 1000,
+        size: stat.size,
+        activity: "live",
+        proc: "running",
+        pid: process.pid,
+        model: "gpt-5.6-sol",
+        pendingQuestion: null,
+        waitingInput: null,
+      };
+      const counts = { create: 0, verify: 0 };
+
+      await withIncompleteTailRead(pathname, async () => {
+        await reconcileMigrationInventory(store, [file]);
+        expect(store.conversationForPath(pathname)?.turn.state).toBe(
+          priorState === "busy" || priorState === "unknown" ? priorState : "unknown",
+        );
+        await advanceConversationMigration(conversation.id, store, provider([`/should-wait-${priorState}.jsonl`], counts));
+        expect(counts.create).toBe(0);
+        expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
+      });
+
+      await reconcileMigrationInventory(store, [file]);
+      expect(store.conversationForPath(pathname)?.turn.state).toBe("busy");
+      await advanceConversationMigration(conversation.id, store, provider([`/still-waiting-${priorState}.jsonl`], counts));
+      expect(counts.create).toBe(0);
+      expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
+    });
+  }
+
+  test("an incomplete first observation stays unknown until same-identity recovery", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "incomplete-first-observation.jsonl");
+    fs.writeFileSync(pathname, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+      "x".repeat(150_000),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_started" } }),
+      "",
+    ].join("\n"));
+    const stat = fs.statSync(pathname);
+    const file: FileEntry = {
+      path: pathname,
+      root: "codex-sessions",
+      name: path.basename(pathname),
+      project: "repo",
+      title: "Incomplete first observation",
+      engine: "codex",
+      kind: "session",
+      fmt: "codex",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "live",
+      proc: "running",
+      pid: process.pid,
+      model: "gpt-5.6-sol",
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+
+    await withIncompleteTailRead(pathname, async () => {
+      await reconcileMigrationInventory(store, [file]);
+      expect(store.conversationForPath(pathname)?.turn.state).toBe("unknown");
+    });
+    await reconcileMigrationInventory(store, [file]);
+    expect(store.conversationForPath(pathname)?.turn.state).toBe("busy");
+  });
+
+  test("a requested migration revalidates an uncertain turn before creating its successor", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "requested-turn-revalidation.jsonl");
+    const started = JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-07-16T12:00:00.000Z",
+      payload: { type: "task_started" },
+    }).padEnd(256);
+    const completed = JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-07-16T12:01:00.000Z",
+      payload: { type: "task_complete" },
+    }).padEnd(256);
+    expect(started).toHaveLength(completed.length);
+    fs.writeFileSync(pathname, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+      "x".repeat(150_000),
+      started,
+      "",
+    ].join("\n"));
+    store.reconcileConversations([observation(pathname, "a", "idle")]);
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "requested-turn-revalidation",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "all",
+    });
+    const conversation = store.conversationForPath(pathname)!;
+    const operationId = conversation.migration!.operationId;
+    expect(conversation.migration?.phase).toBe("requested");
+    const stat = fs.statSync(pathname);
+    const file: FileEntry = {
+      path: pathname,
+      root: "codex-sessions",
+      name: path.basename(pathname),
+      project: "repo",
+      title: "Requested turn revalidation",
+      engine: "codex",
+      kind: "session",
+      fmt: "codex",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "live",
+      activityReason: "jsonl_turn_open",
+      proc: "running",
+      pid: process.pid,
+      model: "gpt-5.6-sol",
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+    const counts = { create: 0, verify: 0 };
+    const successor = provider(["/requested-turn-successor.jsonl"], counts);
+
+    await withIncompleteTailRead(pathname, async () => {
+      await reconcileMigrationInventory(store, [file]);
+      expect(store.conversation(conversation.id)).toMatchObject({
+        turn: { state: "unknown" },
+        migration: { phase: "requested", operationId },
+      });
+      await advanceConversationMigration(conversation.id, store, successor);
+      expect(counts.create).toBe(0);
+    });
+
+    await reconcileMigrationInventory(store, [file]);
+    expect(store.conversation(conversation.id)).toMatchObject({
+      turn: { state: "busy" },
+      migration: { phase: "requested", operationId },
+    });
+    await advanceConversationMigration(conversation.id, store, successor);
+    expect(counts.create).toBe(0);
+
+    fs.writeFileSync(pathname, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+      "x".repeat(150_000),
+      completed,
+      "",
+    ].join("\n"));
+    fs.utimesSync(pathname, stat.atime, new Date(stat.mtimeMs + 1_000));
+    const completedStat = fs.statSync(pathname);
+    file.size = completedStat.size;
+    file.mtime = completedStat.mtimeMs / 1000;
+    file.activity = "recent";
+    file.activityReason = "jsonl_turn_completed";
+    await reconcileMigrationInventory(store, [file]);
+    await advanceConversationMigration(conversation.id, store, successor);
+    await advanceConversationMigration(conversation.id, store, successor);
+
+    expect(counts.create).toBe(1);
+    expect(store.conversation(conversation.id)).toMatchObject({
+      migration: { phase: "committed", operationId },
+      generations: [{ path: pathname }, { path: "/requested-turn-successor.jsonl" }],
+    });
+  });
+
+  for (const restoredPhase of ["preparing", "successor-starting"] as const) {
+    test(`a restored ${restoredPhase} migration stays fenced through EIO and busy recovery`, async () => {
+      const store = registry();
+      const pathname = path.join(path.dirname(store.filename), `restored-${restoredPhase}-turn.jsonl`);
+      fs.writeFileSync(pathname, [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+        "x".repeat(150_000),
+        JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_started" } }),
+        "",
+      ].join("\n"));
+      store.reconcileConversations([observation(pathname, "a", "terminal")]);
+      store.commitMigrationIntent({
+        engine: "codex",
+        targetId: "b",
+        origin: "manual",
+        requestId: `restored-${restoredPhase}-turn`,
+        expectedRevision: store.engineRouting("codex").revision,
+        scope: "all",
+      });
+      let conversation = store.conversationForPath(pathname)!;
+      conversation = store.transitionConversationMigration(
+        conversation.id,
+        conversation.migration!.revision,
+        ["requested"],
+        { phase: "preparing" },
+      );
+      if (restoredPhase === "successor-starting") {
+        conversation = store.transitionConversationMigration(
+          conversation.id,
+          conversation.migration!.revision,
+          ["preparing"],
+          { phase: "successor-starting" },
+        );
+      }
+      const operationId = conversation.migration!.operationId;
+      const stat = fs.statSync(pathname);
+      const file: FileEntry = {
+        path: pathname,
+        root: "codex-sessions",
+        name: path.basename(pathname),
+        project: "repo",
+        title: `Restored ${restoredPhase} turn`,
+        engine: "codex",
+        kind: "session",
+        fmt: "codex",
+        parent: null,
+        mtime: stat.mtimeMs / 1000,
+        size: stat.size,
+        activity: "live",
+        activityReason: "jsonl_turn_open",
+        derivationComplete: true,
+        proc: "running",
+        pid: process.pid,
+        model: "gpt-5.6-sol",
+        pendingQuestion: null,
+        waitingInput: null,
+      };
+      const counts = { create: 0, verify: 0 };
+      const successor = provider([`/restored-${restoredPhase}-successor.jsonl`], counts);
+
+      await withIncompleteTailRead(pathname, async () => {
+        await reconcileMigrationInventory(store, [file]);
+        await advanceConversationMigration(conversation.id, store, successor);
+        expect(store.conversation(conversation.id)).toMatchObject({
+          turn: { state: "unknown" },
+          migration: { phase: restoredPhase, operationId },
+        });
+        expect(counts.create).toBe(0);
+      });
+
+      await reconcileMigrationInventory(store, [file]);
+      await advanceConversationMigration(conversation.id, store, successor);
+      expect(store.conversation(conversation.id)).toMatchObject({
+        turn: { state: "busy" },
+        migration: { phase: restoredPhase, operationId },
+      });
+      expect(counts.create).toBe(0);
+    });
+  }
+
+  for (const fence of [
+    { name: "newly busy direct advance", phase: "requested", turn: "busy", route: "direct" },
+    { name: "unknown direct retry", phase: "requested", turn: "unknown", route: "retry" },
+    { name: "EIO fast reconciliation", phase: "preparing", turn: "terminal", route: "reconcile", interruption: "eio" },
+    { name: "short-read restored advance", phase: "successor-starting", turn: "terminal", route: "direct", interruption: "short" },
+  ] as const) {
+    test(`provider creation fences a ${fence.name} at the current transcript identity`, async () => {
+      const store = registry();
+      const pathname = path.join(path.dirname(store.filename), `provider-fence-${fence.route}-${fence.phase}-${fence.turn}.jsonl`);
+      const lifecycle = fence.turn === "busy"
+        ? { type: "task_started" }
+        : fence.turn === "terminal" ? { type: "task_complete" } : null;
+      fs.writeFileSync(pathname, [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+        "x".repeat(150_000),
+        ...(lifecycle ? [JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: lifecycle })] : []),
+        "",
+      ].join("\n"));
+      store.reconcileConversations([observation(pathname, "a", "idle")]);
+      store.commitMigrationIntent({
+        engine: "codex",
+        targetId: "b",
+        origin: "manual",
+        requestId: `provider-fence-${fence.route}-${fence.phase}-${fence.turn}`,
+        expectedRevision: store.engineRouting("codex").revision,
+        scope: "all",
+      });
+      let conversation = store.conversationForPath(pathname)!;
+      if (fence.route === "retry") {
+        conversation = store.transitionConversationMigration(
+          conversation.id,
+          conversation.migration!.revision,
+          ["requested"],
+          { phase: "failed-recoverable", error: "retryable provider failure", errorCode: "codex-fork-outcome-unknown" },
+        );
+        conversation = store.retryConversationMigration(conversation.id, conversation.migration!.revision);
+      } else if (fence.phase === "preparing" || fence.phase === "successor-starting") {
+        conversation = store.transitionConversationMigration(
+          conversation.id,
+          conversation.migration!.revision,
+          ["requested"],
+          { phase: "preparing" },
+        );
+        if (fence.phase === "successor-starting") {
+          conversation = store.transitionConversationMigration(
+            conversation.id,
+            conversation.migration!.revision,
+            ["preparing"],
+            { phase: "successor-starting" },
+          );
+        }
+      }
+      const expected = {
+        phase: conversation.migration!.phase,
+        operationId: conversation.migration!.operationId,
+        providerReceipt: conversation.migration!.providerReceipt,
+      };
+      const counts = { create: 0, verify: 0 };
+      const successor = provider([`/provider-fence-${fence.route}-successor.jsonl`], counts);
+      const advance = async () => {
+        if (fence.route === "reconcile") {
+          await reconcileMigrations(successor, { async deliver() { return "delivered"; } }, store);
+        } else {
+          await advanceConversationMigration(conversation.id, store, successor);
+        }
+      };
+
+      if (fence.interruption) await withInterruptedTailRead(pathname, fence.interruption, advance);
+      else await advance();
+
+      expect(counts.create).toBe(0);
+      expect(store.conversation(conversation.id)?.migration).toMatchObject(expected);
+    });
+  }
+
+  for (const restoredPhase of ["requested", "preparing", "successor-starting"] as const) {
+    test(`a missing production transcript fences provider creation in ${restoredPhase}`, async () => {
+      const store = registry();
+      const pathname = path.join(path.dirname(store.filename), `missing-provider-source-${restoredPhase}.jsonl`);
+      store.reconcileConversations([observation(pathname, "a", "terminal")]);
+      store.commitMigrationIntent({
+        engine: "codex",
+        targetId: "b",
+        origin: "manual",
+        requestId: `missing-provider-source-${restoredPhase}`,
+        expectedRevision: store.engineRouting("codex").revision,
+        scope: "all",
+      });
+      let conversation = store.conversationForPath(pathname)!;
+      if (restoredPhase === "preparing" || restoredPhase === "successor-starting") {
+        conversation = store.transitionConversationMigration(
+          conversation.id,
+          conversation.migration!.revision,
+          ["requested"],
+          { phase: "preparing" },
+        );
+      }
+      if (restoredPhase === "successor-starting") {
+        conversation = store.transitionConversationMigration(
+          conversation.id,
+          conversation.migration!.revision,
+          ["preparing"],
+          { phase: "successor-starting" },
+        );
+      }
+      const expectedOperationId = conversation.migration!.operationId;
+      const counts = { create: 0, verify: 0 };
+      const successor = provider([`/missing-provider-source-${restoredPhase}-successor.jsonl`], counts, [], false);
+
+      await advanceConversationMigration(conversation.id, store, successor);
+
+      expect(counts.create).toBe(0);
+      expect(store.conversation(conversation.id)?.migration).toMatchObject({
+        phase: restoredPhase,
+        operationId: expectedOperationId,
+        providerReceipt: null,
+      });
+
+      fs.writeFileSync(pathname, [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+        JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_complete" } }),
+        "",
+      ].join("\n"));
+      await advanceConversationMigration(conversation.id, store, successor);
+      await advanceConversationMigration(conversation.id, store, successor);
+
+      expect(counts.create).toBe(1);
+      expect(store.conversation(conversation.id)?.migration).toMatchObject({
+        phase: "committed",
+        operationId: expectedOperationId,
+      });
+    });
+  }
+
+  test("provider creation rechecks transcript identity after phase transitions", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "provider-fence-transition-race.jsonl");
+    const terminal = JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-07-16T12:00:00.000Z",
+      payload: { type: "task_complete" },
+    }).padEnd(256);
+    const busy = JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-07-16T12:00:00.000Z",
+      payload: { type: "task_started" },
+    }).padEnd(256);
+    expect(busy).toHaveLength(terminal.length);
+    const transcript = (lifecycle: string) => [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+      "x".repeat(150_000),
+      lifecycle,
+      "",
+    ].join("\n");
+    fs.writeFileSync(pathname, transcript(terminal));
+    store.reconcileConversations([observation(pathname, "a", "terminal")]);
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "provider-fence-transition-race",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "all",
+    });
+    const conversation = store.conversationForPath(pathname)!;
+    const expected = {
+      phase: conversation.migration!.phase,
+      operationId: conversation.migration!.operationId,
+      providerReceipt: conversation.migration!.providerReceipt,
+    };
+    const originalStat = fs.statSync(pathname);
+    const originalTransition = store.transitionConversationMigration.bind(store);
+    let identityChanged = false;
+    store.transitionConversationMigration = ((...args: Parameters<AgentRegistry["transitionConversationMigration"]>) => {
+      if (!identityChanged && args[2].includes("requested")) {
+        identityChanged = true;
+        fs.writeFileSync(pathname, transcript(busy));
+        fs.utimesSync(pathname, originalStat.atime, new Date(originalStat.mtimeMs + 1_000));
+        store.reconcileConversations([observation(pathname, "a", "busy")]);
+      }
+      return originalTransition(...args);
+    }) as typeof store.transitionConversationMigration;
+    const counts = { create: 0, verify: 0 };
+
+    await advanceConversationMigration(
+      conversation.id,
+      store,
+      provider(["/provider-fence-transition-race-successor.jsonl"], counts),
+    );
+
+    expect(identityChanged).toBe(true);
+    expect(counts.create).toBe(0);
+    expect(store.conversation(conversation.id)?.migration).toMatchObject(expected);
+  });
+
+  test("65 complete inventory turns stay warm, identity-aware, and caller-owned", async () => {
+    const store = registry();
+    const fixtureDir = path.join(path.dirname(store.filename), "warm-inventory-turns");
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    const files: FileEntry[] = [];
+    const terminal = JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_complete" } }).padEnd(128);
+    const busy = JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_started" } }).padEnd(128);
+    expect(busy).toHaveLength(terminal.length);
+    for (let index = 0; index < 65; index += 1) {
+      const pathname = path.join(fixtureDir, `rollout-${String(index).padStart(3, "0")}.jsonl`);
+      fs.writeFileSync(pathname, [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/warm-inventory" } }),
+        "x".repeat(150_000),
+        terminal,
+        "",
+      ].join("\n"));
+      files.push(inventoryEntry(pathname));
+    }
+    const originalOpenSync = fs.openSync;
+    const originalReadSync = fs.readSync;
+    const originalCloseSync = fs.closeSync;
+    const targetFds = new Set<number>();
+    let tailReads = 0;
+    fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+      if (path.resolve(String(target)).startsWith(fixtureDir + path.sep)) targetFds.add(fd);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, ...args: unknown[]) => {
+      if (targetFds.has(fd) && typeof args[3] === "number" && args[3] > 0) tailReads += 1;
+      return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      targetFds.delete(fd);
+      return originalCloseSync(fd);
+    }) as typeof fs.closeSync;
+    try {
+      await reconcileMigrationInventory(store, files);
+      const cold = tailReads;
+      await reconcileMigrationInventory(store, files);
+      const warm = tailReads;
+      const first = files[0]!;
+      fs.writeFileSync(first.path, [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/warm-inventory" } }),
+        "x".repeat(150_000),
+        busy,
+        "",
+      ].join("\n"));
+      fs.utimesSync(first.path, Date.now() / 1000, first.mtime + 1);
+      Object.assign(first, inventoryEntry(first.path, { activity: "live", activityReason: "jsonl_turn_open" }));
+      await reconcileMigrationInventory(store, files);
+      const last = files.at(-1)!;
+      const callerOwned = tailRecordsResult(last.path, last.size, last.mtime * 1000).records;
+      callerOwned.reverse();
+      const retained = tailRecordsResult(last.path, last.size, last.mtime * 1000).records;
+      expect({ cold, warm, changed: tailReads }).toEqual({ cold: 65, warm: 65, changed: 66 });
+      expect(store.conversationForPath(first.path)?.turn.state).toBe("busy");
+      expect(retained.at(-1)).toMatchObject({ payload: { type: "task_complete" } });
+    } finally {
+      fs.openSync = originalOpenSync;
+      fs.readSync = originalReadSync;
+      fs.closeSync = originalCloseSync;
+    }
+  });
+
+  test("migration metadata shares one bounded prefix across 65 identities and warm cycles", async () => {
+    const store = registry();
+    const fixtureDir = path.join(path.dirname(store.filename), "migration-head-prefixes");
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    const files: FileEntry[] = [];
+    for (let index = 0; index < 65; index += 1) {
+      const pathname = path.join(fixtureDir, `rollout-${String(index).padStart(3, "0")}.jsonl`);
+      fs.writeFileSync(pathname, [
+        JSON.stringify({ type: "session_meta", payload: { cwd: `/repo/prefix-${String(index).padStart(3, "0")}`, timestamp: "2026-07-16T12:00:00.000Z" } }),
+        "x".repeat(150_000),
+        JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:01:00.000Z", payload: { type: "task_complete" } }),
+        "",
+      ].join("\n"));
+      files.push(inventoryEntry(pathname));
+    }
+    const originalOpenSync = fs.openSync;
+    const originalReadSync = fs.readSync;
+    const originalCloseSync = fs.closeSync;
+    const targetFds = new Set<number>();
+    let prefixReads = 0;
+    fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+      if (path.resolve(String(target)).startsWith(fixtureDir + path.sep)) targetFds.add(fd);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, ...args: unknown[]) => {
+      if (targetFds.has(fd) && args[2] === 65_536 && args[3] === 0) prefixReads += 1;
+      return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      targetFds.delete(fd);
+      return originalCloseSync(fd);
+    }) as typeof fs.closeSync;
+    try {
+      await reconcileMigrationInventory(store, files);
+      const cold = prefixReads;
+      await reconcileMigrationInventory(store, files);
+      const warm = prefixReads;
+      const first = files[0]!;
+      fs.utimesSync(first.path, Date.now() / 1000, first.mtime + 1);
+      Object.assign(first, inventoryEntry(first.path));
+      await reconcileMigrationInventory(store, files);
+      expect({ cold, warm, changed: prefixReads }).toEqual({ cold: 65, warm: 65, changed: 66 });
+    } finally {
+      fs.openSync = originalOpenSync;
+      fs.readSync = originalReadSync;
+      fs.closeSync = originalCloseSync;
+    }
+  });
+
+  test("a complete busy tail outranks an older incomplete mtime fallback", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "busy-after-incomplete-restart.jsonl");
+    fs.writeFileSync(pathname, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+      "x".repeat(150_000),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_started" } }),
+      "",
+    ].join("\n"));
+    store.reconcileConversations([observation(pathname, "a", "idle")]);
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "busy-after-incomplete-restart",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "all",
+    });
+    const conversation = store.conversationForPath(pathname)!;
+    const stat = fs.statSync(pathname);
+    const file: FileEntry = {
+      path: pathname,
+      root: "codex-sessions",
+      name: path.basename(pathname),
+      project: "repo",
+      title: "Busy after incomplete restart",
+      engine: "codex",
+      kind: "session",
+      fmt: "codex",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "idle",
+      activityReason: "mtime_old",
+      derivationComplete: false,
+      proc: null,
+      pid: null,
+      model: "gpt-5.6-sol",
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+    const counts = { create: 0, verify: 0 };
+
+    await reconcileMigrationInventory(store, [file]);
+    await advanceConversationMigration(conversation.id, store, provider(["/must-remain-fenced.jsonl"], counts));
+
+    expect(store.conversation(conversation.id)).toMatchObject({
+      turn: { state: "busy" },
+      migration: { phase: "requested" },
+    });
+    expect(counts.create).toBe(0);
+  });
+
+  test("an explicit pane-at-composer verdict releases a complete busy tail", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "pane-at-composer-release.jsonl");
+    fs.writeFileSync(pathname, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_started" } }),
+      "",
+    ].join("\n"));
+    store.reconcileConversations([observation(pathname, "a", "busy")]);
+    const stat = fs.statSync(pathname);
+    const file: FileEntry = {
+      path: pathname,
+      root: "codex-sessions",
+      name: path.basename(pathname),
+      project: "repo",
+      title: "Pane at composer release",
+      engine: "codex",
+      kind: "session",
+      fmt: "codex",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "idle",
+      activityReason: "pane_at_composer",
+      derivationComplete: true,
+      proc: "running",
+      pid: process.pid,
+      model: "gpt-5.6-sol",
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+
+    await reconcileMigrationInventory(store, [file]);
+
+    expect(store.conversationForPath(pathname)?.turn.state).toBe("idle");
+    const conversation = store.conversationForPath(pathname)!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "pane-at-composer-provider-release",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "all",
+    });
+    const counts = { create: 0, verify: 0 };
+    const successor = provider(["/pane-at-composer-successor.jsonl"], counts);
+    await advanceConversationMigration(conversation.id, store, successor);
+    await advanceConversationMigration(conversation.id, store, successor);
+    expect(counts.create).toBe(1);
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("committed");
   });
 
   test("a standard account switch migrates active conversations and defers inactive history", async () => {
@@ -382,6 +1257,7 @@ describe("durable account migration coordinator", () => {
       expectedRevision: store.engineRouting("codex").revision,
     });
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create() { throw new SuccessorPendingError(); },
       async verify() {},
     };
@@ -436,6 +1312,7 @@ describe("durable account migration coordinator", () => {
     }) as typeof store.transitionConversationMigration;
     const copiedSourcePaths: string[] = [];
     const successorProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         copiedSourcePaths.push(input.source.path);
         return {
@@ -481,6 +1358,7 @@ describe("durable account migration coordinator", () => {
     let release!: () => void;
     const bothCreating = new Promise<void>((resolve) => { release = resolve; });
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         arrivals += 1;
         const arrival = arrivals;
@@ -530,6 +1408,7 @@ describe("durable account migration coordinator", () => {
     const secondMayReturn = new Promise<void>((resolve) => { releaseSecond = resolve; });
     const cleaned: string[] = [];
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         calls += 1;
         const call = calls;
@@ -617,6 +1496,7 @@ describe("durable account migration coordinator", () => {
       expectedRevision: store.engineRouting("codex").revision,
     });
     const failingProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         input.recordContinuityPath(firstForkPath);
         throw new Error("target account unavailable");
@@ -1529,6 +2409,7 @@ describe("durable account migration coordinator", () => {
     const conversation = store.conversationForPath("/source.jsonl")!;
     store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "to-b", expectedRevision: store.engineRouting("codex").revision });
     const staleProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         store.commitMigrationIntent({ engine: "codex", targetId: "c", origin: "manual", requestId: "to-c", expectedRevision: store.engineRouting("codex").revision });
         return {
@@ -1554,6 +2435,7 @@ describe("durable account migration coordinator", () => {
     store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "ambiguous-fork", expectedRevision: store.engineRouting("codex").revision });
     const operations: string[] = [];
     const ambiguousProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         operations.push(input.operationId);
         if (operations.length === 1) throw new CodexForkOutcomeUnknownError();
@@ -1577,6 +2459,7 @@ describe("durable account migration coordinator", () => {
     store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "cleanup-retry", expectedRevision: store.engineRouting("codex").revision });
     let cleanupAttempts = 0;
     const cleanupProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) { return { operationId: input.operationId, nativeId: "stale", path: "/stale.jsonl", continuityPaths: [], historyHash: "hash", host: { kind: "claude-stream", identity: "%9:99", epoch: 1, verifiedAt: "now" } }; },
       async verify() { throw new Error("verification failed"); },
       async cleanup() { cleanupAttempts += 1; if (cleanupAttempts === 1) throw new Error("tmux unavailable"); },
@@ -1633,6 +2516,7 @@ describe("durable account migration coordinator", () => {
       expect(Object.values(restarted.snapshot().pendingSuccessorCleanups)).toMatchObject([{ receipt: { nativeId: `successor-${action}` } }]);
       const cleaned: string[] = [];
       const cleanupProvider: SuccessorProviderPort = {
+        virtualSource: true,
         async create() { throw new SuccessorPendingError(); },
         async verify() {},
         async cleanup(value) { cleaned.push(value.nativeId); },
@@ -1685,6 +2569,7 @@ describe("durable account migration coordinator", () => {
       const cleaned: string[] = [];
       const delivered: string[] = [];
       const cleanupProvider: SuccessorProviderPort = {
+        virtualSource: true,
         async create() { throw new SuccessorPendingError(); },
         async verify() {},
         async cleanup(value) { cleaned.push(value.nativeId); },
@@ -1885,6 +2770,7 @@ describe("durable account migration coordinator", () => {
     const cleaned: string[] = [];
     let verified = false;
     const staleProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         input.recordContinuityPath("/stale-b.jsonl");
         store.commitMigrationIntent({ engine: "codex", targetId: "a", origin: "manual", requestId: "return-to-a", expectedRevision: store.engineRouting("codex").revision });
@@ -1917,6 +2803,7 @@ describe("durable account migration coordinator", () => {
     const intent = store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "stop-during-start", expectedRevision: store.engineRouting("codex").revision });
     const cleaned: string[] = [];
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         store.setMigrationIntentState(intent.id, "stopped");
         input.recordContinuityPath("/discarded-successor.jsonl");
@@ -1948,6 +2835,7 @@ describe("durable account migration coordinator", () => {
     store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "verification-cleanup", expectedRevision: store.engineRouting("codex").revision });
     const cleaned: string[] = [];
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         return {
           operationId: input.operationId,

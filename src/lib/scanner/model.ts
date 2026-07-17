@@ -1,17 +1,21 @@
-import fs from "node:fs";
 import path from "node:path";
 
 import type { FileEntry } from "../types";
-import { tailRecords } from "./activity";
+import { headRecordsResult, tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { readJson, recordValue, stringValue } from "./json";
 
-interface EntryModels {
+export interface EntryModels {
   display: string | null;
   launch: string | null;
 }
 
-const modelCache = globalCache<[number, EntryModels]>("model");
+export interface EntryModelsResult {
+  value: EntryModels;
+  complete: boolean;
+}
+
+const modelCache = globalCache<[number, number, EntryModels]>("model");
 
 function shortModel(value: string | null): string | null {
   if (!value) return null;
@@ -30,43 +34,40 @@ function pickModel(entry: FileEntry, obj: Record<string, unknown>): string | nul
   return null;
 }
 
-export function entryModels(entry: FileEntry): EntryModels {
+export function entryModelsResult(entry: FileEntry): EntryModelsResult {
   if (entry.root === "claude-projects" && entry.path.includes(path.sep + "subagents" + path.sep)) {
     const meta = readJson(entry.path.slice(0, -".jsonl".length) + ".meta.json") ?? {};
     const model = stringValue(meta.model);
-    if (model) return { display: shortModel(model), launch: model };
+    if (model) return { value: { display: shortModel(model), launch: model }, complete: true };
   }
   if ((entry.root !== "claude-projects" && entry.root !== "codex-sessions") || !entry.path.endsWith(".jsonl")) {
-    return { display: null, launch: null };
+    return { value: { display: null, launch: null }, complete: true };
   }
+  const mtimeMs = entry.mtime * 1000;
   const cached = modelCache.get(entry.path);
-  if (cached?.[0] === entry.size) return cached[1];
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return { value: cached[2], complete: true };
   let model: string | null = null;
-  for (const obj of tailRecords(entry.path, entry.size).reverse()) {
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
+  let complete = tail.complete;
+  for (const obj of tail.records.reverse()) {
     model = pickModel(entry, obj);
     if (model) break;
   }
   if (!model) {
-    try {
-      const lines = fs.readFileSync(entry.path, "utf8").split("\n").slice(0, 41);
-      for (const line of lines) {
-        try {
-          const obj = JSON.parse(line);
-          if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-            model = pickModel(entry, obj);
-            if (model) break;
-          }
-        } catch {
-          /* skip */
-        }
-      }
-    } catch {
-      /* skip */
+    const head = headRecordsResult(entry.path, entry.size, mtimeMs);
+    complete &&= head.complete;
+    for (const obj of head.records) {
+      model = pickModel(entry, obj);
+      if (model) break;
     }
   }
   const value = { display: shortModel(model), launch: model };
-  modelCache.set(entry.path, [entry.size, value]);
-  return value;
+  if (complete) modelCache.set(entry.path, [entry.size, mtimeMs, value]);
+  return { value, complete };
+}
+
+export function entryModels(entry: FileEntry): EntryModels {
+  return entryModelsResult(entry).value;
 }
 
 export function entryModel(entry: FileEntry): string | null {

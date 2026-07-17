@@ -1,9 +1,9 @@
-import { tailRecords } from "./scanner/activity";
+import { tailRecordsResult } from "./scanner/activity";
 import { globalCache } from "./scanner/caches";
 import type { ActionEvent, FileEntry } from "./types";
 import { cleanTitle } from "./title";
 
-const eventCache = globalCache<[number, ActionEvent[]]>("timeline-events");
+const eventCache = globalCache<[number, number, ActionEvent[]]>("timeline-events-v2");
 
 /** Files older than this carry no interesting "recent actions". */
 const FRESH_WINDOW_S = 24 * 3600;
@@ -35,9 +35,9 @@ function label(text: string, max = 72): string {
   return cleanTitle(text, max);
 }
 
-function claudeEvents(entry: FileEntry, actor: string): ActionEvent[] {
+function claudeEvents(entry: FileEntry, actor: string, records: Record<string, unknown>[]): ActionEvent[] {
   const out: ActionEvent[] = [];
-  for (const obj of tailRecords(entry.path, entry.size)) {
+  for (const obj of records) {
     const ts = toTs(obj.timestamp);
     if (ts === null) continue;
     if (obj.type === "user") {
@@ -93,9 +93,9 @@ function claudeEvents(entry: FileEntry, actor: string): ActionEvent[] {
   return out;
 }
 
-function codexEvents(entry: FileEntry, actor: string): ActionEvent[] {
+function codexEvents(entry: FileEntry, actor: string, records: Record<string, unknown>[]): ActionEvent[] {
   const out: ActionEvent[] = [];
-  for (const obj of tailRecords(entry.path, entry.size)) {
+  for (const obj of records) {
     const ts = toTs(obj.timestamp);
     if (ts === null) continue;
     const payload = rec(obj.payload);
@@ -109,18 +109,24 @@ function codexEvents(entry: FileEntry, actor: string): ActionEvent[] {
 }
 
 function fileEvents(entry: FileEntry): ActionEvent[] {
+  const mtimeMs = entry.mtime * 1000;
   const cached = eventCache.get(entry.path);
-  if (cached && cached[0] === entry.size) return cached[1];
+  if (cached && cached[0] === entry.size && cached[1] === mtimeMs) return cached[2];
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
   const actor = cleanTitle(entry.title, 36);
-  const events = entry.fmt === "claude" ? claudeEvents(entry, actor) : entry.fmt === "codex" ? codexEvents(entry, actor) : [];
-  eventCache.set(entry.path, [entry.size, events]);
+  const events = entry.fmt === "claude"
+    ? claudeEvents(entry, actor, tail.records)
+    : entry.fmt === "codex"
+      ? codexEvents(entry, actor, tail.records)
+      : [];
+  if (tail.complete) eventCache.set(entry.path, [entry.size, mtimeMs, events]);
   return events;
 }
 
 /**
  * Recent actions of a project: agent turns, user messages, spawns and
  * inter-agent mail, read from the tails the scanner already touches. Parsing
- * is cached per (path, size), so a poll only re-reads files that grew.
+ * is cached per file identity, so a poll only re-reads files that changed.
  */
 export function projectTimeline(files: FileEntry[], project: string, limit: number): ActionEvent[] {
   const now = Date.now() / 1000;

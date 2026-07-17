@@ -8,13 +8,13 @@ import { overlaySessionTitles, sessionProjectProjection } from "../session/title
 import { tickTaskInbox } from "../tasks/inboxScanner";
 import { panePidMap, resolveTarget } from "../tmux";
 import { tickWorkflows } from "../workflows/engine";
-import { activityVerdict } from "./activity";
+import { activityVerdict, transcriptTurnResult } from "./activity";
 import { ctxFor } from "./context";
 import { lastTurnFor } from "./turnDuration";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
-import { entryEffort, entryFast } from "./effort";
+import { entryEffort, entryEffortResult, entryFast } from "./effort";
 import { linkEntries } from "./links";
-import { entryModels } from "./model";
+import { entryModelsResult } from "./model";
 import { agentProcesses, outputHolders } from "./process";
 import { goalFor, planFor } from "./plan";
 import { pendingQuestionFor } from "./questions";
@@ -236,10 +236,19 @@ async function listFilesInternal(
     const verdict = activityVerdict(entry.root, entry.path, entry.mtime, entry.size);
     entry.activity = verdict.state;
     entry.activityReason = verdict.reason;
-    const models = entryModels(entry);
-    entry.model = models.display;
-    entry.launchModel = models.launch;
-    entry.effort = entryEffort(entry);
+    entry.derivationComplete = verdict.complete;
+    if (entry.path.endsWith(".jsonl") && (entry.engine === "claude" || entry.engine === "codex")) {
+      const authoritative = transcriptTurnResult(entry.path, entry.size, entry.mtime * 1000, entry.engine === "codex");
+      entry.derivationComplete &&= authoritative.complete;
+      if (authoritative.complete) entry.authoritativeTurn = authoritative.turn;
+    }
+    const models = entryModelsResult(entry);
+    entry.model = models.value.display;
+    entry.launchModel = models.value.launch;
+    entry.derivationComplete &&= models.complete;
+    const effort = entryEffortResult(entry);
+    entry.effort = effort.value;
+    entry.derivationComplete &&= effort.complete;
     entry.plan = planFor(entry);
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
@@ -276,7 +285,7 @@ async function listFilesInternal(
     files: entries,
     projectCatalog: scan.projectCatalog,
     ...(pinOverlayPaths?.length ? { pinOverlayPaths } : {}),
-    complete: scan.complete,
+    complete: scan.complete && entries.every((entry) => entry.derivationComplete !== false),
   };
 }
 

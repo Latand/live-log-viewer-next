@@ -7,6 +7,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
+import { projectInfoFromCwd } from "@/lib/scanner/describe";
 import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry } from "@/lib/types";
 import { createFilesClientCache } from "@/hooks/useFiles";
@@ -90,8 +91,9 @@ let pipelinesStore: () => unknown[] = () => [];
 mock.module("@/lib/flows/store", () => ({ loadFlows: () => [] }));
 mock.module("@/lib/pipelines/store", () => ({ loadPipelines: () => pipelinesStore() }));
 mock.module("@/lib/pipelines/visibility", () => ({ filterPipelinesForFileScan: () => [] }));
+let boardTasksStore: () => unknown[] = () => [];
 mock.module("@/lib/tasks/store", () => ({
-  loadTasks: () => [],
+  loadTasks: () => boardTasksStore(),
   mutateTasks: () => { throw new Error("files route attempted a task mutation"); },
 }));
 mock.module("@/lib/workflows/store", () => ({ loadWorkflows: () => [] }));
@@ -129,6 +131,16 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(second.headers.get("x-llv-files-cache-requests")).toBe("2");
   expect(first.headers.get("server-timing")).toMatch(/files-clone;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-scan;dur=\d+(?:\.\d+)?;desc="cold generation 1"/);
+  expect(first.headers.get("server-timing")).toMatch(/files-(?:source|registry|flows|authorship|stores|projects|json);dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-project-rate-limits;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-project-catalog;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-project-cwds;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-session-titles;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-project-affinity;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-flow-store;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-flow-restore;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-task-store;dur=\d+(?:\.\d+)?/);
+  expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
 });
 
 test("files API surfaces degraded tmux endpoint health", async () => {
@@ -980,6 +992,47 @@ test("pinned response projection cannot mutate the shared global scan rows", asy
   expect(ordinaryBody.files.find((entry) => entry.path === sharedPath)?.conversationId).toBeUndefined();
 });
 
+test("a dead registry generation closes an interrupted transcript after its process exits", async () => {
+  const sessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const pathname = `/sessions/${sessionId}.jsonl`;
+  scannedFiles = [{
+    ...file(pathname),
+    root: "claude-projects",
+    engine: "claude",
+    fmt: "claude",
+    activity: "live",
+    activityReason: "jsonl_turn_open",
+    authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null },
+    mtime: Date.now() / 1000,
+    pid: null,
+    proc: null,
+  }];
+  const registry = agentRegistry();
+  registry.ensureConversation("claude", pathname, null);
+  registry.upsert({
+    key: { engine: "claude", sessionId },
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "dead",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+
+  expect(body.files.find((entry) => entry.path === pathname)).toMatchObject({
+    activity: "recent",
+    activityReason: "registry_terminal",
+    proc: "killed",
+    authoritativeTurn: { state: "terminal", source: "lifecycle" },
+  });
+});
+
 test("unique pinned snapshots use bounded LRU retention while recent pins stay warm", async () => {
   const global = file("/sessions/global.jsonl");
   scannedFiles = [global];
@@ -1224,6 +1277,160 @@ function file(path: string): FileEntry {
     waitingInput: null,
   };
 }
+
+test("a no-transcript structured reservation projects its card from canonical cwd truth", async () => {
+  const registry = agentRegistry();
+  const cwd = process.cwd();
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "terra",
+    clientAttemptId: "attempt_93c42855_stikon",
+    requestDigest: "9".repeat(64),
+    launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-sol", effort: "xhigh" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a structured reservation");
+  scannedFiles = [];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files?project=latand"));
+  const body = await response.json() as { files: Array<FileEntry & { spawn?: Record<string, unknown> }> };
+  const card = body.files.find((entry) => entry.conversationId === begun.receipt.conversationId);
+
+  expect(card).toMatchObject({
+    path: `spawn:${begun.receipt.launchId}`,
+    project: projectInfoFromCwd(cwd)?.project,
+    cwd,
+    projectRoot: path.resolve(cwd, "../.."),
+    engine: "codex",
+    kind: "session",
+    activity: "live",
+    proc: null,
+    renamable: false,
+    conversationId: begun.receipt.conversationId,
+    launchModel: "gpt-5.6-sol",
+    effort: "xhigh",
+    spawn: {
+      launchId: begun.receipt.launchId,
+      clientAttemptId: "attempt_93c42855_stikon",
+      state: "starting",
+      initialMessage: "pending",
+      retrySafe: false,
+      error: null,
+    },
+  });
+  expect(card?.project).not.toBe("latand");
+});
+
+test("a selected sidebar project cannot replace canonical cwd attribution after transcript discovery", async () => {
+  const registry = agentRegistry();
+  const cwd = process.cwd();
+  const artifactPath = path.join(stateDir, "cwd-attribution-9173e9a2.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd, project: "latand" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a structured reservation");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "cwd-attribution-9173e9a2" },
+    artifactPath,
+    cwd,
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd, project: "latand" }),
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const scanned = file(artifactPath);
+  scanned.project = "latand";
+  scanned.cwd = cwd;
+  scannedFiles = [scanned];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files?project=latand"));
+  const body = await response.json() as { files: FileEntry[] };
+  const entry = body.files.find((candidate) => candidate.conversationId === begun.receipt.conversationId);
+
+  expect(entry?.project).toBe(projectInfoFromCwd(cwd)?.project);
+  expect(entry?.project).not.toBe("latand");
+});
+
+test("a staged structured card stays binding until its initial message is admitted", async () => {
+  const registry = agentRegistry();
+  const cwd = process.cwd();
+  const artifactPath = path.join(stateDir, "e9e8a4b4.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "stikon",
+    clientAttemptId: "attempt_e9e8a4b4_stikon",
+  });
+  if (begun.kind !== "created") throw new Error("expected a structured reservation");
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "e9e8a4b4" },
+    artifactPath,
+    cwd,
+    accountId: "stikon",
+    status: "unhosted",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  scannedFiles = [];
+
+  const bindingResponse = await GET(new Request("http://127.0.0.1/api/files"));
+  const bindingBody = await bindingResponse.json() as { files: FileEntry[] };
+  expect(bindingBody.files.find((entry) => entry.conversationId === begun.receipt.conversationId)?.spawn)
+    .toMatchObject({ state: "binding", initialMessage: "pending" });
+
+  registry.holdDelivery(begun.receipt.conversationId, "Own issue #282", `spawn_${begun.receipt.launchId}`);
+  const queuedResponse = await GET(new Request("http://127.0.0.1/api/files"));
+  const queuedBody = await queuedResponse.json() as { files: FileEntry[] };
+  expect(queuedBody.files.find((entry) => entry.conversationId === begun.receipt.conversationId)?.spawn)
+    .toMatchObject({ state: "queued", initialMessage: "queued" });
+});
+
+test("transcript discovery suppresses the preallocated card for the same conversation", async () => {
+  const registry = agentRegistry();
+  const cwd = process.cwd();
+  const artifactPath = path.join(stateDir, "9173e9a2.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "terra",
+    clientAttemptId: "p0_282_duplicate_suppression_20260716_a1",
+  });
+  if (begun.kind !== "created") throw new Error("expected a structured reservation");
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "9173e9a2" },
+    artifactPath,
+    cwd,
+    accountId: "terra",
+    status: "idle",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  scannedFiles = [file(artifactPath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const matches = body.files.filter((entry) => entry.conversationId === begun.receipt.conversationId);
+
+  expect(matches).toHaveLength(1);
+  expect(matches[0]?.path).toBe(artifactPath);
+  expect(matches[0]?.spawn).toBeUndefined();
+});
 
 test("a provisional Codex fork projects as archived history of its stable conversation", async () => {
   const registry = agentRegistry();
@@ -1517,7 +1724,7 @@ test("a custom session title (issue #33) overrides the derived title and keeps i
   expect(entry?.renamable).toBe(true);
 });
 
-test("the files rail reaggregates uncapped conversations under registry launch projects", async () => {
+test("the files rail reaggregates uncapped conversations under canonical cwd projects", async () => {
   const registry = agentRegistry();
   const transcript = path.join(stateDir, "capped-out-launch-project.jsonl");
   fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "Catalog prompt" } }) + "\n");
@@ -1548,7 +1755,9 @@ test("the files rail reaggregates uncapped conversations under registry launch p
   const response = await GET(new Request("http://127.0.0.1/api/files"));
   const body = await response.json() as { projectCatalog: Array<{ project: string; conversations: number }> };
 
-  expect(body.projectCatalog).toEqual([expect.objectContaining({ project: "effective-project", conversations: 1 })]);
+  expect(body.projectCatalog).toEqual([
+    expect.objectContaining({ project: projectInfoFromCwd(stateDir)?.project, conversations: 1 }),
+  ]);
 });
 
 test("an unreadable pipelines store degrades to pipelinesError without failing the poll", async () => {
@@ -1744,4 +1953,101 @@ test("a confirmed-gone transcript (ENOENT) is certified by its immutable snapsho
   const body = await response.json() as { files: FileEntry[] };
   const gone = body.files.find((entry) => entry.path === gonePath);
   expect(gone?.authorshipUnverified).toBeUndefined();
+});
+
+test("role titles (issue #325): spawned builder/reviewer present task + role instead of boilerplate", async () => {
+  const registry = agentRegistry();
+  const orchestratorPath = "/sessions/orchestrator-019f4906-3f67-7b72-9fbc-9ec3b5ad1501.jsonl";
+  const builderPath = "/sessions/builder-019f4906-3f67-7b72-9fbc-9ec3b5ad1502.jsonl";
+  const reviewerPath = "/sessions/reviewer-019f4906-3f67-7b72-9fbc-9ec3b5ad1503.jsonl";
+  const orchestrator = registry.ensureConversation("codex", orchestratorPath, null);
+  const builderSpawn = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    parentConversationId: orchestrator.id,
+    parentArtifactPath: orchestratorPath,
+    role: "builder",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: orchestrator.id }),
+  });
+  if (builderSpawn.kind !== "created") throw new Error("expected a fresh builder receipt");
+  registry.settleSpawn(builderSpawn.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1502" },
+    artifactPath: builderPath,
+    cwd: "/repo",
+    accountId: null,
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const reviewerSpawn = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    parentConversationId: orchestrator.id,
+    parentArtifactPath: orchestratorPath,
+    role: "reviewer",
+    reviewsConversationId: builderSpawn.receipt.conversationId,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: orchestrator.id }),
+  });
+  if (reviewerSpawn.kind !== "created") throw new Error("expected a fresh reviewer receipt");
+  registry.settleSpawn(reviewerSpawn.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1503" },
+    artifactPath: reviewerPath,
+    cwd: "/repo",
+    accountId: null,
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  boardTasksStore = () => [{
+    id: "task-325",
+    project: "repo",
+    status: "assigned",
+    text: "🧩 #325 — Group review rounds per task\n\nDetails…",
+    placement: "unplaced",
+    assignments: [{
+      path: null,
+      conversationId: builderSpawn.receipt.conversationId,
+      panePid: null,
+      state: "delivered",
+      error: null,
+      at: "2026-07-16T00:00:00.000Z",
+    }],
+    createdAt: "2026-07-16T00:00:00.000Z",
+    updatedAt: "2026-07-16T00:00:00.000Z",
+  }];
+  try {
+    // An explicit user rename on the builder must keep final precedence; the
+    // role title becomes its Reset base instead of clobbering the rename.
+    writeSessionTitle(
+      [`conversation:${builderSpawn.receipt.conversationId}`],
+      `conversation:${builderSpawn.receipt.conversationId}`,
+      "My builder",
+      undefined,
+      "2026-07-16T00:00:00.000Z",
+    );
+    scannedFiles = [
+      { ...file(orchestratorPath), title: "Codex session" },
+      { ...file(builderPath), title: "Codex session", mtime: 2 },
+      { ...file(reviewerPath), title: "Codex session", mtime: 3 },
+    ];
+
+    const response = await GET(new Request("http://127.0.0.1/api/files"));
+    const body = await response.json() as { files: FileEntry[] };
+    const builder = body.files.find((entry) => entry.path === builderPath);
+    const reviewer = body.files.find((entry) => entry.path === reviewerPath);
+    const orchestratorEntry = body.files.find((entry) => entry.path === orchestratorPath);
+
+    expect(builder?.title).toBe("My builder");
+    expect(builder?.autoTitle).toBe("#325 — Group review rounds per task — builder");
+    expect(reviewer?.title).toBe("#325 — Group review rounds per task — reviewer R1");
+    expect(reviewer?.autoTitle).toBeUndefined();
+    // A role-less session keeps its scanner title untouched.
+    expect(orchestratorEntry?.title).toBe("Codex session");
+  } finally {
+    boardTasksStore = () => [];
+  }
 });

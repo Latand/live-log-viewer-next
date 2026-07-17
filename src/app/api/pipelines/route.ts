@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { createPipelineFromRequest, getPipelines } from "@/lib/pipelines/engine";
 import type { CreatePipelineRequest, Pipeline, PipelinesResponse } from "@/lib/pipelines/types";
+import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
@@ -43,6 +44,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; p
   try {
     const result = await createPipelineFromRequest({ ...body, repoDir });
     if (!result.pipeline) return NextResponse.json({ error: result.error ?? "could not create pipeline" }, { status: result.status ?? 400 });
+    if (result.pipeline.state !== "draft") requestPipelineTick();
     return NextResponse.json({ ok: true, pipeline: result.pipeline }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });

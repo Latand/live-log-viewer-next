@@ -1,10 +1,10 @@
 import type { CtxConfidence, CtxSource, CtxUsage, FileEntry } from "../types";
-import { tailRecords } from "./activity";
+import { tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { numberValue, recordValue, stringValue } from "./json";
 import { MODEL_REGISTRY_VERSION, normalizeModelKey, registryWindow } from "./modelRegistry";
 
-const ctxCache = globalCache<[number, CtxUsage | null]>("ctx");
+const ctxCache = globalCache<[number, number, CtxUsage | null]>("ctx-v2");
 const CLAUDE_1M_MODE = "context-1m-2025-08-07";
 
 interface ContextCapacity {
@@ -91,15 +91,17 @@ function claudeCtx(obj: Record<string, unknown>, fallbackObservedAt: string): Ct
 export function ctxFor(entry: FileEntry): CtxUsage | null {
   const conversationRoot = entry.root === "claude-projects" || entry.root === "codex-sessions";
   if (!conversationRoot || !entry.path.endsWith(".jsonl")) return null;
+  const mtimeMs = entry.mtime * 1000;
   const cached = ctxCache.get(entry.path);
-  if (cached?.[0] === entry.size) return cached[1];
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return cached[2];
 
   const fallbackObservedAt = new Date().toISOString();
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
   let ctx: CtxUsage | null = null;
-  for (const obj of tailRecords(entry.path, entry.size).reverse()) {
+  for (const obj of tail.records.reverse()) {
     ctx = entry.root === "codex-sessions" ? codexCtx(obj, fallbackObservedAt) : claudeCtx(obj, fallbackObservedAt);
     if (ctx) break;
   }
-  ctxCache.set(entry.path, [entry.size, ctx]);
+  if (tail.complete) ctxCache.set(entry.path, [entry.size, mtimeMs, ctx]);
   return ctx;
 }

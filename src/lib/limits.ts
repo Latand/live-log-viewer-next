@@ -298,7 +298,11 @@ interface OauthWindow {
  * from ~/.claude/.credentials.json stays inside the server process; the
  * browser only ever sees percentages.
  */
-export async function fetchClaudeLimits(credentialsPath: string, clock: () => number = Date.now): Promise<LimitRead> {
+export async function fetchClaudeLimits(
+  credentialsPath: string,
+  clock: () => number = Date.now,
+  timeoutMs = 8_000,
+): Promise<LimitRead> {
   let accessToken = "";
   let plan: string | null = null;
   try {
@@ -317,7 +321,7 @@ export async function fetchClaudeLimits(credentialsPath: string, clock: () => nu
         authorization: "Bearer " + accessToken,
         "anthropic-beta": "oauth-2025-04-20",
       },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.status === 429) return { data: null, reason: LIMITS_RATE_LIMITED_REASON, source: "unavailable", retryAt: retryAfterAt(res.headers.get("retry-after"), clock()) };
     if (res.status === 401) return { data: null, reason: LIMITS_REAUTH_REQUIRED_REASON, source: "unavailable" };

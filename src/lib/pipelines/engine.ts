@@ -1,22 +1,25 @@
 import crypto from "node:crypto";
 import path from "node:path";
 
+import { isManagedClaudeHome } from "@/lib/accounts/claude";
 import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type DurableMembershipInput } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
-import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
+import { prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
+import { runtimeHostClient } from "@/lib/runtime/client";
+import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { isShellCommand } from "@/lib/status";
-import { paneInfo, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
+import { paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
@@ -63,6 +66,7 @@ export interface PipelinePorts {
   }, onReserved: (reservation: PipelineStageLaunchReservation) => void): Promise<PipelineStageSpawn>;
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
   paneAgentAlive(paneId: string): Promise<boolean>;
+  conversationAgentActive(conversationId: string): Promise<boolean | null>;
   headCwd(transcriptPath: string): string | null;
   lastMessage(entry: FileEntry): { text: string; ts: number } | null;
   pathForConversation(conversationId: string): string | null;
@@ -100,9 +104,14 @@ async function spawnPipelineAgent(
 ): Promise<PipelineStageSpawn> {
   const account = accountManager.resolveSpawn(input.role.engine);
   const parent = parentIdentity(input.parentPath);
+  if (input.role.engine === "claude" && isManagedClaudeHome(account.home)) {
+    prepareManagedClaudeSpawnHome(account.home, input.cwd);
+  }
   const specBase = freshSpecFor(input.role.engine, input.cwd, {
     model: input.role.model,
     effort: input.role.effort,
+    readOnly: input.role.access === "read-only",
+    permissionMode: input.role.engine === "claude" && input.role.access === "read-only" ? "dontAsk" : null,
     codexHome: input.role.engine === "codex" ? account.home : null,
     claudeConfigDir: input.role.engine === "claude" ? account.home : null,
     claudeProjectsDir: input.role.engine === "claude" ? account.transcriptRoot : null,
@@ -124,6 +133,7 @@ async function spawnPipelineAgent(
   const begun = registry.beginSpawnRequest({
     engine: input.role.engine,
     cwd: input.cwd,
+    transport: "structured",
     accountId: account.accountId,
     parentConversationId: parent.conversationId,
     parentSessionKey: parent.sessionKey,
@@ -148,37 +158,19 @@ async function spawnPipelineAgent(
   }
 
   const spec = { ...specBase, launchProfile };
-  const startedAtMs = Date.now();
-  const pane = await spawnAgentWithPrompt(spec, input.prompt, begun.receipt);
-  const transcript = await resolveSpawnedTranscriptPath({
+  const client = runtimeHostClient();
+  if (!client) throw new Error("pipeline structured runtime host is unavailable");
+  const response = await spawnStructuredConversation({
     engine: input.role.engine,
-    knownTranscript: spec.transcript ?? null,
-    panePid: pane.panePid ?? null,
-    cwd: input.cwd,
-    startedAtMs,
-    codexSessionsDir: input.role.engine === "codex" ? account.transcriptRoot : null,
+    receipt: begun.receipt,
+    spec,
+    account,
+    prompt: input.prompt,
+    registry,
+    client,
   });
-  if (!pane.host || !(await verifyTmuxHostEvidence(pane.host))) {
-    registry.invalidateSpawnHost(begun.receipt.launchId, "pipeline spawn host disappeared before confirmation");
-    throw new Error("pipeline spawn host disappeared before confirmation");
-  }
+  const transcript = response.path ?? null;
   const key = transcript ? sessionKeyFromTranscript(input.role.engine, transcript) : null;
-  if (transcript && key && pane.receipt) {
-    const settled = registry.settleSpawn(pane.receipt.launchId, {
-      key,
-      artifactPath: transcript,
-      cwd: input.cwd,
-      accountId: account.accountId,
-      status: "starting",
-      host: pane.host,
-      claimEpoch: 0,
-      claimOwner: null,
-      pendingAction: "spawn",
-    });
-    if (settled.kind === "conflict") throw new Error(settled.code);
-  } else {
-    registry.markSpawnPathPending(begun.receipt.launchId);
-  }
   if (transcript && input.parentPath && parent.conversationId) {
     rememberHandoffChild(transcript, input.parentPath);
     persistHandoffLineage();
@@ -188,11 +180,12 @@ async function spawnPipelineAgent(
     conversationId: begun.receipt.conversationId,
     sessionId: key?.sessionId ?? null,
     transcript,
-    paneId: pane.paneId,
+    paneId: null,
   };
 }
 
 export function defaultPipelinePorts(): PipelinePorts {
+  let runtimeSnapshot: ReturnType<NonNullable<ReturnType<typeof runtimeHostClient>>["snapshot"]> | null = null;
   return {
     exec: realExec,
     roleLookup: pipelineRoleLookup,
@@ -212,6 +205,23 @@ export function defaultPipelinePorts(): PipelinePorts {
     paneAgentAlive: async (paneId) => {
       const info = await paneInfo(paneId);
       return info !== null && !isShellCommand(info.command);
+    },
+    conversationAgentActive: async (conversationId) => {
+      const client = runtimeHostClient();
+      if (!client) return null;
+      runtimeSnapshot ??= client.snapshot();
+      let snapshot;
+      try {
+        snapshot = await runtimeSnapshot;
+      } catch {
+        return null;
+      }
+      const session = snapshot.sessions.find((item) => item.conversationId === conversationId);
+      if (!session) return null;
+      if (["dead", "unhosted", "conflict"].includes(session.host)) return false;
+      if (session.turn === "idle") return false;
+      if (session.turn === "running" || session.turn === "interrupt_requested" || session.attentionIds.length > 0) return true;
+      return null;
     },
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
@@ -472,19 +482,26 @@ async function tickRunStage(
   }
 
   updateAttemptIdentity(pipeline, attempt, entries, ports);
+  const structuredActive = !attempt.paneId && attempt.conversationId
+    ? await ports.conversationAgentActive(attempt.conversationId)
+    : null;
   if (!attempt.agentPath) {
-    if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited before its session was discovered", attempt);
+    if (structuredActive === false) park(pipeline, "structured stage ended before its session was discovered", attempt);
+    else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited before its session was discovered", attempt);
     return;
   }
   const entry = entries.find((candidate) => candidate.path === attempt!.agentPath);
   if (!entry) {
-    if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited after its transcript disappeared from the scan", attempt);
+    if (structuredActive === false) park(pipeline, "structured stage ended after its transcript disappeared from the scan", attempt);
+    else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited after its transcript disappeared from the scan", attempt);
     return;
   }
-  if (entry.activity === "live" || entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled") return;
+  if (structuredActive === true) return;
+  if (structuredActive !== false && (entry.activity === "live" || entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled")) return;
   const message = ports.lastMessage(entry);
   if (!message || message.ts <= unixMs(attempt.startedAt)) {
-    if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited without producing a verdict", attempt);
+    if (structuredActive === false) park(pipeline, "structured stage ended without producing a verdict", attempt);
+    else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited without producing a verdict", attempt);
     return;
   }
   const parsed = parseStageVerdict(message.text);

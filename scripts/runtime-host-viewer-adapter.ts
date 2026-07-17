@@ -156,6 +156,7 @@ async function retireRelease(candidate: ViewerReleaseIdentity): Promise<void> {
 }
 
 async function retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
+  if (releases.length === 0) throw new Error("at least one retained release is required");
   const output = await command(["docker", "container", "ls", "-a", "--filter", "label=dev.live-log-viewer.managed=1", "--format", "{{.Names}}"]);
   const containers = output.split("\n").map((item) => item.trim()).filter(Boolean);
   const retainedImages = new Set(releases.map((item) => item.image));
@@ -165,6 +166,14 @@ async function retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
     fs.rmSync(composeConfigFile(container), { force: true });
     if (image && !retainedImages.has(image)) {
       try { await command(["docker", "image", "rm", image]); } catch { /* another container may use this image */ }
+    }
+  }
+  /* The first release serves stable traffic. Later entries are durable rollback
+     slots: keep their container, image, config and reserved port while freeing
+     the application process and its scanner caches. */
+  for (const rollback of releases.slice(1)) {
+    if (await containerExists(rollback.container)) {
+      await command(["docker", "container", "stop", "--time", "10", rollback.container]);
     }
   }
 }
@@ -313,7 +322,14 @@ async function main(): Promise<unknown> {
   if (action === "verify-candidate") { const candidate = release(input.candidate); return verify(candidate, candidate.endpoint); }
   if (action === "promote") { switchTarget(release(input.candidate)); return {}; }
   if (action === "verify-promoted") { const candidate = release(input.candidate); return verify(candidate, stableEndpoint, candidate.endpoint); }
-  if (action === "rollback") { switchTarget(release(input.previous)); return {}; }
+  if (action === "rollback") {
+    const previous = release(input.previous);
+    await startCandidate(previous);
+    const evidence = await verify(previous, previous.endpoint);
+    if (!evidence.ok) throw new Error(evidence.detail ?? "rollback release health gate failed");
+    switchTarget(previous);
+    return { health: evidence };
+  }
   if (action === "retire") { await retireRelease(release(input.release)); return {}; }
   if (action === "retain-only") {
     if (!Array.isArray(input.releases)) throw new Error("retained releases are invalid");

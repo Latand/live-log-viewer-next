@@ -46,7 +46,21 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
       transcriptRoot: path.join(cwd, "projects"),
       env: { NODE_ENV: "test" },
     }),
+    resolveSpawnAccount: (_engine, accountId) => ({
+      engine: "claude",
+      accountId: accountId ?? "claude-test",
+      kind: "managed",
+      home: path.join(cwd, "account"),
+      transcriptRoot: path.join(cwd, "projects"),
+      env: { NODE_ENV: "test" },
+    }),
     runtimeHostClient: () => ({} as RuntimeHostClient),
+    defer: (work) => { void work(); },
+    storeImages: (images) => images.map((image) => ({
+      sha256: crypto.createHash("sha256").update(Buffer.from(image.base64, "base64")).digest("hex"),
+      mime: image.mime as "image/png",
+      bytes: Buffer.from(image.base64, "base64").byteLength,
+    })),
     spawnStructuredConversation: async (input) => ({
       ok: true,
       target: null,
@@ -56,10 +70,308 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
       conversationId: input.receipt.conversationId,
       launched: true,
       retrySafe: false,
+      initialMessage: "delivered",
       state: "settled",
     }),
   };
 }
+
+test("a fresh process resolves and refreshes a persisted Claude account before one structured launch", async () => {
+  const sandbox = fs.mkdtempSync(path.join(routeSandbox, "production-resolver-reboot-"));
+  const stateDir = path.join(sandbox, "state");
+  const accountsRoot = path.join(sandbox, "accounts", "claude");
+  const home = path.join(accountsRoot, "rebooted");
+  const cwd = path.join(sandbox, "workspace");
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  fs.chmodSync(accountsRoot, 0o700);
+  fs.chmodSync(home, 0o700);
+  fs.mkdirSync(path.join(home, "projects"), { mode: 0o700 });
+  fs.mkdirSync(cwd, { mode: 0o700 });
+  fs.writeFileSync(path.join(stateDir, "claude-accounts.json"), JSON.stringify({
+    version: 1,
+    active: "rebooted",
+    accounts: [{ id: "rebooted", label: "Rebooted", kind: "managed", createdAt: 1 }],
+  }), { mode: 0o600 });
+  fs.writeFileSync(path.join(home, ".credentials.json"), JSON.stringify({
+    claudeAiOauth: {
+      accessToken: "synthetic-expired-access",
+      refreshToken: "synthetic-refresh",
+      expiresAt: 1,
+      scopes: ["user:inference"],
+    },
+  }), { mode: 0o600 });
+
+  const routePath = path.join(import.meta.dir, "route.ts");
+  const structuredSpawnPath = path.join(import.meta.dir, "../../../lib/runtime/structuredSpawn.ts");
+  const runtimeClientPath = path.join(import.meta.dir, "../../../lib/runtime/client.ts");
+  const source = `
+    const { mock } = await import("bun:test");
+    const deferred = [];
+    let refreshRequests = 0;
+    let usageRequests = 0;
+    let structuredSpawns = 0;
+    let launchedAccount = null;
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      if (url === "https://platform.claude.com/v1/oauth/token") {
+        refreshRequests += 1;
+        return Response.json({
+          access_token: "synthetic-current-access",
+          refresh_token: "synthetic-rotated-refresh",
+          expires_in: 3600,
+          scope: "user:inference",
+        });
+      }
+      if (url === "https://api.anthropic.com/api/oauth/usage") {
+        usageRequests += 1;
+        return Response.json({ five_hour: { utilization: 12, resets_at: "2026-07-17T12:00:00.000Z" } });
+      }
+      throw new Error("unexpected synthetic upstream request");
+    };
+    const nextServer = await import("next/server");
+    mock.module("next/server", () => ({
+      ...nextServer,
+      after: (work) => { deferred.push(work); },
+    }));
+    const structured = await import(${JSON.stringify(structuredSpawnPath)});
+    mock.module("@/lib/runtime/structuredSpawn", () => ({
+      ...structured,
+      spawnStructuredConversation: async (input) => {
+        structuredSpawns += 1;
+        launchedAccount = input.account.accountId;
+        return {
+          ok: true,
+          target: null,
+          path: null,
+          effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default",
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          state: "settled",
+        };
+      },
+    }));
+    const runtimeClient = await import(${JSON.stringify(runtimeClientPath)});
+    mock.module("@/lib/runtime/client", () => ({ ...runtimeClient, runtimeHostClient: () => ({}) }));
+    const { NextRequest } = await import("next/server");
+    const { POST } = await import(${JSON.stringify(routePath)});
+    const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "claude", cwd: ${JSON.stringify(cwd)}, prompt: "resume work", accountId: "rebooted" }),
+    }));
+    await Promise.all(deferred.map((work) => work()));
+    const body = await response.json();
+    const credentials = JSON.parse(await Bun.file(${JSON.stringify(path.join(home, ".credentials.json"))}).text());
+    process.stdout.write(JSON.stringify({
+      status: response.status,
+      body,
+      refreshRequests,
+      usageRequests,
+      structuredSpawns,
+      launchedAccount,
+      accessToken: credentials.claudeAiOauth.accessToken,
+    }));
+  `;
+  const child = Bun.spawn({
+    cmd: [process.execPath, "-e", source],
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      LLV_STATE_DIR: stateDir,
+      LLV_CLAUDE_HOME: path.join(sandbox, "legacy-claude"),
+      LLV_SPAWN_TRANSPORT: "structured",
+      LLV_STRUCTURED_HOSTS: "1",
+      LLV_RUNTIME_EVENTS: "1",
+      LLV_RUNTIME_HOST_SOCKET: path.join(sandbox, "runtime.sock"),
+      NEXT_PUBLIC_RUNTIME_UI: "1",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exit, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+
+  expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+  expect(JSON.parse(stdout)).toEqual({
+    status: 202,
+    body: expect.objectContaining({
+      launched: false,
+      state: "starting",
+      conversationId: expect.stringMatching(/^conversation_/),
+    }),
+    refreshRequests: 1,
+    usageRequests: 1,
+    structuredSpawns: 1,
+    launchedAccount: "rebooted",
+    accessToken: "synthetic-current-access",
+  });
+}, 20_000);
+
+test("fresh processes rescue one orphaned immediate structured admission exactly once", async () => {
+  const sandbox = fs.mkdtempSync(path.join(routeSandbox, "orphaned-structured-admission-"));
+  const stateDir = path.join(sandbox, "state");
+  const cwd = path.join(sandbox, "workspace");
+  const effectsPath = path.join(sandbox, "effects.jsonl");
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(cwd);
+
+  const routePath = path.join(import.meta.dir, "route.ts");
+  const source = `
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const crypto = await import("node:crypto");
+    const { NextRequest } = await import("next/server");
+    const { agentRegistry } = await import("@/lib/agent/registry");
+    const { POST } = await import(${JSON.stringify(routePath)});
+    const phase = process.env.LLV_TEST_PHASE;
+    const deferred = [];
+    const client = {
+      operationStatus: async () => null,
+      snapshot: async () => ({ sessions: [] }),
+    };
+    const dependencies = {
+      registry: agentRegistry,
+      assertStructuredRuntime: () => {},
+      resolveHealthySpawnAccount: async () => ({
+        engine: "claude",
+        accountId: "claude-test",
+        kind: "managed",
+        home: path.join(${JSON.stringify(sandbox)}, "account"),
+        transcriptRoot: path.join(${JSON.stringify(sandbox)}, "projects"),
+        env: { NODE_ENV: "test" },
+      }),
+      resolveSpawnAccount: () => ({
+        engine: "claude",
+        accountId: "claude-test",
+        kind: "managed",
+        home: path.join(${JSON.stringify(sandbox)}, "account"),
+        transcriptRoot: path.join(${JSON.stringify(sandbox)}, "projects"),
+        env: { NODE_ENV: "test" },
+      }),
+      runtimeHostClient: () => client,
+      defer: (work) => { deferred.push(work); },
+      storeImages: () => [],
+      spawnStructuredConversation: async (input) => {
+        fs.appendFileSync(${JSON.stringify(effectsPath)}, JSON.stringify({ effect: "worker", pid: process.pid }) + "\\n");
+        const sessionId = crypto.randomUUID();
+        const artifactPath = path.join(${JSON.stringify(sandbox)}, sessionId + ".jsonl");
+        fs.writeFileSync(artifactPath, JSON.stringify({ type: "user", message: input.prompt }) + "\\n");
+        fs.appendFileSync(${JSON.stringify(effectsPath)}, JSON.stringify({ effect: "first-prompt", pid: process.pid }) + "\\n");
+        const settled = input.registry.settleSpawn(input.receipt.launchId, {
+          key: { engine: input.engine, sessionId },
+          artifactPath,
+          cwd: input.spec.cwd,
+          accountId: input.account.accountId,
+          launchProfile: input.spec.launchProfile,
+          status: "starting",
+          host: null,
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: null,
+        });
+        if (settled.kind !== "settled") throw new Error("structured rescue settlement conflicted");
+        return {
+          ok: true,
+          target: null,
+          path: artifactPath,
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered",
+          state: "settled",
+        };
+      },
+    };
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        engine: "claude",
+        cwd: ${JSON.stringify(cwd)},
+        prompt: "repair the assigned task",
+        clientAttemptId: "orphaned_admission_20260717_a1",
+      }),
+    }), dependencies);
+    const body = await response.json();
+    if (phase === "recover") await Promise.all(deferred.map((work) => work()));
+    const receipt = agentRegistry().snapshot().receipts[body.launchId];
+    process.stdout.write(JSON.stringify({
+      status: response.status,
+      body,
+      deferred: deferred.length,
+      receiptState: receipt?.state ?? null,
+    }));
+  `;
+  const run = async (phase: "admit" | "recover") => {
+    const child = Bun.spawn({
+      cmd: [process.execPath, "-e", source],
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        LLV_TEST_PHASE: phase,
+        LLV_STATE_DIR: stateDir,
+        LLV_AGENT_REGISTRY_SQLITE: "off",
+        LLV_SPAWN_TRANSPORT: "structured",
+        LLV_STRUCTURED_HOSTS: "1",
+        LLV_RUNTIME_EVENTS: "1",
+        LLV_RUNTIME_HOST_SOCKET: path.join(sandbox, "runtime.sock"),
+        NEXT_PUBLIC_RUNTIME_UI: "1",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exit, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+    return JSON.parse(stdout) as {
+      status: number;
+      body: { launchId: string; conversationId: string; state: string };
+      deferred: number;
+      receiptState: string | null;
+    };
+  };
+
+  const admitted = await run("admit");
+  expect(admitted).toMatchObject({ status: 202, deferred: 1, receiptState: "starting" });
+
+  const recovered = await Promise.all([run("recover"), run("recover")]);
+  const effects = fs.existsSync(effectsPath)
+    ? fs.readFileSync(effectsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { effect: string })
+    : [];
+  const finalReceipt = new AgentRegistry(path.join(stateDir, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" })
+    .snapshot().receipts[admitted.body.launchId];
+
+  expect(new Set(recovered.map((result) => result.body.launchId))).toEqual(new Set([admitted.body.launchId]));
+  expect(new Set(recovered.map((result) => result.body.conversationId))).toEqual(new Set([admitted.body.conversationId]));
+  expect(recovered.filter((result) => result.deferred === 1)).toHaveLength(1);
+  expect(effects.map((effect) => effect.effect)).toEqual(["worker", "first-prompt"]);
+  expect(finalReceipt).toMatchObject({
+    launchId: admitted.body.launchId,
+    conversationId: admitted.body.conversationId,
+    state: "completed",
+    completionMode: "route-completed",
+  });
+}, 20_000);
 
 test("structured spawn runtime fence preserves durable state", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "structured-runtime-fence-"));
@@ -83,7 +395,7 @@ test("structured spawn runtime fence preserves durable state", async () => {
       assignedAt: null,
       deliveredAt: `2026-07-16T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
       error: null,
-    };
+    } as unknown as (typeof snapshot.heldDeliveries)[string];
   }
   fs.writeFileSync(registryPath, JSON.stringify(snapshot));
   const registryBytes = fs.readFileSync(registryPath);
@@ -150,6 +462,227 @@ test("structured spawn runtime fence preserves durable state", async () => {
     else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
     if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
     else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("spawn rejects malformed, oversized, and mismatched images before durable mutation", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "image-admission-"));
+  const store = agentRegistry();
+  const imageRoot = path.join(process.env.LLV_STATE_DIR!, "runtime-images");
+  const beforeReceipts = Object.keys(store.snapshot().receipts).sort();
+  const beforeBlobs = fs.existsSync(imageRoot) ? fs.readdirSync(imageRoot).sort() : [];
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  const cases = [
+    { images: [{ base64: "a===", mime: "image/png" }], status: 400 },
+    { images: Array.from({ length: 17 }, () => ({ base64: png, mime: "image/png" })), status: 413 },
+    { images: [{ base64: png, mime: "image/svg+xml" }], status: 415 },
+    { images: [{ base64: Buffer.from("plain").toString("base64"), mime: "image/png" }], status: 415 },
+  ];
+
+  for (const candidate of cases) {
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "claude", cwd, prompt: "inspect", images: candidate.images }),
+    }), structuredRouteDependencies(cwd));
+    expect(response.status).toBe(candidate.status);
+    expect(Object.keys(store.snapshot().receipts).sort()).toEqual(beforeReceipts);
+    expect(fs.existsSync(imageRoot) ? fs.readdirSync(imageRoot).sort() : []).toEqual(beforeBlobs);
+  }
+});
+
+test("structured spawn maps operational image storage failures to 503", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "image-storage-failure-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    storeImages: () => { throw new Error("runtime image storage quota exceeded"); },
+  };
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  try {
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "claude", cwd, prompt: "inspect", images: [{ base64: png, mime: "image/png" }] }),
+    }), dependencies);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "runtime image storage quota exceeded" });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
+test("an oversized structured spawn prompt returns 413 before receipts, blobs, or deferral", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "oversized-spawn-prompt-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  let stores = 0;
+  let deferred = 0;
+  const dependencies: SpawnRouteTestDependencies = {
+    ...structuredRouteDependencies(cwd),
+    defer: () => { deferred += 1; },
+    storeImages: () => { stores += 1; return []; },
+  };
+  const beforeReceipts = Object.keys(agentRegistry().snapshot().receipts).sort();
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  try {
+    /* 10667 three-byte characters = 32001 UTF-8 bytes in 10667 UTF-16 units:
+       a length-measured gate would have admitted this prompt. */
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        engine: "claude",
+        cwd,
+        prompt: "€".repeat(10_667),
+        clientAttemptId: `attempt_${crypto.randomUUID()}`,
+        images: [{ base64: png, mime: "image/png" }],
+      }),
+    }), dependencies);
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: expect.stringContaining("32000-byte envelope") });
+    expect(stores).toBe(0);
+    expect(deferred).toBe(0);
+    expect(Object.keys(agentRegistry().snapshot().receipts).sort()).toEqual(beforeReceipts);
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
+test("an orphan replay whose image storage fails releases its admission lease for the retry", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "replay-storage-release-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const store = agentRegistry();
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  const attemptId = `attempt_${crypto.randomUUID()}`;
+  const request = () => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      origin: "http://127.0.0.1:8898",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      prompt: "own the retry",
+      clientAttemptId: attemptId,
+      images: [{ base64: png, mime: "image/png" }],
+    }),
+  });
+  const deferred: Array<() => Promise<void>> = [];
+  const dependencies = (storeImages: SpawnRouteTestDependencies["storeImages"]): SpawnRouteTestDependencies => ({
+    ...structuredRouteDependencies(cwd),
+    defer: (work) => { deferred.push(work); },
+    storeImages,
+  });
+  try {
+    const admitted = await POST.withDependencies(request(), dependencies((images) => structuredRouteDependencies(cwd).storeImages(images)));
+    expect(admitted.status).toBe(202);
+    const { launchId } = await admitted.json() as { launchId: string };
+    expect(deferred).toHaveLength(1);
+
+    /* The admitting process dies before its deferred launch ran: the durable
+       receipt keeps starting with no live admission owner. */
+    const orphanOwner = store.snapshot().receipts[launchId]!.admissionOwner!;
+    expect(store.releaseStartingStructuredSpawn(launchId, orphanOwner)).toMatchObject({ released: true });
+
+    /* The replay claims the orphan, then image storage fails before anything
+       was deferred: the claimed lease must be handed back, not kept by this
+       live process with no pending work. */
+    const failed = await POST.withDependencies(request(), dependencies(() => {
+      throw new Error("runtime image storage quota exceeded");
+    }));
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ error: "runtime image storage quota exceeded" });
+    expect(deferred).toHaveLength(1);
+    expect(store.snapshot().receipts[launchId]).toMatchObject({ state: "starting", admissionOwner: null });
+
+    /* The retry re-claims the released lease and defers the launch. */
+    const retried = await POST.withDependencies(request(), dependencies((images) => structuredRouteDependencies(cwd).storeImages(images)));
+    expect(retried.status).toBe(202);
+    expect(await retried.json()).toMatchObject({ launchId, state: "starting" });
+    expect(deferred).toHaveLength(2);
+    expect(store.snapshot().receipts[launchId]!.admissionOwner).toMatchObject({ pid: process.pid });
+
+    /* A concurrent replay during the retry's live claim cannot double-defer. */
+    const concurrent = await POST.withDependencies(request(), dependencies((images) => structuredRouteDependencies(cwd).storeImages(images)));
+    expect(concurrent.status).toBe(202);
+    expect(deferred).toHaveLength(2);
+
+    await Promise.all(deferred.map((work) => work()));
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
   }
 });
 
@@ -418,6 +951,153 @@ test("operator structured Claude retries retain bypass and agent reuse conflicts
   }
 });
 
+test("structured replay keeps its admitted account after routing changes", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-rotation-replay-"));
+  const store = registry();
+  const deferred: Array<() => Promise<void>> = [];
+  const effects: string[] = [];
+  const accountResolutions: string[] = [];
+  let routedAccountId = "account-a";
+  const account = (accountId: string) => ({
+    engine: "claude" as const,
+    accountId,
+    kind: "managed" as const,
+    home: path.join(cwd, accountId),
+    transcriptRoot: path.join(cwd, accountId, "projects"),
+    env: { NODE_ENV: "test" },
+  });
+  const runtimeClient = {
+    operationStatus: async () => null,
+    snapshot: async () => ({ sessions: [] }),
+  } as unknown as RuntimeHostClient;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => store,
+    resolveHealthySpawnAccount: async () => {
+      accountResolutions.push(`healthy:${routedAccountId}`);
+      return account(routedAccountId);
+    },
+    resolveSpawnAccount: (_engine: "claude" | "codex", accountId: string | null) => {
+      accountResolutions.push(`exact:${accountId ?? "null"}`);
+      return account(accountId ?? routedAccountId);
+    },
+    runtimeHostClient: () => runtimeClient,
+    defer: (work: () => Promise<void>) => { deferred.push(work); },
+    spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
+      effects.push(`worker:${input.account.accountId}`);
+      const sessionId = crypto.randomUUID();
+      const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+      fs.writeFileSync(artifactPath, JSON.stringify({ type: "user", message: input.prompt }) + "\n");
+      effects.push(`first-prompt:${input.prompt}`);
+      const settled = input.registry.settleSpawn(input.receipt.launchId, {
+        key: { engine: input.engine, sessionId },
+        artifactPath,
+        cwd: input.spec.cwd,
+        accountId: input.account.accountId,
+        launchProfile: input.spec.launchProfile,
+        status: "starting",
+        host: null,
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: null,
+      });
+      if (settled.kind !== "settled") throw new Error("account replay settlement conflicted");
+      return {
+        ok: true as const,
+        target: null,
+        path: artifactPath,
+        launchId: input.receipt.launchId,
+        conversationId: input.receipt.conversationId,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "delivered" as const,
+        state: "settled" as const,
+      };
+    },
+  } as SpawnRouteTestDependencies;
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const alternateCwd = fs.mkdtempSync(path.join(routeSandbox, "account-rotation-conflict-"));
+  const alternateParent = store.ensureConversation("claude", path.join(cwd, "alternate-parent.jsonl"), "account-a");
+  const request = (overrides: Record<string, unknown> = {}) => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      origin: "http://127.0.0.1:8898",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      prompt: "repair release",
+      clientAttemptId: "account_rotation_replay_20260717_a1",
+      ...overrides,
+    }),
+  });
+  try {
+    const admitted = await POST.withDependencies(request(), dependencies);
+    const admittedBody = await admitted.json();
+    expect(admitted.status).toBe(202);
+    expect(store.spawnReceiptForClientAttempt("account_rotation_replay_20260717_a1")).toMatchObject({
+      launchId: admittedBody.launchId,
+      accountId: "account-a",
+    });
+    routedAccountId = "account-b";
+
+    const replay = await POST.withDependencies(request(), dependencies);
+    expect(accountResolutions).toEqual(["healthy:account-a", "exact:account-a"]);
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toMatchObject({
+      launchId: admittedBody.launchId,
+      conversationId: admittedBody.conversationId,
+      state: "starting",
+    });
+
+    const changedRequests = [
+      request({ prompt: "changed release scope" }),
+      request({ model: "opus" }),
+      request({ effort: "high" }),
+      request({ cwd: alternateCwd }),
+      request({ engine: "codex" }),
+      request({ parentConversationId: alternateParent.id }),
+      request({ accountId: "account-b" }),
+      request({ images: [{ mime: "image/png", base64: Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64") }] }),
+    ];
+    for (const changedRequest of changedRequests) {
+      const conflict = await POST.withDependencies(changedRequest, dependencies);
+      expect(conflict.status).toBe(409);
+    }
+
+    expect(deferred).toHaveLength(1);
+    await Promise.all(deferred.map((work) => work()));
+    expect(effects).toEqual(["worker:account-a", "first-prompt:repair release"]);
+    expect(store.snapshot().receipts[admittedBody.launchId]).toMatchObject({
+      accountId: "account-a",
+      state: "completed",
+    });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
 test("structured spawn flag reaches the pane-less capability gate", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "structured-smoke-"));
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
@@ -443,6 +1123,343 @@ test("structured spawn flag reaches the pane-less capability gate", async () => 
     else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
     if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
     else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+  }
+});
+
+async function runDeferred(work: (() => Promise<void>) | null): Promise<void> {
+  if (work) await work();
+}
+
+test("text-only Codex models reject images before blob and receipt mutation", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "codex-text-only-image-"));
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  let storageCalled = false;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    storeImages: () => {
+      storageCalled = true;
+      return [];
+    },
+  };
+  const beforeReceipts = Object.keys(agentRegistry().snapshot().receipts).sort();
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  try {
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        engine: "codex",
+        model: "gpt-5.3-codex-spark",
+        cwd,
+        prompt: "inspect",
+        images: [{ base64: png, mime: "image/png" }],
+      }),
+    }), dependencies);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "The selected Codex model does not advertise image input through app-server.",
+    });
+    expect(storageCalled).toBeFalse();
+    expect(Object.keys(agentRegistry().snapshot().receipts).sort()).toEqual(beforeReceipts);
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("admitted structured spawn returns its reserved card identity while host binding is delayed", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "p0-282-delayed-binding-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  let deferred: (() => Promise<void>) | null = null;
+  let releaseBinding!: () => void;
+  const binding = new Promise<void>((resolve) => { releaseBinding = resolve; });
+  let launchStarted = false;
+  let publishedArtifacts = 0;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    defer: (work: () => Promise<void>) => { deferred = work; },
+    publishFilesRevision: async () => {
+      publishedArtifacts += 1;
+    },
+    spawnStructuredConversation: async (input: Parameters<NonNullable<Parameters<typeof POST.withDependencies>[1]>["spawnStructuredConversation"]>[0]) => {
+      launchStarted = true;
+      await binding;
+      const artifactPath = path.join(cwd, "delayed.jsonl");
+      fs.writeFileSync(artifactPath, JSON.stringify({ type: "user", message: input.prompt }) + "\n");
+      return {
+        ok: true as const,
+        target: null,
+        path: artifactPath,
+        launchId: input.receipt.launchId,
+        conversationId: input.receipt.conversationId,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "delivered" as const,
+        state: "settled" as const,
+      };
+    },
+  } as Parameters<typeof POST.withDependencies>[1];
+  try {
+    const responsePromise = POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        engine: "claude",
+        cwd,
+        prompt: "Own issue #282",
+        clientAttemptId: "p0_282_spawn_visibility_20260716_a1",
+      }),
+    }), dependencies);
+    const response = await Promise.race([
+      responsePromise,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 25)),
+    ]);
+
+    releaseBinding();
+    if (!response) await responsePromise;
+
+    expect(response).not.toBeNull();
+    expect(response?.status).toBe(202);
+    expect(await response?.json()).toMatchObject({
+      ok: true,
+      state: "starting",
+      launched: false,
+      retrySafe: false,
+      launchId: expect.any(String),
+      conversationId: expect.stringMatching(/^conversation_/),
+      initialMessage: "pending",
+    });
+    expect(launchStarted).toBeFalse();
+    expect(deferred).not.toBeNull();
+    await runDeferred(deferred);
+    expect(launchStarted).toBeTrue();
+    expect(publishedArtifacts).toBe(1);
+  } finally {
+    releaseBinding();
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
+test("a terminal structured replay returns its reserved identity and retry-safe message outcome", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "p0-282-terminal-replay-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  let deferred: (() => Promise<void>) | null = null;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    defer: (work: () => Promise<void>) => { deferred = work; },
+    spawnStructuredConversation: async (input: Parameters<NonNullable<Parameters<typeof POST.withDependencies>[1]>["spawnStructuredConversation"]>[0]) => {
+      input.registry.failStructuredSpawn(input.receipt.launchId, "structured host ownership is unavailable");
+      throw new Error("structured host ownership is unavailable");
+    },
+  } as Parameters<typeof POST.withDependencies>[1];
+  const request = () => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      origin: "http://127.0.0.1:8898",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      prompt: "Own issue #282",
+      clientAttemptId: "p0_282_terminal_replay_20260716_a1",
+    }),
+  });
+  try {
+    const admitted = await POST.withDependencies(request(), dependencies);
+    const admittedBody = await admitted.json();
+    await runDeferred(deferred);
+
+    const replay = await POST.withDependencies(request(), dependencies);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({
+      ok: true,
+      target: null,
+      path: null,
+      effectivePermissionMode: "bypassPermissions",
+      launchId: admittedBody.launchId,
+      conversationId: admittedBody.conversationId,
+      launched: false,
+      retrySafe: true,
+      initialMessage: "failed",
+      state: "failed",
+      error: "structured host ownership is unavailable",
+    });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
+test("a clientAttemptId replay recovers the reserved card from runtime evidence", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "p0-282-runtime-replay-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const sessionId = crypto.randomUUID();
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  let deferred: (() => Promise<void>) | null = null;
+  let admittedReceipt: Parameters<NonNullable<Parameters<typeof POST.withDependencies>[1]>["spawnStructuredConversation"]>[0]["receipt"] | null = null;
+  const runtimeClient = {
+    operationStatus: async (operationId: string) => admittedReceipt && operationId === `spawn_message_${admittedReceipt.launchId}` ? {
+      receipt: {
+        operationId,
+        idempotencyKey: `spawn_${admittedReceipt.launchId}`,
+        conversationId: admittedReceipt.conversationId,
+        kind: "send" as const,
+        status: "delivered" as const,
+        at: new Date().toISOString(),
+        revision: 2,
+      },
+      replayed: true,
+    } : null,
+    snapshot: async () => ({
+      sessions: admittedReceipt ? [{
+        conversationId: admittedReceipt.conversationId,
+        sessionKey: { engine: "claude" as const, sessionId },
+        hostKind: "claude-broker" as const,
+        host: "hosted" as const,
+        turn: "running" as const,
+        provenance: "structured" as const,
+        revision: 2,
+        attentionIds: [],
+        recentReceipts: [],
+        accountId: "claude-test",
+        parentConversationId: null,
+        flowId: null,
+        workflowId: null,
+        cwd,
+        artifactPath,
+        capabilities: { steer: false, structuredAttention: true },
+        activeTurnId: "turn-initial",
+      }] : [],
+    }),
+  } as unknown as RuntimeHostClient;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    runtimeHostClient: () => runtimeClient,
+    defer: (work: () => Promise<void>) => { deferred = work; },
+    spawnStructuredConversation: async (input: Parameters<NonNullable<Parameters<typeof POST.withDependencies>[1]>["spawnStructuredConversation"]>[0]) => {
+      admittedReceipt = input.receipt;
+      input.registry.failStructuredSpawn(input.receipt.launchId, "host binding timed out");
+      throw new Error("host binding timed out");
+    },
+  } as Parameters<typeof POST.withDependencies>[1];
+  const request = () => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      origin: "http://127.0.0.1:8898",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      prompt: "Own issue #282",
+      clientAttemptId: "p0_282_runtime_route_replay_20260716_a1",
+    }),
+  });
+  try {
+    const admitted = await POST.withDependencies(request(), dependencies);
+    const admittedBody = await admitted.json();
+    await runDeferred(deferred);
+
+    const replay = await POST.withDependencies(request(), dependencies);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      launchId: admittedBody.launchId,
+      conversationId: admittedBody.conversationId,
+      path: artifactPath,
+      state: "settled",
+      launched: true,
+      retrySafe: false,
+      initialMessage: "delivered",
+    });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
   }
 });
 
@@ -518,6 +1535,7 @@ test("a staged pane-less receipt replays with accepted status", () => {
     conversationId: "conversation_pending",
     launched: false,
     retrySafe: false,
+    initialMessage: "queued" as const,
     state: "path-pending" as const,
   };
 

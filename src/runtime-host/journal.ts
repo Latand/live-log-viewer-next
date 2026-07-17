@@ -30,6 +30,8 @@ import {
   type ViewerDeploymentReceipt,
   type ViewerDeploymentStatus,
 } from "@/lib/runtime/contracts";
+import { parseStructuredImageRefs, structuredContent } from "@/lib/runtime/structuredContent";
+import { runtimeImageCapability } from "@/lib/runtime/runtimeImageStore";
 
 export class RuntimeJournalFault extends Error {}
 
@@ -201,6 +203,9 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
     capabilities: {
       steer: capabilities.steer === true,
       structuredAttention: capabilities.structuredAttention === true,
+      imageInput: capabilities.imageInput && typeof capabilities.imageInput === "object"
+        ? capabilities.imageInput as RuntimeSession["capabilities"]["imageInput"]
+        : runtimeImageCapability(key.engine === "claude" ? "claude" : "codex", false),
     },
     activeTurnId: typeof payload.activeTurnId === "string" ? payload.activeTurnId : null,
     drift: payload.drift && typeof payload.drift === "object" ? payload.drift as RuntimeSession["drift"] : null,
@@ -254,9 +259,10 @@ export class RuntimeJournal {
       CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL, event_seq INTEGER NOT NULL, state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS producer_receipts (producer_kind TEXT NOT NULL, producer_key TEXT NOT NULL, event_json TEXT NOT NULL, PRIMARY KEY(producer_kind, producer_key));
       CREATE TABLE IF NOT EXISTS operations (
-        operation_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+        operation_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
         request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
-        receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL
+        receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL,
+        UNIQUE(conversation_id, idempotency_key)
       );
       CREATE TABLE IF NOT EXISTS consumer_checkpoints (
         event_id TEXT NOT NULL, consumer TEXT NOT NULL, completed_at INTEGER NOT NULL,
@@ -270,6 +276,7 @@ export class RuntimeJournal {
       CREATE UNIQUE INDEX IF NOT EXISTS viewer_deployments_one_active
         ON viewer_deployments(active) WHERE active = 1;
     `);
+    this.migrateOperationIdempotencyScope();
     this.migrateLegacyEvents();
     for (const row of this.db.query<EventRow, []>("SELECT * FROM events WHERE producer_key IS NOT NULL").all()) {
       this.db.query("INSERT INTO producer_receipts(producer_kind, producer_key, event_json) VALUES (?, ?, ?) ON CONFLICT(producer_kind, producer_key) DO NOTHING")
@@ -316,6 +323,7 @@ export class RuntimeJournal {
     beforeAdmission?: () => void,
   ): RuntimeOperationResult {
     this.assertHealthy();
+    command = this.normalizeOperation(command);
     this.assertOperation(command);
     const operationId = command.operationId?.trim() || newOperationId();
     const requestValue = { ...command } as Record<string, unknown>;
@@ -325,7 +333,7 @@ export class RuntimeJournal {
     const requestHash = createHash("sha256").update(requestJson).digest("hex");
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const existing = this.db.query<{ operation_id: string; request_hash: string; receipt_json: string }, [string]>("SELECT operation_id, request_hash, receipt_json FROM operations WHERE idempotency_key = ?").get(command.idempotencyKey);
+      const existing = this.db.query<{ operation_id: string; request_hash: string; receipt_json: string }, [string, string]>("SELECT operation_id, request_hash, receipt_json FROM operations WHERE conversation_id = ? AND idempotency_key = ?").get(command.conversationId, command.idempotencyKey);
       if (existing) {
         if (existing.request_hash !== requestHash) throw new RuntimeIdempotencyConflictError("idempotency key already belongs to another request");
         const result = { operationId: existing.operation_id, receipt: JSON.parse(existing.receipt_json) as RuntimeOperationReceipt, replayed: true };
@@ -362,15 +370,15 @@ export class RuntimeJournal {
         scope: { type: "operation", id: operationId },
         kind: "receipt",
         operationId,
-        producer: { kind: "viewer-command", eventKey: `operation:${command.idempotencyKey}`, hostEpoch: Number(this.meta("host_epoch")) },
+        producer: { kind: "viewer-command", eventKey: `operation:${command.conversationId}:${command.idempotencyKey}`, hostEpoch: Number(this.meta("host_epoch")) },
         payload: receipt as unknown as Record<string, unknown>,
         ...(effect ? { effect } : {}),
       }));
       const committedReceipt: RuntimeOperationReceipt = { ...receipt, revision: event.revision };
       this.upsertEntity("operation", operationId, event.revision, committedReceipt, event.seq);
       this.appendOperationConsequences(command, committedReceipt, operationId);
-      this.db.query("INSERT INTO operations(operation_id, idempotency_key, request_hash, request_json, receipt_json, event_seq) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(operationId, command.idempotencyKey, requestHash, requestJson, stableJson(committedReceipt), event.seq);
+      this.db.query("INSERT INTO operations(operation_id, conversation_id, idempotency_key, request_hash, request_json, receipt_json, event_seq) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(operationId, command.conversationId, command.idempotencyKey, requestHash, requestJson, stableJson(committedReceipt), event.seq);
       this.db.exec("COMMIT");
       this.compactIfNeeded();
       this.notifyWaiters();
@@ -998,8 +1006,8 @@ export class RuntimeJournal {
     if (command.operationId !== undefined && (!command.operationId.trim() || command.operationId.includes(":") || /\s/.test(command.operationId))) throw new Error("operationId is invalid");
     if (Buffer.byteLength(JSON.stringify(command)) > 256 * 1024) throw new Error("runtime operation exceeds 256 KiB");
     if (command.kind === "send" || command.kind === "steer") {
-      if (!command.text.trim()) throw new Error("message text is required");
-      if (command.images !== undefined && (!Array.isArray(command.images) || command.images.length > 16 || command.images.some((image) => typeof image !== "string"))) throw new Error("message images are invalid");
+      if (!command.text.trim() && !command.images?.length) throw new Error("message content is required");
+      if (!command.contentDigest) throw new Error("message content digest is required");
     }
     if (command.kind === "answer" && !command.attentionId.trim()) throw new Error("attentionId is required");
     if (command.kind === "kill"
@@ -1011,6 +1019,47 @@ export class RuntimeJournal {
       && (typeof command.cwd !== "string" || !command.cwd.trim() || typeof command.prompt !== "string")) {
       throw new Error("spawn cwd and prompt are required");
     }
+  }
+
+  private normalizeOperation(command: RuntimeOperationCommand): RuntimeOperationCommand {
+    if (command.kind !== "send" && command.kind !== "steer" && command.kind !== "spawn") return command;
+    const rawImages = command.images ?? [];
+    const images = parseStructuredImageRefs(rawImages, 16);
+    if (!images) throw new Error("message images are invalid");
+    const text = command.kind === "spawn" ? command.prompt : command.text;
+    if (!text.trim() && images.length === 0) {
+      if (command.kind === "spawn") {
+        const rest = { ...command };
+        delete rest.images;
+        delete rest.contentDigest;
+        return { ...rest, prompt: "" };
+      }
+      throw new Error("message content is required");
+    }
+    const normalized = structuredContent(text, images);
+    if (command.contentDigest && command.contentDigest !== normalized.contentDigest) {
+      throw new Error("message content digest mismatch");
+    }
+    if (command.kind === "spawn") {
+      const rest = { ...command };
+      delete rest.images;
+      delete rest.contentDigest;
+      return {
+        ...rest,
+        prompt: normalized.content.text,
+        ...(images.length ? { images } : {}),
+        contentDigest: normalized.contentDigest,
+      };
+    }
+    const rest = { ...command };
+    delete rest.images;
+    delete rest.contentDigest;
+    return {
+      ...rest,
+      text: normalized.content.text,
+      ...(images.length ? { images } : {}),
+      contentDigest: normalized.contentDigest,
+    };
   }
 
   private operationReceipt(
@@ -1113,6 +1162,7 @@ export class RuntimeJournal {
       queuePosition,
       reason,
       text: command.kind === "send" || command.kind === "steer" ? command.text.slice(0, 240) : null,
+      ...(command.kind === "send" || command.kind === "steer" ? { imageCount: command.images?.length ?? 0 } : {}),
       at: new Date(this.now()).toISOString(),
       revision,
     };
@@ -1175,7 +1225,11 @@ export class RuntimeJournal {
           parentConversationId,
           cwd: command.cwd,
           artifactPath: null,
-          capabilities: { steer: command.engine === "codex", structuredAttention: true },
+          capabilities: {
+            steer: command.engine === "codex",
+            structuredAttention: true,
+            imageInput: runtimeImageCapability(command.engine, false),
+          },
           activeTurnId: null,
         },
       }));
@@ -1413,6 +1467,28 @@ export class RuntimeJournal {
 
   private assertHealthy(): void {
     if (this.fault) throw new RuntimeJournalFault(`runtime journal is read-only: ${this.fault}`);
+  }
+
+  private migrateOperationIdempotencyScope(): void {
+    const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(operations)").all().map((row) => row.name));
+    if (columns.has("conversation_id")) return;
+    this.db.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE operations RENAME TO operations_global_idempotency;
+      CREATE TABLE operations (
+        operation_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+        request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
+        receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL,
+        UNIQUE(conversation_id, idempotency_key)
+      );
+      INSERT INTO operations(operation_id, conversation_id, idempotency_key, request_hash, request_json, receipt_json, event_seq)
+      SELECT operation_id,
+        COALESCE(json_extract(request_json, '$.conversationId'), json_extract(receipt_json, '$.conversationId')),
+        idempotency_key, request_hash, request_json, receipt_json, event_seq
+      FROM operations_global_idempotency;
+      DROP TABLE operations_global_idempotency;
+      COMMIT;
+    `);
   }
 
   private migrateLegacyEvents(): void {

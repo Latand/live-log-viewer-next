@@ -13,6 +13,7 @@ import { CodexAppServerHost, redactCodexHostDiagnostic } from "./codexAppServerH
 import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import type { HostState, RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
+import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef } from "./structuredContent";
 
 class MemoryEventStore implements RuntimeEventStore {
   private readonly events = new Map<string, RuntimeEvent[]>();
@@ -54,6 +55,8 @@ class FakeAppServer extends EventEmitter {
   autoCompleteUserMessage = true;
   readTurns: unknown[] | null = null;
   readError: string | null = null;
+  modelList: unknown[] = [{ id: "gpt-5.3-codex-spark", isDefault: true, inputModalities: ["text"] }];
+  modelListFailuresRemaining = 0;
   private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
 
@@ -112,6 +115,13 @@ class FakeAppServer extends EventEmitter {
     if (typeof method === "string" && this.ignoredMethods.includes(method)) return;
     if (method === "initialize") return this.respond(message.id, { userAgent: "codex_desktop_app/0.144.1 (Linux)" });
     if (method === "account/read") return this.respond(message.id, { account: { type: "chatgpt", planType: "pro" }, requiresOpenaiAuth: false });
+    if (method === "model/list") {
+      if (this.modelListFailuresRemaining > 0) {
+        this.modelListFailuresRemaining -= 1;
+        return this.respondError(message.id, "model list probe timed out");
+      }
+      return this.respond(message.id, { data: this.modelList });
+    }
     if (method === "config/read") return this.respond(message.id, {
       config: {
         mcp_servers: {
@@ -203,6 +213,126 @@ async function nextEvent(iterable: AsyncIterable<unknown>): Promise<unknown> {
 }
 
 describe("CodexAppServerHost", () => {
+  test("round-trips image blocks through turn start and image-only steering", async () => {
+    const server = new FakeAppServer("image-thread");
+    server.modelList = [
+      { id: "gpt-5.6-sol", isDefault: true, inputModalities: ["text", "image"] },
+      { id: "gpt-5.3-codex-spark", isDefault: false, inputModalities: ["text"] },
+    ];
+    const resolved: StructuredImageRef[] = [];
+    const first = {
+      sha256: "1".repeat(64),
+      mime: "image/png" as const,
+      bytes: 67,
+    };
+    const second = {
+      sha256: "2".repeat(64),
+      mime: "image/webp" as const,
+      bytes: 44,
+    };
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      model: "gpt-5.6-sol",
+      eventStore: new MemoryEventStore(),
+      resolveImagePath: (ref) => {
+        resolved.push(ref);
+        return `/runtime-images/${ref.sha256}`;
+      },
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect((await host.health()).activeFlags).toContain(STRUCTURED_IMAGE_CAPABILITY);
+    const firstContent = structuredContent("inspect", [first]);
+    expect(await host.send({ id: "image-start", ...firstContent })).toEqual({
+      outcome: "turn-started",
+      turnId: "turn-1",
+    });
+    expect(server.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({
+      input: [
+        { type: "localImage", path: `/runtime-images/${first.sha256}` },
+        { type: "text", text: `<!-- llv:structured-user sha256=${firstContent.contentDigest} -->\ninspect` },
+      ],
+      clientUserMessageId: "image-start",
+    });
+
+    const secondContent = structuredContent("", [second]);
+    expect(await host.send({ id: "image-steer", expectedTurnId: "turn-1", ...secondContent })).toEqual({
+      outcome: "steered",
+      turnId: "turn-1",
+    });
+    expect(server.requests.find((request) => request.method === "turn/steer")?.params).toMatchObject({
+      expectedTurnId: "turn-1",
+      input: [
+        { type: "localImage", path: `/runtime-images/${second.sha256}` },
+        { type: "text", text: `<!-- llv:structured-user sha256=${secondContent.contentDigest} -->\n` },
+      ],
+      clientUserMessageId: "image-steer",
+    });
+    expect(resolved).toEqual([first, second]);
+    await host.release();
+  });
+
+  test("keeps image affordance disabled for a text-only selected model", async () => {
+    const server = new FakeAppServer("spark-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      model: "gpt-5.3-codex-spark",
+      eventStore: new MemoryEventStore(),
+      resolveImagePath: () => { throw new Error("image path must stay unresolved"); },
+      spawnProcess: fakeSpawn(server),
+    });
+    expect((await host.health()).activeFlags).not.toContain(STRUCTURED_IMAGE_CAPABILITY);
+    await expect(host.send({
+      id: "spark-image",
+      content: { text: "inspect", images: [{ sha256: "3".repeat(64), mime: "image/png", bytes: 67 }] },
+    })).rejects.toThrow("does not advertise image input");
+    expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
+    await host.release();
+  });
+
+  test("a transient capability probe fault stays fail-closed and recovers on the next image send", async () => {
+    const server = new FakeAppServer("probe-thread");
+    server.modelList = [{ id: "gpt-5.6-sol", isDefault: true, inputModalities: ["text", "image"] }];
+    /* Startup probe and the first on-demand retry both fault. */
+    server.modelListFailuresRemaining = 2;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      model: "gpt-5.6-sol",
+      eventStore: new MemoryEventStore(),
+      resolveImagePath: (ref) => `/runtime-images/${ref.sha256}`,
+      spawnProcess: fakeSpawn(server),
+    });
+    const imageEntry = (id: string) => ({
+      id,
+      content: { text: "inspect", images: [{ sha256: "4".repeat(64), mime: "image/png" as const, bytes: 67 }] },
+    });
+
+    /* Probe-unavailable: fail closed with a retryable reason, never the
+       model-incompatible verdict, and never actuate the turn. */
+    expect((await host.health()).activeFlags).not.toContain(STRUCTURED_IMAGE_CAPABILITY);
+    await expect(host.send(imageEntry("probe-image-one"))).rejects.toThrow("temporarily unavailable");
+    expect(server.requests.some((request) => request.method === "turn/start")).toBeFalse();
+
+    /* The probe recovers: the next image send re-discovers capability inside
+       the same host lifetime and delivers. */
+    expect(await host.send(imageEntry("probe-image-two"))).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+    expect((await host.health()).activeFlags).toContain(STRUCTURED_IMAGE_CAPABILITY);
+
+    /* A genuine text-only verdict still rejects with the model reason. */
+    await host.release();
+    const textOnlyServer = new FakeAppServer("probe-verdict-thread");
+    textOnlyServer.modelListFailuresRemaining = 1;
+    const textOnlyHost = await CodexAppServerHost.start({
+      cwd: "/repo",
+      model: "gpt-5.3-codex-spark",
+      eventStore: new MemoryEventStore(),
+      resolveImagePath: () => { throw new Error("image path must stay unresolved"); },
+      spawnProcess: fakeSpawn(textOnlyServer),
+    });
+    await expect(textOnlyHost.send(imageEntry("probe-image-three"))).rejects.toThrow("does not advertise image input");
+    await textOnlyHost.release();
+  });
+
   test("fans out replay, fences steering, answers attention, and persists host columns", async () => {
     const server = new FakeAppServer();
     const captured: { options?: SpawnOptionsWithoutStdio } = {};
@@ -1848,6 +1978,36 @@ describe("CodexAppServerHost", () => {
       secrets[8],
     ].join(" "));
     for (const secret of secrets) expect(redacted).not.toContain(secret);
+  });
+
+  test("reports a bounded redacted stderr diagnostic when the app-server exits during startup", async () => {
+    const server = new FakeAppServer(
+      "startup-exit-thread",
+      "startup-exit-thread",
+      false,
+      [],
+      undefined,
+      null,
+      ["initialize"],
+    );
+    const started = CodexAppServerHost.start({
+      cwd: "/repo",
+      requestTimeoutMs: 100,
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    await Bun.sleep(0);
+    server.stderr.write(`${"x".repeat(20 * 1024)}\nYour authentication token has been invalidated oauth_token=must-stay-private\n`);
+    server.emit("close", 1, null);
+
+    const failure: unknown = await started.then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("expected Codex startup to fail");
+    expect(failure.message).toContain("Codex app-server child exited");
+    expect(failure.message).toContain("Your authentication token has been invalidated");
+    expect(failure.message).not.toContain("must-stay-private");
+    expect(failure.message.length).toBeLessThanOrEqual(500);
   });
 
   test("requires an exact opt-in value", async () => {

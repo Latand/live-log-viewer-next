@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -8,6 +7,8 @@ import { stateDir } from "@/lib/configDir";
 import type { Engine, Fmt, RootKey } from "../types";
 import { cleanTitle } from "../title";
 import { globalCache } from "./caches";
+import { nativeCodexParentThreadIdResult } from "./codexNative";
+import { HEAD_READ_CHUNK_BYTES, headFingerprint, readHead, type HeadReadResult } from "./head";
 import { readJsonResult, recordValue, recordsValue, stringValue } from "./json";
 import { projectResolutionStateKey } from "./projectState";
 
@@ -15,6 +16,8 @@ export interface FileDescription {
   project: string;
   worktree?: string;
   cwd?: string;
+  sessionStartedAt?: string | null;
+  nativeParentThreadId?: string | null;
   projectRoot?: string | null;
   title: string;
   engine: Engine;
@@ -73,8 +76,9 @@ const codexProjectCache = globalCache<{
 const repoSlugCache = globalCache<[number, string | null]>("repo-path-from-slug-v1");
 /* The cwd follows the same append-only head reuse and rewrite invalidation. */
 const cwdCache = globalCache<HeadMetadataCache<string | null>>("claude-cwd-v3");
+const sessionStartedAtCache = globalCache<HeadMetadataCache<string | null>>("session-started-at-v1");
 
-const HEAD_BYTES = 131_072;
+const HEAD_BYTES = HEAD_READ_CHUNK_BYTES;
 
 function subagentSidecarPath(rootName: RootKey, pathname: string): string | null {
   if (rootName !== "claude-projects" || !path.basename(pathname).startsWith("agent-") || !pathname.endsWith(".jsonl")) {
@@ -117,31 +121,6 @@ function sameFileDescriptionIdentity(left: FileDescriptionIdentity, right: FileD
     && left.mtimeMs === right.mtimeMs
     && left.sidecarSize === right.sidecarSize
     && left.sidecarMtimeMs === right.sidecarMtimeMs;
-}
-
-interface HeadReadResult {
-  value: { bytes: Buffer; text: string; read: number } | null;
-  complete: boolean;
-}
-
-function headFingerprint(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("base64url");
-}
-
-function readHead(pathname: string, size: number): HeadReadResult {
-  try {
-    const fd = fs.openSync(pathname, "r");
-    try {
-      const buf = Buffer.alloc(Math.min(size, HEAD_BYTES));
-      const read = fs.readSync(fd, buf, 0, buf.length, 0);
-      const bytes = buf.subarray(0, read);
-      return { value: { bytes, text: bytes.toString("utf8"), read }, complete: true };
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return { value: null, complete: false };
-  }
 }
 
 function readSearchHead(pathname: string, size: number): { text: string; read: number } | null {
@@ -499,7 +478,8 @@ function persistedProjects(): {
     slugs name it (`projectFromSlug` of the dashed path). One naming scheme
     means a codex session, a claude session, and any worktree of the same repo
     all land in the SAME sidebar group instead of lookalike neighbors. */
-function projectInfoFromCwd(cwd: string): { project: string; worktree?: string; repo?: string } | null {
+export function projectInfoFromCwd(cwd: string): { project: string; worktree?: string; repo?: string } | null {
+  if (!cwd.trim()) return null;
   const scratchpad = projectInfoFromClaudeTaskCwd(cwd);
   if (scratchpad) return scratchpad;
   let worktree =
@@ -734,7 +714,7 @@ function transcriptCwd(pathname: string, st: fs.Stats): MetadataReadResult<strin
   if (cached?.size === st.size && cached.mtimeMs === st.mtimeMs) {
     return { value: cached.value, complete: true, headPreserved: true };
   }
-  const head = readHead(pathname, st.size);
+  const head = readHead(pathname, st.size, st.mtimeMs, { maxBytes: HEAD_BYTES });
   if (!head.complete || !head.value) return { value: cached?.value ?? null, complete: false, headPreserved: false };
   if (cached) {
     const reused = reusableGrowingHead(cached, st, head);
@@ -746,6 +726,40 @@ function transcriptCwd(pathname: string, st: fs.Stats): MetadataReadResult<strin
   const cwd = cwdFromLines(head.value.text.split("\n").slice(0, 25));
   cwdCache.set(pathname, cacheHeadMetadata(st, head.value, cwd));
   return { value: cwd, complete: true, headPreserved: false };
+}
+
+function transcriptStartedAt(pathname: string, st: fs.Stats): MetadataReadResult<string | null> {
+  const cached = sessionStartedAtCache.get(pathname);
+  if (cached?.size === st.size && cached.mtimeMs === st.mtimeMs) {
+    return { value: cached.value, complete: true, headPreserved: true };
+  }
+  const head = readHead(pathname, st.size, st.mtimeMs, { maxBytes: HEAD_BYTES });
+  if (!head.complete || !head.value) return { value: cached?.value ?? null, complete: false, headPreserved: false };
+  if (cached) {
+    const reused = reusableGrowingHead(cached, st, head);
+    if (reused) {
+      sessionStartedAtCache.set(pathname, reused);
+      return { value: reused.value, complete: true, headPreserved: true };
+    }
+  }
+  let startedAt: string | null = null;
+  for (const line of head.value.text.split("\n").slice(0, 10)) {
+    if (!line.trim()) continue;
+    try {
+      const value = JSON.parse(line) as { timestamp?: unknown; payload?: { timestamp?: unknown } };
+      const timestamp = typeof value.payload?.timestamp === "string"
+        ? value.payload.timestamp
+        : typeof value.timestamp === "string" ? value.timestamp : null;
+      if (timestamp && Number.isFinite(Date.parse(timestamp))) {
+        startedAt = new Date(timestamp).toISOString();
+        break;
+      }
+    } catch {
+      continue;
+    }
+  }
+  sessionStartedAtCache.set(pathname, cacheHeadMetadata(st, head.value, startedAt));
+  return { value: startedAt, complete: true, headPreserved: false };
 }
 
 function projectInfoFromTranscript(pathname: string): { project: string; worktree?: string } | null {
@@ -761,7 +775,7 @@ function scanJsonlTitle(pathname: string, st: fs.Stats, wantCodex: boolean): Met
   if (cached?.size === st.size && cached.mtimeMs === st.mtimeMs) {
     return { value: cached.value, complete: true, headPreserved: true };
   }
-  const head = readHead(pathname, st.size);
+  const head = readHead(pathname, st.size, st.mtimeMs, { maxBytes: HEAD_BYTES });
   if (!head.complete || !head.value) return { value: cached?.value ?? null, complete: false, headPreserved: false };
   if (cached) {
     const reused = reusableGrowingHead(cached, st, head);
@@ -799,15 +813,29 @@ export function describeFile(
   let project = "other";
   let worktree: string | undefined;
   let cwd: string | undefined;
+  let sessionStartedAt: string | null = null;
+  let nativeParentThreadId: string | null = null;
   let title: string | null = null;
   let engine: Engine = "claude";
   let kind = "";
   let fmt: Fmt = "plain";
   let complete = identity.complete;
   if (rootName === "codex-sessions") {
-    const cwdRead = transcriptCwd(pathname, st);
+    const cwdRead = complete
+      ? transcriptCwd(pathname, st)
+      : { value: null, complete: false, headPreserved: false };
     complete &&= cwdRead.complete;
     cwd = cwdRead.value ?? undefined;
+    if (complete) {
+      const startedAtRead = transcriptStartedAt(pathname, st);
+      complete &&= startedAtRead.complete;
+      sessionStartedAt = startedAtRead.value;
+    }
+    if (complete) {
+      const nativeParent = nativeCodexParentThreadIdResult(pathname, st.size, st.mtimeMs);
+      complete &&= nativeParent.complete;
+      nativeParentThreadId = nativeParent.value;
+    }
     const cachedProject = codexProjectCache.get(pathname);
     const cachedProjectMatches = cwdRead.complete && cachedProject?.stateKey === stateKey
       && (
@@ -839,9 +867,12 @@ export function describeFile(
     engine = "codex";
     kind = "session";
     fmt = "codex";
-    const titleRead = scanJsonlTitle(pathname, st, true);
-    complete &&= titleRead.complete;
-    title = titleRead.value ?? "Codex session";
+    if (complete) {
+      const titleRead = scanJsonlTitle(pathname, st, true);
+      complete &&= titleRead.complete;
+      title = titleRead.value;
+    }
+    title ??= "Codex session";
   } else if (rootName === "claude-projects") {
     const slug = rel.split(path.sep)[0] ?? "";
     const worktreeInfo = worktreeFromSlug(slug);
@@ -850,9 +881,16 @@ export function describeFile(
     /* The slug alone cannot tell a sibling worktree checkout from a real
        standalone project — only the cwd's git metadata can. When it proves a
        worktree, the session regroups under its main repo's project name. */
-    const cwdRead = transcriptCwd(pathname, st);
+    const cwdRead = complete
+      ? transcriptCwd(pathname, st)
+      : { value: null, complete: false, headPreserved: false };
     complete &&= cwdRead.complete;
     cwd = cwdRead.value ?? undefined;
+    if (complete) {
+      const startedAtRead = transcriptStartedAt(pathname, st);
+      complete &&= startedAtRead.complete;
+      sessionStartedAt = startedAtRead.value;
+    }
     const info = cwd ? projectInfoFromCwd(cwd) : projectInfoFromTranscript(pathname);
     const persistedInfo = projectInfoFromTranscript(pathname);
     if (info && (worktreeInfo || info.worktree || persistedInfo)) {
@@ -862,9 +900,11 @@ export function describeFile(
     fmt = "claude";
     if (fn.startsWith("agent-")) {
       kind = "subagent";
-      const sidecar = identity.sidecarSize === null
-        ? { value: null, complete: identity.complete }
-        : readJsonResult(pathname.slice(0, -".jsonl".length) + ".meta.json");
+      const sidecar = complete
+        ? identity.sidecarSize === null
+          ? { value: null, complete: identity.complete }
+          : readJsonResult(pathname.slice(0, -".jsonl".length) + ".meta.json")
+        : { value: null, complete: false };
       complete &&= sidecar.complete;
       const meta = sidecar.value ?? {};
       title =
@@ -873,9 +913,12 @@ export function describeFile(
         "Subagent " + fn.slice("agent-".length).split(".")[0];
     } else {
       kind = "session";
-      const titleRead = scanJsonlTitle(pathname, st, false);
-      complete &&= titleRead.complete;
-      title = titleRead.value ?? "Claude session";
+      if (complete) {
+        const titleRead = scanJsonlTitle(pathname, st, false);
+        complete &&= titleRead.complete;
+        title = titleRead.value;
+      }
+      title ??= "Claude session";
     }
   } else if (rootName === "claude-tasks") {
     const slug = rel.split(path.sep)[0] ?? "";
@@ -890,6 +933,8 @@ export function describeFile(
     project,
     worktree,
     cwd,
+    sessionStartedAt,
+    nativeParentThreadId,
     projectRoot: cwd ? projectRootForCwd(cwd) ?? null : undefined,
     title: cleanTitle(title ?? fn, 120),
     engine,

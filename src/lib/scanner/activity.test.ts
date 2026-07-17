@@ -1,6 +1,19 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import { turnStateFromRecords } from "./activity";
+import {
+  activityVerdict,
+  primeTranscriptTurnEvidence,
+  recordTranscriptComposerRelease,
+  transcriptTurnResult,
+  turnStateFromRecords,
+} from "./activity";
+
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-activity-test-"));
+
+afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
 const assistant = (stop: string | null, ...kinds: string[]) => ({
   type: "assistant",
@@ -11,6 +24,48 @@ const assistant = (stop: string | null, ...kinds: string[]) => ({
 });
 
 describe("turnStateFromRecords (claude)", () => {
+  test("scanner activity keeps Claude end_turn compatibility", () => {
+    const pathname = path.join(sandbox, "claude-end-turn.jsonl");
+    fs.writeFileSync(pathname, [
+      JSON.stringify({ type: "user", message: { content: "Ship" } }),
+      JSON.stringify(assistant("end_turn", "text")),
+      "",
+    ].join("\n"));
+    const stat = fs.statSync(pathname);
+
+    expect(activityVerdict("claude-projects", pathname, stat.mtimeMs / 1000, stat.size)).toMatchObject({
+      state: "recent",
+      reason: "jsonl_turn_completed",
+      complete: true,
+    });
+  });
+
+  test("bounded projection churn preserves complete composer evidence", () => {
+    const pathname = path.join(sandbox, "claude-composer-release.jsonl");
+    fs.writeFileSync(pathname, [
+      JSON.stringify({ type: "user", message: { content: "Ship" } }),
+      JSON.stringify(assistant("tool_use", "tool_use")),
+      "",
+    ].join("\n"));
+    const stat = fs.statSync(pathname);
+    const unknown = { state: "unknown" as const, source: "empty" as const, terminalAt: null };
+    const evidenceCacheCapacity = 4_096;
+    for (let index = 0; index < evidenceCacheCapacity + 904; index += 1) {
+      primeTranscriptTurnEvidence(`/cache-primer-${index}.jsonl`, 1, 1, false, unknown);
+    }
+    transcriptTurnResult(pathname, stat.size, stat.mtimeMs, false, false);
+    recordTranscriptComposerRelease(pathname, stat.size, stat.mtimeMs, false);
+    for (let index = 0; index < evidenceCacheCapacity - 2; index += 1) {
+      primeTranscriptTurnEvidence(`/cache-churn-${index}.jsonl`, 1, 1, false, unknown);
+    }
+    expect(transcriptTurnResult(pathname, stat.size, stat.mtimeMs, false).composerReleased).toBe(true);
+    primeTranscriptTurnEvidence("/cache-churn-final.jsonl", 1, 1, false, unknown);
+
+    transcriptTurnResult(pathname, stat.size, stat.mtimeMs, false, false);
+
+    expect(transcriptTurnResult(pathname, stat.size, stat.mtimeMs, false).composerReleased).toBe(true);
+  });
+
   test("mid-turn narration — text record before its tool_use lands — keeps the turn open", () => {
     /* The exact window that mislabeled working subagents as «returned with
        result»: Claude appends the narration record first, then the tool_use. */

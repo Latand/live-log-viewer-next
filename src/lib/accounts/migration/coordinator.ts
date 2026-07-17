@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 
 import { accountManager } from "@/lib/accounts/manager";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
@@ -11,7 +12,7 @@ import {
 } from "@/lib/board/store";
 import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { listFiles } from "@/lib/scanner";
-import { tailRecords } from "@/lib/scanner/activity";
+import { recordTranscriptComposerRelease, transcriptTurnResult } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -29,7 +30,6 @@ import {
 } from "./contracts";
 import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
 import { safeProviderDiagnostic, sanitizeProviderError } from "./safeHistoryCopy";
-import { turnStateFromRecords } from "./turnState";
 import { AUTO_BALANCE_COOLDOWN_MS } from "./quotaPolicy";
 
 export interface MigrationPreview {
@@ -46,6 +46,28 @@ export interface HeldDeliveryPort {
 
 function engineOf(entry: FileEntry): MigrationEngine | null {
   return entry.engine === "claude" || entry.engine === "codex" ? entry.engine : null;
+}
+
+function projectedInventoryTurn(
+  entry: FileEntry,
+  parsed: ConversationObservation["turn"] | null,
+  existing: RegistryConversation | null,
+): ConversationObservation["turn"] {
+  if (!parsed) {
+    if (existing && (existing.turn.state === "busy" || existing.turn.state === "unknown")) {
+      return { state: existing.turn.state, source: existing.turn.source, terminalAt: existing.turn.terminalAt };
+    }
+    return { state: "unknown", source: "empty", terminalAt: null };
+  }
+
+  const activityComplete = entry.derivationComplete !== false;
+  if (parsed.state === "busy" && activityComplete && entry.activityReason === "pane_at_composer") {
+    return { state: "idle", source: "empty", terminalAt: null };
+  }
+  if (parsed.state === "unknown" && activityComplete && (entry.activity === "idle" || entry.activity === "recent")) {
+    return { state: "idle", source: "empty", terminalAt: null };
+  }
+  return parsed;
 }
 
 async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<ConversationObservation[]> {
@@ -76,19 +98,23 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const existing = conversationByPath.get(entry.path) ?? null;
     const parentConversation = entry.parent ? conversationByPath.get(entry.parent) ?? null : null;
     const owner = accountManager.resolveTranscriptOwner(engine, entry.path);
-    const parsed = turnStateFromRecords(tailRecords(entry.path, entry.size), engine === "codex", true);
-    const turn = parsed.state !== "terminal" && (entry.activity === "idle" || entry.activity === "recent")
-      ? { state: "idle" as const, source: "empty" as const, terminalAt: null }
-      : parsed;
+    const mtimeMs = entry.mtime * 1000;
+    const observedTurn = transcriptTurnResult(entry.path, entry.size, mtimeMs, engine === "codex");
+    const parsed = observedTurn.complete ? observedTurn.turn : null;
+    if (observedTurn.complete && entry.derivationComplete !== false && entry.activityReason === "pane_at_composer") {
+      recordTranscriptComposerRelease(entry.path, entry.size, mtimeMs, engine === "codex");
+    }
+    const turn = projectedInventoryTurn(entry, parsed, existing);
     const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
     const configuredRoot = process.env.LLV_ROOT_CONVERSATION_ID;
+    const transcriptIdentity = { size: entry.size, mtimeMs };
     observations.push({
       engine,
       path: entry.path,
       accountId: owner?.accountId ?? null,
       launchProfile: emptyLaunchProfile({
-        cwd: currentProfile?.cwd || headCwd(entry.path, { maxLines: 40 }) || "",
+        cwd: currentProfile?.cwd || entry.cwd || headCwd(entry.path, { maxLines: 40, identity: transcriptIdentity }) || "",
         model: currentProfile?.model ?? entry.launchModel ?? entry.model,
         effort: currentProfile?.effort ?? entry.effort ?? null,
         fast: currentProfile?.fast ?? null,
@@ -103,8 +129,10 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       }),
       turn,
       expectedTurnObservedAt: existing?.turn.observedAt ?? null,
-      startedAt: headSessionStartedAt(entry.path),
-      observedAt: new Date(Math.max(entry.mtime * 1000, inventoryStartedAt)).toISOString(),
+      startedAt: entry.sessionStartedAt ?? headSessionStartedAt(entry.path, transcriptIdentity),
+      observedAt: !observedTurn.complete && existing?.turn.observedAt
+        ? existing.turn.observedAt
+        : new Date(Math.max(entry.mtime * 1000, inventoryStartedAt)).toISOString(),
     });
   });
   return observations;
@@ -168,6 +196,7 @@ function isCopyOnly(value: SuccessorProviderPort | HistoryCopyPort): value is Hi
 
 function copyAdapter(copy: HistoryCopyPort): SuccessorProviderPort {
   return {
+    virtualSource: true,
     async create(input) {
       const successor = await copy.copy({
         engine: input.engine,
@@ -194,6 +223,34 @@ function productionProvider(): SuccessorProviderPort {
 
 function terminalMigrationPhase(phase: string): boolean {
   return phase === "committed" || phase === "rolled-back" || phase === "failed-recoverable";
+}
+
+function successorCreationReady(conversation: RegistryConversation, registry: AgentRegistry): boolean {
+  if (conversation.turn.state !== "terminal" && conversation.turn.state !== "idle") return false;
+  return !registry.pendingDeliveries(conversation.id).some((delivery) => delivery.state === "delivery-uncertain");
+}
+
+function completeProviderTurnObservation(
+  conversation: RegistryConversation,
+  source: RegistryConversation["generations"][number],
+  virtualSource: boolean,
+): boolean {
+  let before: fs.Stats;
+  try {
+    before = fs.statSync(source.path);
+  } catch (error) {
+    return virtualSource && (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  const observed = transcriptTurnResult(source.path, before.size, before.mtimeMs, conversation.engine === "codex");
+  if (!observed.complete) return false;
+  let after: fs.Stats;
+  try {
+    after = fs.statSync(source.path);
+  } catch {
+    return false;
+  }
+  if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return false;
+  return observed.turn.state === "terminal" || observed.composerReleased;
 }
 
 export interface MigrationCoordinatorOptions {
@@ -335,8 +392,7 @@ export async function advanceConversationMigration(
   if (!conversation?.migration) throw new Error("conversation has no migration");
   let migration = conversation.migration;
   if (migration.phase === "waiting-turn") {
-    if (conversation.turn.state !== "terminal" && conversation.turn.state !== "idle") return conversation;
-    if (registry.pendingDeliveries(conversation.id).some((delivery) => delivery.state === "delivery-uncertain")) return conversation;
+    if (!successorCreationReady(conversation, registry)) return conversation;
     conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["waiting-turn"], { phase: "requested" });
     migration = conversation.migration!;
   }
@@ -356,6 +412,25 @@ export async function advanceConversationMigration(
     if (migration.providerReceipt) {
       receipt = migration.providerReceipt;
     } else {
+      if (!successorCreationReady(conversation, registry)) return conversation;
+      const creationFencePhase = migration.phase;
+      const restoreCreationFence = (current: RegistryConversation): RegistryConversation => {
+        const currentMigration = current.migration ?? migration;
+        if (currentMigration.phase !== creationFencePhase
+          && (currentMigration.phase === "preparing" || currentMigration.phase === "successor-starting")) {
+          return registry.transitionConversationMigration(
+            current.id,
+            currentMigration.revision,
+            [currentMigration.phase],
+            { phase: creationFencePhase },
+          );
+        }
+        return current;
+      };
+      let source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
+        ?? conversation.generations.at(-1);
+      if (!source) throw new Error("conversation has no source generation");
+      if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true)) return conversation;
       if (migration.phase === "requested") {
         conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["requested"], { phase: "preparing" });
         migration = conversation.migration!;
@@ -364,9 +439,13 @@ export async function advanceConversationMigration(
         conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["preparing"], { phase: "successor-starting" });
         migration = conversation.migration!;
       }
-      const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
+      conversation = registry.conversation(conversation.id) ?? conversation;
+      migration = conversation.migration ?? migration;
+      if (!successorCreationReady(conversation, registry)) return restoreCreationFence(conversation);
+      source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
+      if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true)) return restoreCreationFence(conversation);
       const conversationId = conversation.id;
       receipt = await successorProvider.create({
         engine: conversation.engine,
@@ -463,7 +542,7 @@ export async function drainHeldDeliveries(
     const reconciling = item.state === "delivery-uncertain";
     if (reconciling && !delivery.reconcileUncertain) return;
     if (!reconciling && (item.state !== "assigned" || item.generationId !== current.id)) return;
-    if (item.payloadKind !== "text") {
+    if (item.payloadKind !== "text" && item.payloadKind !== "runtime-images") {
       registry.recordDeliveryOutcome(item.id, "failed", "request-local delivery requires client retry");
       return;
     }

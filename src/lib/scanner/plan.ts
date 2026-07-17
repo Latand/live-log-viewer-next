@@ -1,10 +1,10 @@
 import type { AgentGoal, AgentPlan, FileEntry, PlanStep, PlanStepStatus } from "../types";
-import { tailRecords } from "./activity";
+import { tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { numberValue, recordValue, recordsValue, stringValue } from "./json";
 
-const planCache = globalCache<[number, AgentPlan | null]>("plan");
-const goalCache = globalCache<[number, AgentGoal | null]>("goal");
+const planCache = globalCache<[number, number, AgentPlan | null]>("plan-v2");
+const goalCache = globalCache<[number, number, AgentGoal | null]>("goal-v2");
 
 function normalizeStatus(value: unknown): PlanStepStatus {
   if (value === "in_progress" || value === "completed") return value;
@@ -71,15 +71,17 @@ function codexPlan(obj: Record<string, unknown>): AgentPlan | null {
 export function planFor(entry: FileEntry): AgentPlan | null {
   const conversationRoot = entry.root === "claude-projects" || entry.root === "codex-sessions";
   if (!conversationRoot || !entry.path.endsWith(".jsonl")) return null;
+  const mtimeMs = entry.mtime * 1000;
   const cached = planCache.get(entry.path);
-  if (cached?.[0] === entry.size) return cached[1];
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return cached[2];
 
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
   let plan: AgentPlan | null = null;
-  for (const obj of tailRecords(entry.path, entry.size).reverse()) {
+  for (const obj of tail.records.reverse()) {
     plan = entry.root === "codex-sessions" ? codexPlan(obj) : claudePlan(obj);
     if (plan) break;
   }
-  planCache.set(entry.path, [entry.size, plan]);
+  if (tail.complete) planCache.set(entry.path, [entry.size, mtimeMs, plan]);
   return plan;
 }
 
@@ -128,14 +130,16 @@ function goalFragment(obj: Record<string, unknown>): Partial<AgentGoal> | null {
  */
 export function goalFor(entry: FileEntry): AgentGoal | null {
   if (entry.root !== "codex-sessions" || !entry.path.endsWith(".jsonl")) return null;
+  const mtimeMs = entry.mtime * 1000;
   const cached = goalCache.get(entry.path);
-  if (cached?.[0] === entry.size) return cached[1];
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return cached[2];
 
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
   let objective: string | null = null;
   let status: AgentGoal["status"] | null = null;
   let tokensUsed: number | null = null;
   let timeUsedSeconds: number | null = null;
-  for (const obj of tailRecords(entry.path, entry.size).reverse()) {
+  for (const obj of tail.records.reverse()) {
     const fragment = goalFragment(obj);
     if (!fragment) continue;
     if (status === null && fragment.status) status = fragment.status;
@@ -150,6 +154,6 @@ export function goalFor(entry: FileEntry): AgentGoal | null {
     tokensUsed,
     timeUsedSeconds,
   };
-  goalCache.set(entry.path, [entry.size, goal]);
+  if (tail.complete) goalCache.set(entry.path, [entry.size, mtimeMs, goal]);
   return goal;
 }

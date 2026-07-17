@@ -116,6 +116,38 @@ test("dual-write keeps JSON authoritative and SQLite reads require parity", () =
   expect(() => new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" })).toThrow(RegistryParityError);
 });
 
+test("SQLite restart normalizes legacy held-delivery rows before parity", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-held-upgrade-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const sqliteFilename = path.join(directory, "agent-registry.sqlite");
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  const conversation = sqlite.ensureConversation("codex", "/sessions/legacy-held.jsonl", "default");
+  const reserved = sqlite.holdDelivery(conversation.id, "continue after SQLite upgrade", "legacy-sqlite-held");
+
+  const db = new Database(sqliteFilename);
+  const stored = db.query<{ value_json: string }, [string, string]>(
+    "SELECT value_json FROM registry_rows WHERE collection = ? AND row_key = ?",
+  ).get("heldDeliveries", reserved.id);
+  if (!stored) throw new Error("expected the held-delivery SQLite row");
+  const legacy = JSON.parse(stored.value_json) as Partial<typeof reserved>;
+  delete legacy.command;
+  delete legacy.requestDigest;
+  db.query("UPDATE registry_rows SET value_json = ? WHERE collection = ? AND row_key = ?")
+    .run(JSON.stringify(legacy), "heldDeliveries", reserved.id);
+  db.close();
+
+  const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  expect(restarted.pendingDeliveries(conversation.id)[0]).toMatchObject({
+    id: reserved.id,
+    command: {
+      operationId: reserved.id,
+      kind: "send",
+      policy: "interrupt-active",
+    },
+    requestDigest: expect.any(String),
+  });
+});
+
 test("dual-write leaves both backends unchanged after a no-op mutation", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-noop-"));
   const filename = path.join(directory, "agent-registry.json");

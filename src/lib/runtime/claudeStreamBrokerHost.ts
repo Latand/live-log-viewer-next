@@ -9,10 +9,11 @@ import { statePath } from "@/lib/configDir";
 import { applyClaudeSpawnPolicy } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
+import { signalDetachedProcessGroup, type ProcessSignal } from "@/lib/processGroup";
 import { hardenedRedact } from "@/lib/view/compactText";
 
-import type { DeliveryReceipt, EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
-import { RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
+import type { DeliveryReceipt, EngineHost, HostState, NormalizedQueueEntry, QueueEntry, RuntimeEvent } from "./engineHost";
+import { normalizeQueueEntry, RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
 import {
   FileRuntimeEventStore,
   nextRuntimeEventSequence,
@@ -20,6 +21,13 @@ import {
   type RuntimeEventCursorRecoveryReporter,
   type RuntimeEventStore,
 } from "./eventStore";
+import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
+import {
+  STRUCTURED_IMAGE_CAPABILITY,
+  normalizeStructuredImageMime,
+  structuredContent,
+  type StructuredImageRef,
+} from "./structuredContent";
 
 type JsonObject = Record<string, unknown>;
 type Subscriber = { afterSeq: number; queue: RuntimeEvent[]; wake: (() => void) | null; closed: boolean };
@@ -45,7 +53,7 @@ type PendingAnswer = {
 };
 
 export interface ClaudeDeliveryState {
-  entry: QueueEntry;
+  entry: NormalizedQueueEntry;
   disposition: "turn-started" | "queued-next-turn";
   delivered: boolean;
   queuedAt?: string;
@@ -59,7 +67,7 @@ export interface ClaudeDeliveryLedger {
 }
 
 type ClaudeDeliveryRecord =
-  | { kind: "queued"; entry: QueueEntry; disposition: ClaudeDeliveryState["disposition"]; queuedAt: string }
+  | { kind: "queued"; entry: NormalizedQueueEntry; disposition: ClaudeDeliveryState["disposition"]; queuedAt: string }
   | { kind: "delivered"; entryId: string; engineMessageId: string | null; deliveredAt: string };
 
 export class FileClaudeDeliveryLedger implements ClaudeDeliveryLedger {
@@ -89,14 +97,15 @@ export class FileClaudeDeliveryLedger implements ClaudeDeliveryLedger {
   }
 
   recordQueued(sessionId: string, entry: QueueEntry, disposition: ClaudeDeliveryState["disposition"]): void {
-    const existing = this.load(sessionId).find((state) => state.entry.id === entry.id);
+    const normalized = normalizeQueueEntry(entry);
+    const existing = this.load(sessionId).find((state) => state.entry.id === normalized.id);
     if (existing) {
-      if (!sameQueueEntry(existing.entry, entry)) {
+      if (!sameQueueEntry(existing.entry, normalized)) {
         throw new Error("Claude delivery ledger entry id belongs to a different payload");
       }
       return;
     }
-    this.append(sessionId, { kind: "queued", entry, disposition, queuedAt: new Date().toISOString() });
+    this.append(sessionId, { kind: "queued", entry: normalized, disposition, queuedAt: new Date().toISOString() });
   }
 
   confirmDelivered(sessionId: string, entryId: string, engineMessageId: string | null): void {
@@ -169,6 +178,7 @@ export interface ClaudeStreamBrokerHostOptions {
   claudeProjectsDir?: string;
   spawnPolicyBaseSettingsPath?: string | null;
   allowSubagents?: boolean;
+  readOnly?: boolean;
   binary?: string;
   model?: string;
   effort?: string;
@@ -181,14 +191,18 @@ export interface ClaudeStreamBrokerHostOptions {
   initialEventCursor?: number;
   onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
+  signalProcess?: ProcessSignal;
   readAuthStatus?: () => ClaudeAuthStatus | Promise<ClaudeAuthStatus>;
   readTranscript?: (cwd: string, sessionId: string) => ClaudeTranscriptUser[];
   eventStore?: RuntimeEventStore;
   deliveryLedger?: ClaudeDeliveryLedger;
+  readImage?: (ref: StructuredImageRef) => Buffer;
 }
 
 export interface ClaudeTranscriptUser {
   text: string;
+  contentDigest?: string;
+  imageCount?: number;
   uuid: string | null;
   timestamp: string | null;
 }
@@ -202,7 +216,8 @@ const CHILD_ENV_ALLOWLIST = [
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
-const MAX_LINE_BYTES = 4 * 1024 * 1024;
+const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
+const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
 
 function record(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
@@ -214,19 +229,25 @@ function stringField(value: unknown, key: string): string | null {
 }
 
 function sameQueueEntry(left: QueueEntry, right: QueueEntry): boolean {
-  return left.id === right.id
-    && left.text === right.text
-    && left.expectedTurnId === right.expectedTurnId;
+  const normalizedLeft = normalizeQueueEntry(left);
+  const normalizedRight = normalizeQueueEntry(right);
+  return normalizedLeft.id === normalizedRight.id
+    && normalizedLeft.contentDigest === normalizedRight.contentDigest
+    && normalizedLeft.expectedTurnId === normalizedRight.expectedTurnId;
 }
 
 function deliveryRecord(value: unknown): ClaudeDeliveryRecord | null {
   const candidate = record(value);
   if (candidate?.kind === "queued") {
     const entry = record(candidate.entry);
-    if (typeof entry?.id !== "string" || !entry.id || typeof entry.text !== "string" || !entry.text) return null;
+    if (typeof entry?.id !== "string" || !entry.id) return null;
     if (candidate.disposition !== "turn-started" && candidate.disposition !== "queued-next-turn") return null;
     if (typeof candidate.queuedAt !== "string") return null;
-    return candidate as unknown as ClaudeDeliveryRecord;
+    try {
+      return { ...candidate, entry: normalizeQueueEntry(entry as unknown as QueueEntry) } as ClaudeDeliveryRecord;
+    } catch {
+      return null;
+    }
   }
   if (candidate?.kind === "delivered"
     && typeof candidate.entryId === "string"
@@ -300,6 +321,68 @@ function userText(message: JsonObject): string {
   return textContent(record(message.message)?.content);
 }
 
+function messageContent(message: JsonObject): ReturnType<typeof structuredContent> | null {
+  const blocks = record(message.message)?.content;
+  if (typeof blocks === "string") return blocks.trim() ? structuredContent(blocks, []) : null;
+  if (!Array.isArray(blocks)) return null;
+  const images: StructuredImageRef[] = [];
+  let text = "";
+  for (const block of blocks) {
+    const item = record(block);
+    if (item?.type === "text" && typeof item.text === "string") {
+      text += item.text;
+      continue;
+    }
+    if (item?.type !== "image") continue;
+    const source = record(item.source);
+    const mime = typeof source?.media_type === "string" ? normalizeStructuredImageMime(source.media_type) : null;
+    if (source?.type !== "base64" || !mime || typeof source.data !== "string") return null;
+    const data = Buffer.from(source.data, "base64");
+    if (!data.length || data.toString("base64") !== source.data) return null;
+    images.push({
+      sha256: crypto.createHash("sha256").update(data).digest("hex"),
+      mime,
+      bytes: data.byteLength,
+    });
+  }
+  try { return structuredContent(text, images); } catch { return null; }
+}
+
+function matchesClaudeUserContent(
+  entry: NormalizedQueueEntry,
+  observed: { contentDigest: string; text: string; imageCount: number },
+): boolean {
+  if (entry.contentDigest === observed.contentDigest) return true;
+  return entry.content.images.length > 0
+    && observed.imageCount === entry.content.images.length
+    && observed.text === entry.content.text;
+}
+
+function sanitizedUserReplay(
+  message: JsonObject,
+  content: ReturnType<typeof structuredContent> | null,
+): JsonObject {
+  const providerMessage = record(message.message) ?? {};
+  const sanitizedBlocks: JsonObject[] = content
+    ? content.content.images.map((image) => ({
+        type: "image",
+        source: {
+          type: "runtime_ref",
+          sha256: image.sha256,
+          media_type: image.mime,
+          bytes: image.bytes,
+        },
+      }))
+    : [];
+  const text = content?.content.text ?? userText(message);
+  if (text) sanitizedBlocks.push({ type: "text", text });
+  return {
+    ...message,
+    ...(content ? { contentDigest: content.contentDigest } : {}),
+    message: { ...providerMessage, content: sanitizedBlocks },
+  };
+}
+
 function defaultTranscriptUsers(cwd: string, sessionId: string, projectsRoot?: string): ClaudeTranscriptUser[] {
   const filename = claudeTranscriptPath(cwd, sessionId, projectsRoot);
   let contents: string;
@@ -314,8 +397,11 @@ function defaultTranscriptUsers(cwd: string, sessionId: string, projectsRoot?: s
     let value: JsonObject | null = null;
     try { value = record(JSON.parse(line)); } catch { continue; }
     if (value?.type !== "user" || record(value.message)?.role !== "user") continue;
+    const content = messageContent(value);
     users.push({
       text: userText(value),
+      ...(content ? { contentDigest: content.contentDigest } : {}),
+      ...(content ? { imageCount: content.content.images.length } : {}),
       uuid: stringField(value, "uuid"),
       timestamp: stringField(value, "timestamp"),
     });
@@ -330,9 +416,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly eventStore: RuntimeEventStore;
   private readonly deliveryLedger: ClaudeDeliveryLedger;
+  private readonly readImage: (ref: StructuredImageRef) => Buffer;
   private readonly requestTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
+  private readonly signalProcess: ProcessSignal;
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly deliveries: ClaudeDeliveryState[] = [];
@@ -372,9 +460,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.identity = identity;
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.deliveryLedger = options.deliveryLedger ?? new FileClaudeDeliveryLedger();
+    this.readImage = options.readImage ?? ((ref) => runtimeImageStore().read(ref));
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
+    this.signalProcess = options.signalProcess ?? process.kill;
     this.cursor = options.initialEventCursor ?? 0;
     this.protocolVersion = auth.version ?? null;
     this.account = { type: auth.authMethod, planType: auth.subscriptionType };
@@ -430,7 +520,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       "--permission-prompt-tool", "stdio",
       "--permission-mode", options.permissionMode ?? "default",
     ];
-    if (!options.allowSubagents) args.push("--disallowedTools", "Task,Agent");
+    const disallowedTools = [
+      ...(!options.allowSubagents ? ["Task", "Agent"] : []),
+      ...(options.readOnly ? ["Edit", "Write", "NotebookEdit"] : []),
+    ];
+    if (disallowedTools.length > 0) args.push("--disallowedTools", disallowedTools.join(","));
     if (options.claudeConfigDir) {
       const profileId = `structured-${crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 24)}`;
       const settings = applyClaudeSpawnPolicy(options.claudeConfigDir, {
@@ -448,7 +542,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (options.tools) args.push("--tools", options.tools.join(","));
     const spawnProcess = options.spawnProcess ?? ((command, childArgs, spawnOptions) =>
       spawn(command, childArgs, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
-    const child = spawnProcess(binary, args, { cwd: options.cwd, env });
+    const child = spawnProcess(binary, args, { cwd: options.cwd, env, detached: true });
     const host = new ClaudeStreamBrokerHost(child, { sessionId }, auth, options);
     try {
       host.restore();
@@ -502,12 +596,13 @@ export class ClaudeStreamBrokerHost implements EngineHost {
 
   async send(entry: QueueEntry): Promise<DeliveryReceipt> {
     if (this.unavailable()) return { outcome: "rejected", reason: "dead-host" };
-    if (!entry.id || !entry.text) throw new Error("queue entry id and text are required");
+    if (!entry.id) throw new Error("queue entry id is required");
+    const normalized = normalizeQueueEntry(entry);
     const duplicate = this.deliveries.find((state) => state.entry.id === entry.id);
-    if (duplicate && !sameQueueEntry(duplicate.entry, entry)) {
+    if (duplicate && !sameQueueEntry(duplicate.entry, normalized)) {
       throw new Error("Claude queue entry id belongs to a different payload");
     }
-    if (!duplicate && entry.expectedTurnId !== undefined && entry.expectedTurnId !== this.activeTurnId) {
+    if (!duplicate && normalized.expectedTurnId !== undefined && normalized.expectedTurnId !== this.activeTurnId) {
       return { outcome: "rejected", reason: "stale-turn" };
     }
     if (duplicate?.delivered) {
@@ -515,16 +610,25 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     }
     const existingPending = this.pendingDeliveries.get(entry.id);
     if (existingPending) return existingPending.promise;
+    const blocks: JsonObject[] = normalized.content.images.map((image) => ({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: image.mime,
+        data: this.readImage(image).toString("base64"),
+      },
+    }));
+    if (normalized.content.text) blocks.push({ type: "text", text: normalized.content.text });
     const disposition: ClaudeDeliveryState["disposition"] = duplicate?.disposition
       ?? (this.activeTurnId ? "queued-next-turn" : "turn-started");
     try {
-      this.deliveryLedger.recordQueued(this.identity.sessionId, entry, disposition);
+      this.deliveryLedger.recordQueued(this.identity.sessionId, normalized, disposition);
     } catch (error) {
       this.failWithoutLedger(new Error(`Claude delivery ledger failed: ${safeError(error)}`));
       throw new Error(`Claude delivery ledger failed: ${safeError(error)}`);
     }
     const delivery: ClaudeDeliveryState = duplicate
-      ?? { entry: structuredClone(entry), disposition, delivered: false };
+      ?? { entry: structuredClone(normalized), disposition, delivered: false };
     if (!duplicate) this.deliveries.push(delivery);
     let resolveDelivery!: PendingDelivery["resolve"];
     let rejectDelivery!: PendingDelivery["reject"];
@@ -546,7 +650,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.write({
       type: "user",
       session_id: this.identity.sessionId,
-      message: { role: "user", content: [{ type: "text", text: entry.text }] },
+      message: { role: "user", content: blocks },
     });
     this.turnQueue.push(entry.id);
     if (!this.activeTurnId) {
@@ -642,7 +746,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       protocolVersion: this.protocolVersion,
       activeTurnRef: this.activeTurnId,
       pendingAttention: [...this.attentions.keys()],
-      activeFlags: [],
+      activeFlags: [STRUCTURED_IMAGE_CAPABILITY],
       account: this.account,
     };
   }
@@ -656,7 +760,10 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       this.cursor,
       this.onEventCursorRecovery,
     );
-    this.deliveries.push(...this.deliveryLedger.load(this.identity.sessionId));
+    this.deliveries.push(...this.deliveryLedger.load(this.identity.sessionId).map((delivery) => ({
+      ...delivery,
+      entry: normalizeQueueEntry(delivery.entry),
+    })));
     let restoredTurn: string | null = null;
     for (const event of stored) {
       if (event.kind === "turn-started") restoredTurn = event.turnId;
@@ -682,7 +789,12 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       const queuedAt = delivery.queuedAt ? Date.parse(delivery.queuedAt) : Number.NEGATIVE_INFINITY;
       const index = unmatched.findIndex((user) => {
         const timestamp = user.timestamp ? Date.parse(user.timestamp) : Number.POSITIVE_INFINITY;
-        return user.text === delivery.entry.text && timestamp >= queuedAt;
+        const digest = user.contentDigest ?? structuredContent(user.text, []).contentDigest;
+        return matchesClaudeUserContent(delivery.entry, {
+          contentDigest: digest,
+          text: user.text,
+          imageCount: user.imageCount ?? 0,
+        }) && timestamp >= queuedAt;
       });
       if (index < 0) continue;
       const [user] = unmatched.splice(index, 1);
@@ -746,10 +858,14 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       return;
     }
     if (type === "user") {
-      const text = userText(message);
-      const userRoleReplay = message.isReplay === true && stringField(message.message, "role") === "user";
-      const delivery = userRoleReplay
-        ? this.deliveries.find((candidate) => !candidate.delivered && candidate.entry.text === text)
+      const content = messageContent(message);
+      const directUserEcho = stringField(message.message, "role") === "user" && content !== null;
+      const delivery = directUserEcho
+        ? this.deliveries.find((candidate) => !candidate.delivered && matchesClaudeUserContent(candidate.entry, {
+            contentDigest: content.contentDigest,
+            text: content.content.text,
+            imageCount: content.content.images.length,
+          }))
         : undefined;
       if (delivery) {
         try {
@@ -766,7 +882,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
           return this.failWithoutLedger(new Error(`Claude delivery ledger failed: ${safeError(error)}`));
         }
       }
-      this.emit({ kind: "item", turnId: this.activeTurnId, item: message, phase: "completed" });
+      this.emit({ kind: "item", turnId: this.activeTurnId, item: sanitizedUserReplay(message, content), phase: "completed" });
       return;
     }
     if (type === "stream_event") {
@@ -869,7 +985,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.rejectPending(new Error("Claude stream host released"));
     this.startTermination();
     if (!await this.waitForReap(this.shutdownGraceMs * 2)) {
-      try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
+      signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
       if (!await this.waitForReap(this.shutdownGraceMs)) throw new Error("Claude child could not be reaped");
     }
     this.finishRelease();
@@ -934,11 +1050,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (this.terminationStarted || this.reaped) return;
     this.terminationStarted = true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
-    try { this.child.kill("SIGTERM"); } catch { /* already closed */ }
+    signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
       if (this.reaped) return;
-      try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
+      signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
     }, this.shutdownGraceMs);
   }
 

@@ -1,8 +1,9 @@
-import type { Flow, FlowAnnotation } from "@/lib/flows/types";
+import type { Flow, FlowAnnotation, ReviewVerdict } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { TmuxEndpointHealth } from "@/lib/tmux";
 import type { Workflow } from "@/lib/workflows/types";
+import type { TurnState } from "@/lib/accounts/migration/contracts";
 
 export type RootKey =
   | "codex-sessions"
@@ -12,6 +13,16 @@ export type RootKey =
 export type Engine = "codex" | "claude" | "shell";
 export type Activity = "live" | "recent" | "stalled" | "idle";
 export type Fmt = "codex" | "claude" | "plain";
+
+export interface StructuredSpawnCardState {
+  launchId: string;
+  clientAttemptId: string | null;
+  accountId: string | null;
+  state: "starting" | "binding" | "queued" | "failed" | "recovered";
+  initialMessage: "pending" | "queued" | "delivered" | "failed";
+  retrySafe: boolean;
+  error: string | null;
+}
 
 /** Current quota wall affecting a hosted conversation. Account provenance
     joins the existing conversation identity at the read-model boundary. */
@@ -32,6 +43,10 @@ export interface FileEntry {
   project: string;
   /** Working directory recorded by the conversation transcript. */
   cwd?: string | null;
+  /** Identity-bound session creation time parsed from the transcript header. */
+  sessionStartedAt?: string | null;
+  /** Native Codex parent thread parsed from the identity-bound transcript header. */
+  nativeParentThreadId?: string | null;
   /** Canonical parent-repository root when cwd belongs to a linked worktree. */
   projectRoot?: string | null;
   /** Git worktree name when cwd lives under <repo>/.claude/worktrees/<name>. */
@@ -63,6 +78,10 @@ export interface FileEntry {
   activity: Activity;
   /** Machine-readable reason behind `activity` (jsonl_turn_open, mtime_fresh…). */
   activityReason?: string;
+  /** Whether transcript-backed scanner derivations completed for this file identity. */
+  derivationComplete?: boolean;
+  /** Complete provider-authoritative turn evidence retained independently from activity projection. */
+  authoritativeTurn?: TurnState;
   /** Real OS process state when the entry maps to a process, else null. */
   proc: "running" | "done" | "killed" | null;
   pid: number | null;
@@ -119,6 +138,12 @@ export interface FileEntry {
   cmdDesc?: string;
   /** Review-loop ownership for grouping implementer/reviewer sessions. */
   flow?: FlowAnnotation;
+  /** Terminal review outcome of a one-shot reviewer, parsed from the reviewer
+      transcript's last assistant message (issue #325). Present only on current
+      generations carrying a durable `role=reviewer` edge; a clean "NO FINDINGS"
+      reply projects as APPROVE with zero findings. Absent while the reviewer is
+      still working or when its tail carries no verdict. */
+  review?: { verdict: ReviewVerdict; findingsCount: number | null; observedAt: string | null } | null;
   /** Stable registry projection used by board adapters after paths rotate. */
   durableLineage?: {
     kind: "spawn" | "review";
@@ -158,6 +183,8 @@ export interface FileEntry {
   /** Live per-session migration annotation while an intent drains. Absent for
       every session not currently migrating. */
   migration?: ConversationMigration;
+  /** Durable launch projection shown before its transcript enters the scan. */
+  spawn?: StructuredSpawnCardState;
 }
 
 /** Per-session migration annotation carried on a {@link FileEntry} while an

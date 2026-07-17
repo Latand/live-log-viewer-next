@@ -20,7 +20,7 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
-import { ImagePickerButton } from "./imageAttachments";
+import { ImagePickerButton, type PendingImage } from "./imageAttachments";
 import { ReceiptChip, runtimeReceiptStatusText } from "./runtime/ReceiptChip";
 import { mintIdempotencyKey, receiptIsTerminal } from "./runtime/runtimeModel";
 
@@ -372,6 +372,75 @@ export function RuntimeComposerReceipts({
   );
 }
 
+/**
+ * Exact draft clearing after an accepted delivery. Removes precisely the
+ * delivered text from the front of the draft: text typed while the send was in
+ * flight survives, and a stale delivery for text the draft no longer holds
+ * leaves it untouched.
+ */
+export function draftAfterDelivery(draft: string, delivered: string): string {
+  const deliveredTrim = delivered.trim();
+  if (!deliveredTrim) return draft;
+  const start = draft.trimStart();
+  if (start.startsWith(deliveredTrim)) return start.slice(deliveredTrim.length).trimStart();
+  return draft;
+}
+
+/** A send whose immediate response was lost or deferred, remembered so a later
+    delivered receipt for its idempotency key still clears the draft exactly. */
+export interface PendingDelivery {
+  key: string;
+  /** The draft text this attempt carried, the clearing fallback when the
+      delivered receipt omits its own text. */
+  text: string;
+  /** Immutable snapshot of the attachments this attempt carried: a late
+      delivered receipt removes exactly these from the composer, so images
+      attached after the send stay put. */
+  images: readonly PendingImage[];
+}
+
+const PENDING_DELIVERY_LIMIT = 8;
+
+/**
+ * Settle pending deliveries against the current receipt set: a `delivered`
+ * receipt for a pending key yields the attempt with its delivered text (the
+ * receipt's own text is the server's record of what actually reached the
+ * agent, so it wins over the local attempt's) and drops the entry, so repeated
+ * delivered receipts clear at most once. Non-delivered and unknown receipts
+ * change nothing.
+ */
+export function settlePendingDeliveries(
+  pending: readonly PendingDelivery[],
+  receipts: readonly RuntimeReceipt[],
+): { delivered: { entry: PendingDelivery; text: string }[]; remaining: PendingDelivery[] } {
+  const deliveredByKey = new Map<string, RuntimeReceipt>();
+  for (const receipt of receipts) {
+    if (receipt.status === "delivered") deliveredByKey.set(receipt.idempotencyKey, receipt);
+  }
+  const delivered: { entry: PendingDelivery; text: string }[] = [];
+  const remaining: PendingDelivery[] = [];
+  for (const entry of pending) {
+    const receipt = deliveredByKey.get(entry.key);
+    if (receipt) delivered.push({ entry, text: typeof receipt.text === "string" && receipt.text ? receipt.text : entry.text });
+    else remaining.push(entry);
+  }
+  return { delivered, remaining };
+}
+
+/** Removes one attachment per delivered snapshot entry (matched by content,
+    not position), so attachments added while the send was in flight survive. */
+export function attachmentsAfterDelivery(
+  current: readonly PendingImage[],
+  delivered: readonly PendingImage[],
+): PendingImage[] {
+  const remaining = [...current];
+  for (const sent of delivered) {
+    const index = remaining.findIndex((image) => image.base64 === sent.base64 && image.mime === sent.mime);
+    if (index >= 0) remaining.splice(index, 1);
+  }
+  return remaining;
+}
+
 /** A receipt still awaiting durable delivery (a migration hold) must never be
     pruned by the pane/spawn TTLs — its text lands on the successor, whose
     transcript is a different file, so only an explicit resolve/dismiss clears it. */
@@ -463,6 +532,11 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   const cardId = conversationIdentity(file);
   const runtimeSession = useRuntimeSession(cardId);
   const structuredSession = structuredComposerSession(runtimeSession);
+  const structuredImageCapability = structuredSession?.session.capabilities.imageInput;
+  const structuredImagesDisabled = Boolean(structuredSession && !structuredImageCapability?.supported);
+  const structuredImagesReason = structuredImagesDisabled
+    ? t("composer.structuredImagesProtocol")
+    : undefined;
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of
      pretending the text reached the live predecessor pane. */
@@ -479,6 +553,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       else sessionStorage.removeItem(draftKey(cardId));
     },
     submit: (overrideText) => send(overrideText),
+    imageCapability: structuredSession ? structuredImageCapability ?? null : null,
   });
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const isMobile = useIsMobile();
@@ -498,6 +573,10 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      so the runtime host can round-trip it once the structured plane is on; the
      legacy /api/tmux route ignores the extra field. */
   const idempotencyKey = useRef<string>(mintIdempotencyKey());
+  /* Sends the server may have accepted although the immediate response was
+     lost or non-ok: a later `delivered` receipt for one of these keys clears
+     the draft exactly, so an acknowledged message never lingers as a draft. */
+  const pendingDeliveries = useRef<PendingDelivery[]>([]);
   /* Durable receipts for this session from the runtime bus (empty while the bus
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
@@ -513,8 +592,31 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   useEffect(() => {
     setSent(readSent(cardId));
     setImmediateRuntimeReceipts([]);
+    pendingDeliveries.current = [];
   }, [cardId]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  /* Settle lost-response sends against the receipt stream: a `delivered`
+     receipt for a remembered key means the server accepted that attempt and
+     the turn ran, so its exact text leaves the draft (later typing survives;
+     a rewritten draft for the next turn stays untouched). */
+  useEffect(() => {
+    if (!pendingDeliveries.current.length) return;
+    const { delivered, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);
+    if (!delivered.length) return;
+    pendingDeliveries.current = remaining;
+    let remainingImages: readonly PendingImage[] = attachments.images;
+    for (const settled of delivered) {
+      const next = draftAfterDelivery(textRef.current, settled.text);
+      if (next !== textRef.current) setText(next);
+      remainingImages = attachmentsAfterDelivery(remainingImages, settled.entry.images);
+      /* The delivered attempt consumed its key: minting a fresh one keeps the
+         next message from being replay-deduped into silence server-side. */
+      if (settled.entry.key === idempotencyKey.current) idempotencyKey.current = mintIdempotencyKey();
+    }
+    if (remainingImages.length !== attachments.images.length) attachments.replace([...remainingImages]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef/attachments are hook-stable
+  }, [displayedRuntimeReceipts]);
 
   /* A link-arrow drop appended to the stored draft; reload it and put the
      caret at the end so the ask can be typed straight away. Goes through the
@@ -575,6 +677,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   const send = async (overrideText?: string, retry?: { receiptId: number; clientMessageId?: string }) => {
     const payloadText = overrideText ?? text;
     if (busy || voiceSending || (!payloadText.trim() && !attachments.images.length)) return;
+    if (structuredSession && attachments.images.length && !attachments.validate()) return;
     setBusy(true);
     setStatus(null);
     /* Idempotency key: the backend can dedupe a retried held/failed delivery
@@ -585,23 +688,27 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         ok?: boolean;
         structured?: boolean;
         error?: string;
+        /** HTTP status of the response, absent when the response was lost. */
+        status?: number;
         imagePaths?: string[];
         target?: string;
         spawned?: boolean;
         outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "delivering" | "delivered" | "recovering" | "failed";
         receipt?: RuntimeReceipt;
       } = structuredSession
-        ? attachments.images.length > 0
-          ? { ok: false, structured: true, error: t("composer.structuredImagesUnavailable") }
+        ? structuredImagesDisabled && attachments.images.length > 0
+          ? { ok: false, structured: true, error: structuredImagesReason }
           : await sendRuntimeMessage({
               conversationId: structuredSession.session.conversationId,
               text: payloadText.trim(),
+              images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
               idempotencyKey: clientMessageId,
               policy: "interrupt-active",
             }).then((result) => ({
               ok: result.ok,
               structured: true,
               error: result.error,
+              status: result.status,
               receipt: result.receipt,
               outcome: result.receipt?.status === "delivering" || result.receipt?.status === "delivered"
                 ? result.receipt.status
@@ -620,7 +727,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             }),
           }).then(async (response) => {
             const body = await response.json() as typeof json;
-            return { ...body, ok: response.ok && body.ok === true };
+            return { ...body, status: response.status, ok: response.ok && body.ok === true };
           });
       if (!json.ok) {
         if (json.structured && json.receipt) {
@@ -629,6 +736,35 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             ...current.filter((receipt) => receipt.operationId !== json.receipt!.operationId),
           ].slice(0, 8));
           idempotencyKey.current = mintIdempotencyKey();
+          if (json.receipt.status === "delivered") {
+            /* An idempotent replay: this key's FIRST attempt already reached
+               the agent and the turn ran. The accepted delivery clears its
+               exact text (the receipt's record wins) and exactly the FIRST
+               attempt's attachment snapshot — images attached after that
+               attempt stay put for the next message. */
+            const delivered = typeof json.receipt.text === "string" && json.receipt.text ? json.receipt.text : payloadText;
+            setText(draftAfterDelivery(textRef.current, delivered));
+            const attempt = pendingDeliveries.current.find((entry) => entry.key === clientMessageId);
+            pendingDeliveries.current = pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId);
+            if (attempt) attachments.replace(attachmentsAfterDelivery(attachments.images, attempt.images));
+            else attachments.clear();
+            setStatus({ kind: "ok", text: t("common.sent") });
+            inputRef.current?.focus();
+            return;
+          }
+        }
+        /* The earliest attempt per key is the immutable record of what the
+           server may have accepted: a retry never overwrites it, and a
+           definitive 4xx rejection (e.g. a changed-payload 409) creates no
+           entry at all — only a lost response (network/5xx) or an explicitly
+           still-moving receipt does. */
+        if (!receiptIsTerminal(json.receipt?.status ?? "pending")
+          && !pendingDeliveries.current.some((entry) => entry.key === clientMessageId)
+          && (json.status === undefined || json.status >= 500)) {
+          pendingDeliveries.current = [
+            { key: clientMessageId, text: payloadText, images: attachments.images.map((image) => ({ ...image })) },
+            ...pendingDeliveries.current,
+          ].slice(0, PENDING_DELIVERY_LIMIT);
         }
         // A hard failure keeps the draft text (never cleared) so the message is
         // not lost; the error is announced by the composer's live status region.
@@ -641,7 +777,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           ...current.filter((receipt) => receipt.operationId !== json.receipt!.operationId),
         ].slice(0, 8));
         idempotencyKey.current = mintIdempotencyKey();
-        setText("");
+        setText(draftAfterDelivery(textRef.current, payloadText));
+        pendingDeliveries.current = pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId);
         attachments.clear();
         inputRef.current?.focus();
         return;
@@ -664,7 +801,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
       persistSent([...prior, entry].slice(-SENT_LIMIT));
       idempotencyKey.current = mintIdempotencyKey(); // next draft is a new message
-      setText("");
+      setText(draftAfterDelivery(textRef.current, payloadText));
+      pendingDeliveries.current = pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId);
       attachments.clear();
       setStatus({
         kind: held ? "info" : "ok",
@@ -678,6 +816,16 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       });
       inputRef.current?.focus();
     } catch {
+      /* The request died on the wire AFTER the server may have accepted it:
+         remember the attempt (text AND attachment snapshot) so a delivered
+         receipt still clears exactly what was sent. An earlier attempt under
+         the same key stays the immutable record. */
+      if (!pendingDeliveries.current.some((entry) => entry.key === clientMessageId)) {
+        pendingDeliveries.current = [
+          { key: clientMessageId, text: payloadText, images: attachments.images.map((image) => ({ ...image })) },
+          ...pendingDeliveries.current,
+        ].slice(0, PENDING_DELIVERY_LIMIT);
+      }
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {
       setBusy(false);
@@ -980,6 +1128,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             : []
         }
         showImage={!isMobile}
+        imageDisabled={structuredImagesDisabled}
+        imageDisabledReason={structuredImagesReason}
         receipts={
           displayedRuntimeReceipts.length
             ? <RuntimeComposerReceipts
@@ -1011,6 +1161,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                     ariaLabel={t("composer.addImages")}
                     className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
                     onFiles={attachments.addFiles}
+                    disabled={structuredImagesDisabled}
+                    disabledReason={structuredImagesReason}
                   />
                 </>
               ) : null}

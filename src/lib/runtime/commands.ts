@@ -1,4 +1,5 @@
 import type { RuntimeOperationCommand, RuntimeOperationKind } from "./contracts";
+import { parseStructuredImageRefs, structuredContent } from "./structuredContent";
 
 const MAX_OPERATION_BYTES = 256 * 1024;
 
@@ -36,9 +37,10 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
 
   if (kind === "send" || kind === "steer") {
     const text = typeof body.text === "string" ? body.text.trim() : "";
-    if (!text) throw new Error("text is required");
     const images = body.images === undefined ? undefined : body.images;
-    if (images !== undefined && (!Array.isArray(images) || images.length > 16 || images.some((image) => typeof image !== "string"))) throw new Error("images are invalid");
+    const imageRefs = images === undefined ? [] : parseStructuredImageRefs(images, 16);
+    if (!imageRefs) throw new Error("images are invalid");
+    const content = structuredContent(text, imageRefs);
     const policy = body.policy === undefined ? undefined : body.policy;
     if (policy !== undefined && policy !== "queue" && policy !== "steer-if-active" && policy !== "interrupt-active") {
       throw new Error("policy is invalid");
@@ -48,8 +50,9 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
       conversationId,
       ...(operationId ? { operationId } : {}),
       idempotencyKey,
-      text,
-      ...(images ? { images: images as string[] } : {}),
+      text: content.content.text,
+      ...(imageRefs.length ? { images: imageRefs } : {}),
+      contentDigest: content.contentDigest,
       ...(policy ? { policy } : {}),
       ...(turnId !== undefined ? { turnId } : {}),
     };
@@ -99,6 +102,9 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
   if (!cwd) throw new Error("spawn cwd is required");
   if (typeof body.prompt !== "string") throw new Error("prompt is required");
   const prompt = body.prompt.trim();
+  const images = body.images === undefined ? [] : parseStructuredImageRefs(body.images, 16);
+  if (!images) throw new Error("images are invalid");
+  const content = prompt || images.length ? structuredContent(prompt, images) : null;
   const accountId = optionalNullableId(body.accountId, "accountId");
   const parentConversationId = optionalNullableId(body.parentConversationId, "parentConversationId");
   const sessionId = optionalNullableId(body.sessionId, "sessionId");
@@ -110,6 +116,8 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
     engine,
     cwd,
     prompt,
+    ...(images.length ? { images } : {}),
+    ...(content ? { contentDigest: content.contentDigest } : {}),
     ...(accountId !== undefined ? { accountId } : {}),
     ...(parentConversationId !== undefined ? { parentConversationId } : {}),
     ...(sessionId !== undefined ? { sessionId } : {}),

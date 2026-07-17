@@ -85,6 +85,8 @@ export interface FreshSpecOptions {
       `service_tier=standard`; unset leaves the user's config.toml default. */
   fast?: boolean | null;
   readOnly?: boolean;
+  /** Claude only: override the CLI permission mode for a fresh launch. */
+  permissionMode?: string | null;
   /** Codex only: explicit account home scoped into the typed host command. */
   codexHome?: string | null;
   /** Claude only: an already-resolved managed config home. */
@@ -120,10 +122,9 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     const sid = crypto.randomUUID();
     const args = [resolveBinary("claude")];
     /* Read-only rounds must not inherit the skip-permissions bypass: with it,
-       denying Edit/Write still leaves Bash free to mutate the worktree. Plan
-       mode is the CLI's real read-only policy — mutating actions need an
-       approval the reviewer never gets. */
-    if (options.readOnly) args.push("--permission-mode", "plan", "--disallowedTools", "Edit,Write,NotebookEdit");
+       denying Edit/Write still leaves Bash free to mutate the worktree. */
+    const readOnlyPermissionMode = options.permissionMode ?? "plan";
+    if (options.readOnly) args.push("--permission-mode", readOnlyPermissionMode, "--disallowedTools", "Edit,Write,NotebookEdit");
     else args.push("--dangerously-skip-permissions");
     args.push("--session-id", sid);
     if (options.model) args.push("--model", options.model);
@@ -152,7 +153,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
         model: options.model ?? null,
         effort: options.effort ?? null,
         fast: null,
-        permissionMode: options.readOnly ? "plan" : "bypassPermissions",
+        permissionMode: options.readOnly ? readOnlyPermissionMode : "bypassPermissions",
         readOnly: options.readOnly ?? false,
         allowSubagents: options.allowSubagents ?? false,
         title: null,

@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
 
-import { AgentRegistry, conversationLookupFromSnapshot, SPAWN_STARTING_ADMISSION_LEASE_MS } from "@/lib/agent/registry";
+import { AgentRegistry, conversationLookupFromSnapshot, CORRUPT_HELD_DELIVERY_IMAGES_ERROR, DeliveryReservationConflictError, SPAWN_STARTING_ADMISSION_LEASE_MS } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { structuredContent } from "@/lib/runtime/structuredContent";
 
 const KEY = { engine: "codex" as const, sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" };
 
@@ -97,6 +98,8 @@ describe("agent registry", () => {
         createdAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
         clientMessageId: id,
         payloadKind: "text",
+        runtimeImages: [],
+        contentDigest: null,
         artifactPaths: [],
         state: "delivered",
         generationId: conversation.generations.at(-1)!.id,
@@ -104,7 +107,7 @@ describe("agent registry", () => {
         assignedAt: null,
         deliveredAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
         error: null,
-      };
+      } as unknown as (typeof snapshot.heldDeliveries)[string];
     }
     fs.writeFileSync(store.filename, JSON.stringify(snapshot));
 
@@ -116,6 +119,213 @@ describe("agent registry", () => {
     expect(retained.every((delivery) => delivery.text === "")).toBe(true);
     expect(retained.map((delivery) => delivery.id)).not.toContain("legacy-000");
     expect(retained.map((delivery) => delivery.id)).toContain("legacy-104");
+  });
+
+  test("a restarted legacy delivered tombstone replays while modern digests retain payload conflicts", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/legacy-delivered-retry.jsonl", "default");
+    const snapshot = store.snapshot();
+    snapshot.heldDeliveries["legacy-delivered"] = {
+      id: "legacy-delivered",
+      conversationId: conversation.id,
+      text: "",
+      createdAt: "2026-07-11T00:00:00.000Z",
+      clientMessageId: "legacy-client-message",
+      payloadKind: "text",
+      runtimeImages: [],
+      contentDigest: null,
+      artifactPaths: [],
+      state: "delivered",
+      generationId: conversation.generations.at(-1)!.id,
+      attempts: 1,
+      assignedAt: "2026-07-11T00:00:01.000Z",
+      deliveredAt: "2026-07-11T00:00:02.000Z",
+      error: null,
+    } as unknown as (typeof snapshot.heldDeliveries)[string];
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const restarted = new AgentRegistry(store.filename);
+    const originalContent = structuredContent("original payload", []);
+    expect(restarted.holdDelivery(
+      conversation.id,
+      originalContent.content.text,
+      "legacy-client-message",
+      "text",
+      [],
+      originalContent.contentDigest,
+    )).toMatchObject({ id: "legacy-delivered", state: "delivered", contentDigest: null });
+
+    const modernContent = structuredContent("modern payload", []);
+    const modern = restarted.holdDelivery(
+      conversation.id,
+      modernContent.content.text,
+      "modern-client-message",
+      "text",
+      [],
+      modernContent.contentDigest,
+    );
+    restarted.beginDeliveryAttempt(modern.id, conversation.generations.at(-1)!.id);
+    restarted.recordDeliveryOutcome(modern.id, "delivered");
+    const changedContent = structuredContent("changed payload", []);
+    expect(() => restarted.holdDelivery(
+      conversation.id,
+      changedContent.content.text,
+      "modern-client-message",
+      "text",
+      [],
+      changedContent.contentDigest,
+    )).toThrow("client message id is already reserved for another request");
+  });
+
+  test("a changed-image replay of one client message id raises a typed 409 reservation conflict", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("claude", "/changed-image-conflict.jsonl", "default");
+    const originalRefs = [{ sha256: "a".repeat(64), mime: "image/png" as const, bytes: 67 }];
+    const original = structuredContent("ship the screenshot", originalRefs);
+    const held = store.holdDelivery(
+      conversation.id, original.content.text, "image-client-message", "runtime-images", originalRefs, original.contentDigest,
+    );
+    expect(held.state).toBe("assigned");
+
+    /* The exact replay (same text and image digests) stays idempotent. */
+    const replay = store.holdDelivery(
+      conversation.id, original.content.text, "image-client-message", "runtime-images", originalRefs, original.contentDigest,
+    );
+    expect(replay.id).toBe(held.id);
+
+    /* Same client message id and text, different image set: a reservation
+       conflict typed for HTTP 409, with the original reservation untouched. */
+    const changedRefs = [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }];
+    const changed = structuredContent("ship the screenshot", changedRefs);
+    expect(() => store.holdDelivery(
+      conversation.id, changed.content.text, "image-client-message", "runtime-images", changedRefs, changed.contentDigest,
+    )).toThrow(DeliveryReservationConflictError);
+    expect(store.snapshot().heldDeliveries[held.id]).toMatchObject({
+      contentDigest: original.contentDigest,
+      runtimeImages: originalRefs,
+      state: "assigned",
+    });
+
+    /* And the exact replay still works after the rejected conflict. */
+    expect(store.holdDelivery(
+      conversation.id, original.content.text, "image-client-message", "runtime-images", originalRefs, original.contentDigest,
+    ).id).toBe(held.id);
+  });
+
+  test("a retirement-aged delivered reservation still replays exactly and conflicts by digest", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("claude", "/retired-tombstone.jsonl", "default");
+    const refs = [{ sha256: "a".repeat(64), mime: "image/png" as const, bytes: 67 }];
+    const content = structuredContent("retired but idempotent", refs);
+    const held = store.holdDelivery(conversation.id, content.content.text, "retired-key", "runtime-images", refs, content.contentDigest);
+    store.beginDeliveryAttempt(held.id, conversation.generations.at(-1)!.id);
+    store.recordDeliveryOutcome(held.id, "delivered");
+    /* Age the tombstone far past the reachability retirement grace: blob refs
+       may retire from quota accounting, but the digest tombstone itself keeps
+       replay and conflict semantics untouched. */
+    const snapshot = store.snapshot();
+    snapshot.heldDeliveries[held.id]!.deliveredAt = "2026-01-01T00:00:00.000Z";
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+    const restarted = new AgentRegistry(store.filename);
+
+    expect(restarted.holdDelivery(conversation.id, content.content.text, "retired-key", "runtime-images", refs, content.contentDigest))
+      .toMatchObject({ id: held.id, state: "delivered" });
+    const changed = structuredContent("retired but idempotent", [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }]);
+    expect(() => restarted.holdDelivery(conversation.id, changed.content.text, "retired-key", "runtime-images", changed.content.images, changed.contentDigest))
+      .toThrow(DeliveryReservationConflictError);
+  });
+
+  test("corrupt persisted image refs become a visible recoverable failure with zero actuation", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("claude", "/corrupt-image-refs.jsonl", "default");
+    const refs = [{ sha256: "a".repeat(64), mime: "image/png" as const, bytes: 67 }];
+    const content = structuredContent("annotate the diagram", refs);
+    const held = store.holdDelivery(conversation.id, content.content.text, "corrupt-image-key", "runtime-images", refs, content.contentDigest);
+    expect(held.state).toBe("assigned");
+    const snapshot = store.snapshot();
+    (snapshot.heldDeliveries[held.id] as { runtimeImages: unknown }).runtimeImages =
+      [{ sha256: "not-a-digest", mime: "image/png", bytes: 67 }];
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    /* Normalization keeps the image reservation in a recoverable failure
+       state and blocks caption-only actuation. */
+    const restarted = new AgentRegistry(store.filename);
+    expect(restarted.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      runtimeImages: [],
+      generationId: null,
+      error: CORRUPT_HELD_DELIVERY_IMAGES_ERROR,
+      contentDigest: content.contentDigest,
+    });
+
+    /* No delivery attempt can claim it, and an exact replay cannot revive it
+       into an assignable text-only delivery — it stays visibly failed. */
+    expect(restarted.beginDeliveryAttempt(held.id, conversation.generations.at(-1)!.id)).toBeNull();
+    expect(restarted.holdDelivery(conversation.id, content.content.text, "corrupt-image-key", "runtime-images", refs, content.contentDigest))
+      .toMatchObject({ id: held.id, state: "failed", error: CORRUPT_HELD_DELIVERY_IMAGES_ERROR });
+
+    /* A changed payload under the same key still raises the typed conflict. */
+    const changed = structuredContent("annotate the diagram", [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }]);
+    expect(() => restarted.holdDelivery(conversation.id, changed.content.text, "corrupt-image-key", "runtime-images", changed.content.images, changed.contentDigest))
+      .toThrow(DeliveryReservationConflictError);
+  });
+
+  for (const scenario of [
+    { label: "missing", runtimeImages: undefined },
+    { label: "null", runtimeImages: null },
+    { label: "empty", runtimeImages: [] },
+  ] as const) {
+    test(`runtime-images reservation with ${scenario.label} refs becomes a recoverable failure`, () => {
+      const store = registry();
+      const conversation = store.ensureConversation("claude", `/missing-image-refs-${scenario.label}.jsonl`, "default");
+      const refs = [{ sha256: "a".repeat(64), mime: "image/png" as const, bytes: 67 }];
+      const content = structuredContent("keep the image", refs);
+      const held = store.holdDelivery(conversation.id, content.content.text, null, "runtime-images", refs, content.contentDigest);
+      const snapshot = store.snapshot();
+      if (scenario.runtimeImages === undefined) delete (snapshot.heldDeliveries[held.id] as Partial<typeof held>).runtimeImages;
+      else (snapshot.heldDeliveries[held.id] as { runtimeImages: unknown }).runtimeImages = scenario.runtimeImages;
+      fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+      expect(new AgentRegistry(store.filename).snapshot().heldDeliveries[held.id]).toMatchObject({
+        state: "failed",
+        runtimeImages: [],
+        generationId: null,
+        error: CORRUPT_HELD_DELIVERY_IMAGES_ERROR,
+      });
+    });
+  }
+
+  test("new runtime-images reservations require at least one valid image ref", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("claude", "/empty-image-reservation.jsonl", "default");
+
+    expect(() => store.holdDelivery(
+      conversation.id,
+      "caption",
+      "empty-runtime-images",
+      "runtime-images",
+      [],
+      structuredContent("caption", []).contentDigest,
+    )).toThrow("runtime-images delivery requires image references");
+  });
+
+  test("held delivery captions share one UTF-8 envelope bound across payload kinds", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("claude", "/caption-envelope.jsonl", "default");
+    const refs = [{ sha256: "c".repeat(64), mime: "image/png" as const, bytes: 67 }];
+    /* 32001 UTF-8 bytes in 10667 UTF-16 units: the legacy length gate missed
+       this, and the runtime-images kind skipped the gate entirely. */
+    const oversized = "€".repeat(10_667);
+    expect(() => store.holdDelivery(conversation.id, oversized, "caption-overflow", "runtime-images", refs, "d".repeat(64)))
+      .toThrow("32000-byte envelope");
+    expect(() => store.holdDelivery(conversation.id, oversized, "text-overflow"))
+      .toThrow("32000-byte envelope");
+
+    const boundary = "€".repeat(10_666) + "aa";
+    expect(store.holdDelivery(conversation.id, boundary, "caption-boundary", "runtime-images", refs, "e".repeat(64)))
+      .toMatchObject({ state: "assigned" });
+    expect(store.holdDelivery(conversation.id, "", "image-only", "runtime-images", refs, "f".repeat(64)))
+      .toMatchObject({ state: "assigned" });
   });
 
   test("startup compaction bounds abandoned failed reservations and leaves capacity", () => {
@@ -1123,6 +1333,87 @@ describe("agent registry", () => {
       launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "default" }),
     }).kind).toBe("conflict");
     expect(store.beginSpawnRequest({ ...request, transport: "tmux" }).kind).toBe("conflict");
+  });
+
+  test("structured admission recovery fences a live owner and adopts a recycled pid", () => {
+    const store = registry((owner) =>
+      owner.pid === process.pid || (owner.pid === 987_654 && owner.startIdentity === "987654:new"));
+    const begun = store.beginSpawnRequest({
+      engine: "claude",
+      cwd: "/repo",
+      accountId: "work",
+      clientAttemptId: "attempt_admission_owner",
+      requestDigest: "digest",
+      transport: "structured",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const snapshot = store.snapshot();
+    snapshot.receipts[begun.receipt.launchId]!.admissionOwner = {
+      pid: 987_654,
+      startIdentity: "987654:new",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    expect(store.claimStartingStructuredSpawn(begun.receipt.launchId)).toMatchObject({
+      claimed: false,
+      receipt: { admissionOwner: { pid: 987_654, startIdentity: "987654:new" } },
+    });
+
+    snapshot.receipts[begun.receipt.launchId]!.admissionOwner = {
+      pid: 987_654,
+      startIdentity: "987654:old",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    expect(store.claimStartingStructuredSpawn(begun.receipt.launchId)).toMatchObject({
+      claimed: true,
+      receipt: { admissionOwner: { pid: process.pid } },
+    });
+  });
+
+  test("a claimed structured admission releases only through its exact owner", () => {
+    const store = registry((owner) => owner.pid === process.pid && owner.startIdentity === null);
+    const begun = store.beginSpawnRequest({
+      engine: "claude",
+      cwd: "/repo",
+      accountId: "work",
+      clientAttemptId: "attempt_admission_release",
+      requestDigest: "digest",
+      transport: "structured",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const launchId = begun.receipt.launchId;
+    const claimedOwner = begun.receipt.admissionOwner!;
+
+    /* A raced release from another process identity is a no-op: the lease
+       stays with its claimant. */
+    expect(store.releaseStartingStructuredSpawn(launchId, { pid: 987_654, startIdentity: "987654:other" }))
+      .toMatchObject({ released: false, receipt: { admissionOwner: { pid: process.pid } } });
+
+    /* The exact owner hands the lease back and the receipt stays starting. */
+    expect(store.releaseStartingStructuredSpawn(launchId, claimedOwner))
+      .toMatchObject({ released: true, receipt: { admissionOwner: null, state: "starting" } });
+
+    /* A released lease is immediately re-claimable — the retry path. */
+    const reclaimed = store.claimStartingStructuredSpawn(launchId);
+    expect(reclaimed).toMatchObject({ claimed: true, receipt: { admissionOwner: { pid: process.pid } } });
+
+    /* A double release with the stale first-claim owner cannot strip the new
+       claimant's lease when identities differ, and a settled receipt refuses
+       release outright. */
+    store.settleSpawn(launchId, {
+      key: { engine: "claude", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1327" },
+      artifactPath: "/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl",
+      cwd: "/repo",
+      accountId: "work",
+      status: "starting",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: "spawn",
+    });
+    expect(store.releaseStartingStructuredSpawn(launchId, reclaimed.receipt.admissionOwner!))
+      .toMatchObject({ released: false });
   });
 
   test("spawn capability digest durably resolves its reserved conversation", () => {
@@ -2519,7 +2810,7 @@ describe("agent registry", () => {
       role: "reviewer",
       reviewsConversationId: provisional.id,
     });
-    const held = store.holdDelivery(provisional.id, "deliver after migration");
+    const held = store.holdDelivery(provisional.id, "deliver after migration", "provisional-migration-message");
     store.reconcileConversations([{
       engine: "claude",
       path: "/child.jsonl",
@@ -2561,6 +2852,7 @@ describe("agent registry", () => {
       reviewsConversationId: original.id,
     });
     expect(snapshot.heldDeliveries[held.id]).toMatchObject({ conversationId: original.id });
+    expect(store.holdDelivery(original.id, "deliver after migration", "provisional-migration-message").id).toBe(held.id);
     expect(store.conversationForPath("/child.jsonl")?.generations[0]?.launchProfile.parentConversationId).toBe(original.id);
     expect(snapshot.conversationAliases[provisional.id]).toBe(original.id);
     expect(store.canonicalConversationId(provisional.id)).toBe(original.id);
@@ -2576,7 +2868,7 @@ describe("agent registry", () => {
     }));
     const restarted = new AgentRegistry(store.filename).snapshot();
     expect(restarted.version).toBe(2);
-    expect(restarted.receipts.legacy).toMatchObject({ clientAttemptId: null, pane: null, key: null, state: "starting" });
+    expect(restarted.receipts.legacy).toMatchObject({ clientAttemptId: null, pane: null, key: null, state: "starting", artifactLifecycle: "pending" });
     expect(restarted.receipts.legacy?.conversationId.startsWith("conversation_")).toBe(true);
   });
 

@@ -63,6 +63,14 @@ test("Claude commands do not gain Codex environment assignments", () => {
   expect(spec.command).not.toContain("CODEX_HOME=");
 });
 
+test("fresh read-only Claude commands accept a non-interactive permission mode", () => {
+  const spec = freshSpecFor("claude", "/repo", { readOnly: true, permissionMode: "dontAsk" });
+
+  expect(spec.command).toContain("'--permission-mode' 'dontAsk'");
+  expect(spec.command).toContain("'--disallowedTools' 'Edit,Write,NotebookEdit'");
+  expect(spec.launchProfile).toMatchObject({ readOnly: true, permissionMode: "dontAsk" });
+});
+
 test("Codex resume derives its owning account home from the transcript path", () => {
   const transcript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "09", "rollout-019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });

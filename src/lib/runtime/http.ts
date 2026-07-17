@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -12,6 +13,9 @@ import { runtimeEventsEnabled } from "./flags";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
+import { admitRuntimeImagePayload } from "./runtimeImageAdmission";
+import type { RuntimeImageUpload } from "./runtimeImageStore";
+import type { StructuredImageRef } from "./structuredContent";
 
 export interface RuntimeHttpDependencies {
   enabled(): boolean;
@@ -64,13 +68,31 @@ export async function handleRuntimeCommand(
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   let command;
+  let rawImages: RuntimeImageUpload[] | null = null;
   try {
-    command = parseRuntimeCommand(kind, value);
+    let parseValue = value;
+    if ((kind === "send" || kind === "steer") && value && typeof value === "object" && !Array.isArray(value)) {
+      const body = value as Record<string, unknown>;
+      if (Array.isArray(body.images) && body.images.some((image) => image && typeof image === "object" && "base64" in image)) {
+        const admitted = admitRuntimeImagePayload({ images: body.images });
+        if (admitted.error) return NextResponse.json({ error: admitted.error.error }, { status: admitted.error.status });
+        rawImages = admitted.images;
+        const admissionRefs: StructuredImageRef[] = rawImages.map((image) => {
+          const data = Buffer.from(image.base64, "base64");
+          return {
+            sha256: crypto.createHash("sha256").update(data).digest("hex"),
+            mime: image.mime as StructuredImageRef["mime"],
+            bytes: data.byteLength,
+          };
+        });
+        parseValue = { ...body, images: admissionRefs };
+      }
+    }
+    command = parseRuntimeCommand(kind, parseValue);
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "runtime command is invalid" }, { status: 400 });
   }
   const client = dependencies.client();
-  if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
   try {
     if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
       const admitted = await dependencies.enqueue({
@@ -82,7 +104,7 @@ export async function handleRuntimeCommand(
         ...(command.policy ? { policy: command.policy } : {}),
         ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
         text: command.text,
-        hasImages: Boolean(command.images?.length),
+        ...(rawImages ? { images: rawImages } : command.images?.length ? { imageRefs: command.images } : {}),
       }, {
         enabled: dependencies.structuredEnabled ?? (() => process.env.LLV_STRUCTURED_HOSTS === "1"),
         client: () => client,
@@ -102,6 +124,7 @@ export async function handleRuntimeCommand(
         return NextResponse.json({ operationId: admitted.operationId, receipt: admitted.receipt }, { status });
       }
     }
+    if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
     const result = await client.command(command);
     if (result.receipt.status === "pending" || result.receipt.status === "queued") {
       dependencies.kick?.();

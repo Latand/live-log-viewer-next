@@ -1,4 +1,5 @@
 import type { AgentEngine } from "@/lib/agent/cli";
+import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
 import type { AgentGoal, AgentPlan, EngineLimits, LimitsProvenance } from "@/lib/types";
 
 export type MigrationEngine = Extract<AgentEngine, "claude" | "codex">;
@@ -196,6 +197,20 @@ export interface DurableQuotaObservation {
   bootId: string;
 }
 
+export interface HeldDeliveryCommand {
+  operationId: string;
+  kind: "send" | "steer";
+  policy: "queue" | "steer-if-active" | "interrupt-active";
+  turnId?: string | null;
+}
+
+export interface HeldDeliveryCommandInput {
+  operationId?: string;
+  kind?: HeldDeliveryCommand["kind"];
+  policy?: HeldDeliveryCommand["policy"];
+  turnId?: string | null;
+}
+
 export interface HeldDelivery {
   id: string;
   conversationId: ViewerConversationId;
@@ -203,9 +218,13 @@ export interface HeldDelivery {
   createdAt: string;
   clientMessageId: string | null;
   /** Image payload bytes stay request-local; these reservations can only be retried by the client. */
-  payloadKind: "text" | "ephemeral-images" | "ephemeral-text";
+  payloadKind: "text" | "ephemeral-images" | "ephemeral-text" | "runtime-images";
+  runtimeImages: StructuredImageRef[];
+  contentDigest: string | null;
   /** Inbox files already materialized for an ambiguous request-local attempt. */
   artifactPaths: string[];
+  command: HeldDeliveryCommand;
+  requestDigest: string | null;
   state: "held" | "assigned" | "delivered" | "failed" | "delivery-uncertain";
   generationId: string | null;
   attempts: number;
@@ -215,6 +234,8 @@ export interface HeldDelivery {
 }
 
 export interface SuccessorProviderPort {
+  /** Allows controlled fixtures and legacy adapters to supply a source without a filesystem transcript. */
+  virtualSource?: true;
   create(input: {
     engine: MigrationEngine;
     operationId: string;

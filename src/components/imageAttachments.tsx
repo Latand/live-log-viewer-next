@@ -6,11 +6,41 @@ import { ArrowRight, ImageIcon, X } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
+import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 export interface PendingImage {
   base64: string;
   mime: string;
   preview: string;
+}
+
+function rawBytesFromBase64(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor(value.length * 3 / 4) - padding);
+}
+
+function encodedBytesForRawBytes(value: number): number {
+  return Math.ceil(value / 3) * 4;
+}
+
+function megabytes(value: number): string {
+  return String(Math.round(value / (1024 * 1024) * 10) / 10);
+}
+
+function pendingImageLimitError(images: readonly PendingImage[], capability: RuntimeImageCapability | null): string | null {
+  if (!capability || images.length === 0) return null;
+  if (!capability.supported) return capability.reason ?? translate(getLocale(), "composer.structuredImagesUnavailable");
+  if (images.length > capability.maxImages) {
+    return translate(getLocale(), "img.tooManyStructured", { max: capability.maxImages });
+  }
+  if (images.some((image) => rawBytesFromBase64(image.base64) > capability.maxRawBytesPerImage)) {
+    return translate(getLocale(), "img.structuredTooLarge", { max: megabytes(capability.maxRawBytesPerImage) });
+  }
+  const encodedBytes = images.reduce((total, image) => total + image.base64.length, 0);
+  if (encodedBytes > capability.maxEncodedBytesPerRequest) {
+    return translate(getLocale(), "img.structuredAggregateTooLarge", { max: megabytes(capability.maxEncodedBytesPerRequest) });
+  }
+  return null;
 }
 
 function readImage(file: File): Promise<PendingImage> {
@@ -37,11 +67,33 @@ function readImage(file: File): Promise<PendingImage> {
  * via a file picker, preview, remove, clear after send. Shared by the pane
  * composer and the spawn dialog so both accept images the same way.
  */
-export function useImageAttachments(handlers: { onError: (message: string) => void; onAdded?: () => void }) {
+export function useImageAttachments(handlers: {
+  onError: (message: string) => void;
+  onAdded?: () => void;
+  imageCapability?: RuntimeImageCapability | null;
+}) {
   const [images, setImages] = useState<PendingImage[]>([]);
+  const imagesRef = useRef<PendingImage[]>([]);
+  const capability = handlers.imageCapability ?? null;
+
+  const commit = (next: PendingImage[]) => {
+    imagesRef.current = next;
+    setImages(next);
+  };
+
+  const reportPendingLimit = (next: readonly PendingImage[]): boolean => {
+    const error = pendingImageLimitError(next, capability);
+    if (!error) return true;
+    handlers.onError(error);
+    return false;
+  };
 
   const addFiles = (files: File[]) => {
     if (!files.length) return;
+    if (capability && !capability.supported) {
+      handlers.onError(capability.reason ?? translate(getLocale(), "composer.structuredImagesUnavailable"));
+      return;
+    }
     /* Validated against the same whitelist and size limit the server enforces
        (src/lib/imagePolicy.ts), so a rejected file is reported here instead of
        round-tripping to the API first. */
@@ -51,19 +103,36 @@ export function useImageAttachments(handlers: { onError: (message: string) => vo
         handlers.onError(translate(getLocale(), "img.unsupported", { name: file.name || file.type || translate(getLocale(), "img.unknownFile") }));
         continue;
       }
-      if (file.size > MAX_INBOX_IMAGE_BYTES) {
-        handlers.onError(translate(getLocale(), "img.tooLarge", { name: file.name || translate(getLocale(), "img.image") }));
+      const rawLimit = capability?.maxRawBytesPerImage ?? MAX_INBOX_IMAGE_BYTES;
+      if (file.size > rawLimit) {
+        handlers.onError(capability
+          ? translate(getLocale(), "img.structuredTooLarge", { max: megabytes(rawLimit) })
+          : translate(getLocale(), "img.tooLarge", { name: file.name || translate(getLocale(), "img.image") }));
         continue;
       }
       accepted.push(file);
     }
     if (!accepted.length) return;
+    if (capability) {
+      if (imagesRef.current.length + accepted.length > capability.maxImages) {
+        handlers.onError(translate(getLocale(), "img.tooManyStructured", { max: capability.maxImages }));
+        return;
+      }
+      const encodedBytes = imagesRef.current.reduce((total, image) => total + image.base64.length, 0)
+        + accepted.reduce((total, file) => total + encodedBytesForRawBytes(file.size), 0);
+      if (encodedBytes > capability.maxEncodedBytesPerRequest) {
+        handlers.onError(translate(getLocale(), "img.structuredAggregateTooLarge", { max: megabytes(capability.maxEncodedBytesPerRequest) }));
+        return;
+      }
+    }
     /* onAdded clears the status line at both call sites; a mixed batch keeps
        the rejection message on screen instead of wiping it right away. */
     const rejectedSome = accepted.length < files.length;
     Promise.all(accepted.map(readImage))
       .then((pending) => {
-        setImages((prev) => [...prev, ...pending]);
+        const next = [...imagesRef.current, ...pending];
+        if (!reportPendingLimit(next)) return;
+        commit(next);
         if (!rejectedSome) handlers.onAdded?.();
       })
       .catch((error: unknown) => {
@@ -85,9 +154,14 @@ export function useImageAttachments(handlers: { onError: (message: string) => vo
     images,
     addFiles,
     handlePaste,
-    removeAt: (idx: number) => setImages((prev) => prev.filter((_, i) => i !== idx)),
-    clear: () => setImages([]),
-    replace: (next: PendingImage[]) => setImages(next),
+    removeAt: (idx: number) => commit(imagesRef.current.filter((_, i) => i !== idx)),
+    clear: () => commit([]),
+    replace: (next: PendingImage[]) => {
+      if (!reportPendingLimit(next)) return false;
+      commit(next);
+      return true;
+    },
+    validate: () => reportPendingLimit(imagesRef.current),
   };
 }
 
@@ -116,7 +190,7 @@ export function ImagePreviewStrip({ images, onRemove }: { images: PendingImage[]
           </div>
         ))}
         <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-muted">
-          {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.toFilePaths")}
+          {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.deliveryHint")}
         </span>
       </div>
     );
@@ -138,7 +212,7 @@ export function ImagePreviewStrip({ images, onRemove }: { images: PendingImage[]
         </div>
       ))}
       <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-muted">
-        {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.toFilePaths")}
+        {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.deliveryHint")}
       </span>
     </div>
   );
@@ -150,10 +224,14 @@ export function ImagePickerButton({
   onFiles,
   ariaLabel,
   className,
+  disabled = false,
+  disabledReason,
 }: {
   onFiles: (files: File[]) => void;
   ariaLabel: string;
   className: string;
+  disabled?: boolean;
+  disabledReason?: string;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   return (
@@ -163,13 +241,14 @@ export function ImagePickerButton({
         type="file"
         accept="image/*"
         multiple
+        disabled={disabled}
         className="hidden"
         onChange={(event) => {
           onFiles(Array.from(event.target.files ?? []));
           event.target.value = "";
         }}
       />
-      <button type="button" aria-label={ariaLabel} onClick={() => fileRef.current?.click()} className={className}>
+      <button type="button" aria-label={ariaLabel} title={disabledReason} disabled={disabled} onClick={() => fileRef.current?.click()} className={className}>
         <ImageIcon className="h-4 w-4" aria-hidden />
       </button>
     </>

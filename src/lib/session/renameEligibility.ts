@@ -13,11 +13,14 @@ import { isRenameableSessionPath } from "./titleStore";
  * client bundle; the files response projects the result onto
  * {@link FileEntry.renamable}.
  */
-export function isRenameableSessionEntry(entry: Pick<FileEntry, "engine" | "path" | "size"> & { kind?: string }): boolean {
+export function isRenameableSessionEntry(
+  entry: Pick<FileEntry, "engine" | "path" | "size"> & { kind?: string; mtime?: number },
+): boolean {
   if (entry.engine !== "claude" && entry.engine !== "codex") return false;
   if (entry.kind && entry.kind !== "session") return false;
   if (!isRenameableSessionPath(entry.path)) return false;
-  if (entry.engine === "codex" && isNativeCodexSubagentTranscript(entry.path, entry.size)) return false;
+  const mtimeMs = entry.mtime === undefined ? undefined : entry.mtime * 1_000;
+  if (entry.engine === "codex" && isNativeCodexSubagentTranscript(entry.path, entry.size, mtimeMs)) return false;
   return true;
 }
 

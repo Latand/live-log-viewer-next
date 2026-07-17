@@ -9,18 +9,216 @@ import { sessionKey, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKe
 import type { SpawnResponse } from "@/lib/agent/spawnResponse";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
+import { hasUserAuthoredMessage } from "@/lib/session/reader";
+import { hardenedRedact } from "@/lib/view/compactText";
 
 import { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import { CodexAppServerHost } from "./codexAppServerHost";
 import type { RuntimeHostClient } from "./client";
 import { StructuredHostAdoptionCleanupError, type EngineHost, type HostState } from "./engineHost";
+import type { RuntimeOperationResult, RuntimeSession } from "./contracts";
 import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
 import { publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "./structuredDeliveryController";
+import { enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { runtimeImageCapability } from "./runtimeImageStore";
+import { parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "./structuredContent";
 
 export type SpawnedStructuredHost = EngineHost & {
   identity: { threadId: string; path: string | null } | { sessionId: string };
   onStateChange(listener: (state: HostState) => void): () => void;
 };
+
+export const INITIAL_MESSAGE_TIMEOUT_MS = 30_000;
+const INITIAL_MESSAGE_POLL_MS = 250;
+const INITIAL_MESSAGE_DELIVERED = new Set(["delivered", "turn-started", "steered"]);
+const INITIAL_MESSAGE_FAILED = new Set(["failed", "rejected", "uncertain", "interrupted"]);
+
+function structuredSpawnFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : "structured spawn failed";
+  return hardenedRedact(message).replace(/\s+/g, " ").trim().slice(0, 240) || "structured spawn failed";
+}
+
+function runtimeEntryStatus(session: RuntimeSession): "dead" | "live" | "idle" {
+  if (session.host === "dead" || session.host === "unhosted") return "dead";
+  if (session.turn === "running") return "live";
+  return "idle";
+}
+
+function failedOperationReason(operation: RuntimeOperationResult | null, subject: string): string | null {
+  const status = operation?.receipt.status;
+  if (!status || !INITIAL_MESSAGE_FAILED.has(status)) return null;
+  return operation.receipt.reason ?? `${subject} ended as ${status}`;
+}
+
+function reconciledInitialMessage(
+  receipt: SpawnReceipt,
+  status: string | undefined,
+  runtimeDelivered: boolean,
+): "pending" | "queued" | "delivered" | "failed" {
+  if (receipt.state === "failed" || (status !== undefined && INITIAL_MESSAGE_FAILED.has(status))) return "failed";
+  if (runtimeDelivered || receipt.state === "completed") return "delivered";
+  if (status === "queued" || status === "pending" || status === "delivering") return "queued";
+  return "pending";
+}
+
+function settleInitialMessageReservation(registry: AgentRegistry, launchId: string): void {
+  const clientMessageId = `spawn_${launchId}`;
+  const reservation = Object.values(registry.snapshot().heldDeliveries)
+    .find((delivery) => delivery.clientMessageId === clientMessageId);
+  if (reservation && reservation.state !== "delivered") {
+    registry.recordDeliveryOutcome(reservation.id, "delivered");
+  }
+}
+
+export async function waitForStructuredInitialMessage(
+  client: RuntimeHostClient,
+  operationId: string,
+  options: {
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    timeoutMs?: number;
+    pollMs?: number;
+  } = {},
+): Promise<void> {
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const timeoutMs = options.timeoutMs ?? INITIAL_MESSAGE_TIMEOUT_MS;
+  const pollMs = options.pollMs ?? INITIAL_MESSAGE_POLL_MS;
+  const deadline = now() + timeoutMs;
+  let lastStatus: string | undefined;
+  let lastReadError: string | null = null;
+  for (;;) {
+    let operation: Awaited<ReturnType<RuntimeHostClient["operationStatus"]>> = null;
+    try {
+      operation = await client.operationStatus(operationId, { currentRetryLeaf: true });
+      lastStatus = operation?.receipt.status ?? lastStatus;
+      lastReadError = null;
+    } catch (error) {
+      lastReadError = error instanceof Error ? error.message : "runtime status read failed";
+    }
+    const status = operation?.receipt.status ?? lastStatus;
+    if (status && INITIAL_MESSAGE_DELIVERED.has(status)) return;
+    if (status && INITIAL_MESSAGE_FAILED.has(status)) {
+      throw new Error(operation?.receipt.reason ?? `structured initial message ended as ${status}`);
+    }
+    if (now() >= deadline) {
+      if (lastReadError) {
+        throw new Error(`structured initial message status remained unavailable for ${timeoutMs}ms: ${lastReadError}`);
+      }
+      throw new Error(`structured initial message remained ${status ?? "pending"} for ${timeoutMs}ms`);
+    }
+    await sleep(Math.min(pollMs, deadline - now()));
+  }
+}
+
+export async function reconcileStructuredSpawnReplay(
+  launchId: string,
+  registry: AgentRegistry,
+  client: RuntimeHostClient,
+  options: {
+    now?: () => number;
+    timeoutMs?: number;
+    releaseHost?: (key: SessionKey) => Promise<boolean>;
+  } = {},
+): Promise<SpawnReceipt & { initialMessage: "pending" | "queued" | "delivered" | "failed" }> {
+  const current = registry.snapshot().receipts[launchId];
+  if (!current) throw new Error("unknown spawn receipt");
+  if (current.state === "completed") {
+    return { ...current, initialMessage: "delivered" };
+  }
+  const [operation, spawnOperation, runtime] = await Promise.all([
+    client.operationStatus(`spawn_message_${launchId}`, { currentRetryLeaf: true }).catch(() => null),
+    client.operationStatus(launchId, { currentRetryLeaf: true }).catch(() => null),
+    client.snapshot().catch(() => null),
+  ]);
+  const runtimeDelivered = Boolean(operation
+    && operation.receipt.conversationId === current.conversationId
+    && INITIAL_MESSAGE_DELIVERED.has(operation.receipt.status));
+  const transcriptDelivered = Boolean(current.artifactPath
+    && hasUserAuthoredMessage(current.artifactPath, current.engine));
+  if (runtimeDelivered || transcriptDelivered) {
+    const session = runtime?.sessions.find((candidate) => candidate.conversationId === current.conversationId);
+    const sessionMatches = session
+      && session.sessionKey.engine === current.engine
+      && session.cwd === current.cwd
+      && typeof session.artifactPath === "string"
+      ? session
+      : null;
+    const evidence = sessionMatches ? {
+      key: sessionMatches.sessionKey,
+      artifactPath: sessionMatches.artifactPath!,
+      cwd: current.cwd,
+      accountId: current.accountId,
+      launchProfile: current.launchProfile,
+      status: runtimeEntryStatus(sessionMatches),
+      host: null,
+      structuredHost: sessionMatches.hostKind === "codex-app-server" || sessionMatches.hostKind === "claude-broker"
+        ? {
+          kind: sessionMatches.hostKind,
+          endpoint: "runtime:reconciled",
+          process: null,
+          eventCursor: sessionMatches.revision,
+          protocolVersion: null,
+          writerClaimEpoch: 0,
+          activeTurnRef: sessionMatches.activeTurnId,
+          pendingAttention: sessionMatches.attentionIds,
+          activeFlags: [],
+        }
+        : null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    } : undefined;
+    const recovered = registry.recoverStructuredSpawnFromEvidence(launchId, evidence);
+    if (recovered.kind === "settled") {
+      return { ...recovered.receipt, initialMessage: "delivered" };
+    }
+  }
+  const messageStatus = operation?.receipt.status;
+  const runtimeSession = runtime?.sessions.find((candidate) => candidate.conversationId === current.conversationId) ?? null;
+  const entry = current.key ? registry.snapshot().entries[sessionKeyId(current.key)] : null;
+  const liveRegisteringSession = Boolean(runtimeSession
+    && current.key
+    && runtimeSession.host === "registering"
+    && sessionKeyId(runtimeSession.sessionKey) === sessionKeyId(current.key)
+    && runtimeSession.cwd === current.cwd
+    && runtimeSession.artifactPath === current.artifactPath
+    && entry?.structuredHostOperationId === launchId
+    && entry.pendingAction === "spawn"
+    && entry.claimOwner
+    && entry.structuredHost?.process
+    && entry.structuredHost.writerClaimEpoch === entry.claimEpoch
+    && entry.status !== "dead"
+    && entry.status !== "unhosted");
+  const operationStartedAt = operation ? Date.parse(operation.receipt.at) : Number.NaN;
+  const stageStartedAt = Number.isFinite(operationStartedAt) ? operationStartedAt : Date.parse(current.createdAt);
+  const ageMs = (options.now ?? Date.now)() - stageStartedAt;
+  const timeoutMs = options.timeoutMs ?? INITIAL_MESSAGE_TIMEOUT_MS;
+  let terminalReason = failedOperationReason(operation, "structured initial message")
+    ?? failedOperationReason(spawnOperation, "structured spawn");
+  if (!terminalReason
+    && current.state !== "failed"
+    && runtime
+    && !liveRegisteringSession
+    && ageMs >= timeoutMs) {
+    terminalReason = runtimeSession
+      ? `structured initial message remained ${messageStatus ?? "pending"} for ${timeoutMs}ms`
+      : `structured spawn runtime snapshot has no session after ${timeoutMs}ms`;
+  }
+  if (terminalReason) {
+    registry.failStructuredSpawn(launchId, terminalReason.slice(0, 240));
+    if (current.key) {
+      await (options.releaseHost ?? releaseStructuredDeliveryHost)(current.key).catch(() => false);
+    }
+    const failed = registry.snapshot().receipts[launchId] ?? current;
+    return { ...failed, initialMessage: "failed" };
+  }
+  const receipt = registry.snapshot().receipts[launchId] ?? current;
+  return {
+    ...receipt,
+    initialMessage: reconciledInitialMessage(receipt, messageStatus, runtimeDelivered),
+  };
+}
 
 export interface StructuredSpawnInput {
   engine: AgentEngine;
@@ -28,6 +226,7 @@ export interface StructuredSpawnInput {
   spec: ResumeSpec;
   account: AccountContext;
   prompt: string;
+  imageRefs?: StructuredImageRef[];
   registry: AgentRegistry;
   client: RuntimeHostClient;
 }
@@ -75,7 +274,11 @@ async function projectDeadStructuredSpawn(
       parentConversationId: receipt.parentConversationId,
       cwd: entry.cwd,
       artifactPath,
-      capabilities: { steer: key.engine === "codex", structuredAttention: true },
+      capabilities: {
+        steer: key.engine === "codex",
+        structuredAttention: true,
+        imageInput: runtimeImageCapability(key.engine, false),
+      },
       activeTurnId: null,
     },
   });
@@ -123,7 +326,7 @@ export interface StructuredSpawnDependencies {
     releasedStatus?: "unhosted" | "dead",
   ): Promise<() => void>;
   publishHost?(key: SessionKey, host: SpawnedStructuredHost): Promise<() => Promise<void>>;
-  deliverFirst?(input: StructuredSpawnInput, artifactPath: string): Promise<void>;
+  deliverFirst?(input: StructuredSpawnInput, artifactPath: string): Promise<void | "held">;
   processIdentity?(): { pid: number; startIdentity: string | null };
 }
 
@@ -276,24 +479,30 @@ export async function recoverPendingStructuredSpawns(
     }
     if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") continue;
     const prompt = typeof effect?.prompt === "string" ? effect.prompt : null;
+    const imageRefs = parseStructuredImageRefs(effect?.images ?? [], 16);
     if (prompt === null || effect?.conversationId !== receipt.conversationId || effect?.cwd !== receipt.cwd) {
       throw new Error(`structured spawn recovery is missing durable prompt admission for ${receipt.launchId}`);
     }
-    if (prompt.trim()) {
-      const { enqueueStructuredMessage } = await import("./structuredMessageDelivery");
+    if (imageRefs === null) throw new Error(`structured spawn recovery has invalid image refs for ${receipt.launchId}`);
+    if (prompt.trim() || imageRefs.length) {
       const delivered = await enqueueStructuredMessage({
         path: receipt.artifactPath,
         conversationId: receipt.conversationId,
         clientMessageId: `spawn_${receipt.launchId}`,
         operationId: `spawn_message_${receipt.launchId}`,
         text: prompt,
-        hasImages: false,
+        imageRefs,
       }, {
         client: () => client,
         registry: () => registry,
         enabled: () => true,
       });
       if (!delivered?.ok) throw new Error(delivered?.error ?? `structured spawn recovery could not admit ${receipt.launchId}`);
+      if (delivered.outcome === "held") continue;
+      if (delivered.outcome !== "delivered") {
+        await waitForStructuredInitialMessage(client, delivered.operationId);
+        settleInitialMessageReservation(registry, receipt.launchId);
+      }
     }
     await client.transitionOperation(receipt.launchId, "delivered");
     const finalized = registry.finalizeStructuredSpawn(receipt.launchId);
@@ -346,7 +555,7 @@ export function structuredClaudePermissionMode(
 ): string {
   if (!mode) return "default";
   if (mode !== "bypassPermissions") return mode;
-  return context.operatorAuthenticated || (context.roleSpawn && !context.agentInitiated) ? mode : "default";
+  return !context.agentInitiated || context.operatorAuthenticated ? mode : "default";
 }
 
 export function structuredClaudeSpawnPolicyBaseSettingsPath(
@@ -391,6 +600,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     claudeProjectsDir: input.account.transcriptRoot,
     spawnPolicyBaseSettingsPath: structuredClaudeSpawnPolicyBaseSettingsPath(input.account),
     allowSubagents: profile.allowSubagents,
+    readOnly: profile.readOnly === true,
     model: profile.model ?? undefined,
     effort: profile.effort ?? undefined,
     permissionMode: profile.permissionMode ?? "default",
@@ -421,22 +631,26 @@ async function defaultBindHost(
     : await bindClaudeHostPersistence(registry, key, host as ClaudeStreamBrokerHost, claimOwner, claimEpoch, releasedStatus);
 }
 
-async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: string): Promise<void> {
-  if (!input.prompt.trim()) return;
-  const { enqueueStructuredMessage } = await import("./structuredMessageDelivery");
+async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: string): Promise<void | "held"> {
+  if (!input.prompt.trim() && !input.imageRefs?.length) return;
   const delivered = await enqueueStructuredMessage({
     path: artifactPath,
     conversationId: input.receipt.conversationId,
     clientMessageId: `spawn_${input.receipt.launchId}`,
     operationId: `spawn_message_${input.receipt.launchId}`,
     text: input.prompt,
-    hasImages: false,
+    imageRefs: input.imageRefs,
   }, {
     client: () => input.client,
     registry: () => input.registry,
     enabled: () => true,
   });
   if (!delivered?.ok) throw new Error(delivered?.error ?? "structured spawn first-message delivery was unavailable");
+  if (delivered.outcome === "held") return "held";
+  if (delivered.outcome !== "delivered") {
+    await waitForStructuredInitialMessage(input.client, delivered.operationId);
+    settleInitialMessageReservation(input.registry, input.receipt.launchId);
+  }
 }
 
 async function cleanupHost(host: SpawnedStructuredHost | null, binding: HostBinding): Promise<void> {
@@ -471,6 +685,10 @@ export async function spawnStructuredConversation(
   let adoptionClaimTransferred = false;
   let adoptionClaimContended = false;
   try {
+    const imageRefs = input.imageRefs ?? [];
+    const content = input.prompt.trim() || imageRefs.length
+      ? structuredContent(input.prompt, imageRefs)
+      : null;
     await input.client.command({
       kind: "spawn",
       operationId,
@@ -478,7 +696,9 @@ export async function spawnStructuredConversation(
       conversationId: input.receipt.conversationId,
       engine: input.engine,
       cwd: input.spec.cwd,
-      prompt: input.prompt,
+      prompt: content?.content.text ?? "",
+      ...(content?.content.images.length ? { images: content.content.images } : {}),
+      ...(content ? { contentDigest: content.contentDigest } : {}),
       accountId: input.account.accountId,
       parentConversationId: input.receipt.parentConversationId,
       ...(input.receipt.purpose === "resume-successor" ? { sessionId: structuredResumeSessionId(input) } : {}),
@@ -525,7 +745,23 @@ export async function spawnStructuredConversation(
     adoptionClaimTransferred = adoptionClaim !== null;
     binding.stopPersistence = await bindHost(input.registry, key, host, claimed.claimOwner, claimed.claimEpoch);
     binding.unregister = await publishHost(key, host);
-    await deliverFirst(input, identity.path);
+    const initialMessage = await deliverFirst(input, identity.path);
+    if (initialMessage === "held") {
+      return {
+        ok: true,
+        target: null,
+        path: identity.path,
+        ...(input.engine === "claude"
+          ? { effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default" }
+          : {}),
+        launchId: input.receipt.launchId,
+        conversationId: input.receipt.conversationId,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "queued",
+        state: "path-pending",
+      };
+    }
     await input.client.transitionOperation(operationId, "delivered");
     const settled = input.registry.finalizeStructuredSpawn(input.receipt.launchId);
     if (settled.kind === "conflict") throw new Error(`structured spawn registry conflict: ${settled.code}`);
@@ -540,11 +776,13 @@ export async function spawnStructuredConversation(
       conversationId: settled.conversation.id,
       launched: true,
       retrySafe: false,
+      initialMessage: "delivered",
       state: "settled",
     };
   } catch (error) {
+    const failureReason = structuredSpawnFailureReason(error);
     await input.client.transitionOperation(operationId, "failed", {
-      reason: error instanceof Error ? error.message.slice(0, 240) : "structured spawn failed",
+      reason: failureReason,
     }).catch(() => {});
     if (!host && error instanceof StructuredHostAdoptionCleanupError) {
       host = error.host as SpawnedStructuredHost;
@@ -601,9 +839,9 @@ export async function spawnStructuredConversation(
     }
     if (projectionSucceeded) {
       if (key) {
-        input.registry.failStructuredSpawn(input.receipt.launchId, error instanceof Error ? error.message : "structured spawn failed");
+        input.registry.failStructuredSpawn(input.receipt.launchId, failureReason);
       } else {
-        input.registry.failSpawn(input.receipt.launchId, "structured spawn failed before host binding");
+        input.registry.failSpawn(input.receipt.launchId, failureReason);
       }
     }
     throw error;

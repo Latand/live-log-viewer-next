@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { Workflow } from "@/lib/workflows/types";
+import type { RuntimeImageCapability, StructuredImageRef } from "./structuredContent";
 
 export const RUNTIME_SCHEMA_VERSION = 1;
 export const RUNTIME_SCOPE_KINDS = ["session", "flow", "workflow", "task", "operation", "deployment", "edge", "account", "system"] as const;
@@ -178,6 +179,7 @@ export interface RuntimeOperationReceipt {
   queuePosition?: number | null;
   reason?: string | null;
   text?: string | null;
+  imageCount?: number;
   at: string;
   revision: number;
 }
@@ -207,7 +209,8 @@ interface RuntimeCommandBase {
 export interface RuntimeSendCommand extends RuntimeCommandBase {
   kind: "send" | "steer";
   text: string;
-  images?: string[];
+  images?: StructuredImageRef[];
+  contentDigest?: string;
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
 }
@@ -233,6 +236,8 @@ export interface RuntimeSpawnCommand extends RuntimeCommandBase {
   engine: RuntimeEngine;
   cwd: string;
   prompt: string;
+  images?: StructuredImageRef[];
+  contentDigest?: string;
   accountId?: string | null;
   parentConversationId?: string | null;
   sessionId?: string | null;
@@ -286,7 +291,7 @@ export interface RuntimeSession {
   workflowId: string | null;
   cwd: string | null;
   artifactPath: string | null;
-  capabilities: { steer: boolean; structuredAttention: boolean };
+  capabilities: { steer: boolean; structuredAttention: boolean; imageInput?: RuntimeImageCapability };
   activeTurnId: string | null;
   drift?: RuntimeDrift | null;
 }
