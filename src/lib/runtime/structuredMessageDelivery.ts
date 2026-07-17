@@ -7,7 +7,7 @@ import {
   type RegistryConversation,
 } from "@/lib/agent/registry";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
-import type { HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt } from "./contracts";
@@ -197,6 +197,34 @@ function requestMigrationProgress(
   if (phase && !["committed", "rolled-back"].includes(phase)) requestTick();
 }
 
+function deliveredReservationReplay(
+  reservation: HeldDelivery,
+  idempotencyKey: string,
+  target: ViewerConversationId | null,
+  spawned: boolean,
+): StructuredMessageResult {
+  const receipt: RuntimeOperationReceipt = {
+    operationId: reservation.command.operationId,
+    idempotencyKey,
+    conversationId: reservation.conversationId,
+    kind: reservation.command.kind,
+    status: "delivered",
+    ...(reservation.command.turnId !== undefined ? { turnId: reservation.command.turnId } : {}),
+    reason: null,
+    at: reservation.deliveredAt ?? reservation.createdAt,
+    revision: 1,
+  };
+  return {
+    ok: true,
+    structured: true,
+    target,
+    outcome: "delivered",
+    operationId: reservation.command.operationId,
+    receipt,
+    ...(spawned ? { spawned: true } : {}),
+  };
+}
+
 export async function deliverHeldStructuredMessage(
   request: HeldStructuredMessageRequest,
   dependencies: HeldStructuredMessageDependencies = {},
@@ -330,6 +358,14 @@ export async function enqueueStructuredMessage(
         ...(recoveredHost ? { spawned: true } : {}),
       };
     }
+    if (reservation.state === "delivered") {
+      return deliveredReservationReplay(
+        reservation,
+        idempotencyKey,
+        recoveredHost ? null : conversation.id,
+        recoveredHost,
+      );
+    }
     if (reservation.state === "assigned" && reservation.generationId) {
       const claimed = registry.beginDeliveryAttempt(reservation.id, reservation.generationId);
       if (!claimed) {
@@ -344,7 +380,7 @@ export async function enqueueStructuredMessage(
         };
       }
       claimedReservationId = claimed.id;
-    } else if (reservation.state !== "delivered") {
+    } else {
       return {
         ok: false,
         structured: true,

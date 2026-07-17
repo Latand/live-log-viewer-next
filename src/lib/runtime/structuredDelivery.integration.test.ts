@@ -1044,7 +1044,7 @@ test("runtime recovery drains one durable synchronization hold into one engine c
   journal.close();
 });
 
-test("explicit operation ownership rejects a second client and recovers without an uncertain tombstone", async () => {
+test("terminal operation replay survives registry and runtime journal compaction", async () => {
   const sessionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   const directory = path.join(sandbox, "durable-operation-ownership");
   const artifactPath = path.join(directory, `${sessionId}.jsonl`);
@@ -1082,7 +1082,8 @@ test("explicit operation ownership rejects a second client and recovers without 
     claimOwner: null,
     pendingAction: null,
   });
-  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const runtimeFilename = path.join(directory, "runtime.sqlite");
+  let journal = new RuntimeJournal(runtimeFilename, { structuredHosts: true });
   journal.append({
     scope: { type: "session", id: conversation.id },
     kind: "session-status",
@@ -1152,20 +1153,47 @@ test("explicit operation ownership rejects a second client and recovers without 
     })).toMatchObject({ ok: true, structured: true, outcome: "delivered" });
     expect(ledger.writes).toHaveLength(1);
 
-    const reopened = new AgentRegistry(registry.filename);
-    expect(reopened.pendingDeliveries(conversation.id)).toEqual([]);
-    expect(Object.values(reopened.snapshot().heldDeliveries)).toMatchObject([{
-      clientMessageId: original.clientMessageId,
-      command: {
-        operationId: original.operationId,
-        kind: original.kind,
-        policy: original.policy,
-        turnId: original.turnId,
-      },
-      state: "delivered",
-      text: "",
-    }]);
+    for (let index = 0; index < 101; index += 1) {
+      const later = registry.holdDelivery(
+        conversation.id,
+        `later terminal delivery ${index}`,
+        `later-terminal-delivery-${index}`,
+      );
+      registry.recordDeliveryOutcome(later.id, "delivered");
+    }
+    expect(Object.values(registry.snapshot().heldDeliveries)
+      .some((delivery) => delivery.command.operationId === original.operationId)).toBeFalse();
+    journal.append({ scope: { type: "system", id: "runtime" }, kind: "files.revision", payload: { filesRevision: 1 } });
+    journal.append({ scope: { type: "system", id: "runtime" }, kind: "files.revision", payload: { filesRevision: 2 } });
+    journal.compact(1);
+    expect(journal.operationResult(original.operationId)).toBeNull();
     expect(journal.effectBatch()).toEqual([]);
+    journal.close();
+
+    const reopened = new AgentRegistry(registry.filename);
+    journal = new RuntimeJournal(runtimeFilename, { structuredHosts: true });
+    const restartedClient = runtimeJournalClient(journal);
+    expect(await enqueueStructuredMessage(original, {
+      enabled: () => true,
+      client: () => restartedClient,
+      registry: () => reopened,
+      kick: () => {},
+    })).toMatchObject({
+      ok: true,
+      structured: true,
+      outcome: "delivered",
+      operationId: original.operationId,
+      receipt: { status: "delivered" },
+    });
+    expect(await enqueueStructuredMessage({ ...original, text: "changed after compaction" }, {
+      enabled: () => true,
+      client: () => restartedClient,
+      registry: () => reopened,
+      kick: () => {},
+    })).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 409 });
+    expect(reopened.pendingDeliveries(conversation.id)).toEqual([]);
+    expect(journal.effectBatch()).toEqual([]);
+    expect(ledger.writes).toHaveLength(1);
   } finally {
     await bindStructuredDeliveryQueue([], { registry, client: null });
     journal.close();
