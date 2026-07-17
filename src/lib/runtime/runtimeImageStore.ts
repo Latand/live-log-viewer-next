@@ -476,23 +476,6 @@ export class RuntimeImageStore {
     });
   }
 
-  /** Rollback half of delivery admission removes blobs with no durable
-      references. A losing publication releases quota immediately. Shared
-      digests referenced by the winning payload remain available. */
-  discardUnreferenced(refs: readonly StructuredImageRef[]): void {
-    if (!refs.length) return;
-    this.withWriterLock("write", (root) => {
-      const reachable = this.reachableDigests();
-      let removed = false;
-      for (const ref of refs) {
-        if (reachable.has(ref.sha256)) continue;
-        fs.rmSync(path.join(root.path, path.basename(this.pathFor(ref))), { force: true });
-        removed = true;
-      }
-      if (removed) syncDirectory(root.path);
-    });
-  }
-
   read(ref: StructuredImageRef): Buffer {
     const root = this.openRoot("read");
     try { return this.readFromRoot(root, ref); }

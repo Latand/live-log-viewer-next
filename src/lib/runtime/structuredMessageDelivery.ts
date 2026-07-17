@@ -56,24 +56,13 @@ export interface StructuredMessageDependencies {
   /** The refs `storeImages` would publish, computed without writing — used by
       the same-key conflict preflight so a changed payload rejects blob-free. */
   previewImageRefs?: (images: readonly RuntimeImageUpload[]) => StructuredImageRef[];
-  /** Rollback for blobs published by an admission that then lost its
-      reservation conflict (e.g. to a concurrent writer in another process). */
-  discardImages?: (refs: readonly StructuredImageRef[]) => void;
   /** Cross-process fence spanning image publication and durable reservation. */
   withImageAdmissionLock?: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
-class DeliveryPublicationRollbackError extends Error {
-  constructor(error: unknown) {
-    super(`structured image publication rollback failed: ${error instanceof Error ? error.message : String(error)}`);
-    this.name = "DeliveryPublicationRollbackError";
-  }
-}
-
 /** Serializes preflight → publication → reservation per (conversation,
-    client message id) within this process — the only blob publisher — so two
-    racing changed payloads cannot both observe an empty reservation: the
-    loser sees the winner's reservation BEFORE publishing anything. */
+    client message id) within this process. Two racing changed payloads see a
+    durable winner before the losing request publishes anything. */
 const admissionSections = new Map<string, Promise<unknown>>();
 
 async function withAdmissionSection<T>(key: string | null, run: () => T | Promise<T>): Promise<T> {
@@ -429,33 +418,23 @@ export async function enqueueStructuredMessage(
           && registry.deliveryReservationConflict(conversation.id, content.content.text, idempotencyKey, content.contentDigest, commandInput(request))) {
           throw new DeliveryReservationConflictError();
         }
-        let published: StructuredImageRef[] = [];
         if (rawImages.length > 0) {
-          published = (dependencies.storeImages ?? ((images) => runtimeImageStore().putMany(images)))(rawImages);
+          (dependencies.storeImages ?? ((images) => runtimeImageStore().putMany(images)))(rawImages);
         }
-        try {
-          return registry.holdDelivery(
-            conversation.id,
-            content.content.text,
-            idempotencyKey,
-            refs.length ? "runtime-images" : "text",
-            refs,
-            content.contentDigest,
-            commandInput(request),
-          );
-        } catch (error) {
-          /* A cross-version writer can still reserve this key after preflight.
-             Rollback runs inside the same publication fence, preserving blobs
-             already referenced by another current writer. */
-          if (error instanceof DeliveryReservationConflictError && published.length) {
-            try {
-              (dependencies.discardImages ?? ((toDiscard) => runtimeImageStore().discardUnreferenced(toDiscard)))(published);
-            } catch (rollbackError) {
-              throw new DeliveryPublicationRollbackError(rollbackError);
-            }
-          }
-          throw error;
-        }
+        /* A reservation race can follow publication when another process runs
+           older code or when a structured spawn published the same digest.
+           The grace-period collector owns orphan cleanup. Synchronous removal
+           cannot distinguish this admission's blob from a deduplicated blob
+           whose durable reservation is still pending. */
+        return registry.holdDelivery(
+          conversation.id,
+          content.content.text,
+          idempotencyKey,
+          refs.length ? "runtime-images" : "text",
+          refs,
+          content.contentDigest,
+          commandInput(request),
+        );
       };
       if (rawImages.length === 0) return admit();
       return (dependencies.withImageAdmissionLock ?? withAccountMutationLockAsync)(async () => admit());

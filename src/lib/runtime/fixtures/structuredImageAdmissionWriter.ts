@@ -109,7 +109,6 @@ const result = await enqueueStructuredMessage({
     }
     return refs;
   },
-  discardImages: (refs) => store.discardUnreferenced(refs),
   kick: () => {},
 });
 

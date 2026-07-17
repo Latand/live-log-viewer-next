@@ -435,11 +435,10 @@ test("a changed payload rejects before any blob publication even at full quota",
   expect(stores).toBe(2);
 });
 
-test("a conflicting reservation raced in behind the preflight rolls the published blobs back", async () => {
+test("a reservation race leaves publication cleanup to grace-period GC", async () => {
   const { registry, conversation } = registryWithConversation("default", "claude");
   const winnerRef: StructuredImageRef = { sha256: "a".repeat(64), mime: "image/png", bytes: 67 };
   const loserRef: StructuredImageRef = { sha256: "b".repeat(64), mime: "image/png", bytes: 91 };
-  const discarded: StructuredImageRef[][] = [];
   let commands = 0;
   const client = {
     snapshot: async () => snapshot(conversation.id, "claude", true),
@@ -467,7 +466,6 @@ test("a conflicting reservation raced in behind the preflight rolls the publishe
       );
       return [loserRef];
     },
-    discardImages: (refs) => { discarded.push([...refs]); },
     kick: () => {},
   });
 
@@ -478,18 +476,21 @@ test("a conflicting reservation raced in behind the preflight rolls the publishe
     error: "client message id is already reserved for another request",
   });
   expect(commands).toBe(0);
-  /* The losing payload's publication was rolled back immediately. */
-  expect(discarded).toEqual([[loserRef]]);
   /* The winner's reservation is untouched. */
   const reservation = Object.values(new AgentRegistry(registry.filename).snapshot().heldDeliveries)
     .find((held) => held.clientMessageId === "raced-admission");
   expect(reservation).toMatchObject({ runtimeImages: [winnerRef] });
 });
 
-test("a failed cross-process publication rollback surfaces a retryable delivery failure", async () => {
+test("a spawn publication survives a later deduplicated admission conflict", async () => {
   const { registry, conversation } = registryWithConversation("default", "claude");
+  const imageRoot = path.join(sandbox, `spawn-publication-${registryNumber}`);
+  const store = new RuntimeImageStore(imageRoot);
+  const upload = { base64: PNG_BASE64, mime: "image/png" };
+  /* The spawn route publishes before its deferred runtime command creates a
+     durable reservation. A later raw admission deduplicates this blob. */
+  const [spawnRef] = store.putMany([upload]);
   const winnerRef: StructuredImageRef = { sha256: "a".repeat(64), mime: "image/png", bytes: 67 };
-  const loserRef: StructuredImageRef = { sha256: "b".repeat(64), mime: "image/png", bytes: 91 };
   const client = {
     snapshot: async () => snapshot(conversation.id, "claude", true),
     command: async () => { throw new Error("unexpected command"); },
@@ -498,35 +499,36 @@ test("a failed cross-process publication rollback surfaces a retryable delivery 
   const result = await enqueueStructuredMessage({
     path: artifactPath,
     conversationId: conversation.id,
-    clientMessageId: "raced-admission-rollback-failure",
+    clientMessageId: "spawn-publication-conflict",
     text: "",
-    images: [{ base64: PNG_BASE64, mime: "image/png" }],
+    images: [upload],
   }, {
     enabled: () => true,
     client: () => client,
     registry: () => registry,
-    previewImageRefs: () => [loserRef],
+    previewImageRefs: () => [spawnRef!],
     storeImages: () => {
+      const refs = store.putMany([upload]);
       new AgentRegistry(registry.filename).holdDelivery(
         conversation.id,
         "",
-        "raced-admission-rollback-failure",
+        "spawn-publication-conflict",
         "runtime-images",
         [winnerRef],
         structuredContentDigest({ text: "", images: [winnerRef] }),
       );
-      return [loserRef];
+      return refs;
     },
-    discardImages: () => { throw new Error("runtime image writer lock timed out"); },
     kick: () => {},
   });
 
   expect(result).toMatchObject({
     ok: false,
     outcome: "failed",
-    status: 503,
-    error: expect.stringContaining("publication rollback failed"),
+    status: 409,
+    error: "client message id is already reserved for another request",
   });
+  expect(store.read(spawnRef!)).toEqual(Buffer.from(PNG_BASE64, "base64"));
 });
 
 test("cross-process image admission fences publication through durable reservation", async () => {
