@@ -941,6 +941,7 @@ test("a migration-held delivery switches from the source host to the published C
     return commitSuccessor(...args);
   }) as AgentRegistry["commitSuccessor"];
   const provider: SuccessorProviderPort = {
+    virtualSource: true,
     async create(input) {
       input.recordContinuityPath(successorPath);
       return {

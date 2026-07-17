@@ -30,6 +30,7 @@ test("controller migration cycle reconciles and ticks both durable quota policy 
   const conversation = registry.conversationForPath("/source.jsonl")!;
   registry.commitMigrationIntent({ engine: "codex", targetId: "target", origin: "manual", requestId: "controller-cycle", expectedRevision: registry.engineRouting("codex").revision });
   const provider: SuccessorProviderPort = {
+    virtualSource: true,
     async create(input) { return { operationId: input.operationId, nativeId: "successor", path: "/target.jsonl", continuityPaths: [], historyHash: "hash", host: { kind: "codex-app-server", identity: "successor", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" } }; },
     async verify() {},
   };
@@ -272,6 +273,7 @@ test("quota controller cycles preserve routing and transcript ownership", async 
     const conversationId = registry.conversationForPath("/main.jsonl")!.id;
     let successorStarts = 0;
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         successorStarts += 1;
         return {

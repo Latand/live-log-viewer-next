@@ -142,8 +142,14 @@ function inventoryEntry(pathname: string, overrides: Partial<FileEntry> = {}): F
   };
 }
 
-function provider(paths: string[], counts = { create: 0, verify: 0 }, continuityPaths: string[][] = []): SuccessorProviderPort {
+function provider(
+  paths: string[],
+  counts = { create: 0, verify: 0 },
+  continuityPaths: string[][] = [],
+  virtualSource = true,
+): SuccessorProviderPort {
   return {
+    ...(virtualSource ? { virtualSource: true as const } : {}),
     async create(input) {
       counts.create += 1;
       const next = paths.shift() ?? `/successor-${counts.create}.jsonl`;
@@ -637,6 +643,65 @@ describe("durable account migration coordinator", () => {
 
       expect(counts.create).toBe(0);
       expect(store.conversation(conversation.id)?.migration).toMatchObject(expected);
+    });
+  }
+
+  for (const restoredPhase of ["requested", "preparing", "successor-starting"] as const) {
+    test(`a missing production transcript fences provider creation in ${restoredPhase}`, async () => {
+      const store = registry();
+      const pathname = path.join(path.dirname(store.filename), `missing-provider-source-${restoredPhase}.jsonl`);
+      store.reconcileConversations([observation(pathname, "a", "terminal")]);
+      store.commitMigrationIntent({
+        engine: "codex",
+        targetId: "b",
+        origin: "manual",
+        requestId: `missing-provider-source-${restoredPhase}`,
+        expectedRevision: store.engineRouting("codex").revision,
+        scope: "all",
+      });
+      let conversation = store.conversationForPath(pathname)!;
+      if (restoredPhase === "preparing" || restoredPhase === "successor-starting") {
+        conversation = store.transitionConversationMigration(
+          conversation.id,
+          conversation.migration!.revision,
+          ["requested"],
+          { phase: "preparing" },
+        );
+      }
+      if (restoredPhase === "successor-starting") {
+        conversation = store.transitionConversationMigration(
+          conversation.id,
+          conversation.migration!.revision,
+          ["preparing"],
+          { phase: "successor-starting" },
+        );
+      }
+      const expectedOperationId = conversation.migration!.operationId;
+      const counts = { create: 0, verify: 0 };
+      const successor = provider([`/missing-provider-source-${restoredPhase}-successor.jsonl`], counts, [], false);
+
+      await advanceConversationMigration(conversation.id, store, successor);
+
+      expect(counts.create).toBe(0);
+      expect(store.conversation(conversation.id)?.migration).toMatchObject({
+        phase: restoredPhase,
+        operationId: expectedOperationId,
+        providerReceipt: null,
+      });
+
+      fs.writeFileSync(pathname, [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/repo", model: "gpt-5.6-sol" } }),
+        JSON.stringify({ type: "event_msg", timestamp: "2026-07-16T12:00:00.000Z", payload: { type: "task_complete" } }),
+        "",
+      ].join("\n"));
+      await advanceConversationMigration(conversation.id, store, successor);
+      await advanceConversationMigration(conversation.id, store, successor);
+
+      expect(counts.create).toBe(1);
+      expect(store.conversation(conversation.id)?.migration).toMatchObject({
+        phase: "committed",
+        operationId: expectedOperationId,
+      });
     });
   }
 
@@ -1192,6 +1257,7 @@ describe("durable account migration coordinator", () => {
       expectedRevision: store.engineRouting("codex").revision,
     });
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create() { throw new SuccessorPendingError(); },
       async verify() {},
     };
@@ -1246,6 +1312,7 @@ describe("durable account migration coordinator", () => {
     }) as typeof store.transitionConversationMigration;
     const copiedSourcePaths: string[] = [];
     const successorProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         copiedSourcePaths.push(input.source.path);
         return {
@@ -1291,6 +1358,7 @@ describe("durable account migration coordinator", () => {
     let release!: () => void;
     const bothCreating = new Promise<void>((resolve) => { release = resolve; });
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         arrivals += 1;
         const arrival = arrivals;
@@ -1340,6 +1408,7 @@ describe("durable account migration coordinator", () => {
     const secondMayReturn = new Promise<void>((resolve) => { releaseSecond = resolve; });
     const cleaned: string[] = [];
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         calls += 1;
         const call = calls;
@@ -1427,6 +1496,7 @@ describe("durable account migration coordinator", () => {
       expectedRevision: store.engineRouting("codex").revision,
     });
     const failingProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         input.recordContinuityPath(firstForkPath);
         throw new Error("target account unavailable");
@@ -2339,6 +2409,7 @@ describe("durable account migration coordinator", () => {
     const conversation = store.conversationForPath("/source.jsonl")!;
     store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "to-b", expectedRevision: store.engineRouting("codex").revision });
     const staleProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         store.commitMigrationIntent({ engine: "codex", targetId: "c", origin: "manual", requestId: "to-c", expectedRevision: store.engineRouting("codex").revision });
         return {
@@ -2364,6 +2435,7 @@ describe("durable account migration coordinator", () => {
     store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "ambiguous-fork", expectedRevision: store.engineRouting("codex").revision });
     const operations: string[] = [];
     const ambiguousProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         operations.push(input.operationId);
         if (operations.length === 1) throw new CodexForkOutcomeUnknownError();
@@ -2387,6 +2459,7 @@ describe("durable account migration coordinator", () => {
     store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "cleanup-retry", expectedRevision: store.engineRouting("codex").revision });
     let cleanupAttempts = 0;
     const cleanupProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) { return { operationId: input.operationId, nativeId: "stale", path: "/stale.jsonl", continuityPaths: [], historyHash: "hash", host: { kind: "claude-stream", identity: "%9:99", epoch: 1, verifiedAt: "now" } }; },
       async verify() { throw new Error("verification failed"); },
       async cleanup() { cleanupAttempts += 1; if (cleanupAttempts === 1) throw new Error("tmux unavailable"); },
@@ -2443,6 +2516,7 @@ describe("durable account migration coordinator", () => {
       expect(Object.values(restarted.snapshot().pendingSuccessorCleanups)).toMatchObject([{ receipt: { nativeId: `successor-${action}` } }]);
       const cleaned: string[] = [];
       const cleanupProvider: SuccessorProviderPort = {
+        virtualSource: true,
         async create() { throw new SuccessorPendingError(); },
         async verify() {},
         async cleanup(value) { cleaned.push(value.nativeId); },
@@ -2495,6 +2569,7 @@ describe("durable account migration coordinator", () => {
       const cleaned: string[] = [];
       const delivered: string[] = [];
       const cleanupProvider: SuccessorProviderPort = {
+        virtualSource: true,
         async create() { throw new SuccessorPendingError(); },
         async verify() {},
         async cleanup(value) { cleaned.push(value.nativeId); },
@@ -2695,6 +2770,7 @@ describe("durable account migration coordinator", () => {
     const cleaned: string[] = [];
     let verified = false;
     const staleProvider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         input.recordContinuityPath("/stale-b.jsonl");
         store.commitMigrationIntent({ engine: "codex", targetId: "a", origin: "manual", requestId: "return-to-a", expectedRevision: store.engineRouting("codex").revision });
@@ -2727,6 +2803,7 @@ describe("durable account migration coordinator", () => {
     const intent = store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "stop-during-start", expectedRevision: store.engineRouting("codex").revision });
     const cleaned: string[] = [];
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         store.setMigrationIntentState(intent.id, "stopped");
         input.recordContinuityPath("/discarded-successor.jsonl");
@@ -2758,6 +2835,7 @@ describe("durable account migration coordinator", () => {
     store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "verification-cleanup", expectedRevision: store.engineRouting("codex").revision });
     const cleaned: string[] = [];
     const provider: SuccessorProviderPort = {
+      virtualSource: true,
       async create(input) {
         return {
           operationId: input.operationId,

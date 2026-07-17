@@ -196,6 +196,7 @@ function isCopyOnly(value: SuccessorProviderPort | HistoryCopyPort): value is Hi
 
 function copyAdapter(copy: HistoryCopyPort): SuccessorProviderPort {
   return {
+    virtualSource: true,
     async create(input) {
       const successor = await copy.copy({
         engine: input.engine,
@@ -232,13 +233,13 @@ function successorCreationReady(conversation: RegistryConversation, registry: Ag
 function completeProviderTurnObservation(
   conversation: RegistryConversation,
   source: RegistryConversation["generations"][number],
+  virtualSource: boolean,
 ): boolean {
   let before: fs.Stats;
   try {
     before = fs.statSync(source.path);
   } catch (error) {
-    // Legacy adapters and registry fixtures can carry virtual source paths.
-    return (error as NodeJS.ErrnoException).code === "ENOENT";
+    return virtualSource && (error as NodeJS.ErrnoException).code === "ENOENT";
   }
   const observed = transcriptTurnResult(source.path, before.size, before.mtimeMs, conversation.engine === "codex");
   if (!observed.complete) return false;
@@ -429,7 +430,7 @@ export async function advanceConversationMigration(
       let source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
-      if (!completeProviderTurnObservation(conversation, source)) return conversation;
+      if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true)) return conversation;
       if (migration.phase === "requested") {
         conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["requested"], { phase: "preparing" });
         migration = conversation.migration!;
@@ -444,7 +445,7 @@ export async function advanceConversationMigration(
       source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
-      if (!completeProviderTurnObservation(conversation, source)) return restoreCreationFence(conversation);
+      if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true)) return restoreCreationFence(conversation);
       const conversationId = conversation.id;
       receipt = await successorProvider.create({
         engine: conversation.engine,

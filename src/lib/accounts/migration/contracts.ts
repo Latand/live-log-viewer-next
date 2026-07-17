@@ -215,6 +215,8 @@ export interface HeldDelivery {
 }
 
 export interface SuccessorProviderPort {
+  /** Allows controlled fixtures and legacy adapters to supply a source without a filesystem transcript. */
+  virtualSource?: true;
   create(input: {
     engine: MigrationEngine;
     operationId: string;
