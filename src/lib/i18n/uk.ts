@@ -1215,6 +1215,18 @@ export const uk: Record<keyof typeof en, Message> = {
 
   "tree.quiet": "Тихі розмови й задачі",
 
+  "taskStacks.title": "Складені задачі",
+  "taskStacks.aria": "Картки задач, згорнуті в стеки за статусом",
+  "taskStacks.statusAria": "Задачі «{status}» · {count}",
+  "taskStacks.open": "Розгорнути задачу на дошці: {title}",
+  "taskStacks.assignments": "Призначень: {count}",
+  "taskStacks.collapse": "Згорнути картку назад у стек статусу",
+  "launchHistory.title": "Історія запусків",
+  "launchHistory.aria": "Термінальні квитанції запусків",
+  "launchHistory.failed": "невдалий",
+  "launchHistory.recovered": "відновлений",
+  "launchHistory.retryLabel": "Повторити",
+  "launchHistory.retry": "Повторити запуск: {title}",
   "workerStack.title": "Згорнуті воркери",
   "workerStack.aria": "Згорнуті розмови воркерів",
   "workerStack.flow": "Потік",

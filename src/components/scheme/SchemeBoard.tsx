@@ -104,6 +104,9 @@ interface Props {
   /** «Send» on a task card with no aimed agent: seed a fresh draft conversation
       with the task text. Absent in map mode. */
   onTaskDraft?: (task: BoardTask) => void;
+  /** Fold a full card back into its status stack (drops the durable expand
+      pin). Absent in map mode and while status stacks are unavailable. */
+  onTaskCollapse?: (task: BoardTask) => void;
   /** Place-on-map: an unplaced task armed by the panel. The next canvas click
       pins it where clicked; `onTaskPlaced` fires to disarm the caller. */
   placeTaskId?: string | null;
@@ -178,6 +181,7 @@ export function SchemeBoard({
   onDraftSpawned,
   onHandoff,
   onTaskDraft,
+  onTaskCollapse,
   placeTaskId,
   onTaskPlaced,
   newTaskNonce,
@@ -351,6 +355,7 @@ export function SchemeBoard({
   const draftSpawnedRef = useRef(onDraftSpawned);
   const handoffRef = useRef(onHandoff);
   const taskDraftRef = useRef(onTaskDraft);
+  const taskCollapseRef = useRef(onTaskCollapse);
   useEffect(() => {
     selectRef.current = onSelect;
     nodePickRef.current = onNodePick;
@@ -359,6 +364,7 @@ export function SchemeBoard({
     draftSpawnedRef.current = onDraftSpawned;
     handoffRef.current = onHandoff;
     taskDraftRef.current = onTaskDraft;
+    taskCollapseRef.current = onTaskCollapse;
   });
   const stableSelect = useCallback((file: FileEntry) => {
     const nodePick = nodePickRef.current;
@@ -806,6 +812,9 @@ export function SchemeBoard({
       /* No aimed agent: seed a fresh draft conversation with the task text —
          launches nothing until the user picks an engine and hits send. */
       draft: (task) => taskDraftRef.current?.(task),
+      /* Fold-back rides the same ref pattern: the button renders only where a
+         collapse target exists (the dashboard always wires one on desktop). */
+      collapse: (task) => taskCollapseRef.current?.(task),
       unassign: async (task, path) => {
         const error = await unassignTask(task.id, path);
         if (error) pushTaskToast("err", error);

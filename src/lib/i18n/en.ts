@@ -1251,6 +1251,18 @@ export const en = {
   "tree.quiet": "Quiet conversations and tasks",
 
   // WorkerStacks (issue #112): auto-collapsed worker-class cards
+  "taskStacks.title": "Stacked tasks",
+  "taskStacks.aria": "Task cards folded into status stacks",
+  "taskStacks.statusAria": "{status} tasks · {count}",
+  "taskStacks.open": "Expand task on the board: {title}",
+  "taskStacks.assignments": "{count} assignments",
+  "taskStacks.collapse": "Fold the card back into its status stack",
+  "launchHistory.title": "Launch history",
+  "launchHistory.aria": "Terminal launch receipts",
+  "launchHistory.failed": "failed",
+  "launchHistory.recovered": "recovered",
+  "launchHistory.retryLabel": "Retry",
+  "launchHistory.retry": "Retry launch: {title}",
   "workerStack.title": "Collapsed workers",
   "workerStack.aria": "Collapsed worker conversations",
   "workerStack.flow": "Flow",
