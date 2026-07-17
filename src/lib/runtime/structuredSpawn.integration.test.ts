@@ -50,7 +50,7 @@ test("structured Claude permission mapping distinguishes trusted autonomous spaw
     agentInitiated: false,
     operatorAuthenticated: false,
     roleSpawn: false,
-  })).toBe("default");
+  })).toBe("bypassPermissions");
   expect(structuredClaudePermissionMode("plan", {
     agentInitiated: true,
     operatorAuthenticated: false,

@@ -1039,7 +1039,7 @@ test("a terminal structured replay returns its reserved identity and retry-safe 
       ok: true,
       target: null,
       path: null,
-      effectivePermissionMode: "default",
+      effectivePermissionMode: "bypassPermissions",
       launchId: admittedBody.launchId,
       conversationId: admittedBody.conversationId,
       launched: false,

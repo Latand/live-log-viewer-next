@@ -538,7 +538,7 @@ export function structuredClaudePermissionMode(
 ): string {
   if (!mode) return "default";
   if (mode !== "bypassPermissions") return mode;
-  return context.operatorAuthenticated || (context.roleSpawn && !context.agentInitiated) ? mode : "default";
+  return !context.agentInitiated || context.operatorAuthenticated ? mode : "default";
 }
 
 export function structuredClaudeSpawnPolicyBaseSettingsPath(
