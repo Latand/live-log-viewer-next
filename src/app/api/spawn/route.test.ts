@@ -8,9 +8,6 @@ import { NextRequest } from "next/server";
 import { agentRegistry, AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots, createManagedCodexAccount } from "@/lib/accounts/codex";
-import type { ClaudeAccount } from "@/lib/accounts/claude";
-import { refreshClaudeOauth } from "@/lib/accounts/claudeOauth";
-import { selectHealthyClaudeAccount } from "@/lib/accounts/spawnHealth";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
@@ -66,78 +63,82 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
   };
 }
 
-test("post-reboot spawn refreshes an expired Claude account before structured launch", async () => {
-  const cwd = fs.mkdtempSync(path.join(routeSandbox, "expired-claude-spawn-"));
-  const home = path.join(cwd, "claude-home");
-  fs.mkdirSync(home, { mode: 0o700 });
+test("a fresh process resolves and refreshes a persisted Claude account before one structured launch", async () => {
+  const sandbox = fs.mkdtempSync(path.join(routeSandbox, "production-resolver-reboot-"));
+  const stateDir = path.join(sandbox, "state");
+  const accountsRoot = path.join(sandbox, "accounts", "claude");
+  const home = path.join(accountsRoot, "rebooted");
+  const cwd = path.join(sandbox, "workspace");
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  fs.chmodSync(accountsRoot, 0o700);
+  fs.chmodSync(home, 0o700);
+  fs.mkdirSync(path.join(home, "projects"), { mode: 0o700 });
+  fs.mkdirSync(cwd, { mode: 0o700 });
+  fs.writeFileSync(path.join(stateDir, "claude-accounts.json"), JSON.stringify({
+    version: 1,
+    active: "rebooted",
+    accounts: [{ id: "rebooted", label: "Rebooted", kind: "managed", createdAt: 1 }],
+  }), { mode: 0o600 });
   fs.writeFileSync(path.join(home, ".credentials.json"), JSON.stringify({
     claudeAiOauth: {
-      accessToken: crypto.randomUUID(),
-      refreshToken: crypto.randomUUID(),
+      accessToken: "synthetic-expired-access",
+      refreshToken: "synthetic-refresh",
       expiresAt: 1,
       scopes: ["user:inference"],
     },
   }), { mode: 0o600 });
-  const account: ClaudeAccount = {
-    id: "rebooted",
-    label: "rebooted",
-    kind: "managed",
-    home,
-    projectsDir: path.join(home, "projects"),
-    authPresent: true,
-    createdAt: 0,
-  };
-  const store = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  let structuredSpawns = 0;
-  const base = structuredRouteDependencies(cwd);
-  const dependencies: SpawnRouteTestDependencies = {
-    ...base,
-    registry: () => store,
-    resolveHealthySpawnAccount: async () => {
-      const selected = await selectHealthyClaudeAccount([account], account.id, {
-        now: () => 2,
-        probe: async () => "valid",
-        refresh: async (candidate) => {
-          const refreshed = await refreshClaudeOauth(candidate, {
-            now: () => 2,
-            fetch: async () => Response.json({
-              access_token: crypto.randomUUID(),
-              refresh_token: crypto.randomUUID(),
-              expires_in: 3_600,
-              scope: "user:inference",
-            }),
-          });
-          return refreshed === "refreshed" ? "valid" : refreshed === "invalid" ? "invalid" : "unknown";
-        },
-      });
-      return {
-        engine: "claude",
-        accountId: selected.id,
-        kind: selected.kind,
-        home: selected.home,
-        transcriptRoot: selected.projectsDir,
-        env: { NODE_ENV: "test" },
-      };
-    },
-    spawnStructuredConversation: async (input) => {
-      structuredSpawns += 1;
-      return await base.spawnStructuredConversation(input);
-    },
-  };
-  const previous = {
-    transport: process.env.LLV_SPAWN_TRANSPORT,
-    hosts: process.env.LLV_STRUCTURED_HOSTS,
-    events: process.env.LLV_RUNTIME_EVENTS,
-    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
-    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
-  };
-  process.env.LLV_SPAWN_TRANSPORT = "structured";
-  process.env.LLV_STRUCTURED_HOSTS = "1";
-  process.env.LLV_RUNTIME_EVENTS = "1";
-  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
-  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
-  try {
-    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+
+  const routePath = path.join(import.meta.dir, "route.ts");
+  const structuredSpawnPath = path.join(import.meta.dir, "../../../lib/runtime/structuredSpawn.ts");
+  const runtimeClientPath = path.join(import.meta.dir, "../../../lib/runtime/client.ts");
+  const source = `
+    const { mock } = await import("bun:test");
+    let refreshRequests = 0;
+    let usageRequests = 0;
+    let structuredSpawns = 0;
+    let launchedAccount = null;
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      if (url === "https://platform.claude.com/v1/oauth/token") {
+        refreshRequests += 1;
+        return Response.json({
+          access_token: "synthetic-current-access",
+          refresh_token: "synthetic-rotated-refresh",
+          expires_in: 3600,
+          scope: "user:inference",
+        });
+      }
+      if (url === "https://api.anthropic.com/api/oauth/usage") {
+        usageRequests += 1;
+        return Response.json({ five_hour: { utilization: 12, resets_at: "2026-07-17T12:00:00.000Z" } });
+      }
+      throw new Error("unexpected synthetic upstream request");
+    };
+    const structured = await import(${JSON.stringify(structuredSpawnPath)});
+    mock.module("@/lib/runtime/structuredSpawn", () => ({
+      ...structured,
+      spawnStructuredConversation: async (input) => {
+        structuredSpawns += 1;
+        launchedAccount = input.account.accountId;
+        return {
+          ok: true,
+          target: null,
+          path: null,
+          effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default",
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          state: "settled",
+        };
+      },
+    }));
+    const runtimeClient = await import(${JSON.stringify(runtimeClientPath)});
+    mock.module("@/lib/runtime/client", () => ({ ...runtimeClient, runtimeHostClient: () => ({}) }));
+    const { NextRequest } = await import("next/server");
+    const { POST } = await import(${JSON.stringify(routePath)});
+    const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
       method: "POST",
       headers: {
         host: "127.0.0.1:8898",
@@ -145,29 +146,57 @@ test("post-reboot spawn refreshes an expired Claude account before structured la
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "claude", cwd, prompt: "resume work", accountId: account.id }),
-    }), dependencies);
+      body: JSON.stringify({ engine: "claude", cwd: ${JSON.stringify(cwd)}, prompt: "resume work", accountId: "rebooted" }),
+    }));
+    const body = await response.json();
+    const credentials = JSON.parse(await Bun.file(${JSON.stringify(path.join(home, ".credentials.json"))}).text());
+    process.stdout.write(JSON.stringify({
+      status: response.status,
+      body,
+      refreshRequests,
+      usageRequests,
+      structuredSpawns,
+      launchedAccount,
+      accessToken: credentials.claudeAiOauth.accessToken,
+    }));
+  `;
+  const child = Bun.spawn({
+    cmd: [process.execPath, "-e", source],
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      LLV_STATE_DIR: stateDir,
+      LLV_CLAUDE_HOME: path.join(sandbox, "legacy-claude"),
+      LLV_SPAWN_TRANSPORT: "structured",
+      LLV_STRUCTURED_HOSTS: "1",
+      LLV_RUNTIME_EVENTS: "1",
+      LLV_RUNTIME_HOST_SOCKET: path.join(sandbox, "runtime.sock"),
+      NEXT_PUBLIC_RUNTIME_UI: "1",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exit, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
 
-    expect(response.status).toBe(202);
-    expect(await response.json()).toMatchObject({
+  expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+  expect(JSON.parse(stdout)).toEqual({
+    status: 202,
+    body: expect.objectContaining({
       launched: false,
       state: "starting",
       conversationId: expect.stringMatching(/^conversation_/),
-    });
-    expect(structuredSpawns).toBe(1);
-  } finally {
-    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
-    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
-    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
-    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
-    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
-    else process.env.LLV_RUNTIME_EVENTS = previous.events;
-    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
-    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
-    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
-    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
-  }
-});
+    }),
+    refreshRequests: 1,
+    usageRequests: 1,
+    structuredSpawns: 1,
+    launchedAccount: "rebooted",
+    accessToken: "synthetic-current-access",
+  });
+}, 20_000);
 
 test("structured spawn runtime fence preserves durable state", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "structured-runtime-fence-"));

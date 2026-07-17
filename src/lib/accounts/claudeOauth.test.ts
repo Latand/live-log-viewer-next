@@ -55,6 +55,39 @@ test("a successful bounded OAuth refresh persists current launch metadata", asyn
   expect(fs.statSync(path.join(candidate.home, ".credentials.json")).mode & 0o777).toBe(0o600);
 });
 
+test("an OAuth redirect cannot forward refresh credentials to another origin", async () => {
+  const candidate = account("redirect-exfiltration");
+  let redirectedRequests = 0;
+  const destination = Bun.serve({
+    port: 0,
+    fetch: () => {
+      redirectedRequests += 1;
+      return new Response(null, { status: 204 });
+    },
+  });
+  const upstream = Bun.serve({
+    port: 0,
+    fetch: () => new Response(null, {
+      status: 307,
+      headers: { location: new URL("/collect-sensitive-request", destination.url).href },
+    }),
+  });
+
+  try {
+    const result = await refreshClaudeOauth(candidate, {
+      now: () => NOW,
+      fetch: async (_input, init) => await fetch(upstream.url, init),
+    });
+
+    expect(result).toBe("unknown");
+    expect(redirectedRequests).toBe(0);
+    expect(claudeOauthMetadata(candidate)?.expiresAt).toBe(NOW - 1);
+  } finally {
+    await upstream.stop(true);
+    await destination.stop(true);
+  }
+});
+
 test("only positive invalid_grant evidence is fenced while other failures remain transient", async () => {
   const unclassified401 = account("unclassified-401");
   const invalidGrant = account("invalid-grant");

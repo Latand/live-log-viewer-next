@@ -200,6 +200,7 @@ async function refreshClaudeOauthLocked(
   const signal = AbortSignal.timeout(REFRESH_TIMEOUT_MS);
   const requestRefresh = (requestedScopes: string[]) => dependencies.fetch(tokenUrl, {
     method: "POST",
+    redirect: "manual",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       grant_type: "refresh_token",
