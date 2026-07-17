@@ -155,7 +155,23 @@ export async function reconcileStructuredSpawnReplay(
   }
   const messageStatus = operation?.receipt.status;
   const runtimeSession = runtime?.sessions.find((candidate) => candidate.conversationId === current.conversationId) ?? null;
-  const ageMs = (options.now ?? Date.now)() - Date.parse(current.createdAt);
+  const entry = current.key ? registry.snapshot().entries[sessionKeyId(current.key)] : null;
+  const liveRegisteringSession = Boolean(runtimeSession
+    && current.key
+    && runtimeSession.host === "registering"
+    && sessionKeyId(runtimeSession.sessionKey) === sessionKeyId(current.key)
+    && runtimeSession.cwd === current.cwd
+    && runtimeSession.artifactPath === current.artifactPath
+    && entry?.structuredHostOperationId === launchId
+    && entry.pendingAction === "spawn"
+    && entry.claimOwner
+    && entry.structuredHost?.process
+    && entry.structuredHost.writerClaimEpoch === entry.claimEpoch
+    && entry.status !== "dead"
+    && entry.status !== "unhosted");
+  const operationStartedAt = operation ? Date.parse(operation.receipt.at) : Number.NaN;
+  const stageStartedAt = Number.isFinite(operationStartedAt) ? operationStartedAt : Date.parse(current.createdAt);
+  const ageMs = (options.now ?? Date.now)() - stageStartedAt;
   const timeoutMs = options.timeoutMs ?? INITIAL_MESSAGE_TIMEOUT_MS;
   let terminalReason = failedOperationReason(operation, "structured initial message")
     ?? failedOperationReason(spawnOperation, "structured spawn");
@@ -163,6 +179,7 @@ export async function reconcileStructuredSpawnReplay(
     && current.state !== "completed"
     && current.state !== "failed"
     && runtime
+    && !liveRegisteringSession
     && ageMs >= timeoutMs) {
     terminalReason = runtimeSession
       ? `structured initial message remained ${messageStatus ?? "pending"} for ${timeoutMs}ms`
@@ -284,7 +301,7 @@ export interface StructuredSpawnDependencies {
     releasedStatus?: "unhosted" | "dead",
   ): Promise<() => void>;
   publishHost?(key: SessionKey, host: SpawnedStructuredHost): Promise<() => Promise<void>>;
-  deliverFirst?(input: StructuredSpawnInput, artifactPath: string): Promise<void>;
+  deliverFirst?(input: StructuredSpawnInput, artifactPath: string): Promise<void | "held">;
   processIdentity?(): { pid: number; startIdentity: string | null };
 }
 
@@ -455,6 +472,7 @@ export async function recoverPendingStructuredSpawns(
         enabled: () => true,
       });
       if (!delivered?.ok) throw new Error(delivered?.error ?? `structured spawn recovery could not admit ${receipt.launchId}`);
+      if (delivered.outcome === "held") continue;
     }
     await client.transitionOperation(receipt.launchId, "delivered");
     const finalized = registry.finalizeStructuredSpawn(receipt.launchId);
@@ -582,7 +600,7 @@ async function defaultBindHost(
     : await bindClaudeHostPersistence(registry, key, host as ClaudeStreamBrokerHost, claimOwner, claimEpoch, releasedStatus);
 }
 
-async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: string): Promise<void> {
+async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: string): Promise<void | "held"> {
   if (!input.prompt.trim()) return;
   const { enqueueStructuredMessage } = await import("./structuredMessageDelivery");
   const delivered = await enqueueStructuredMessage({
@@ -598,7 +616,7 @@ async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: st
     enabled: () => true,
   });
   if (!delivered?.ok) throw new Error(delivered?.error ?? "structured spawn first-message delivery was unavailable");
-  if (delivered.outcome === "held") throw new Error("structured spawn first message entered a migration hold");
+  if (delivered.outcome === "held") return "held";
   if (delivered.outcome !== "delivered") {
     await waitForStructuredInitialMessage(input.client, delivered.operationId);
   }
@@ -690,7 +708,23 @@ export async function spawnStructuredConversation(
     adoptionClaimTransferred = adoptionClaim !== null;
     binding.stopPersistence = await bindHost(input.registry, key, host, claimed.claimOwner, claimed.claimEpoch);
     binding.unregister = await publishHost(key, host);
-    await deliverFirst(input, identity.path);
+    const initialMessage = await deliverFirst(input, identity.path);
+    if (initialMessage === "held") {
+      return {
+        ok: true,
+        target: null,
+        path: identity.path,
+        ...(input.engine === "claude"
+          ? { effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default" }
+          : {}),
+        launchId: input.receipt.launchId,
+        conversationId: input.receipt.conversationId,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "queued",
+        state: "path-pending",
+      };
+    }
     await input.client.transitionOperation(operationId, "delivered");
     const settled = input.registry.finalizeStructuredSpawn(input.receipt.launchId);
     if (settled.kind === "conflict") throw new Error(`structured spawn registry conflict: ${settled.code}`);
