@@ -1155,6 +1155,42 @@ describe("agent registry", () => {
     expect(store.beginSpawnRequest({ ...request, transport: "tmux" }).kind).toBe("conflict");
   });
 
+  test("structured admission recovery fences a live owner and adopts a recycled pid", () => {
+    const store = registry((owner) =>
+      owner.pid === process.pid || (owner.pid === 987_654 && owner.startIdentity === "987654:new"));
+    const begun = store.beginSpawnRequest({
+      engine: "claude",
+      cwd: "/repo",
+      accountId: "work",
+      clientAttemptId: "attempt_admission_owner",
+      requestDigest: "digest",
+      transport: "structured",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const snapshot = store.snapshot();
+    snapshot.receipts[begun.receipt.launchId]!.admissionOwner = {
+      pid: 987_654,
+      startIdentity: "987654:new",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    expect(store.claimStartingStructuredSpawn(begun.receipt.launchId)).toMatchObject({
+      claimed: false,
+      receipt: { admissionOwner: { pid: 987_654, startIdentity: "987654:new" } },
+    });
+
+    snapshot.receipts[begun.receipt.launchId]!.admissionOwner = {
+      pid: 987_654,
+      startIdentity: "987654:old",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    expect(store.claimStartingStructuredSpawn(begun.receipt.launchId)).toMatchObject({
+      claimed: true,
+      receipt: { admissionOwner: { pid: process.pid } },
+    });
+  });
+
   test("spawn capability digest durably resolves its reserved conversation", () => {
     const store = registry();
     const digest = "a".repeat(64);

@@ -265,6 +265,46 @@ async function postSpawn(
       requestDigest: digest,
     });
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
+    const deferStructuredSpawn = (
+      receipt: typeof begun.receipt,
+      runtimeClient: NonNullable<ReturnType<typeof dependencies.runtimeHostClient>>,
+    ): void => {
+      dependencies.defer(async () => {
+        let response: SpawnResponse;
+        try {
+          response = await dependencies.spawnStructuredConversation({
+            engine,
+            receipt,
+            spec,
+            account,
+            prompt,
+            registry,
+            client: runtimeClient,
+          });
+        } catch (error) {
+          console.error("[spawn] structured launch failed", {
+            launchId: receipt.launchId,
+            conversationId: receipt.conversationId,
+            error,
+          });
+          return;
+        }
+        if (parentArtifactPath && response.path) {
+          try {
+            rememberHandoffChild(response.path, parentArtifactPath);
+            persistHandoffLineage();
+          } catch (error) {
+            console.error("[spawn] handoff lineage persistence failed", {
+              launchId: receipt.launchId,
+              conversationId: receipt.conversationId,
+              childArtifactPath: response.path,
+              parentArtifactPath,
+              error,
+            });
+          }
+        }
+      });
+    };
     if (begun.kind === "replay") {
       const structured = begun.receipt.transport === "structured"
         || (begun.receipt.transport === null
@@ -280,6 +320,9 @@ async function postSpawn(
         } catch {
           /* The durable registry receipt remains available during runtime resynchronization. */
         }
+        const admission = registry.claimStartingStructuredSpawn(receipt.launchId);
+        receipt = admission.receipt;
+        if (admission.claimed) deferStructuredSpawn(receipt, runtimeClient);
       }
       const response = spawnResponseForReceipt(receipt, receipt.artifactPath, { structured, initialMessage });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
@@ -297,41 +340,7 @@ async function postSpawn(
     if (transport === "structured") {
       const runtimeClient = dependencies.runtimeHostClient();
       if (!runtimeClient) throw new Error("structured spawn runtime host is unavailable");
-      dependencies.defer(async () => {
-        let response: SpawnResponse;
-        try {
-          response = await dependencies.spawnStructuredConversation({
-            engine,
-            receipt: begun.receipt,
-            spec,
-            account,
-            prompt,
-            registry,
-            client: runtimeClient,
-          });
-        } catch (error) {
-          console.error("[spawn] structured launch failed", {
-            launchId: begun.receipt.launchId,
-            conversationId: begun.receipt.conversationId,
-            error,
-          });
-          return;
-        }
-        if (parentArtifactPath && response.path) {
-          try {
-            rememberHandoffChild(response.path, parentArtifactPath);
-            persistHandoffLineage();
-          } catch (error) {
-            console.error("[spawn] handoff lineage persistence failed", {
-              launchId: begun.receipt.launchId,
-              conversationId: begun.receipt.conversationId,
-              childArtifactPath: response.path,
-              parentArtifactPath,
-              error,
-            });
-          }
-        }
-      });
+      deferStructuredSpawn(begun.receipt, runtimeClient);
       return NextResponse.json(
         spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured: true }),
         { status: 202 },

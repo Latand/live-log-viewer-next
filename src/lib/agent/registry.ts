@@ -116,6 +116,9 @@ export interface SpawnReceipt {
   requestDigest: string | null;
   /** Launch transport fixed when the idempotent reservation is created. */
   transport: "tmux" | "structured" | null;
+  /** Process that owns pre-host structured admission. A replacement may take
+      this fence only after the recorded process identity is no longer live. */
+  admissionOwner: ProcessIdentity | null;
   /** One-way binding for the caller credential injected into this worker. */
   spawnCapabilityDigest: string | null;
   /** Reserved at receipt birth so path discovery cannot choose the identity. */
@@ -1234,6 +1237,14 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     clientAttemptId: typeof value.clientAttemptId === "string" ? value.clientAttemptId : null,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : null,
     transport: value.transport === "tmux" || value.transport === "structured" ? value.transport : null,
+    admissionOwner: value.admissionOwner
+      && Number.isInteger(value.admissionOwner.pid)
+      && value.admissionOwner.pid > 0
+      ? {
+          pid: value.admissionOwner.pid,
+          startIdentity: typeof value.admissionOwner.startIdentity === "string" ? value.admissionOwner.startIdentity : null,
+        }
+      : null,
     spawnCapabilityDigest: typeof value.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(value.spawnCapabilityDigest)
       ? value.spawnCapabilityDigest
       : null,
@@ -2089,6 +2100,9 @@ export class AgentRegistry {
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
         transport: input.transport ?? null,
+        admissionOwner: input.transport === "structured"
+          ? { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }
+          : null,
         spawnCapabilityDigest: typeof input.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(input.spawnCapabilityDigest)
           ? input.spawnCapabilityDigest
           : null,
@@ -2154,6 +2168,26 @@ export class AgentRegistry {
         recordMembership(file, receipt.conversationId, membership, receipt.createdAt);
       }
       return { kind: "created", receipt: clone(receipt) };
+    });
+  }
+
+  /** Atomically adopts a structured receipt whose pre-host owner exited.
+      A live owner keeps responsibility for its process-local deferred work. */
+  claimStartingStructuredSpawn(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.transport !== "structured" || receipt.state !== "starting" || receipt.key || receipt.pane) {
+        return { claimed: false, receipt: clone(receipt) };
+      }
+      if (receipt.admissionOwner && this.ownerAlive(receipt.admissionOwner)) {
+        return { claimed: false, receipt: clone(receipt) };
+      }
+      receipt.admissionOwner = {
+        pid: process.pid,
+        startIdentity: procBackend.processIdentity(process.pid),
+      };
+      return { claimed: true, receipt: clone(receipt) };
     });
   }
 

@@ -205,6 +205,152 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
   });
 }, 20_000);
 
+test("fresh processes rescue one orphaned immediate structured admission exactly once", async () => {
+  const sandbox = fs.mkdtempSync(path.join(routeSandbox, "orphaned-structured-admission-"));
+  const stateDir = path.join(sandbox, "state");
+  const cwd = path.join(sandbox, "workspace");
+  const effectsPath = path.join(sandbox, "effects.jsonl");
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(cwd);
+
+  const routePath = path.join(import.meta.dir, "route.ts");
+  const source = `
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const crypto = await import("node:crypto");
+    const { NextRequest } = await import("next/server");
+    const { agentRegistry } = await import("@/lib/agent/registry");
+    const { POST } = await import(${JSON.stringify(routePath)});
+    const phase = process.env.LLV_TEST_PHASE;
+    const deferred = [];
+    const client = {
+      operationStatus: async () => null,
+      snapshot: async () => ({ sessions: [] }),
+    };
+    const dependencies = {
+      registry: agentRegistry,
+      assertStructuredRuntime: () => {},
+      resolveHealthySpawnAccount: async () => ({
+        engine: "claude",
+        accountId: "claude-test",
+        kind: "managed",
+        home: path.join(${JSON.stringify(sandbox)}, "account"),
+        transcriptRoot: path.join(${JSON.stringify(sandbox)}, "projects"),
+        env: { NODE_ENV: "test" },
+      }),
+      runtimeHostClient: () => client,
+      defer: (work) => { deferred.push(work); },
+      spawnStructuredConversation: async (input) => {
+        fs.appendFileSync(${JSON.stringify(effectsPath)}, JSON.stringify({ effect: "worker", pid: process.pid }) + "\\n");
+        const sessionId = crypto.randomUUID();
+        const artifactPath = path.join(${JSON.stringify(sandbox)}, sessionId + ".jsonl");
+        fs.writeFileSync(artifactPath, JSON.stringify({ type: "user", message: input.prompt }) + "\\n");
+        fs.appendFileSync(${JSON.stringify(effectsPath)}, JSON.stringify({ effect: "first-prompt", pid: process.pid }) + "\\n");
+        const settled = input.registry.settleSpawn(input.receipt.launchId, {
+          key: { engine: input.engine, sessionId },
+          artifactPath,
+          cwd: input.spec.cwd,
+          accountId: input.account.accountId,
+          launchProfile: input.spec.launchProfile,
+          status: "starting",
+          host: null,
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: null,
+        });
+        if (settled.kind !== "settled") throw new Error("structured rescue settlement conflicted");
+        return {
+          ok: true,
+          target: null,
+          path: artifactPath,
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered",
+          state: "settled",
+        };
+      },
+    };
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        engine: "claude",
+        cwd: ${JSON.stringify(cwd)},
+        prompt: "repair the assigned task",
+        clientAttemptId: "orphaned_admission_20260717_a1",
+      }),
+    }), dependencies);
+    const body = await response.json();
+    if (phase === "recover") await Promise.all(deferred.map((work) => work()));
+    const receipt = agentRegistry().snapshot().receipts[body.launchId];
+    process.stdout.write(JSON.stringify({
+      status: response.status,
+      body,
+      deferred: deferred.length,
+      receiptState: receipt?.state ?? null,
+    }));
+  `;
+  const run = async (phase: "admit" | "recover") => {
+    const child = Bun.spawn({
+      cmd: [process.execPath, "-e", source],
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        LLV_TEST_PHASE: phase,
+        LLV_STATE_DIR: stateDir,
+        LLV_AGENT_REGISTRY_SQLITE: "off",
+        LLV_SPAWN_TRANSPORT: "structured",
+        LLV_STRUCTURED_HOSTS: "1",
+        LLV_RUNTIME_EVENTS: "1",
+        LLV_RUNTIME_HOST_SOCKET: path.join(sandbox, "runtime.sock"),
+        NEXT_PUBLIC_RUNTIME_UI: "1",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exit, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+    return JSON.parse(stdout) as {
+      status: number;
+      body: { launchId: string; conversationId: string; state: string };
+      deferred: number;
+      receiptState: string | null;
+    };
+  };
+
+  const admitted = await run("admit");
+  expect(admitted).toMatchObject({ status: 202, deferred: 1, receiptState: "starting" });
+
+  const recovered = await Promise.all([run("recover"), run("recover")]);
+  const effects = fs.existsSync(effectsPath)
+    ? fs.readFileSync(effectsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { effect: string })
+    : [];
+  const finalReceipt = new AgentRegistry(path.join(stateDir, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" })
+    .snapshot().receipts[admitted.body.launchId];
+
+  expect(new Set(recovered.map((result) => result.body.launchId))).toEqual(new Set([admitted.body.launchId]));
+  expect(new Set(recovered.map((result) => result.body.conversationId))).toEqual(new Set([admitted.body.conversationId]));
+  expect(recovered.filter((result) => result.deferred === 1)).toHaveLength(1);
+  expect(effects.map((effect) => effect.effect)).toEqual(["worker", "first-prompt"]);
+  expect(finalReceipt).toMatchObject({
+    launchId: admitted.body.launchId,
+    conversationId: admitted.body.conversationId,
+    state: "completed",
+    completionMode: "route-completed",
+  });
+}, 20_000);
+
 test("structured spawn runtime fence preserves durable state", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "structured-runtime-fence-"));
   const registryPath = path.join(cwd, "cold-agent-registry.json");
