@@ -151,15 +151,11 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     if (responsePinOverlayPaths.has(child.path)) responsePinOverlayPaths.add(parentPath);
   }
   const scannedPaths = new Set(files.map((file) => file.path));
-  const ownsPath = (conversation: (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations], pathname: string) =>
-    conversation.generations.some((generation) => generation.path === pathname)
-    || conversation.continuityPaths.includes(pathname);
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
     if (file.spawn) continue;
-    const conversation = Object.values(registrySnapshot.conversations).find((candidate) =>
-      candidate.engine === file.engine && ownsPath(candidate, file.path));
-    if (!conversation) continue;
+    const conversation = conversationForPath(file.path);
+    if (!conversation || conversation.engine !== file.engine) continue;
     const generation = conversation.generations.find((item) => item.path === file.path);
     const generationIndex = conversation.generations.findIndex((item) => item.path === file.path);
     const latest = conversation.generations.at(-1);
