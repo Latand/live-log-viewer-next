@@ -65,8 +65,9 @@ state language (§2) that all surfaces render.
   (flow, pipeline, spawner, parent conversation) or a *lane* (task status).
   A stack is itself a nav target and a camera target; it shows a count and a
   rolled-up state dot (§2.2). Expanding a member restores the exact card.
-- **Tray** — new (§1.4): the stack of a parent agent card's engine-spawned
-  children, docked *inside* the parent's footprint rather than beside it.
+- **Tray** — new (§1.4): the stack of a parent agent card's quiet or
+  hand-folded engine-spawned children, docked *inside* the parent's
+  footprint rather than beside it.
 - **Lane** — new (§1.3): a labeled world-space column in the task lanes band;
   the Kanban read of #290.
 - **Presence** — where on the ladder (§1.2) an identity currently renders.
@@ -92,7 +93,8 @@ P0 hidden        durable close (#289 mutation, manual close, tombstone)
 | expanded by the user (durable pin) | P3 | `expandedIds` pin, worker-collapse pin |
 | needing attention: failed delivery, failed spawn, `pendingQuestion`, `waitingInput`, overdue open task, **rate-limited (#97)** | P2, surfaced out of any stack | `needsAttention` — extended with rate-limited |
 | live / mid-turn / spawning, and **operator-spawned or owner-touched** | P2 | `assignmentActive`, `isCollapseExempt` |
-| live / mid-turn, but **engine-spawned child** (#142/#339) | P1 in the parent's tray | new — "one spawn = one card" |
+| live / mid-turn **engine-spawned child** (#142/#339) | P2 under the parent — unless hand-folded (durable fold pin → P1 in the tray) | owner decision: live work stays visible |
+| quiet engine-spawned child | P1 in the parent's tray, **immediately on turn end** (no 15-min wait) | new — keeps fan-outs from lingering |
 | recently touched (<15 min) | P2 | `TASK_STACK_RECENT_MS`, idle window |
 | quiet task | P1 in its **lane stack** (§1.3) | today: bottom strip stack |
 | quiet worker conversation | P1 in its **origin stack** | `workerCollapse` unchanged |
@@ -146,13 +148,16 @@ Options considered:
 
 #### Placement & geometry
 
-- The band docks in a **reserved world zone left of the agent field origin**
-  (negative-x half-plane, fixed right edge at `x = −LANE_GAP`). The agent
-  field already grows rightward/downward from `PAD`; the world box
-  (`taskWorldBounds`) already tolerates off-layout rects, and the minimap
-  draws in world coordinates with a shiftable origin — so the band never
-  reflows agent geometry, and vice versa. Spatial memory: tasks always live
-  "to the left", agents "to the right".
+- The band docks as a **top band** — its own row above the favorites band
+  (band order: lanes → favorites → rest), using the exact banding mechanism
+  `layout.ts` already runs for favorites (`bandTop` + `FAV_BAND_GAP`).
+  Owner decision (2026-07-17): top, not left. Lane growth therefore shifts
+  the agent field down; that reflow is acceptable because (a) band height
+  changes only when a card is promoted/expanded or a column overflows —
+  not per poll tick, and (b) the existing reflow machinery already absorbs
+  it: nodes glide via `MOVE_TRANSITION` and the spatial-nav camera follow
+  (`glideBy`) keeps the anchored card steady on screen. Spatial memory:
+  tasks always live "up top", agents below.
 - Columns are fixed-width (`TASK_W + gutter`), cards flow top-down per lane
   ordered by `updatedAt` (freshest first); lane height grows as needed. Lane
   headers carry the heading + count + rolled-up state dots, and are nav/camera
@@ -190,10 +195,14 @@ headings + the three activity badges (§2.2). One line, collapsible.
   the parent, staircase layout, full lifecycle.
 - **Engine-spawned** children — Codex `spawn_agent` rollouts
   (`thread_source: "subagent"`, #142) and Claude in-harness subagents
-  (`<parent-sid>/subagents/**/agent-*.jsonl`, sidechain shape, #339) — are
-  the *parent agent's implementation detail*. They render at **P1 in a tray
-  docked on the parent card**: "one spawn = one card" exactly as the #142
-  operator expected.
+  (`<parent-sid>/subagents/**/agent-*.jsonl`, sidechain shape, #339) —
+  render as **full P2 nodes under the parent while working** (owner
+  decision 2026-07-17: live work stays visible), and fold into a **tray
+  docked on the parent card immediately when their turn ends** — no 15-min
+  idle wait, unlike other workers. The operator can also **hand-fold a
+  live child** into the tray (a durable per-child fold pin — the inverse of
+  the expand pin) when a fan-out gets noisy; the tray's roll-up dots keep
+  its state visible.
 
 The **tray** (new element on the agent card, both desktop pane and map-lite
 card):
@@ -517,10 +526,12 @@ children of the first; provenance flag present on all four.
   + roll-up dots), `workerCollapse.ts` (tray members excluded from origin
   stacks), `Minimap.tsx` (tray members leave the node rects), mobile card.
 - New: `scheme/subagentTray.ts` (pure partition: children → tray / promoted,
-  attention overrides, pin handling).
-- *Accepts:* engine-spawned live child renders as tray row, not a root/full
-  node ("one spawn = one card"); child with `pendingQuestion` promotes to P2;
-  owner-touched child never demotes; tray expand/collapse is durable; tray
+  attention overrides, fold/expand pin handling).
+- *Accepts:* engine-spawned child renders as a full node under its parent
+  while working — never as an unlinked root; the moment its turn ends it
+  folds into the tray (no idle wait); a live child can be hand-folded and
+  the fold pin survives reloads; child with `pendingQuestion`/failure
+  promotes out of the tray; owner-touched child never auto-folds; tray
   roll-up shows hottest child state; operator-spawned children unchanged.
 
 ### S3 — Card presence & navigation (#292 core; PR #294 mined, built fresh)
@@ -546,7 +557,7 @@ children of the first; provenance flag present on all four.
   status), `tasks/taskModel.ts` (cycle + tone + copy EN/UK),
   `taskStacks.ts` (partition becomes lane partition; P1 lane rows),
   `SchemeBoard.tsx`/`TasksLayer.tsx` (lane band render, dock/undock drags),
-  `taskGeometry.ts`/`taskWorldBounds` (negative-x band), `Minimap.tsx`
+  `layout.ts` (lanes band as the first band above favorites), `Minimap.tsx`
   (lane zone outline), `TaskStacksStrip.tsx` (becomes lane projection),
   mobile task sheet + `mapGate.ts`.
 - New: `scheme/taskLanes.ts` (pure lane layout: columns, ordering, in-lane
@@ -621,7 +632,7 @@ Checks against this design:
    zoom ladder already; semantic zoom can drive presence from camera z
    (far zoom renders lane bands and trays as their roll-ups without card
    DOM), which slots into the existing `dormant` far-zoom machinery.
-4. **Lanes as a "room".** The task band at fixed negative-x is a stable
+4. **Lanes as a "room".** The task band pinned at the top is a stable
    spatial anchor — at project-map level it becomes the project's task
    shelf; user-placed free cards keep their coordinates, which is the
    spatial-memory contract.
@@ -637,22 +648,18 @@ Checks against this design:
 
 ## 7. Open questions for the owner
 
+Resolved by the owner (2026-07-17): lane band sits **on top** (§1.3); live
+engine children render **fully while working**, with a manual fold into the
+tray (§1.4).
+
 1. **`review` as a fifth persisted task status (§1.3)** — confirm. It touches
    the task API contract and both locales. Fallback is derived lanes, at the
    cost of poll-noise lane flapping.
-2. **Lane band position** — designed left-of-origin (negative-x). If you'd
-   rather have it as a top band above favorites, say so before S4; both fit
-   the geometry, top-band reflows agents vertically when lanes grow.
-3. **Tray demotion of *live* engine children (§1.4)** — the design demotes
-   even working children to the tray (with roll-up dots) per "one spawn =
-   one card". If you want live children promoted to full nodes while
-   working, S2 flips one predicate — but dense Codex fan-outs will flood
-   again.
-4. **Reseat policy (§2.4)** — one-click manual only, or also a policy-driven
+2. **Reseat policy (§2.4)** — one-click manual only, or also a policy-driven
    auto-reseat ("always continue on account X when rate-limited")? Designed
    as manual-first; auto is a small follow-up on the same path.
-5. **`E`/`G` key choices (§3.3)** — plain-letter shortcuts on the board are
+3. **`E`/`G` key choices (§3.3)** — plain-letter shortcuts on the board are
    new; conflicts with future single-key bindings are cheap to change now.
-6. **#289 scope of the durable close** — designed to also cover engine-
+4. **#289 scope of the durable close** — designed to also cover engine-
    spawned reviewers (S1 provenance) under the same contract; confirm that's
    wanted from day one or flow/direct reviewers first.
