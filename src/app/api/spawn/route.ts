@@ -303,6 +303,7 @@ async function postSpawn(
     const deferStructuredSpawn = (
       receipt: typeof begun.receipt,
       runtimeClient: NonNullable<ReturnType<typeof dependencies.runtimeHostClient>>,
+      imageRefs: StructuredImageRef[],
     ): void => {
       dependencies.defer(async () => {
         let response: SpawnResponse;
@@ -313,6 +314,7 @@ async function postSpawn(
             spec,
             account,
             prompt,
+            imageRefs,
             registry,
             client: runtimeClient,
           });
@@ -369,7 +371,12 @@ async function postSpawn(
         }
         const admission = registry.claimStartingStructuredSpawn(receipt.launchId);
         receipt = admission.receipt;
-        if (admission.claimed) deferStructuredSpawn(receipt, runtimeClient);
+        if (admission.claimed) {
+          let imageRefs;
+          try { imageRefs = dependencies.storeImages(images); }
+          catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
+          deferStructuredSpawn(receipt, runtimeClient, imageRefs);
+        }
       }
       const response = spawnResponseForReceipt(receipt, receipt.artifactPath, { structured, initialMessage });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
@@ -390,21 +397,11 @@ async function postSpawn(
       let imageRefs;
       try { imageRefs = dependencies.storeImages(images); }
       catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
-      const response = await dependencies.spawnStructuredConversation({
-        engine,
-        receipt: begun.receipt,
-        spec,
-        account,
-        prompt,
-        imageRefs,
-        registry,
-        client: runtimeClient,
-      });
-      if (parentArtifactPath && response.path) {
-        rememberHandoffChild(response.path, parentArtifactPath);
-        persistHandoffLineage();
-      }
-      return NextResponse.json(response);
+      deferStructuredSpawn(begun.receipt, runtimeClient, imageRefs);
+      return NextResponse.json(
+        spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured: true }),
+        { status: 202 },
+      );
     }
     /* Pasted images land in the inbox and reach the fresh agent as file paths
        appended to its first prompt — the same contract the pane composer uses. */

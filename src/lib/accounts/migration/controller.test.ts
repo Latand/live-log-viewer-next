@@ -83,6 +83,7 @@ test("controller preserves durable image refs while draining a migration-held st
     deliveryId: claimed.id,
     clientMessageId: "migration-message",
     text: "continue",
+    command: claimed.command,
     imageRefs: [imageRef],
   }]);
   expect(legacyCalls).toBe(0);

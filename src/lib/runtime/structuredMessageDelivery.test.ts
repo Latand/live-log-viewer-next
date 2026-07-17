@@ -376,6 +376,7 @@ test("a reopened synchronization hold replays the exact steer command", async ()
     policy: request.policy,
     turnId: request.turnId,
     text: request.text,
+    contentDigest: expect.any(String),
   });
 });
 

@@ -3861,7 +3861,7 @@ export class AgentRegistry {
       const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;
       const requestedCommand = canonicalHeldDeliveryCommand(commandInput, existing?.id ?? "pending-delivery");
       const requestDigest = heldDeliveryRequestDigest(canonicalId, text, requestedCommand);
-      if (existing && !heldDeliveryRequestDigests(file, canonicalId, text, requestedCommand).has(existing.requestDigest ?? "")) {
+      if (existing?.requestDigest && !heldDeliveryRequestDigests(file, canonicalId, text, requestedCommand).has(existing.requestDigest)) {
         throw new DeliveryReservationConflictError();
       }
       const conversation = file.conversations[canonicalId];

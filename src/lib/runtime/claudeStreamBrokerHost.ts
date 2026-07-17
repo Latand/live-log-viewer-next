@@ -733,7 +733,12 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private restore(): void {
     const stored = this.eventStore.load(this.identity.sessionId);
     this.events.push(...stored);
-    this.cursor = Math.max(this.cursor, stored.at(-1)?.seq ?? 0);
+    this.cursor = reconcileRuntimeEventCursor(
+      this.identity.sessionId,
+      stored.at(-1)?.seq ?? 0,
+      this.cursor,
+      this.onEventCursorRecovery,
+    );
     this.deliveries.push(...this.deliveryLedger.load(this.identity.sessionId).map((delivery) => ({
       ...delivery,
       entry: normalizeQueueEntry(delivery.entry),

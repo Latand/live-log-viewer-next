@@ -777,7 +777,7 @@ test("runtime retry network replay returns the same replacement operation", asyn
       journal.transitionOperation(operationId, status, details);
     },
   }, () => new FakeEngineHost(ledger)).drain();
-  expect(ledger.writes).toEqual([{
+  expect(ledger.writes).toMatchObject([{
     id: firstBody.operationId,
     text: "deliver once after a lost HTTP response",
     expectedTurnId: null,

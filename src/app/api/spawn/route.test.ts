@@ -76,6 +76,395 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
   };
 }
 
+test("a fresh process resolves and refreshes a persisted Claude account before one structured launch", async () => {
+  const sandbox = fs.mkdtempSync(path.join(routeSandbox, "production-resolver-reboot-"));
+  const stateDir = path.join(sandbox, "state");
+  const accountsRoot = path.join(sandbox, "accounts", "claude");
+  const home = path.join(accountsRoot, "rebooted");
+  const cwd = path.join(sandbox, "workspace");
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  fs.chmodSync(accountsRoot, 0o700);
+  fs.chmodSync(home, 0o700);
+  fs.mkdirSync(path.join(home, "projects"), { mode: 0o700 });
+  fs.mkdirSync(cwd, { mode: 0o700 });
+  fs.writeFileSync(path.join(stateDir, "claude-accounts.json"), JSON.stringify({
+    version: 1,
+    active: "rebooted",
+    accounts: [{ id: "rebooted", label: "Rebooted", kind: "managed", createdAt: 1 }],
+  }), { mode: 0o600 });
+  fs.writeFileSync(path.join(home, ".credentials.json"), JSON.stringify({
+    claudeAiOauth: {
+      accessToken: "synthetic-expired-access",
+      refreshToken: "synthetic-refresh",
+      expiresAt: 1,
+      scopes: ["user:inference"],
+    },
+  }), { mode: 0o600 });
+
+  const routePath = path.join(import.meta.dir, "route.ts");
+  const structuredSpawnPath = path.join(import.meta.dir, "../../../lib/runtime/structuredSpawn.ts");
+  const runtimeClientPath = path.join(import.meta.dir, "../../../lib/runtime/client.ts");
+  const source = `
+    const { mock } = await import("bun:test");
+    const deferred = [];
+    let refreshRequests = 0;
+    let usageRequests = 0;
+    let structuredSpawns = 0;
+    let launchedAccount = null;
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      if (url === "https://platform.claude.com/v1/oauth/token") {
+        refreshRequests += 1;
+        return Response.json({
+          access_token: "synthetic-current-access",
+          refresh_token: "synthetic-rotated-refresh",
+          expires_in: 3600,
+          scope: "user:inference",
+        });
+      }
+      if (url === "https://api.anthropic.com/api/oauth/usage") {
+        usageRequests += 1;
+        return Response.json({ five_hour: { utilization: 12, resets_at: "2026-07-17T12:00:00.000Z" } });
+      }
+      throw new Error("unexpected synthetic upstream request");
+    };
+    const nextServer = await import("next/server");
+    mock.module("next/server", () => ({
+      ...nextServer,
+      after: (work) => { deferred.push(work); },
+    }));
+    const structured = await import(${JSON.stringify(structuredSpawnPath)});
+    mock.module("@/lib/runtime/structuredSpawn", () => ({
+      ...structured,
+      spawnStructuredConversation: async (input) => {
+        structuredSpawns += 1;
+        launchedAccount = input.account.accountId;
+        return {
+          ok: true,
+          target: null,
+          path: null,
+          effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default",
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          state: "settled",
+        };
+      },
+    }));
+    const runtimeClient = await import(${JSON.stringify(runtimeClientPath)});
+    mock.module("@/lib/runtime/client", () => ({ ...runtimeClient, runtimeHostClient: () => ({}) }));
+    const { NextRequest } = await import("next/server");
+    const { POST } = await import(${JSON.stringify(routePath)});
+    const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "claude", cwd: ${JSON.stringify(cwd)}, prompt: "resume work", accountId: "rebooted" }),
+    }));
+    await Promise.all(deferred.map((work) => work()));
+    const body = await response.json();
+    const credentials = JSON.parse(await Bun.file(${JSON.stringify(path.join(home, ".credentials.json"))}).text());
+    process.stdout.write(JSON.stringify({
+      status: response.status,
+      body,
+      refreshRequests,
+      usageRequests,
+      structuredSpawns,
+      launchedAccount,
+      accessToken: credentials.claudeAiOauth.accessToken,
+    }));
+  `;
+  const child = Bun.spawn({
+    cmd: [process.execPath, "-e", source],
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      LLV_STATE_DIR: stateDir,
+      LLV_CLAUDE_HOME: path.join(sandbox, "legacy-claude"),
+      LLV_SPAWN_TRANSPORT: "structured",
+      LLV_STRUCTURED_HOSTS: "1",
+      LLV_RUNTIME_EVENTS: "1",
+      LLV_RUNTIME_HOST_SOCKET: path.join(sandbox, "runtime.sock"),
+      NEXT_PUBLIC_RUNTIME_UI: "1",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exit, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+
+  expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+  expect(JSON.parse(stdout)).toEqual({
+    status: 202,
+    body: expect.objectContaining({
+      launched: false,
+      state: "starting",
+      conversationId: expect.stringMatching(/^conversation_/),
+    }),
+    refreshRequests: 1,
+    usageRequests: 1,
+    structuredSpawns: 1,
+    launchedAccount: "rebooted",
+    accessToken: "synthetic-current-access",
+  });
+}, 20_000);
+
+test("fresh processes rescue one orphaned immediate structured admission exactly once", async () => {
+  const sandbox = fs.mkdtempSync(path.join(routeSandbox, "orphaned-structured-admission-"));
+  const stateDir = path.join(sandbox, "state");
+  const cwd = path.join(sandbox, "workspace");
+  const effectsPath = path.join(sandbox, "effects.jsonl");
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(cwd);
+
+  const routePath = path.join(import.meta.dir, "route.ts");
+  const source = `
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const crypto = await import("node:crypto");
+    const { NextRequest } = await import("next/server");
+    const { agentRegistry } = await import("@/lib/agent/registry");
+    const { POST } = await import(${JSON.stringify(routePath)});
+    const phase = process.env.LLV_TEST_PHASE;
+    const deferred = [];
+    const client = {
+      operationStatus: async () => null,
+      snapshot: async () => ({ sessions: [] }),
+    };
+    const dependencies = {
+      registry: agentRegistry,
+      assertStructuredRuntime: () => {},
+      resolveHealthySpawnAccount: async () => ({
+        engine: "claude",
+        accountId: "claude-test",
+        kind: "managed",
+        home: path.join(${JSON.stringify(sandbox)}, "account"),
+        transcriptRoot: path.join(${JSON.stringify(sandbox)}, "projects"),
+        env: { NODE_ENV: "test" },
+      }),
+      resolveSpawnAccount: () => ({
+        engine: "claude",
+        accountId: "claude-test",
+        kind: "managed",
+        home: path.join(${JSON.stringify(sandbox)}, "account"),
+        transcriptRoot: path.join(${JSON.stringify(sandbox)}, "projects"),
+        env: { NODE_ENV: "test" },
+      }),
+      runtimeHostClient: () => client,
+      defer: (work) => { deferred.push(work); },
+      storeImages: () => [],
+      spawnStructuredConversation: async (input) => {
+        fs.appendFileSync(${JSON.stringify(effectsPath)}, JSON.stringify({ effect: "worker", pid: process.pid }) + "\\n");
+        const sessionId = crypto.randomUUID();
+        const artifactPath = path.join(${JSON.stringify(sandbox)}, sessionId + ".jsonl");
+        fs.writeFileSync(artifactPath, JSON.stringify({ type: "user", message: input.prompt }) + "\\n");
+        fs.appendFileSync(${JSON.stringify(effectsPath)}, JSON.stringify({ effect: "first-prompt", pid: process.pid }) + "\\n");
+        const settled = input.registry.settleSpawn(input.receipt.launchId, {
+          key: { engine: input.engine, sessionId },
+          artifactPath,
+          cwd: input.spec.cwd,
+          accountId: input.account.accountId,
+          launchProfile: input.spec.launchProfile,
+          status: "starting",
+          host: null,
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: null,
+        });
+        if (settled.kind !== "settled") throw new Error("structured rescue settlement conflicted");
+        return {
+          ok: true,
+          target: null,
+          path: artifactPath,
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered",
+          state: "settled",
+        };
+      },
+    };
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        engine: "claude",
+        cwd: ${JSON.stringify(cwd)},
+        prompt: "repair the assigned task",
+        clientAttemptId: "orphaned_admission_20260717_a1",
+      }),
+    }), dependencies);
+    const body = await response.json();
+    if (phase === "recover") await Promise.all(deferred.map((work) => work()));
+    const receipt = agentRegistry().snapshot().receipts[body.launchId];
+    process.stdout.write(JSON.stringify({
+      status: response.status,
+      body,
+      deferred: deferred.length,
+      receiptState: receipt?.state ?? null,
+    }));
+  `;
+  const run = async (phase: "admit" | "recover") => {
+    const child = Bun.spawn({
+      cmd: [process.execPath, "-e", source],
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        LLV_TEST_PHASE: phase,
+        LLV_STATE_DIR: stateDir,
+        LLV_AGENT_REGISTRY_SQLITE: "off",
+        LLV_SPAWN_TRANSPORT: "structured",
+        LLV_STRUCTURED_HOSTS: "1",
+        LLV_RUNTIME_EVENTS: "1",
+        LLV_RUNTIME_HOST_SOCKET: path.join(sandbox, "runtime.sock"),
+        NEXT_PUBLIC_RUNTIME_UI: "1",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exit, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+    return JSON.parse(stdout) as {
+      status: number;
+      body: { launchId: string; conversationId: string; state: string };
+      deferred: number;
+      receiptState: string | null;
+    };
+  };
+
+  const admitted = await run("admit");
+  expect(admitted).toMatchObject({ status: 202, deferred: 1, receiptState: "starting" });
+
+  const recovered = await Promise.all([run("recover"), run("recover")]);
+  const effects = fs.existsSync(effectsPath)
+    ? fs.readFileSync(effectsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { effect: string })
+    : [];
+  const finalReceipt = new AgentRegistry(path.join(stateDir, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" })
+    .snapshot().receipts[admitted.body.launchId];
+
+  expect(new Set(recovered.map((result) => result.body.launchId))).toEqual(new Set([admitted.body.launchId]));
+  expect(new Set(recovered.map((result) => result.body.conversationId))).toEqual(new Set([admitted.body.conversationId]));
+  expect(recovered.filter((result) => result.deferred === 1)).toHaveLength(1);
+  expect(effects.map((effect) => effect.effect)).toEqual(["worker", "first-prompt"]);
+  expect(finalReceipt).toMatchObject({
+    launchId: admitted.body.launchId,
+    conversationId: admitted.body.conversationId,
+    state: "completed",
+    completionMode: "route-completed",
+  });
+}, 20_000);
+
+test("structured spawn runtime fence preserves durable state", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "structured-runtime-fence-"));
+  const registryPath = path.join(cwd, "cold-agent-registry.json");
+  const seeded = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
+  const conversation = seeded.ensureConversation("codex", path.join(cwd, "session.jsonl"), "codex-test");
+  const snapshot = seeded.snapshot();
+  for (let index = 0; index < 101; index += 1) {
+    const id = `legacy-${String(index).padStart(3, "0")}`;
+    snapshot.heldDeliveries[id] = {
+      id,
+      conversationId: conversation.id,
+      text: `legacy body ${index}`,
+      createdAt: `2026-07-16T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+      clientMessageId: id,
+      payloadKind: "text",
+      artifactPaths: [],
+      state: "delivered",
+      generationId: conversation.generations.at(-1)!.id,
+      attempts: 1,
+      assignedAt: null,
+      deliveredAt: `2026-07-16T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+      error: null,
+    } as unknown as (typeof snapshot.heldDeliveries)[string];
+  }
+  fs.writeFileSync(registryPath, JSON.stringify(snapshot));
+  const registryBytes = fs.readFileSync(registryPath);
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  let registryFactoryCalls = 0;
+  let accountLookups = 0;
+  let structuredSpawns = 0;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => {
+      registryFactoryCalls += 1;
+      return new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
+    },
+    assertStructuredRuntime: () => {
+      throw new StructuredRuntimeRequirementError("structured hosts on macOS require the Viewer server to run with Bun");
+    },
+    resolveHealthySpawnAccount: async () => {
+      accountLookups += 1;
+      throw new Error("account lookup crossed the runtime fence");
+    },
+    spawnStructuredConversation: async () => {
+      structuredSpawns += 1;
+      throw new Error("structured spawn crossed the runtime fence");
+    },
+  } satisfies SpawnRouteTestDependencies;
+
+  try {
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "codex", cwd, prompt: "must stay fenced" }),
+    }), dependencies);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "structured hosts on macOS require the Viewer server to run with Bun" });
+    expect(registryFactoryCalls).toBe(0);
+    expect(accountLookups).toBe(0);
+    expect(structuredSpawns).toBe(0);
+    expect(fs.readFileSync(registryPath)).toEqual(registryBytes);
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
 test("spawn rejects malformed, oversized, and mismatched images before durable mutation", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "image-admission-"));
   const store = agentRegistry();
@@ -535,7 +924,7 @@ test("structured replay keeps its admitted account after routing changes", async
       request({ engine: "codex" }),
       request({ parentConversationId: alternateParent.id }),
       request({ accountId: "account-b" }),
-      request({ images: [{ mime: "image/png", base64: "eA==" }] }),
+      request({ images: [{ mime: "image/png", base64: Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64") }] }),
     ];
     for (const changedRequest of changedRequests) {
       const conflict = await POST.withDependencies(changedRequest, dependencies);

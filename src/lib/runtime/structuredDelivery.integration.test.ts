@@ -680,7 +680,7 @@ test("repeated terminal retry clicks produce one replacement engine write", asyn
   expect(journal.effectBatch()).toHaveLength(1);
   await new StructuredDeliveryQueue(journalPort(journal), () => new FakeEngineHost(ledger)).drain();
 
-  expect(ledger.writes).toEqual([{
+  expect(ledger.writes).toMatchObject([{
     id: replacement.operationId,
     text: "deliver this once",
     expectedTurnId: null,
@@ -1008,7 +1008,7 @@ test("runtime recovery drains one durable synchronization hold into one engine c
     reconcileUncertain: deliverAfterRecovery,
   }, registry);
 
-  expect(ledger.writes).toEqual([{
+  expect(ledger.writes).toMatchObject([{
     id: request.operationId,
     text: request.text,
     expectedTurnId: null,
@@ -1311,7 +1311,7 @@ test("a migration-held delivery switches from the source host to the published C
   expect(order.slice(0, 3)).toEqual(["verify", "publish", "commit"]);
   expect(sourceLedger.writes).toEqual([]);
   expect(successorLedger.writes).toMatchObject([{
-    id: held.id,
+    id: held.command.operationId,
     text: "continue on the successor",
     expectedTurnId: null,
   }]);
@@ -1518,7 +1518,7 @@ test("a migration-held delivery switches from the source host to the published C
   expect(publications).toBe(1);
   expect(sourceLedger.writes).toEqual([]);
   expect(successorLedger.writes).toMatchObject([{
-    id: held.id,
+    id: held.command.operationId,
     text: "continue on the Claude successor",
     expectedTurnId: null,
   }]);

@@ -174,7 +174,7 @@ describe("agent registry", () => {
       "text",
       [],
       changedContent.contentDigest,
-    )).toThrow("held delivery idempotency conflict");
+    )).toThrow("client message id is already reserved for another request");
   });
 
   test("startup compaction bounds abandoned failed reservations and leaves capacity", () => {

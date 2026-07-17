@@ -288,7 +288,7 @@ test("/api/tmux contains structured recovery failures without legacy tmux delive
   }
 });
 
-test("/api/tmux stores structured attachments and admits their Viewer inbox paths", async () => {
+test("/api/tmux forwards structured attachments to runtime image delivery", async () => {
   const previous = process.env.LLV_STRUCTURED_HOSTS;
   structuredMessageCalls = 0;
   structuredMessageRequest = null;
@@ -316,10 +316,9 @@ test("/api/tmux stores structured attachments and admits their Viewer inbox path
       path: PATHNAME,
       conversationId: "conversation_image",
       text: "inspect",
-      hasImages: true,
-      images: ["/viewer/inbox/img-one.png"],
+      images: [{ base64: "encoded", mime: "image/png" }],
     });
-    expect(await response.json()).toMatchObject({ ok: true, structured: true, imagePaths: ["/viewer/inbox/img-one.png"] });
+    expect(await response.json()).toMatchObject({ ok: true, structured: true });
     expect(deletedImagePaths).toEqual([]);
   } finally {
     collectedImages = [];
