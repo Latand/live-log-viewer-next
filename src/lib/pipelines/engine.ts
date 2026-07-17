@@ -1,22 +1,25 @@
 import crypto from "node:crypto";
 import path from "node:path";
 
+import { isManagedClaudeHome } from "@/lib/accounts/claude";
 import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type DurableMembershipInput } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
-import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
+import { prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
+import { runtimeHostClient } from "@/lib/runtime/client";
+import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { isShellCommand } from "@/lib/status";
-import { paneInfo, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
+import { paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
@@ -100,9 +103,13 @@ async function spawnPipelineAgent(
 ): Promise<PipelineStageSpawn> {
   const account = accountManager.resolveSpawn(input.role.engine);
   const parent = parentIdentity(input.parentPath);
+  if (input.role.engine === "claude" && isManagedClaudeHome(account.home)) {
+    prepareManagedClaudeSpawnHome(account.home, input.cwd);
+  }
   const specBase = freshSpecFor(input.role.engine, input.cwd, {
     model: input.role.model,
     effort: input.role.effort,
+    readOnly: input.role.access === "read-only",
     codexHome: input.role.engine === "codex" ? account.home : null,
     claudeConfigDir: input.role.engine === "claude" ? account.home : null,
     claudeProjectsDir: input.role.engine === "claude" ? account.transcriptRoot : null,
@@ -124,6 +131,7 @@ async function spawnPipelineAgent(
   const begun = registry.beginSpawnRequest({
     engine: input.role.engine,
     cwd: input.cwd,
+    transport: "structured",
     accountId: account.accountId,
     parentConversationId: parent.conversationId,
     parentSessionKey: parent.sessionKey,
@@ -148,37 +156,19 @@ async function spawnPipelineAgent(
   }
 
   const spec = { ...specBase, launchProfile };
-  const startedAtMs = Date.now();
-  const pane = await spawnAgentWithPrompt(spec, input.prompt, begun.receipt);
-  const transcript = await resolveSpawnedTranscriptPath({
+  const client = runtimeHostClient();
+  if (!client) throw new Error("pipeline structured runtime host is unavailable");
+  const response = await spawnStructuredConversation({
     engine: input.role.engine,
-    knownTranscript: spec.transcript ?? null,
-    panePid: pane.panePid ?? null,
-    cwd: input.cwd,
-    startedAtMs,
-    codexSessionsDir: input.role.engine === "codex" ? account.transcriptRoot : null,
+    receipt: begun.receipt,
+    spec,
+    account,
+    prompt: input.prompt,
+    registry,
+    client,
   });
-  if (!pane.host || !(await verifyTmuxHostEvidence(pane.host))) {
-    registry.invalidateSpawnHost(begun.receipt.launchId, "pipeline spawn host disappeared before confirmation");
-    throw new Error("pipeline spawn host disappeared before confirmation");
-  }
+  const transcript = response.path ?? null;
   const key = transcript ? sessionKeyFromTranscript(input.role.engine, transcript) : null;
-  if (transcript && key && pane.receipt) {
-    const settled = registry.settleSpawn(pane.receipt.launchId, {
-      key,
-      artifactPath: transcript,
-      cwd: input.cwd,
-      accountId: account.accountId,
-      status: "starting",
-      host: pane.host,
-      claimEpoch: 0,
-      claimOwner: null,
-      pendingAction: "spawn",
-    });
-    if (settled.kind === "conflict") throw new Error(settled.code);
-  } else {
-    registry.markSpawnPathPending(begun.receipt.launchId);
-  }
   if (transcript && input.parentPath && parent.conversationId) {
     rememberHandoffChild(transcript, input.parentPath);
     persistHandoffLineage();
@@ -188,7 +178,7 @@ async function spawnPipelineAgent(
     conversationId: begun.receipt.conversationId,
     sessionId: key?.sessionId ?? null,
     transcript,
-    paneId: pane.paneId,
+    paneId: null,
   };
 }
 
