@@ -2,14 +2,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
+import { freshSpecFor } from "@/lib/agent/cli";
 import { accountManager } from "@/lib/accounts/manager";
 import type { AccountContext } from "@/lib/accounts/contracts";
-import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
 import { agentRegistry, type AgentRegistry, type SpawnBeginResult, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
+import { deliverConversationMessage } from "@/lib/delivery";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { isShellCommand } from "@/lib/status";
 import { killPane, paneInfo, spawnAgentWithPrompt } from "@/lib/tmux";
@@ -241,16 +241,23 @@ function currentConversationPath(conversationId: string | null | undefined, fall
   return agentRegistry().canonicalPath(fallback);
 }
 
-export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, FileEntry>, text: string): Promise<string> {
+export async function sendToImplementer(
+  flow: Flow,
+  entriesByPath: Map<string, FileEntry>,
+  text: string,
+  deliver: typeof deliverConversationMessage = deliverConversationMessage,
+): Promise<string> {
   const entry = entriesByPath.get(currentConversationPath(flow.implementerConversationId, flow.implementerPath));
   if (!entry) throw new Error("implementer transcript is missing from scanner");
-  const spec = resumeSpecFor(entry.root, entry.path, {
-    model: entry.launchModel ?? entry.model,
-    effort: entry.effort,
-    allowSubagents: agentRegistry().launchProfileForPath(entry.path)?.allowSubagents,
+  const clientMessageId = `flow_${flow.id}_${crypto.createHash("sha256").update(text).digest("hex").slice(0, 24)}`;
+  const outcome = await deliver({
+    pid: null,
+    path: entry.path,
+    conversationId: flow.implementerConversationId,
+    clientMessageId,
+    text,
+    images: [],
   });
-  if (!spec) throw new Error("implementer session cannot be resumed");
-  const outcome = await deliverToTranscriptHost({ entry, spec, payload: text });
   if (!outcome.ok) throw new Error(outcome.error);
   return entry.path;
 }

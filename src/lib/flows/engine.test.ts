@@ -11,7 +11,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark, reserveReviewerSpawn } = await import("./engine");
+const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark, reserveReviewerSpawn, sendToImplementer } = await import("./engine");
 const { loadFlows, outputPathFor, saveFlows, stderrPathFor, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
@@ -46,6 +46,45 @@ function writeCodexEntry(name: string, payload: Record<string, unknown>, mtime: 
   fs.writeFileSync(pathname, JSON.stringify({ type: "session_meta", payload }) + "\n");
   return entryFor(pathname, mtime);
 }
+
+test("flow implementer messages enter the conversation delivery boundary", async () => {
+  const entry = writeCodexEntry(
+    "structured-implementer.jsonl",
+    { id: "019f7115-f7a5-7493-996c-aa65e63c9b58", cwd: "/repo" },
+    Date.now() / 1_000,
+  );
+  const flow = {
+    id: "flow-structured-delivery",
+    implementerPath: entry.path,
+    implementerConversationId: "conversation_c8e4ec16-9fd1-4b73-8965-304bdc675c45",
+  } as unknown as Flow;
+  const calls: unknown[] = [];
+
+  const deliveredPath = await sendToImplementer(
+    flow,
+    new Map([[entry.path, entry]]),
+    "Review findings",
+    async (message) => {
+      calls.push(message);
+      return {
+        ok: true,
+        target: flow.implementerConversationId!,
+        outcome: "queued",
+        structured: true,
+      };
+    },
+  );
+
+  expect(deliveredPath).toBe(entry.path);
+  expect(calls).toEqual([{
+    pid: null,
+    path: entry.path,
+    conversationId: flow.implementerConversationId,
+    clientMessageId: expect.stringMatching(/^flow_flow-structured-delivery_[0-9a-f]{24}$/),
+    text: "Review findings",
+    images: [],
+  }]);
+});
 
 test("a review round captures its clean commit immediately before launch", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-reviewed-head-"));
