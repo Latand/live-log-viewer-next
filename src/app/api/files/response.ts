@@ -21,6 +21,7 @@ import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
+import { overlayLineageProjectAffinity } from "@/lib/session/projectAffinity";
 import { overlayRoleSessionTitles } from "@/lib/session/roleTitles";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
@@ -241,6 +242,13 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      on `autoTitle`; the `renamable` flag is projected too so the client never
      imports the Node-only store. */
   overlaySessionTitles(files);
+  /* Durable project affinity: a Viewer-launched family whose root transcript
+     recorded a bare directory above the repository its lineage works in (an
+     orchestrator opened from a project board with cwd=$HOME) regroups under
+     that repository's project. Pure over scan + registry lineage, so the
+     grouping survives every refresh without rewriting transcripts; sessions
+     with no such lineage are untouched. */
+  overlayLineageProjectAffinity(files);
   const flows = projectRestoredFlows(loadFlows(), files, {
     pinnedPaths: visibilityPinnedPaths,
     memberships: registrySnapshot.memberships,
