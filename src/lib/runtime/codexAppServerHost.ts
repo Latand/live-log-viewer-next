@@ -80,7 +80,12 @@ export interface CodexAppServerHostOptions {
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   eventStore?: RuntimeEventStore;
   signalProcess?: ProcessSignal;
+  processIdentity?: (pid: number) => string | null;
+  pidAlive?: (pid: number) => boolean;
 }
+
+type ChildProcessOwnership = "owned" | "gone" | "recycled" | "unknown";
+type TerminationSignalResult = "attempted" | "unsafe";
 
 export interface CodexThreadIdentity {
   threadId: string;
@@ -248,6 +253,9 @@ export class CodexAppServerHost implements EngineHost {
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
   private readonly signalProcess: ProcessSignal;
+  private readonly processIdentity: (pid: number) => string | null;
+  private readonly pidAlive: (pid: number) => boolean;
+  private readonly childStartIdentity: string | null;
   private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly pending = new Map<number, PendingRpc>();
   private readonly lateThreadReadResponses = new Map<number, number>();
@@ -277,6 +285,9 @@ export class CodexAppServerHost implements EngineHost {
   private reaped = false;
   private terminationStarted = false;
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
+  private terminationPromise: Promise<void> | null = null;
+  private resolveTermination: (() => void) | null = null;
+  private failureCleanupTimer: ReturnType<typeof setTimeout> | null = null;
   private releasePromise: Promise<void> | null = null;
   private writerFence: (() => boolean) | null = null;
   private ledgerFailed = false;
@@ -292,6 +303,9 @@ export class CodexAppServerHost implements EngineHost {
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
     this.signalProcess = options.signalProcess ?? process.kill;
+    this.processIdentity = options.processIdentity ?? ((pid) => procBackend.processIdentity(pid));
+    this.pidAlive = options.pidAlive ?? ((pid) => procBackend.pidAlive(pid));
+    this.childStartIdentity = child.pid ? this.processIdentity(child.pid) : null;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
@@ -303,9 +317,10 @@ export class CodexAppServerHost implements EngineHost {
     child.on("error", (error) => this.fail(new Error(`Codex app-server child failed: ${safeError(error)}`)));
     child.on("close", () => {
       this.reaped = true;
+      this.completeGroupCleanupAfterReap();
       this.resolveReaped();
       if (this.releasing) {
-        this.finishRelease();
+        this.startFailureCleanup();
       } else if (!this.released) {
         if (this.dead) this.notifyStateListeners();
         else this.fail(new Error("Codex app-server child exited"));
@@ -512,7 +527,9 @@ export class CodexAppServerHost implements EngineHost {
 
   private currentState(): HostState {
     const pid = this.reaped || this.released ? null : this.child.pid ?? null;
-    const processStartIdentity = pid ? procBackend.processIdentity(pid) : null;
+    const processStartIdentity = pid && this.childProcessOwnership() === "owned"
+      ? this.childStartIdentity
+      : null;
     const status: HostState["status"] = this.dead ? "dead"
       : this.released ? "unhosted"
       : this.attentions.size > 0 ? "attention"
@@ -554,19 +571,54 @@ export class CodexAppServerHost implements EngineHost {
       request.reject(new Error("Codex app-server host released"));
     }
     this.pending.clear();
-    this.startTermination();
+    let terminationStarted = this.startTermination();
+    const initialOwnership = this.childProcessOwnership();
+    if (!this.reaped && (initialOwnership === "gone" || initialOwnership === "recycled")) {
+      await this.finishReleaseAfterGroupCleanup();
+      return;
+    }
+    if (!this.reaped && initialOwnership === "owned" && !terminationStarted) {
+      terminationStarted = this.startTermination();
+    }
+    if (!this.reaped && !terminationStarted) {
+      throw new Error("Codex app-server child ownership is unknown");
+    }
     if (!await this.waitForReap(this.shutdownGraceMs)) {
-      if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
-      else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      const ownership = this.childProcessOwnership();
+      if (!this.reaped && (ownership === "gone" || ownership === "recycled")) {
+        await this.finishReleaseAfterGroupCleanup();
+        return;
+      }
+      if (!this.reaped && ownership === "unknown") {
+        throw new Error("Codex app-server child ownership is unknown");
+      }
+      this.signalTermination("SIGKILL");
       if (!await this.waitForReap(this.shutdownGraceMs)) {
+        const escalatedOwnership = this.childProcessOwnership();
+        if (!this.reaped && (escalatedOwnership === "gone" || escalatedOwnership === "recycled")) {
+          await this.finishReleaseAfterGroupCleanup();
+          return;
+        }
+        if (!this.reaped && escalatedOwnership === "unknown") {
+          throw new Error("Codex app-server child ownership is unknown");
+        }
         throw new Error("Codex app-server child could not be reaped");
       }
     }
+    await this.finishReleaseAfterGroupCleanup();
+  }
+
+  private async finishReleaseAfterGroupCleanup(): Promise<void> {
+    await this.terminationPromise;
     this.finishRelease();
   }
 
   private finishRelease(): void {
     if (this.released) return;
+    if (this.failureCleanupTimer) {
+      clearTimeout(this.failureCleanupTimer);
+      this.failureCleanupTimer = null;
+    }
     this.released = true;
     this.releasing = false;
     this.activeTurnId = null;
@@ -576,17 +628,66 @@ export class CodexAppServerHost implements EngineHost {
     this.closeSubscribers();
   }
 
-  private startTermination(): void {
-    if (this.terminationStarted) return;
-    this.terminationStarted = true;
+  private completeGroupCleanupAfterReap(): void {
+    if (!this.terminationStarted || !this.resolveTermination) return;
+    if (this.terminationTimer) {
+      clearTimeout(this.terminationTimer);
+      this.terminationTimer = null;
+    }
+    try {
+      if (this.childProcessOwnership() === "gone") {
+        signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+      }
+    } finally {
+      this.resolveTermination();
+      this.resolveTermination = null;
+    }
+  }
+
+  private startTermination(): boolean {
+    if (this.terminationStarted) return true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
-    if (this.reaped) signalProcessGroup(this.child.pid, "SIGTERM", this.signalProcess);
-    else signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
+    const ownership = this.childProcessOwnership();
+    if (ownership === "gone") {
+      signalProcessGroup(this.child.pid, "SIGTERM", this.signalProcess);
+      signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+      this.terminationStarted = true;
+      this.terminationPromise = Promise.resolve();
+      return true;
+    }
+    if (ownership !== "owned") return false;
+    if (this.signalTermination("SIGTERM") === "unsafe") return false;
+    this.terminationStarted = true;
+    this.terminationPromise = new Promise((resolve) => { this.resolveTermination = resolve; });
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
-      if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
-      else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      try {
+        this.signalTermination("SIGKILL");
+      } finally {
+        this.resolveTermination?.();
+        this.resolveTermination = null;
+      }
     }, this.shutdownGraceMs);
+    return true;
+  }
+
+  private childProcessOwnership(): ChildProcessOwnership {
+    const pid = this.child.pid;
+    if (!pid || !Number.isInteger(pid) || pid <= 0 || !this.pidAlive(pid)) return "gone";
+    const observedIdentity = this.processIdentity(pid);
+    if (this.childStartIdentity === null || observedIdentity === null) return "unknown";
+    return observedIdentity === this.childStartIdentity ? "owned" : "recycled";
+  }
+
+  private signalTermination(signal: NodeJS.Signals): TerminationSignalResult {
+    const ownership = this.childProcessOwnership();
+    if (ownership === "gone") {
+      signalProcessGroup(this.child.pid, signal, this.signalProcess);
+      return "attempted";
+    }
+    if (this.reaped || ownership !== "owned") return "unsafe";
+    signalDetachedProcessGroup(this.child, signal, this.signalProcess);
+    return "attempted";
   }
 
   private async waitForReap(timeoutMs: number): Promise<boolean> {
@@ -1156,7 +1257,7 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.setSessionStatus("dead", activeFlags);
     this.closeSubscribers();
-    this.startTermination();
+    this.startFailureCleanup();
   }
 
   private failWithoutLedger(error: Error): void {
@@ -1176,7 +1277,17 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.notifyStateListeners();
     this.closeSubscribers();
-    this.startTermination();
+    this.startFailureCleanup();
+  }
+
+  private startFailureCleanup(): void {
+    void this.release().catch(() => {
+      if (this.released || this.failureCleanupTimer) return;
+      this.failureCleanupTimer = setTimeout(() => {
+        this.failureCleanupTimer = null;
+        this.startFailureCleanup();
+      }, this.shutdownGraceMs);
+    });
   }
 
   private rejectPendingAnswers(error: Error): void {

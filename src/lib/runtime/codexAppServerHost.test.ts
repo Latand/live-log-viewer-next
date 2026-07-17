@@ -193,6 +193,11 @@ function fakeSpawn(server: FakeAppServer, captured?: { args?: string[]; options?
   };
 }
 
+const ownedFakeProcess = {
+  pidAlive: () => true,
+  processIdentity: () => "4242:owned",
+};
+
 async function nextEvent(iterable: AsyncIterable<unknown>): Promise<unknown> {
   return (await iterable[Symbol.asyncIterator]().next()).value;
 }
@@ -354,6 +359,7 @@ describe("CodexAppServerHost", () => {
       eventStore,
       initialEventCursor: 1,
       spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
     })).rejects.toThrow("thread/resume returned a different thread id");
     expect(server.signals).toContain("SIGTERM");
     expect(eventStore.load("requested-thread")).toEqual([
@@ -1150,6 +1156,7 @@ describe("CodexAppServerHost", () => {
       shutdownGraceMs: 5,
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
     });
     const stream = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
     await host.release();
@@ -1161,19 +1168,24 @@ describe("CodexAppServerHost", () => {
   test("release escalates the process group after its leader exits during grace", async () => {
     const server = new FakeAppServer("group-reap-thread");
     const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let alive = true;
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
       shutdownGraceMs: 5,
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
+      processIdentity: ownedFakeProcess.processIdentity,
+      pidAlive: () => alive,
       signalProcess: (pid, signal) => {
         signals.push({ pid, signal });
-        if (signal === "SIGTERM") queueMicrotask(() => server.emit("close", 0, signal));
+        if (signal === "SIGTERM") queueMicrotask(() => {
+          alive = false;
+          server.emit("close", 0, signal);
+        });
       },
     });
 
     await host.release();
-    await Bun.sleep(10);
 
     expect(signals).toEqual([
       { pid: -4242, signal: "SIGTERM" },
@@ -1184,17 +1196,21 @@ describe("CodexAppServerHost", () => {
   test("release cleans the detached process group after an unexpected leader exit", async () => {
     const server = new FakeAppServer("exited-group-thread");
     const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let alive = true;
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
       shutdownGraceMs: 5,
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
+      processIdentity: ownedFakeProcess.processIdentity,
+      pidAlive: () => alive,
       signalProcess: (pid, signal) => {
         signals.push({ pid, signal });
         if (signal === "SIGTERM") throw new Error("group exited");
       },
     });
 
+    alive = false;
     server.emit("close", 0, null);
     await host.release();
     await Bun.sleep(10);
@@ -1214,6 +1230,7 @@ describe("CodexAppServerHost", () => {
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
       signalProcess: () => {},
+      ...ownedFakeProcess,
     });
     const states: HostState[] = [];
     host.onStateChange((state) => states.push(state));
@@ -1227,6 +1244,198 @@ describe("CodexAppServerHost", () => {
     await expect(host.release()).resolves.toBeUndefined();
   });
 
+  test("release converges when the owned child exits without a close event", async () => {
+    const server = new FakeAppServer("missing-close-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let processIdentity: string | null = "4242:owned";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => processIdentity,
+      pidAlive: () => processIdentity !== null,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGKILL") processIdentity = null;
+      },
+    });
+
+    await expect(host.release()).resolves.toBeUndefined();
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "unhosted", pid: null, endpoint: "stdio:released" });
+    expect(server.signals).toEqual([]);
+  });
+
+  test("release cleans the process group when TERM removes the leader without a close event", async () => {
+    const server = new FakeAppServer("term-missing-close-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let alive = true;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: ownedFakeProcess.processIdentity,
+      pidAlive: () => alive,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") alive = false;
+      },
+    });
+
+    await expect(host.release()).resolves.toBeUndefined();
+    await Bun.sleep(6);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(server.signals).toEqual([]);
+    expect(await host.health()).toMatchObject({ status: "unhosted", pid: null, endpoint: "stdio:released" });
+  });
+
+  test("release never signals a recycled child pid", async () => {
+    const server = new FakeAppServer("recycled-pid-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let processIdentity = "4242:owned";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => processIdentity,
+      pidAlive: () => true,
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+    });
+    processIdentity = "4242:recycled";
+
+    await expect(host.release()).resolves.toBeUndefined();
+
+    expect(signals).toEqual([]);
+    expect(server.signals).toEqual([]);
+    expect(await host.health()).toMatchObject({ status: "unhosted", pid: null, endpoint: "stdio:released" });
+  });
+
+  test("release preserves ownership when the initial identity lookup is unknown", async () => {
+    const server = new FakeAppServer("initial-identity-unknown-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let alive = true;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => null,
+      pidAlive: () => alive,
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+    });
+
+    await expect(host.release()).rejects.toThrow("Codex app-server child ownership is unknown");
+    expect(signals).toEqual([]);
+    expect(await host.health()).toMatchObject({ pid: 4242, processStartIdentity: null });
+
+    alive = false;
+    server.emit("close", 0, null);
+    await Bun.sleep(0);
+    await expect(host.release()).resolves.toBeUndefined();
+  });
+
+  test("release preserves ownership during a transient identity lookup failure", async () => {
+    const server = new FakeAppServer("later-identity-unknown-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let processIdentity: string | null = "4242:owned";
+    let alive = true;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => processIdentity,
+      pidAlive: () => alive,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") queueMicrotask(() => {
+          alive = false;
+          server.emit("close", 0, signal);
+        });
+      },
+    });
+    processIdentity = null;
+
+    await expect(host.release()).rejects.toThrow("Codex app-server child ownership is unknown");
+    expect(signals).toEqual([]);
+    expect(await host.health()).toMatchObject({ pid: 4242, processStartIdentity: null });
+
+    processIdentity = "4242:owned";
+    await expect(host.release()).resolves.toBeUndefined();
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+  });
+
+  test("release retries TERM when a transient identity lookup immediately recovers", async () => {
+    const server = new FakeAppServer("immediate-identity-recovery-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let failNextIdentityRead = false;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => {
+        if (!failNextIdentityRead) return "4242:owned";
+        failNextIdentityRead = false;
+        return null;
+      },
+      pidAlive: () => true,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGKILL") queueMicrotask(() => server.emit("close", 0, signal));
+      },
+    });
+    failNextIdentityRead = true;
+
+    await expect(host.release()).resolves.toBeUndefined();
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+  });
+
+  test("release skips group cleanup after the reaped leader pid is reused", async () => {
+    const server = new FakeAppServer("reaped-recycled-pid-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let processIdentity = "4242:owned";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => processIdentity,
+      pidAlive: () => true,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") {
+          processIdentity = "4242:recycled";
+          queueMicrotask(() => server.emit("close", 0, signal));
+        }
+      },
+    });
+
+    await host.release();
+    await Bun.sleep(6);
+
+    expect(signals).toEqual([{ pid: -4242, signal: "SIGTERM" }]);
+    expect(await host.health()).toMatchObject({ status: "unhosted", pid: null });
+  });
+
   test("protocol failure starts bounded TERM and KILL cleanup", async () => {
     const server = new FakeAppServer("failed-thread", "failed-thread", true);
     const host = await CodexAppServerHost.start({
@@ -1234,6 +1443,7 @@ describe("CodexAppServerHost", () => {
       shutdownGraceMs: 5,
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
     });
     const stream = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
     server.stdout.write("malformed\n");
@@ -1255,6 +1465,76 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("protocol failure retries TERM when identity recovers after one read", async () => {
+    const server = new FakeAppServer("failed-transient-identity-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let failureIdentityReads = 0;
+    let injectIdentityFailure = false;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => {
+        if (!injectIdentityFailure) return "4242:owned";
+        failureIdentityReads += 1;
+        return failureIdentityReads === 2 ? null : "4242:owned";
+      },
+      pidAlive: () => true,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGKILL") queueMicrotask(() => server.emit("close", 0, signal));
+      },
+    });
+    injectIdentityFailure = true;
+
+    server.stdout.write("malformed\n");
+    await Bun.sleep(10);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "dead", pid: null });
+  });
+
+  test("protocol failure keeps retrying fenced cleanup until identity recovers", async () => {
+    const server = new FakeAppServer("failed-delayed-identity-recovery-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let processIdentity: string | null = "4242:owned";
+    let alive = true;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => processIdentity,
+      pidAlive: () => alive,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGKILL") {
+          alive = false;
+          queueMicrotask(() => server.emit("close", 0, signal));
+        }
+      },
+    });
+    processIdentity = null;
+
+    server.stdout.write("malformed\n");
+    await Bun.sleep(6);
+    expect(signals).toEqual([]);
+    expect(await host.health()).toMatchObject({ status: "dead", pid: 4242 });
+
+    processIdentity = "4242:owned";
+    await Bun.sleep(12);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "dead", pid: null });
+  });
+
   test("an asynchronous stdin EPIPE fails and reaps the host", async () => {
     const server = new FakeAppServer("epipe-thread", "epipe-thread", false, [], undefined, null, ["turn/start"]);
     const host = await CodexAppServerHost.start({
@@ -1262,6 +1542,7 @@ describe("CodexAppServerHost", () => {
       requestTimeoutMs: 1_000,
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
     });
     const pendingSend = host.send({ id: "epipe-send", text: "start" });
     const error = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
@@ -1348,6 +1629,7 @@ describe("CodexAppServerHost", () => {
       requestTimeoutMs: 5,
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
     });
     await expect(host.send({ id: "ambiguous-send", text: "start" })).rejects.toThrow("outcome is uncertain");
     expect(await host.send({ id: "retry", text: "duplicate" })).toEqual({ outcome: "rejected", reason: "dead-host" });
@@ -1424,6 +1706,7 @@ describe("CodexAppServerHost", () => {
       requestTimeoutMs: 1_000,
       eventStore: store,
       spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
     });
     const stream = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
     const pendingSend = host.send({ id: "pending-ledger-send", text: "start" });
@@ -1436,6 +1719,66 @@ describe("CodexAppServerHost", () => {
     expect((await stream.next()).done).toBeTrue();
     expect(server.signals).toContain("SIGTERM");
     await host.release();
+  });
+
+  test("ledger failure converges without close and releases the writer claim", async () => {
+    const store = new FailingEventStore();
+    const server = new FakeAppServer("ledger-missing-close-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let alive = true;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: store,
+      spawnProcess: fakeSpawn(server),
+      processIdentity: ownedFakeProcess.processIdentity,
+      pidAlive: () => alive,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGKILL") alive = false;
+      },
+    });
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-failed-ledger-registry-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const key = { engine: "codex" as const, sessionId: "ledger-missing-close-thread" };
+    registry.upsert({
+      key,
+      artifactPath: "/sessions/ledger-missing-close-thread.jsonl",
+      cwd: "/repo",
+      accountId: null,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:4242",
+        process: { pid: 4242, startIdentity: "4242:owned" },
+        eventCursor: 1,
+        protocolVersion: "0.144.1",
+        writerClaimEpoch: 8,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 8,
+      claimOwner: "failed-owner",
+      pendingAction: null,
+    });
+    await bindCodexHostPersistence(registry, key, host, "failed-owner", 8);
+
+    server.notify("account/rateLimits/updated", { rateLimits: {} });
+    await Bun.sleep(10);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "dead", pid: null });
+    expect(registry.snapshot().entries["codex:ledger-missing-close-thread"]).toMatchObject({
+      status: "dead",
+      claimOwner: null,
+      structuredHost: { process: null, endpoint: "stdio:released" },
+    });
+    fs.rmSync(directory, { recursive: true, force: true });
   });
 
   test("a shutdown ledger failure still releases the bound registry claim", async () => {
@@ -1754,6 +2097,7 @@ describe("CodexAppServerHost", () => {
         shutdownGraceMs: 2,
         spawnProcess: fakeSpawn(server),
         signalProcess: () => {},
+        ...ownedFakeProcess,
       }),
       { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
     );

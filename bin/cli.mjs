@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { detectTailscale, getToken, readStatus, serve as serveTailscale, TailscaleError } from "./tailscale.mjs";
+import { viewerServerBunRuntime } from "./server-runtime.mjs";
 
 const DEFAULT_PORT = 8898;
 const DEFAULT_HOSTNAME = "127.0.0.1";
@@ -211,10 +212,7 @@ function readPackageJson(packageRoot) {
 }
 
 function resolveServer(packageRoot) {
-  const sqliteMode = process.env.LLV_AGENT_REGISTRY_SQLITE ?? "off";
-  const bunRuntime = sqliteMode === "off"
-    ? null
-    : (process.versions.bun ? process.execPath : (process.env.LLV_BUN_EXECUTABLE || "bun"));
+  const bunRuntime = viewerServerBunRuntime();
   const commandFor = (command, args, bunEntry = command, bunArgs = args) => bunRuntime
     ? { command: bunRuntime, args: ["--bun", bunEntry, ...bunArgs] }
     : { command, args };

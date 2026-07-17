@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 
+import { darwinProcessIdentity } from "./darwinIdentity";
 import { parsePsMemory, parseSwapUsage, parseVmStat } from "./memory";
 import type { ProcBackend, ProcessMemory, ProcSnapshotEntry, SystemMemory } from "./types";
 
@@ -177,8 +178,7 @@ function readPpid(pid: number): number | null {
 
 function processIdentity(pid: number): string | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
-  const started = runCapture("ps", ["-p", String(pid), "-o", "lstart="]).trim().replace(/\s+/g, " ");
-  return started ? `${pid}:${started}` : null;
+  return process.platform === "darwin" ? darwinProcessIdentity(pid) : null;
 }
 
 /**
