@@ -1564,6 +1564,38 @@ test("concurrent socket replays keep maximum-size command output byte-bounded an
   journal.close();
 });
 
+test("a production-sized snapshot has a bounded read budget independent from controls", async () => {
+  const dir = sandbox("socket-large-snapshot-budget");
+  const socketPath = path.join(dir, "runtime.sock");
+  const server = net.createServer((socket) => {
+    let frame = "";
+    socket.on("data", (chunk) => {
+      frame += String(chunk);
+      const newline = frame.indexOf("\n");
+      if (newline < 0) return;
+      const request = JSON.parse(frame.slice(0, newline)) as { id: string; method: string };
+      setTimeout(() => {
+        const result = request.method === "snapshot"
+          ? { snapshotSeq: 1, transportPadding: "x".repeat(950 * 1024) }
+          : { reset: false, floorSeq: 0, events: [] };
+        socket.end(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
+      }, 60);
+    });
+  });
+  server.listen(socketPath);
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const client = new UnixRuntimeHostClient(socketPath, 20, 100, 250);
+
+  try {
+    const snapshot = await client.snapshot() as unknown as { transportPadding: string };
+    expect(Buffer.byteLength(snapshot.transportPadding)).toBe(950 * 1024);
+    await expect(client.events(0)).rejects.toThrow("runtime host request timed out");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("structured queue controls cross the local runtime socket", async () => {
   const dir = sandbox("structured-socket");
   const socketPath = path.join(dir, "runtime.sock");
