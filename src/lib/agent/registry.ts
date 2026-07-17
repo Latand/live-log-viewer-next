@@ -926,11 +926,16 @@ function heldDeliveryRequestDigests(
 
 function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
   const state = value.state ?? "held";
+  const text = typeof value.text === "string" ? value.text : "";
+  const command = canonicalHeldDeliveryCommand(value.command, value.id);
+  const legacyDigest = text
+    ? heldDeliveryRequestDigest(value.conversationId, text, command)
+    : null;
   const payloadKind = value.payloadKind ?? "text";
   const runtimeImages = parseStructuredImageRefs(value.runtimeImages ?? [], 16) ?? [];
   let contentDigest = typeof value.contentDigest === "string" ? value.contentDigest : null;
   if (!contentDigest && state !== "delivered" && (payloadKind === "text" || payloadKind === "runtime-images")) {
-    try { contentDigest = structuredContent(value.text, runtimeImages).contentDigest; } catch { /* legacy invalid records stay recoverable */ }
+    try { contentDigest = structuredContent(text, runtimeImages).contentDigest; } catch { /* legacy invalid records stay recoverable */ }
   }
   return {
     ...value,
@@ -3848,6 +3853,7 @@ export class AgentRegistry {
     payloadKind: HeldDelivery["payloadKind"] = "text",
     runtimeImages: readonly StructuredImageRef[] = [],
     contentDigest: string | null = null,
+    commandInput: HeldDeliveryCommandInput = {},
   ): HeldDelivery {
     if (payloadKind === "text" && (!text || text.length > 32_000)) throw new Error("held delivery must contain at most 32000 characters");
     return this.mutate((file) => {
@@ -3891,6 +3897,7 @@ export class AgentRegistry {
         }
         return place(existing);
       }
+      const deliveryId = crypto.randomUUID();
       const held: HeldDelivery = {
         id: deliveryId,
         conversationId: canonicalId,

@@ -83,6 +83,8 @@ export interface CodexAppServerHostOptions {
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   eventStore?: RuntimeEventStore;
   signalProcess?: ProcessSignal;
+  processIdentity?: (pid: number) => string | null;
+  pidAlive?: (pid: number) => boolean;
   resolveImagePath?: (ref: StructuredImageRef) => string;
 }
 
@@ -265,6 +267,10 @@ export class CodexAppServerHost implements EngineHost {
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
   private readonly signalProcess: ProcessSignal;
+  private readonly processIdentity: (pid: number) => string | null;
+  private readonly pidAlive: (pid: number) => boolean;
+  private readonly childStartIdentity: string | null;
+  private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly resolveImagePath: (ref: StructuredImageRef) => string;
   private readonly pending = new Map<number, PendingRpc>();
   private readonly lateThreadReadResponses = new Map<number, number>();
@@ -317,6 +323,10 @@ export class CodexAppServerHost implements EngineHost {
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
     this.signalProcess = options.signalProcess ?? process.kill;
+    this.processIdentity = options.processIdentity ?? ((pid) => procBackend.processIdentity(pid));
+    this.pidAlive = options.pidAlive ?? ((pid) => procBackend.pidAlive(pid));
+    this.childStartIdentity = child.pid ? this.processIdentity(child.pid) : null;
+    this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.resolveImagePath = options.resolveImagePath ?? ((ref) => {
       const store = runtimeImageStore();
       store.read(ref);

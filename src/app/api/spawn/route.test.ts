@@ -32,7 +32,9 @@ function registry(): AgentRegistry {
   return new AgentRegistry(path.join(dir, "agent-registry.json"));
 }
 
-function structuredRouteDependencies(cwd: string): NonNullable<Parameters<typeof POST.withDependencies>[1]> {
+type SpawnRouteTestDependencies = NonNullable<Parameters<typeof POST.withDependencies>[1]>;
+
+function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
   return {
     registry: agentRegistry,
     assertStructuredRuntime: () => {},
@@ -53,6 +55,7 @@ function structuredRouteDependencies(cwd: string): NonNullable<Parameters<typeof
       env: { NODE_ENV: "test" },
     }),
     runtimeHostClient: () => ({} as RuntimeHostClient),
+    defer: (work) => { void work(); },
     storeImages: (images) => images.map((image) => ({
       sha256: crypto.createHash("sha256").update(Buffer.from(image.base64, "base64")).digest("hex"),
       mime: image.mime as "image/png",
@@ -588,6 +591,10 @@ test("structured spawn flag reaches the pane-less capability gate", async () => 
   }
 });
 
+async function runDeferred(work: (() => Promise<void>) | null): Promise<void> {
+  if (work) await work();
+}
+
 test("text-only Codex models reject images before blob and receipt mutation", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "codex-text-only-image-"));
   const previous = {
@@ -646,6 +653,278 @@ test("text-only Codex models reject images before blob and receipt mutation", as
     else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
     if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
     else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("admitted structured spawn returns its reserved card identity while host binding is delayed", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "p0-282-delayed-binding-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  let deferred: (() => Promise<void>) | null = null;
+  let releaseBinding!: () => void;
+  const binding = new Promise<void>((resolve) => { releaseBinding = resolve; });
+  let launchStarted = false;
+  let publishedArtifacts = 0;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    defer: (work: () => Promise<void>) => { deferred = work; },
+    publishFilesRevision: async () => {
+      publishedArtifacts += 1;
+    },
+    spawnStructuredConversation: async (input: Parameters<NonNullable<Parameters<typeof POST.withDependencies>[1]>["spawnStructuredConversation"]>[0]) => {
+      launchStarted = true;
+      await binding;
+      const artifactPath = path.join(cwd, "delayed.jsonl");
+      fs.writeFileSync(artifactPath, JSON.stringify({ type: "user", message: input.prompt }) + "\n");
+      return {
+        ok: true as const,
+        target: null,
+        path: artifactPath,
+        launchId: input.receipt.launchId,
+        conversationId: input.receipt.conversationId,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "delivered" as const,
+        state: "settled" as const,
+      };
+    },
+  } as Parameters<typeof POST.withDependencies>[1];
+  try {
+    const responsePromise = POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        engine: "claude",
+        cwd,
+        prompt: "Own issue #282",
+        clientAttemptId: "p0_282_spawn_visibility_20260716_a1",
+      }),
+    }), dependencies);
+    const response = await Promise.race([
+      responsePromise,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 25)),
+    ]);
+
+    releaseBinding();
+    if (!response) await responsePromise;
+
+    expect(response).not.toBeNull();
+    expect(response?.status).toBe(202);
+    expect(await response?.json()).toMatchObject({
+      ok: true,
+      state: "starting",
+      launched: false,
+      retrySafe: false,
+      launchId: expect.any(String),
+      conversationId: expect.stringMatching(/^conversation_/),
+      initialMessage: "pending",
+    });
+    expect(launchStarted).toBeFalse();
+    expect(deferred).not.toBeNull();
+    await runDeferred(deferred);
+    expect(launchStarted).toBeTrue();
+    expect(publishedArtifacts).toBe(1);
+  } finally {
+    releaseBinding();
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
+test("a terminal structured replay returns its reserved identity and retry-safe message outcome", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "p0-282-terminal-replay-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  let deferred: (() => Promise<void>) | null = null;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    defer: (work: () => Promise<void>) => { deferred = work; },
+    spawnStructuredConversation: async (input: Parameters<NonNullable<Parameters<typeof POST.withDependencies>[1]>["spawnStructuredConversation"]>[0]) => {
+      input.registry.failStructuredSpawn(input.receipt.launchId, "structured host ownership is unavailable");
+      throw new Error("structured host ownership is unavailable");
+    },
+  } as Parameters<typeof POST.withDependencies>[1];
+  const request = () => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      origin: "http://127.0.0.1:8898",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      prompt: "Own issue #282",
+      clientAttemptId: "p0_282_terminal_replay_20260716_a1",
+    }),
+  });
+  try {
+    const admitted = await POST.withDependencies(request(), dependencies);
+    const admittedBody = await admitted.json();
+    await runDeferred(deferred);
+
+    const replay = await POST.withDependencies(request(), dependencies);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({
+      ok: true,
+      target: null,
+      path: null,
+      effectivePermissionMode: "bypassPermissions",
+      launchId: admittedBody.launchId,
+      conversationId: admittedBody.conversationId,
+      launched: false,
+      retrySafe: true,
+      initialMessage: "failed",
+      state: "failed",
+      error: "structured host ownership is unavailable",
+    });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
+test("a clientAttemptId replay recovers the reserved card from runtime evidence", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "p0-282-runtime-replay-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const sessionId = crypto.randomUUID();
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  let deferred: (() => Promise<void>) | null = null;
+  let admittedReceipt: Parameters<NonNullable<Parameters<typeof POST.withDependencies>[1]>["spawnStructuredConversation"]>[0]["receipt"] | null = null;
+  const runtimeClient = {
+    operationStatus: async (operationId: string) => admittedReceipt && operationId === `spawn_message_${admittedReceipt.launchId}` ? {
+      receipt: {
+        operationId,
+        idempotencyKey: `spawn_${admittedReceipt.launchId}`,
+        conversationId: admittedReceipt.conversationId,
+        kind: "send" as const,
+        status: "delivered" as const,
+        at: new Date().toISOString(),
+        revision: 2,
+      },
+      replayed: true,
+    } : null,
+    snapshot: async () => ({
+      sessions: admittedReceipt ? [{
+        conversationId: admittedReceipt.conversationId,
+        sessionKey: { engine: "claude" as const, sessionId },
+        hostKind: "claude-broker" as const,
+        host: "hosted" as const,
+        turn: "running" as const,
+        provenance: "structured" as const,
+        revision: 2,
+        attentionIds: [],
+        recentReceipts: [],
+        accountId: "claude-test",
+        parentConversationId: null,
+        flowId: null,
+        workflowId: null,
+        cwd,
+        artifactPath,
+        capabilities: { steer: false, structuredAttention: true },
+        activeTurnId: "turn-initial",
+      }] : [],
+    }),
+  } as unknown as RuntimeHostClient;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    runtimeHostClient: () => runtimeClient,
+    defer: (work: () => Promise<void>) => { deferred = work; },
+    spawnStructuredConversation: async (input: Parameters<NonNullable<Parameters<typeof POST.withDependencies>[1]>["spawnStructuredConversation"]>[0]) => {
+      admittedReceipt = input.receipt;
+      input.registry.failStructuredSpawn(input.receipt.launchId, "host binding timed out");
+      throw new Error("host binding timed out");
+    },
+  } as Parameters<typeof POST.withDependencies>[1];
+  const request = () => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      origin: "http://127.0.0.1:8898",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      prompt: "Own issue #282",
+      clientAttemptId: "p0_282_runtime_route_replay_20260716_a1",
+    }),
+  });
+  try {
+    const admitted = await POST.withDependencies(request(), dependencies);
+    const admittedBody = await admitted.json();
+    await runDeferred(deferred);
+
+    const replay = await POST.withDependencies(request(), dependencies);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      launchId: admittedBody.launchId,
+      conversationId: admittedBody.conversationId,
+      path: artifactPath,
+      state: "settled",
+      launched: true,
+      retrySafe: false,
+      initialMessage: "delivered",
+    });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
   }
 });
 

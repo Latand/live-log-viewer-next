@@ -101,9 +101,14 @@ interface Props {
   /** The handoff handle under a pane: drop a draft that continues this
       conversation. Absent in map mode — the handle stays hidden there. */
   onHandoff?: (file: FileEntry) => void;
+  /** Retry a terminal structured launch as a fresh editable draft. */
+  onSpawnRetry?: (file: FileEntry) => void;
   /** «Send» on a task card with no aimed agent: seed a fresh draft conversation
       with the task text. Absent in map mode. */
   onTaskDraft?: (task: BoardTask) => void;
+  /** Fold a full card back into its status stack (drops the durable expand
+      pin). Absent in map mode and while status stacks are unavailable. */
+  onTaskCollapse?: (task: BoardTask) => void;
   /** Place-on-map: an unplaced task armed by the panel. The next canvas click
       pins it where clicked; `onTaskPlaced` fires to disarm the caller. */
   placeTaskId?: string | null;
@@ -177,7 +182,9 @@ export function SchemeBoard({
   onDraftClose,
   onDraftSpawned,
   onHandoff,
+  onSpawnRetry,
   onTaskDraft,
+  onTaskCollapse,
   placeTaskId,
   onTaskPlaced,
   newTaskNonce,
@@ -350,7 +357,9 @@ export function SchemeBoard({
   const draftCloseRef = useRef(onDraftClose);
   const draftSpawnedRef = useRef(onDraftSpawned);
   const handoffRef = useRef(onHandoff);
+  const spawnRetryRef = useRef(onSpawnRetry);
   const taskDraftRef = useRef(onTaskDraft);
+  const taskCollapseRef = useRef(onTaskCollapse);
   useEffect(() => {
     selectRef.current = onSelect;
     nodePickRef.current = onNodePick;
@@ -358,7 +367,9 @@ export function SchemeBoard({
     draftCloseRef.current = onDraftClose;
     draftSpawnedRef.current = onDraftSpawned;
     handoffRef.current = onHandoff;
+    spawnRetryRef.current = onSpawnRetry;
     taskDraftRef.current = onTaskDraft;
+    taskCollapseRef.current = onTaskCollapse;
   });
   const stableSelect = useCallback((file: FileEntry) => {
     const nodePick = nodePickRef.current;
@@ -372,6 +383,7 @@ export function SchemeBoard({
   const stableDraftClose = useCallback((id: string) => draftCloseRef.current(id), []);
   const stableDraftSpawned = useCallback((id: string, file: FileEntry) => draftSpawnedRef.current(id, file), []);
   const stableHandoff = useCallback((file: FileEntry) => handoffRef.current?.(file), []);
+  const stableSpawnRetry = useCallback((file: FileEntry) => spawnRetryRef.current?.(file), []);
   /* The handle renders only when the opener wired a handler (not in map mode). */
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
   const stableExpand = useCallback((path: string) => setExpanded(path), []);
@@ -806,6 +818,9 @@ export function SchemeBoard({
       /* No aimed agent: seed a fresh draft conversation with the task text —
          launches nothing until the user picks an engine and hits send. */
       draft: (task) => taskDraftRef.current?.(task),
+      /* Fold-back rides the same ref pattern: the button renders only where a
+         collapse target exists (the dashboard always wires one on desktop). */
+      collapse: (task) => taskCollapseRef.current?.(task),
       unassign: async (task, path) => {
         const error = await unassignTask(task.id, path);
         if (error) pushTaskToast("err", error);
@@ -925,6 +940,7 @@ export function SchemeBoard({
           onDraftClose={stableDraftClose}
           onDraftSpawned={stableDraftSpawned}
           onHandoff={handoffForNodes}
+          onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
           onExpand={stableExpand}
         />
         <TaskEdgesLayer edges={taskEdges} world={world} routes={taskRoutes} onRetry={retryEdge} />
@@ -1071,6 +1087,7 @@ export function SchemeBoard({
           showFavorite
           onToggleExpand={() => setExpanded(null)}
           autoEditToken={autoEditTokenFor(renameRequest, expandedNode.file.path)}
+          onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
         />
       </div>
     ) : null}

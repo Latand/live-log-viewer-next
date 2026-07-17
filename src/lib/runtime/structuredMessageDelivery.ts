@@ -11,6 +11,7 @@ import type { HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/m
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt } from "./contracts";
+import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "./runtimeImageStore";
 import { admitRuntimeImagePayload } from "./runtimeImageAdmission";
 import { structuredContent, type StructuredImageRef } from "./structuredContent";
@@ -44,6 +45,7 @@ export interface StructuredMessageDependencies {
   requestMigrationTick?: () => void;
   startupFailed?: () => boolean;
   startupRecovered?: () => void;
+  recover?: typeof recoverDeadStructuredConversation;
   storeImages?: (images: readonly RuntimeImageUpload[]) => StructuredImageRef[];
 }
 
@@ -166,12 +168,18 @@ function holdDuringRuntimeSynchronization(
   if (!owner) return ownershipUnavailable();
   if (owner.kind === "legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   const { conversation } = owner;
-  if (request.hasImages) {
+  if (request.hasImages || request.images?.length) {
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }
   try {
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
-    registry.holdDelivery(conversation.id, request.text, idempotencyKey, "text", commandInput(request));
+    const refs = request.imageRefs ?? [];
+    if (refs.length) {
+      const content = structuredContent(request.text, refs);
+      registry.holdDelivery(conversation.id, content.content.text, idempotencyKey, "runtime-images", refs, content.contentDigest, commandInput(request));
+    } else {
+      registry.holdDelivery(conversation.id, request.text, idempotencyKey, "text", [], null, commandInput(request));
+    }
     requestTick();
     return {
       ok: true,
@@ -294,8 +302,15 @@ export async function enqueueStructuredMessage(
     ? snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     : undefined)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
-  if (!session || session.hostKind === "tmux-legacy") return null;
-  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return null;
+  if (!session) {
+    return holdDuringRuntimeSynchronization(
+      request,
+      (dependencies.registry ?? agentRegistry)(),
+      dependencies.requestMigrationTick ?? requestAccountMigrationTick,
+    );
+  }
+  if (session.hostKind === "tmux-legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
+  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return ownershipUnavailable();
   const suppliedRefs = request.imageRefs ?? [];
   const wantsImages = request.hasImages === true || rawImages.length > 0 || suppliedRefs.length > 0;
   const imageCapability = session.capabilities.imageInput
@@ -348,6 +363,7 @@ export async function enqueueStructuredMessage(
       refs.length ? "runtime-images" : "text",
       refs,
       content.contentDigest,
+      commandInput(request),
     );
     let claimedReservationId: string | null = null;
     if (reservation.state === "delivery-uncertain") {

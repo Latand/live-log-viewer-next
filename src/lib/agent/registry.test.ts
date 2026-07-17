@@ -141,7 +141,7 @@ describe("agent registry", () => {
       assignedAt: "2026-07-11T00:00:01.000Z",
       deliveredAt: "2026-07-11T00:00:02.000Z",
       error: null,
-    };
+    } as unknown as (typeof snapshot.heldDeliveries)[string];
     fs.writeFileSync(store.filename, JSON.stringify(snapshot));
 
     const restarted = new AgentRegistry(store.filename);

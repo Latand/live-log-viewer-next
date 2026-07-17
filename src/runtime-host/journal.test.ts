@@ -10,7 +10,7 @@ import { mergeRuntimeReceipts } from "@/components/TmuxComposer";
 import { applyEvent, installSnapshot } from "@/components/runtime/runtimeModel";
 import type { Flow } from "@/lib/flows/types";
 import { UnixRuntimeHostClient } from "@/lib/runtime/client";
-import { runtimeScope } from "@/lib/runtime/contracts";
+import { runtimePresentationReceipt, runtimeScope } from "@/lib/runtime/contracts";
 import { structuredContentDigest, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 
 import { RuntimeHost, RuntimeHostFence } from "./host";
@@ -1224,6 +1224,58 @@ test("runtime command acknowledgements do not wait for a slow committed-event co
 
   releaseConsumer();
   await host.recoverConsumers();
+  journal.close();
+});
+
+test("runtime host acknowledges a durable command while consumer recovery is slow", async () => {
+  const dir = sandbox("command-consumer-latency");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  let releaseConsumer!: () => void;
+  let markStarted!: () => void;
+  const consumerStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const consumerGate = new Promise<void>((resolve) => { releaseConsumer = resolve; });
+  const host = new RuntimeHost(journal, {
+    flowReady: async (flowId) => {
+      markStarted();
+      await consumerGate;
+      return { id: flowId, state: "spawn_pending" } as unknown as Flow;
+    },
+    workflowStageCompleted: () => undefined,
+    taskDeliveryAcknowledged: () => undefined,
+  });
+  const pendingConsumerEvent = journal.append({
+    scope: runtimeScope("session", "implementer"),
+    kind: "turn.completed",
+    producerKey: "terminal-before-command",
+    payload: { flowId: "flow-one", readyNote: "REVIEW_READY: finished" },
+  });
+
+  const response = await Promise.race([
+    host.handle({
+      id: "spawn-command",
+      method: "command",
+      params: {
+        command: {
+          kind: "spawn",
+          conversationId: "worker",
+          operationId: "op-worker",
+          idempotencyKey: "op-worker",
+          engine: "claude",
+          cwd: "/repo",
+          prompt: "work",
+          accountId: "account-one",
+          parentConversationId: null,
+        },
+      },
+    }).then(() => "acknowledged"),
+    Bun.sleep(50).then(() => "blocked"),
+  ]);
+
+  expect(response).toBe("acknowledged");
+  await consumerStarted;
+  releaseConsumer();
+  await host.recoverConsumers();
+  expect(journal.consumerCompleted(pendingConsumerEvent.eventId, "orchestration")).toBe(true);
   journal.close();
 });
 

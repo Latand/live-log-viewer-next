@@ -47,6 +47,8 @@ export async function GET(request: Request): Promise<Response> {
     const failure = lastScan.status === "failed" ? " failed" : "";
     serverTiming.push(`files-scan;dur=${lastScan.durationMs.toFixed(1)};desc="${lastScan.reason} generation ${lastScan.generation}${failure}"`);
   }
+  const projectionTiming = response.headers.get("server-timing");
+  if (projectionTiming) serverTiming.push(projectionTiming);
   response.headers.set("server-timing", serverTiming.join(", "));
   return response;
 }

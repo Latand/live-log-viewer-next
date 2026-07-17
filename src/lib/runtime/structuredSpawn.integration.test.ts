@@ -50,7 +50,7 @@ test("structured Claude permission mapping distinguishes trusted autonomous spaw
     agentInitiated: false,
     operatorAuthenticated: false,
     roleSpawn: false,
-  })).toBe("default");
+  })).toBe("bypassPermissions");
   expect(structuredClaudePermissionMode("plan", {
     agentInitiated: true,
     operatorAuthenticated: false,
@@ -267,6 +267,86 @@ test("clientAttemptId replay materializes its reserved conversation from runtime
     initialMessage: "delivered",
   });
   expect(registry.snapshot().conversations[begun.receipt.conversationId]?.generations).toHaveLength(1);
+});
+
+test("completed replay preserves its live structured host ownership", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `completed-live-replay-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "review current diff" } })}\n`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    clientAttemptId: `completed-live-${id}`,
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const key = { engine: "codex" as const, sessionId: id };
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:4312",
+      process: { pid: 4312, startIdentity: "4312:live" },
+      eventCursor: 8,
+      protocolVersion: "0.144.5",
+      writerClaimEpoch: 3,
+      activeTurnRef: "turn-live",
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 3,
+    claimOwner: "structured-host:live-owner",
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("spawn staging failed");
+  expect(registry.finalizeStructuredSpawn(begun.receipt.launchId)).toMatchObject({ kind: "settled" });
+  const entryBeforeReplay = registry.snapshot().entries[`codex:${id}`];
+  const client = {
+    snapshot: async () => ({
+      sessions: [{
+        conversationId: begun.receipt.conversationId,
+        sessionKey: key,
+        cwd,
+        artifactPath,
+        hostKind: "codex-app-server" as const,
+        host: "unhosted" as const,
+        turn: "idle" as const,
+        revision: 9,
+        attentionIds: [],
+        activeTurnId: null,
+      }],
+    }),
+    operationStatus: async (operationId: string) => operationId === `spawn_message_${begun.receipt.launchId}` ? {
+      receipt: {
+        operationId,
+        idempotencyKey: `spawn_${begun.receipt.launchId}`,
+        conversationId: begun.receipt.conversationId,
+        kind: "send" as const,
+        status: "delivered" as const,
+        at: new Date().toISOString(),
+        revision: 3,
+      },
+      replayed: true,
+    } : null,
+  } as unknown as RuntimeHostClient;
+  let released = 0;
+
+  const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
+    releaseHost: async () => { released += 1; return true; },
+  });
+
+  expect(reconciled).toMatchObject({ state: "completed", initialMessage: "delivered" });
+  expect(registry.snapshot().entries[`codex:${id}`]).toEqual(entryBeforeReplay);
+  expect(released).toBe(0);
 });
 
 test.each(["codex", "claude"] as const)("%s replay keeps a live registering spawn pending beyond the receipt timeout", async (engine) => {
@@ -582,8 +662,9 @@ class RoundTripHost implements SpawnedStructuredHost {
   }
 
   attach(afterSeq: number): AsyncIterable<RuntimeEvent> {
-    // eslint-disable-next-line @typescript-eslint/no-this-alias -- the generator receiver is the iterable wrapper
-    const host = this;
+    const isReleased = () => this.released;
+    const eventAfter = (cursor: number) => this.events.find((candidate) => candidate.seq > cursor);
+    const waitForEvent = () => new Promise<void>((resolve) => this.waiters.add(resolve));
     return {
       async *[Symbol.asyncIterator]() {
         let cursor = afterSeq;

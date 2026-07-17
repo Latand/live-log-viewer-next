@@ -18,6 +18,7 @@ import { paneInfo } from "@/lib/tmux";
 
 import { drainHeldDeliveries, reconcileMigrationInventory, reconcileMigrations, type HeldDeliveryPort } from "./coordinator";
 import { createMigrationDeliveryPort } from "./deliveryPort";
+export { createMigrationDeliveryPort } from "./deliveryPort";
 import { registerAccountMigrationTick } from "./controllerSignal";
 import type { SuccessorProviderPort } from "./contracts";
 import { RegisteredSuccessorProvider } from "./provider";
@@ -25,41 +26,6 @@ import { QuotaController } from "./quotaController";
 
 const CONTROLLER_INTERVAL_MS = 60_000;
 const INITIAL_INVENTORY_DELAY_MS = 1_000;
-
-type HeldDeliveryInput = Parameters<HeldDeliveryPort["deliver"]>[0];
-
-export interface MigrationDeliveryPortDependencies {
-  structuredDelivery?: typeof deliverHeldStructuredMessage;
-  legacyDelivery?: (input: HeldDeliveryInput) => Promise<Exclude<HeldStructuredMessageOutcome, null> | "held">;
-}
-
-export function createMigrationDeliveryPort(
-  dependencies: MigrationDeliveryPortDependencies = {},
-): HeldDeliveryPort {
-  const structuredDelivery = dependencies.structuredDelivery ?? deliverHeldStructuredMessage;
-  const legacyDelivery = dependencies.legacyDelivery ?? (async ({ delivery, path, clientMessageId }) => {
-    if (delivery.payloadKind === "runtime-images") return "delivery-uncertain";
-    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId, reservedDeliveryId: delivery.id });
-    return migrationDeliveryOutcome(result);
-  });
-  const deliverStructured = ({ delivery, path, clientMessageId }: HeldDeliveryInput) => structuredDelivery({
-    conversationId: delivery.conversationId,
-    path,
-    deliveryId: delivery.id,
-    clientMessageId,
-    text: delivery.text,
-    ...(delivery.runtimeImages.length ? { imageRefs: delivery.runtimeImages } : {}),
-  });
-  return {
-    async deliver(input) {
-      const outcome = await deliverStructured(input);
-      return outcome ?? legacyDelivery(input);
-    },
-    async reconcileUncertain(input) {
-      return await deliverStructured(input) ?? "delivery-uncertain";
-    },
-  };
-}
 
 const deliveryPort = createMigrationDeliveryPort();
 

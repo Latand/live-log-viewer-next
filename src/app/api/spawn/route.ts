@@ -25,10 +25,11 @@ import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineag
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
+import { publishFilesRevision } from "@/lib/runtime/filesRevision";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
 import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
-import { spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
+import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
@@ -51,7 +52,10 @@ interface SpawnRouteDependencies {
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
   resolveSpawnAccount: typeof accountManager.resolveSpawn;
   runtimeHostClient: typeof runtimeHostClient;
+  publishFilesRevision?: typeof publishFilesRevision;
   spawnStructuredConversation: typeof spawnStructuredConversation;
+  assertStructuredRuntime: typeof assertDarwinStructuredRuntime;
+  defer(work: () => Promise<void>): void;
   storeImages(images: readonly RuntimeImageUpload[]): StructuredImageRef[];
 }
 
@@ -62,7 +66,10 @@ const productionSpawnRouteDependencies: SpawnRouteDependencies = {
   resolveHealthySpawnAccount,
   resolveSpawnAccount: (engine, accountId) => accountManager.resolveSpawn(engine, accountId),
   runtimeHostClient,
+  publishFilesRevision,
   spawnStructuredConversation,
+  assertStructuredRuntime: assertDarwinStructuredRuntime,
+  defer: (work) => after(work),
   storeImages: (images) => runtimeImageStore().putMany(images),
 };
 
@@ -178,6 +185,11 @@ async function postSpawn(
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
   if (transport === "structured") {
+    try {
+      dependencies.assertStructuredRuntime();
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 503 });
+    }
     const gap = structuredSpawnGap({
       engine,
       model: selectedModel.model,
@@ -322,6 +334,18 @@ async function postSpawn(
               conversationId: receipt.conversationId,
               childArtifactPath: response.path,
               parentArtifactPath,
+              error,
+            });
+          }
+        }
+        if (response.path && fs.existsSync(response.path)) {
+          try {
+            await dependencies.publishFilesRevision?.(runtimeClient);
+          } catch (error) {
+            console.error("[spawn] transcript materialization refresh failed", {
+              launchId: receipt.launchId,
+              conversationId: receipt.conversationId,
+              artifactPath: response.path,
               error,
             });
           }

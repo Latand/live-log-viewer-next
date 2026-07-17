@@ -7,7 +7,7 @@ import type { FileEntry } from "@/lib/types";
 import { classifyWorker, shouldCollapseWorker } from "@/components/scheme/workerCollapse";
 
 import { claimedReviewerPaths, foldClaimedReviewers } from "./flowModel";
-import { directReviewFlows, isDirectReviewFlow } from "./directReviewGroups";
+import { directReviewFlows, isDirectReviewFlow, splitDirectReviewGroups } from "./directReviewGroups";
 
 /*
  * Issue #325: Viewer-managed one-shot reviewers spawned directly through
@@ -434,5 +434,45 @@ describe("directReviewFlows", () => {
     /* A verdict round folds immediately; the live latest never collapses. */
     expect(shouldCollapseWorker(done, context)).toBe(true);
     expect(shouldCollapseWorker(live, context)).toBe(false);
+  });
+});
+
+describe("splitDirectReviewGroups (terminal review-history stacks)", () => {
+  test("an actionable group keeps its deck; a terminal group parks as history", () => {
+    const builder = entry({ path: "/builder", conversationId: "conversation-builder" });
+    const activeReviewer = directReviewer("/r-active", { id: "conversation-r-active", reviews: "conversation-builder", activity: "live" });
+    const quietBuilder = entry({ path: "/quiet", conversationId: "conversation-quiet" });
+    const terminalReviewer = directReviewer("/r-done", {
+      id: "conversation-r-done",
+      reviews: "conversation-quiet",
+      review: { verdict: "APPROVE", findingsCount: 0, observedAt: "2026-07-10T02:00:00.000Z" },
+    });
+    const groups = directReviewFlows({ files: [builder, activeReviewer, quietBuilder, terminalReviewer], flows: [] });
+    const { active, history } = splitDirectReviewGroups(groups);
+    expect(active).toHaveLength(1);
+    expect(history).toHaveLength(1);
+    expect(active[0]!.implementerPath).toBe("/builder");
+    expect(history[0]!.implementerPath).toBe("/quiet");
+    /* History reviewers stay claimed by the FULL group list (never a
+       standalone card) and collapse into a worker stack keyed by the group. */
+    expect(claimedReviewerPaths(groups).has("/r-done")).toBe(true);
+    expect(classifyWorker(terminalReviewer, { flows: groups, pipelineStagePaths: new Set() })).toBe("flow-reviewer");
+    expect(shouldCollapseWorker(terminalReviewer, {
+      flows: groups,
+      pipelineStagePaths: new Set(),
+      nowMs: Date.parse("2026-07-10T03:00:00.000Z"),
+      idleMs: 15 * 60_000,
+      pinnedPaths: new Set(),
+    })).toBe(true);
+  });
+
+  test("a failed-before-verdict latest round is history, still claimed", () => {
+    const quietBuilder = entry({ path: "/quiet", conversationId: "conversation-quiet" });
+    const stopped = directReviewer("/r-stopped", { id: "conversation-r-stopped", reviews: "conversation-quiet" });
+    const groups = directReviewFlows({ files: [quietBuilder, stopped], flows: [] });
+    const { active, history } = splitDirectReviewGroups(groups);
+    expect(active).toHaveLength(0);
+    expect(history).toHaveLength(1);
+    expect(claimedReviewerPaths(groups).has("/r-stopped")).toBe(true);
   });
 });

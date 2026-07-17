@@ -21,6 +21,7 @@ import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
+import { overlayLineageProjectAffinity } from "@/lib/session/projectAffinity";
 import { overlayRoleSessionTitles } from "@/lib/session/roleTitles";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
@@ -72,10 +73,18 @@ function projectedProjectCatalog(
 }
 
 export async function buildFilesResponse(request: Request, dependencies: FilesRouteDependencies): Promise<NextResponse> {
+  const timings: string[] = [];
+  let timingMark = performance.now();
+  const markTiming = (name: string) => {
+    const now = performance.now();
+    timings.push(`${name};dur=${(now - timingMark).toFixed(1)}`);
+    timingMark = now;
+  };
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
   const pinnedPath = url.searchParams.get("path")?.trim() || undefined;
   const { files, projectCatalog, pinOverlayPaths } = await dependencies.listFilesWithProjectCatalog(selectedProject, pinnedPath);
+  markTiming("files-source");
   const responsePinOverlayPaths = new Set(pinOverlayPaths ?? []);
   const visibilityPinnedPaths = new Set([...pinnedPathsFor(pinnedPath), ...responsePinOverlayPaths]);
   // A scan is a read model. Runtime reconciliation and notifications belong to
@@ -142,15 +151,11 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     if (responsePinOverlayPaths.has(child.path)) responsePinOverlayPaths.add(parentPath);
   }
   const scannedPaths = new Set(files.map((file) => file.path));
-  const ownsPath = (conversation: (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations], pathname: string) =>
-    conversation.generations.some((generation) => generation.path === pathname)
-    || conversation.continuityPaths.includes(pathname);
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
     if (file.spawn) continue;
-    const conversation = Object.values(registrySnapshot.conversations).find((candidate) =>
-      candidate.engine === file.engine && ownsPath(candidate, file.path));
-    if (!conversation) continue;
+    const conversation = conversationForPath(file.path);
+    if (!conversation || conversation.engine !== file.engine) continue;
     const generation = conversation.generations.find((item) => item.path === file.path);
     const generationIndex = conversation.generations.findIndex((item) => item.path === file.path);
     const latest = conversation.generations.at(-1);
@@ -233,6 +238,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       };
     }
   }
+  markTiming("files-registry");
   /* Custom session titles (issue #33) are the last word on `title`. The shared
      projection runs after the registry has stamped `conversationId` and the
      launch profile, so an override filed under the stable conversation identity
@@ -240,12 +246,26 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      downstream (cards, lists, attention, push). The pre-override title survives
      on `autoTitle`; the `renamable` flag is projected too so the client never
      imports the Node-only store. */
+  const flowsStartedAt = performance.now();
   overlaySessionTitles(files);
-  const flows = projectRestoredFlows(loadFlows(), files, {
+  markTiming("files-session-titles");
+  /* Durable project affinity: a Viewer-launched family whose root transcript
+     recorded a bare directory above the repository its lineage works in (an
+     orchestrator opened from a project board with cwd=$HOME) regroups under
+     that repository's project. Pure over scan + registry lineage, so the
+     grouping survives every refresh without rewriting transcripts; sessions
+     with no such lineage are untouched. */
+  overlayLineageProjectAffinity(files);
+  markTiming("files-project-affinity");
+  const storedFlows = loadFlows();
+  markTiming("files-flow-store");
+  const flows = projectRestoredFlows(storedFlows, files, {
     pinnedPaths: visibilityPinnedPaths,
     memberships: registrySnapshot.memberships,
   });
+  markTiming("files-flow-restore");
   const storedTasks = loadTasks();
+  markTiming("files-task-store");
   /* Role titles (issue #325): a Viewer-spawned worker whose scan/launch title
      is machine boilerplate («Codex session», the spawn prompt head) presents
      its durable identity instead — task subject + role for builders, reviewed
@@ -253,6 +273,8 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      explicit user rename keeps final precedence (the role title becomes its
      Reset base), and never rewrites native transcripts. */
   overlayRoleSessionTitles({ files, flows, tasks: storedTasks, conversationAliases: registrySnapshot.conversationAliases });
+  markTiming("files-role-titles");
+  timings.push(`files-flows;dur=${(performance.now() - flowsStartedAt).toFixed(1)}`);
   /* Human-authorship pin for the board's worker-class auto-collapse (issue
      #112): the reaper's sticky evidence (PR #125) marks any transcript that
      carries a real user message. Both authorship and fail-closed freshness span
@@ -325,6 +347,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     });
     if (unverified) file.authorshipUnverified = true;
   }
+  markTiming("files-authorship");
   const tasks = reconcileTasks(files, storedTasks, {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,
@@ -352,8 +375,12 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     pipelinesError = error instanceof Error ? error.message : "pipeline registry unreadable";
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
+  markTiming("files-stores");
+  const projectsStartedAt = performance.now();
   const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
+  markTiming("files-project-rate-limits");
   const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
+  markTiming("files-project-catalog");
   const projectCwds = projectDirectoryFallbacks([
     ...projected.files.map((file) => file.project),
     ...effectiveProjectCatalog.map((entry) => entry.project),
@@ -362,6 +389,10 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     ...workflows.map((workflow) => workflow.project),
     ...tasks.tasks.map((task) => task.project),
   ]);
+  markTiming("files-project-cwds");
+  const projectsFinishedAt = performance.now();
+  timings.push(`files-projects;dur=${(projectsFinishedAt - projectsStartedAt).toFixed(1)}`);
+  timingMark = projectsFinishedAt;
   const body = JSON.stringify({
     files: projected.files,
     ...(responsePinOverlayPaths.size ? { pinOverlayPaths: [...responsePinOverlayPaths] } : {}),
@@ -380,11 +411,13 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      unchanged response come back as a bodyless 304. force-dynamic still holds
      — the body is recomputed every request, only its transfer is skipped. */
   const etag = `"${createHash("sha1").update(body).digest("hex")}"`;
+  markTiming("files-json");
+  const responseHeaders = { ETag: etag, "server-timing": timings.join(", ") };
   if (request.headers.get("if-none-match") === etag) {
-    return new NextResponse(null, { status: 304, headers: { ETag: etag } });
+    return new NextResponse(null, { status: 304, headers: responseHeaders });
   }
   return new NextResponse(body, {
     status: 200,
-    headers: { "content-type": "application/json", ETag: etag },
+    headers: { "content-type": "application/json", ...responseHeaders },
   });
 }

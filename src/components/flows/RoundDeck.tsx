@@ -1,12 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { Flow, Round } from "@/lib/flows/types";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { BranchPane } from "@/components/BranchPane";
+import { ChevronDown, FoldVertical } from "@/components/icons";
 
 import { VERDICT_GLYPHS, verdictTone } from "./flowModel";
 import { RoundStateIcon } from "./RoundIcons";
@@ -16,6 +17,10 @@ const TAB_H = 26;
 const TAB_STEP = 30;
 /* Spines visible before the rest collapses into a «+N» tail. */
 const TAB_MAX = 5;
+
+export function reviewDeckCollapseKey(flowId: string): string {
+  return `llvReviewDeckCollapsed:${flowId}`;
+}
 
 export interface DeckRound {
   key: string;
@@ -93,6 +98,17 @@ export function RoundDeck({
 }) {
   const { t } = useLocale();
   const latest = rounds.length ? rounds[rounds.length - 1]! : null;
+  const collapseKey = reviewDeckCollapseKey(flow.id);
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrate the owner-controlled local board preference after SSR.
+    setCollapsed(window.localStorage.getItem(collapseKey) === "1");
+  }, [collapseKey]);
+  const setDeckCollapsed = (value: boolean) => {
+    setCollapsed(value);
+    if (value) window.localStorage.setItem(collapseKey, "1");
+    else window.localStorage.removeItem(collapseKey);
+  };
   /* Ephemeral by design: on reload the live round is in front again. */
   const [frontKey, setFrontKey] = useState<string | null>(null);
   /* State adjustments happen during render (no effects): a strip chip click
@@ -131,6 +147,39 @@ export function RoundDeck({
     latest && front.key !== latest.key && latest.round.verdict === null && !latest.round.error
       ? latest
       : null;
+  const collapseControl = (
+    <button
+      type="button"
+      data-review-deck-collapse
+      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      aria-label={t("roundDeck.collapseStack", { count: rounds.length })}
+      title={t("roundDeck.collapseStack", { count: rounds.length })}
+      onClick={() => setDeckCollapsed(true)}
+    >
+      <FoldVertical className="h-3.5 w-3.5" aria-hidden />
+    </button>
+  );
+
+  if (collapsed) {
+    return (
+      <button
+        type="button"
+        data-review-deck-collapsed
+        className="flex h-12 w-full items-center gap-2 rounded-[10px] border border-border bg-card px-3 text-left shadow-1 hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        aria-label={t("roundDeck.expandStack", { count: rounds.length })}
+        title={t("roundDeck.expandStack", { count: rounds.length })}
+        onClick={() => setDeckCollapsed(false)}
+      >
+        <span className="inline-flex h-6 shrink-0 items-center rounded-full px-2 text-[10px] font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
+          {t("roundDeck.roundsCount", { count: rounds.length })}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-muted">
+          {front.round.error ? t("roundDeck.aborted") : front.round.verdict ?? t("roundDeck.reviewInProgress")}
+        </span>
+        <ChevronDown className="h-4 w-4 shrink-0 text-accent" aria-hidden />
+      </button>
+    );
+  }
 
   return (
     <div className="deck-3d relative h-full" style={{ paddingBottom: Math.min(stacked.length, TAB_MAX + (hidden ? 1 : 0)) * TAB_STEP }}>
@@ -144,6 +193,7 @@ export function RoundDeck({
             isRoot={false}
             dormant={dormant}
             noComposer={flow.reviewerMode === "headless" || finished}
+            headerActions={collapseControl}
             banner={
               <div
                 className="flex h-6 shrink-0 items-center gap-1.5 border-b border-border px-2.5 text-[10.5px] font-bold"
@@ -162,7 +212,8 @@ export function RoundDeck({
             }
           />
         ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-1 rounded-[10px] border border-border bg-card shadow-1">
+          <div className="relative flex h-full flex-col items-center justify-center gap-1 rounded-[10px] border border-border bg-card shadow-1">
+            <div className="absolute right-1.5 top-1.5">{collapseControl}</div>
             <span className="text-[12px] font-semibold text-muted">{roundLabel(t, front.round)}</span>
             <span className="text-[11px] text-muted">
               {front.round.error ? front.round.error : t("roundDeck.spawningReviewer")}

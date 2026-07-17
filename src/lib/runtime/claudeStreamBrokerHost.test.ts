@@ -18,7 +18,7 @@ import {
   type ClaudeDeliveryState,
 } from "./claudeStreamBrokerHost";
 import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
-import { normalizeQueueEntry, type QueueEntry, type RuntimeEvent } from "./engineHost";
+import { normalizeQueueEntry, type HostState, type QueueEntry, type RuntimeEvent } from "./engineHost";
 import { structuredContent, type StructuredImageRef } from "./structuredContent";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES } from "./runtimeImageStore";
 import {

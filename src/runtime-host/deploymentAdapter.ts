@@ -20,7 +20,7 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "verify-candidate": 90_000,
   promote: 30_000,
   "verify-promoted": 90_000,
-  rollback: 30_000,
+  rollback: 90_000,
   retire: 60_000,
   "retain-only": 60_000,
 };

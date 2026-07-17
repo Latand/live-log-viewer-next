@@ -43,3 +43,17 @@ test("a preallocated branch pane shows launch status without transcript actions"
   expect(html).not.toContain("Delete the conversation from disk");
   expect(html).not.toContain("textarea");
 });
+
+test("an owner action renders in the native pane header", () => {
+  const html = renderToStaticMarkup(
+    <BranchPane
+      file={file}
+      tasks={[]}
+      isRoot={false}
+      headerActions={<button data-owner-header-action>collapse</button>}
+    />,
+  );
+
+  expect(html).toContain("data-owner-header-action");
+  expect(html.indexOf("data-owner-header-action")).toBeLessThan(html.indexOf("data-spawn-state"));
+});

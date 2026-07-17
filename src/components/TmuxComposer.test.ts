@@ -307,3 +307,74 @@ test("a bounded receipt summary keeps retry while withholding lossy edit", () =>
   expect(html).toContain(">Retry<");
   expect(html).not.toContain("Edit &amp; resend");
 });
+
+/* ── Exact draft clearing on accepted delivery ──────────────────────────── */
+
+import { draftAfterDelivery, settlePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
+
+function deliveredReceipt(key: string, status: RuntimeReceipt["status"] = "delivered", text?: string): RuntimeReceipt {
+  return {
+    operationId: "op-" + key,
+    idempotencyKey: key,
+    conversationId: "conv-one",
+    kind: "send",
+    status,
+    ...(text === undefined ? {} : { text }),
+    at: "2026-07-17T00:00:00.000Z",
+    revision: 1,
+  };
+}
+
+test("draftAfterDelivery clears a draft that exactly matches the delivered text", () => {
+  expect(draftAfterDelivery("ship the fix", "ship the fix")).toBe("");
+  expect(draftAfterDelivery("  ship the fix \n", "ship the fix")).toBe("");
+});
+
+test("draftAfterDelivery keeps text typed while the send was in flight", () => {
+  expect(draftAfterDelivery("ship the fix\n\nalso add tests", "ship the fix")).toBe("also add tests");
+});
+
+test("draftAfterDelivery leaves a rewritten draft untouched on a stale delivery", () => {
+  expect(draftAfterDelivery("a completely new ask", "ship the fix")).toBe("a completely new ask");
+  expect(draftAfterDelivery("", "ship the fix")).toBe("");
+  expect(draftAfterDelivery("ship the fix", "")).toBe("ship the fix");
+});
+
+test("settlePendingDeliveries clears exactly the delivered keys and keeps the rest", () => {
+  const pending: PendingDelivery[] = [
+    { key: "key-a", text: "first ask" },
+    { key: "key-b", text: "second ask" },
+  ];
+  const { deliveredTexts, remaining } = settlePendingDeliveries(pending, [deliveredReceipt("key-a")]);
+  expect(deliveredTexts).toEqual(["first ask"]);
+  expect(remaining).toEqual([{ key: "key-b", text: "second ask" }]);
+});
+
+test("settlePendingDeliveries ignores non-delivered and unknown receipts", () => {
+  const pending: PendingDelivery[] = [{ key: "key-a", text: "first ask" }];
+  const { deliveredTexts, remaining } = settlePendingDeliveries(pending, [
+    deliveredReceipt("key-a", "queued"),
+    deliveredReceipt("key-a", "failed"),
+    deliveredReceipt("key-unknown"),
+  ]);
+  expect(deliveredTexts).toEqual([]);
+  expect(remaining).toEqual(pending);
+});
+
+test("settlePendingDeliveries prefers the receipt's own delivered text over the attempt's", () => {
+  /* A replayed key can deliver the ORIGINAL turn's text while the local
+     attempt carried a rewritten draft — the server's record is what actually
+     reached the agent, so clearing keys off the receipt text. */
+  const pending: PendingDelivery[] = [{ key: "key-a", text: "rewritten draft" }];
+  const { deliveredTexts } = settlePendingDeliveries(pending, [deliveredReceipt("key-a", "delivered", "old turn ask")]);
+  expect(deliveredTexts).toEqual(["old turn ask"]);
+});
+
+test("settlePendingDeliveries is idempotent across repeated delivered receipts", () => {
+  const pending: PendingDelivery[] = [{ key: "key-a", text: "first ask" }];
+  const first = settlePendingDeliveries(pending, [deliveredReceipt("key-a")]);
+  const second = settlePendingDeliveries(first.remaining, [deliveredReceipt("key-a")]);
+  expect(first.deliveredTexts).toEqual(["first ask"]);
+  expect(second.deliveredTexts).toEqual([]);
+  expect(second.remaining).toEqual([]);
+});

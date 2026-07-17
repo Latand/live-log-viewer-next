@@ -1228,6 +1228,8 @@ test("a migration-held delivery switches from the source host to the published C
     "continue on the successor",
     "migration-successor-message",
     "text",
+    [],
+    null,
     {
       operationId: "operation-migration-successor-message",
       kind: "send",
@@ -1424,6 +1426,8 @@ test("a migration-held delivery switches from the source host to the published C
     "continue on the Claude successor",
     "claude-migration-message",
     "text",
+    [],
+    null,
     {
       operationId: "operation-claude-migration-message",
       kind: "send",

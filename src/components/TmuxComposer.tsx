@@ -372,6 +372,56 @@ export function RuntimeComposerReceipts({
   );
 }
 
+/**
+ * Exact draft clearing after an accepted delivery. Removes precisely the
+ * delivered text from the front of the draft: text typed while the send was in
+ * flight survives, and a stale delivery for text the draft no longer holds
+ * leaves it untouched.
+ */
+export function draftAfterDelivery(draft: string, delivered: string): string {
+  const deliveredTrim = delivered.trim();
+  if (!deliveredTrim) return draft;
+  const start = draft.trimStart();
+  if (start.startsWith(deliveredTrim)) return start.slice(deliveredTrim.length).trimStart();
+  return draft;
+}
+
+/** A send whose immediate response was lost or deferred, remembered so a later
+    delivered receipt for its idempotency key still clears the draft exactly. */
+export interface PendingDelivery {
+  key: string;
+  /** The draft text this attempt carried, the clearing fallback when the
+      delivered receipt omits its own text. */
+  text: string;
+}
+
+const PENDING_DELIVERY_LIMIT = 8;
+
+/**
+ * Settle pending deliveries against the current receipt set: a `delivered`
+ * receipt for a pending key yields its delivered text (the receipt's own text
+ * is the server's record of what actually reached the agent, so it wins over
+ * the local attempt's) and drops the entry, so repeated delivered receipts
+ * clear at most once. Non-delivered and unknown receipts change nothing.
+ */
+export function settlePendingDeliveries(
+  pending: readonly PendingDelivery[],
+  receipts: readonly RuntimeReceipt[],
+): { deliveredTexts: string[]; remaining: PendingDelivery[] } {
+  const deliveredByKey = new Map<string, RuntimeReceipt>();
+  for (const receipt of receipts) {
+    if (receipt.status === "delivered") deliveredByKey.set(receipt.idempotencyKey, receipt);
+  }
+  const deliveredTexts: string[] = [];
+  const remaining: PendingDelivery[] = [];
+  for (const entry of pending) {
+    const receipt = deliveredByKey.get(entry.key);
+    if (receipt) deliveredTexts.push(typeof receipt.text === "string" && receipt.text ? receipt.text : entry.text);
+    else remaining.push(entry);
+  }
+  return { deliveredTexts, remaining };
+}
+
 /** A receipt still awaiting durable delivery (a migration hold) must never be
     pruned by the pane/spawn TTLs — its text lands on the successor, whose
     transcript is a different file, so only an explicit resolve/dismiss clears it. */
@@ -504,6 +554,10 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      so the runtime host can round-trip it once the structured plane is on; the
      legacy /api/tmux route ignores the extra field. */
   const idempotencyKey = useRef<string>(mintIdempotencyKey());
+  /* Sends the server may have accepted although the immediate response was
+     lost or non-ok: a later `delivered` receipt for one of these keys clears
+     the draft exactly, so an acknowledged message never lingers as a draft. */
+  const pendingDeliveries = useRef<PendingDelivery[]>([]);
   /* Durable receipts for this session from the runtime bus (empty while the bus
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
@@ -519,8 +573,25 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   useEffect(() => {
     setSent(readSent(cardId));
     setImmediateRuntimeReceipts([]);
+    pendingDeliveries.current = [];
   }, [cardId]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  /* Settle lost-response sends against the receipt stream: a `delivered`
+     receipt for a remembered key means the server accepted that attempt and
+     the turn ran, so its exact text leaves the draft (later typing survives;
+     a rewritten draft for the next turn stays untouched). */
+  useEffect(() => {
+    if (!pendingDeliveries.current.length) return;
+    const { deliveredTexts, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);
+    if (!deliveredTexts.length) return;
+    pendingDeliveries.current = remaining;
+    for (const delivered of deliveredTexts) {
+      const next = draftAfterDelivery(textRef.current, delivered);
+      if (next !== textRef.current) setText(next);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef are hook-stable
+  }, [displayedRuntimeReceipts]);
 
   /* A link-arrow drop appended to the stored draft; reload it and put the
      caret at the end so the ask can be typed straight away. Goes through the
@@ -637,6 +708,27 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             ...current.filter((receipt) => receipt.operationId !== json.receipt!.operationId),
           ].slice(0, 8));
           idempotencyKey.current = mintIdempotencyKey();
+          if (json.receipt.status === "delivered") {
+            /* An idempotent replay: this key's FIRST attempt already reached
+               the agent and the turn ran. The accepted delivery clears its
+               exact text (the receipt's record wins) instead of stranding the
+               message as a visible draft. */
+            const delivered = typeof json.receipt.text === "string" && json.receipt.text ? json.receipt.text : payloadText;
+            setText(draftAfterDelivery(textRef.current, delivered));
+            pendingDeliveries.current = pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId);
+            attachments.clear();
+            setStatus({ kind: "ok", text: t("common.sent") });
+            inputRef.current?.focus();
+            return;
+          }
+        }
+        if (!receiptIsTerminal(json.receipt?.status ?? "pending")) {
+          /* The response was lost or the delivery is still moving server-side:
+             remember the attempt so a later delivered receipt clears the draft. */
+          pendingDeliveries.current = [
+            { key: clientMessageId, text: payloadText },
+            ...pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId),
+          ].slice(0, PENDING_DELIVERY_LIMIT);
         }
         // A hard failure keeps the draft text (never cleared) so the message is
         // not lost; the error is announced by the composer's live status region.
@@ -649,7 +741,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           ...current.filter((receipt) => receipt.operationId !== json.receipt!.operationId),
         ].slice(0, 8));
         idempotencyKey.current = mintIdempotencyKey();
-        setText("");
+        setText(draftAfterDelivery(textRef.current, payloadText));
+        pendingDeliveries.current = pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId);
         attachments.clear();
         inputRef.current?.focus();
         return;
@@ -672,7 +765,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
       persistSent([...prior, entry].slice(-SENT_LIMIT));
       idempotencyKey.current = mintIdempotencyKey(); // next draft is a new message
-      setText("");
+      setText(draftAfterDelivery(textRef.current, payloadText));
+      pendingDeliveries.current = pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId);
       attachments.clear();
       setStatus({
         kind: held ? "info" : "ok",
@@ -686,6 +780,12 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       });
       inputRef.current?.focus();
     } catch {
+      /* The request died on the wire AFTER the server may have accepted it:
+         remember the attempt so a delivered receipt still clears the draft. */
+      pendingDeliveries.current = [
+        { key: clientMessageId, text: payloadText },
+        ...pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId),
+      ].slice(0, PENDING_DELIVERY_LIMIT);
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {
       setBusy(false);

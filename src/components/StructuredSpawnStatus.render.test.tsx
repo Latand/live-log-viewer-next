@@ -40,3 +40,21 @@ test("structured spawn card renders every durable launch state in English and Uk
     }
   }
 });
+
+test("retry-safe terminal card exposes the fresh-attempt action when wired by the board", () => {
+  const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("uk", key, params);
+  const spawn: StructuredSpawnCardState = {
+    ...base,
+    state: "failed",
+    initialMessage: "failed",
+    retrySafe: true,
+    error: "runtime host request timed out",
+  };
+
+  const passive = renderToStaticMarkup(<StructuredSpawnStatusView spawn={spawn} t={t} />);
+  const actionable = renderToStaticMarkup(<StructuredSpawnStatusView spawn={spawn} t={t} onRetry={() => undefined} />);
+
+  expect(passive).not.toContain(t("launchHistory.retryLabel"));
+  expect(actionable).toContain("<button");
+  expect(actionable).toContain(t("launchHistory.retryLabel"));
+});

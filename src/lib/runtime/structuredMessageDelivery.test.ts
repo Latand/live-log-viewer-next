@@ -35,6 +35,59 @@ function registryWithConversation(accountId = "default", engine: "codex" | "clau
   return { registry, conversation };
 }
 
+function recordStructuredOwner(registry: AgentRegistry, conversation: ReturnType<typeof registryWithConversation>["conversation"]): void {
+  const generation = conversation.generations.at(-1)!;
+  registry.upsert({
+    key: { engine: conversation.engine, sessionId: generation.id },
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:deployment-window",
+      process: { pid: 101, startIdentity: "runtime-before-restart" },
+      eventCursor: 17,
+      protocolVersion: "v2",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: "structured-host:runtime-before-restart",
+    pendingAction: null,
+  });
+}
+
+function recordLegacyOwner(registry: AgentRegistry, conversation: ReturnType<typeof registryWithConversation>["conversation"]): void {
+  const generation = conversation.generations.at(-1)!;
+  registry.upsert({
+    key: { engine: conversation.engine, sessionId: generation.id },
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "idle",
+    host: {
+      kind: "tmux",
+      endpoint: "/run/user/1000/tmux/default",
+      server: { pid: 201, startIdentity: "tmux-server" },
+      paneId: "%21",
+      panePid: { pid: 202, startIdentity: "tmux-pane" },
+      windowName: "legacy-root",
+      agent: { pid: 203, startIdentity: "legacy-agent" },
+      argv: ["codex", "resume", generation.id],
+    },
+    structuredHost: null,
+    claimEpoch: 2,
+    claimOwner: null,
+    pendingAction: null,
+  });
+}
+
 function snapshot(ownedConversationId = conversationId, engine: "codex" | "claude" = "codex", imageSupported = false): RuntimeSnapshot {
   return {
     schemaVersion: 1,

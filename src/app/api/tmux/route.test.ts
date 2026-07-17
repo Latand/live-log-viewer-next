@@ -46,7 +46,13 @@ let killOutcome: { ok: true; target: string } | { ok: false; outcome: "failed"; 
 let structuredControlCalls = 0;
 let interruptCalls = 0;
 let structuredMessageCalls = 0;
-let structuredMessageResult: { ok: false; structured: true; outcome: "failed"; error: string; status: number } | null = null;
+let structuredMessageRequest: Record<string, unknown> | null = null;
+let collectedImages: Array<{ base64: string; mime: string }> = [];
+let deletedImagePaths: string[][] = [];
+let structuredMessageResult:
+  | { ok: false; structured: true; outcome: "failed"; error: string; status: number }
+  | { ok: true; structured: true; target: string; outcome: "queued"; operationId: string; receipt: { operationId: string; status: "queued" } }
+  | null = null;
 let structuredControlResult:
   | { status: 202; body: { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } } }
   | { status: 409; body: { error: string } }
@@ -88,8 +94,9 @@ mock.module("@/lib/runtime/structuredControls", () => ({
   },
 }));
 mock.module("@/lib/runtime/structuredMessageDelivery", () => ({
-  enqueueStructuredMessage: async () => {
+  enqueueStructuredMessage: async (request: Record<string, unknown>) => {
     structuredMessageCalls += 1;
+    structuredMessageRequest = request;
     return structuredMessageResult;
   },
 }));
@@ -117,7 +124,9 @@ mock.module("@/lib/resources", () => ({
 }));
 mock.module("@/lib/tmux", () => ({
   captureTmuxAttachReference: (value: Record<string, unknown>) => ({ ...value, tmuxServerStartIdentity: "900:one", paneStartIdentity: "100:one" }),
-  collectImagePayloads: () => ({ images: [], error: null }),
+  buildImagePayload: () => ({ payload: "", imagePaths: ["/viewer/inbox/img-one.png"] }),
+  collectImagePayloads: () => ({ images: collectedImages, error: null }),
+  deleteInboxImages: (paths: string[]) => { deletedImagePaths.push(paths); },
   killPane: async () => {},
   paneScreen: async () => "",
   panePidOf: async () => null,
@@ -274,6 +283,48 @@ test("/api/tmux contains structured recovery failures without legacy tmux delive
   } finally {
     structuredMessageResult = null;
     delivery = async () => ({ ok: true, outcome: "delivered-to-live", target: "agents:4.0" });
+    if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous;
+  }
+});
+
+test("/api/tmux stores structured attachments and admits their Viewer inbox paths", async () => {
+  const previous = process.env.LLV_STRUCTURED_HOSTS;
+  structuredMessageCalls = 0;
+  structuredMessageRequest = null;
+  collectedImages = [{ base64: "encoded", mime: "image/png" }];
+  deletedImagePaths = [];
+  structuredMessageResult = {
+    ok: true,
+    structured: true,
+    target: "conversation_image",
+    outcome: "queued",
+    operationId: "op_image",
+    receipt: { operationId: "op_image", status: "queued" },
+  };
+  try {
+    process.env.LLV_STRUCTURED_HOSTS = "1";
+    const response = await POST(post({
+      path: PATHNAME,
+      conversationId: "conversation_image",
+      text: "inspect",
+      images: collectedImages,
+    }));
+
+    expect(response.status).toBe(200);
+    expect(structuredMessageRequest).toMatchObject({
+      path: PATHNAME,
+      conversationId: "conversation_image",
+      text: "inspect",
+      hasImages: true,
+      images: ["/viewer/inbox/img-one.png"],
+    });
+    expect(await response.json()).toMatchObject({ ok: true, structured: true, imagePaths: ["/viewer/inbox/img-one.png"] });
+    expect(deletedImagePaths).toEqual([]);
+  } finally {
+    collectedImages = [];
+    structuredMessageResult = null;
+    structuredMessageRequest = null;
     if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
     else process.env.LLV_STRUCTURED_HOSTS = previous;
   }
