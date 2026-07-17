@@ -1,3 +1,5 @@
+import { tickPipelines } from "./engine";
+
 type PipelineTick = () => Promise<void>;
 
 interface PipelineSignalState {
@@ -9,12 +11,18 @@ const signalHost = globalThis as typeof globalThis & {
   __llvPipelineSignal?: PipelineSignalState;
 };
 
-const signal = signalHost.__llvPipelineSignal ??= { tick: null, scheduled: false };
+async function defaultPipelineTick(): Promise<void> {
+  await tickPipelines([]);
+  await tickPipelines([]);
+}
+
+const signal = signalHost.__llvPipelineSignal ??= { tick: defaultPipelineTick, scheduled: false };
 
 export function registerPipelineTick(tick: PipelineTick): () => void {
+  const previous = signal.tick;
   signal.tick = tick;
   return () => {
-    if (signal.tick === tick) signal.tick = null;
+    if (signal.tick === tick) signal.tick = previous;
   };
 }
 
