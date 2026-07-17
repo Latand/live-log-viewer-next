@@ -496,16 +496,22 @@ export class RuntimeImageStore {
 
   private assertQuota(root: OpenRoot, decoded: readonly { data: Buffer; mime: StructuredImageMime }[]): void {
     let current = this.storedBytes(root);
-    const missing = new Map<string, number>();
-    for (const { data, mime } of decoded) {
-      const sha256 = crypto.createHash("sha256").update(data).digest("hex");
-      const filename = path.join(root.path, `${sha256}.${MIME_EXT[mime]}`);
-      if (!fs.existsSync(filename)) missing.set(filename, data.byteLength);
-    }
-    const incoming = [...missing.values()].reduce((sum, bytes) => sum + bytes, 0);
+    const missingBytes = () => {
+      const missing = new Map<string, number>();
+      for (const { data, mime } of decoded) {
+        const sha256 = crypto.createHash("sha256").update(data).digest("hex");
+        const filename = path.join(root.path, `${sha256}.${MIME_EXT[mime]}`);
+        if (!fs.existsSync(filename)) missing.set(filename, data.byteLength);
+      }
+      return [...missing.values()].reduce((sum, bytes) => sum + bytes, 0);
+    };
+    let incoming = missingBytes();
     if (current + incoming > this.maxBytes) {
       this.collectGarbage(root, this.reachableDigests());
       current = this.storedBytes(root);
+      /* GC may remove an aged dedup candidate from this batch. Refresh the
+         missing set before deciding whether the complete write fits. */
+      incoming = missingBytes();
     }
     if (current + incoming > this.maxBytes) throw new Error("runtime image storage quota exceeded");
   }

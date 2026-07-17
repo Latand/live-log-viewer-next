@@ -1038,6 +1038,64 @@ test("runtime recovery drains one durable synchronization hold into one engine c
   journal.close();
 });
 
+test("queue binding settles an uncertain reservation from a terminal journal receipt", async () => {
+  const sessionId = "abababab-abab-4bab-8bab-abababababab";
+  const directory = path.join(sandbox, "terminal-journal-registry-reconciliation");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-17T19:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const operationId = "operation-terminal-before-registry-settlement";
+  const held = registry.holdDelivery(
+    conversation.id,
+    "already delivered",
+    "terminal-before-registry-settlement",
+    "text",
+    [],
+    structuredContentDigest({ text: "already delivered", images: [] }),
+    { operationId, kind: "send", policy: "queue", turnId: null },
+  );
+  expect(held.state).toBe("assigned");
+  expect(registry.beginDeliveryAttempt(held.id, held.generationId!)?.state).toBe("delivery-uncertain");
+  let statusReads = 0;
+  const client = {
+    operationStatus: async (requestedId: string) => {
+      statusReads += 1;
+      expect(requestedId).toBe(operationId);
+      return {
+        operationId,
+        replayed: true,
+        receipt: {
+          operationId,
+          idempotencyKey: "terminal-before-registry-settlement",
+          conversationId: conversation.id,
+          kind: "send" as const,
+          status: "delivered" as const,
+        },
+      };
+    },
+    effectBatch: async () => [],
+  } as unknown as RuntimeHostClient;
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect(statusReads).toBe(1);
+  expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
+    state: "delivered",
+    text: "",
+    error: null,
+  });
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+});
+
 test("a stale synchronization-held steer fails safely across Codex and Claude recovery", async () => {
   const cases = [
     {

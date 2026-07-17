@@ -88,6 +88,27 @@ test("runtime image storage enforces a deterministic global byte quota", () => {
   expect(fs.readdirSync(root).filter((entry) => !entry.startsWith("."))).toHaveLength(1);
 });
 
+test("quota admission recalculates deduplicated candidates after GC", () => {
+  const first = taggedPng("quota-gc-dedup-first");
+  const second = taggedPng("quota-gc-dedup-second");
+  const root = sandbox();
+  const store = new RuntimeImageStore(root, {
+    maxBytes: first.byteLength + second.byteLength - 1,
+    gcGraceMs: 0,
+    reachableDigests: () => new Set(),
+  });
+  store.putMany([{ base64: first.toString("base64"), mime: "image/png" }]);
+
+  expect(() => store.putMany([
+    { base64: first.toString("base64"), mime: "image/png" },
+    { base64: second.toString("base64"), mime: "image/png" },
+  ])).toThrow("runtime image storage quota exceeded");
+  const storedBytes = fs.readdirSync(root)
+    .filter((entry) => !entry.startsWith("."))
+    .reduce((total, entry) => total + fs.statSync(path.join(root, entry)).size, 0);
+  expect(storedBytes).toBeLessThanOrEqual(first.byteLength + second.byteLength - 1);
+});
+
 test("runtime image GC reclaims aged unreachable blobs and preserves reachable refs", () => {
   const first = taggedPng("gc-first");
   const second = taggedPng("gc-second");

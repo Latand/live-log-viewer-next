@@ -138,6 +138,39 @@ export async function bindStructuredDeliveryQueue(
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   if (!client) return;
   const registry = dependencies.registry ?? agentRegistry();
+  const uncertainDeliveries = Object.values(registry.snapshot().heldDeliveries)
+    .filter((delivery) => delivery.state === "delivery-uncertain");
+  for (const delivery of uncertainDeliveries) {
+    try {
+      const result = await client.operationStatus(delivery.command.operationId, { currentRetryLeaf: true });
+      if (!result) continue;
+      const status = result.receipt.status;
+      if (status !== "delivered" && status !== "failed") continue;
+      const receiptConversationId = result.receipt.conversationId;
+      if (!receiptConversationId.startsWith("conversation_")
+        || registry.canonicalConversationId(receiptConversationId as `conversation_${string}`)
+          !== registry.canonicalConversationId(delivery.conversationId)) {
+        console.error("[structured delivery] terminal receipt conversation mismatch", {
+          operationId: delivery.command.operationId,
+          deliveryConversationId: delivery.conversationId,
+          receiptConversationId,
+        });
+        continue;
+      }
+      registry.recordDeliveryOutcomeForOperation(
+        delivery.conversationId,
+        delivery.command.operationId,
+        status,
+        result.receipt.reason ?? null,
+      );
+    } catch (error) {
+      console.error("[structured delivery] terminal receipt reconciliation failed", {
+        operationId: delivery.command.operationId,
+        conversationId: delivery.conversationId,
+        error,
+      });
+    }
+  }
   const hosts = new Map<string, EngineHost>();
   let scheduleAutomaticRetry = () => {};
   const queue = new StructuredDeliveryQueue(
