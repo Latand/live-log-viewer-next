@@ -657,7 +657,7 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
-  test("confirms image delivery from the provider user echo without timing out the host", async () => {
+  test("confirms image delivery when the provider transcodes the direct user echo", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);
     const host = await ClaudeStreamBrokerHost.start({
@@ -670,6 +670,17 @@ describe("ClaudeStreamBrokerHost", () => {
     });
     const content = structuredContent("inspect this", [IMAGE_REF]);
     const sent = host.send({ id: "image-echo", ...content });
+    let settled = false;
+    void sent.finally(() => { settled = true; });
+
+    child.emitJson({
+      type: "user",
+      session_id: host.identity.sessionId,
+      uuid: "provider-image-caption",
+      message: { role: "user", content: [{ type: "text", text: "inspect this" }] },
+    });
+    await Bun.sleep(0);
+    expect(settled).toBeFalse();
 
     child.emitJson({
       type: "user",
@@ -680,7 +691,7 @@ describe("ClaudeStreamBrokerHost", () => {
         content: [
           {
             type: "image",
-            source: { type: "base64", media_type: "image/png", data: IMAGE_BYTES.toString("base64") },
+            source: { type: "base64", media_type: "image/jpeg", data: Buffer.from("provider-transcoded-image").toString("base64") },
           },
           { type: "text", text: "inspect this" },
         ],
@@ -810,7 +821,7 @@ describe("ClaudeStreamBrokerHost", () => {
     await confirmed.release();
   });
 
-  test("restart transcript reconciliation confirms an image delivery by content digest", async () => {
+  test("restart transcript reconciliation confirms a provider-transcoded image delivery", async () => {
     const sessionId = "confirmed-image-session";
     const content = structuredContent("reconcile image", [IMAGE_REF]);
     const ledger = new RecordingDeliveryLedger();
@@ -824,7 +835,12 @@ describe("ClaudeStreamBrokerHost", () => {
       readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
       readTranscript: () => [{
         text: content.content.text,
-        contentDigest: content.contentDigest,
+        contentDigest: structuredContent(content.content.text, [{
+          sha256: "b".repeat(64),
+          mime: "image/jpeg",
+          bytes: 25,
+        }]).contentDigest,
+        imageCount: 1,
         uuid: "transcript-image-user",
         timestamp: new Date().toISOString(),
       }],

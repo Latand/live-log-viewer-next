@@ -201,6 +201,7 @@ export interface ClaudeStreamBrokerHostOptions {
 export interface ClaudeTranscriptUser {
   text: string;
   contentDigest?: string;
+  imageCount?: number;
   uuid: string | null;
   timestamp: string | null;
 }
@@ -346,6 +347,16 @@ function messageContent(message: JsonObject): ReturnType<typeof structuredConten
   try { return structuredContent(text, images); } catch { return null; }
 }
 
+function matchesClaudeUserContent(
+  entry: NormalizedQueueEntry,
+  observed: { contentDigest: string; text: string; imageCount: number },
+): boolean {
+  if (entry.contentDigest === observed.contentDigest) return true;
+  return entry.content.images.length > 0
+    && observed.imageCount === entry.content.images.length
+    && observed.text === entry.content.text;
+}
+
 function sanitizedUserReplay(
   message: JsonObject,
   content: ReturnType<typeof structuredContent> | null,
@@ -389,6 +400,7 @@ function defaultTranscriptUsers(cwd: string, sessionId: string, projectsRoot?: s
     users.push({
       text: userText(value),
       ...(content ? { contentDigest: content.contentDigest } : {}),
+      ...(content ? { imageCount: content.content.images.length } : {}),
       uuid: stringField(value, "uuid"),
       timestamp: stringField(value, "timestamp"),
     });
@@ -773,7 +785,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       const index = unmatched.findIndex((user) => {
         const timestamp = user.timestamp ? Date.parse(user.timestamp) : Number.POSITIVE_INFINITY;
         const digest = user.contentDigest ?? structuredContent(user.text, []).contentDigest;
-        return digest === delivery.entry.contentDigest && timestamp >= queuedAt;
+        return matchesClaudeUserContent(delivery.entry, {
+          contentDigest: digest,
+          text: user.text,
+          imageCount: user.imageCount ?? 0,
+        }) && timestamp >= queuedAt;
       });
       if (index < 0) continue;
       const [user] = unmatched.splice(index, 1);
@@ -840,7 +856,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       const content = messageContent(message);
       const directUserEcho = stringField(message.message, "role") === "user" && content !== null;
       const delivery = directUserEcho
-        ? this.deliveries.find((candidate) => !candidate.delivered && candidate.entry.contentDigest === content?.contentDigest)
+        ? this.deliveries.find((candidate) => !candidate.delivered && matchesClaudeUserContent(candidate.entry, {
+            contentDigest: content.contentDigest,
+            text: content.content.text,
+            imageCount: content.content.images.length,
+          }))
         : undefined;
       if (delivery) {
         try {
