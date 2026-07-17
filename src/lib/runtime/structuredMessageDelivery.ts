@@ -6,6 +6,7 @@ import {
   type AgentRegistry,
   type RegistryConversation,
 } from "@/lib/agent/registry";
+import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import type { HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
@@ -58,6 +59,8 @@ export interface StructuredMessageDependencies {
   /** Rollback for blobs published by an admission that then lost its
       reservation conflict (e.g. to a concurrent writer in another process). */
   discardImages?: (refs: readonly StructuredImageRef[]) => void;
+  /** Cross-process fence spanning image publication and durable reservation. */
+  withImageAdmissionLock?: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
 class DeliveryPublicationRollbackError extends Error {
@@ -420,39 +423,42 @@ export async function enqueueStructuredMessage(
     const admissionKey = request.clientMessageId?.trim()
       ? `${conversation.id} ${request.clientMessageId.trim()}`
       : null;
-    let reservation = await withAdmissionSection(admissionKey, () => {
-      if (admissionKey
-        && registry.deliveryReservationConflict(conversation.id, content.content.text, idempotencyKey, content.contentDigest, commandInput(request))) {
-        throw new DeliveryReservationConflictError();
-      }
-      let published: StructuredImageRef[] = [];
-      if (rawImages.length > 0) {
-        published = (dependencies.storeImages ?? ((images) => runtimeImageStore().putMany(images)))(rawImages);
-      }
-      try {
-        return registry.holdDelivery(
-          conversation.id,
-          content.content.text,
-          idempotencyKey,
-          refs.length ? "runtime-images" : "text",
-          refs,
-          content.contentDigest,
-          commandInput(request),
-        );
-      } catch (error) {
-        /* A writer in another process reserved this key between the preflight
-           and the reservation: roll the just-published blobs back (digests the
-           winner also references survive) so the losing payload never
-           consumes quota until GC. */
-        if (error instanceof DeliveryReservationConflictError && published.length) {
-          try {
-            (dependencies.discardImages ?? ((toDiscard) => runtimeImageStore().discardUnreferenced(toDiscard)))(published);
-          } catch (rollbackError) {
-            throw new DeliveryPublicationRollbackError(rollbackError);
-          }
+    let reservation = await withAdmissionSection(admissionKey, async () => {
+      const admit = () => {
+        if (admissionKey
+          && registry.deliveryReservationConflict(conversation.id, content.content.text, idempotencyKey, content.contentDigest, commandInput(request))) {
+          throw new DeliveryReservationConflictError();
         }
-        throw error;
-      }
+        let published: StructuredImageRef[] = [];
+        if (rawImages.length > 0) {
+          published = (dependencies.storeImages ?? ((images) => runtimeImageStore().putMany(images)))(rawImages);
+        }
+        try {
+          return registry.holdDelivery(
+            conversation.id,
+            content.content.text,
+            idempotencyKey,
+            refs.length ? "runtime-images" : "text",
+            refs,
+            content.contentDigest,
+            commandInput(request),
+          );
+        } catch (error) {
+          /* A cross-version writer can still reserve this key after preflight.
+             Rollback runs inside the same publication fence, preserving blobs
+             already referenced by another current writer. */
+          if (error instanceof DeliveryReservationConflictError && published.length) {
+            try {
+              (dependencies.discardImages ?? ((toDiscard) => runtimeImageStore().discardUnreferenced(toDiscard)))(published);
+            } catch (rollbackError) {
+              throw new DeliveryPublicationRollbackError(rollbackError);
+            }
+          }
+          throw error;
+        }
+      };
+      if (rawImages.length === 0) return admit();
+      return (dependencies.withImageAdmissionLock ?? withAccountMutationLockAsync)(async () => admit());
     });
     let claimedReservationId: string | null = null;
     if (reservation.state === "delivery-uncertain") {

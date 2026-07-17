@@ -8,7 +8,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot } from "./contracts";
-import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageCapability } from "./runtimeImageStore";
+import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, RuntimeImageStore, runtimeImageCapability } from "./runtimeImageStore";
 import { structuredContentDigest, type StructuredImageRef } from "./structuredContent";
 
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -18,6 +18,7 @@ const conversationId = "conversation_11111111-1111-4111-8111-111111111111";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-message-"));
 let registryNumber = 0;
 const PNG_BASE64 = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+const SECOND_PNG_BASE64 = Buffer.concat([Buffer.from(PNG_BASE64, "base64"), Buffer.from([1])]).toString("base64");
 
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
@@ -526,6 +527,114 @@ test("a failed cross-process publication rollback surfaces a retryable delivery 
     status: 503,
     error: expect.stringContaining("publication rollback failed"),
   });
+});
+
+test("cross-process image admission fences publication through durable reservation", async () => {
+  const stateRoot = fs.mkdtempSync(path.join(sandbox, "cross-process-admission-"));
+  const registry = new AgentRegistry(
+    path.join(stateRoot, "agent-registry.json"),
+    undefined,
+    undefined,
+    { sqliteMode: "off" },
+  );
+  const sharedArtifact = path.join(stateRoot, "shared-session.jsonl");
+  registry.reconcileConversations([{
+    engine: "claude",
+    path: sharedArtifact,
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-17T00:00:00.000Z",
+  }]);
+
+  const fixture = path.join(import.meta.dir, "fixtures", "structuredImageAdmissionWriter.ts");
+  const marker = (name: string) => path.join(stateRoot, name);
+  const aPublished = marker("a-published");
+  const aRelease = marker("a-release");
+  const cPublished = marker("c-published");
+  const cRelease = marker("c-release");
+  const child = (key: string, image: string, published = "-", release = "-") => Bun.spawn([
+    process.execPath,
+    fixture,
+    stateRoot,
+    sharedArtifact,
+    key,
+    image,
+    published,
+    release,
+  ], {
+    env: {
+      ...process.env,
+      LLV_STATE_DIR: stateRoot,
+      LLV_AGENT_REGISTRY_SQLITE: "off",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const waitForFile = async (filename: string): Promise<void> => {
+    const deadline = Date.now() + 10_000;
+    while (!fs.existsSync(filename)) {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path.basename(filename)}`);
+      await Bun.sleep(10);
+    }
+  };
+  const finish = async (process: ReturnType<typeof child>): Promise<string> => {
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
+    if (exitCode !== 0) throw new Error(stderr || `structured image admission writer exited ${exitCode}`);
+    return stdout;
+  };
+
+  const writerA = child("admission-a", PNG_BASE64, aPublished, aRelease);
+  let writerC: ReturnType<typeof child> | null = null;
+  let writerB: ReturnType<typeof child> | null = null;
+  try {
+    await waitForFile(aPublished);
+    writerC = child("admission-b", PNG_BASE64, cPublished, cRelease);
+    await Bun.sleep(40);
+    writerB = child("admission-b", SECOND_PNG_BASE64);
+    await Bun.sleep(150);
+    const crossedPublicationFence = fs.existsSync(cPublished);
+
+    if (crossedPublicationFence) {
+      await finish(writerB);
+      fs.writeFileSync(cRelease, "release\n");
+      await finish(writerC);
+      fs.writeFileSync(aRelease, "release\n");
+      await finish(writerA);
+    } else {
+      fs.writeFileSync(aRelease, "release\n");
+      await finish(writerA);
+      const cPublishedBeforeExit = await Promise.race([
+        waitForFile(cPublished).then(() => true),
+        writerC.exited.then(() => false),
+      ]);
+      if (cPublishedBeforeExit) fs.writeFileSync(cRelease, "release\n");
+      await Promise.all([finish(writerC), finish(writerB)]);
+    }
+
+    expect(crossedPublicationFence).toBe(false);
+    const persisted = new AgentRegistry(
+      path.join(stateRoot, "agent-registry.json"),
+      undefined,
+      undefined,
+      { sqliteMode: "off" },
+    ).snapshot();
+    const reservation = Object.values(persisted.heldDeliveries)
+      .find((delivery) => delivery.clientMessageId === "admission-a");
+    expect(reservation?.runtimeImages).toHaveLength(1);
+    const store = new RuntimeImageStore(path.join(stateRoot, "runtime-images"));
+    expect(store.read(reservation!.runtimeImages[0]!)).toEqual(Buffer.from(PNG_BASE64, "base64"));
+  } finally {
+    fs.writeFileSync(aRelease, "release\n");
+    fs.writeFileSync(cRelease, "release\n");
+    for (const process of [writerA, writerC, writerB]) {
+      if (process && process.exitCode === null) process.kill();
+    }
+  }
 });
 
 test("one UTF-8 envelope bound rejects an oversized multibyte caption before storage, recovery, and reservation", async () => {
