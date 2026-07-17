@@ -4091,7 +4091,8 @@ export class AgentRegistry {
         resolveConversationAlias(file, candidate.conversationId) === canonicalId
         && candidate.command.operationId === operationId);
       if (!delivery || delivery.state === "delivered") return delivery ? clone(delivery) : null;
-      if (delivery.state !== "delivery-uncertain") return null;
+      const retryRecovered = delivery.state === "failed" && state === "delivered";
+      if (delivery.state !== "delivery-uncertain" && !retryRecovered) return null;
       const conversation = file.conversations[canonicalId];
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";

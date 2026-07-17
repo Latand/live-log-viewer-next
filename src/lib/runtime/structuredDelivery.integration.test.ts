@@ -647,18 +647,65 @@ test("a delivering entry resumes after restart through the host ledger without a
 
 test("repeated terminal retry clicks produce one replacement engine write", async () => {
   const filename = path.join(sandbox, "terminal-retry-clicks.sqlite");
+  const sessionId = "12121212-1212-4212-8212-121212121212";
+  const artifactPath = path.join(sandbox, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(sandbox, "terminal-retry-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: sandbox });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-17T19:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: sandbox,
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:terminal-retry",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const held = registry.holdDelivery(
+    conversation.id,
+    "deliver this once",
+    "message-terminal-original",
+    "text",
+    [],
+    structuredContentDigest({ text: "deliver this once", images: [] }),
+    { operationId: "operation-terminal-original", kind: "send", policy: "queue" },
+  );
+  registry.beginDeliveryAttempt(held.id, held.generationId!);
+  registry.recordDeliveryOutcome(held.id, "failed", "dead-host");
   const journal = new RuntimeJournal(filename, { structuredHosts: true });
   journal.append({
-    scope: { type: "session", id: "conversation-terminal-retry" },
+    scope: { type: "session", id: conversation.id },
     kind: "session-status",
     payload: {
-      conversationId: "conversation-terminal-retry",
-      sessionKey: { engine: "codex", sessionId: "session-terminal-retry" },
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId },
       hostKind: "codex-app-server",
       host: "hosted",
       turn: "idle",
       provenance: "structured",
-      artifactPath: "/sessions/terminal-retry.jsonl",
+      artifactPath,
       capabilities: { steer: true, structuredAttention: true },
     },
   });
@@ -666,7 +713,7 @@ test("repeated terminal retry clicks produce one replacement engine write", asyn
     kind: "send",
     operationId: "operation-terminal-original",
     idempotencyKey: "message-terminal-original",
-    conversationId: "conversation-terminal-retry",
+    conversationId: conversation.id,
     text: "deliver this once",
     policy: "queue",
   });
@@ -679,7 +726,11 @@ test("repeated terminal retry clicks produce one replacement engine write", asyn
 
   expect(repeated).toMatchObject({ operationId: replacement.operationId, replayed: true });
   expect(journal.effectBatch()).toHaveLength(1);
-  await new StructuredDeliveryQueue(journalPort(journal), () => new FakeEngineHost(ledger)).drain();
+  await bindStructuredDeliveryQueue([{
+    key: { engine: "codex", sessionId },
+    host: observableFakeHost(new FakeEngineHost(ledger)),
+  }], { registry, client: runtimeJournalClient(journal) });
+  await kickStructuredDeliveryQueue();
 
   expect(ledger.writes).toMatchObject([{
     id: replacement.operationId,
@@ -690,6 +741,8 @@ test("repeated terminal retry clicks produce one replacement engine write", asyn
     status: "delivered",
     retryOfOperationId: "operation-terminal-original",
   });
+  expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({ state: "delivered", text: "" });
+  await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
 });
 
@@ -1092,6 +1145,56 @@ test("queue binding settles an uncertain reservation from a terminal journal rec
     state: "delivered",
     text: "",
     error: null,
+  });
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+});
+
+test("queue binding settles a rejected journal receipt as a recoverable failure", async () => {
+  const sessionId = "acacacac-acac-4cac-8cac-acacacacacac";
+  const directory = path.join(sandbox, "rejected-journal-registry-reconciliation");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-17T19:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const operationId = "operation-rejected-before-registry-settlement";
+  const held = registry.holdDelivery(
+    conversation.id,
+    "rejected before settlement",
+    "rejected-before-registry-settlement",
+    "text",
+    [],
+    structuredContentDigest({ text: "rejected before settlement", images: [] }),
+    { operationId, kind: "send", policy: "queue", turnId: null },
+  );
+  registry.beginDeliveryAttempt(held.id, held.generationId!);
+  const client = {
+    operationStatus: async () => ({
+      operationId,
+      replayed: true,
+      receipt: {
+        operationId,
+        idempotencyKey: "rejected-before-registry-settlement",
+        conversationId: conversation.id,
+        kind: "send" as const,
+        status: "rejected" as const,
+        reason: "no-claim",
+      },
+    }),
+    effectBatch: async () => [],
+  } as unknown as RuntimeHostClient;
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
+    state: "failed",
+    error: "no-claim",
   });
   await bindStructuredDeliveryQueue([], { registry, client: null });
 });

@@ -294,30 +294,93 @@ function journalOperationRetired(receiptJson: unknown, retireBefore: number): bo
   return Number.isFinite(at) && at <= retireBefore;
 }
 
+type JournalOperationReachabilityRow = {
+  operation_id: string;
+  request_json: string;
+  receipt_json: string;
+};
+
+function journalReceiptRecord(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function retiredJournalOperationIds(rows: readonly JournalOperationReachabilityRow[], retireBefore: number): Set<string> {
+  const rowsById = new Map(rows.map((row) => [row.operation_id, row]));
+  const receiptsById = new Map(rows.map((row) => [row.operation_id, journalReceiptRecord(row.receipt_json)]));
+  const parentIds = new Set<string>();
+  for (const receipt of receiptsById.values()) {
+    if (typeof receipt?.retryOfOperationId === "string") parentIds.add(receipt.retryOfOperationId);
+  }
+  const groups = new Map<string, Set<string>>();
+  for (const operationId of rowsById.keys()) {
+    let root = operationId;
+    const seen = new Set<string>();
+    while (!seen.has(root)) {
+      seen.add(root);
+      const parent = receiptsById.get(root)?.retryOfOperationId;
+      if (typeof parent !== "string") break;
+      root = parent;
+    }
+    const members = groups.get(root) ?? new Set<string>();
+    members.add(operationId);
+    groups.set(root, members);
+  }
+  const retired = new Set<string>();
+  for (const members of groups.values()) {
+    const leaves = [...members].filter((operationId) => !parentIds.has(operationId));
+    if (leaves.length === 0 || !leaves.every((operationId) =>
+      journalOperationRetired(rowsById.get(operationId)?.receipt_json, retireBefore))) continue;
+    for (const operationId of members) retired.add(operationId);
+  }
+  return retired;
+}
+
 function collectJournalDigests(filename: string, digests: Set<string>, retireBefore: number): void {
   if (!fs.existsSync(filename)) return;
   const db = openReadonlyDatabase(filename);
   try {
-    const sources: Array<[string, string[]]> = [
-      ["events", ["payload_json"]],
-      ["projections", ["state_json"]],
-      ["entities", ["state_json"]],
-      ["outbox", ["payload_json"]],
-      ["producer_receipts", ["event_json"]],
-      ["operations", ["request_json", "receipt_json"]],
-    ];
-    const tables = new Set((db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
-    for (const [table, columns] of sources) {
-      if (!tables.has(table)) continue;
-      const rows = db.query(`SELECT ${columns.join(", ")} FROM ${table}`).all() as Array<Record<string, unknown>>;
-      for (const row of rows) {
-        /* Journal operations correlate each request with its terminal
-           receipt: a delivered-terminal operation past the retirement grace
-           stops pinning its request's image refs, so quota can breathe long
-           before event-count compaction trims the journal. */
-        if (table === "operations" && journalOperationRetired(row.receipt_json, retireBefore)) continue;
-        for (const column of columns) {
-          const raw = row[column];
+      const sources: Array<[string, string[]]> = [
+        ["events", ["payload_json"]],
+        ["projections", ["state_json"]],
+        ["entities", ["state_json"]],
+        ["outbox", ["payload_json"]],
+        ["producer_receipts", ["event_json"]],
+      ];
+      const tables = new Set((db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
+      if (tables.has("operations")) {
+        const columns = new Set((db.query("PRAGMA table_info(operations)").all() as Array<{ name: string }>).map((column) => column.name));
+        if (columns.has("operation_id")) {
+          const rows = db.query("SELECT operation_id, request_json, receipt_json FROM operations").all() as JournalOperationReachabilityRow[];
+          const retired = retiredJournalOperationIds(rows, retireBefore);
+          for (const row of rows) {
+            if (retired.has(row.operation_id)) continue;
+            for (const raw of [row.request_json, row.receipt_json]) {
+              if (raw.trim()) collectDigests(JSON.parse(raw), digests, retireBefore);
+            }
+          }
+        } else {
+          const rows = db.query("SELECT request_json, receipt_json FROM operations").all() as Array<Pick<JournalOperationReachabilityRow, "request_json" | "receipt_json">>;
+          for (const row of rows) {
+            if (journalOperationRetired(row.receipt_json, retireBefore)) continue;
+            for (const raw of [row.request_json, row.receipt_json]) {
+              if (raw.trim()) collectDigests(JSON.parse(raw), digests, retireBefore);
+            }
+          }
+        }
+      }
+      for (const [table, columns] of sources) {
+        if (!tables.has(table)) continue;
+        const rows = db.query(`SELECT ${columns.join(", ")} FROM ${table}`).all() as Array<Record<string, unknown>>;
+        for (const row of rows) {
+          for (const column of columns) {
+            const raw = row[column];
           if (typeof raw === "string" && raw.trim()) collectDigests(JSON.parse(raw), digests, retireBefore);
         }
       }
@@ -507,7 +570,9 @@ export class RuntimeImageStore {
     };
     let incoming = missingBytes();
     if (current + incoming > this.maxBytes) {
-      this.collectGarbage(root, this.reachableDigests());
+      const protectedDigests = new Set(this.reachableDigests());
+      for (const { data } of decoded) protectedDigests.add(crypto.createHash("sha256").update(data).digest("hex"));
+      this.collectGarbage(root, protectedDigests);
       current = this.storedBytes(root);
       /* GC may remove an aged dedup candidate from this batch. Refresh the
          missing set before deciding whether the complete write fits. */
@@ -791,11 +856,13 @@ export class RuntimeImageStore {
     const sha256 = crypto.createHash("sha256").update(data).digest("hex");
     const ref = { sha256, mime, bytes: data.byteLength };
     const filename = path.join(root.path, path.basename(this.pathFor(ref)));
-    if (fs.existsSync(filename)) {
-      this.readFromRoot(root, ref);
-      fs.chmodSync(filename, 0o600);
-      return { ref, created: false };
-    }
+      if (fs.existsSync(filename)) {
+        this.readFromRoot(root, ref);
+        fs.chmodSync(filename, 0o600);
+        const touchedAt = new Date(this.now());
+        fs.utimesSync(filename, touchedAt, touchedAt);
+        return { ref, created: false };
+      }
     const temporary = path.join(root.path, `.${sha256}.${crypto.randomUUID()}.partial`);
     let published = false;
     try {

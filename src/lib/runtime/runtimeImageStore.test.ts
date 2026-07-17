@@ -109,6 +109,28 @@ test("quota admission recalculates deduplicated candidates after GC", () => {
   expect(storedBytes).toBeLessThanOrEqual(first.byteLength + second.byteLength - 1);
 });
 
+test("deduplicated publication renews its GC lifetime before deferred reservation", () => {
+  const reused = taggedPng("dedup-publication-lifetime");
+  const pressure = taggedPng("dedup-publication-pressure");
+  const root = sandbox();
+  let clock = Date.now();
+  const grace = 60_000;
+  const store = new RuntimeImageStore(root, {
+    maxBytes: Math.max(reused.byteLength, pressure.byteLength),
+    gcGraceMs: grace,
+    now: () => clock,
+    reachableDigests: () => new Set(),
+  });
+  const [ref] = store.putMany([{ base64: reused.toString("base64"), mime: "image/png" }]);
+  if (!ref) throw new Error("reused ref missing");
+  clock += grace + 1;
+
+  store.putMany([{ base64: reused.toString("base64"), mime: "image/png" }]);
+  expect(() => store.putMany([{ base64: pressure.toString("base64"), mime: "image/png" }]))
+    .toThrow("runtime image storage quota exceeded");
+  expect(store.read(ref)).toEqual(reused);
+});
+
 test("runtime image GC reclaims aged unreachable blobs and preserves reachable refs", () => {
   const first = taggedPng("gc-first");
   const second = taggedPng("gc-second");
@@ -304,6 +326,34 @@ test("terminal journal operations retire request refs while pending and retryabl
   const reachable = collectRuntimeImageReachableDigests(state, { now, retiredGraceMs: grace });
 
   expect([...reachable].sort()).toEqual(["3", "4", "5", "6"].map(sha));
+});
+
+test("an aged delivered retry leaf retires image refs for its whole operation chain", () => {
+  const state = sandbox();
+  const now = Date.parse("2026-07-17T12:00:00.000Z");
+  const grace = 60 * 60 * 1000;
+  const retired = new Date(now - grace - 1_000).toISOString();
+  const digest = "9".repeat(64);
+  const request = JSON.stringify({ images: [{ sha256: digest, mime: "image/png", bytes: PNG.byteLength }] });
+  const db = new Database(path.join(state, "runtime-events.sqlite"), { create: true });
+  db.exec("CREATE TABLE operations (operation_id TEXT, request_json TEXT, receipt_json TEXT)");
+  const insert = db.query("INSERT INTO operations VALUES (?, ?, ?)");
+  insert.run("operation-original", request, JSON.stringify({
+    operationId: "operation-original",
+    status: "failed",
+    at: retired,
+  }));
+  insert.run("operation-retry", request, JSON.stringify({
+    operationId: "operation-retry",
+    retryOfOperationId: "operation-original",
+    presentationOperationId: "operation-original",
+    presentationRevision: 2,
+    status: "delivered",
+    at: retired,
+  }));
+  db.close();
+
+  expect(collectRuntimeImageReachableDigests(state, { now, retiredGraceMs: grace }).has(digest)).toBe(false);
 });
 
 test("a multi-image batch failure rolls back its newly published blobs and keeps dedup hits", () => {
