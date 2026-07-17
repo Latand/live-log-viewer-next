@@ -32,6 +32,27 @@ export interface RuntimeImageCapability {
 export const CODEX_STRUCTURED_IMAGE_REASON = "The selected Codex model does not advertise image input through app-server.";
 export const STRUCTURED_IMAGE_PROTOCOL_REASON = "Structured image protocol is unavailable for this host.";
 
+/** One UTF-8 envelope bound for structured message text, captions included.
+    Measured in encoded bytes (not UTF-16 units) so multibyte captions cannot
+    smuggle oversized frames past the gate: 32000 bytes of text plus the JSON
+    overhead of a full 16-ref image set (~2.5 KB) keeps comfortable headroom
+    inside the journal record and host socket frames. */
+export const MAX_STRUCTURED_TEXT_BYTES = 32_000;
+
+export class StructuredEnvelopeTooLargeError extends Error {
+  constructor() {
+    super(`structured message text exceeds the ${MAX_STRUCTURED_TEXT_BYTES}-byte envelope bound`);
+    this.name = "StructuredEnvelopeTooLargeError";
+  }
+}
+
+/** Enforced once, before storage, recovery, and reservation: an over-bound
+    caption must reject with zero side effects instead of mutating the image
+    store or registry and failing later at the journal or socket. */
+export function assertStructuredTextEnvelope(text: string): void {
+  if (Buffer.byteLength(text, "utf8") > MAX_STRUCTURED_TEXT_BYTES) throw new StructuredEnvelopeTooLargeError();
+}
+
 export function normalizeStructuredImageMime(value: string): StructuredImageMime | null {
   const mime = value.toLowerCase() === "image/jpg" ? "image/jpeg" : value.toLowerCase();
   return STRUCTURED_IMAGE_MIMES.includes(mime as StructuredImageMime) ? mime as StructuredImageMime : null;

@@ -28,7 +28,7 @@ import type { AgentEngine } from "./cli";
 import { sessionKeyFromTranscript, sessionKeyId, type SessionKey } from "./sessionKey";
 import { SqliteAgentRegistryStore, type SqliteRegistrySnapshot } from "./sqliteRegistryStore";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
-import { parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
+import { assertStructuredTextEnvelope, parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 
 export type AgentHostStatus = "starting" | "live" | "idle" | "handoff" | "unhosted" | "dead";
 
@@ -3874,7 +3874,10 @@ export class AgentRegistry {
     contentDigest: string | null = null,
     commandInput: HeldDeliveryCommandInput = {},
   ): HeldDelivery {
-    if (payloadKind === "text" && (!text || text.length > 32_000)) throw new Error("held delivery must contain at most 32000 characters");
+    if (payloadKind === "text" && !text) throw new Error("held delivery must contain at most 32000 characters");
+    /* One UTF-8 bound for every payload kind: an image caption is envelope
+       text too and must not bypass the gate the text kind always had. */
+    assertStructuredTextEnvelope(text);
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, conversationId);
       const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;

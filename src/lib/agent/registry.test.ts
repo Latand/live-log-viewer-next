@@ -235,6 +235,25 @@ describe("agent registry", () => {
       .toThrow(DeliveryReservationConflictError);
   });
 
+  test("held delivery captions share one UTF-8 envelope bound across payload kinds", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("claude", "/caption-envelope.jsonl", "default");
+    const refs = [{ sha256: "c".repeat(64), mime: "image/png" as const, bytes: 67 }];
+    /* 32001 UTF-8 bytes in 10667 UTF-16 units: the legacy length gate missed
+       this, and the runtime-images kind skipped the gate entirely. */
+    const oversized = "€".repeat(10_667);
+    expect(() => store.holdDelivery(conversation.id, oversized, "caption-overflow", "runtime-images", refs, "d".repeat(64)))
+      .toThrow("32000-byte envelope");
+    expect(() => store.holdDelivery(conversation.id, oversized, "text-overflow"))
+      .toThrow("32000-byte envelope");
+
+    const boundary = "€".repeat(10_666) + "aa";
+    expect(store.holdDelivery(conversation.id, boundary, "caption-boundary", "runtime-images", refs, "e".repeat(64)))
+      .toMatchObject({ state: "assigned" });
+    expect(store.holdDelivery(conversation.id, "", "image-only", "runtime-images", refs, "f".repeat(64)))
+      .toMatchObject({ state: "assigned" });
+  });
+
   test("startup compaction bounds abandoned failed reservations and leaves capacity", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/failed-deliveries.jsonl", "default");

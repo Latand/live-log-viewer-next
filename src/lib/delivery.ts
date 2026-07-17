@@ -419,7 +419,11 @@ interface DeliveryOverrides {
 export async function deliverConversationMessage(message: ConversationMessage, overrides: DeliveryOverrides = {}): Promise<DeliveryOutcome> {
   const { pid, images } = message;
   const text = message.text.trim();
-  const requestLocalPayload = images.length > 0 || text.length > 32_000;
+  /* Byte-measured to match the registry's UTF-8 envelope bound: a multibyte
+     text over the byte bound rides the request-local (ephemeral) path instead
+     of tripping the reservation gate. */
+  const textBytes = Buffer.byteLength(text, "utf8");
+  const requestLocalPayload = images.length > 0 || textBytes > 32_000;
 
   const registry = agentRegistry();
   const conversation = message.conversationId?.startsWith("conversation_")
@@ -477,9 +481,9 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     try {
       queued = registry.holdDelivery(
         conversation.id,
-        text.length > 32_000 ? "" : text,
+        textBytes > 32_000 ? "" : text,
         message.clientMessageId ?? null,
-        images.length ? "ephemeral-images" : text.length > 32_000 ? "ephemeral-text" : "text",
+        images.length ? "ephemeral-images" : textBytes > 32_000 ? "ephemeral-text" : "text",
       );
     } catch (error) {
       return failure(error, 409);
