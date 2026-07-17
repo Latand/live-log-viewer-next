@@ -1137,6 +1137,10 @@ test("a failed resume before identity staging projects dead ownership so the fol
     startHost: async () => { throw new Error("runtime event ledger sequence gap after 2907"); },
   })).rejects.toThrow("runtime event ledger sequence gap after 2907");
 
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    error: "runtime event ledger sequence gap after 2907",
+  });
   expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
     status: "dead",
     claimOwner: null,

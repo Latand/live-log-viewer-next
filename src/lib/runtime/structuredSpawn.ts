@@ -10,6 +10,7 @@ import type { SpawnResponse } from "@/lib/agent/spawnResponse";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
 import { hasUserAuthoredMessage } from "@/lib/session/reader";
+import { hardenedRedact } from "@/lib/view/compactText";
 
 import { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import { CodexAppServerHost } from "./codexAppServerHost";
@@ -31,6 +32,11 @@ export const INITIAL_MESSAGE_TIMEOUT_MS = 30_000;
 const INITIAL_MESSAGE_POLL_MS = 250;
 const INITIAL_MESSAGE_DELIVERED = new Set(["delivered", "turn-started", "steered"]);
 const INITIAL_MESSAGE_FAILED = new Set(["failed", "rejected", "uncertain", "interrupted"]);
+
+function structuredSpawnFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : "structured spawn failed";
+  return hardenedRedact(message).replace(/\s+/g, " ").trim().slice(0, 240) || "structured spawn failed";
+}
 
 function runtimeEntryStatus(session: RuntimeSession): "dead" | "live" | "idle" {
   if (session.host === "dead" || session.host === "unhosted") return "dead";
@@ -773,8 +779,9 @@ export async function spawnStructuredConversation(
       state: "settled",
     };
   } catch (error) {
+    const failureReason = structuredSpawnFailureReason(error);
     await input.client.transitionOperation(operationId, "failed", {
-      reason: error instanceof Error ? error.message.slice(0, 240) : "structured spawn failed",
+      reason: failureReason,
     }).catch(() => {});
     if (!host && error instanceof StructuredHostAdoptionCleanupError) {
       host = error.host as SpawnedStructuredHost;
@@ -831,9 +838,9 @@ export async function spawnStructuredConversation(
     }
     if (projectionSucceeded) {
       if (key) {
-        input.registry.failStructuredSpawn(input.receipt.launchId, error instanceof Error ? error.message : "structured spawn failed");
+        input.registry.failStructuredSpawn(input.receipt.launchId, failureReason);
       } else {
-        input.registry.failSpawn(input.receipt.launchId, "structured spawn failed before host binding");
+        input.registry.failSpawn(input.receipt.launchId, failureReason);
       }
     }
     throw error;
