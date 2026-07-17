@@ -104,7 +104,9 @@ Tapping the pill expands the **group chat room**:
 2. **Member strip** (§1.3).
 3. **Message list** — the room transcript (§2), newest at bottom,
    scroll-anchored to bottom with a "↓ new messages" jump chip when scrolled
-   up (reuse the `scrollMemory` pattern from the feed).
+   up (reuse the `scrollMemory` pattern from the feed). Loads the **last 200
+   messages** with a "load earlier" affordance at the top on scroll (owner
+   decision 2026-07-17); retention policy itself belongs to #322.
 4. **Composer** — single-line growing textarea with `@`-mention autocomplete
    (§2.6), mic (`MicButton`) and image attach (`ImagePickerButton`) reused,
    send button. Receipts render on the sent message, not under the composer
@@ -112,10 +114,20 @@ Tapping the pill expands the **group chat room**:
 
 ### 1.3 Member strip and presence
 
+**Member model (owner decision 2026-07-17): one agent = one provider.** The
+room's agent members are singletons, one per provider, with fixed identity:
+**Fable 5 · low** (the orchestrator) and **Sol 5.6 · high**. There are no
+per-template instance fleets in chat — mentioning `@fable` or `@sol` is
+always unambiguous: it wakes, respawns, or injects into THE member. Workers
+the orchestrators spawn live on the board as normal conversations (with the
+"spawned by Orchestrator" badge), not as chat members. Multi-instance
+members (ordinals, per-instance avatar variants) are documented in §1.4 as
+future-proofing for the #338 phase-4 pipeline-spawn work, not v1.
+
 A horizontal row of member avatars under the header, ordered: orchestrator
-first, then active members by recency, then idle, then dead. Overflow folds
-into a `+N` chip that opens the full member list as a popover (desktop) /
-sheet (mobile).
+first, then by recency of activity. With the fixed duo the strip never
+overflows in v1; when multi-member arrives, overflow folds into a `+N` chip
+that opens the full member list as a popover (desktop) / sheet (mobile).
 
 Each avatar carries a **presence dot** (bottom-right of the avatar, 10px,
 1.5px `card` ring for contrast):
@@ -129,7 +141,7 @@ Each avatar carries a **presence dot** (bottom-right of the avatar, 10px,
 | **Dead** | process/pane gone, transcript stale | gray dot, desaturated avatar. Tap → respawn (§3.6). |
 
 Tapping an avatar opens the **member popover**: avatar large, name
-("Sol · 2"), template + engine/model/effort line (reuse `engineBadgeFor`
+("Sol"), model + engine/model/effort line (reuse `engineBadgeFor`
 tinting), presence with elapsed time, and actions: **Open conversation**
 (link-out §4), **Stop** (working members), **Respawn** (dead members),
 **Mute** (per-member hard mute, #338 guard — muted members can be mentioned
@@ -142,15 +154,16 @@ Deterministic, generated, no image assets — same philosophy as
 color, translucent soft derived from it, works on both themes).
 
 **Layer 1 — template identity** (who kind of agent this is). Each template
-gets a fixed hue + a monogram glyph:
+gets a fixed hue + a monogram glyph. **V1 ships two** (the singleton duo,
+§1.3); the rest of the table is reserved for the future multi-member phase:
 
-| Template | Base | Hue (identity color) | Glyph |
-| --- | --- | --- | --- |
-| Sol | GPT-5.6-Sol (review) | Codex blue family, `#2f6fd0` | S |
-| Terra | GPT-5.6-Terra (implement) | Codex teal shift, `#2f9fd0` → distinct teal | T |
-| Opus | Claude Opus | Claude orange family `#d97757` | O |
-| Fable | Claude Fable | Claude deep amber shift | F |
-| Sonnet | Claude Sonnet | Claude light coral shift | So |
+| Template | Base | Hue (identity color) | Glyph | Status |
+| --- | --- | --- | --- | --- |
+| Fable | Claude Fable 5 · low | Claude deep amber shift of `#d97757` | F | **v1** (orchestrator) |
+| Sol | GPT-5.6-Sol · high | Codex blue family, `#2f6fd0` | S | **v1** |
+| Terra | GPT-5.6-Terra | Codex teal shift → distinct teal | T | reserved |
+| Opus | Claude Opus | Claude orange family `#d97757` | O | reserved |
+| Sonnet | Claude Sonnet | Claude light coral shift | So | reserved |
 
 (The exact shifted hex values reuse the model-family hue-shift table already
 in `utils.ts` — one source of truth; new templates from the role registry get
@@ -161,12 +174,12 @@ Avatar = circle filled with a two-stop gradient of the identity color
 **orchestrator** is the Fable avatar with a 1.5px `crown`-token ring — it is
 visually a member, first among equals.
 
-**Layer 2 — per-instance variant** (which Sol this is). `hash(conversationId)
-mod 8` selects one of 8 variants: gradient angle (0/45/90/135°) × a small
-corner notch position (top-left / bottom-right). Additionally every instance
-gets an ordinal within the room — "Sol · 2" — shown in names and tooltips;
-the ordinal is assigned at launch and never reused within a room. Two Sols
-are therefore tellable apart by both variant and ordinal.
+**Layer 2 — per-instance variant** (future-proofing, not exercised in v1
+where every member is a singleton). When multi-instance members arrive:
+`hash(conversationId) mod 8` selects one of 8 variants (gradient angle
+0/45/90/135° × a corner-notch position), and every instance gets an ordinal
+within the room — "Sol · 2" — assigned at launch, never reused. In v1
+members render without ordinals: just "Fable" and "Sol".
 
 **The user** renders with a neutral `accent`-soft circle and their initial
 (from the account badge identity); user messages are also right-aligned, so
@@ -227,11 +240,11 @@ per-message, inline, and survive reload (journal-backed).
 Centered, small (`text-[11px] text-muted`), no bubble, no avatar, grouped by
 minute:
 
-- `— Sol · 2 launched by @you —`
-- `— Sol · 2 stopped by you —`
-- `— Terra · 1 rate-limited until 19:55 —` (`warning` tint, #97)
-- `— Sol · 2 died —` (gray; followed by the respawn affordance on the member)
-- `⚠ Sol · 2 finished without report` — the **contract-violation marker**
+- `— Sol respawned by @you —`
+- `— Sol stopped by you —`
+- `— Sol rate-limited until 19:55 —` (`warning` tint, #97)
+- `— Sol died —` (gray; followed by the respawn affordance on the member)
+- `⚠ Sol finished without report` — the **contract-violation marker**
   (`warning-soft` background strip, not centered-muted: it must be seen).
   Carries two affordances: *Open conversation* and *Request summary* (injects
   a canned "post your completion summary to the chat" message through the
@@ -248,20 +261,17 @@ announcements except violations (polite) and failures (assertive).
 Typing `@` (or tapping an @-button in the composer on mobile) opens the
 autocomplete popover anchored to the caret:
 
-- **Section "In room"** — existing members: avatar, name+ordinal, presence
-  dot, template label. Mentioning a live/idle member = wake or inject (§3.4).
-  Mentioning a **dead** member offers `Respawn & deliver`.
-- **Section "Launch new"** — templates from the role registry (#35:
-  orchestrator excluded, reviewer/builder/architect/… included) with engine
-  badge. Selecting one inserts a chip like `@Sol (new)`; sending launches a
-  fresh member (§3.2).
-- Bare-template disambiguation: typing `@sol` when Sol instances exist ranks
-  the **most recently active live instance first**, then other instances,
-  then "Sol (new)". The chip always resolves to a concrete target before
-  send — a message never carries an ambiguous mention.
+- One flat list of the room's members (v1: `@fable`, `@sol` — the §1.3
+  singleton duo): avatar, name, presence dot, model/effort label. Mentioning
+  a live/idle member = wake or inject (§3.4). Mentioning a **dead** member
+  offers `Respawn & deliver`. Mentions are always unambiguous — one agent
+  per provider, so a message never carries an ambiguous target.
+- *(Future multi-member phase, out of v1: a "Launch new" section over
+  role-registry templates and instance disambiguation — parked with the #338
+  phase-4 pipeline-spawn work.)*
 - Keyboard: ↑/↓ navigate, Enter/Tab accept, Esc closes (and does NOT close
   the overlay — Esc closes innermost layer first). Filtering is
-  fuzzy-by-prefix over name, template, model.
+  fuzzy-by-prefix over name and model.
 - An untagged message posts to the room and wakes nobody (contract §1). The
   composer shows a one-time inline hint under the field when the first
   untagged message is sent: "No one is tagged — nobody will be woken."
@@ -274,7 +284,7 @@ autocomplete popover anchored to the caret:
 ### 3.1 Master lifecycle (per member)
 
 ```
-                 mention @Template(new)
+              first mention / respawn of a member
                           │
                           ▼
                     ┌──────────┐  journal deadline (90s) /
@@ -287,8 +297,7 @@ autocomplete popover anchored to the caret:
                           ▼                          (back to LAUNCHING)
                     ┌──────────┐  plan chat.post
                     │  WAKING   │ ───────────────► plan card rendered
-                    └─────┬─────┘  (>3 min without plan → "working
-                          │         without plan ⚠" soft marker)
+                    └─────┬─────┘
                           ▼
                     ┌──────────┐ ◄── re-mention = injection (§3.4)
                     │ WORKING   │ ◄── decision question posted → RED
@@ -307,12 +316,12 @@ autocomplete popover anchored to the caret:
 
 ### 3.2 Mention → launch (and why the perpetual spinner is impossible)
 
-1. User sends `@Sol (new) review the auth diff`. The message posts
+1. User sends `@sol review the auth diff` while Sol has no live session
+   (never launched, or dead — §1.3 singletons). The message posts
    optimistically with receipt `queued`.
 2. The server launches through the structured spawn path (`/api/spawn`,
-   202-fast per #336) and the member appears in the strip immediately in the
-   **launching** state (spinner avatar placeholder with the template identity
-   color).
+   202-fast per #336) and the member's avatar in the strip flips to the
+   **launching** state (spinner overlaying the identity color).
 3. Launch progress is **only ever derived from the journaled spawn state**
    (`StructuredSpawnCardState`: `starting | binding | queued | failed |
    recovered`) — the exact machinery `StructuredSpawnStatus` +
@@ -328,18 +337,20 @@ autocomplete popover anchored to the caret:
    line shows the exact error (`spawn.error` verbatim, like `LaunchHistory`)
    with **Retry** (relaunches the same profile; the original message is
    redelivered on success) and **Dismiss**.
-5. Success: `conversationId` binds, the member gets its ordinal + avatar
-   variant, receipt flips to `delivered`, and the room waits for the plan
-   card (§2.2). Per #336, the plan message streams into the chat from the
-   runtime host — it must not wait on the transcript scanner.
+5. Success: `conversationId` binds, the receipt flips to `delivered`, and
+   the room waits for the plan card (§2.2). Per #336, the plan message
+   streams into the chat from the runtime host — it must not wait on the
+   transcript scanner.
 
 ### 3.3 Plan → work → completion
 
 Covered by §§2.2–2.4. Enforcement is **surfacing, not blocking**: the viewer
-never suppresses a working agent for skipping a plan; it marks the contract
-violation (soft "working without plan" after 3 min; hard "finished without
-report" on turn end without a completion post) and makes the fix one tap
-("Request summary").
+never suppresses a working agent for skipping the contract; the one
+violation it marks is **"finished without report"** (turn end without a
+completion post), with the fix one tap away ("Request summary"). The marker
+persists until explicitly acknowledged — no auto-expiry (owner decision
+2026-07-17). A missing plan needs no separate marker: a member whose turn
+ends silently hits the same finished-without-report surface.
 
 Turn-end detection reuses the runtime turn state (the same signal #268's
 timer freezes on). "Posted this turn" = any `chat.post` from that member
@@ -365,10 +376,10 @@ Two equivalent surfaces:
   `{"action":"interrupt"}` through `structuredControls` — same as the
   conversation card. A long-press / overflow "Force kill" maps to `kill` for
   a wedged pane.
-- **Chat command:** a message `/stop @Sol·2` (autocomplete assists after
+- **Chat command:** a message `/stop @sol` (autocomplete assists after
   `/stop `). The command is a control, not a chat post — it renders as a
   pending system line with the control receipt, becoming
-  `— Sol · 2 stopped by you —` on ack.
+  `— Sol stopped by you —` on ack.
 
 Stop never deletes anything: the member drops to **idle**, its conversation
 card keeps the partial feed, and the room notes the interruption.
@@ -379,7 +390,7 @@ A dead member stays in the strip (gray) with history intact. Tap → popover →
 **Respawn**: ownership-principle order — try to re-attach/resume the live
 process; else `--resume` the transcript into a fresh pane (same semantics the
 supervisor uses elsewhere). The respawned member **keeps its identity**
-(name, ordinal, avatar variant); the room posts `— Sol · 2 respawned —`. If
+(name, avatar); the room posts `— Sol respawned —`. If
 the user *mentions* a dead member, the composer chip shows
 `Respawn & deliver` and the flow is: respawn → deliver via the queue →
 normal receipts. Respawn failures follow §3.2's journaled-failure UI.
@@ -448,8 +459,9 @@ edge to a hidden parent.
   autocomplete → member popover → overlay. Closing returns focus to the pill.
 
 **Keyboard (desktop).**
-- Global toggle: `c` (chat), guarded by the same "not while typing" check the
-  `N`/`F` hotkeys use in `Viewer.tsx`; no modifier conflicts.
+- No global hotkey in v1 (owner decision 2026-07-17) — the pill and the
+  `#chat` deep link are the entries. If one is added later it must pass the
+  same "not while typing" guard the `N`/`F` hotkeys use in `Viewer.tsx`.
 - In-room: Enter sends, Shift+Enter newline; ↑ in an empty composer edits
   nothing (no history editing in v1 — receipts' Edit covers failures); Tab
   order: composer → send → member strip (roving tabindex, arrow keys move
@@ -459,7 +471,7 @@ edge to a hidden parent.
 - Message list is `role="log"` with `aria-live="polite"`; violations polite,
   delivery failures assertive (matching `ReceiptChip`'s existing behavior).
 - Every avatar/dot pairs with text: presence is announced as words
-  ("Sol 2, reviewer, working 4 minutes 32 seconds"), never color alone.
+  ("Sol, working 4 minutes 32 seconds"), never color alone.
   Color is reinforcement throughout — state words always present (same rule
   `ReceiptChip` documents).
 - The pill's `aria-label` enumerates its state (§1.1); the red/unread badges
@@ -493,7 +505,7 @@ edge to a hidden parent.
 | `ChatOverlay.tsx` | desktop panel / mobile sheet shell, dim+blur, trap, expand |
 | `ChatRoomView.tsx` | header + member strip + message list + composer (shared by overlay and `#chat` full page) |
 | `MemberStrip.tsx`, `MemberAvatar.tsx`, `MemberPopover.tsx` | §1.3–1.4 |
-| `chatAvatar.ts` | pure: template hue/glyph + instance variant hash + ordinals |
+| `chatAvatar.ts` | pure: template hue/glyph (v1: Fable/Sol; variant hash + ordinals reserved for multi-member) |
 | `ChatMessage.tsx` (+ kind variants), `SystemEventLine.tsx`, `ViolationMarker.tsx` | §2 taxonomy |
 | `MentionAutocomplete.tsx`, `mentionModel.ts` | §2.6 (pure model: sections, ranking, disambiguation — unit-testable) |
 | `ChatComposer.tsx` | composer wiring mentions + receipts + `/stop` command |
@@ -526,22 +538,24 @@ never an unterminated spinner (pull the network mid-launch: failure + Retry
 appears ≤90s); header button gone; orchestrator absent from board/scheme.
 
 **Slice 2 — Members, avatars, presence, link-out.**
-Member model + avatar system + member strip + popover; presence from the
-inventory (working/idle/dead; #268 elapsed in popover); Open-conversation
-link-out with overlay collapse; "spawned by Orchestrator" badge on children.
-*Accepted when:* two Sols are visually distinct (variant + ordinal); presence
-dots track runtime state within one poll/stream tick; link-out lands on the
-`#c=` pane and back-tap reopens the room at the same scroll.
+Member model (the Fable/Sol singleton duo) + avatar system + member strip +
+popover; presence from the inventory (working/idle/dead; #268 elapsed in
+popover); Open-conversation link-out with overlay collapse; "spawned by
+Orchestrator" badge on children.
+*Accepted when:* Fable and Sol are visually distinct (hue + monogram);
+presence dots track runtime state within one poll/stream tick; link-out
+lands on the `#c=` pane and back-tap reopens the room at the same scroll.
 
 **Slice 3 — Mention = launch + contract markers.**
-`@` autocomplete (members + templates), template mention launches a member
-(§3.2 lifecycle end-to-end), plan-first card, completion card,
-finished-without-report + working-without-plan markers, unread badge +
+`@` autocomplete over the members, first mention of an unlaunched/dead
+member launches it (§3.2 lifecycle end-to-end), plan-first card, completion
+card, finished-without-report marker (persists until ack), unread badge +
 `lastReadSeq`.
-*Accepted when:* `@Sol (new) …` yields launching → plan card ≤ launch time +
-first token (no scanner wait once #336 lands); killing the agent before its
-summary produces the violation marker with working Request-summary; unread
-count survives reload and clears on open.
+*Accepted when:* `@sol …` with no live Sol yields launching → plan card ≤
+launch time + first token (no scanner wait once #336 lands); killing the
+agent before its summary produces the violation marker with working
+Request-summary that stays until acknowledged; unread count survives reload
+and clears on open.
 
 **Slice 4 — Injection, stop, receipts.**
 Re-mention of a working member delivers via the queue with full `ReceiptChip`
@@ -554,9 +568,12 @@ conversation-card control; retry of a failed injection never double-delivers
 
 **Slice 5 — Decision layer + red state + push.**
 Decision-point question cards (QuestionCard re-skin), red pill precedence,
-red member ring, pipeline-draft artifact chips (draft-only — link to board,
-no Start in chat), push notifications on decision points only (#182 §5).
-*Accepted when:* an agent question turns the pill red until answered;
+red member ring, chat decisions entering the global `buildAttentionQueue`
+(top-right badge, toasts, tab-title count — owner decision 2026-07-17),
+pipeline-draft artifact chips (draft-only — link to board, no Start in
+chat), push notifications on decision points only (#182 §5).
+*Accepted when:* an agent question turns the pill red until answered and
+appears in the attention badge/popover with a jump that opens the room;
 answering from chat resolves the pane's pending question too (single source
 of truth); a draft posted by the orchestrator is startable only from the
 board.
@@ -577,19 +594,21 @@ is not ready, slices 1–2 ship regardless; slice 3 waits.
 
 ---
 
-## Open questions for the owner
+## Owner decisions (2026-07-17, closing the open questions)
 
-1. **Red state in the global attention queue?** Proposed: chat decisions
-   also enter `buildAttentionQueue` (top-right badge + toasts) so the
-   existing "needs me" muscle memory covers chat. Alternative: pill-only.
-2. **History depth in the overlay** — proposed: last 200 messages with
-   load-earlier on scroll; retention itself is #322's call.
-3. **Bare `@sol` default** when live instances exist — spec says "most
-   recently active instance"; confirm, or prefer always-disambiguate.
-4. **Plan-timeout threshold** for the soft "working without plan" marker —
-   proposed 3 min.
-5. **`c` hotkey** for toggling the room — confirm it's free in your muscle
-   memory (N/F are taken; `c` currently unbound).
-6. **Violation acknowledgment** — proposed: tapping either affordance on the
-   marker clears red; should ignoring it also expire (e.g. 2h TTL like
-   stalled attention)?
+1. **Red state joins the global attention queue** — chat decisions enter
+   `buildAttentionQueue` (badge, toasts, tab title); jump opens the room
+   (§Slice 5).
+2. **History depth:** last 200 messages + load-earlier on scroll (§1.2);
+   retention is #322's call.
+3. **One agent = one provider.** Members are singletons with fixed identity:
+   Fable 5 · low (orchestrator) and Sol 5.6 · high. No instance fleets in
+   chat; mentions are always unambiguous (§1.3). Multi-instance machinery
+   (ordinals, avatar variants, template launch) is parked for the #338
+   phase-4 pipeline-spawn work.
+4. **No separate "working without plan" marker.** The only surfaced
+   violation is "finished without report" (§3.3); a silent turn end covers
+   the missing-plan case too.
+5. **No global hotkey in v1** — pill and `#chat` deep link only (§5).
+6. **Violation markers persist until explicit acknowledgment** — no TTL,
+   no auto-expiry (§2.6, §3.3).
