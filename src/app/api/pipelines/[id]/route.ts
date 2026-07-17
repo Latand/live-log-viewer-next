@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { patchPipeline } from "@/lib/pipelines/engine";
 import type { PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
+import { requestFileControllerTick } from "@/lib/scanner/controllerSignal";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
@@ -12,6 +13,8 @@ const ACTIONS = new Set<PipelineAction>([
   "start", "update-draft", "add-stage", "remove-stage", "reorder-stage",
   "pause", "resume", "retry-stage", "skip-stage", "override-stage", "delete", "close",
 ]);
+
+const CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
 
 export async function PATCH(
   req: NextRequest,
@@ -32,6 +35,7 @@ export async function PATCH(
   try {
     const result = await patchPipeline(id, body);
     if (!result.pipeline) return NextResponse.json({ error: result.error ?? "could not update pipeline" }, { status: result.status ?? 400 });
+    if (CONTROLLER_ACTIONS.has(body.action)) requestFileControllerTick();
     return NextResponse.json({ ok: true, pipeline: result.pipeline });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "could not update pipeline" }, { status: 500 });
