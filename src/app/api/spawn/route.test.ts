@@ -46,6 +46,14 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
       transcriptRoot: path.join(cwd, "projects"),
       env: { NODE_ENV: "test" },
     }),
+    resolveSpawnAccount: (_engine, accountId) => ({
+      engine: "claude",
+      accountId: accountId ?? "claude-test",
+      kind: "managed",
+      home: path.join(cwd, "account"),
+      transcriptRoot: path.join(cwd, "projects"),
+      env: { NODE_ENV: "test" },
+    }),
     runtimeHostClient: () => ({} as RuntimeHostClient),
     defer: (work) => { void work(); },
     spawnStructuredConversation: async (input) => ({
@@ -231,6 +239,14 @@ test("fresh processes rescue one orphaned immediate structured admission exactly
       registry: agentRegistry,
       assertStructuredRuntime: () => {},
       resolveHealthySpawnAccount: async () => ({
+        engine: "claude",
+        accountId: "claude-test",
+        kind: "managed",
+        home: path.join(${JSON.stringify(sandbox)}, "account"),
+        transcriptRoot: path.join(${JSON.stringify(sandbox)}, "projects"),
+        env: { NODE_ENV: "test" },
+      }),
+      resolveSpawnAccount: () => ({
         engine: "claude",
         accountId: "claude-test",
         kind: "managed",
@@ -698,6 +714,153 @@ test("operator structured Claude retries retain bypass and agent reuse conflicts
     const agentReplay = await POST.withDependencies(request(agentCapability, agentAttemptId), structuredRouteDependencies(cwd));
     expect(agentReplay.status).toBe(202);
     expect(await agentReplay.json()).toMatchObject({ state: "starting", effectivePermissionMode: "default" });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
+test("structured replay keeps its admitted account after routing changes", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-rotation-replay-"));
+  const store = registry();
+  const deferred: Array<() => Promise<void>> = [];
+  const effects: string[] = [];
+  const accountResolutions: string[] = [];
+  let routedAccountId = "account-a";
+  const account = (accountId: string) => ({
+    engine: "claude" as const,
+    accountId,
+    kind: "managed" as const,
+    home: path.join(cwd, accountId),
+    transcriptRoot: path.join(cwd, accountId, "projects"),
+    env: { NODE_ENV: "test" },
+  });
+  const runtimeClient = {
+    operationStatus: async () => null,
+    snapshot: async () => ({ sessions: [] }),
+  } as unknown as RuntimeHostClient;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => store,
+    resolveHealthySpawnAccount: async () => {
+      accountResolutions.push(`healthy:${routedAccountId}`);
+      return account(routedAccountId);
+    },
+    resolveSpawnAccount: (_engine: "claude" | "codex", accountId: string | null) => {
+      accountResolutions.push(`exact:${accountId ?? "null"}`);
+      return account(accountId ?? routedAccountId);
+    },
+    runtimeHostClient: () => runtimeClient,
+    defer: (work: () => Promise<void>) => { deferred.push(work); },
+    spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
+      effects.push(`worker:${input.account.accountId}`);
+      const sessionId = crypto.randomUUID();
+      const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+      fs.writeFileSync(artifactPath, JSON.stringify({ type: "user", message: input.prompt }) + "\n");
+      effects.push(`first-prompt:${input.prompt}`);
+      const settled = input.registry.settleSpawn(input.receipt.launchId, {
+        key: { engine: input.engine, sessionId },
+        artifactPath,
+        cwd: input.spec.cwd,
+        accountId: input.account.accountId,
+        launchProfile: input.spec.launchProfile,
+        status: "starting",
+        host: null,
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: null,
+      });
+      if (settled.kind !== "settled") throw new Error("account replay settlement conflicted");
+      return {
+        ok: true as const,
+        target: null,
+        path: artifactPath,
+        launchId: input.receipt.launchId,
+        conversationId: input.receipt.conversationId,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "delivered" as const,
+        state: "settled" as const,
+      };
+    },
+  } as SpawnRouteTestDependencies;
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const alternateCwd = fs.mkdtempSync(path.join(routeSandbox, "account-rotation-conflict-"));
+  const alternateParent = store.ensureConversation("claude", path.join(cwd, "alternate-parent.jsonl"), "account-a");
+  const request = (overrides: Record<string, unknown> = {}) => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      origin: "http://127.0.0.1:8898",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      prompt: "repair release",
+      clientAttemptId: "account_rotation_replay_20260717_a1",
+      ...overrides,
+    }),
+  });
+  try {
+    const admitted = await POST.withDependencies(request(), dependencies);
+    const admittedBody = await admitted.json();
+    expect(admitted.status).toBe(202);
+    expect(store.spawnReceiptForClientAttempt("account_rotation_replay_20260717_a1")).toMatchObject({
+      launchId: admittedBody.launchId,
+      accountId: "account-a",
+    });
+    routedAccountId = "account-b";
+
+    const replay = await POST.withDependencies(request(), dependencies);
+    expect(accountResolutions).toEqual(["healthy:account-a", "exact:account-a"]);
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toMatchObject({
+      launchId: admittedBody.launchId,
+      conversationId: admittedBody.conversationId,
+      state: "starting",
+    });
+
+    const changedRequests = [
+      request({ prompt: "changed release scope" }),
+      request({ model: "opus" }),
+      request({ effort: "high" }),
+      request({ cwd: alternateCwd }),
+      request({ engine: "codex" }),
+      request({ parentConversationId: alternateParent.id }),
+      request({ accountId: "account-b" }),
+      request({ images: [{ mime: "image/png", base64: "eA==" }] }),
+    ];
+    for (const changedRequest of changedRequests) {
+      const conflict = await POST.withDependencies(changedRequest, dependencies);
+      expect(conflict.status).toBe(409);
+    }
+
+    expect(deferred).toHaveLength(1);
+    await Promise.all(deferred.map((work) => work()));
+    expect(effects).toEqual(["worker:account-a", "first-prompt:repair release"]);
+    expect(store.snapshot().receipts[admittedBody.launchId]).toMatchObject({
+      accountId: "account-a",
+      state: "completed",
+    });
   } finally {
     if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previousTransport;

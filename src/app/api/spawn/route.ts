@@ -6,7 +6,7 @@ import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import { resolveHealthySpawnAccount } from "@/lib/accounts/manager";
+import { accountManager, resolveHealthySpawnAccount } from "@/lib/accounts/manager";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
@@ -47,6 +47,7 @@ const SUGGEST_MAX = 10;
 interface SpawnRouteDependencies {
   registry: typeof agentRegistry;
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
+  resolveSpawnAccount: typeof accountManager.resolveSpawn;
   runtimeHostClient: typeof runtimeHostClient;
   spawnStructuredConversation: typeof spawnStructuredConversation;
   assertStructuredRuntime: typeof assertDarwinStructuredRuntime;
@@ -56,6 +57,7 @@ interface SpawnRouteDependencies {
 const productionSpawnRouteDependencies: SpawnRouteDependencies = {
   registry: agentRegistry,
   resolveHealthySpawnAccount,
+  resolveSpawnAccount: (engine, accountId) => accountManager.resolveSpawn(engine, accountId),
   runtimeHostClient,
   spawnStructuredConversation,
   assertStructuredRuntime: assertDarwinStructuredRuntime,
@@ -197,7 +199,11 @@ async function postSpawn(
   let imagePaths: string[] = [];
   let launchId: string | null = null;
   try {
-    const account = await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
+    const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
+    const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
+    const account = existingAttempt && body.accountId === undefined && existingAttempt.accountId !== null
+      ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
+      : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
     const lineage = resolveSpawnLineage(spawnLineageSelectorForCaller(authenticatedCaller, {
       ...body,
       role: role.value?.role,
@@ -261,7 +267,7 @@ async function postSpawn(
       reviewsConversationId: reviewedConversationId,
       liveChildrenCap: authenticatedCaller?.liveChildrenCap,
       launchProfile: spec.launchProfile,
-      clientAttemptId: body.clientAttemptId ?? null,
+      clientAttemptId,
       requestDigest: digest,
     });
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });

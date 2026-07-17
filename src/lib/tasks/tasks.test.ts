@@ -320,6 +320,35 @@ describe("task delivery assembly", () => {
     expect(result.task.assignments).toEqual([{ path: "/one", panePid: null, state: "delivered", error: null, at: "new" }]);
   });
 
+  test("failed launch preserves ownership held by another active assignment", () => {
+    for (const state of ["spawning", "delivered", "handoff"] as const) {
+      const existing = task({
+        status: "assigned",
+        assignments: [
+          { launchId: `owner-${state}`, path: `/${state}`, panePid: null, state, error: null, at: "old" },
+          { launchId: "failed-launch", path: null, panePid: null, state: "spawning", error: null, at: "admitted" },
+        ],
+      });
+      const result = applyAssignmentPatches([existing], existing.id, [{
+        launchId: "failed-launch",
+        path: null,
+        panePid: null,
+        state: "failed",
+        error: "process exited before pane creation",
+        at: "failed",
+      }], "failed");
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error);
+      expect(result.task.status).toBe("assigned");
+      expect(result.task.assignments).toContainEqual(expect.objectContaining({
+        launchId: "failed-launch",
+        state: "failed",
+        error: "process exited before pane creation",
+      }));
+    }
+  });
+
   test("task launch replay updates one assignment by durable launch identity", () => {
     const launchId = "9173e9a2-2f14-4a70-818a-bd4052a1ad4a";
     const conversationId = "conversation_ac6029b9";

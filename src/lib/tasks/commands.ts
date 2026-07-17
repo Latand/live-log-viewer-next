@@ -366,15 +366,18 @@ export function applyAssignmentPatches(
   const index = existing.findIndex((task) => task.id === id);
   if (index < 0) return { ok: false, error: "task not found", status: 404 };
   const task = existing[index]!;
-  /* A handoff routes the task into an agent's composer without delivering, but
-     it still moves the card off «inbox» — the task now belongs to that agent. */
-  const hasSuccess = patches.some(
-    (patch) => patch.state === "delivered" || patch.state === "spawning" || patch.state === "handoff",
+  const assignments = mergeAssignments(task.assignments, patches);
+  const hasOwner = assignments.some(
+    (assignment) => assignment.state === "delivered" || assignment.state === "spawning" || assignment.state === "handoff",
   );
+  let status = task.status;
+  if (status === "inbox" || status === "assigned") {
+    status = hasOwner ? "assigned" : "inbox";
+  }
   const updated: BoardTask = {
     ...task,
-    status: task.status === "inbox" && hasSuccess ? "assigned" : task.status,
-    assignments: mergeAssignments(task.assignments, patches),
+    status,
+    assignments,
     updatedAt: now,
   };
   const tasks = existing.slice();

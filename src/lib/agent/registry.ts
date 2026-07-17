@@ -2005,6 +2005,12 @@ export class AgentRegistry {
     return readFile(this.filename);
   }
 
+  spawnReceiptForClientAttempt(clientAttemptId: string): SpawnReceipt | null {
+    const receipt = Object.values(this.readOnlySnapshot().receipts)
+      .find((candidate) => candidate.clientAttemptId === clientAttemptId);
+    return receipt ? clone(receipt) : null;
+  }
+
   conversationIdForSpawnCapabilityDigest(digest: string): ViewerConversationId | null {
     if (!/^[0-9a-f]{64}$/.test(digest)) return null;
     const file = this.readOnlySnapshot();
