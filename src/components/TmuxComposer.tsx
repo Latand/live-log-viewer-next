@@ -688,6 +688,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         ok?: boolean;
         structured?: boolean;
         error?: string;
+        /** HTTP status of the response, absent when the response was lost. */
+        status?: number;
         imagePaths?: string[];
         target?: string;
         spawned?: boolean;
@@ -706,6 +708,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
               ok: result.ok,
               structured: true,
               error: result.error,
+              status: result.status,
               receipt: result.receipt,
               outcome: result.receipt?.status === "delivering" || result.receipt?.status === "delivered"
                 ? result.receipt.status
@@ -724,7 +727,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             }),
           }).then(async (response) => {
             const body = await response.json() as typeof json;
-            return { ...body, ok: response.ok && body.ok === true };
+            return { ...body, status: response.status, ok: response.ok && body.ok === true };
           });
       if (!json.ok) {
         if (json.structured && json.receipt) {
@@ -750,13 +753,17 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             return;
           }
         }
-        if (!receiptIsTerminal(json.receipt?.status ?? "pending")) {
-          /* The response was lost or the delivery is still moving server-side:
-             remember the attempt (text AND attachment snapshot) so a later
-             delivered receipt clears exactly what was sent. */
+        /* The earliest attempt per key is the immutable record of what the
+           server may have accepted: a retry never overwrites it, and a
+           definitive 4xx rejection (e.g. a changed-payload 409) creates no
+           entry at all — only a lost response (network/5xx) or an explicitly
+           still-moving receipt does. */
+        if (!receiptIsTerminal(json.receipt?.status ?? "pending")
+          && !pendingDeliveries.current.some((entry) => entry.key === clientMessageId)
+          && (json.status === undefined || json.status >= 500)) {
           pendingDeliveries.current = [
             { key: clientMessageId, text: payloadText, images: attachments.images.map((image) => ({ ...image })) },
-            ...pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId),
+            ...pendingDeliveries.current,
           ].slice(0, PENDING_DELIVERY_LIMIT);
         }
         // A hard failure keeps the draft text (never cleared) so the message is
@@ -811,11 +818,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     } catch {
       /* The request died on the wire AFTER the server may have accepted it:
          remember the attempt (text AND attachment snapshot) so a delivered
-         receipt still clears exactly what was sent. */
-      pendingDeliveries.current = [
-        { key: clientMessageId, text: payloadText, images: attachments.images.map((image) => ({ ...image })) },
-        ...pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId),
-      ].slice(0, PENDING_DELIVERY_LIMIT);
+         receipt still clears exactly what was sent. An earlier attempt under
+         the same key stays the immutable record. */
+      if (!pendingDeliveries.current.some((entry) => entry.key === clientMessageId)) {
+        pendingDeliveries.current = [
+          { key: clientMessageId, text: payloadText, images: attachments.images.map((image) => ({ ...image })) },
+          ...pendingDeliveries.current,
+        ].slice(0, PENDING_DELIVERY_LIMIT);
+      }
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {
       setBusy(false);
