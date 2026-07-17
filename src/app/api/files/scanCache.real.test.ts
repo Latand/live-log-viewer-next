@@ -434,6 +434,102 @@ test("an incomplete tail generation stays unpersisted and rereads the same ident
   }
 }, 20_000);
 
+test("a head-model EIO preserves the last complete snapshot until same-identity recovery", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "incomplete-head-model-state");
+  const transcript = path.join(sessions, "incomplete-head-model.jsonl");
+  const nullTranscript = path.join(sessions, "complete-null-model.jsonl");
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const tracked = new Set<number>();
+  let failExtension = false;
+  let extensionReads = 0;
+  const contents = (model: string) => [
+    JSON.stringify({ type: "response_item", payload: { type: "message", text: "x".repeat(140_000) } }),
+    JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/head-model", model } }),
+    "x".repeat(150_000),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }),
+    "",
+  ].join("\n");
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    resetFilesRouteCacheForTests();
+    fs.writeFileSync(transcript, contents("gpt-alpha"));
+    fs.utimesSync(transcript, 1_700_000_000, 1_700_000_000);
+    const initial = await currentFileScan({ fresh: true });
+    expect(initial.snapshot.files.find((entry) => entry.path === transcript)).toMatchObject({
+      launchModel: "gpt-alpha",
+      derivationComplete: true,
+    });
+    const snapshotPath = path.join(testStateDir, "files-scan-snapshot.json");
+    const completeSnapshot = fs.readFileSync(snapshotPath);
+
+    fs.writeFileSync(transcript, contents("gpt-bravo"));
+    fs.utimesSync(transcript, 1_700_000_001, 1_700_000_001);
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.delete(transcript);
+    resetFilesRouteCacheForTests();
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      if (filename === transcript) tracked.add(fd);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      if (tracked.has(fd) && position === 128 * 1024) {
+        extensionReads += 1;
+        if (failExtension) {
+          const error = new Error("injected scanner head extension EIO") as NodeJS.ErrnoException;
+          error.code = "EIO";
+          throw error;
+        }
+      }
+      return originalRead(fd, buffer, offset, length, position);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    failExtension = true;
+    await expect(currentFileScan({ fresh: true })).rejects.toThrow("filesystem scan incomplete");
+    expect(fs.readFileSync(snapshotPath)).toEqual(completeSnapshot);
+
+    failExtension = false;
+    const recovered = await currentFileScan({ fresh: true });
+    expect(extensionReads).toBeGreaterThanOrEqual(2);
+    expect(recovered.snapshot.files.find((entry) => entry.path === transcript)).toMatchObject({
+      launchModel: "gpt-bravo",
+      derivationComplete: true,
+    });
+
+    fs.writeFileSync(nullTranscript, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/no-model" } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }),
+      "",
+    ].join("\n"));
+    const completeNull = await currentFileScan({ fresh: true });
+    expect(completeNull.snapshot.files.find((entry) => entry.path === nullTranscript)).toMatchObject({
+      launchModel: null,
+      derivationComplete: true,
+    });
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    fs.rmSync(transcript, { force: true });
+    fs.rmSync(nullTranscript, { force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) {
+      cache.delete(transcript);
+      cache.delete(nullTranscript);
+    }
+  }
+}, 20_000);
+
 test("one file generation reads each transcript tail once beyond the tail-cache cap", async () => {
   const previousTestStateDir = process.env.LLV_STATE_DIR;
   const testStateDir = path.join(sandbox, "single-tail-read-state");

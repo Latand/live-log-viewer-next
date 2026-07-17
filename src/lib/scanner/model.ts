@@ -5,9 +5,14 @@ import { headRecordsResult, tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { readJson, recordValue, stringValue } from "./json";
 
-interface EntryModels {
+export interface EntryModels {
   display: string | null;
   launch: string | null;
+}
+
+export interface EntryModelsResult {
+  value: EntryModels;
+  complete: boolean;
 }
 
 const modelCache = globalCache<[number, number, EntryModels]>("model");
@@ -29,18 +34,18 @@ function pickModel(entry: FileEntry, obj: Record<string, unknown>): string | nul
   return null;
 }
 
-export function entryModels(entry: FileEntry): EntryModels {
+export function entryModelsResult(entry: FileEntry): EntryModelsResult {
   if (entry.root === "claude-projects" && entry.path.includes(path.sep + "subagents" + path.sep)) {
     const meta = readJson(entry.path.slice(0, -".jsonl".length) + ".meta.json") ?? {};
     const model = stringValue(meta.model);
-    if (model) return { display: shortModel(model), launch: model };
+    if (model) return { value: { display: shortModel(model), launch: model }, complete: true };
   }
   if ((entry.root !== "claude-projects" && entry.root !== "codex-sessions") || !entry.path.endsWith(".jsonl")) {
-    return { display: null, launch: null };
+    return { value: { display: null, launch: null }, complete: true };
   }
   const mtimeMs = entry.mtime * 1000;
   const cached = modelCache.get(entry.path);
-  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return cached[2];
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return { value: cached[2], complete: true };
   let model: string | null = null;
   const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
   let complete = tail.complete;
@@ -58,7 +63,11 @@ export function entryModels(entry: FileEntry): EntryModels {
   }
   const value = { display: shortModel(model), launch: model };
   if (complete) modelCache.set(entry.path, [entry.size, mtimeMs, value]);
-  return value;
+  return { value, complete };
+}
+
+export function entryModels(entry: FileEntry): EntryModels {
+  return entryModelsResult(entry).value;
 }
 
 export function entryModel(entry: FileEntry): string | null {

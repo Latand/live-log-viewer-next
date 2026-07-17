@@ -51,14 +51,23 @@ function argvEffort(entry: FileEntry): string | null {
  * blocks as a transcript-backed fallback.
  */
 export function entryEffort(entry: FileEntry): string | null {
+  return entryEffortResult(entry).value;
+}
+
+export interface EntryEffortResult {
+  value: string | null;
+  complete: boolean;
+}
+
+export function entryEffortResult(entry: FileEntry): EntryEffortResult {
   if ((entry.root !== "claude-projects" && entry.root !== "codex-sessions") || !entry.path.endsWith(".jsonl")) {
-    return null;
+    return { value: null, complete: true };
   }
   const argv = normalizeEffort(argvEffort(entry));
-  if (entry.root === "claude-projects" && argv) return argv;
+  if (entry.root === "claude-projects" && argv) return { value: argv, complete: true };
   const mtimeMs = entry.mtime * 1000;
   const cached = effortCache.get(entry.path);
-  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return cached[2] ?? argv;
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return { value: cached[2] ?? argv, complete: true };
   let effort: string | null = null;
   const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
   let complete = tail.complete;
@@ -75,7 +84,7 @@ export function entryEffort(entry: FileEntry): string | null {
     }
   }
   if (complete) effortCache.set(entry.path, [entry.size, mtimeMs, effort]);
-  return effort ?? argv;
+  return { value: effort ?? argv, complete };
 }
 
 /** Codex speed tier from the live process argv. Transcript records currently
