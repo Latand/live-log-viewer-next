@@ -16,6 +16,8 @@ Agent Log Viewer (`~/.agents/tools/live-log-viewer-next`) is the user's dashboar
 - Prompts to agents: English. Codex effort is set at boot (`-c model_reasoning_effort=...`), never mid-conversation.
 - **Prompt = role + scope, nothing else.** Never name the model or reasoning level in the prompt text ("Act as Sol xhigh reviewer" is wrong twice: effort is a launch parameter that words cannot enable, and the model already knows what it is). Write the role — "You are a fresh-context Reviewer. …" — and pass model/effort only as spawn parameters.
 - Review fan-out is budget-bound: Fable runs at most 1–2 independent review passes; swarms of 5+ reviewers are Sol-only and must run as visible pipeline stages.
+- **Reviewer isolation (#393).** Reviewer and verifier roles perform every assigned check inside their own single session and have zero child-launch capability: they never launch helpers, workflows, teams, swarms, native subagents, Viewer children, or MCP children. Multiple review perspectives are always explicit visible pipeline stages, never fan-out from inside a review session.
+- **Bounded delegation (#393).** Roles that may delegate (builder, architect, orchestrator) spawn only through the Viewer with lineage recorded (`src`, plus `role`/`reviews` where applicable) and keep the delegation chain within the configured maximum depth — initially two.
 - After a worker finishes, keep its session/window: the user inspects and kills it from the UI.
 - One orchestrator per file set: while a worker runs, monitor it and review its diff afterwards instead of editing the same files yourself.
 
@@ -34,6 +36,8 @@ Templates map 1:1 to `agent:*` labels on GitHub issues (`Latand/live-log-viewer-
 Assignment defaults: all LLV UX/UI and Viewer bug investigation, implementation, and review go to Fable by default. Sol is reserved for visible review swarms of five or more reviewers and for explicit operator exceptions. Research goes to Sonnet, and Terra stays parked until the operator explicitly assigns a task to it. Fable runs at most one or two independent review passes on any change.
 
 **Review-pass policy (#381).** Fable performs at most **one or two independent review passes** on any change. A review swarm of **five or more reviewers is Sol-only** and runs as visible Viewer pipeline stages (explicit `/api/spawn` workers or flows the operator sees on the board). Structured Fable hosts deny the native Claude multi-agent tools (`Task`, `Agent`, `Workflow`, `TeamCreate`, `TeamDelete`, `SendMessage`); spawn every helper through the Viewer API so it appears on the board with correct lineage.
+
+**Reviewer isolation and bounded delegation (#393).** An agent spawned as a **reviewer or verifier** does all of its assigned checks itself, inside that one visible session — it must never launch helpers, workflows, teams, swarms, native subagents, Viewer children, or MCP children. If a review needs more coverage or another perspective, the reviewer reports that in its verdict and the orchestrator adds an explicit pipeline stage the operator can see. Roles that are allowed to delegate (builder, architect, orchestrator) record lineage on every spawn and obey the configured maximum delegation depth, **initially two** (e.g. orchestrator → builder → helper; nothing deeper). Product enforcement of these limits is tracked in #393.
 
 ## Spawning
 
