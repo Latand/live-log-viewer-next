@@ -311,7 +311,7 @@ test("a bounded receipt summary keeps retry while withholding lossy edit", () =>
 /* ── Exact draft clearing on accepted delivery ──────────────────────────── */
 
 import type { PendingImage } from "./imageAttachments";
-import { attachmentsAfterDelivery, draftAfterDelivery, settlePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
+import { adoptComposerState, attachmentsAfterDelivery, draftAfterDelivery, readPendingDeliveries, settlePendingDeliveries, writePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
 
 function deliveredReceipt(key: string, status: RuntimeReceipt["status"] = "delivered", text?: string): RuntimeReceipt {
   return {
@@ -350,19 +350,34 @@ test("settlePendingDeliveries clears exactly the delivered keys and keeps the re
     { key: "key-a", text: "first ask", images: [pendingImage("a")] },
     { key: "key-b", text: "second ask", images: [] },
   ];
-  const { delivered, remaining } = settlePendingDeliveries(pending, [deliveredReceipt("key-a")]);
-  expect(delivered).toEqual([{ entry: pending[0]!, text: "first ask" }]);
+  const { settled, remaining } = settlePendingDeliveries(pending, [deliveredReceipt("key-a")]);
+  expect(settled).toEqual([{ entry: pending[0]!, text: "first ask" }]);
   expect(remaining).toEqual([{ key: "key-b", text: "second ask", images: [] }]);
 });
 
-test("settlePendingDeliveries ignores non-delivered and unknown receipts", () => {
+test("settlePendingDeliveries treats durable queue admission as acceptance (issue #272)", () => {
+  /* Production shape of operation ac0223c0: the first response timed out, the
+     idempotent retry returned `queued`. Queue admission is durable — the
+     server holds the message — so the generation settles and the draft clears. */
+  for (const status of ["queued", "delivering", "turn-started", "steered", "answered"] as const) {
+    const pending: PendingDelivery[] = [{ key: "key-a", text: "first ask", images: [] }];
+    const { settled, remaining } = settlePendingDeliveries(pending, [deliveredReceipt("key-a", status)]);
+    expect(settled).toEqual([{ entry: pending[0]!, text: "first ask" }]);
+    expect(remaining).toEqual([]);
+  }
+});
+
+test("settlePendingDeliveries ignores unsettled, failed, and unknown receipts", () => {
   const pending: PendingDelivery[] = [{ key: "key-a", text: "first ask", images: [] }];
-  const { delivered, remaining } = settlePendingDeliveries(pending, [
-    deliveredReceipt("key-a", "queued"),
+  const { settled, remaining } = settlePendingDeliveries(pending, [
+    deliveredReceipt("key-a", "pending"),
+    deliveredReceipt("key-a", "uncertain"),
     deliveredReceipt("key-a", "failed"),
+    deliveredReceipt("key-a", "rejected"),
+    deliveredReceipt("key-a", "interrupted"),
     deliveredReceipt("key-unknown"),
   ]);
-  expect(delivered).toEqual([]);
+  expect(settled).toEqual([]);
   expect(remaining).toEqual(pending);
 });
 
@@ -371,8 +386,26 @@ test("settlePendingDeliveries prefers the receipt's own delivered text over the 
      attempt carried a rewritten draft — the server's record is what actually
      reached the agent, so clearing keys off the receipt text. */
   const pending: PendingDelivery[] = [{ key: "key-a", text: "rewritten draft", images: [] }];
-  const { delivered } = settlePendingDeliveries(pending, [deliveredReceipt("key-a", "delivered", "old turn ask")]);
-  expect(delivered.map((settled) => settled.text)).toEqual(["old turn ask"]);
+  const { settled } = settlePendingDeliveries(pending, [deliveredReceipt("key-a", "delivered", "old turn ask")]);
+  expect(settled.map((settlement) => settlement.text)).toEqual(["old turn ask"]);
+});
+
+test("a queued admission clears by the attempt's full text, never a bounded echo", () => {
+  /* Pre-delivery receipts carry a bounded summary of the message; clearing off
+     a truncated echo would strand the tail of the accepted prompt in the
+     composer. The generation's own record is exact. */
+  const pending: PendingDelivery[] = [{ key: "key-a", text: "a long accepted production prompt", images: [] }];
+  const { settled } = settlePendingDeliveries(pending, [deliveredReceipt("key-a", "queued", "a long accepted")]);
+  expect(settled.map((settlement) => settlement.text)).toEqual(["a long accepted production prompt"]);
+});
+
+test("a delivered record outranks a queued echo for the same key in one receipt set", () => {
+  const pending: PendingDelivery[] = [{ key: "key-a", text: "local attempt text", images: [] }];
+  const { settled } = settlePendingDeliveries(pending, [
+    deliveredReceipt("key-a", "queued", "local attempt"),
+    deliveredReceipt("key-a", "delivered", "server record"),
+  ]);
+  expect(settled.map((settlement) => settlement.text)).toEqual(["server record"]);
 });
 
 test("attachmentsAfterDelivery removes exactly the sent snapshot and keeps later attachments", () => {
@@ -386,11 +419,80 @@ test("attachmentsAfterDelivery removes exactly the sent snapshot and keeps later
   expect(attachmentsAfterDelivery([later], sent)).toEqual([later]);
 });
 
-test("settlePendingDeliveries is idempotent across repeated delivered receipts", () => {
+test("settlePendingDeliveries is idempotent across repeated admission receipts", () => {
   const pending: PendingDelivery[] = [{ key: "key-a", text: "first ask", images: [] }];
-  const first = settlePendingDeliveries(pending, [deliveredReceipt("key-a")]);
+  const first = settlePendingDeliveries(pending, [deliveredReceipt("key-a", "queued")]);
   const second = settlePendingDeliveries(first.remaining, [deliveredReceipt("key-a")]);
-  expect(first.delivered.map((settled) => settled.text)).toEqual(["first ask"]);
-  expect(second.delivered).toEqual([]);
+  expect(first.settled.map((settlement) => settlement.text)).toEqual(["first ask"]);
+  expect(second.settled).toEqual([]);
   expect(second.remaining).toEqual([]);
+});
+
+test("pending generations persist text-only per conversation and reload bounded", () => {
+  /* A remount or refresh must not orphan an accepted message in the composer:
+     the unsettled generation reloads (attachment snapshots are memory-only). */
+  const backing = new Map<string, string>();
+  const globalStore = globalThis as { sessionStorage?: unknown };
+  const previous = globalStore.sessionStorage;
+  globalStore.sessionStorage = {
+    getItem: (key: string) => backing.get(key) ?? null,
+    setItem: (key: string, value: string) => void backing.set(key, String(value)),
+    removeItem: (key: string) => void backing.delete(key),
+  };
+  try {
+    const entries: PendingDelivery[] = Array.from({ length: 10 }, (_, index) => ({
+      key: `key-${index}`,
+      text: `ask ${index}`,
+      images: index === 0 ? [pendingImage("a")] : [],
+    }));
+    writePendingDeliveries("conv-persist", entries);
+    const reloaded = readPendingDeliveries("conv-persist");
+    expect(reloaded).toHaveLength(8);
+    expect(reloaded[0]).toEqual({ key: "key-0", text: "ask 0", images: [] });
+    writePendingDeliveries("conv-persist", []);
+    expect(readPendingDeliveries("conv-persist")).toEqual([]);
+    backing.set("llvPendingSend:conv-corrupt", "{not json");
+    expect(readPendingDeliveries("conv-corrupt")).toEqual([]);
+  } finally {
+    if (previous === undefined) delete globalStore.sessionStorage;
+    else globalStore.sessionStorage = previous;
+  }
+});
+
+test("identity adoption moves composer records across id rotations in both directions", () => {
+  const backing = new Map<string, string>();
+  const globalStore = globalThis as { sessionStorage?: unknown };
+  const previous = globalStore.sessionStorage;
+  globalStore.sessionStorage = {
+    getItem: (key: string) => backing.get(key) ?? null,
+    setItem: (key: string, value: string) => void backing.set(key, String(value)),
+    removeItem: (key: string) => void backing.delete(key),
+  };
+  try {
+    /* Pre-identity records live under the bare path; the first enrichment
+       moves them onto the provisional id and remembers the owner. */
+    backing.set("llvDraft:/conv.jsonl", "typed before any id");
+    adoptComposerState("/conv.jsonl", "conv-provisional");
+    expect(backing.get("llvDraft:conv-provisional")).toBe("typed before any id");
+    expect(backing.has("llvDraft:/conv.jsonl")).toBe(false);
+
+    /* The canonical id adopts from the recorded owner, not just the path. */
+    adoptComposerState("/conv.jsonl", "conv-canonical");
+    expect(backing.get("llvDraft:conv-canonical")).toBe("typed before any id");
+    expect(backing.has("llvDraft:conv-provisional")).toBe(false);
+
+    /* A flap that drops the id folds the records back onto the path… */
+    adoptComposerState("/conv.jsonl", "/conv.jsonl");
+    expect(backing.get("llvDraft:/conv.jsonl")).toBe("typed before any id");
+    expect(backing.has("llvComposerOwner:/conv.jsonl")).toBe(false);
+
+    /* …and a record already filed under the new identity always wins. */
+    backing.set("llvDraft:conv-final", "newer draft");
+    adoptComposerState("/conv.jsonl", "conv-final");
+    expect(backing.get("llvDraft:conv-final")).toBe("newer draft");
+    expect(backing.has("llvDraft:/conv.jsonl")).toBe(false);
+  } finally {
+    if (previous === undefined) delete globalStore.sessionStorage;
+    else globalStore.sessionStorage = previous;
+  }
 });

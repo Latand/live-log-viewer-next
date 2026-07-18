@@ -48,7 +48,14 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
     const node = cardRef.current;
     if (!node) return;
     const focusables = () => Array.from(node.querySelectorAll<HTMLElement>('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')).filter((el) => !el.hasAttribute("disabled"));
-    focusables()[0]?.focus({ preventScroll: true });
+    /* The card arrives on a runtime event, not a user action: it must never
+       yank the caret out of a field mid-typing (issue #272). It takes initial
+       focus only when nothing text-editable holds it; a typing user reaches it
+       with Tab, at which point the trap below behaves as always. */
+    const active = document.activeElement;
+    const editing = active instanceof HTMLElement
+      && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable);
+    if (!editing) focusables()[0]?.focus({ preventScroll: true });
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && onDeny) {
         event.preventDefault();

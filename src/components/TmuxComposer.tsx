@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { ArrowRight, ArrowUpToLine, ChevronRight, FoldVertical, Loader2, Play, Square, SquareTerminal, X } from "@/components/icons";
 import { Check, Plus, RotateCcw } from "lucide-react";
@@ -22,7 +22,7 @@ import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import { ComposerBar } from "./ComposerBar";
 import { ImagePickerButton, type PendingImage } from "./imageAttachments";
 import { ReceiptChip, runtimeReceiptStatusText } from "./runtime/ReceiptChip";
-import { mintIdempotencyKey, receiptIsTerminal } from "./runtime/runtimeModel";
+import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 
 /**
  * A delivery receipt shown above the composer. `state` tracks whether the
@@ -284,9 +284,13 @@ export function RuntimeComposerReceipts({
                     className="flex min-w-0 flex-col items-end gap-0.5 rounded-control bg-card/70 px-2 py-1"
                     {...(pending ? { "data-optimistic-message": "true" } : {})}
                   >
-                    <div className="flex w-full min-w-0 items-start justify-end gap-1.5">
+                    {/* The action chip (state badge + Retry/Edit) wraps under
+                        the message on narrow screens instead of squeezing the
+                        text into a sliver — the payload must stay readable at
+                        390px in exactly the failed state that needs it. */}
+                    <div className="flex w-full min-w-0 flex-wrap items-start justify-end gap-1.5">
                       <span
-                        className="min-w-0 flex-1 whitespace-pre-wrap break-words text-right text-secondary"
+                        className="min-w-[8rem] flex-1 whitespace-pre-wrap break-words text-right text-secondary"
                         data-receipt-message
                       >
                         {receipt.text}
@@ -386,45 +390,89 @@ export function draftAfterDelivery(draft: string, delivered: string): string {
   return draft;
 }
 
-/** A send whose immediate response was lost or deferred, remembered so a later
-    delivered receipt for its idempotency key still clears the draft exactly. */
+/** One submitted draft generation whose fate is not yet settled: recorded when
+    the attempt leaves for the wire, so a durable admission receipt for its
+    idempotency key — however late it arrives, and on whichever plane — clears
+    exactly this generation and nothing typed or attached afterwards. */
 export interface PendingDelivery {
   key: string;
-  /** The draft text this attempt carried, the clearing fallback when the
-      delivered receipt omits its own text. */
+  /** The exact draft text this attempt carried — what admission clears. */
   text: string;
   /** Immutable snapshot of the attachments this attempt carried: a late
-      delivered receipt removes exactly these from the composer, so images
-      attached after the send stay put. */
+      admission removes exactly these from the composer, so images attached
+      after the send stay put. */
   images: readonly PendingImage[];
 }
 
 const PENDING_DELIVERY_LIMIT = 8;
+const SETTLED_SEND_KEY_LIMIT = 32;
+
+/** Text-only projection persisted per conversation so an unsettled generation
+    survives a composer remount or a full page refresh (the attachment snapshot
+    is memory-only — previews don't survive a refresh either). */
+const pendingSendKey = (id: string) => "llvPendingSend:" + id;
+
+export function readPendingDeliveries(id: string): PendingDelivery[] {
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(pendingSendKey(id)) ?? "[]") as { key?: unknown; text?: unknown }[];
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((entry): entry is { key: string; text: string } =>
+        Boolean(entry) && typeof entry.key === "string" && typeof entry.text === "string")
+      .slice(0, PENDING_DELIVERY_LIMIT)
+      .map((entry) => ({ key: entry.key, text: entry.text, images: [] }));
+  } catch {
+    return [];
+  }
+}
+
+export function writePendingDeliveries(id: string, pending: readonly PendingDelivery[]): void {
+  try {
+    if (pending.length) {
+      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text }) => ({ key, text }))));
+    } else {
+      sessionStorage.removeItem(pendingSendKey(id));
+    }
+  } catch { /* quota/opaque-origin: the in-memory generation still settles */ }
+}
 
 /**
- * Settle pending deliveries against the current receipt set: a `delivered`
- * receipt for a pending key yields the attempt with its delivered text (the
- * receipt's own text is the server's record of what actually reached the
- * agent, so it wins over the local attempt's) and drops the entry, so repeated
- * delivered receipts clear at most once. Non-delivered and unknown receipts
- * change nothing.
+ * Settle pending generations against the current receipt set: a durably
+ * admitted receipt (queued or beyond — {@link receiptIsAdmitted}) for a pending
+ * key yields that generation for clearing and drops the entry, so repeated
+ * receipts for one key clear at most once. For a pre-delivery admission the
+ * generation's own text is what leaves the draft (the receipt's echo may be a
+ * bounded summary, and clearing off a truncated echo would strand a tail); a
+ * `delivered` receipt's text wins, since it is the server's record of what
+ * actually reached the agent on a replayed key. Timeout (`uncertain`),
+ * `pending`, failed/rejected, and unknown receipts change nothing.
  */
 export function settlePendingDeliveries(
   pending: readonly PendingDelivery[],
   receipts: readonly RuntimeReceipt[],
-): { delivered: { entry: PendingDelivery; text: string }[]; remaining: PendingDelivery[] } {
-  const deliveredByKey = new Map<string, RuntimeReceipt>();
+): { settled: { entry: PendingDelivery; text: string }[]; remaining: PendingDelivery[] } {
+  const admittedByKey = new Map<string, RuntimeReceipt>();
   for (const receipt of receipts) {
-    if (receipt.status === "delivered") deliveredByKey.set(receipt.idempotencyKey, receipt);
+    if (!receiptIsAdmitted(receipt.status)) continue;
+    const current = admittedByKey.get(receipt.idempotencyKey);
+    if (!current || (receipt.status === "delivered" && current.status !== "delivered")) {
+      admittedByKey.set(receipt.idempotencyKey, receipt);
+    }
   }
-  const delivered: { entry: PendingDelivery; text: string }[] = [];
+  const settled: { entry: PendingDelivery; text: string }[] = [];
   const remaining: PendingDelivery[] = [];
   for (const entry of pending) {
-    const receipt = deliveredByKey.get(entry.key);
-    if (receipt) delivered.push({ entry, text: typeof receipt.text === "string" && receipt.text ? receipt.text : entry.text });
-    else remaining.push(entry);
+    const receipt = admittedByKey.get(entry.key);
+    if (!receipt) {
+      remaining.push(entry);
+      continue;
+    }
+    const deliveredText = receipt.status === "delivered" && typeof receipt.text === "string" && receipt.text
+      ? receipt.text
+      : entry.text;
+    settled.push({ entry, text: deliveredText });
   }
-  return { delivered, remaining };
+  return { settled, remaining };
 }
 
 /** Removes one attachment per delivered snapshot entry (matched by content,
@@ -466,6 +514,107 @@ function canMessageWithoutPane(file: FileEntry): boolean {
 
 const draftKey = (id: string) => "llvDraft:" + id;
 const COMPOSE_EVENT = "llv-compose-draft";
+
+/** Links a transcript path to the identity whose sessionStorage records hold
+    that conversation's composer state, so an id rotation can find them. */
+const composerOwnerKey = (path: string) => "llvComposerOwner:" + path;
+
+/** Provisional-id adoption (and late identity enrichment) rotates the card's
+    identity while its transcript path stays put: the draft, the unsettled
+    generations, and the delivery receipts persisted under the old identity
+    must ride along, or a poll that fills in the canonical id would silently
+    orphan the text the user is typing. The owner pointer written per path
+    makes the move bidirectional — a flap that drops the id for a poll adopts
+    the records back onto the path, the next enrichment adopts them forward.
+    Moves each record once; a record already filed under the new identity
+    always wins. */
+export function adoptComposerState(path: string, cardId: string): void {
+  try {
+    const previousOwner = sessionStorage.getItem(composerOwnerKey(path));
+    for (const from of [previousOwner, path]) {
+      if (!from || from === cardId) continue;
+      for (const keyOf of [draftKey, pendingSendKey, sentKey]) {
+        const legacy = sessionStorage.getItem(keyOf(from));
+        if (legacy === null) continue;
+        if (sessionStorage.getItem(keyOf(cardId)) === null) sessionStorage.setItem(keyOf(cardId), legacy);
+        sessionStorage.removeItem(keyOf(from));
+      }
+    }
+    if (cardId === path) sessionStorage.removeItem(composerOwnerKey(path));
+    else sessionStorage.setItem(composerOwnerKey(path), cardId);
+  } catch { /* quota/opaque-origin: in-memory state still carries the turn */ }
+}
+
+/** Focus continuity across composer remounts (issue #272). Board polls churn
+    the hosting keys — a committed migration rewrites the transcript path, an
+    adoption flap drops and re-adds the entry — which remounts the composer
+    mid-typing and throws keyboard focus to `body`. The outgoing textarea
+    records that it held focus (with the caret and scroll position); the next
+    composer for the same conversation reclaims it, but only while nothing else
+    took focus in between, so a poll-driven remount restores exactly what it
+    destroyed and a user's click elsewhere is never overridden. Claims expire
+    after {@link FOCUS_CLAIM_TTL_MS} so a card reopened much later — a real
+    user navigation — never has focus grabbed for it. */
+const FOCUS_CLAIM_TTL_MS = 10_000;
+interface ComposerFocusClaim {
+  start: number;
+  end: number;
+  scrollTop: number;
+  at: number;
+}
+const composerFocusClaims = new Map<string, ComposerFocusClaim>();
+
+function ComposerFocusContinuity({ claimKeys }: {
+  /** Both identity axes of one conversation (stable id and transcript path):
+      a migration keeps the id while the path rotates, an adoption keeps the
+      path while the id rotates — either axis must find the claim. */
+  claimKeys: readonly string[];
+}) {
+  /* The textarea is resolved through the DOM from this anchor, not through the
+     composer's ref: React attaches/detaches refs in tree order, so a sibling's
+     ref is not yet attached when this component mounts and already detached
+     when its cleanup runs — but the form subtree is in the document on both
+     sides of a deletion pass. */
+  const anchorRef = useRef<HTMLElement>(null);
+  const keys = [...new Set(claimKeys)];
+  const keysSignature = keys.join(" ");
+  useLayoutEffect(() => {
+    const composerField = () => anchorRef.current?.closest("form")?.querySelector("textarea") ?? null;
+    const el = composerField();
+    const claim = keys.map((key) => composerFocusClaims.get(key)).find(Boolean);
+    if (el && claim) {
+      for (const key of keys) composerFocusClaims.delete(key);
+      const active = document.activeElement;
+      const focusIsOrphaned = !active || active === document.body || !active.isConnected;
+      if (focusIsOrphaned && nowMs() - claim.at < FOCUS_CLAIM_TTL_MS) {
+        el.focus({ preventScroll: true });
+        const end = Math.min(claim.end, el.value.length);
+        el.setSelectionRange(Math.min(claim.start, end), end);
+        el.scrollTop = claim.scrollTop;
+      }
+    }
+    /* The record runs in the deletion pass, while the textarea is still in the
+       document — a plain re-render never reaches it, so polls that only update
+       data cannot trigger any focus side effect. */
+    return () => {
+      const outgoing = composerField();
+      if (!outgoing || document.activeElement !== outgoing) return;
+      const at = nowMs();
+      for (const [key, stale] of composerFocusClaims) {
+        if (at - stale.at >= FOCUS_CLAIM_TTL_MS) composerFocusClaims.delete(key);
+      }
+      const claim: ComposerFocusClaim = {
+        start: outgoing.selectionStart ?? outgoing.value.length,
+        end: outgoing.selectionEnd ?? outgoing.value.length,
+        scrollTop: outgoing.scrollTop,
+        at,
+      };
+      for (const key of keys) composerFocusClaims.set(key, claim);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keys is re-derived per render; keysSignature is its value identity
+  }, [keysSignature]);
+  return <span ref={anchorRef} hidden aria-hidden />;
+}
 
 /**
  * Drops text into a conversation's composer from outside (the link-arrow
@@ -547,7 +696,13 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   /* Column reshuffles can remount the composer mid-typing; the draft lives in
      sessionStorage so the text survives the remount. */
   const composer = useComposer({
-    initialText: () => (typeof window === "undefined" ? "" : sessionStorage.getItem(draftKey(cardId)) ?? ""),
+    initialText: () => {
+      if (typeof window === "undefined") return "";
+      /* A remount that crossed an identity adoption (provisional id →
+         canonical id) must find the draft persisted under the old key. */
+      adoptComposerState(file.path, cardId);
+      return sessionStorage.getItem(draftKey(cardId)) ?? "";
+    },
     persistText: (value) => {
       if (value) sessionStorage.setItem(draftKey(cardId), value);
       else sessionStorage.removeItem(draftKey(cardId));
@@ -573,10 +728,17 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      so the runtime host can round-trip it once the structured plane is on; the
      legacy /api/tmux route ignores the extra field. */
   const idempotencyKey = useRef<string>(mintIdempotencyKey());
-  /* Sends the server may have accepted although the immediate response was
-     lost or non-ok: a later `delivered` receipt for one of these keys clears
-     the draft exactly, so an acknowledged message never lingers as a draft. */
+  /* Unsettled submitted generations: recorded when an attempt leaves for the
+     wire, settled by the first durable admission receipt for the key on any
+     plane (immediate response, receipt stream, refresh snapshot). Persisted
+     text-only per conversation so a remount or refresh cannot orphan an
+     accepted message inside the composer. */
   const pendingDeliveries = useRef<PendingDelivery[]>([]);
+  /* Generations that already settled (draft cleared exactly once). A stale
+     timeout settling after a faster durable admission, or a replayed receipt
+     for a consumed key, must neither report a false failure, re-arm a pending
+     entry, nor clear text the user typed afterwards. Bounded, newest last. */
+  const settledSendKeys = useRef<Set<string>>(new Set());
   /* Durable receipts for this session from the runtime bus (empty while the bus
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
@@ -588,33 +750,60 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     return () => window.clearTimeout(timer);
   }, [compactArmed]);
 
+  const persistPendingDeliveries = (next: PendingDelivery[]) => {
+    pendingDeliveries.current = next;
+    writePendingDeliveries(cardId, next);
+  };
+
+  const markSettled = (key: string) => {
+    const keys = settledSendKeys.current;
+    keys.delete(key);
+    keys.add(key);
+    while (keys.size > SETTLED_SEND_KEY_LIMIT) {
+      const oldest = keys.values().next().value;
+      if (oldest === undefined) break;
+      keys.delete(oldest);
+    }
+  };
+
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
+    /* Identity enrichment without a remount (a poll fills in the conversation
+       id while this instance stays mounted): move the persisted records onto
+       the new key before re-reading them. */
+    adoptComposerState(file.path, cardId);
     setSent(readSent(cardId));
     setImmediateRuntimeReceipts([]);
-    pendingDeliveries.current = [];
+    pendingDeliveries.current = readPendingDeliveries(cardId);
+    settledSendKeys.current = new Set();
+    /* Keyed by identity alone: a path migration under a stable id must not
+       wipe the immediate receipts or the settled-key memory (`file.path` is
+       only read to adopt records the old identity left behind). */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cardId]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  /* Settle lost-response sends against the receipt stream: a `delivered`
-     receipt for a remembered key means the server accepted that attempt and
-     the turn ran, so its exact text leaves the draft (later typing survives;
-     a rewritten draft for the next turn stays untouched). */
+  /* Settle submitted generations against the receipt stream: a durably
+     admitted receipt (queued or beyond) for a remembered key means the server
+     holds that attempt, so its exact text leaves the draft (later typing
+     survives; a rewritten draft for the next turn stays untouched). Runs on
+     mount too, so a refresh snapshot reconciles a persisted generation. */
   useEffect(() => {
     if (!pendingDeliveries.current.length) return;
-    const { delivered, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);
-    if (!delivered.length) return;
-    pendingDeliveries.current = remaining;
-    let remainingImages: readonly PendingImage[] = attachments.images;
-    for (const settled of delivered) {
-      const next = draftAfterDelivery(textRef.current, settled.text);
+    const { settled, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);
+    if (!settled.length) return;
+    persistPendingDeliveries(remaining);
+    let remainingImages: readonly PendingImage[] = attachments.imagesRef.current;
+    for (const settlement of settled) {
+      markSettled(settlement.entry.key);
+      const next = draftAfterDelivery(textRef.current, settlement.text);
       if (next !== textRef.current) setText(next);
-      remainingImages = attachmentsAfterDelivery(remainingImages, settled.entry.images);
-      /* The delivered attempt consumed its key: minting a fresh one keeps the
+      remainingImages = attachmentsAfterDelivery(remainingImages, settlement.entry.images);
+      /* The admitted attempt consumed its key: minting a fresh one keeps the
          next message from being replay-deduped into silence server-side. */
-      if (settled.entry.key === idempotencyKey.current) idempotencyKey.current = mintIdempotencyKey();
+      if (settlement.entry.key === idempotencyKey.current) idempotencyKey.current = mintIdempotencyKey();
     }
-    if (remainingImages.length !== attachments.images.length) attachments.replace([...remainingImages]);
+    if (remainingImages.length !== attachments.imagesRef.current.length) attachments.replace([...remainingImages]);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef/attachments are hook-stable
   }, [displayedRuntimeReceipts]);
 
@@ -676,13 +865,44 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
 
   const send = async (overrideText?: string, retry?: { receiptId: number; clientMessageId?: string }) => {
     const payloadText = overrideText ?? text;
-    if (busy || voiceSending || (!payloadText.trim() && !attachments.images.length)) return;
-    if (structuredSession && attachments.images.length && !attachments.validate()) return;
+    /* The generation snapshot: exactly the text and attachments this attempt
+       carries onto the wire. Read through the ref so a submit racing a paste
+       still sends and later clears the same set. */
+    const sentImages: PendingImage[] = attachments.imagesRef.current.map((image) => ({ ...image }));
+    if (busy || voiceSending || (!payloadText.trim() && !sentImages.length)) return;
+    if (structuredSession && sentImages.length && !attachments.validate()) return;
     setBusy(true);
     setStatus(null);
     /* Idempotency key: the backend can dedupe a retried held/failed delivery
        against this id so the successor never receives the same prompt twice. */
     const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
+    /* A local pre-flight rejection (image protocol gate) never reaches the
+       wire, so it must not arm a pending generation either. */
+    const reachesWire = !(structuredSession && structuredImagesDisabled && sentImages.length > 0);
+    /* Record the generation BEFORE the request: a durable admission receipt can
+       land on the receipt stream while this response is still in flight, and
+       it must find the generation to clear. The earliest attempt per key stays
+       the immutable record — a replay never overwrites it — and a key whose
+       generation already settled is never re-armed. */
+    const recordedThisAttempt = reachesWire
+      && !settledSendKeys.current.has(clientMessageId)
+      && !pendingDeliveries.current.some((entry) => entry.key === clientMessageId);
+    if (recordedThisAttempt) {
+      persistPendingDeliveries([
+        { key: clientMessageId, text: payloadText, images: sentImages },
+        ...pendingDeliveries.current,
+      ].slice(0, PENDING_DELIVERY_LIMIT));
+    }
+    /* Clear exactly this settled generation: its text prefix leaves the draft
+       (later typing survives) and its attachment snapshot leaves the tray
+       (later images survive). At most once per key — a replayed receipt for an
+       already-settled generation must not touch what the user typed since. */
+    const settleGeneration = (clearedText: string, snapshot: readonly PendingImage[]) => {
+      if (settledSendKeys.current.has(clientMessageId)) return;
+      markSettled(clientMessageId);
+      setText(draftAfterDelivery(textRef.current, clearedText));
+      attachments.replace(attachmentsAfterDelivery(attachments.imagesRef.current, snapshot));
+    };
     try {
       const json: {
         ok?: boolean;
@@ -696,12 +916,12 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "delivering" | "delivered" | "recovering" | "failed";
         receipt?: RuntimeReceipt;
       } = structuredSession
-        ? structuredImagesDisabled && attachments.images.length > 0
+        ? !reachesWire
           ? { ok: false, structured: true, error: structuredImagesReason }
           : await sendRuntimeMessage({
               conversationId: structuredSession.session.conversationId,
               text: payloadText.trim(),
-              images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
+              images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
               idempotencyKey: clientMessageId,
               policy: "interrupt-active",
             }).then((result) => ({
@@ -723,7 +943,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
               text: payloadText,
               idempotencyKey: clientMessageId,
               clientMessageId,
-              images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
+              images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
             }),
           }).then(async (response) => {
             const body = await response.json() as typeof json;
@@ -731,40 +951,57 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           });
       if (!json.ok) {
         if (json.structured && json.receipt) {
+          /* Keep the payload readable in the compact receipt for retry and
+             audit even when the server's echo omits it. */
+          const receipt: RuntimeReceipt = (json.receipt.kind === "send" || json.receipt.kind === "steer")
+            && !json.receipt.text && payloadText.trim()
+            ? { ...json.receipt, text: payloadText.trim() }
+            : json.receipt;
           setImmediateRuntimeReceipts((current) => [
-            json.receipt!,
-            ...current.filter((receipt) => receipt.operationId !== json.receipt!.operationId),
+            receipt,
+            ...current.filter((candidate) => candidate.operationId !== receipt.operationId),
           ].slice(0, 8));
-          idempotencyKey.current = mintIdempotencyKey();
-          if (json.receipt.status === "delivered") {
-            /* An idempotent replay: this key's FIRST attempt already reached
-               the agent and the turn ran. The accepted delivery clears its
-               exact text (the receipt's record wins) and exactly the FIRST
-               attempt's attachment snapshot — images attached after that
-               attempt stay put for the next message. */
-            const delivered = typeof json.receipt.text === "string" && json.receipt.text ? json.receipt.text : payloadText;
-            setText(draftAfterDelivery(textRef.current, delivered));
+          if (receiptIsAdmitted(receipt.status)) {
+            /* An idempotent replay: this key's FIRST attempt was durably
+               admitted (queued or beyond) — the server holds the message.
+               Clear exactly that generation: for a delivered replay the
+               receipt's record of what reached the agent wins; for a queued
+               admission the attempt's own text does (the echo may be a bounded
+               summary). Attachments clear by the FIRST attempt's snapshot —
+               images attached after that attempt stay put. */
             const attempt = pendingDeliveries.current.find((entry) => entry.key === clientMessageId);
-            pendingDeliveries.current = pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId);
-            if (attempt) attachments.replace(attachmentsAfterDelivery(attachments.images, attempt.images));
-            else attachments.clear();
-            setStatus({ kind: "ok", text: t("common.sent") });
+            persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
+            const admitted = receipt.status === "delivered" && typeof json.receipt.text === "string" && json.receipt.text
+              ? json.receipt.text
+              : attempt?.text ?? payloadText;
+            settleGeneration(admitted, attempt?.images ?? sentImages);
+            if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
+            if (receipt.status === "delivered") setStatus({ kind: "ok", text: t("common.sent") });
             inputRef.current?.focus();
             return;
           }
+          /* A definitive rejection consumed the key — the next submit is a new
+             message. An `uncertain`/`pending` receipt keeps the key so the
+             user's retry replays idempotently instead of double-sending. */
+          if (receiptIsTerminal(receipt.status) && idempotencyKey.current === clientMessageId) {
+            idempotencyKey.current = mintIdempotencyKey();
+          }
+        }
+        if (settledSendKeys.current.has(clientMessageId)) {
+          /* A stale settlement: a durable admission already cleared this
+             generation while the response was in flight. The receipt stack
+             tells the truth — no false failure, no re-armed pending entry. */
+          return;
         }
         /* The earliest attempt per key is the immutable record of what the
            server may have accepted: a retry never overwrites it, and a
-           definitive 4xx rejection (e.g. a changed-payload 409) creates no
-           entry at all — only a lost response (network/5xx) or an explicitly
+           definitive 4xx rejection (e.g. a changed-payload 409) keeps no
+           entry — only a lost response (network/5xx) or an explicitly
            still-moving receipt does. */
-        if (!receiptIsTerminal(json.receipt?.status ?? "pending")
-          && !pendingDeliveries.current.some((entry) => entry.key === clientMessageId)
-          && (json.status === undefined || json.status >= 500)) {
-          pendingDeliveries.current = [
-            { key: clientMessageId, text: payloadText, images: attachments.images.map((image) => ({ ...image })) },
-            ...pendingDeliveries.current,
-          ].slice(0, PENDING_DELIVERY_LIMIT);
+        const possiblyAccepted = !receiptIsTerminal(json.receipt?.status ?? "pending")
+          && (json.status === undefined || json.status >= 500);
+        if (!possiblyAccepted && recordedThisAttempt) {
+          persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
         }
         // A hard failure keeps the draft text (never cleared) so the message is
         // not lost; the error is announced by the composer's live status region.
@@ -776,14 +1013,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           json.receipt!,
           ...current.filter((receipt) => receipt.operationId !== json.receipt!.operationId),
         ].slice(0, 8));
-        idempotencyKey.current = mintIdempotencyKey();
-        setText(draftAfterDelivery(textRef.current, payloadText));
-        pendingDeliveries.current = pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId);
-        attachments.clear();
+        const attempt = pendingDeliveries.current.find((entry) => entry.key === clientMessageId);
+        persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
+        if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
+        settleGeneration(payloadText, attempt?.images ?? sentImages);
         inputRef.current?.focus();
         return;
       }
-      const imgCount = attachments.images.length;
+      const imgCount = sentImages.length;
       // The migration delivery fence returns `held`/`queued`/`recovering` when
       // the text was accepted for the successor rather than delivered live. Those
       // are durable acknowledgements (the backend persisted the message), so the
@@ -800,10 +1037,10 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       };
       const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
       persistSent([...prior, entry].slice(-SENT_LIMIT));
-      idempotencyKey.current = mintIdempotencyKey(); // next draft is a new message
-      setText(draftAfterDelivery(textRef.current, payloadText));
-      pendingDeliveries.current = pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId);
-      attachments.clear();
+      const attempt = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
+      persistPendingDeliveries(pendingDeliveries.current.filter((candidate) => candidate.key !== clientMessageId));
+      if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey(); // next draft is a new message
+      settleGeneration(payloadText, attempt?.images ?? sentImages);
       setStatus({
         kind: held ? "info" : "ok",
         text: held
@@ -816,17 +1053,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       });
       inputRef.current?.focus();
     } catch {
-      /* The request died on the wire AFTER the server may have accepted it:
-         remember the attempt (text AND attachment snapshot) so a delivered
-         receipt still clears exactly what was sent. An earlier attempt under
-         the same key stays the immutable record. */
-      if (!pendingDeliveries.current.some((entry) => entry.key === clientMessageId)) {
-        pendingDeliveries.current = [
-          { key: clientMessageId, text: payloadText, images: attachments.images.map((image) => ({ ...image })) },
-          ...pendingDeliveries.current,
-        ].slice(0, PENDING_DELIVERY_LIMIT);
+      /* The request died on the wire AFTER the server may have accepted it.
+         The pre-flight record (text AND attachment snapshot) stays armed so a
+         late admission receipt still clears exactly what was sent. A stale
+         death racing a faster durable admission reports nothing — the receipt
+         stack already tells the truth. */
+      if (!settledSendKeys.current.has(clientMessageId)) {
+        setStatus({ kind: "err", text: t("common.serverUnavailable") });
       }
-      setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {
       setBusy(false);
     }
@@ -1042,6 +1276,10 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       className="flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2"
       aria-label={structuredSession ? t("composer.sendStructuredAria") : spawnMode ? t("composer.spawnAria") : t("composer.sendAria", { target: target ?? "" })}
     >
+      {/* Unmounts exactly when the textarea does (a key-churn remount, an
+          adoption flap, a pane-target flap hiding the composer), so its
+          deletion pass can still see who held focus. */}
+      <ComposerFocusContinuity claimKeys={[cardId, file.path]} />
       {/* Proactive hold hint: while the card is switching accounts, the next
           send is queued for the successor rather than delivered live. Shown
           identically under the desktop and mobile composers. */}

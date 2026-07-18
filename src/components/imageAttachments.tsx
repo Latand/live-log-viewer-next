@@ -152,6 +152,9 @@ export function useImageAttachments(handlers: {
 
   return {
     images,
+    /** Latest committed attachments, for async send closures whose render-scope
+        `images` may be stale by the time a response or receipt settles. */
+    imagesRef,
     addFiles,
     handlePaste,
     removeAt: (idx: number) => commit(imagesRef.current.filter((_, i) => i !== idx)),

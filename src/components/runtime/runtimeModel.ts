@@ -624,6 +624,23 @@ export function receiptIsTerminal(status: ReceiptStatus): boolean {
 }
 
 /**
+ * A receipt whose status proves the server durably admitted the message into
+ * the structured queue (or further along the delivery lifecycle). Admission is
+ * the contract point where a composer may clear the submitted draft: the
+ * payload is journaled server-side and survives without the client copy.
+ * `pending`/`uncertain` prove nothing (the attempt may still be lost);
+ * `rejected`/`failed`/`interrupted` admit nothing to deliver.
+ */
+export function receiptIsAdmitted(status: ReceiptStatus): boolean {
+  return status === "queued"
+    || status === "delivering"
+    || status === "turn-started"
+    || status === "steered"
+    || status === "delivered"
+    || status === "answered";
+}
+
+/**
  * Mint an idempotency key for a fresh message draft. Same key must be reused on
  * Retry (never re-sends server-side) and replaced on Edit-and-resend.
  */

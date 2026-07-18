@@ -387,6 +387,13 @@ test("the 390px receipt row reserves preview space beside localized state counts
     expect(pending.querySelector("[data-receipt-count-value]")?.textContent).toBe("1");
     expect(problems.querySelector("[data-receipt-count-value]")?.textContent).toBe("2");
 
+    /* Expanded rows keep the message readable beside (or above) the action
+       chip: the row wraps and the text reserves width instead of collapsing
+       into a one-character column at 390px. */
+    const message = host.querySelector("[data-runtime-receipt-details] [data-receipt-message]") as HTMLElement;
+    expect(message.className.split(/\s+/)).toContain("min-w-[8rem]");
+    expect(message.parentElement!.className.split(/\s+/)).toContain("flex-wrap");
+
     flushSync(() => root.unmount());
     host.remove();
   }
@@ -1069,4 +1076,158 @@ test("a stale delivered replay never wipes a draft rewritten for the next turn",
   expect(textarea.value).toBe("brand new ask");
   expect(sessionStorage.getItem("llvDraft:conv-stale")).toBe("brand new ask");
   flushSync(() => root.unmount());
+});
+
+/* ── Issue #272: timeout followed by durable queued admission ───────────── */
+
+/** Production shape of operation ac0223c0-2bef-46dd-a26e-143b758f66dc: the
+    first `/api/tmux` send times out with an `uncertain` receipt, the operator
+    types more while the fate is unknown, and the idempotent retry comes back
+    `queued`. Queue admission is durable, so exactly the submitted generation
+    must leave the composer — the later typing survives, the receipt stack
+    carries the payload, and no stale failure lingers. */
+async function runTimeoutThenQueuedAdmission(locale: "en" | "uk", viewportWidth: number) {
+  (dom as unknown as { innerWidth: number }).innerWidth = viewportWidth;
+  setLocale(locale);
+  const conversationId = `conv-timeout-${locale}-${viewportWidth}`;
+  const prompt = "довгий виробничий запит — ship the composer reconciliation contract";
+  const sentKeys: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/tmux/targets") {
+      return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+    }
+    if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+    const body = JSON.parse(String(init?.body)) as { clientMessageId: string; text: string };
+    sentKeys.push(body.clientMessageId);
+    if (sentKeys.length === 1) {
+      /* The runtime host request timed out; the server can only attest an
+         uncertain receipt — nothing durable yet, the draft must stay. */
+      return {
+        ok: false,
+        status: 503,
+        json: async () => ({
+          ok: false,
+          structured: true,
+          error: "runtime host request timed out",
+          receipt: {
+            operationId: "ac0223c0-2bef-46dd-a26e-143b758f66dc",
+            idempotencyKey: body.clientMessageId,
+            conversationId,
+            kind: "send",
+            status: "uncertain",
+            reason: "runtime host request timed out",
+            text: prompt,
+            at: "2026-07-18T00:00:00.000Z",
+            revision: 1,
+          },
+        }),
+      } as Response;
+    }
+    /* The idempotent retry replays the key: the operation is durably queued. */
+    return {
+      ok: false,
+      status: 409,
+      json: async () => ({
+        ok: false,
+        structured: true,
+        error: "idempotency key already accepted",
+        receipt: {
+          operationId: "ac0223c0-2bef-46dd-a26e-143b758f66dc",
+          idempotencyKey: body.clientMessageId,
+          conversationId,
+          kind: "send",
+          status: "queued",
+          text: prompt,
+          at: "2026-07-18T00:00:02.000Z",
+          revision: 2,
+        },
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  const file = {
+    path: `/codex-timeout-${locale}-${viewportWidth}.jsonl`,
+    root: "codex-sessions",
+    name: "codex-timeout.jsonl",
+    project: "viewer",
+    title: "Codex timeout",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    parent: null,
+    mtime: 1,
+    size: 1,
+    activity: "idle",
+    proc: "running",
+    pid: null,
+    conversationId,
+    pendingQuestion: null,
+    waitingInput: null,
+  } as FileEntry;
+  sessionStorage.setItem(`llvDraft:${conversationId}`, prompt);
+  const host = document.createElement("div");
+  if (viewportWidth <= 430) host.style.width = `${viewportWidth}px`;
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<TmuxComposer file={file} />));
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const form = textarea.closest("form")!;
+  const submit = async () => {
+    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  try {
+    await submit();
+    /* The timeout is a truthful failure: the draft stays editable and the
+       error is announced. */
+    expect(textarea.value).toBe(prompt);
+    expect(host.textContent).toContain("runtime host request timed out");
+
+    /* The operator keeps typing while the first attempt's fate is unknown. */
+    flushSync(() => appendComposerDraft(conversationId, "додатково: also add tests"));
+    expect(textarea.value).toBe(`${prompt}\n\nдодатково: also add tests`);
+
+    await submit();
+    /* Same delivery key both times — an uncertain receipt never rotates it,
+       so the retry replays instead of double-sending. */
+    expect(sentKeys).toHaveLength(2);
+    expect(sentKeys[1]).toBe(sentKeys[0]);
+    /* Durable queue admission clears exactly the submitted generation: the
+       typing that followed survives, in the editor and in storage. */
+    expect(textarea.value).toBe("додатково: also add tests");
+    expect(sessionStorage.getItem(`llvDraft:${conversationId}`)).toBe("додатково: also add tests");
+    /* No stale failure lingers after admission. */
+    expect(host.textContent).not.toContain("runtime host request timed out");
+    expect(host.textContent).not.toContain(translate(locale, "common.failedSend"));
+    /* The payload lives on in a compact truthful receipt: queued, pending
+       count of one, preview text — announced through the live status region. */
+    const stack = host.querySelector("details[data-runtime-receipt-stack]") as HTMLDetailsElement;
+    expect(stack).toBeTruthy();
+    const summary = stack.querySelector("summary")!;
+    expect(summary.textContent).toContain(translate(locale, "runtime.receipt.summary", { count: 1 }));
+    expect(summary.querySelector("[data-receipt-preview]")?.textContent).toBe(prompt);
+    expect(summary.querySelector("[data-receipt-pending-count] [data-receipt-count-value]")?.textContent).toBe("1");
+    expect(host.querySelector('[data-receipt-status="queued"]')?.textContent)
+      .toBe(translate(locale, "runtime.receipt.queued"));
+    expect(host.querySelector('[data-optimistic-message="true"]')?.textContent).toContain(prompt);
+    const status = host.querySelector("[data-runtime-receipt-status]")!;
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.getAttribute("aria-live")).toBe("polite");
+    expect(status.textContent).toContain(translate(locale, "runtime.receipt.statusPending", { count: 1 }));
+    /* Mobile keeps the 44px summary row; desktop keeps the compact stack. */
+    expect(summary.className.split(/\s+/)).toContain("min-h-11");
+  } finally {
+    flushSync(() => root.unmount());
+    host.remove();
+    (dom as unknown as { innerWidth: number }).innerWidth = 1024;
+  }
+}
+
+test("a timed-out send settles on queued admission via idempotent retry (desktop, EN)", async () => {
+  await runTimeoutThenQueuedAdmission("en", 1024);
+});
+
+test("a timed-out send settles on queued admission via idempotent retry (390px, UK)", async () => {
+  await runTimeoutThenQueuedAdmission("uk", 390);
 });
