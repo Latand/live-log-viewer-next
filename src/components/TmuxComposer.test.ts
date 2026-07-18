@@ -311,7 +311,7 @@ test("a bounded receipt summary keeps retry while withholding lossy edit", () =>
 /* ── Exact draft clearing on accepted delivery ──────────────────────────── */
 
 import type { PendingImage } from "./imageAttachments";
-import { attachmentsAfterDelivery, draftAfterDelivery, readPendingDeliveries, settlePendingDeliveries, writePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
+import { adoptComposerState, attachmentsAfterDelivery, draftAfterDelivery, readPendingDeliveries, settlePendingDeliveries, writePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
 
 function deliveredReceipt(key: string, status: RuntimeReceipt["status"] = "delivered", text?: string): RuntimeReceipt {
   return {
@@ -453,6 +453,44 @@ test("pending generations persist text-only per conversation and reload bounded"
     expect(readPendingDeliveries("conv-persist")).toEqual([]);
     backing.set("llvPendingSend:conv-corrupt", "{not json");
     expect(readPendingDeliveries("conv-corrupt")).toEqual([]);
+  } finally {
+    if (previous === undefined) delete globalStore.sessionStorage;
+    else globalStore.sessionStorage = previous;
+  }
+});
+
+test("identity adoption moves composer records across id rotations in both directions", () => {
+  const backing = new Map<string, string>();
+  const globalStore = globalThis as { sessionStorage?: unknown };
+  const previous = globalStore.sessionStorage;
+  globalStore.sessionStorage = {
+    getItem: (key: string) => backing.get(key) ?? null,
+    setItem: (key: string, value: string) => void backing.set(key, String(value)),
+    removeItem: (key: string) => void backing.delete(key),
+  };
+  try {
+    /* Pre-identity records live under the bare path; the first enrichment
+       moves them onto the provisional id and remembers the owner. */
+    backing.set("llvDraft:/conv.jsonl", "typed before any id");
+    adoptComposerState("/conv.jsonl", "conv-provisional");
+    expect(backing.get("llvDraft:conv-provisional")).toBe("typed before any id");
+    expect(backing.has("llvDraft:/conv.jsonl")).toBe(false);
+
+    /* The canonical id adopts from the recorded owner, not just the path. */
+    adoptComposerState("/conv.jsonl", "conv-canonical");
+    expect(backing.get("llvDraft:conv-canonical")).toBe("typed before any id");
+    expect(backing.has("llvDraft:conv-provisional")).toBe(false);
+
+    /* A flap that drops the id folds the records back onto the path… */
+    adoptComposerState("/conv.jsonl", "/conv.jsonl");
+    expect(backing.get("llvDraft:/conv.jsonl")).toBe("typed before any id");
+    expect(backing.has("llvComposerOwner:/conv.jsonl")).toBe(false);
+
+    /* …and a record already filed under the new identity always wins. */
+    backing.set("llvDraft:conv-final", "newer draft");
+    adoptComposerState("/conv.jsonl", "conv-final");
+    expect(backing.get("llvDraft:conv-final")).toBe("newer draft");
+    expect(backing.has("llvDraft:/conv.jsonl")).toBe(false);
   } finally {
     if (previous === undefined) delete globalStore.sessionStorage;
     else globalStore.sessionStorage = previous;

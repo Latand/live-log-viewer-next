@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { ArrowRight, ArrowUpToLine, ChevronRight, FoldVertical, Loader2, Play, Square, SquareTerminal, X } from "@/components/icons";
 import { Check, Plus, RotateCcw } from "lucide-react";
@@ -515,6 +515,107 @@ function canMessageWithoutPane(file: FileEntry): boolean {
 const draftKey = (id: string) => "llvDraft:" + id;
 const COMPOSE_EVENT = "llv-compose-draft";
 
+/** Links a transcript path to the identity whose sessionStorage records hold
+    that conversation's composer state, so an id rotation can find them. */
+const composerOwnerKey = (path: string) => "llvComposerOwner:" + path;
+
+/** Provisional-id adoption (and late identity enrichment) rotates the card's
+    identity while its transcript path stays put: the draft, the unsettled
+    generations, and the delivery receipts persisted under the old identity
+    must ride along, or a poll that fills in the canonical id would silently
+    orphan the text the user is typing. The owner pointer written per path
+    makes the move bidirectional — a flap that drops the id for a poll adopts
+    the records back onto the path, the next enrichment adopts them forward.
+    Moves each record once; a record already filed under the new identity
+    always wins. */
+export function adoptComposerState(path: string, cardId: string): void {
+  try {
+    const previousOwner = sessionStorage.getItem(composerOwnerKey(path));
+    for (const from of [previousOwner, path]) {
+      if (!from || from === cardId) continue;
+      for (const keyOf of [draftKey, pendingSendKey, sentKey]) {
+        const legacy = sessionStorage.getItem(keyOf(from));
+        if (legacy === null) continue;
+        if (sessionStorage.getItem(keyOf(cardId)) === null) sessionStorage.setItem(keyOf(cardId), legacy);
+        sessionStorage.removeItem(keyOf(from));
+      }
+    }
+    if (cardId === path) sessionStorage.removeItem(composerOwnerKey(path));
+    else sessionStorage.setItem(composerOwnerKey(path), cardId);
+  } catch { /* quota/opaque-origin: in-memory state still carries the turn */ }
+}
+
+/** Focus continuity across composer remounts (issue #272). Board polls churn
+    the hosting keys — a committed migration rewrites the transcript path, an
+    adoption flap drops and re-adds the entry — which remounts the composer
+    mid-typing and throws keyboard focus to `body`. The outgoing textarea
+    records that it held focus (with the caret and scroll position); the next
+    composer for the same conversation reclaims it, but only while nothing else
+    took focus in between, so a poll-driven remount restores exactly what it
+    destroyed and a user's click elsewhere is never overridden. Claims expire
+    after {@link FOCUS_CLAIM_TTL_MS} so a card reopened much later — a real
+    user navigation — never has focus grabbed for it. */
+const FOCUS_CLAIM_TTL_MS = 10_000;
+interface ComposerFocusClaim {
+  start: number;
+  end: number;
+  scrollTop: number;
+  at: number;
+}
+const composerFocusClaims = new Map<string, ComposerFocusClaim>();
+
+function ComposerFocusContinuity({ claimKeys }: {
+  /** Both identity axes of one conversation (stable id and transcript path):
+      a migration keeps the id while the path rotates, an adoption keeps the
+      path while the id rotates — either axis must find the claim. */
+  claimKeys: readonly string[];
+}) {
+  /* The textarea is resolved through the DOM from this anchor, not through the
+     composer's ref: React attaches/detaches refs in tree order, so a sibling's
+     ref is not yet attached when this component mounts and already detached
+     when its cleanup runs — but the form subtree is in the document on both
+     sides of a deletion pass. */
+  const anchorRef = useRef<HTMLElement>(null);
+  const keys = [...new Set(claimKeys)];
+  const keysSignature = keys.join(" ");
+  useLayoutEffect(() => {
+    const composerField = () => anchorRef.current?.closest("form")?.querySelector("textarea") ?? null;
+    const el = composerField();
+    const claim = keys.map((key) => composerFocusClaims.get(key)).find(Boolean);
+    if (el && claim) {
+      for (const key of keys) composerFocusClaims.delete(key);
+      const active = document.activeElement;
+      const focusIsOrphaned = !active || active === document.body || !active.isConnected;
+      if (focusIsOrphaned && nowMs() - claim.at < FOCUS_CLAIM_TTL_MS) {
+        el.focus({ preventScroll: true });
+        const end = Math.min(claim.end, el.value.length);
+        el.setSelectionRange(Math.min(claim.start, end), end);
+        el.scrollTop = claim.scrollTop;
+      }
+    }
+    /* The record runs in the deletion pass, while the textarea is still in the
+       document — a plain re-render never reaches it, so polls that only update
+       data cannot trigger any focus side effect. */
+    return () => {
+      const outgoing = composerField();
+      if (!outgoing || document.activeElement !== outgoing) return;
+      const at = nowMs();
+      for (const [key, stale] of composerFocusClaims) {
+        if (at - stale.at >= FOCUS_CLAIM_TTL_MS) composerFocusClaims.delete(key);
+      }
+      const claim: ComposerFocusClaim = {
+        start: outgoing.selectionStart ?? outgoing.value.length,
+        end: outgoing.selectionEnd ?? outgoing.value.length,
+        scrollTop: outgoing.scrollTop,
+        at,
+      };
+      for (const key of keys) composerFocusClaims.set(key, claim);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keys is re-derived per render; keysSignature is its value identity
+  }, [keysSignature]);
+  return <span ref={anchorRef} hidden aria-hidden />;
+}
+
 /**
  * Drops text into a conversation's composer from outside (the link-arrow
  * gesture): the stored draft grows and any mounted composer for that
@@ -595,7 +696,13 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   /* Column reshuffles can remount the composer mid-typing; the draft lives in
      sessionStorage so the text survives the remount. */
   const composer = useComposer({
-    initialText: () => (typeof window === "undefined" ? "" : sessionStorage.getItem(draftKey(cardId)) ?? ""),
+    initialText: () => {
+      if (typeof window === "undefined") return "";
+      /* A remount that crossed an identity adoption (provisional id →
+         canonical id) must find the draft persisted under the old key. */
+      adoptComposerState(file.path, cardId);
+      return sessionStorage.getItem(draftKey(cardId)) ?? "";
+    },
     persistText: (value) => {
       if (value) sessionStorage.setItem(draftKey(cardId), value);
       else sessionStorage.removeItem(draftKey(cardId));
@@ -661,10 +768,18 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
+    /* Identity enrichment without a remount (a poll fills in the conversation
+       id while this instance stays mounted): move the persisted records onto
+       the new key before re-reading them. */
+    adoptComposerState(file.path, cardId);
     setSent(readSent(cardId));
     setImmediateRuntimeReceipts([]);
     pendingDeliveries.current = readPendingDeliveries(cardId);
     settledSendKeys.current = new Set();
+    /* Keyed by identity alone: a path migration under a stable id must not
+       wipe the immediate receipts or the settled-key memory (`file.path` is
+       only read to adopt records the old identity left behind). */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cardId]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -1161,6 +1276,10 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       className="flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2"
       aria-label={structuredSession ? t("composer.sendStructuredAria") : spawnMode ? t("composer.spawnAria") : t("composer.sendAria", { target: target ?? "" })}
     >
+      {/* Unmounts exactly when the textarea does (a key-churn remount, an
+          adoption flap, a pane-target flap hiding the composer), so its
+          deletion pass can still see who held focus. */}
+      <ComposerFocusContinuity claimKeys={[cardId, file.path]} />
       {/* Proactive hold hint: while the card is switching accounts, the next
           send is queued for the successor rather than delivered live. Shown
           identically under the desktop and mobile composers. */}
