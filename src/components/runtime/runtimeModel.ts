@@ -22,7 +22,7 @@ import type { MessageKey } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { Activity } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
-import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
+import type { RuntimeSettingsCapability, ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 /* ------------------------------------------------------------------ *
@@ -239,7 +239,7 @@ export interface RuntimeSession {
   workflowId: string | null;
   cwd: string | null;
   artifactPath: string | null;
-  capabilities: { steer: boolean; structuredAttention: boolean; imageInput?: RuntimeImageCapability };
+  capabilities: { steer: boolean; structuredAttention: boolean; imageInput?: RuntimeImageCapability; runtimeSettings?: RuntimeSettingsCapability };
   activeTurnId: string | null;
   /** Unresolved drift notice, if any. */
   drift?: RuntimeDrift | null;

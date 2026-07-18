@@ -181,6 +181,10 @@ export interface SendOptions {
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   images?: { base64: string; mime: string }[];
   kind?: OperationKind;
+  /** The conversation's selected per-turn runtime snapshot (issue #390 §10):
+      rides the send so a replay re-delivers with identical settings. Only
+      explicitly selected fields are present; omitted entirely = today. */
+  runtime?: { model?: string; effort?: string; fast?: boolean };
 }
 
 /** Send/steer a message. Replaying the same key returns the original receipt
@@ -192,6 +196,7 @@ export function sendRuntimeMessage(options: SendOptions): Promise<CommandResult>
     images: options.images,
     idempotencyKey: options.idempotencyKey,
     policy: options.policy ?? "interrupt-active",
+    ...(options.runtime ? { runtime: options.runtime } : {}),
   });
 }
 

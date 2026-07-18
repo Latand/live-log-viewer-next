@@ -38,11 +38,8 @@ export const en = {
   "runtimeConfig.effort": "Running agent reasoning effort",
   "runtimeConfig.speedTitle": "Fast uses the Codex priority service tier",
   "runtimeConfig.apply": "Apply",
-  "runtimeConfig.openSheet": "Change the running agent's model and effort",
-  "runtimeConfig.pending": "After turn",
-  "runtimeConfig.confirming": "Next turn",
-  "runtimeConfig.applied": "Applied",
-  "runtimeConfig.pendingDraft": "Unapplied draft: {model} · {effort} — tap to review",
+  // The pending/confirming/applied/pendingDraft/openSheet apply-lifecycle keys
+  // retired with the strip controls (issue #390) — the pill auto-applies.
   "runtimeConfig.failed": "Could not change the running agent configuration",
   "time.agoSec": "{n}s ago",
   "time.agoMin": "{n}m ago",
@@ -262,8 +259,16 @@ export const en = {
   "composer.queueAria": "Queue of sent messages",
   "composer.removeFromQueue": "Remove from queue",
   "composer.deliveryHeld": "Held for «{label}» — delivers after the account switch",
-  "composer.structured": "structured",
-  "composer.structuredHost": "Structured runtime host",
+  "composer.runtimePill": "Model and reasoning — applies to your next message",
+  "composer.reasoningGroup": "Reasoning",
+  "composer.modelGroup": "Model",
+  "composer.speedGroup": "Speed",
+  "composer.speedStandard": "Standard",
+  "composer.speedFastTier": "Fast — priority tier",
+  "composer.backTo": "Back",
+  "composer.nextMessageUses": "Next message: {model} · {effort}",
+  "composer.settingsNextResume": "applies when the conversation is next resumed",
+  // composer.structured / composer.structuredHost retired with the strip badge (issue #390 §8).
   "composer.structuredImagesUnavailable": "Image delivery is unavailable for structured conversations",
   "composer.codexImagesTextOnly": "The selected Codex model accepts text input only.",
   "composer.structuredImagesProtocol": "This structured host has no negotiated image capability.",
@@ -418,6 +423,15 @@ export const en = {
   "effortTier.xhigh": "extra high",
   "effortTier.max": "max",
   "effortTier.ultra": "ultra",
+
+  // Standalone reasoning-tier labels for the composer runtime menu (issue #390)
+  "reasoningTier.minimal": "Minimal",
+  "reasoningTier.low": "Light",
+  "reasoningTier.medium": "Medium",
+  "reasoningTier.high": "High",
+  "reasoningTier.xhigh": "Extra High",
+  "reasoningTier.max": "Max",
+  "reasoningTier.ultra": "Ultra",
 
   // Role catalog display copy (issue #221 §1). The registry stays English —
   // these are UI labels only; prompts sent to agents are untouched.

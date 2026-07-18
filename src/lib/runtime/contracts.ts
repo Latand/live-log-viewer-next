@@ -206,6 +206,16 @@ interface RuntimeCommandBase {
   idempotencyKey: string;
 }
 
+/** Per-turn runtime settings a send may carry (issue #390 decision record §10):
+    the composer snapshots the conversation's selected model/effort/fast onto the
+    send so a replay re-delivers with identical settings. Absent field = today's
+    behaviour, keeping the durable format forward-compatible. */
+export interface RuntimeSendSettings {
+  model?: string;
+  effort?: string;
+  fast?: boolean;
+}
+
 export interface RuntimeSendCommand extends RuntimeCommandBase {
   kind: "send" | "steer";
   text: string;
@@ -213,6 +223,31 @@ export interface RuntimeSendCommand extends RuntimeCommandBase {
   contentDigest?: string;
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
+  runtime?: RuntimeSendSettings;
+}
+
+/**
+ * A host's negotiated per-turn runtime-settings capability (issue #390 §7),
+ * mirroring `imageInput`: whether it can honor a model/effort supplied on a
+ * single send. A false axis drives an honest disabled-with-reason row in the
+ * composer pill instead of a silent no-op.
+ */
+export interface RuntimeSettingsCapability {
+  perTurnEffort: boolean;
+  perTurnModel: boolean;
+}
+
+/**
+ * Advertisement per issue #390 §11 sequencing. codex-app-server honors a
+ * per-turn `effort` (the snapshot rides the durable send effect and lands on
+ * `turn/start`), but model and service tier are thread-level in its protocol
+ * (`thread/resume` carries `model`/`serviceTier`), so `perTurnModel` stays
+ * false. claude-broker fixes `--model`/`--effort` at process boot; both axes
+ * read false until between-turns succession (§5 phase 3) ships. False axes
+ * render honest disabled-with-reason rows in the composer pill.
+ */
+export function runtimeSettingsCapability(engine: RuntimeEngine): RuntimeSettingsCapability {
+  return { perTurnEffort: engine === "codex", perTurnModel: false };
 }
 
 export interface RuntimeInterruptCommand extends RuntimeCommandBase {
@@ -291,7 +326,7 @@ export interface RuntimeSession {
   workflowId: string | null;
   cwd: string | null;
   artifactPath: string | null;
-  capabilities: { steer: boolean; structuredAttention: boolean; imageInput?: RuntimeImageCapability };
+  capabilities: { steer: boolean; structuredAttention: boolean; imageInput?: RuntimeImageCapability; runtimeSettings?: RuntimeSettingsCapability };
   activeTurnId: string | null;
   drift?: RuntimeDrift | null;
 }

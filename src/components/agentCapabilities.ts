@@ -279,8 +279,11 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
         controls: {
           stop: ENABLED,
           compact: disabled("strip.structuredUnsupported"),
-          // Pickers stay visible; the strip disables Apply with the same reason.
-          runtime: disabled("strip.structuredUnsupported"),
+          // The composer runtime pill owns selection here (issue #390): the cell
+          // is enabled, and per-turn honesty comes from the session's negotiated
+          // `runtimeSettings` capability, which disables individual rows when a
+          // host can't honor a live change (never a whole-control fence).
+          runtime: ENABLED,
           // Kill enters the durable structured control channel (one structured
           // request, never /api/proc). Compact and reconfigure stay fenced:
           // dispatchStructuredControl still answers them with a 409.
@@ -367,8 +370,9 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
 }
 
 /** The controls the strip *itself* renders. `kind`/`send`/`images` belong to the
-    header and the composer, so they never keep an otherwise-empty strip alive. */
-const STRIP_OWN_CONTROLS: ControlName[] = ["stop", "compact", "runtime", "terminal"];
+    header and the composer — and since issue #390 so does `runtime` (the
+    composer's RuntimePill) — so they never keep an otherwise-empty strip alive. */
+const STRIP_OWN_CONTROLS: ControlName[] = ["stop", "compact", "terminal"];
 
 /** True when the strip has at least one of its own visible controls. */
 export function stripHasVisibleControls(caps: StripCapabilities): boolean {

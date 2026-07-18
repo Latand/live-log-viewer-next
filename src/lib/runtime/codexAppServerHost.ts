@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 
+import { isKnownEffortTier } from "@/lib/agent/efforts";
 import { procBackend } from "@/lib/proc";
 import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "@/lib/processGroup";
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
@@ -530,6 +531,7 @@ export class CodexAppServerHost implements EngineHost {
       content: normalized.content,
       contentDigest: normalized.contentDigest,
       ...(normalized.expectedTurnId !== undefined ? { expectedTurnId: normalized.expectedTurnId } : {}),
+      ...(normalized.runtime ? { runtime: normalized.runtime } : {}),
     };
     if (!entry.id) throw new Error("queue entry id is required");
     const confirmed = await this.confirmedDelivery(entry);
@@ -567,9 +569,21 @@ export class CodexAppServerHost implements EngineHost {
         throw error;
       }
     }
+    /* Per-turn effort (issue #390 §5): the snapshot riding the durable entry
+       outranks the host-fixed default — the only axis `turn/start` accepts
+       (model and service tier are thread-level in this protocol, so the
+       negotiated capability advertises `perTurnModel: false`). A token outside
+       the CLI tier vocabulary falls back to the host default rather than
+       failing the turn over a settings blemish; model fit for an in-vocabulary
+       tier is the app server's own verdict (per-model scales exceed the base
+       engine list — sol/terra accept `ultra`). */
+    const perTurnEffort = entry.runtime?.effort && isKnownEffortTier(entry.runtime.effort)
+      ? entry.runtime.effort
+      : undefined;
+    const effort = perTurnEffort ?? this.effort;
     const result = await this.rpc("turn/start", {
       threadId: this.identity.threadId,
-      ...(this.effort ? { effort: this.effort } : {}),
+      ...(effort ? { effort } : {}),
       input,
       clientUserMessageId: entry.id,
     });

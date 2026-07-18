@@ -10,6 +10,7 @@ import {
   Brain,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   ChevronUp,
   CircleCheck,
@@ -42,6 +43,7 @@ import {
   Trash2,
   Wrench,
   X,
+  Zap,
 } from "lucide-react";
 
 export {
@@ -55,6 +57,7 @@ export {
   Brain,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   ChevronUp,
   CircleCheck,
@@ -79,6 +82,7 @@ export {
   Terminal,
   Trash2,
   X,
+  Zap,
 };
 
 /** Loader kept as its own export so callers add `animate-spin` at the call site. */

@@ -218,16 +218,18 @@ test("live-subagent: stop enabled (root-interrupt note), compact disabled, runti
   expect(state("images", f, null)).toBe("enabled");
 });
 
-test("structured: stop+terminal+kill enabled, compact/runtime still fenced, images follow the negotiated capability", () => {
+test("structured: stop+terminal+kill+runtime enabled, compact still fenced, images follow the negotiated capability", () => {
   const f = file({ proc: "running" });
   const view = rv("codex-app-server", "hosted");
   expect(state("stop", f, view)).toBe("enabled");
   expect(state("terminal", f, view)).toBe("enabled");
   // Kill is enabled and routed through the durable structured control channel.
   expect(state("kill", f, view)).toBe("enabled");
-  // Compact/reconfigure stay disabled: dispatchStructuredControl still 409s them.
+  // Compact stays disabled: dispatchStructuredControl still 409s it.
   expect(reason("compact", f, view)).toBe("strip.structuredUnsupported");
-  expect(reason("runtime", f, view)).toBe("strip.structuredUnsupported");
+  // The composer RuntimePill owns runtime selection here (issue #390); per-row
+  // honesty comes from the session's negotiated runtimeSettings capability.
+  expect(state("runtime", f, view)).toBe("enabled");
   // Images delegate to session.capabilities.imageInput: no negotiated capability
   // (or an unsupported one) disables with the protocol reason; a supported one enables.
   expect(reason("images", f, view)).toBe("composer.structuredImagesProtocol");

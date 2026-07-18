@@ -6,7 +6,6 @@ import { MoreHorizontal } from "lucide-react";
 import { ArrowUpToLine, Check, FoldVertical, Loader2, Play, Square, SquareTerminal } from "@/components/icons";
 
 import { Hint } from "@/components/Hint";
-import { AgentRuntimeControls, DisabledRuntimeControls, ResumeRuntimeControls } from "@/components/AgentRuntimeControls";
 import { AttachTerminalDialog } from "@/components/AttachTerminalDialog";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { interruptRuntime } from "@/hooks/useRuntime";
@@ -74,12 +73,15 @@ function StripButton({
   );
 }
 
-/** The mode chip — where the message goes (design §2 item 1). */
+/** The mode chip — where the message goes (design §2 item 1). The `structured`
+    surface renders no chip (issue #390): a structured host is the normal
+    conversation shape, so the badge carried no routing information — the
+    remaining chips all do. */
 function ModeChip({ t, surface }: { t: TFunction; surface: StripSurface }) {
   const face = (() => {
     switch (surface) {
       case "structured":
-        return { icon: <SquareTerminal className="h-3 w-3 shrink-0" aria-hidden />, label: t("composer.structured"), title: t("composer.structuredHost") };
+        return null;
       case "live-subagent":
         return { icon: <ArrowUpToLine className="h-3 w-3 shrink-0" aria-hidden />, label: t("composer.root"), title: t("composer.titleRelay") };
       case "resume":
@@ -90,6 +92,7 @@ function ModeChip({ t, surface }: { t: TFunction; surface: StripSurface }) {
         return { icon: <SquareTerminal className="h-3 w-3 shrink-0" aria-hidden />, label: t("strip.live"), title: t("branch.live") };
     }
   })();
+  if (!face) return null;
   return (
     <span
       className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"
@@ -106,7 +109,6 @@ export interface AgentControlStripViewProps {
   isMobile: boolean;
   caps: StripCapabilities;
   layout: StripLayout;
-  runtimeSlot: React.ReactNode | null;
   compactArmed: boolean;
   stopBusy: boolean;
   compactBusy: boolean;
@@ -131,7 +133,6 @@ export function AgentControlStripView({
   isMobile,
   caps,
   layout,
-  runtimeSlot,
   compactArmed,
   stopBusy,
   compactBusy,
@@ -143,9 +144,10 @@ export function AgentControlStripView({
   status,
 }: AgentControlStripViewProps) {
   const { controls, surface } = caps;
-  /* Owner-critical controls always stay on the face (§3): Stop and the runtime
-     pill. Compact and Terminal fold into the overflow on narrow/mini and on the
-     phone. */
+  /* Owner-critical controls always stay on the face (§3): Stop. The runtime
+     control moved into the composer's bottom row as the RuntimePill (issue
+     #390). Compact and Terminal fold into the overflow on narrow/mini and on
+     the phone. */
   const foldsSecondary = isMobile || layout !== "full";
   const overflowNeeded =
     foldsSecondary && (visible(controls.compact) || visible(controls.terminal));
@@ -211,8 +213,6 @@ export function AgentControlStripView({
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         <ModeChip t={t} surface={surface} />
         {stopBtn}
-        {/* Runtime pill/selects always stay on the face. */}
-        {runtimeSlot}
         {/* Secondary controls: inline on the full desktop face, folded otherwise. */}
         {foldsSecondary ? null : compactBtn}
         {foldsSecondary ? null : terminalBtn}
@@ -252,10 +252,9 @@ export function AgentControlStripView({
 }
 
 /**
- * Container: computes the capability matrix for this conversation, builds the
- * runtime group for the surface, and wires the stop/compact/attach actions. The
- * header keeps only identity + status; this footer strip is the single action
- * surface (design §2).
+ * Container: computes the capability matrix for this conversation and wires
+ * the stop/compact/attach actions. The header keeps only identity + status;
+ * the runtime control lives in the composer's RuntimePill (issue #390).
  */
 export function AgentControlStrip({ file }: { file: FileEntry }) {
   const { t } = useLocale();
@@ -343,8 +342,6 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
     }
   };
 
-  const runtimeSlot = runtimeSlotFor(t, caps.surface, caps.controls.runtime, file);
-
   return (
     <div ref={rootRef}>
       <AgentControlStripView
@@ -352,7 +349,6 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
         isMobile={isMobile}
         caps={caps}
         layout={layout}
-        runtimeSlot={runtimeSlot}
         compactArmed={compactArmed}
         stopBusy={stopBusy}
         compactBusy={compactBusy}
@@ -366,14 +362,4 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
       {attachOpen ? <AttachTerminalDialog file={file} mode={attachMode} onClose={() => setAttachOpen(false)} /> : null}
     </div>
   );
-}
-
-/** The runtime (model·effort·apply) group for a surface, or null when hidden. */
-function runtimeSlotFor(t: TFunction, surface: StripSurface, cap: Capability, file: FileEntry): React.ReactNode | null {
-  if (cap.state === "hidden") return null;
-  if (file.engine !== "claude" && file.engine !== "codex") return null;
-  if (surface === "live-root") return <AgentRuntimeControls file={file} />;
-  if (surface === "resume") return <ResumeRuntimeControls file={file} />;
-  if (surface === "structured" && cap.state === "disabled") return <DisabledRuntimeControls file={file} reason={t(cap.reason)} />;
-  return null;
 }

@@ -11,7 +11,7 @@ import { requestAccountMigrationTick } from "@/lib/accounts/migration/controller
 import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
-import type { RuntimeOperationReceipt, RuntimeSession } from "./contracts";
+import type { RuntimeOperationReceipt, RuntimeSendSettings, RuntimeSession } from "./contracts";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { runtimeImageCapability, runtimeImageRefsForUploads, runtimeImageStore, type RuntimeImageUpload } from "./runtimeImageStore";
@@ -37,6 +37,11 @@ export interface StructuredMessageRequest {
   images?: RuntimeImageUpload[];
   imageRefs?: StructuredImageRef[];
   hasImages?: boolean;
+  /** Per-turn runtime settings snapshot (issue #390 §10): rides the durable
+      send effect so a replayed key re-delivers with identical settings. A
+      migration hold drops the override (absent = today's behavior) — the held
+      command format predates it and stays untouched. */
+  runtime?: RuntimeSendSettings;
 }
 
 export type StructuredMessageResult =
@@ -564,6 +569,7 @@ export async function enqueueStructuredMessage(
       contentDigest: content.contentDigest,
       policy: request.policy ?? "interrupt-active",
       ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
+      ...(request.runtime ? { runtime: request.runtime } : {}),
     });
     const receipt = result.receipt;
     if (receipt.status === "rejected" || receipt.status === "failed" || receipt.status === "uncertain") {

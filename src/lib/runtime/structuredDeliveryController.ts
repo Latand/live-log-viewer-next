@@ -4,7 +4,7 @@ import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/li
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
-import type { RuntimeEventInput } from "./contracts";
+import { runtimeSettingsCapability, type RuntimeEventInput } from "./contracts";
 import type { EngineHost, HostState } from "./engineHost";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { projectEngineHostEvent } from "./engineHostEvents";
@@ -129,6 +129,7 @@ async function publishHostState(
           adopted.key.engine,
           state.activeFlags.includes(STRUCTURED_IMAGE_CAPABILITY),
         ),
+        runtimeSettings: runtimeSettingsCapability(adopted.key.engine),
       },
       activeTurnId: state.activeTurnRef,
     },
@@ -323,11 +324,13 @@ export async function bindStructuredDeliveryQueue(
               steer: entry.structuredHost.kind === "codex-app-server",
               structuredAttention: true,
               imageInput: runtimeImageCapability(key.engine, false),
+              runtimeSettings: runtimeSettingsCapability(key.engine),
             }
           : {
               steer: false,
               structuredAttention: false,
               imageInput: runtimeImageCapability(key.engine, false),
+              runtimeSettings: runtimeSettingsCapability(key.engine),
             },
         activeTurnId: null,
       },

@@ -80,6 +80,42 @@ test("runtime command parsing rejects malformed and oversized bodies", () => {
   expect(() => parseRuntimeCommand("send", { conversationId: "conv-one", text: "x".repeat(256 * 1024), idempotencyKey: "send-one" })).toThrow("request body exceeds 256 KiB");
 });
 
+test("a send may carry a per-turn runtime settings snapshot (issue #390 §10)", () => {
+  // Explicit fields survive normalized; the model reuses the CLI-argument
+  // bounds and the effort lowercases to its CLI token.
+  expect(parseRuntimeCommand("send", {
+    conversationId: "conv-one",
+    text: "continue",
+    idempotencyKey: "send-runtime",
+    runtime: { model: " gpt-5.6-sol ", effort: "Ultra", fast: true },
+  })).toMatchObject({ runtime: { model: "gpt-5.6-sol", effort: "ultra", fast: true } });
+  // A sparse snapshot keeps only the selected fields; an empty object is
+  // dropped entirely so absent = today's behavior stays byte-identical.
+  expect(parseRuntimeCommand("send", {
+    conversationId: "conv-one",
+    text: "continue",
+    idempotencyKey: "send-runtime-sparse",
+    runtime: { effort: "high" },
+  })).toMatchObject({ runtime: { effort: "high" } });
+  const bare = parseRuntimeCommand("send", {
+    conversationId: "conv-one",
+    text: "continue",
+    idempotencyKey: "send-runtime-empty",
+    runtime: {},
+  });
+  expect("runtime" in bare).toBe(false);
+  // Malformed snapshots reject as client errors.
+  expect(() => parseRuntimeCommand("send", {
+    conversationId: "conv-one", text: "x", idempotencyKey: "k1", runtime: "fast",
+  })).toThrow("runtime settings are invalid");
+  expect(() => parseRuntimeCommand("send", {
+    conversationId: "conv-one", text: "x", idempotencyKey: "k2", runtime: { effort: "not a tier!" },
+  })).toThrow("runtime effort is invalid");
+  expect(() => parseRuntimeCommand("send", {
+    conversationId: "conv-one", text: "x", idempotencyKey: "k3", runtime: { model: "terra\n--help" },
+  })).toThrow();
+});
+
 test("runtime command parsing admits image-only content with a canonical digest", () => {
   const command = parseRuntimeCommand("send", {
     conversationId: "conv-images",

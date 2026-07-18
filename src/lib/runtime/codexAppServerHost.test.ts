@@ -425,6 +425,26 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("a per-turn effort snapshot on the queue entry outranks the host default on turn/start (issue #390)", async () => {
+    const overrideServer = new FakeAppServer("per-turn-effort");
+    const overrideHost = await CodexAppServerHost.start({
+      cwd: "/repo", effort: "medium", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(overrideServer),
+    });
+    await overrideHost.send({ id: "with-override", text: "run hot", runtime: { effort: "ultra", fast: true } });
+    expect(overrideServer.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({ effort: "ultra" });
+    await overrideHost.release();
+
+    // A tier outside the codex vocabulary falls back to the host default
+    // instead of failing the turn over a settings blemish.
+    const invalidServer = new FakeAppServer("per-turn-invalid");
+    const invalidHost = await CodexAppServerHost.start({
+      cwd: "/repo", effort: "medium", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(invalidServer),
+    });
+    await invalidHost.send({ id: "with-blemish", text: "stay safe", runtime: { effort: "warp9" } });
+    expect(invalidServer.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({ effort: "medium" });
+    await invalidHost.release();
+  });
+
   test("resumes the same engine thread after a host-process replacement", async () => {
     const eventStore = new MemoryEventStore();
     const firstServer = new FakeAppServer("durable-thread");
