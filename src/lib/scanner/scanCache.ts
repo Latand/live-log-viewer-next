@@ -218,7 +218,16 @@ function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
 function readPersistedFileScanSnapshot(): FileScanSnapshot | undefined {
   try {
     const value = JSON.parse(fs.readFileSync(statePath(FILE_SCAN_SNAPSHOT_FILE), "utf8")) as unknown;
-    if (!isRecord(value) || value.version !== FILE_SCAN_SNAPSHOT_VERSION || !isFileScanSnapshot(value.snapshot)) return undefined;
+    // The persisted snapshot carries the cache schema: a snapshot written by a
+    // build with different derivation semantics (pre-#406 lastTurn boundaries
+    // opened by meta records) must not warm-start this one — the first cold
+    // scan after an upgrade recomputes every boundary instead.
+    if (
+      !isRecord(value)
+      || value.version !== FILE_SCAN_SNAPSHOT_VERSION
+      || value.schemaVersion !== FILE_SCAN_CACHE_SCHEMA_VERSION
+      || !isFileScanSnapshot(value.snapshot)
+    ) return undefined;
     return value.snapshot;
   } catch {
     return undefined;
@@ -236,7 +245,11 @@ function writePersistedFileScanSnapshot(snapshot: FileScanSnapshot): void {
     temporary = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`);
     operation = "write temporary snapshot";
     target = temporary;
-    fs.writeFileSync(temporary, JSON.stringify({ version: FILE_SCAN_SNAPSHOT_VERSION, snapshot }) + "\n", {
+    fs.writeFileSync(temporary, JSON.stringify({
+      version: FILE_SCAN_SNAPSHOT_VERSION,
+      schemaVersion: FILE_SCAN_CACHE_SCHEMA_VERSION,
+      snapshot,
+    }) + "\n", {
       encoding: "utf8",
       mode: 0o600,
     });

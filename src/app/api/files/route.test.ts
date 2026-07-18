@@ -179,6 +179,7 @@ test("a restart serves the persisted completed snapshot while revalidating", asy
   };
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
     version: 1,
+    schemaVersion: 8,
     snapshot: persistedSnapshot,
   }));
   resetFilesRouteCacheForTests();
@@ -198,6 +199,7 @@ test("a restart serves the persisted completed snapshot while revalidating", asy
 test("a current scan joins restart revalidation before publishing transcript metadata", async () => {
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
     version: 1,
+    schemaVersion: 8,
     snapshot: {
       files: [file("/sessions/persisted-resource.jsonl")],
       projectCatalog: [],
@@ -633,6 +635,7 @@ test("a fresh resource snapshot replaces stale process and pane observations bef
 test("a client automatically converges from a persisted restart snapshot to its completed generation", async () => {
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
     version: 1,
+    schemaVersion: 8,
     snapshot: {
       files: [file("/sessions/persisted-client.jsonl")],
       projectCatalog: [],
@@ -670,6 +673,7 @@ test("a restart hydrates a persisted 7700-row snapshot within two seconds", asyn
   const files = Array.from({ length: 7_700 }, (_, index) => file(`/sessions/persisted-${index}.jsonl`));
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
     version: 1,
+    schemaVersion: 8,
     snapshot: { files, projectCatalog: [], complete: true },
   }));
   resetFilesRouteCacheForTests();
@@ -693,6 +697,7 @@ test("a corrupt completed snapshot falls back to a cold scan and repairs persist
   expect(scans).toBe(1);
   const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "files-scan-snapshot.json"), "utf8"));
   expect(persisted.version).toBe(1);
+  expect(persisted.schemaVersion).toBe(8);
 });
 
 test("repeated first-ever incomplete scans stay unpublished until recovery", async () => {
@@ -757,6 +762,7 @@ test("snapshot publication failures preserve the canonical file, clean temps, st
   const snapshotPath = path.join(stateDir, "files-scan-snapshot.json");
   const canonical = JSON.stringify({
     version: 1,
+    schemaVersion: 8,
     snapshot: {
       files: [file("/sessions/canonical.jsonl")],
       projectCatalog: [],
