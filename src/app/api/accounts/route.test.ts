@@ -517,3 +517,28 @@ test("Claude DTOs remain secret-free and creation rejects cross-origin before an
   expect((await createClaude(req)).status).toBe(403);
   expect(fs.existsSync(path.join(process.env.LLV_STATE_DIR!, "claude-accounts.json"))).toBe(false);
 });
+
+test("GET projects the per-engine quick-switch catalog: active id plus secret-free {id,label,authPresent} rows", async () => {
+  // The in-UI quick switch (issue #40) — the Switchboard triggers and the
+  // draft pane's launch selector — reads exactly this contract for both
+  // engines: which stored profile is active, and which rows can be picked.
+  const codex = createManagedCodexAccount("Codex Work");
+  authenticateCodex(codex);
+  setActiveCodexAccount(codex.id);
+  const claudeMain = createManagedClaudeAccount("Claude Main");
+  const claudeSpare = createManagedClaudeAccount("Claude Spare");
+  authenticateClaude(claudeMain);
+  setActiveClaudeAccount(claudeMain.id);
+
+  const body = await (await GET()).json() as {
+    claude: { active: string; accounts: { id: string; label: string; authPresent: boolean }[] };
+    codex: { active: string; accounts: { id: string; label: string; authPresent: boolean }[] };
+  };
+  expect(body.claude.active).toBe(claudeMain.id);
+  expect(body.codex.active).toBe(codex.id);
+  expect(body.codex.accounts.find((row) => row.id === codex.id)).toEqual(expect.objectContaining({ label: "Codex Work", authPresent: true }));
+  expect(body.claude.accounts.find((row) => row.id === claudeMain.id)).toEqual(expect.objectContaining({ label: "Claude Main", authPresent: true }));
+  // A signed-out profile stays listed (history preserved) but is marked, so the
+  // UI can offer it for sign-in instead of dropping it.
+  expect(body.claude.accounts.find((row) => row.id === claudeSpare.id)).toEqual(expect.objectContaining({ label: "Claude Spare", authPresent: false }));
+});

@@ -16,7 +16,7 @@ import { conversationIdentity } from "@/lib/accounts/identity";
 
 import { projectKey } from "./projectModel";
 import { CornerStatus } from "./CornerStatus";
-import { CodexAccountSwitch } from "./CodexAccountSwitch";
+import { EngineAccountSwitch } from "./EngineAccountSwitch";
 import { FlipRow } from "./FlipRow";
 import { SwitchCard, type SwitchCardTone } from "./SwitchCard";
 
@@ -145,7 +145,8 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
           >
             <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card px-4">
               <div className="text-[15px] font-bold">{t("switch.title")}</div>
-              <CodexAccountSwitch />
+              <EngineAccountSwitch engine="claude" />
+              <EngineAccountSwitch engine="codex" />
               <input
                 ref={inputRef}
                 value={query}
