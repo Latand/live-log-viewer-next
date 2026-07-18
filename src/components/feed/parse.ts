@@ -6,6 +6,7 @@ import {
   VERDICT_LINE_RE,
   type ReviewCardItem,
 } from "@/lib/review";
+import { isClaudeProtocolUser } from "@/lib/claudeProtocolUser";
 import { getLocale, translate } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { decodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
@@ -863,25 +864,9 @@ function sameCodexTextAtTime(leftTs: unknown, leftText: unknown, rightTs: unknow
   return Math.abs(aValue - bValue) <= 0.01;
 }
 
-function claudeContentText(content: unknown): string {
-  return typeof content === "string" ? content : arr(content).map((part) => textPart(part.text)).filter(Boolean).join("\n");
-}
-
-function isClaudeProtocolUser(obj: Record<string, unknown>, content: unknown): boolean {
-  const originKind = textPart(rec(obj.origin).kind);
-  /* Claude records queued human input with the same envelope fields that its
-     harness uses. Explicit human provenance and typed prompts keep their
-     transcript role through any wrapper text. */
-  if (originKind === "human" || textPart(obj.promptSource) === "typed") return false;
-  if (obj.isMeta === true || "interruptedMessageId" in obj || "promptSource" in obj || "origin" in obj) return true;
-  const text = claudeContentText(content).trim();
-  return (
-    /^\[Request interrupted by user\]$/.test(text) ||
-    /^<local-command-caveat>\s*Caveat:[\s\S]*<\/local-command-caveat>$/.test(text) ||
-    /^<task-notification\b[^>]*>[\s\S]*<\/task-notification>$/.test(text) ||
-    /^This came from another Claude session\b[\s\S]*not typed by your user[\s\S]*$/.test(text)
-  );
-}
+/* The meta/command user-record classification is shared with turn-duration
+   scanning — one contract decides both the feed's system-row rendering and
+   which prompts may open a work window (issue #406). */
 
 /**
  * The stateful line-window parser behind a feed pane. All cross-line effects
@@ -1543,7 +1528,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         if (text.trim()) attachCompactSummary(ts, text.trim());
         return;
       }
-      const isHarness = isClaudeProtocolUser(obj, content);
+      const isHarness = isClaudeProtocolUser(obj);
       if (typeof content === "string") addUserText(ts, content, isHarness);
       else {
         for (const part of arr(content)) {
