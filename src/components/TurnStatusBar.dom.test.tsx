@@ -112,6 +112,19 @@ test("a new prompt after a finished turn resets the timer to the new receipt", (
   }
 });
 
+test("finished caption's accessible output is the localized visible duration text", () => {
+  const t0 = Date.parse("2026-07-18T10:00:00.000Z");
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  render(file({ startedAt: t0, endedAt: t0 + (12 * 60 + 30) * 1000 }, "idle"), container);
+  const caption = container.querySelector('[data-turn-status="finished"] .tabular-nums');
+  expect(caption?.textContent).toBe("Worked for 12m 30s");
+  // The caption span is role-less: an aria-label there would override the
+  // visible localized caption for assistive tech, so it must carry none and
+  // expose the caption itself as its accessible output (issue #268 review).
+  expect(caption?.hasAttribute("aria-label")).toBe(false);
+});
+
 test("live agent with no known boundary keeps the working label without a timer", () => {
   const container = document.createElement("div");
   document.body.appendChild(container);

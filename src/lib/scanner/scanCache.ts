@@ -60,9 +60,10 @@ const FILE_SCAN_FRESH_MS = 1_000;
 /** Poll-driven attempts share the client's fallback cadence, including failures. */
 const FILE_SCAN_ORDINARY_REFRESH_MS = 10_000;
 const FILE_SCAN_PIN_CACHE_MAX = 8;
-// v6: lastTurn boundaries switched to initiating-prompt semantics (issue #268)
-// — persisted v5 snapshots carry last-prompt starts and must be recomputed.
-const FILE_SCAN_CACHE_SCHEMA_VERSION = 6 as const;
+// v7: lastTurn boundaries now close on interrupt/crash failure evidence
+// (issue #268 review) — persisted v6 snapshots carry windows that never end
+// without a terminal record and must be recomputed.
+const FILE_SCAN_CACHE_SCHEMA_VERSION = 7 as const;
 const FILE_SCAN_SNAPSHOT_VERSION = 1 as const;
 const FILE_SCAN_SNAPSHOT_FILE = "files-scan-snapshot.json";
 const FILE_SCAN_PERSISTENCE_DIAGNOSTIC_MS = 60_000;
@@ -202,7 +203,7 @@ function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
     if (Object.hasOwn(entry, "goal")) globalCache<[number, number, FileEntry["goal"]]>("goal-v2").set(entry.path, [entry.size, mtimeMs, entry.goal]);
     if (Object.hasOwn(entry, "ctx")) globalCache<[number, number, FileEntry["ctx"]]>("ctx-v2").set(entry.path, [entry.size, mtimeMs, entry.ctx]);
     if (Object.hasOwn(entry, "lastTurn")) {
-      globalCache<[number, number, FileEntry["lastTurn"]]>("last-turn-v3").set(entry.path, [entry.size, mtimeMs, entry.lastTurn]);
+      globalCache<[number, number, FileEntry["lastTurn"]]>("last-turn-v4").set(entry.path, [entry.size, mtimeMs, entry.lastTurn]);
     }
     if (Object.hasOwn(entry, "pendingWakeup")) {
       globalCache<[number, number, FileEntry["pendingWakeup"]]>("wakeup-v2").set(entry.path, [entry.size, mtimeMs, entry.pendingWakeup]);

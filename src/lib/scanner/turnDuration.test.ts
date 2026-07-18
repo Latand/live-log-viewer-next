@@ -25,6 +25,18 @@ const claudeAssistantEnd = (timestamp: string) => ({
   timestamp,
   message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "done" }] },
 });
+const claudeInterrupt = (timestamp: string, extra: Record<string, unknown> = { interruptedMessageId: "msg-1" }) => ({
+  type: "user",
+  timestamp,
+  ...extra,
+  message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] },
+});
+const claudeApiError = (timestamp: string) => ({
+  type: "assistant",
+  timestamp,
+  isApiErrorMessage: true,
+  message: { role: "assistant", stop_reason: null, content: [{ type: "text", text: "API Error: 500" }] },
+});
 
 // ── Codex rollout record builders ───────────────────────────────────────────
 const codexUser = (timestamp: string, message: string) => ({
@@ -137,6 +149,81 @@ describe("lastTurnFromRecords — Claude", () => {
         claudeUser("2026-07-14T10:00:00.000Z", "start"),
         claudeAssistantOpen("2026-07-14T10:00:05.000Z"),
         claudeUser("2026-07-14T10:20:00.000Z", "steer"),
+      ],
+      false,
+    );
+    expect(boundary).toEqual({ startedAt: ms("2026-07-14T10:00:00.000Z"), endedAt: null });
+  });
+
+  test("interrupt sentinel closes the window without a terminal record", () => {
+    // Ctrl-C leaves no `result` / `end_turn` record — only the protocol user
+    // record. The window must still end there instead of ticking forever
+    // (issue #268 review finding).
+    const boundary = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "start"),
+        claudeAssistantOpen("2026-07-14T10:00:05.000Z"),
+        claudeInterrupt("2026-07-14T10:04:00.000Z"),
+      ],
+      false,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:04:00.000Z"),
+    });
+  });
+
+  test("bare interrupt sentinel text (no id field) also closes the window", () => {
+    const boundary = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "start"),
+        claudeInterrupt("2026-07-14T10:01:30.000Z", {}),
+      ],
+      false,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:01:30.000Z"),
+    });
+  });
+
+  test("the prompt after an interrupt initiates a new window", () => {
+    const boundary = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "start"),
+        claudeAssistantOpen("2026-07-14T10:00:05.000Z"),
+        claudeInterrupt("2026-07-14T10:04:00.000Z"),
+        claudeUser("2026-07-14T10:05:00.000Z", "try a different approach"),
+      ],
+      false,
+    );
+    expect(boundary).toEqual({ startedAt: ms("2026-07-14T10:05:00.000Z"), endedAt: null });
+  });
+
+  test("API-error crash closes the window at the error record", () => {
+    const boundary = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "start"),
+        claudeAssistantOpen("2026-07-14T10:00:05.000Z"),
+        claudeApiError("2026-07-14T10:02:00.000Z"),
+      ],
+      false,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:02:00.000Z"),
+    });
+  });
+
+  test("a survived API error keeps the run open and steering continuous", () => {
+    // The error was transient: the model kept working after it, so a later
+    // prompt steers the same window instead of resetting the start.
+    const boundary = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "start"),
+        claudeApiError("2026-07-14T10:00:30.000Z"),
+        claudeAssistantOpen("2026-07-14T10:00:40.000Z"),
+        claudeUser("2026-07-14T10:10:00.000Z", "steer"),
       ],
       false,
     );

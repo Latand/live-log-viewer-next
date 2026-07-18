@@ -87,7 +87,10 @@ export function TurnStatusBar({ file, workingLabel, workingIcon: Icon, compact =
       className={`flex shrink-0 items-center gap-2 border-t border-border ${pad} text-[11px] font-semibold text-muted`}
     >
       <span className="h-px flex-1 bg-border" aria-hidden />
-      <span className="tabular-nums" aria-label={t("turn.timer")}>{caption}</span>
+      {/* No aria-label here: this role-less span's accessible output must be
+          the caption itself — the localized visible duration text — not a
+          generic timer name that would override it (issue #268 review). */}
+      <span className="tabular-nums">{caption}</span>
       <span className="h-px flex-1 bg-border" aria-hidden />
     </div>
   );

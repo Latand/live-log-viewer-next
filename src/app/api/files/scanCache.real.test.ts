@@ -165,7 +165,7 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
     if (Object.hasOwn(persisted!, "goal")) expect(caches["goal-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.goal]);
     if (Object.hasOwn(persisted!, "ctx")) expect(caches["ctx-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.ctx]);
     if (Object.hasOwn(persisted!, "lastTurn")) {
-      expect(caches["last-turn-v3"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.lastTurn]);
+      expect(caches["last-turn-v4"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.lastTurn]);
     }
 
     activityVerdict(persisted!.root, transcript, persisted!.mtime, persisted!.size);
