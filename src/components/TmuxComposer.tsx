@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
-import { ArrowRight, ArrowUpToLine, ChevronRight, Loader2, Play, X } from "@/components/icons";
+import { ArrowRight, ArrowUpToLine, Check, ChevronRight, Loader2, Play, X } from "@/components/icons";
 import { RotateCcw } from "lucide-react";
 
 import type { TFunction } from "@/lib/i18n";
@@ -22,6 +22,16 @@ import { savedResumeProfile } from "./AgentRuntimeControls";
 import { ComposerBar } from "./ComposerBar";
 import { type PendingImage } from "./imageAttachments";
 import { ReceiptChip, runtimeReceiptStatusText } from "./runtime/ReceiptChip";
+import {
+  deliveryAttemptGroups,
+  deliveryEchoes,
+  deliveryProblem,
+  dismissedReceiptsKey,
+  readDismissedReceipts,
+  visibleStandaloneReceipts,
+  withDismissedReceipts,
+  writeDismissedReceipts,
+} from "./runtime/deliveryState";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 
@@ -164,16 +174,25 @@ export function mergeRuntimeReceipts(
         || left.idempotencyKey.localeCompare(right.idempotencyKey));
 }
 
+const NO_DISMISSED: ReadonlySet<string> = new Set();
+
 export function RuntimeComposerReceipts({
   receipts,
   actionsDisabled = false,
+  dismissed = NO_DISMISSED,
   onRetry,
   onEdit,
+  onDismiss,
 }: {
   receipts: RuntimeReceipt[];
   actionsDisabled?: boolean;
+  /** Operation ids the user dismissed (issue #264 rule 3): settled problems in
+      this set stay hidden; a still-moving attempt always renders. */
+  dismissed?: ReadonlySet<string>;
   onRetry: (receipt: RuntimeReceipt) => void;
   onEdit: (receipt: RuntimeReceipt) => void;
+  /** Persists a dismissal — receives every settled operation id of the row. */
+  onDismiss?: (operationIds: string[]) => void;
 }) {
   const { t } = useLocale();
   const statusId = useId();
@@ -184,25 +203,12 @@ export function RuntimeComposerReceipts({
     && typeof receipt.text === "string"
     && receipt.text.length > 0
     && receipt.text.length < 240;
-  const messageReceipts = receipts
-    .filter((receipt) => isMessage(receipt) && receipt.status !== "delivered" && Boolean(receipt.text))
-    .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
-  /* Repeated attempts of one logical send (identical kind + text) share one
-     row: the newest attempt carries the current state and the action set, the
-     older ones survive as counted status history instead of duplicate text. */
-  const attemptGroups: { current: RuntimeReceipt; attempts: RuntimeReceipt[] }[] = [];
-  const groupsByText = new Map<string, { current: RuntimeReceipt; attempts: RuntimeReceipt[] }>();
-  for (const receipt of messageReceipts) {
-    const key = `${receipt.kind}\u0000${receipt.text}`;
-    const group = groupsByText.get(key);
-    if (group) {
-      group.attempts.push(receipt);
-      continue;
-    }
-    const next = { current: receipt, attempts: [receipt] };
-    groupsByText.set(key, next);
-    attemptGroups.push(next);
-  }
+  /* Visibility and grouping live in the delivery-state model (issue #264):
+     resolved successes render nothing (the feed bubble is the receipt), a
+     group superseded by a successful resend of the same text goes quiet, and
+     dismissed settled problems stay dismissed. */
+  const attemptGroups = deliveryAttemptGroups(receipts, dismissed);
+  const visibleAttempts = attemptGroups.flatMap((group) => group.attempts);
   const supersededStatusLabels = (attempts: RuntimeReceipt[]): string[] => {
     const counts = new Map<string, number>();
     for (const attempt of attempts.slice(1)) {
@@ -211,19 +217,16 @@ export function RuntimeComposerReceipts({
     }
     return [...counts].map(([label, count]) => (count > 1 ? `${label} ×${count}` : label));
   };
-  const standaloneReceipts = receipts.filter((receipt) => {
-    if (isMessage(receipt) && receipt.status === "delivered") return false;
-    return !isMessage(receipt) || !receipt.text;
-  });
-  const pendingReceipts = messageReceipts.filter((receipt) => !receiptIsTerminal(receipt.status));
-  const problemReceipts = messageReceipts.filter((receipt) => receipt.status === "failed" || receipt.status === "rejected");
+  const standaloneReceipts = visibleStandaloneReceipts(receipts, dismissed);
+  const pendingReceipts = visibleAttempts.filter((receipt) => !receiptIsTerminal(receipt.status));
+  const problemReceipts = visibleAttempts.filter((receipt) => deliveryProblem(receipt.status));
   const busyRetry = pendingReceipts.some((receipt) => typeof receipt.reason === "string" && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason));
-  const receiptSummaryLabel = t("runtime.receipt.summary", { count: messageReceipts.length });
+  const receiptSummaryLabel = t("runtime.receipt.summary", { count: visibleAttempts.length });
   const disclosureLabel = t(detailsOpen ? "runtime.receipt.hideDetails" : "runtime.receipt.showDetails");
 
   return (
     <>
-      {messageReceipts.length ? (
+      {visibleAttempts.length ? (
         <>
           {/* `open` is controlled: the details element can unmount while all
               message receipts are resolved and remount for the next attempt,
@@ -246,9 +249,9 @@ export function RuntimeComposerReceipts({
               <span
                 className="min-w-[3rem] flex-1 truncate text-right text-muted"
                 data-receipt-preview
-                title={messageReceipts[0]!.text ?? undefined}
+                title={visibleAttempts[0]!.text ?? undefined}
               >
-                {messageReceipts[0]!.text}
+                {visibleAttempts[0]!.text}
               </span>
               <span className="flex shrink-0 items-center gap-1" data-receipt-counts>
                 {pendingReceipts.length ? (
@@ -328,6 +331,25 @@ export function RuntimeComposerReceipts({
                         onRetry={failed ? () => onRetry(receipt) : undefined}
                         onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
                       />
+                      {/* A settled problem is dismissible (issue #264 rule 3):
+                          the dismissal records every settled attempt of the
+                          row and persists, while a still-moving attempt in the
+                          group keeps rendering — dismissal never hides live
+                          delivery truth. */}
+                      {onDismiss && deliveryProblem(receipt.status) ? (
+                        <button
+                          type="button"
+                          aria-label={t("runtime.receipt.dismiss")}
+                          title={t("runtime.receipt.dismiss")}
+                          data-receipt-dismiss
+                          className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0 sm:px-0.5"
+                          onClick={() => onDismiss(group.attempts
+                            .filter((attempt) => receiptIsTerminal(attempt.status))
+                            .map((attempt) => attempt.operationId))}
+                        >
+                          <X className="h-3 w-3" aria-hidden />
+                        </button>
+                      ) : null}
                       {receipt.status === "pending" ? (
                         <span
                           className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-muted motion-reduce:animate-none"
@@ -379,13 +401,26 @@ export function RuntimeComposerReceipts({
       {standaloneReceipts.map((receipt) => {
         const failed = receipt.status === "failed";
         return (
-          <ReceiptChip
-            key={receipt.operationId}
-            receipt={receipt}
-            actionsDisabled={actionsDisabled}
-            onRetry={isMessage(receipt) && failed ? () => onRetry(receipt) : undefined}
-            onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
-          />
+          <span key={receipt.operationId} className="inline-flex items-center gap-1">
+            <ReceiptChip
+              receipt={receipt}
+              actionsDisabled={actionsDisabled}
+              onRetry={isMessage(receipt) && failed ? () => onRetry(receipt) : undefined}
+              onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
+            />
+            {onDismiss && deliveryProblem(receipt.status) ? (
+              <button
+                type="button"
+                aria-label={t("runtime.receipt.dismiss")}
+                title={t("runtime.receipt.dismiss")}
+                data-receipt-dismiss
+                className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0 sm:px-0.5"
+                onClick={() => onDismiss([receipt.operationId])}
+              >
+                <X className="h-3 w-3" aria-hidden />
+              </button>
+            ) : null}
+          </span>
         );
       })}
     </>
@@ -549,7 +584,7 @@ export function adoptComposerState(path: string, cardId: string): void {
     const previousOwner = sessionStorage.getItem(composerOwnerKey(path));
     for (const from of [previousOwner, path]) {
       if (!from || from === cardId) continue;
-      for (const keyOf of [draftKey, pendingSendKey, sentKey]) {
+      for (const keyOf of [draftKey, pendingSendKey, sentKey, dismissedReceiptsKey]) {
         const legacy = sessionStorage.getItem(keyOf(from));
         if (legacy === null) continue;
         if (sessionStorage.getItem(keyOf(cardId)) === null) sessionStorage.setItem(keyOf(cardId), legacy);
@@ -752,6 +787,10 @@ export function TmuxComposer({
      (text, images, mic, send) and its delivery receipts. */
   const [sent, setSent] = useState<SentEntry[]>([]);
   const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>([]);
+  /* Operation ids whose settled problem rows the user dismissed (issue #264
+     rule 3). Persisted per conversation identity and adopted across id
+     rotations alongside the draft. */
+  const [dismissedReceiptIds, setDismissedReceiptIds] = useState<string[]>([]);
   /* One idempotency key per message draft: reused verbatim on a retry (never a
      second send) and re-minted after a successful delivery. Passed to the send
      so the runtime host can round-trip it once the structured plane is on; the
@@ -772,6 +811,18 @@ export function TmuxComposer({
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
   const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
+  const dismissedReceipts = new Set(dismissedReceiptIds);
+  const dismissReceipts = (operationIds: string[]) => {
+    if (!operationIds.length) return;
+    const next = withDismissedReceipts(dismissedReceiptIds, operationIds);
+    setDismissedReceiptIds(next);
+    writeDismissedReceipts(cardId, next);
+  };
+  /* Successful sends whose bubble has not landed in the visible feed yet:
+     quiet one-line echoes derived from the receipt stream (issue #264 rule 2).
+     They self-clear the moment the transcript grows — the bubble in the feed
+     is the real confirmation — so success never accumulates chrome. */
+  const echoedReceipts = deliveryEchoes(displayedRuntimeReceipts, file.mtime * 1000, dismissedReceipts, nowMs());
 
   const persistPendingDeliveries = (next: PendingDelivery[]) => {
     pendingDeliveries.current = next;
@@ -797,6 +848,7 @@ export function TmuxComposer({
     adoptComposerState(file.path, cardId);
     setSent(readSent(cardId));
     setImmediateRuntimeReceipts([]);
+    setDismissedReceiptIds(readDismissedReceipts(cardId));
     pendingDeliveries.current = readPendingDeliveries(cardId);
     settledSendKeys.current = new Set();
     /* Keyed by identity alone: a path migration under a stable id must not
@@ -1183,8 +1235,33 @@ export function TmuxComposer({
           <span className="min-w-0 truncate">{t("migrate.heldSend")}</span>
         </div>
       ) : null}
-      {sent.length ? (
+      {sent.length || echoedReceipts.length ? (
         <div className="flex flex-col gap-0.5" aria-label={t("composer.queueAria")}>
+          {echoedReceipts.map((receipt) => (
+            <div key={receipt.operationId} data-delivery-echo className="flex items-center justify-end gap-1.5">
+              <Check className="h-3 w-3 shrink-0 text-success" aria-hidden />
+              <span className="sr-only">{t("composer.deliveredEcho")}</span>
+              <span
+                className="min-w-0 max-w-[85%] truncate text-label text-secondary"
+                title={receipt.text ?? undefined}
+              >
+                {receipt.text}
+              </span>
+              <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
+                {hhmm(Date.parse(receipt.at))}
+              </span>
+              <button
+                type="button"
+                aria-label={t("runtime.receipt.dismiss")}
+                className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                  isMobile ? "h-11 w-11" : "px-0.5"
+                }`}
+                onClick={() => dismissReceipts([receipt.operationId])}
+              >
+                <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
+              </button>
+            </div>
+          ))}
           {sent.map((entry) => {
             const receipt = receiptMeta(t, entry.state);
             return (
@@ -1268,8 +1345,10 @@ export function TmuxComposer({
             ? <RuntimeComposerReceipts
                 receipts={displayedRuntimeReceipts}
                 actionsDisabled={busy || voiceSending || deadHost}
+                dismissed={dismissedReceipts}
                 onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
                 onEdit={editRuntimeReceipt}
+                onDismiss={dismissReceipts}
               />
             : undefined
         }

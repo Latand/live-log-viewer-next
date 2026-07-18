@@ -522,6 +522,8 @@ test("receipt summary keeps the pending count beside busy retry feedback", () =>
           at: "2026-07-15T16:00:01.000Z",
           revision: 1,
         },
+        /* A steer already inside the running turn is resolved (issue #264):
+           its bubble is in the transcript, so it renders no pending chrome. */
         {
           operationId: "op-started",
           idempotencyKey: "key-started",
@@ -539,12 +541,13 @@ test("receipt summary keeps the pending count beside busy retry feedback", () =>
   ));
 
   const summary = host.querySelector("summary")!;
+  expect(summary.textContent).not.toContain("then this");
   const pendingBadge = summary.querySelector("[data-receipt-pending-count]")!;
   expect(pendingBadge.getAttribute("aria-label")).toBe(
-    `${translate("en", "runtime.receipt.pendingCount", { count: 2 })} · ${translate("en", "runtime.receipt.busyRetry")}`,
+    `${translate("en", "runtime.receipt.pendingCount", { count: 1 })} · ${translate("en", "runtime.receipt.busyRetry")}`,
   );
   const status = host.querySelector("[data-runtime-receipt-status]");
-  expect(status?.textContent).toContain("2 pending");
+  expect(status?.textContent).toContain("1 pending");
   expect(status?.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));
   const busy = host.querySelector("[data-runtime-receipt-busy]") as HTMLElement;
   expect(busy.className).toContain("max-w-");
@@ -553,7 +556,9 @@ test("receipt summary keeps the pending count beside busy retry feedback", () =>
 });
 
 test("all active delivery states use a neutral pending summary in both locales", () => {
-  const activeStatuses = ["pending", "delivering", "turn-started", "steered", "queued", "uncertain"] as const;
+  /* `turn-started`/`steered` are resolved, not active (issue #264): the
+     message is inside the running turn, so they render nothing. */
+  const activeStatuses = ["pending", "delivering", "queued", "uncertain"] as const;
 
   for (const locale of ["en", "uk"] as const) {
     setLocale(locale);
@@ -578,8 +583,8 @@ test("all active delivery states use a neutral pending summary in both locales",
     ));
 
     const summary = host.querySelector("summary")!;
-    expect(summary.textContent).toContain(locale === "en" ? "pending: 6" : "очікують: 6");
-    expect(summary.textContent).not.toContain(locale === "en" ? "queued: 6" : "черга: 6");
+    expect(summary.textContent).toContain(locale === "en" ? "pending: 4" : "очікують: 4");
+    expect(summary.textContent).not.toContain(locale === "en" ? "queued: 4" : "черга: 4");
     expect(summary.getAttribute("aria-label")).toContain(translate(locale, "runtime.receipt.showDetails"));
     flushSync(() => root.unmount());
   }
