@@ -150,6 +150,116 @@ describe("durable project ownership", () => {
     expect(resettled.conversation.projectOwnership?.operationId).toBe(begun.receipt.launchId);
   });
 
+  test("a conflicted resume-successor settlement leaves an unowned conversation unowned", () => {
+    const store = registry();
+    const cwd = "/home/latand";
+    /* Conversation A: settled without operator intent — durably unowned. */
+    const begunA = store.beginSpawnRequest({ engine: "codex", cwd });
+    if (begunA.kind !== "created") throw new Error("expected a fresh receipt");
+    store.settleSpawn(
+      begunA.receipt.launchId,
+      spawnEntry("/transcripts/019f4906-6f67-7b72-9fbc-9ec3b5ad1329.jsonl", "019f4906-6f67-7b72-9fbc-9ec3b5ad1329", cwd),
+    );
+
+    /* Conversation B: two generations, so it can never be adopted as a
+       scanner-allocated provisional owner of its successor path. */
+    const begunB = store.beginSpawnRequest({ engine: "codex", cwd });
+    if (begunB.kind !== "created") throw new Error("expected a fresh receipt");
+    store.settleSpawn(
+      begunB.receipt.launchId,
+      spawnEntry("/transcripts/019f4906-7f67-7b72-9fbc-9ec3b5ad1330.jsonl", "019f4906-7f67-7b72-9fbc-9ec3b5ad1330", cwd),
+    );
+    const resumeB = store.beginSpawnRequest({
+      engine: "codex",
+      cwd,
+      conversationId: begunB.receipt.conversationId,
+      purpose: "resume-successor",
+    });
+    if (resumeB.kind !== "created") throw new Error("expected a resume receipt");
+    const contestedPath = "/transcripts/019f4906-8f67-7b72-9fbc-9ec3b5ad1331.jsonl";
+    const settledB = store.settleSpawn(
+      resumeB.receipt.launchId,
+      spawnEntry(contestedPath, "019f4906-8f67-7b72-9fbc-9ec3b5ad1331", cwd),
+    );
+    if (settledB.kind !== "settled") throw new Error("expected B's resume settlement");
+
+    /* A resume-successor for A carrying explicit operator intent collides with
+       B's owned path. The settlement conflicts — and the conflict must not
+       persist ownership onto A. */
+    const resumeA = store.beginSpawnRequest({
+      engine: "codex",
+      cwd,
+      conversationId: begunA.receipt.conversationId,
+      purpose: "resume-successor",
+      explicitProject: LLV_PROJECT,
+    });
+    if (resumeA.kind !== "created") throw new Error("expected a resume receipt");
+    const conflicted = store.settleSpawn(
+      resumeA.receipt.launchId,
+      spawnEntry(contestedPath, "019f4906-9f67-7b72-9fbc-9ec3b5ad1332", cwd),
+    );
+    expect(conflicted.kind).toBe("conflict");
+    if (conflicted.kind !== "conflict") throw new Error("expected a conflicted settlement");
+    expect(conflicted.code).toBe("spawn_artifact_conflict");
+
+    const snapshot = store.snapshot();
+    expect(snapshot.conversations[begunA.receipt.conversationId]?.projectOwnership).toBeNull();
+    expect(snapshot.conversations[begunB.receipt.conversationId]?.projectOwnership).toBeNull();
+  });
+
+  test("a launch settlement that loses a provisional-owner conflict admits no ownership", () => {
+    const store = registry();
+    const cwd = "/home/latand";
+    /* Conversation A exists unowned; conversation B durably owns the contested
+       path across two generations. */
+    const begunA = store.beginSpawnRequest({ engine: "codex", cwd });
+    if (begunA.kind !== "created") throw new Error("expected a fresh receipt");
+    store.settleSpawn(
+      begunA.receipt.launchId,
+      spawnEntry("/transcripts/019f4907-0f67-7b72-9fbc-9ec3b5ad1333.jsonl", "019f4907-0f67-7b72-9fbc-9ec3b5ad1333", cwd),
+    );
+    const begunB = store.beginSpawnRequest({ engine: "codex", cwd });
+    if (begunB.kind !== "created") throw new Error("expected a fresh receipt");
+    store.settleSpawn(
+      begunB.receipt.launchId,
+      spawnEntry("/transcripts/019f4907-1f67-7b72-9fbc-9ec3b5ad1334.jsonl", "019f4907-1f67-7b72-9fbc-9ec3b5ad1334", cwd),
+    );
+    const resumeB = store.beginSpawnRequest({
+      engine: "codex",
+      cwd,
+      conversationId: begunB.receipt.conversationId,
+      purpose: "resume-successor",
+    });
+    if (resumeB.kind !== "created") throw new Error("expected a resume receipt");
+    const contestedPath = "/transcripts/019f4907-2f67-7b72-9fbc-9ec3b5ad1335.jsonl";
+    const settledB = store.settleSpawn(
+      resumeB.receipt.launchId,
+      spawnEntry(contestedPath, "019f4907-2f67-7b72-9fbc-9ec3b5ad1335", cwd),
+    );
+    if (settledB.kind !== "settled") throw new Error("expected B's resume settlement");
+
+    const launchA = store.beginSpawnRequest({
+      engine: "codex",
+      cwd,
+      conversationId: begunA.receipt.conversationId,
+      explicitProject: LLV_PROJECT,
+    });
+    if (launchA.kind !== "created") throw new Error("expected a launch receipt");
+    const conflicted = store.settleSpawn(
+      launchA.receipt.launchId,
+      spawnEntry(contestedPath, "019f4907-3f67-7b72-9fbc-9ec3b5ad1336", cwd),
+    );
+    expect(conflicted.kind).toBe("conflict");
+    if (conflicted.kind !== "conflict") throw new Error("expected a conflicted settlement");
+    expect(conflicted.code).toBe("spawn_artifact_conflict");
+
+    const snapshot = store.snapshot();
+    expect(snapshot.conversations[begunA.receipt.conversationId]?.projectOwnership).toBeNull();
+    for (const conversation of Object.values(snapshot.conversations)) {
+      expect(conversation.projectOwnership).toBeNull();
+    }
+  });
+
   test("legacy sessions without ownership stay cwd-attributed", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/transcripts/legacy.jsonl", "terra");

@@ -2634,17 +2634,6 @@ export class AgentRegistry {
       updatedAt: createdAt,
     };
     if (conversation.engine !== receipt.engine) return conflict("spawn_identity_conflict");
-    /* Explicit operator project intent becomes durable ownership exactly once,
-       at admission. An already-owned conversation (an earlier operator spawn or
-       a relocation) keeps its record — succession receipts never demote it. */
-    if (receipt.explicitProject && !conversation.projectOwnership) {
-      conversation.projectOwnership = {
-        project: receipt.explicitProject,
-        source: "operator",
-        setAt: createdAt,
-        operationId: receipt.launchId,
-      };
-    }
     if (receipt.purpose === "resume-successor" && !resumeCanRebaseMigration(conversation.migration)) {
       return conflict("spawn_identity_conflict");
     }
@@ -2702,6 +2691,19 @@ export class AgentRegistry {
           };
         }
       }
+    }
+    /* Explicit operator project intent becomes durable ownership exactly once,
+       at admission — and only after every conflict gate above has passed, so a
+       conflicted settlement never persists ownership onto an existing
+       conversation. An already-owned conversation (an earlier operator spawn or
+       a relocation) keeps its record — succession receipts never demote it. */
+    if (receipt.explicitProject && !conversation.projectOwnership) {
+      conversation.projectOwnership = {
+        project: receipt.explicitProject,
+        source: "operator",
+        setAt: createdAt,
+        operationId: receipt.launchId,
+      };
     }
     if (receipt.purpose !== "migration-successor" && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
       conversation.generations.push({
