@@ -24,9 +24,20 @@ type TranscriptEntry = Pick<FileEntry, "path" | "root" | "size" | "mtime">;
 
 export function lastAssistantMessage(entry: TranscriptEntry): { text: string; ts: number } | null {
   const records = tailRecords(entry.path, entry.size, entry.mtime * 1000);
-  for (const obj of records.reverse()) {
-    const ts = Date.parse(String(obj.timestamp ?? "")) || entry.mtime * 1000;
-    if (entry.root === "codex-sessions") {
+  return lastAssistantMessageFromRecords(records, entry.root, entry.mtime * 1000);
+}
+
+/** Same extraction over an already-read record tail, for callers that obtain
+    their records from a durable (identity-verified) read instead of the
+    scanner's permissive cache. */
+export function lastAssistantMessageFromRecords(
+  source: Record<string, unknown>[],
+  root: FileEntry["root"],
+  fallbackTs: number,
+): { text: string; ts: number } | null {
+  for (const obj of [...source].reverse()) {
+    const ts = Date.parse(String(obj.timestamp ?? "")) || fallbackTs;
+    if (root === "codex-sessions") {
       const payload = recordValue(obj.payload) ?? {};
       const type = stringValue(payload.type);
       if (type === "task_complete") {
@@ -42,7 +53,7 @@ export function lastAssistantMessage(entry: TranscriptEntry): { text: string; ts
         if (text) return { text, ts };
       }
     }
-    if (entry.root === "claude-projects" && obj.type === "assistant") {
+    if (root === "claude-projects" && obj.type === "assistant") {
       const text = recordsValue(recordValue(obj.message)?.content)
         .filter((part) => part.type === "text")
         .map((part) => stringValue(part.text) ?? "")

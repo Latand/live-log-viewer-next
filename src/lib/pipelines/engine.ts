@@ -21,6 +21,8 @@ import { paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
+import { requestPipelineTick } from "./controllerSignal";
+import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
 import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase } from "./git";
 import { MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "./limits";
 import { renderStagePrompt } from "./prompts";
@@ -65,6 +67,7 @@ export interface PipelinePorts {
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
   paneAgentAlive(paneId: string): Promise<boolean>;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
+  durableTurnEvidence(engine: EffectivePipelineRole["engine"], transcriptPath: string): Promise<StageTurnEvidence | null>;
   headCwd(transcriptPath: string): string | null;
   lastMessage(entry: FileEntry): { text: string; ts: number } | null;
   pathForConversation(conversationId: string): string | null;
@@ -228,6 +231,7 @@ export function defaultPipelinePorts(): PipelinePorts {
       if (session.turn === "running" || session.turn === "interrupt_requested" || session.attentionIds.length > 0) return true;
       return null;
     },
+    durableTurnEvidence: durableStageTurnEvidence,
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
     pathForConversation: (conversationId) => conversationId.startsWith("conversation_")
@@ -372,6 +376,31 @@ function commitPassedStage(
   advancePipeline(pipeline, stage, ports);
 }
 
+/** One-shot settlement of a completed stage turn. Records the verdict on the
+    attempt, then either commits + advances (pass) or parks with the verdict
+    preserved (fail / needs_decision). */
+function settleStageVerdict(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt,
+  parsed: NonNullable<ReturnType<typeof parseStageVerdict>>,
+  ports: PipelinePorts,
+  persist: () => void,
+): void {
+  attempt.output = parsed.output;
+  attempt.verdict = parsed.verdict;
+  if (parsed.verdict.status !== "pass") {
+    attempt.state = parsed.verdict.status === "fail" ? "failed" : "needs_decision";
+    attempt.completedAt = ports.now();
+    park(pipeline, parsed.verdict.findings?.[0] ?? `stage verdict: ${parsed.verdict.status}`, attempt);
+    return;
+  }
+  attempt.state = "committing";
+  pipeline.cursor = { stageId: stage.id, state: "committing" };
+  persist();
+  commitPassedStage(pipeline, stage, attempt, ports);
+}
+
 function updateAttemptIdentity(pipeline: Pipeline, attempt: PipelineStageAttempt, entries: FileEntry[], ports: PipelinePorts): void {
   if (attempt.conversationId) {
     const currentPath = ports.pathForConversation(attempt.conversationId);
@@ -496,36 +525,50 @@ async function tickRunStage(
     return;
   }
   const entry = entries.find((candidate) => candidate.path === attempt!.agentPath);
+  /* Cheap live path: the scan projects an open turn and the runtime ledger does
+     not contradict it — no durable read needed while the agent works. */
+  if (entry && structuredActive !== false && (entry.activity === "live" || entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled")) return;
+
+  /* The transcript artifact is the completion authority (#337). A terminal turn
+     whose completion evidence belongs to this attempt and ends in a valid fenced
+     verdict settles once — even when the runtime ledger is stale `running`, the
+     scan projection transiently lost the transcript, or the host is already
+     gone. A busy turn is mid-work: its messages are never verdict candidates. */
+  const durable = await ports.durableTurnEvidence(attempt.effectiveRole.engine, attempt.agentPath);
+  const durableTerminal = durable?.turn === "terminal" && durable.message !== null && durable.message.ts > unixMs(attempt.startedAt);
+  if (durable && durableTerminal) {
+    const parsed = parseStageVerdict(durable.message!.text);
+    if (parsed) {
+      settleStageVerdict(pipeline, stage, attempt, parsed, ports, persist);
+      return;
+    }
+  }
   if (!entry) {
-    if (structuredActive === false) park(pipeline, "structured stage ended after its transcript disappeared from the scan", attempt);
+    if (durableTerminal) park(pipeline, "stage completed without a valid final JSON verdict", attempt);
+    /* A readable durable artifact means the disappearance is a projection loss,
+       not an ended stage — wait for the scan or the terminal turn evidence. */
+    else if (durable) return;
+    else if (structuredActive === false) park(pipeline, "structured stage ended after its transcript disappeared from the scan", attempt);
     else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited after its transcript disappeared from the scan", attempt);
     return;
   }
   if (structuredActive === true) return;
-  if (structuredActive !== false && (entry.activity === "live" || entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled")) return;
   const message = ports.lastMessage(entry);
   if (!message || message.ts <= unixMs(attempt.startedAt)) {
+    if (durable?.turn === "busy" && !attempt.paneId) return;
     if (structuredActive === false) park(pipeline, "structured stage ended without producing a verdict", attempt);
     else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited without producing a verdict", attempt);
     return;
   }
   const parsed = parseStageVerdict(message.text);
   if (!parsed) {
+    /* A recovered idle host over a mid-turn transcript must not terminalize the
+       attempt; completion needs turn evidence, not just a trailing message. */
+    if (durable?.turn === "busy" && !attempt.paneId) return;
     park(pipeline, "stage completed without a valid final JSON verdict", attempt);
     return;
   }
-  attempt.output = parsed.output;
-  attempt.verdict = parsed.verdict;
-  if (parsed.verdict.status !== "pass") {
-    attempt.state = parsed.verdict.status === "fail" ? "failed" : "needs_decision";
-    attempt.completedAt = ports.now();
-    park(pipeline, parsed.verdict.findings?.[0] ?? `stage verdict: ${parsed.verdict.status}`, attempt);
-    return;
-  }
-  attempt.state = "committing";
-  pipeline.cursor = { stageId: stage.id, state: "committing" };
-  persist();
-  commitPassedStage(pipeline, stage, attempt, ports);
+  settleStageVerdict(pipeline, stage, attempt, parsed, ports, persist);
 }
 
 /** Substitute the {{task}}/{{prev.output}} placeholders and trim. */
@@ -716,8 +759,9 @@ const tickStore = globalThis as unknown as { __llvPipelineTick?: boolean };
 export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts = defaultPipelinePorts()): Promise<{ pipelines: Pipeline[]; changed: boolean }> {
   if (tickStore.__llvPipelineTick) return { pipelines: [], changed: false };
   tickStore.__llvPipelineTick = true;
+  let followUp = false;
   try {
-    return await withPipelineMutation(async (pipelines, persist) => {
+    const result = await withPipelineMutation(async (pipelines, persist) => {
       let changed = false;
       for (const pipeline of pipelines) {
         let pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports);
@@ -732,6 +776,11 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
       if (changed) persist();
       return { pipelines, changed };
     });
+    /* A pass that ends on a pending cursor (a stage just passed and advanced,
+       or provisioning finished) must not wait for an unrelated wake-up to
+       materialize the next attempt (#337). */
+    followUp = result.pipelines.some((pipeline) => pipeline.state === "running" && pipeline.cursor?.state === "pending");
+    return result;
   } catch (error) {
     /* The store fails closed on malformed state, but this tick runs inside
        the shared reconcile pass — flows, workflows, and the task inbox must
@@ -741,6 +790,9 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
     return { pipelines: [], changed: false };
   } finally {
     tickStore.__llvPipelineTick = false;
+    /* Scheduled after the re-entry guard clears so the microtask tick cannot
+       be swallowed by it. */
+    if (followUp) requestPipelineTick();
   }
 }
 

@@ -8,8 +8,14 @@ import type { FileEntry } from "@/lib/types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
 const { createPipelineFromRequest, patchPipeline, pipelineClaudePermissionMode, reviewNote, tickPipelines } = await import("./engine");
+const { registerPipelineTick } = await import("./controllerSignal");
 const { loadPipelines, savePipelines } = await import("./store");
 type PipelinePorts = import("./engine").PipelinePorts;
+type StageTurnEvidence = import("./durableEvidence").StageTurnEvidence;
+
+/* tickPipelines self-schedules a follow-up tick when a pass leaves a pending
+   cursor; keep that wake-up away from the real default ports in this suite. */
+registerPipelineTick(async () => {});
 
 afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
 
@@ -57,6 +63,7 @@ function entry(pathname: string): FileEntry {
 function harness() {
   const calls: string[] = [];
   const messages = new Map<string, { text: string; ts: number }>();
+  const durableTurns = new Map<string, StageTurnEvidence>();
   const flows = new Map<string, Flow>();
   let spawn = 0;
   let clock = 1_000_000;
@@ -89,6 +96,7 @@ function harness() {
     },
     paneAgentAlive: async () => paneAlive,
     conversationAgentActive: async () => conversationActive,
+    durableTurnEvidence: async (_engine, transcriptPath) => durableTurns.get(transcriptPath) ?? null,
     headCwd: () => loadPipelines()[0]?.worktreeDir ?? null,
     lastMessage: (item) => messages.get(item.path) ?? null,
     pathForConversation: (id) => id === "conversation_stage_1" ? "/codex/stage-1.jsonl" : id === "conversation_stage_2" ? "/codex/stage-2.jsonl" : null,
@@ -118,6 +126,7 @@ function harness() {
     ports,
     calls,
     messages,
+    durableTurns,
     flows,
     finish,
     setBuilderEffort: (effort: string) => { builderEffort = effort; },
@@ -586,6 +595,207 @@ test("an ended structured stage overrides a stale live transcript marker", async
 
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
   expect(loadPipelines()[0]!.stateDetail).toContain("structured stage ended without producing a verdict");
+});
+
+/* #337 durable convergence fixtures: a structured stage attempt (no pane) whose
+   completion authority is the transcript artifact itself. */
+const STAGE_HEAD = "f8aa42dc90b04d34a1f2a5f3f8c2f6b7c9d0e1a2";
+const PASS_TEXT = "integration complete\n\n```json\n{\"status\":\"pass\",\"confidence\":0.9}\n```";
+
+function makeStructuredAttempt() {
+  const pipeline = loadPipelines()[0]!;
+  pipeline.runs[0]!.attempts[0]!.paneId = null;
+  savePipelines([pipeline]);
+}
+
+function pinStageHead(h: ReturnType<typeof harness>) {
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => args[0] === "rev-parse" && args[1] === "HEAD"
+    ? { code: 0, stdout: `${STAGE_HEAD}\n`, stderr: "" }
+    : baseExec(command, args, cwd);
+}
+
+/** Provision + spawn the first stage, then strip its pane so the attempt is a
+    structured host, and pin later HEAD reads to the stage's own commit. */
+async function runningStructuredStage(h: ReturnType<typeof harness>) {
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  makeStructuredAttempt();
+  pinStageHead(h);
+}
+
+test("a durable terminal pass verdict settles a stage despite a stale running runtime ledger (#337, pipeline 0ec6eab0)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  /* The runtime session ledger never observed the end of the turn. */
+  h.setConversationActive(true);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_000_000 },
+  });
+
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.stateDetail).toBeNull();
+  expect(current.cursor).toEqual({ stageId: "build", state: "pending" });
+  /* The actual clean stage HEAD advances, not the pipeline base. */
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    output: "integration complete",
+    verdict: { status: "pass", confidence: 0.9 },
+  });
+  expect(current.runs[0]!.attempts[0]!.completedAt).toBeTruthy();
+});
+
+test("scanner projection loss cannot park a durably completed stage (#337, pipelines fdbea289/4dd0e775)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  /* Host already terminal; the transcript vanished from the scan projection
+     while still existing at its durable agentPath. */
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_000_000 },
+  });
+
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.cursor).toEqual({ stageId: "build", state: "pending" });
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+  expect(current.runs[0]!.attempts[0]!.state).toBe("passed");
+  /* No reset happened on the way through: the committed work survives. */
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
+});
+
+test("projection loss over a readable mid-turn artifact keeps waiting instead of parking", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", { turn: "busy", message: null });
+
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]!.state).toBe("running");
+});
+
+test("a mid-work message on a recovered idle host never terminalizes the attempt (#337 restart invariant)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  /* Recovered idle broker: the ledger reports not-running while the durable
+     transcript still shows an open turn with a mid-work trailing message. */
+  h.setConversationActive(false);
+  h.messages.set("/codex/stage-1.jsonl", { text: "midway through applying the fix", ts: 5_000_000 });
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "busy",
+    message: { text: "midway through applying the fix", ts: 5_000_000 },
+  });
+
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]!.state).toBe("running");
+});
+
+test("a genuinely terminal turn without a valid verdict stays parked and retry preserves the attempt receipt", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  makeStructuredAttempt();
+  h.setConversationActive(false);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "should I proceed with plan A or plan B?", ts: 5_000_000 },
+  });
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("without a valid final JSON verdict");
+
+  const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  expect(retried.pipeline?.state).toBe("running");
+  await tickPipelines([], h.ports);
+  const attempts = loadPipelines()[0]!.runs[0]!.attempts;
+  expect(attempts).toHaveLength(2);
+  expect(attempts[0]!.state).toBe("needs_decision");
+  expect(attempts[0]!.error).toContain("without a valid final JSON verdict");
+});
+
+test("a durable fail verdict parks with the verdict receipt preserved", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(true);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "blocked\n\n```json\n{\"status\":\"fail\",\"findings\":[\"tests are red\"]}\n```", ts: 5_000_000 },
+  });
+
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("needs_decision");
+  expect(current.stateDetail).toBe("tests are red");
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "failed",
+    verdict: { status: "fail", findings: ["tests are red"] },
+  });
+});
+
+test("durable settlement is idempotent across repeated wake-up ticks", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(true);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_000_000 },
+  });
+
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.cursor).toEqual({ stageId: "build", state: "pending" });
+  /* The next wake-up materializes the build attempt; further wake-ups with the
+     same durable evidence neither re-settle nor duplicate anything. */
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[0]!.attempts[0]!.state).toBe("passed");
+  expect(current.runs[1]!.attempts).toHaveLength(1);
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+  expect(h.calls.filter((call) => call.startsWith("spawn:")).length).toBe(2);
+});
+
+test("a pass that advances to a pending stage schedules its own follow-up tick (#337, pipeline a91b4562)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  let ticks = 0;
+  const unregister = registerPipelineTick(async () => { ticks += 1; });
+  try {
+    await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+    expect(loadPipelines()[0]!.cursor).toEqual({ stageId: "build", state: "pending" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ticks).toBe(1);
+
+    /* A pass that leaves no pending cursor does not wake the controller. */
+    await tickPipelines([], h.ports);
+    expect(loadPipelines()[0]!.cursor).toEqual({ stageId: "build", state: "running" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ticks).toBe(1);
+  } finally {
+    unregister();
+  }
 });
 
 test("role-less run stages persist the Builder registry runtime", async () => {
