@@ -7,7 +7,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
-import { projectInfoFromCwd } from "@/lib/scanner/describe";
+import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry } from "@/lib/types";
 import { createFilesClientCache } from "@/hooks/useFiles";
@@ -1387,7 +1387,7 @@ test("a no-transcript structured reservation projects its card from canonical cw
     path: `spawn:${begun.receipt.launchId}`,
     project: projectInfoFromCwd(cwd)?.project,
     cwd,
-    projectRoot: path.resolve(cwd, "../.."),
+    projectRoot: projectRootForCwd(cwd),
     engine: "codex",
     kind: "session",
     activity: "live",
