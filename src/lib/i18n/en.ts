@@ -326,6 +326,17 @@ export const en = {
   "deadHost.sendBlocked": "host is dead — respawn to continue",
   "deadHost.expiredCard": "expired — the host died before this was answered",
 
+  // Superseded-round banner (issue #383)
+  "superseded.title": "Round superseded · {since}",
+  "superseded.body": "A recovery replaced this round with a live successor. This transcript stays as round history.",
+  "superseded.open": "Open the live round",
+  "superseded.resumeHere": "Resume here",
+  "superseded.resumeConfirm": "Resume this retired round? It forks the work: this card goes live again beside the successor.",
+  "superseded.resumeFailed": "Couldn't clear the supersedence link — try again.",
+  "superseded.sendBlocked": "round superseded — open the live successor",
+  "lineage.continues": "round {round} · continues previous",
+  "lineage.continuesTitle": "Round {round}: continues a superseded predecessor round — click to open it",
+
   // Attach-to-terminal dialog (issue #247)
   "attach.dialogTitle": "Attach in your terminal",
   "attach.dialogIntro": "Runs this conversation in your own terminal with the same account ({account}) and working directory.",

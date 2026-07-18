@@ -178,6 +178,9 @@ function structuredStartupAdoptionFilter(
   return (entry) => {
     const conversation = conversationsByCurrentEntry.get(sessionKeyId(entry.key));
     if (!conversation) return false;
+    /* A superseded conversation is terminal (issue #383): a boot can never
+       revive a retired round, held work or not — the successor owns it. */
+    if (conversation.supersededBy) return false;
     const conversationId = registry.canonicalConversationId(conversation.id);
     const hasPendingWork = pendingDeliveryConversationIds.has(conversationId)
       || signals.pendingOperationConversationIds.has(conversationId);

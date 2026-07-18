@@ -39,6 +39,7 @@ export type StripSurface =
   | "structured"     // pane-less structured host (codex-app-server / claude-broker)
   | "resume"         // finished, resumable root conversation
   | "dead"           // host died / went unhosted — banner owns recovery (§5)
+  | "superseded"     // terminally retired round (issue #383) — banner links the live successor
   | "shell"          // background shell task — only Kill applies
   | "unresolved"     // runtime plane is authoritative but no host evidence yet
   | "inert";         // nothing applies (e.g. a finished, non-resumable subagent)
@@ -173,9 +174,15 @@ function isSubagent(file: FileEntry): boolean {
   return file.kind === "subagent";
 }
 
-/** Classify the surface. Dead-host and shell win over everything else. */
+/** Classify the surface. Shell, superseded, and dead-host win over everything
+    else. Supersedence (issue #383) is durable registry evidence projected by
+    the server — it needs no runtime-plane resolution, wins over `dead` (the
+    banner replaces recovery with navigation to the live successor), and can
+    never mark a live card because the registry refuses edges over actively
+    hosted chain ends. */
 export function surfaceFor(file: FileEntry, rv: RuntimeSessionView | null, opts: HostOptions = {}): StripSurface {
   if (file.engine === "shell") return "shell";
+  if (file.supersededBy) return "superseded";
   const host = resolveHost(rv, opts);
   if (host.kind === "structured") return "structured";
   if (host.kind === "dead") return "dead";
@@ -314,6 +321,23 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
           terminal: ENABLED, // the dead-host escape hatch (§5/§6)
           images: HIDDEN,
           send: disabled("deadHost.sendBlocked"),
+        },
+      };
+    case "superseded":
+      // A terminally retired round (issue #383): the banner owns navigation to
+      // the live successor and the explicit resume-here fork; only the
+      // terminal escape hatch stays. Send is disabled with a redirect reason —
+      // the server answers any bypass attempt with a 409 successor pointer.
+      return {
+        surface,
+        controls: {
+          stop: HIDDEN,
+          compact: HIDDEN,
+          runtime: HIDDEN,
+          kill: HIDDEN,
+          terminal: ENABLED,
+          images: HIDDEN,
+          send: disabled("superseded.sendBlocked"),
         },
       };
     case "shell":

@@ -42,7 +42,7 @@ export interface StructuredMessageRequest {
 export type StructuredMessageResult =
   | { ok: true; structured: true; target: string | null; outcome: "queued" | "delivering" | "delivered"; operationId: string; receipt: RuntimeOperationReceipt; spawned?: boolean }
   | { ok: true; structured: true; target: string | null; outcome: "held"; spawned?: boolean }
-  | { ok: false; structured: true; outcome: "failed"; error: string; status: number; operationId?: string; receipt?: RuntimeOperationReceipt };
+  | { ok: false; structured: true; outcome: "failed"; error: string; status: number; operationId?: string; receipt?: RuntimeOperationReceipt; successorConversationId?: string };
 
 export interface StructuredMessageDependencies {
   enabled?: () => boolean;
@@ -125,6 +125,23 @@ function legacyCommandUnavailable(): StructuredMessageResult {
   };
 }
 
+/** A send addressed to a terminally superseded round (issue #383) never forks
+    it through implicit recovery — it answers with the live chain end. */
+function supersededRejection(
+  registry: AgentRegistry,
+  conversation: Pick<RegistryConversation, "id" | "supersededBy"> | null,
+): StructuredMessageResult | null {
+  if (!conversation?.supersededBy) return null;
+  return {
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: "superseded",
+    status: 409,
+    successorConversationId: registry.supersedenceChainTail(conversation.id),
+  };
+}
+
 function requiresStructuredCommand(request: StructuredMessageRequest): boolean {
   return request.operationId !== undefined
     || (request.kind ?? "send") !== "send"
@@ -201,6 +218,8 @@ function holdDuringRuntimeSynchronization(
 ): StructuredMessageResult | null {
   const owner = persistedCurrentOwner(request, registry);
   if (!owner) return ownershipUnavailable();
+  const rejectedHold = supersededRejection(registry, owner.conversation);
+  if (rejectedHold) return rejectedHold;
   if (owner.kind === "legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   const { conversation } = owner;
   if (request.hasImages || request.images?.length) {
@@ -425,6 +444,10 @@ export async function enqueueStructuredMessage(
     return { ok: false, structured: true, outcome: "failed", error: "structured image payload is unavailable", status: 409 };
   }
   if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
+  /* The superseded guard runs BEFORE dead-host recovery below: an implicit
+     recovery of a retired round would silently fork it (issue #383). */
+  const rejected = supersededRejection(registry, registry.conversation(session.conversationId as ViewerConversationId));
+  if (rejected) return rejected;
   let recoveredHost = false;
   /* Ownership recovery comes BEFORE capability evaluation: a dead projection
      carries no image capability, and judging the payload against it would 409

@@ -1049,3 +1049,51 @@ test("card-level Keep survives unrelated inventory revisions", async () => {
   expect(restarted.conversationForPath(observation.path)?.migration?.phase).toBe("rolled-back");
   expect(restarted.pendingDeliveries(conversation.id)).toHaveLength(0);
 });
+
+test("a send or resume aimed at a superseded round answers 409 with the live chain end (#383)", async () => {
+  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf766666";
+  const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
+  fs.writeFileSync(pathname, "");
+  const registry = new AgentRegistry(path.join(SANDBOX, "superseded-registry.json"));
+  setAgentRegistryForTests(registry);
+  const predecessor = registry.ensureConversation("codex", pathname, "a");
+  const middle = registry.ensureConversation("codex", path.join(SANDBOX, "middle.jsonl"), "a");
+  const tail = registry.ensureConversation("codex", path.join(SANDBOX, "tail.jsonl"), "a");
+  registry.recordSupersedence(predecessor.id, middle.id, "recovery-spawn");
+  registry.recordSupersedence(middle.id, tail.id, "recovery-spawn");
+  let recoveryCalls = 0;
+  const recover = async () => {
+    recoveryCalls += 1;
+    return null;
+  };
+
+  const sent = await deliverConversationMessage({
+    pid: null,
+    path: pathname,
+    conversationId: predecessor.id,
+    text: "message for a retired round",
+    images: [],
+  }, { recover });
+  expect(sent).toMatchObject({
+    ok: false,
+    status: 409,
+    error: "superseded",
+    successorConversationId: tail.id,
+  });
+
+  const resumed = await resumeConversation(pathname, {
+    pathAllowed: () => true,
+    registry,
+    recover,
+    listFiles: async () => [],
+  } as never);
+  expect(resumed).toMatchObject({
+    ok: false,
+    status: 409,
+    error: "superseded",
+    successorConversationId: tail.id,
+  });
+  /* The guard fires BEFORE any implicit recovery — a retired round is never
+     silently forked by a message. */
+  expect(recoveryCalls).toBe(0);
+});
