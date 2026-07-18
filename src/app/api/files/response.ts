@@ -17,6 +17,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { loadTasks } from "@/lib/tasks/store";
+import { projectSupersededTaskHandoffs } from "@/lib/tasks/supersedence";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
@@ -451,6 +452,17 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       ? conversationLookup.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
       : null,
   });
+  /* Task-deck absorption for supersedence chains (issue #383): tasks assigned
+     to a retired round also project a handoff assignment for the live chain
+     end, so the successor joins the same deck. Read-model overlay only — the
+     durable task store is never mutated by a scan. */
+  tasks.tasks = projectSupersededTaskHandoffs(
+    tasks.tasks,
+    registrySnapshot.conversations,
+    (conversationId) => conversationId.startsWith("conversation_")
+      ? conversationLookup.canonicalConversationId(conversationId as `conversation_${string}`)
+      : conversationId,
+  );
   const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);
   /* The pipelines store fails closed on malformed or future-schema state
      (both viewer instances share one config dir, so skew is a normal
