@@ -327,6 +327,58 @@ test("expanding full task text reflows a covered neighbour without persisting po
   }
 });
 
+test("a pane's reserved relation strip opens the assigned task without floating chips over the feed", async () => {
+  const agent: FileEntry = {
+    path: "/agent.jsonl", root: "claude-projects", name: "agent.jsonl", project: "relation-strip", title: "Working agent",
+    engine: "claude", kind: "session", fmt: "claude", parent: null, mtime: 2, size: 1, activity: "live",
+    proc: "running", pid: 42, model: null, pendingQuestion: null, waitingInput: null, conversationId: "conversation-1",
+  };
+  const openedTasks: string[] = [];
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  flushSync(() => {
+    root.render(
+      <SchemeBoard
+        project="relation-strip"
+        groups={[]}
+        manual={[agent]}
+        files={[agent]}
+        flows={[]}
+        tasks={[{
+          id: "strip-task", project: "relation-strip", status: "assigned", text: "Bidirectional navigation",
+          placement: "pinned", pos: { x: 900, y: 0 },
+          assignments: [{ path: "/agent.jsonl", conversationId: "conversation-1", panePid: 42, state: "delivered", error: null, at: "2026-07-18T00:00:00.000Z" }],
+          createdAt: "2026-07-18T00:00:00.000Z", updatedAt: "2026-07-18T00:00:00.000Z",
+        }]}
+        drafts={[]}
+        focus={null}
+        onSelect={() => {}}
+        onOpenTask={(task) => openedTasks.push(task.id)}
+        onClose={() => {}}
+        onDraftClose={() => {}}
+        onDraftSpawned={() => {}}
+      />,
+    );
+  });
+  await settle();
+
+  /* The relation control lives inside the pane's own reserved column — never a
+     viewport-floating chip layer that can cover conversation content. */
+  const pane = host.querySelector('[data-scheme-node="/agent.jsonl"]')!;
+  const strip = pane.querySelector("[data-task-relations]") as HTMLElement;
+  expect(strip).toBeTruthy();
+  expect(strip.className).not.toContain("absolute");
+  expect(host.querySelector("[data-edge-chip]")).toBeNull();
+
+  const chip = strip.querySelector("button[data-task-relation]") as HTMLButtonElement;
+  expect(chip.getAttribute("aria-label")).toBe("Open task Bidirectional navigation");
+  flushSync(() => chip.click());
+  await settle();
+  expect(openedTasks).toEqual(["strip-task"]);
+});
+
 test("an assignment chip opens the current conversation generation and centers its pane", async () => {
   const agent: FileEntry = {
     path: "/agent-current", root: "claude-projects", name: "agent-current.jsonl", project: "task-open", title: "Current agent",

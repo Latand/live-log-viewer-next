@@ -23,6 +23,7 @@ import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplateP
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
 import { STAGE_TONES, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
+import type { TaskRelation } from "@/components/tasks/taskRelations";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
@@ -56,6 +57,8 @@ import {
   type SchemeRect,
   type StageSlot,
 } from "./layout";
+
+const EMPTY_RELATIONS: readonly TaskRelation[] = [];
 
 /* Layout reshuffles glide instead of jumping. */
 export const MOVE_MS = 380;
@@ -789,6 +792,7 @@ function NodeShell({
   renderablePaths,
   renderableFlows,
   linkedTasks,
+  relatedTasks,
   canFlow,
   canPipeline,
   onSelect,
@@ -823,6 +827,9 @@ function NodeShell({
   /** Flow ids with a rendered deck; gates the strip's review-loop actions. */
   renderableFlows: ReadonlySet<string>;
   linkedTasks: BoardTask[];
+  /** Board tasks related to this conversation, for the pane's reserved relation
+      strip (issue #292) — the conversation-side half of task↔agent navigation. */
+  relatedTasks: readonly TaskRelation[];
   /** This node may host a new flow (root claude/codex conversation without one). */
   canFlow: boolean;
   /** This conversation may seed a pipeline — broader than canFlow: children and
@@ -951,6 +958,8 @@ function NodeShell({
           onClose={() => onClose(node.file.path)}
           onToggleExpand={() => onExpand(node.file.path)}
           onSpawnRetry={onSpawnRetry}
+          relatedTasks={relatedTasks}
+          onOpenTask={onOpenTask}
         />
       </div>
       {flow ? <RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /> : null}
@@ -1161,6 +1170,7 @@ export const NodesLayer = memo(function NodesLayer({
   flows,
   pipelineStrips,
   linkedTasksByPipeline,
+  relatedTasksByPath,
   deckFocus,
   onSelect,
   onClose,
@@ -1195,6 +1205,8 @@ export const NodesLayer = memo(function NodesLayer({
   /** Node path → the pipeline whose compact strip mounts over it (§2.2). */
   pipelineStrips: Map<string, Pipeline>;
   linkedTasksByPipeline: ReadonlyMap<string, BoardTask[]>;
+  /** Node path → its related board tasks, for the pane relation strip (#292). */
+  relatedTasksByPath?: ReadonlyMap<string, readonly TaskRelation[]>;
   deckFocus: DeckFocus | null;
   onSelect: (file: FileEntry) => void;
   onClose: (path: string) => void;
@@ -1333,6 +1345,7 @@ export const NodesLayer = memo(function NodesLayer({
             flow={flowsByImpl.get(node.file.path) ?? null}
             pipeline={pipeline}
             linkedTasks={pipeline ? linkedTasksByPipeline.get(pipeline.id) ?? [] : []}
+            relatedTasks={relatedTasksByPath?.get(node.file.path) ?? EMPTY_RELATIONS}
             flows={flows}
             files={files}
             renderablePaths={renderablePaths}

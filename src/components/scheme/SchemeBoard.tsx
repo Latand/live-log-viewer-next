@@ -17,6 +17,7 @@ import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
 import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
+import { taskRelationsByPath } from "@/components/tasks/taskRelations";
 import { taskTitle } from "@/components/tasks/taskModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
@@ -599,10 +600,12 @@ export function SchemeBoard({
     () => currentWorkRects(layout, placedTasks, favorites ?? EMPTY_PATHS, textExpandedIds).length,
     [layout, placedTasks, favorites, textExpandedIds],
   );
-  const clusters = useMemo(
-    () => boardClusters(layout, placedTasks, favorites ?? EMPTY_PATHS, textExpandedIds),
-    [layout, placedTasks, favorites, textExpandedIds],
-  );
+  const clusters = useMemo(() => boardClusters(layout, favorites ?? EMPTY_PATHS), [layout, favorites]);
+  /* Conversation-side relation controls (issue #292): each pane reserves a
+     strip naming its assigned/captured tasks, mirroring the cards' own open
+     controls, so the task↔agent relation navigates in both directions without
+     any chip ever floating over conversation content. */
+  const relatedTasksByPath = useMemo(() => taskRelationsByPath(files, allTasks), [files, allTasks]);
   const [frameAnnouncement, setFrameAnnouncement] = useState("");
   const announceFit = useCallback(
     (kind: "current" | "all") => {
@@ -1055,6 +1058,7 @@ export function SchemeBoard({
           flows={flows}
           pipelineStrips={pipelineStrips}
           linkedTasksByPipeline={linkedTasksByPipeline}
+          relatedTasksByPath={relatedTasksByPath}
           deckFocus={deckFocus}
           onSelect={stableSelect}
           onClose={stableClose}
@@ -1224,6 +1228,10 @@ export function SchemeBoard({
           onToggleExpand={() => setExpanded(null)}
           autoEditToken={autoEditTokenFor(renameRequest, expandedNode.file.path)}
           onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
+          relatedTasks={relatedTasksByPath.get(expandedNode.file.path)}
+          /* Opening a task from the full-window conversation returns to the
+             board first — the card the camera centers must be visible. */
+          onOpenTask={onOpenTask ? (task) => { setExpanded(null); stableOpenTask(task); } : undefined}
         />
       </div>
     ) : null}

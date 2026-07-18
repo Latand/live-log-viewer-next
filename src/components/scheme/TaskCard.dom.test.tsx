@@ -145,6 +145,53 @@ test("compact and expanded cards avoid nested scrolling", () => {
   expect(full.host.querySelector("[data-task-disclosure]")?.getAttribute("aria-expanded")).toBe("true");
 });
 
+test("a clipped compact preview fades out and the expanded body drops the fade", () => {
+  const compact = render(boardTask({ id: "compact", text: LONG_TEXT }));
+  const compactBody = compact.host.querySelector("[data-task-body]") as HTMLElement;
+  expect(compactBody.hasAttribute("data-task-clipped")).toBe(true);
+  expect(compactBody.style.maskImage).toContain("linear-gradient");
+
+  const short = render(boardTask({ id: "short", text: "fits\nentirely" }));
+  const shortBody = short.host.querySelector("[data-task-body]") as HTMLElement;
+  expect(shortBody.hasAttribute("data-task-clipped")).toBe(false);
+  expect(shortBody.style.maskImage || "").toBe("");
+
+  const full = render(boardTask({ id: "full", text: LONG_TEXT }), { expanded: true });
+  const fullBody = full.host.querySelector("[data-task-body]") as HTMLElement;
+  expect(fullBody.hasAttribute("data-task-clipped")).toBe(false);
+  expect(fullBody.style.maskImage || "").toBe("");
+});
+
+test("the action row hides behind hover on compact cards but stays pinned while expanded", () => {
+  const compact = render(boardTask({ id: "compact", text: LONG_TEXT }));
+  const compactRow = compact.host.querySelector("[data-task-actions]") as HTMLElement;
+  expect(compactRow.className).toContain("opacity-0");
+
+  const full = render(boardTask({ id: "full", text: LONG_TEXT }), { expanded: true });
+  const fullRow = full.host.querySelector("[data-task-actions]") as HTMLElement;
+  expect(fullRow.className).not.toContain("opacity-0");
+  expect(fullRow.className).not.toContain("pointer-events-none");
+});
+
+test("the source chip opens the originating conversation and disables truthfully when it is gone", () => {
+  const origin = file("/origin.jsonl", "Origin conversation");
+  const sourced = boardTask({
+    id: "sourced",
+    source: { path: "/origin.jsonl", ts: null, text: "captured", fingerprint: "f1", engine: "codex" },
+  });
+  const live = render(sourced, { files: [origin] });
+  const open = live.host.querySelector("[data-task-open-source]") as HTMLButtonElement;
+  expect(open.disabled).toBe(false);
+  expect(open.getAttribute("aria-label")).toBe("Open source conversation Origin conversation");
+  open.click();
+  expect(live.calls.opened.map((entry) => entry.path)).toEqual(["/origin.jsonl"]);
+
+  const gone = render(sourced, { files: [] });
+  const disabled = gone.host.querySelector("[data-task-open-source]") as HTMLButtonElement;
+  expect(disabled.disabled).toBe(true);
+  expect(disabled.title).toBe("the source conversation is not on the board");
+});
+
 test("text disclosure and fold-to-stack remain separate actions", () => {
   const { host, calls } = render(boardTask({ id: "task", text: LONG_TEXT }));
   (host.querySelector("[data-task-disclosure]") as HTMLButtonElement).click();

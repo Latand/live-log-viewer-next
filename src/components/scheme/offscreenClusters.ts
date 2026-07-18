@@ -1,15 +1,10 @@
 import { conversationIdentity } from "@/lib/accounts/identity";
-import type { BoardTask } from "@/lib/tasks/types";
 
-import { TASK_TONES, taskTitle } from "@/components/tasks/taskModel";
 import { cleanTitle } from "@/components/utils";
 
 import { isCurrentWorkFile, isCurrentWorkGroup } from "./currentWork";
 import type { SchemeLayout, SchemeRect } from "./layout";
 import type { Camera } from "./Minimap";
-import { isPlacedTask, taskRect } from "./taskGeometry";
-
-const EMPTY_TEXT_EXPANDED_IDS: ReadonlySet<string> = new Set();
 
 export type ChipEdge = "top" | "right" | "bottom" | "left";
 
@@ -82,12 +77,14 @@ export function offscreenClusterChips(
   return { visible, overflow };
 }
 
-/** Labeled board clusters eligible for edge navigation. */
+/** Labeled board clusters eligible for edge navigation: current-work groups and
+    panes plus crowned favorites. Task cards deliberately stay out (issue #292):
+    their navigation lives in the reserved relation controls on panes and cards
+    (plus the minimap), so a floating wayfinding chip never covers an open
+    conversation's content the way the old task chips did. */
 export function boardClusters(
   layout: SchemeLayout,
-  tasks: readonly BoardTask[],
   favorites: ReadonlySet<string>,
-  textExpandedIds: ReadonlySet<string> = EMPTY_TEXT_EXPANDED_IDS,
 ): BoardCluster[] {
   const clusters: BoardCluster[] = [];
   for (const group of layout.groups) {
@@ -112,16 +109,6 @@ export function boardClusters(
       rect: node,
       priority: isCurrentWorkFile(node.file) ? 4 : 2,
       color: node.file.engine === "codex" ? "var(--color-codex)" : "var(--color-claude)",
-    });
-  }
-  for (const task of tasks) {
-    if (task.status === "done" || !isPlacedTask(task)) continue;
-    clusters.push({
-      key: `task::${task.id}`,
-      label: taskTitle(task.text),
-      rect: taskRect(task, textExpandedIds.has(task.id)),
-      priority: 1,
-      color: TASK_TONES[task.status].color,
     });
   }
   return clusters;

@@ -19,6 +19,9 @@ import { TASK_W, taskCardExpandable, taskRect, type PlacedTask, type SchemeRect 
 
 const TITLE_CLAMP_CLASS = "line-clamp-2";
 const PREVIEW_CLAMP_CLASS = "line-clamp-3";
+/* A clipped compact preview fades out over its last line instead of ending on a
+   hard cut — the visual cue that the in-card Expand control reveals more. */
+const PREVIEW_FADE_MASK = "linear-gradient(to bottom, #000 calc(100% - 18px), transparent)";
 
 /* Below this zoom the card text is unreadable: an edit click glides first. */
 const EDIT_MIN_Z = 0.55;
@@ -65,7 +68,7 @@ function ChipAction({
   hoverClass,
   disabled,
   onClick,
-  openAgent,
+  dataAttr,
 }: {
   icon: React.ReactNode;
   ariaLabel: string;
@@ -73,12 +76,13 @@ function ChipAction({
   hoverClass: string;
   disabled?: boolean;
   onClick: () => void;
-  openAgent?: boolean;
+  /** Stable test/query hook, e.g. `data-task-open-agent`. */
+  dataAttr?: string;
 }) {
   return (
     <button
       type="button"
-      {...(openAgent ? { "data-task-open-agent": "" } : {})}
+      {...(dataAttr ? { [dataAttr]: "" } : {})}
       className={`-my-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${hoverClass} disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted`}
       aria-label={ariaLabel}
       title={title}
@@ -178,7 +182,7 @@ function AssignmentChip({
         onClick={() => {
           if (file && openable) onOpen(file);
         }}
-        openAgent
+        dataAttr="data-task-open-agent"
       />
       <ChipAction
         icon={<X className="h-3 w-3" aria-hidden />}
@@ -191,7 +195,7 @@ function AssignmentChip({
   );
 }
 
-function SourceChip({ task, file }: { task: BoardTask; file: FileEntry | null }) {
+function SourceChip({ task, file, onOpen }: { task: BoardTask; file: FileEntry | null; onOpen: (file: FileEntry) => void }) {
   const { t } = useLocale();
   const source = task.source;
   if (!source) return null;
@@ -211,6 +215,21 @@ function SourceChip({ task, file }: { task: BoardTask; file: FileEntry | null })
       </span>
       <span className="shrink-0 text-[10.5px] font-bold">{t("tasks.source")}</span>
       <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold">{title}</span>
+      {/* The task-side mirror of the pane's relation strip (issue #292): a
+          capture navigates back to its origin exactly like an assignment opens
+          its agent. Disabled — with a truthful title — once the origin has left
+          the current list. */}
+      <ChipAction
+        icon={<Crosshair className="h-3 w-3" aria-hidden />}
+        ariaLabel={t("tasks.openSourceAria", { title })}
+        title={file ? t("tasks.openSource") : t("tasks.sourceGone")}
+        hoverClass="hover:bg-black/5 hover:text-accent"
+        disabled={!file}
+        onClick={() => {
+          if (file) onOpen(file);
+        }}
+        dataAttr="data-task-open-source"
+      />
     </span>
   );
 }
@@ -357,6 +376,10 @@ export const TaskCard = memo(function TaskCard({
   const tone = TASK_TONES[task.status];
   const title = taskTitle(task.text) || t("tasks.untitled");
   const rest = task.text.includes("\n") ? task.text.slice(task.text.indexOf("\n") + 1) : "";
+  const expandable = taskCardExpandable(task);
+  /* Compact presentation is hiding text: fade the clamped preview out so the
+     cut reads as «more below» and the Expand control announces where it is. */
+  const clipped = !expanded && expandable;
   const byPath = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
   const byConversationId = useMemo(
     () => new Map(files.filter((file) => file.conversationId).map((file) => [file.conversationId!, file])),
@@ -427,7 +450,12 @@ export const TaskCard = memo(function TaskCard({
             maxLength={6000}
           />
         ) : (
-          <div data-task-body className="cursor-text px-3 py-2">
+          <div
+            data-task-body
+            {...(clipped ? { "data-task-clipped": "" } : {})}
+            className="cursor-text px-3 py-2"
+            style={clipped ? { maskImage: PREVIEW_FADE_MASK, WebkitMaskImage: PREVIEW_FADE_MASK } : undefined}
+          >
             <div
               className={`whitespace-pre-wrap break-words text-[12.5px] font-semibold leading-[17px] tracking-[-0.006em] text-primary ${
                 expanded ? "" : TITLE_CLAMP_CLASS
@@ -444,7 +472,7 @@ export const TaskCard = memo(function TaskCard({
         )}
         {task.source || task.assignments.length ? (
           <div className="flex flex-col gap-1 px-2 pb-2">
-            <SourceChip task={task} file={task.source ? (byPath.get(task.source.path) ?? null) : null} />
+            <SourceChip task={task} file={task.source ? (byPath.get(task.source.path) ?? null) : null} onOpen={handlers.openAgent} />
             {task.assignments.map((assignment, index) => (
               <AssignmentChip
                 key={assignment.conversationId ?? assignment.path ?? (assignment.panePid != null ? `pane:${assignment.panePid}` : `index:${index}`)}
@@ -457,7 +485,7 @@ export const TaskCard = memo(function TaskCard({
             ))}
           </div>
         ) : null}
-        {!editing && taskCardExpandable(task) ? (
+        {!editing && expandable ? (
           <div className="px-2 pb-2">
             <button
               type="button"
@@ -474,10 +502,13 @@ export const TaskCard = memo(function TaskCard({
       </div>
 
       {/* Action row floats under the card on hover/edit so the card's own
-          height keeps matching the pure geometry estimate. */}
+          height keeps matching the pure geometry estimate. An expanded card
+          keeps it pinned visible: full-text reading must never strand the
+          collapse/status/delete actions behind a hover the reader hasn't made. */}
       <div
+        data-task-actions
         className={`absolute left-0 top-full flex -translate-y-8 items-center gap-1.5 ${
-          lifted ? "" : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100"
+          lifted || expanded ? "" : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100"
         } transition-opacity`}
       >
         {/* One pill, two handoffs, neither auto-sends: drag the arrow onto a
