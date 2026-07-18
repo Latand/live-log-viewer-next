@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 
 import { readSession, type SessionRecord } from "@/lib/session/reader";
 import type { FileEntry } from "@/lib/types";
+import { autoTaskPosition } from "./lattice";
 
 import { createTask } from "./commands";
 import { mutateTasks } from "./store";
@@ -230,14 +231,6 @@ function curatedFingerprint(input: TaskCuratorInput, title: string): string {
   return hash(["curated", input.source.fingerprint, title.toLocaleLowerCase()]);
 }
 
-function autoPos(projectTasks: BoardTask[]): BoardTask["pos"] {
-  const index = projectTasks.length;
-  return {
-    x: 740 + (index % 2) * 300,
-    y: 120 + Math.floor(index / 2) * 120,
-  };
-}
-
 function existingTitleKey(task: BoardTask): string {
   return `${task.project}\u0000${task.text.trim().toLocaleLowerCase()}`;
 }
@@ -289,7 +282,7 @@ export function applyTaskCuratorProposals(
       const outcome = createTask(next, {
         project: input.project,
         text: title,
-        pos: autoPos(projectTasks),
+        pos: autoTaskPosition(projectTasks),
         source: {
           ...input.source,
           fingerprint,

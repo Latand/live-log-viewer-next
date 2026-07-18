@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { SchemeRect } from "./layout";
-import { isAutoPlaceable, resolveTaskPlacements, TASK_GUTTER, type PlaceableTask } from "./taskPlacement";
+import { AUTO_OVERFLOW_Y, isAutoPlaceable, MAX_AUTO_DRIFT, resolveTaskPlacements, TASK_GUTTER, type PlaceableTask } from "./taskPlacement";
 import { TASK_W, taskCardHeight, taskRect } from "./taskGeometry";
 
 /* A prompt-captured source — what curator.ts and inboxScanner.ts stamp on every
@@ -204,8 +204,16 @@ describe("resolveTaskPlacements", () => {
     /* Cards stay clustered near the lattice, never flung to the far ring cap. */
     for (const t of tasks) {
       const spot = placement.get(t.id)!;
-      expect(Math.abs(spot.x - t.pos.x)).toBeLessThan(4000);
-      expect(Math.abs(spot.y - t.pos.y)).toBeLessThan(6000);
+      const locallyBounded = Math.abs(spot.x - t.pos.x) <= MAX_AUTO_DRIFT && Math.abs(spot.y - t.pos.y) <= MAX_AUTO_DRIFT;
+      expect(locallyBounded || spot.y >= AUTO_OVERFLOW_Y).toBe(true);
     }
+    expect([...placement.values()].some((spot) => spot.y >= AUTO_OVERFLOW_Y)).toBe(true);
+  });
+
+  test("placement is display-only and leaves every stored seed byte-identical", () => {
+    const tasks = densePileup(24);
+    const before = JSON.stringify(tasks);
+    resolveTaskPlacements(tasks, [{ x: 700, y: 60, w: 600, h: 680 }]);
+    expect(JSON.stringify(tasks)).toBe(before);
   });
 });

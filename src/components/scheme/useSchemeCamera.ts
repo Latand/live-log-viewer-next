@@ -27,6 +27,8 @@ interface CameraOptions {
       fit and edge-keep all read this grown box, so a relocated card past the raw
       layout dimensions is always reachable. */
   world: SchemeRect;
+  /** Current operator work; null falls back to the full world. */
+  currentWork?: SchemeRect | null;
   /** Map mode (phone full-screen overlay): always opens fitted, never persists. */
   mapMode: boolean;
   /** Path to glide the camera to once its node exists in the layout. */
@@ -57,6 +59,8 @@ interface CameraOptions {
       zoom around the viewport centre. */
   onArrowNav?: React.RefObject<(event: KeyboardEvent) => boolean>;
   onZoomKey?: React.RefObject<(dir: 1 | -1) => boolean>;
+  /** Announces explicit framing actions to the board live region. */
+  onFit?: (kind: "current" | "all") => void;
 }
 
 export interface SchemeCamera {
@@ -81,6 +85,8 @@ export interface SchemeCamera {
   zoomCenter: (factor: number) => void;
   zoomTo: (targetZ: number) => void;
   fit: () => void;
+  /** Frame current work, falling back to Fit All when the set is empty. */
+  fitCurrent: () => void;
   /** Glide to fit a world rect (the "show selection" bulk action). */
   fitRect: (rect: SchemeRect) => void;
   jump: (wx: number, wy: number) => void;
@@ -108,16 +114,28 @@ export interface SchemeCamera {
     cards count (issue #17) — a project with only cards must still init and fit
     the camera, so both the fit guard and the one-time init effect read this. */
 export function hasBoardContent(
-  layout: Pick<SchemeLayout, "nodes" | "drafts">,
+  layout: Pick<SchemeLayout, "nodes" | "drafts"> & Partial<Pick<SchemeLayout, "groups">>,
   taskRects?: ReadonlyMap<string, SchemeRect>,
 ): boolean {
-  return layout.nodes.length > 0 || layout.drafts.length > 0 || (taskRects?.size ?? 0) > 0;
+  return layout.nodes.length > 0 || layout.drafts.length > 0 || (layout.groups?.length ?? 0) > 0 || (taskRects?.size ?? 0) > 0;
+}
+
+/** Pure camera framing shared by Fit All, Fit Current, tests, and map toggles. */
+export function fitCameraToRect(rect: SchemeRect, vp: { w: number; h: number }): Camera {
+  const z = Math.min(MAX_Z, Math.max(MIN_Z, Math.min((vp.w - 48) / rect.w, (vp.h - 48) / rect.h, 1)));
+  return { z, x: (vp.w - rect.w * z) / 2 - rect.x * z, y: (vp.h - rect.h * z) / 2 - rect.y * z };
+}
+
+/** The deadband used by repeated 0 to escalate from current work to all. */
+export function cameraMatchesFraming(camera: Camera, target: Camera): boolean {
+  return Math.abs(camera.z - target.z) <= target.z * 0.01 && Math.abs(camera.x - target.x) <= 4 && Math.abs(camera.y - target.y) <= 4;
 }
 
 export function useSchemeCamera({
   project,
   layout,
   world,
+  currentWork = null,
   mapMode,
   focus,
   onNodePick,
@@ -128,6 +146,7 @@ export function useSchemeCamera({
   onPlaceTask,
   onArrowNav,
   onZoomKey,
+  onFit,
 }: CameraOptions): SchemeCamera {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const tapRef = useRef<{ x: number; y: number } | null>(null);
@@ -153,6 +172,11 @@ export function useSchemeCamera({
   const placeTaskRef = useRef(onPlaceTask);
   const glideTimer = useRef<number | null>(null);
   const initedFor = useRef<string | null>(null);
+  const latestCam = useRef(cam);
+
+  useEffect(() => {
+    latestCam.current = cam;
+  }, [cam]);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -278,10 +302,9 @@ export function useSchemeCamera({
        cards and no nodes/drafts must still fit, or Fit sits inert and a
        relocated card can stay off-screen. `world` already spans the cards. */
     if (!rect || !hasBoardContent(layout, taskRects)) return null;
-    const z = Math.min(MAX_Z, Math.max(MIN_Z, Math.min((rect.width - 48) / world.w, (rect.height - 48) / world.h, 1)));
-    return { z, x: (rect.width - world.w * z) / 2 - world.x * z, y: (rect.height - world.h * z) / 2 - world.y * z };
+    return fitCameraToRect(world, { w: rect.width, h: rect.height });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- hasBoardContent reads only layout.nodes/drafts, whose lengths are already deps; subscribing to all of `layout` would re-fit on every unrelated relayout
-  }, [layout.nodes.length, layout.drafts.length, taskRects, world]);
+  }, [layout.nodes.length, layout.drafts.length, layout.groups.length, taskRects, world]);
 
   const glideTo = useCallback((next: Camera | ((c: Camera) => Camera)) => {
     /* Reduced motion: skip the CSS transition — the move lands instantly. */
@@ -299,15 +322,43 @@ export function useSchemeCamera({
 
   const fit = useCallback(() => {
     const c = fitCam();
-    if (c) glideTo(c);
-  }, [fitCam, glideTo]);
+    if (c) {
+      glideTo(c);
+      onFit?.("all");
+    }
+  }, [fitCam, glideTo, onFit]);
+
+  const currentFitCam = useCallback((): Camera | null => {
+    const rect = viewportRef.current?.getBoundingClientRect();
+    if (!rect || !hasBoardContent(layout, taskRects)) return null;
+    return fitCameraToRect(currentWork ?? world, { w: rect.width, h: rect.height });
+  }, [currentWork, world, layout, taskRects]);
+
+  const fitCurrent = useCallback(() => {
+    const c = currentFitCam();
+    if (!c) return;
+    glideTo(clampCam(c));
+    onFit?.(currentWork ? "current" : "all");
+  }, [currentFitCam, glideTo, clampCam, onFit, currentWork]);
+
+  const fitCurrentOrAll = useCallback(() => {
+    const current = currentFitCam();
+    if (!current) return;
+    const target = clampCam(current);
+    if (currentWork && cameraMatchesFraming(latestCam.current, target)) {
+      fit();
+      return;
+    }
+    latestCam.current = target;
+    glideTo(target);
+    onFit?.(currentWork ? "current" : "all");
+  }, [currentFitCam, currentWork, clampCam, fit, glideTo, onFit]);
 
   const fitRect = useCallback(
     (r: SchemeRect) => {
       const rect = viewportRef.current?.getBoundingClientRect();
       if (!rect || r.w <= 0 || r.h <= 0) return;
-      const z = Math.min(MAX_Z, Math.max(MIN_Z, Math.min((rect.width - 48) / r.w, (rect.height - 48) / r.h, 1)));
-      glideTo(clampCam({ z, x: (rect.width - r.w * z) / 2 - r.x * z, y: (rect.height - r.h * z) / 2 - r.y * z }));
+      glideTo(clampCam(fitCameraToRect(r, { w: rect.width, h: rect.height })));
     },
     [glideTo, clampCam],
   );
@@ -377,11 +428,11 @@ export function useSchemeCamera({
         /* corrupt saved camera — fall through to fit */
       }
     }
-    const c = fitCam();
+    const c = mapMode ? fitCam() : currentFitCam();
     if (c) {
       setCam(c);
     }
-  }, [project, layout, taskRects, fitCam, mapMode]);
+  }, [project, layout, taskRects, fitCam, currentFitCam, mapMode]);
 
   /* Debounced: a pan produces hundreds of camera frames, storage needs only
      the resting position. The map never writes — the desktop camera survives. */
@@ -483,7 +534,10 @@ export function useSchemeCamera({
         if (taskToolRef.current) setTaskTool(false);
         else setSelected(null);
       }
-      else if (event.key === "0") fit();
+      else if (event.key === "0") {
+        if (event.shiftKey) fit();
+        else fitCurrentOrAll();
+      }
       else if (event.key === "1") zoomTo(1);
       /* +/− first offer the anchor-preserving zoom ladder; without a followed
          anchor it falls back to continuous zoom around the viewport centre. */
@@ -502,7 +556,7 @@ export function useSchemeCamera({
       window.removeEventListener("keydown", onDown);
       window.removeEventListener("keyup", onUp);
     };
-  }, [fit, zoomCenter, zoomTo, setMode, setSelected, onArrowNav, onZoomKey]);
+  }, [fit, fitCurrentOrAll, zoomCenter, zoomTo, setMode, setSelected, onArrowNav, onZoomKey]);
 
   const localPoint = (event: { clientX: number; clientY: number }) => {
     const rect = viewportRef.current?.getBoundingClientRect();
@@ -726,6 +780,7 @@ export function useSchemeCamera({
     zoomCenter,
     zoomTo,
     fit,
+    fitCurrent,
     fitRect,
     jump,
     manualNonce,

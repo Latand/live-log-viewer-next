@@ -116,6 +116,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
+  const [mapFrame, setMapFrame] = useState<"all" | "current">("all");
   const [taskSheet, setTaskSheet] = useState<TaskSheetView | null>(null);
   /* The header `+ Task` button opens the create view; the first render's nonce
      of 0 never triggers it. */
@@ -380,7 +381,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
               type="button"
               className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-label={t("mobile.openMap")}
-              onClick={() => setMapOpen(true)}
+              onClick={() => { setMapFrame("all"); setMapOpen(true); }}
             >
               <MapIcon className="h-4 w-4" aria-hidden />
             </button>
@@ -475,6 +476,21 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
           <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-border bg-card px-2 py-1.5">
             <span className="shrink-0 pl-1 text-[13px] font-bold">{t("mobile.map")}</span>
             <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{project}</span>
+            <div className="flex shrink-0 rounded-full border border-border bg-canvas p-0.5" aria-label={t("mobile.mapFrame")}>
+              {(["all", "current"] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={mapFrame === value}
+                  className={`min-h-11 rounded-full px-3 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                    mapFrame === value ? "bg-card text-accent shadow-1" : "text-muted"
+                  }`}
+                  onClick={() => setMapFrame(value)}
+                >
+                  {t(value === "all" ? "mobile.mapAll" : "mobile.mapCurrent")}
+                </button>
+              ))}
+            </div>
             <button
               type="button"
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -503,6 +519,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
             onDraftClose={onDraftClose}
             onDraftSpawned={onDraftSpawned}
             onNodePick={pickFromMap}
+            mapFrame={mapFrame}
           />
           {/* The lite map is pick-only and cannot paint a readable stage strip at
               its zoom, so it never surfaces a pipeline's full plan on its own

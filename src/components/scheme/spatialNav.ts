@@ -83,9 +83,10 @@ const MAX_LADDER_N = 20;
 /** Every layout entry the camera can select — nodes, drafts, mini-stacks, decks
     (exactly the `data-scheme-node` set). Task cards live elsewhere and are not
     navigation targets. */
-export function collectNavTargets(layout: SchemeLayout): NavTarget[] {
+export function collectNavTargets(layout: SchemeLayout, extraRects?: ReadonlyMap<string, SchemeRect>): NavTarget[] {
   const out: NavTarget[] = [];
   for (const [key, rect] of layout.byPath) out.push({ key, x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+  if (extraRects) for (const [key, rect] of extraRects) out.push({ key, x: rect.x, y: rect.y, w: rect.w, h: rect.h });
   return out;
 }
 
@@ -95,7 +96,9 @@ export function collectNavTargets(layout: SchemeLayout): NavTarget[] {
  * raw `::stack` suffix — a quiet-branch stack reads as "N quiet branches under
  * <parent title>", and drafts/decks drop their `draft::`/`deck::` prefix.
  */
-export function navTargetLabel(layout: SchemeLayout, key: string, t: TFunction): string {
+export function navTargetLabel(layout: SchemeLayout, key: string, t: TFunction, extraLabels?: ReadonlyMap<string, string>): string {
+  const extra = extraLabels?.get(key);
+  if (extra) return extra;
   const node = layout.nodes.find((n) => n.file.path === key);
   if (node) return cleanTitle(node.file.title, 80);
   const stack = layout.stacks.find((s) => s.key === key);

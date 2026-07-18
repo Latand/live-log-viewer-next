@@ -36,6 +36,9 @@ const GAP_Y = 130;
 export const INDENT = 64;
 const GROUP_GAP = 150;
 const PAD = 100;
+/** Maximum horizontal span of one rest-band row before whole card trees wrap. */
+export const REST_BAND_MAX_W = 10_500;
+const REST_BAND_ROW_GAP = 160;
 /* Vertical corridor between the pinned favorites band and the rest of the board
    (issue #224): wider than GAP_Y so the crowned row reads as its own region. */
 const FAV_BAND_GAP = 220;
@@ -528,6 +531,31 @@ export function buildSchemeLayout(
   for (const file of manual) (isFavoriteRoot(file) ? favManual : restManual).push(file);
   favGroups.sort((a, b) => recency(b.columns[0]!.file) - recency(a.columns[0]!.file));
   favManual.sort((a, b) => recency(b) - recency(a));
+  const fileWorkRank = (file: FileEntry): number => {
+    if (file.pendingQuestion || file.waitingInput) return 5;
+    const owner = groupKeyOfPath.get(file.path);
+    if (owner?.startsWith("pipe:")) {
+      const pipeline = pipelines.find((candidate) => candidate.id === owner.slice(5));
+      if (pipeline?.state === "needs_decision" || pipeline?.state === "paused") return 4;
+    }
+    if (owner?.startsWith("flow:")) {
+      const flow = actionableFlows.find((candidate) => candidate.id === owner.slice(5));
+      if (flow?.state === "needs_decision" || flow?.state === "paused") return 4;
+    }
+    if (file.activity === "live" || file.activity === "stalled" || file.proc === "running") return 3;
+    if (owner?.startsWith("pipe:")) {
+      const pipeline = pipelines.find((candidate) => candidate.id === owner.slice(5));
+      if (pipeline && pipeline.state !== "closed") return 1;
+    }
+    if (owner?.startsWith("flow:")) {
+      const flow = actionableFlows.find((candidate) => candidate.id === owner.slice(5));
+      if (flow && flow.state !== "closed") return 1;
+    }
+    return 0;
+  };
+  const groupWorkRank = (group: BranchGroup): number => Math.max(0, ...group.columns.map((column) => fileWorkRank(column.file)));
+  restGroups.sort((a, b) => groupWorkRank(b) - groupWorkRank(a) || recency(b.columns[0]!.file) - recency(a.columns[0]!.file) || a.key.localeCompare(b.key));
+  restManual.sort((a, b) => fileWorkRank(b) - fileWorkRank(a) || recency(b) - recency(a) || a.path.localeCompare(b.path));
   const hasFavorites = favGroups.length + favManual.length > 0;
 
   for (const group of favGroups) placeGroup(group, PAD);
@@ -543,15 +571,79 @@ export function buildSchemeLayout(
   }
   const restTop = hasFavorites ? bandBottom + FAV_BAND_GAP : PAD;
 
-  cursor = PAD;
-  for (const group of restGroups) placeGroup(group, restTop);
-  for (const file of restManual) placeManual(file, restTop);
+  /* Reserve the row head for compact pipeline rails. This is presentation-only:
+     no pipeline/task record is rewritten. Pipelines with a materialized member
+     receive their surface from that member's own halo. */
+  const materializedPipelineIds = new Set(
+    [...groupKeyOfPath]
+      .filter(([path, owner]) => owner.startsWith("pipe:") && byAll.has(path))
+      .map(([, owner]) => owner.slice(5)),
+  );
+  const surfaceHead = surfacePipelines.filter(
+    (pipeline) => (pipeline.state !== "closed" || pipeline.restored) && !materializedPipelineIds.has(pipeline.id),
+  );
+  const surfaceHeadWidth = surfaceHead.length ? NODE_W + GROUP_PAD * 2 + GROUP_GAP : 0;
+  const surfaceHeadBottom = surfaceHead.length
+    ? restTop + surfaceHead.length * (150 + GROUP_GAP) - GROUP_GAP
+    : restTop;
 
-  /* Remaining drafts trail the row like fresh top-level nodes: root-sized, no edges. */
+  type PlacementMark = { nodes: number; edges: number; stacks: number; decks: number; loops: number; drafts: number };
+  const markPlacement = (): PlacementMark => ({
+    nodes: nodes.length,
+    edges: edges.length,
+    stacks: stacks.length,
+    decks: decks.length,
+    loops: loops.length,
+    drafts: drafts.length,
+  });
+  const shiftPlacement = (mark: PlacementMark, dx: number, dy: number) => {
+    for (const rect of nodes.slice(mark.nodes)) { rect.x += dx; rect.y += dy; }
+    for (const edge of edges.slice(mark.edges)) { edge.x1 += dx; edge.x2 += dx; edge.y1 += dy; edge.y2 += dy; }
+    for (const rect of stacks.slice(mark.stacks)) { rect.x += dx; rect.y += dy; }
+    for (const rect of decks.slice(mark.decks)) { rect.x += dx; rect.y += dy; }
+    for (const loop of loops.slice(mark.loops)) { loop.x1 += dx; loop.x2 += dx; loop.y += dy; }
+    for (const rect of drafts.slice(mark.drafts)) { rect.x += dx; rect.y += dy; }
+  };
+  const placementBottom = (mark: PlacementMark): number => {
+    let value = 0;
+    for (const rect of nodes.slice(mark.nodes)) value = Math.max(value, rect.y + rect.h);
+    for (const rect of stacks.slice(mark.stacks)) value = Math.max(value, rect.y + rect.h);
+    for (const rect of decks.slice(mark.decks)) value = Math.max(value, rect.y + rect.h);
+    for (const rect of drafts.slice(mark.drafts)) value = Math.max(value, rect.y + rect.h);
+    return value;
+  };
+
+  let rowTop = restTop;
+  let rowBottom = surfaceHeadBottom;
+  let rowStartX = PAD + surfaceHeadWidth;
+  cursor = rowStartX;
+  const placeRestItem = (place: (top: number) => void) => {
+    const mark = markPlacement();
+    const startX = cursor;
+    place(rowTop);
+    const endCursor = cursor;
+    if (startX > rowStartX && endCursor - GROUP_GAP > PAD + REST_BAND_MAX_W) {
+      const nextTop = rowBottom + REST_BAND_ROW_GAP;
+      shiftPlacement(mark, PAD - startX, nextTop - rowTop);
+      cursor = PAD + (endCursor - startX);
+      rowTop = nextTop;
+      rowStartX = PAD;
+      rowBottom = placementBottom(mark);
+      return;
+    }
+    rowBottom = Math.max(rowBottom, placementBottom(mark));
+  };
+
+  for (const group of restGroups) placeRestItem((top) => placeGroup(group, top));
+  for (const file of restManual) placeRestItem((top) => placeManual(file, top));
+
+  /* Remaining drafts join the same bounded band as fresh top-level cards. */
   for (const id of draftIds) {
     if (placedDrafts.has(id)) continue;
-    drafts.push({ key: "draft::" + id, id, x: cursor, y: restTop, w: NODE_W, h: ROOT_H });
-    cursor += NODE_W + GROUP_GAP;
+    placeRestItem((top) => {
+      drafts.push({ key: "draft::" + id, id, x: cursor, y: top, w: NODE_W, h: ROOT_H });
+      cursor += NODE_W + GROUP_GAP;
+    });
   }
 
   /* Planned stages live in the compact group rail (#353). Configuration opens
@@ -561,10 +653,11 @@ export function buildSchemeLayout(
   const slots: StageSlot[] = [];
 
   let bottom = 0;
-  for (const node of nodes) bottom = Math.max(bottom, node.y + node.h);
-  for (const stack of stacks) bottom = Math.max(bottom, stack.y + stack.h);
-  for (const deck of decks) bottom = Math.max(bottom, deck.y + deck.h);
-  for (const draft of drafts) bottom = Math.max(bottom, draft.y + draft.h);
+  let right = 0;
+  for (const node of nodes) { bottom = Math.max(bottom, node.y + node.h); right = Math.max(right, node.x + node.w); }
+  for (const stack of stacks) { bottom = Math.max(bottom, stack.y + stack.h); right = Math.max(right, stack.x + stack.w); }
+  for (const deck of decks) { bottom = Math.max(bottom, deck.y + deck.h); right = Math.max(right, deck.x + deck.w); }
+  for (const draft of drafts) { bottom = Math.max(bottom, draft.y + draft.h); right = Math.max(right, draft.x + draft.w); }
   /* Links resolve against what this pass actually placed, so geometry and
      link endpoints can never disagree. */
   const anchors = buildAnchorIndex(
@@ -622,7 +715,7 @@ export function buildSchemeLayout(
   for (const pipeline of surfacePipelines) {
     if ((pipeline.state === "closed" && !pipeline.restored) || framedPipelineIds.has(pipeline.id)) continue;
     framedPipelineIds.add(pipeline.id);
-    const rect = { x: cursor, y: dockY, w: NODE_W + GROUP_PAD * 2, h: 150 };
+    const rect = { x: PAD, y: dockY, w: NODE_W + GROUP_PAD * 2, h: 150 };
     groupHalos.push({
       key: `group::pipeline::${pipeline.id}`,
       kind: "pipeline",
@@ -653,7 +746,7 @@ export function buildSchemeLayout(
     slots,
     byPath,
     width: Math.max(
-      cursor - GROUP_GAP + PAD,
+      right + PAD,
       PAD * 2 + NODE_W,
       dockRight + PAD,
     ),

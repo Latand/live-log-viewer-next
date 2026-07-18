@@ -148,11 +148,13 @@ export const TaskCard = memo(function TaskCard({
   files,
   camRef,
   handlers,
+  selected = false,
 }: {
   task: PlacedTask;
   files: FileEntry[];
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
+  selected?: boolean;
 }) {
   const { t } = useLocale();
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
@@ -310,7 +312,7 @@ export const TaskCard = memo(function TaskCard({
       <div
         className={`flex flex-col overflow-hidden rounded-[8px] border border-border shadow-1 ${
           task.status === "done" ? "opacity-60 saturate-50" : ""
-        } ${editing ? "ring-2 ring-accent/50" : ""}`}
+        } ${editing || selected ? "ring-2 ring-accent/50" : ""}`}
         style={{ backgroundColor: tone.soft }}
       >
         <div aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tone.color }} />

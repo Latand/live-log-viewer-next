@@ -5,10 +5,11 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { readSession, type SessionRecord } from "@/lib/session/reader";
 import type { FileEntry } from "@/lib/types";
+import { autoTaskPosition } from "./lattice";
 
 import { createTask } from "./commands";
 import { mutateTasks } from "./store";
-import type { BoardTask, TaskSource } from "./types";
+import type { TaskSource } from "./types";
 
 const SCAN_STATE_FILE = statePath("task-inbox-scan.json");
 const HOUR_MS = 60 * 60 * 1000;
@@ -144,14 +145,6 @@ function sourceFor(entry: FileEntry, message: SessionRecord, index: number): Tas
   };
 }
 
-function autoPos(projectTasks: BoardTask[]): BoardTask["pos"] {
-  const index = projectTasks.length;
-  return {
-    x: 740 + (index % 2) * 300,
-    y: 120 + Math.floor(index / 2) * 120,
-  };
-}
-
 function isSessionEntry(entry: FileEntry): entry is FileEntry & { engine: "claude" | "codex" } {
   return entry.path.endsWith(".jsonl") && (entry.engine === "claude" || entry.engine === "codex");
 }
@@ -197,7 +190,7 @@ export function tickTaskInbox(files: FileEntry[], deps: { now?: () => Date; stat
       const outcome = createTask(next, {
         project: candidate.project,
         text: candidate.text,
-        pos: autoPos(projectTasks),
+        pos: autoTaskPosition(projectTasks),
         source: candidate.source,
       });
       if (!outcome.ok) continue;

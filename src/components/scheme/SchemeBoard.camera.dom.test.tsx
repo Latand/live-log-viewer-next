@@ -3,6 +3,8 @@ import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
+import type { FileEntry } from "@/lib/types";
+
 import { SchemeBoard } from "./SchemeBoard";
 
 const dom = new Window();
@@ -164,4 +166,111 @@ test("the scheme viewport keeps its minimap and camera gestures after descendant
   );
   await settle();
   expect(world.style.transform).not.toBe(beforeDrag);
+});
+
+test("0 frames current work, repeated 0 escalates to all, and Shift+0 fits all directly", async () => {
+  const active: FileEntry = {
+    path: "/active", root: "claude-projects", name: "active.jsonl", project: "fit-keys", title: "Active work",
+    engine: "claude", kind: "session", fmt: "claude", parent: null, mtime: 2, size: 1, activity: "live",
+    proc: "running", pid: 1, model: null, pendingQuestion: null, waitingInput: null,
+  };
+  const quiet: FileEntry = {
+    ...active, path: "/quiet", name: "quiet.jsonl", title: "Quiet history", mtime: 1, activity: "idle", proc: null, pid: null,
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  flushSync(() => {
+    root.render(
+      <SchemeBoard
+        project="fit-keys"
+        groups={[]}
+        manual={[quiet, active]}
+        files={[quiet, active]}
+        flows={[]}
+        tasks={[]}
+        drafts={[]}
+        focus={null}
+        onSelect={() => {}}
+        onClose={() => {}}
+        onDraftClose={() => {}}
+        onDraftSpawned={() => {}}
+      />,
+    );
+  });
+  await settle();
+
+  const viewport = host.querySelector('[aria-label^="Agent board"]') as HTMLDivElement;
+  Object.defineProperty(viewport, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800, toJSON() {} }),
+  });
+  const world = Array.from(viewport.children).find((child) =>
+    (child as HTMLElement).style.transform.includes("scale("),
+  ) as HTMLElement;
+  const key = (shiftKey = false) => window.dispatchEvent(
+    new dom.KeyboardEvent("keydown", { key: "0", shiftKey, bubbles: true }) as unknown as Event,
+  );
+
+  flushSync(() => key());
+  await settle();
+  const current = world.style.transform;
+  expect(host.textContent).toContain("Framed current work");
+
+  flushSync(() => key());
+  await settle();
+  const all = world.style.transform;
+  expect(all).not.toBe(current);
+  expect(host.textContent).toContain("Framed all content");
+
+  flushSync(() => key());
+  await settle();
+  expect(world.style.transform).toBe(current);
+  flushSync(() => key(true));
+  await settle();
+  expect(world.style.transform).toBe(all);
+
+  expect(host.querySelector('button[title="Fit current work (0)"]')).toBeTruthy();
+  expect(host.querySelector('button[title^="Fit all content"]')).toBeTruthy();
+});
+
+test("arrow navigation lands on a placed task with a visible ring and spoken title", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  flushSync(() => {
+    root.render(
+      <SchemeBoard
+        project="task-nav"
+        groups={[]}
+        manual={[]}
+        files={[]}
+        flows={[]}
+        tasks={[{
+          id: "nav-task", project: "task-nav", status: "assigned", text: "Navigate to bounded task",
+          placement: "pinned", pos: { x: 100, y: 120 }, assignments: [],
+          createdAt: "2026-07-18T00:00:00.000Z", updatedAt: "2026-07-18T00:00:00.000Z",
+        }]}
+        drafts={[]}
+        focus={null}
+        onSelect={() => {}}
+        onClose={() => {}}
+        onDraftClose={() => {}}
+        onDraftSpawned={() => {}}
+      />,
+    );
+  });
+  await settle();
+
+  flushSync(() => window.dispatchEvent(
+    new dom.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }) as unknown as Event,
+  ));
+  await settle();
+
+  const task = host.querySelector('[data-scheme-task="nav-task"]')!;
+  expect(task.firstElementChild?.className).toContain("ring-2");
+  expect(host.textContent).toContain("Navigate to bounded task");
+  expect(document.activeElement).not.toBe(task);
 });

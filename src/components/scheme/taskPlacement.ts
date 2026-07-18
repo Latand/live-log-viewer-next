@@ -1,4 +1,5 @@
 import type { BoardTask } from "@/lib/tasks/types";
+import { AUTO_LATTICE_MAX_Y, AUTO_LATTICE_X, isAutoTaskSeed } from "@/lib/tasks/lattice";
 
 import type { SchemeRect } from "./layout";
 import { TASK_W, taskCardHeight } from "./taskGeometry";
@@ -8,10 +9,13 @@ import { TASK_W, taskCardHeight } from "./taskGeometry";
    enough to keep every card and its dashed edge legible. */
 export const TASK_GUTTER = 16;
 
-/* How far the slot search fans out before giving up. A ring is one card step;
-   48 rings clears any realistic burst of curator/inbox cards while staying a
-   hard bound so the pass always terminates. */
-const MAX_RING = 48;
+/** Maximum local display displacement from a durable auto seed. */
+export const MAX_AUTO_DRIFT = 1_200;
+/** Saturated local searches append to this deterministic grid. */
+export const AUTO_OVERFLOW_Y = AUTO_LATTICE_MAX_Y + 320;
+const AUTO_OVERFLOW_COLUMNS = 12;
+const AUTO_OVERFLOW_ROW_STEP = 640;
+const AUTO_OVERFLOW_LIMIT = 4_096;
 
 /** Everything the placement pass needs from a task — kept structural so the
     module tests with plain literals; no full BoardTask fixtures are needed. Only
@@ -32,22 +36,21 @@ function clashesAny(rect: SchemeRect, rects: readonly SchemeRect[], gap: number)
   return false;
 }
 
-/* Deterministic outward spiral of grid offsets. Each ring tries its bottom row
-   first, then upward, left-to-right, so a displaced card slides *below* its
-   original spot before spreading sideways — matching the top-down board and
-   keeping a card near its owner. Memoized: the offsets never change. */
-let spiralCache: ReadonlyArray<readonly [number, number]> | null = null;
-function spiralOffsets(): ReadonlyArray<readonly [number, number]> {
-  if (spiralCache) return spiralCache;
+/* Deterministic outward spiral constrained by MAX_AUTO_DRIFT on both axes. */
+function spiralOffsets(stepX: number, stepY: number): ReadonlyArray<readonly [number, number]> {
   const out: Array<readonly [number, number]> = [];
-  for (let r = 1; r <= MAX_RING; r++) {
+  const maxX = Math.floor(MAX_AUTO_DRIFT / stepX);
+  const maxY = Math.floor(MAX_AUTO_DRIFT / stepY);
+  const maxRing = Math.max(maxX, maxY);
+  for (let r = 1; r <= maxRing; r++) {
     for (let dy = r; dy >= -r; dy--) {
       for (let dx = -r; dx <= r; dx++) {
-        if (Math.max(Math.abs(dx), Math.abs(dy)) === r) out.push([dx, dy]);
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        if (Math.abs(dx) > maxX || Math.abs(dy) > maxY) continue;
+        out.push([dx, dy]);
       }
     }
   }
-  spiralCache = out;
   return out;
 }
 
@@ -67,9 +70,23 @@ function findSlot(card: SchemeRect, placedCards: readonly SchemeRect[], obstacle
   const stepY = card.h + TASK_GUTTER;
   let cardClearFallback: { x: number; y: number } | null = null;
 
-  for (const [dx, dy] of spiralOffsets()) {
+  for (const [dx, dy] of spiralOffsets(stepX, stepY)) {
     const x = Math.round(card.x + dx * stepX);
     const y = Math.round(card.y + dy * stepY);
+    const candidate: SchemeRect = { x, y, w: card.w, h: card.h };
+    if (clashesAny(candidate, placedCards, TASK_GUTTER)) continue;
+    if (!clashesAny(candidate, obstacles, TASK_GUTTER)) return { x, y };
+    if (!cardClearFallback) cardClearFallback = { x, y };
+  }
+
+  /* Local shelf saturated: append below it in a compact, deterministic grid.
+     The candidate scan still clears every card and prefers obstacle clearance;
+     stored seeds remain untouched because this result is render-only. */
+  for (let index = 0; index < AUTO_OVERFLOW_LIMIT; index += 1) {
+    const col = index % AUTO_OVERFLOW_COLUMNS;
+    const row = Math.floor(index / AUTO_OVERFLOW_COLUMNS);
+    const x = AUTO_LATTICE_X + col * stepX;
+    const y = AUTO_OVERFLOW_Y + row * AUTO_OVERFLOW_ROW_STEP;
     const candidate: SchemeRect = { x, y, w: card.w, h: card.h };
     if (clashesAny(candidate, placedCards, TASK_GUTTER)) continue;
     if (!clashesAny(candidate, obstacles, TASK_GUTTER)) return { x, y };
@@ -83,13 +100,6 @@ function findSlot(card: SchemeRect, placedCards: readonly SchemeRect[], obstacle
    (740 + (i%2)·300), y = 120 + k·120. A sourced card still resting on it was
    never moved by a human and is fair game to spread; anything nudged off it reads
    as a deliberate placement and is held. */
-function onAutoLattice(pos: { x: number; y: number }): boolean {
-  const col = pos.x - 740;
-  if (col !== 0 && col !== 300) return false;
-  const row = pos.y - 120;
-  return row >= 0 && row % 120 === 0;
-}
-
 /**
  * Is this card the pass's to move? Only auto-captured curator/inbox cards still
  * resting on their lattice seed are. Everything else — a card placed with the
@@ -100,7 +110,7 @@ function onAutoLattice(pos: { x: number; y: number }): boolean {
  */
 export function isAutoPlaceable(task: PlaceableTask): boolean {
   if (!task.source) return false;
-  return onAutoLattice(task.pos);
+  return isAutoTaskSeed(task.pos);
 }
 
 /**

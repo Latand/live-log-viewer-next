@@ -47,6 +47,7 @@ export function Minimap({
   layout,
   world,
   tasks = [],
+  currentWork = null,
   stackDots = [],
   cam,
   vp,
@@ -59,6 +60,8 @@ export function Minimap({
   world: SchemeRect;
   /** Tasks render as 3 px status-colored dots; their edges never show here. */
   tasks?: PlacedTask[];
+  /** Faint outline of the operator's current-work framing. */
+  currentWork?: SchemeRect | null;
   /** Collapsed worker stacks (issue #136): one dot per origin, shown as a compact
       legend so folded workers read as a handful of dots, never an agent flood. */
   stackDots?: StackDot[];
@@ -136,7 +139,9 @@ export function Minimap({
               fill={`hsl(${group.hue} 62% 42% / 0.08)`}
               stroke={`hsl(${group.hue} 62% 42%)`}
               strokeWidth={2 / scale}
-            />
+            >
+              <title>{group.label}</title>
+            </rect>
           ))}
           {layout.nodes.map((node) => (
             <rect
@@ -160,6 +165,21 @@ export function Minimap({
               opacity={task.status === "done" ? 0.5 : 0.95}
             />
           ))}
+          {currentWork ? (
+            <rect
+              data-minimap-current-work="true"
+              x={currentWork.x}
+              y={currentWork.y}
+              width={currentWork.w}
+              height={currentWork.h}
+              rx={14}
+              fill="none"
+              stroke="var(--color-warning)"
+              strokeDasharray={`${7 / scale} ${5 / scale}`}
+              strokeWidth={2 / scale}
+              opacity={0.8}
+            />
+          ) : null}
           <rect
             x={-cam.x / cam.z}
             y={-cam.y / cam.z}

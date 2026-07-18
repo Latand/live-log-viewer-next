@@ -125,6 +125,13 @@ describe("collectNavTargets", () => {
     expect(targets).toHaveLength(2);
     expect(targets.find((t) => t.key === "deck::x")).toEqual({ key: "deck::x", x: 5, y: 6, w: 7, h: 8 });
   });
+
+  test("includes placed task rects without adding them to layout.byPath", () => {
+    const layout = { byPath: new Map([["p1", { x: 1, y: 2, w: 3, h: 4 }]]) } as unknown as SchemeLayout;
+    const taskRects = new Map([["task::t1", { x: 20, y: 30, w: 260, h: 180 }]]);
+    expect(collectNavTargets(layout, taskRects).map((target) => target.key)).toEqual(["p1", "task::t1"]);
+    expect(layout.byPath.has("task::t1")).toBe(false);
+  });
 });
 
 describe("nearestToViewportCenter", () => {
@@ -234,5 +241,9 @@ describe("navTargetLabel — screen-reader labels", () => {
   test("draft and deck keys drop their prefix (never a path)", () => {
     expect(navTargetLabel(layout, "draft::abc-123", t)).toBe("abc-123");
     expect(navTargetLabel(layout, "deck::flow-1", t)).toBe("flow-1");
+  });
+
+  test("placed task keys announce the task title", () => {
+    expect(navTargetLabel(layout, "task::t1", t, new Map([["task::t1", "Ship bounded geometry"]]))).toBe("Ship bounded geometry");
   });
 });

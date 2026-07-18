@@ -144,4 +144,13 @@ test("opening the mobile map keeps every active pipeline's full plan on a dock i
   // The whole planned stage graph rides on that dock card.
   expect(overlay!.textContent).toContain("plan");
   expect(overlay!.textContent).toContain("build");
+
+  const framing = overlay!.querySelector('[aria-label="Map framing"]')!;
+  const all = Array.from(framing.querySelectorAll("button")).find((button) => button.textContent === "All");
+  const current = Array.from(framing.querySelectorAll("button")).find((button) => button.textContent === "Current");
+  expect(all).toBeTruthy();
+  expect(current).toBeTruthy();
+  expect(all!.getAttribute("aria-pressed")).toBe("true");
+  flushSync(() => current!.click());
+  expect(current!.getAttribute("aria-pressed")).toBe("true");
 });

@@ -82,6 +82,16 @@ test("the minimap draws one compact outline per pipeline group (#353)", () => {
     <Minimap layout={layout} world={world} cam={cam} vp={vp} onJump={() => {}} />,
   );
   expect((html.match(/data-minimap-pipeline=/g) ?? []).length).toBe(1);
+  expect(html).toContain("<title>Pipeline</title>");
+});
+
+test("the minimap draws the current-work frame separately from the viewport", () => {
+  const currentWork = { x: 100, y: 120, w: 600, h: 780 };
+  const html = renderToStaticMarkup(
+    <Minimap layout={emptyLayout} world={world} currentWork={currentWork} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  expect((html.match(/data-minimap-current-work=/g) ?? []).length).toBe(1);
+  expect((html.match(/stroke="var\(--color-accent\)"/g) ?? []).length).toBe(1);
 });
 
 test("a direct review group's deck shows on the minimap like any managed deck (#325)", () => {

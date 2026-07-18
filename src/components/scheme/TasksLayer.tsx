@@ -52,6 +52,7 @@ export const TasksLayer = memo(function TasksLayer({
   lite,
   camRef,
   handlers,
+  selectedTaskId,
   pending,
   onStickyCreated,
   onCreateCancel,
@@ -64,6 +65,8 @@ export const TasksLayer = memo(function TasksLayer({
   lite: boolean;
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
+  /** Spatial-navigation ring; DOM focus remains on the board viewport. */
+  selectedTaskId?: string | null;
   /** World point where the «task» tool / double-click / `+ Task` dropped a
       not-yet-saved sticky composer. */
   pending: { x: number; y: number } | null;
@@ -76,7 +79,7 @@ export const TasksLayer = memo(function TasksLayer({
         lite ? (
           <LiteTaskCard key={task.id} task={task} />
         ) : (
-          <TaskCard key={task.id} task={task} files={files} camRef={camRef} handlers={handlers} />
+          <TaskCard key={task.id} task={task} files={files} camRef={camRef} handlers={handlers} selected={selectedTaskId === task.id} />
         ),
       )}
       {pending && !lite ? (

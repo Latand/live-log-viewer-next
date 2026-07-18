@@ -1,6 +1,6 @@
 "use client";
 
-import { BoxSelect, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
+import { BoxSelect, Focus, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cameraToPresence, orderedSelection, schemeFocusedPath, schemeVisiblePaths, viewBus } from "@/hooks/viewPresenceBus";
@@ -17,17 +17,21 @@ import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
 import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
+import { taskTitle } from "@/components/tasks/taskModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
 import { compactPipelineLayoutFlows, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
 import { BulkActionBar } from "./BulkActionBar";
+import { EdgeChips } from "./EdgeChips";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { resolveExpandedNode } from "./expandedNode";
 import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest } from "./renameRequest";
+import { currentWorkRect, currentWorkRects } from "./currentWork";
 import { buildSchemeLayout } from "./layout";
 import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
+import { boardClusters } from "./offscreenClusters";
 import type { WorkerStack } from "./workerCollapse";
 import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus, type PipelineGroupControls } from "./nodes";
 import type { TaskCardHandlers } from "./TaskCard";
@@ -98,6 +102,8 @@ interface Props {
   onSelect: (file: FileEntry) => void;
   /** Optional map-mode node pick handler; receives the selected node key. */
   onNodePick?: (key: string) => void;
+  /** Mobile map framing selection; desktop leaves this unset. */
+  mapFrame?: "all" | "current";
   onClose: (path: string) => void;
   onDraftClose: (id: string) => void;
   /** A draft's agent booted and its transcript arrived: open it as a real node. */
@@ -186,6 +192,7 @@ export function SchemeBoard({
   attentionPaths,
   onSelect,
   onNodePick,
+  mapFrame,
   onClose,
   onDraftClose,
   onDraftSpawned,
@@ -531,6 +538,10 @@ export function SchemeBoard({
     () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
     [placedTasks],
   );
+  const taskNavLabels = useMemo(
+    () => new Map(placedTasks.map((task) => [`task::${task.id}`, taskTitle(task.text) || t("tasks.untitled")] as const)),
+    [placedTasks, t],
+  );
   const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout, flows, files)), [placedTasks, layout, flows, files]);
   /* Card rects the edge router steers around, each tagged with its task so an
      edge is never counted as crossing the card it leaves from (issue #17). */
@@ -562,6 +573,28 @@ export function SchemeBoard({
     if (routeBox) rects.push(routeBox);
     return taskWorldBounds(layout.width, layout.height, rects);
   }, [layout.width, layout.height, taskRects, taskRoutes]);
+  const currentWork = useMemo(
+    () => currentWorkRect(layout, placedTasks, favorites ?? EMPTY_PATHS),
+    [layout, placedTasks, favorites],
+  );
+  const currentWorkCount = useMemo(
+    () => currentWorkRects(layout, placedTasks, favorites ?? EMPTY_PATHS).length,
+    [layout, placedTasks, favorites],
+  );
+  const clusters = useMemo(
+    () => boardClusters(layout, placedTasks, favorites ?? EMPTY_PATHS),
+    [layout, placedTasks, favorites],
+  );
+  const [frameAnnouncement, setFrameAnnouncement] = useState("");
+  const announceFit = useCallback(
+    (kind: "current" | "all") => {
+      const count = kind === "current"
+        ? currentWorkCount
+        : layout.nodes.length + layout.drafts.length + layout.groups.length + placedTasks.length;
+      setFrameAnnouncement(t(kind === "current" ? "scheme.framedCurrent" : "scheme.framedAll", { count }));
+    },
+    [currentWorkCount, layout.nodes.length, layout.drafts.length, layout.groups.length, placedTasks.length, t],
+  );
 
   /* Place-on-map arms this ref with the id of an existing unplaced task; the
      next canvas click pins it instead of dropping a fresh sticky. */
@@ -613,6 +646,7 @@ export function SchemeBoard({
     zoomCenter,
     zoomTo,
     fit,
+    fitCurrent,
     fitRect,
     jump,
     manualNonce,
@@ -622,6 +656,7 @@ export function SchemeBoard({
     project,
     layout,
     world,
+    currentWork,
     mapMode,
     focus,
     onNodePick,
@@ -637,7 +672,14 @@ export function SchemeBoard({
     onPlaceTask: mapMode ? undefined : onPlaceTask,
     onArrowNav: navArrowRef,
     onZoomKey: navZoomRef,
+    onFit: announceFit,
   });
+
+  useEffect(() => {
+    if (!mapMode || !mapFrame) return;
+    if (mapFrame === "current") fitCurrent();
+    else fit();
+  }, [mapMode, mapFrame, fitCurrent, fit]);
 
   /* Place-on-map requested from the panel: arm the crosshair so the next click
      pins the task (the camera reverts to select once it lands). */
@@ -687,6 +729,8 @@ export function SchemeBoard({
   const { onArrow, onZoomKey, announcement } = useSpatialNav({
     enabled: navEnabled,
     layout,
+    taskRects,
+    taskLabels: taskNavLabels,
     cam,
     vp,
     selected,
@@ -896,6 +940,9 @@ export function SchemeBoard({
       <div className="sr-only" aria-live="polite" role="status">
         {announcement}
       </div>
+      <div className="sr-only" aria-live="polite" role="status">
+        {frameAnnouncement}
+      </div>
       {/* Separate region so a pipeline transition never races the nav message;
           its text is written imperatively by the effect above. */}
       <div ref={pipelineLiveRef} className="sr-only" aria-live="polite" role="status" />
@@ -974,6 +1021,7 @@ export function SchemeBoard({
           lite={mapMode}
           camRef={camRef}
           handlers={taskHandlers}
+          selectedTaskId={selected?.startsWith("task::") ? selected.slice("task::".length) : null}
           pending={pendingTask}
           onStickyCreated={handleStickyCreated}
           onCreateCancel={cancelCreate}
@@ -1022,6 +1070,14 @@ export function SchemeBoard({
         </div>
       ) : null}
 
+      <EdgeChips
+        clusters={clusters}
+        cam={cam}
+        vp={vp}
+        hidden={mapMode || Boolean(marquee) || panning}
+        onFit={fitRect}
+      />
+
       <div data-scheme-ui className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-border bg-card/95 p-1 shadow-1">
         {mapMode ? null : (
           <>
@@ -1068,6 +1124,9 @@ export function SchemeBoard({
         <ToolButton title={t("scheme.zoomIn")} onClick={() => zoomCenter(1.25)}>
           <Plus className="h-4 w-4" aria-hidden />
         </ToolButton>
+        <ToolButton title={t("scheme.fitCurrent")} onClick={fitCurrent}>
+          <Focus className="h-4 w-4" aria-hidden />
+        </ToolButton>
         <ToolButton title={t("scheme.fit")} onClick={fit}>
           <Maximize2 className="h-4 w-4" aria-hidden />
         </ToolButton>
@@ -1084,7 +1143,7 @@ export function SchemeBoard({
         />
       ) : null}
 
-      <Minimap layout={layout} world={world} tasks={placedTasks} stackDots={stackDots} cam={cam} vp={vp} onJump={jump} />
+      <Minimap layout={layout} world={world} tasks={placedTasks} currentWork={currentWork} stackDots={stackDots} cam={cam} vp={vp} onJump={jump} />
     </div>
     {/* The full-window conversation: the same pane component over the whole
         viewport, with the live feed and the composer of exactly this
