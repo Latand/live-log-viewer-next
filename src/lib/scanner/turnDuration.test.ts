@@ -25,6 +25,11 @@ const claudeAssistantEnd = (timestamp: string) => ({
   timestamp,
   message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "done" }] },
 });
+const claudeAssistantTool = (timestamp: string) => ({
+  type: "assistant",
+  timestamp,
+  message: { role: "assistant", stop_reason: null, content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] },
+});
 const claudeInterrupt = (timestamp: string, extra: Record<string, unknown> = { interruptedMessageId: "msg-1" }) => ({
   type: "user",
   timestamp,
@@ -212,6 +217,163 @@ describe("lastTurnFromRecords — Claude", () => {
     expect(boundary).toEqual({
       startedAt: ms("2026-07-14T10:00:00.000Z"),
       endedAt: ms("2026-07-14T10:02:00.000Z"),
+    });
+  });
+
+  test("slash-command meta records never open a window (feed metadata contract)", () => {
+    // A command invocation is journaled as meta user records that carry real
+    // text: the caveat wrapper and the command echo. The feed classifies both
+    // as metadata; the timer must not start before the actual prompt lands
+    // (issue #406).
+    const records = [
+      {
+        type: "user",
+        timestamp: "2026-07-14T09:59:57.000Z",
+        isMeta: true,
+        message: { role: "user", content: "<local-command-caveat>Caveat: the command output follows</local-command-caveat>" },
+      },
+      {
+        type: "user",
+        timestamp: "2026-07-14T09:59:58.000Z",
+        promptSource: "command",
+        message: { role: "user", content: "<command-name>/review</command-name>" },
+      },
+    ];
+    expect(lastTurnFromRecords(records, false)).toBeNull();
+
+    const boundary = lastTurnFromRecords(
+      [...records, claudeUser("2026-07-14T10:00:00.000Z", "review the diff"), claudeAssistantEnd("2026-07-14T10:05:00.000Z")],
+      false,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:05:00.000Z"),
+    });
+  });
+
+  test("promptSource records stay metadata unless typed", () => {
+    const notification = {
+      type: "user",
+      timestamp: "2026-07-14T10:10:00.000Z",
+      promptSource: "system",
+      origin: { kind: "task-notification" },
+      message: { role: "user", content: "<task-notification>\n<status>completed</status>\n</task-notification>" },
+    };
+    // After a finished turn, a system notification must not open a new window…
+    const boundary = lastTurnFromRecords(
+      [claudeUser("2026-07-14T10:00:00.000Z", "hi"), claudeAssistantEnd("2026-07-14T10:01:00.000Z"), notification],
+      false,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:01:00.000Z"),
+    });
+    // …while an explicitly typed prompt keeps its role through envelope fields.
+    const typed = lastTurnFromRecords(
+      [
+        {
+          type: "user",
+          timestamp: "2026-07-14T10:20:00.000Z",
+          promptSource: "typed",
+          origin: { kind: "human" },
+          message: { role: "user", content: "queued while you worked" },
+        },
+      ],
+      false,
+    );
+    expect(typed).toEqual({ startedAt: ms("2026-07-14T10:20:00.000Z"), endedAt: null });
+  });
+
+  test("an image-bearing prompt opens a window without any text part", () => {
+    const boundary = lastTurnFromRecords(
+      [
+        {
+          type: "user",
+          timestamp: "2026-07-14T10:00:00.000Z",
+          message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } }] },
+        },
+        claudeAssistantOpen("2026-07-14T10:00:05.000Z"),
+      ],
+      false,
+    );
+    expect(boundary).toEqual({ startedAt: ms("2026-07-14T10:00:00.000Z"), endedAt: null });
+  });
+
+  test("an ordinary prompt still opens a window under the shared contract", () => {
+    const boundary = lastTurnFromRecords([claudeUser("2026-07-14T10:00:00.000Z", "plain prompt")], false);
+    expect(boundary).toEqual({ startedAt: ms("2026-07-14T10:00:00.000Z"), endedAt: null });
+  });
+
+  test("an sdk prompt after a finished turn starts a fresh window over new tool work", () => {
+    // Headless/conveyor lanes prompt through the SDK (`promptSource:"sdk"`,
+    // no origin). The feed renders the envelope as a system row, but it is a
+    // genuine initiator: the window must open at the sdk prompt, not tick
+    // from the previous human turn's start (issue #406 review).
+    const sdkPrompt = {
+      type: "user",
+      timestamp: "2026-07-14T12:00:00.000Z",
+      promptSource: "sdk",
+      message: { role: "user", content: "You are a Verifier. Confirm the checkout is clean." },
+    };
+    const running = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "earlier human turn"),
+        claudeAssistantEnd("2026-07-14T10:01:00.000Z"),
+        sdkPrompt,
+        claudeAssistantTool("2026-07-14T12:00:05.000Z"),
+      ],
+      false,
+    );
+    expect(running).toEqual({ startedAt: ms("2026-07-14T12:00:00.000Z"), endedAt: null });
+
+    // A session whose prompts are ALL sdk-sourced still carries a boundary.
+    const headless = lastTurnFromRecords([sdkPrompt, claudeAssistantEnd("2026-07-14T12:10:00.000Z")], false);
+    expect(headless).toEqual({
+      startedAt: ms("2026-07-14T12:00:00.000Z"),
+      endedAt: ms("2026-07-14T12:10:00.000Z"),
+    });
+  });
+
+  test("idle-delivered peer and coordinator messages start fresh windows", () => {
+    // Peer/coordinator deliveries are journaled with isMeta:true, yet they
+    // initiate the turn that follows — provenance outranks the meta flag.
+    for (const kind of ["peer", "coordinator"] as const) {
+      const boundary = lastTurnFromRecords(
+        [
+          claudeUser("2026-07-14T10:00:00.000Z", "earlier human turn"),
+          claudeAssistantEnd("2026-07-14T10:01:00.000Z"),
+          {
+            type: "user",
+            timestamp: "2026-07-14T12:00:00.000Z",
+            isMeta: true,
+            origin: { kind },
+            message: { role: "user", content: [{ type: "text", text: "please pick up the review" }] },
+          },
+          claudeAssistantTool("2026-07-14T12:00:05.000Z"),
+        ],
+        false,
+      );
+      expect(boundary).toEqual({ startedAt: ms("2026-07-14T12:00:00.000Z"), endedAt: null });
+    }
+  });
+
+  test("a compaction summary never opens a window", () => {
+    const boundary = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "hi"),
+        claudeAssistantEnd("2026-07-14T10:01:00.000Z"),
+        {
+          type: "user",
+          timestamp: "2026-07-14T10:02:00.000Z",
+          isCompactSummary: true,
+          message: { role: "user", content: "This session is being continued from a previous conversation…" },
+        },
+      ],
+      false,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:01:00.000Z"),
     });
   });
 

@@ -165,7 +165,7 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
     if (Object.hasOwn(persisted!, "goal")) expect(caches["goal-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.goal]);
     if (Object.hasOwn(persisted!, "ctx")) expect(caches["ctx-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.ctx]);
     if (Object.hasOwn(persisted!, "lastTurn")) {
-      expect(caches["last-turn-v4"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.lastTurn]);
+      expect(caches["last-turn-v5"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.lastTurn]);
     }
 
     activityVerdict(persisted!.root, transcript, persisted!.mtime, persisted!.size);
@@ -336,6 +336,7 @@ test("a persisted completed generation primes permanent lineage facts", async ()
     fs.mkdirSync(testStateDir, { recursive: true });
     fs.writeFileSync(path.join(testStateDir, "files-scan-snapshot.json"), JSON.stringify({
       version: 1,
+      schemaVersion: 8,
       snapshot: {
         complete: true,
         files: [sourceEntry, taskEntry, predecessorEntry, successorEntry],
@@ -612,6 +613,82 @@ test("a persisted Claude result hydrates authoritative turn evidence without tra
     process.env.LLV_STATE_DIR = previousTestStateDir;
     resetFilesRouteCacheForTests();
     fs.rmSync(testStateDir, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("a cold restart after upgrade rejects pre-#406 persisted lastTurn boundaries and recomputes them", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "cold-upgrade-last-turn-state");
+  const projectDir = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo-cold-upgrade-last-turn");
+  const transcript = path.join(projectDir, "cold-upgrade-last-turn.jsonl");
+  const echoStartedAt = Date.parse("2026-07-16T11:59:00.000Z");
+  const promptStartedAt = Date.parse("2026-07-16T12:00:00.000Z");
+  const endedAt = Date.parse("2026-07-16T12:00:30.000Z");
+  const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(transcript, [
+      JSON.stringify({
+        type: "user",
+        timestamp: "2026-07-16T11:59:00.000Z",
+        cwd: "/repo",
+        isMeta: true,
+        message: { role: "user", content: "<command-name>/model</command-name><command-message>model</command-message>" },
+      }),
+      JSON.stringify({ type: "user", timestamp: "2026-07-16T12:00:00.000Z", cwd: "/repo", message: { role: "user", content: "Do the work" } }),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-07-16T12:00:30.000Z",
+        message: { model: "claude-sonnet-4-20250514", stop_reason: "end_turn", content: [{ type: "text", text: "Done" }] },
+      }),
+      JSON.stringify({ type: "result", timestamp: "2026-07-16T12:00:31.000Z", subtype: "success", result: "Done" }),
+      "",
+    ].join("\n"));
+    resetFilesRouteCacheForTests();
+    const initial = await currentFileScan({ fresh: true });
+    expect(initial.snapshot.files.find((entry) => entry.path === transcript)?.lastTurn)
+      .toEqual({ startedAt: promptStartedAt, endedAt });
+
+    /* Rewrite the persisted snapshot as the previous (pre-#406) build wrote
+       it: no cache schema stamp, and a lastTurn window opened by the command
+       echo instead of the initiating prompt. */
+    const snapshotPath = path.join(testStateDir, "files-scan-snapshot.json");
+    const persisted = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as {
+      schemaVersion?: number;
+      snapshot: { files: FileEntry[] };
+    };
+    expect(persisted.schemaVersion).toBe(8);
+    delete persisted.schemaVersion;
+    const persistedEntry = persisted.snapshot.files.find((entry) => entry.path === transcript)!;
+    persistedEntry.lastTurn = { startedAt: echoStartedAt, endedAt };
+    fs.writeFileSync(snapshotPath, JSON.stringify(persisted) + "\n");
+
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+
+    const restarted = await cachedFileScan(undefined, undefined, 0);
+    expect(restarted.cacheStatus).toBe("miss");
+    const recomputed = restarted.snapshot.files.find((entry) => entry.path === transcript)!;
+    expect(recomputed.lastTurn).toEqual({ startedAt: promptStartedAt, endedAt });
+    expect(lastTurnFor(recomputed)).toEqual({ startedAt: promptStartedAt, endedAt });
+
+    /* The recovery scan re-stamps the snapshot with the current schema, so
+       the next restart warm-starts on the repaired boundary. */
+    const restamped = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as { schemaVersion?: number };
+    expect(restamped.schemaVersion).toBe(8);
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    const warm = await cachedFileScan(undefined, undefined, 0);
+    expect(warm.cacheStatus).toBe("hit");
+    expect(warm.snapshot.files.find((entry) => entry.path === transcript)?.lastTurn)
+      .toEqual({ startedAt: promptStartedAt, endedAt });
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
   }
 }, 30_000);
 
