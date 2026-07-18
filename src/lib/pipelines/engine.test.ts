@@ -608,6 +608,22 @@ function makeStructuredAttempt() {
   savePipelines([pipeline]);
 }
 
+/** The production projection shape (#337): scanner resource-scope inheritance
+    keeps the transcript `jsonl_turn_stalled` at its final byte size forever. */
+function stalledEntry(pathname: string): FileEntry {
+  return { ...entry(pathname), activity: "stalled", activityReason: "jsonl_turn_stalled" };
+}
+
+function countDurableReads(h: ReturnType<typeof harness>): () => number {
+  let reads = 0;
+  const base = h.ports.durableTurnEvidence;
+  h.ports.durableTurnEvidence = async (engine, transcriptPath) => {
+    reads += 1;
+    return base(engine, transcriptPath);
+  };
+  return () => reads;
+}
+
 function pinStageHead(h: ReturnType<typeof harness>) {
   const baseExec = h.ports.exec;
   h.ports.exec = (command, args, cwd) => args[0] === "rev-parse" && args[1] === "HEAD"
@@ -725,6 +741,117 @@ test("a durable busy turn blocks scanner-message settlement even for a parseable
     expect(current.runs[0]!.attempts[0]!.state).toBe("running");
     expect(current.runs[0]!.attempts[0]!.verdict).toBeNull();
   }
+});
+
+test("a pane-less stalled projection with a stuck running runtime ledger settles from durable terminal evidence (#337 production shape)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  /* Production shape: the transcript ended in a fenced verdict plus trailing
+     bookkeeping records, the scan projects jsonl_turn_stalled at the final
+     size, and the runtime session ledger stays stuck `running` forever. */
+  h.setConversationActive(true);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_000_000 },
+  });
+
+  await tickPipelines([stalledEntry("/codex/stage-1.jsonl")], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.cursor).toEqual({ stageId: "build", state: "pending" });
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    output: "integration complete",
+    verdict: { status: "pass", confidence: 0.9 },
+  });
+
+  /* Settles exactly once: the frozen stalled projection on later wake-ups
+     neither re-settles nor appends attempts — history stays append-only. */
+  await tickPipelines([stalledEntry("/codex/stage-1.jsonl")], h.ports);
+  await tickPipelines([stalledEntry("/codex/stage-1.jsonl")], h.ports);
+  expect(loadPipelines()[0]!.runs[0]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("spawn:")).length).toBe(2);
+});
+
+test("a restart-primed stalled cache at final size settles without a runtime session (#337)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  /* Restart: the scan cache re-primes busy at the final size and the fresh
+     runtime host has no session for the conversation (ledger answers null). */
+  h.setConversationActive(null);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_000_000 },
+  });
+
+  await tickPipelines([stalledEntry("/codex/stage-1.jsonl")], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.cursor).toEqual({ stageId: "build", state: "pending" });
+  expect(current.lastPassedCommit).toBe(STAGE_HEAD);
+  expect(current.runs[0]!.attempts[0]!.state).toBe("passed");
+});
+
+test("a genuinely busy durable turn keeps a stalled pane-less attempt running (#337)", async () => {
+  for (const active of [true, null] as const) {
+    const h = harness();
+    await runningStructuredStage(h);
+    h.setConversationActive(active);
+    /* The trailing scanner message even parses as a verdict; the durable open
+       turn (open tool call or a later user follow-up) still blocks settlement. */
+    h.finish("/codex/stage-1.jsonl", "pass");
+    h.durableTurns.set("/codex/stage-1.jsonl", {
+      turn: "busy",
+      message: h.messages.get("/codex/stage-1.jsonl")!,
+    });
+
+    await tickPipelines([stalledEntry("/codex/stage-1.jsonl")], h.ports);
+
+    const current = loadPipelines()[0]!;
+    expect(current.state).toBe("running");
+    expect(current.runs[0]!.attempts[0]!.state).toBe("running");
+    expect(current.runs[0]!.attempts[0]!.verdict).toBeNull();
+  }
+});
+
+test("live and open-turn projections never consult the durable read (#337 cheap path)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(null);
+  const reads = countDurableReads(h);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_000_000 },
+  });
+
+  await tickPipelines([{ ...entry("/codex/stage-1.jsonl"), activity: "live", activityReason: "jsonl_turn_open" }], h.ports);
+  await tickPipelines([{ ...entry("/codex/stage-1.jsonl"), activity: "live", activityReason: "mtime_fresh" }], h.ports);
+
+  expect(reads()).toBe(0);
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.state).toBe("running");
+});
+
+test("a pane-hosted stalled attempt keeps the cheap return without a durable read", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  const reads = countDurableReads(h);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_000_000 },
+  });
+
+  await tickPipelines([stalledEntry("/codex/stage-1.jsonl")], h.ports);
+
+  expect(reads()).toBe(0);
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]!.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]!.verdict).toBeNull();
 });
 
 test("a genuinely terminal turn without a valid verdict stays parked and retry preserves the attempt receipt", async () => {

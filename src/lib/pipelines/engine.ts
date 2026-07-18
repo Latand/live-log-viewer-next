@@ -544,8 +544,16 @@ async function tickRunStage(
   }
   const entry = entries.find((candidate) => candidate.path === attempt!.agentPath);
   /* Cheap live path: the scan projects an open turn and the runtime ledger does
-     not contradict it — no durable read needed while the agent works. */
-  if (entry && structuredActive !== false && (entry.activity === "live" || entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled")) return;
+     not contradict it — no durable read needed while the agent works. A stalled
+     projection is only cheap evidence for pane-hosted attempts (their liveness
+     probe guards settlement): scanner resource-scope inheritance keeps
+     `jsonl_turn_stalled` frozen at the final byte size, and a stale `running`
+     runtime ledger cannot contradict it, so a pane-less structured attempt must
+     fall through to the durable transcript read instead (#337). */
+  const scanProjectsOpenTurn = entry?.activity === "live"
+    || entry?.activityReason === "jsonl_turn_open"
+    || (entry?.activityReason === "jsonl_turn_stalled" && attempt.paneId !== null);
+  if (entry && structuredActive !== false && scanProjectsOpenTurn) return;
 
   /* The transcript artifact is the completion authority (#337). A terminal turn
      whose completion evidence belongs to this attempt and ends in a valid fenced
