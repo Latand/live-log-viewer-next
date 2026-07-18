@@ -14,8 +14,10 @@ import {
   routeTaskEdge,
   routeTaskEdges,
   TASK_BODY_MAX,
+  TASK_DISCLOSURE_H,
   TASK_W,
   TASK_WORLD_MARGIN,
+  taskCardExpandable,
   taskCardHeight,
   taskEdgesSignature,
   taskRect,
@@ -1088,5 +1090,31 @@ describe("taskEdgesSignature — poll-stable route cache key (Finding 2)", () =>
     expect(taskEdgesSignature([geom("a", 0, 40, 300, 300)], cards, [])).not.toBe(base);
     expect(taskEdgesSignature(edges, [{ id: "a", x: 80, y: 10, w: 260, h: 100 }], [])).not.toBe(base);
     expect(taskEdgesSignature(edges, cards, [{ x: 0, y: 0, w: 10, h: 10 }])).not.toBe(base);
+  });
+});
+
+describe("taskCardExpandable (issue #292: compact preview + Expand, no internal scroll)", () => {
+  test("short text is not expandable; text past the compact cap is", () => {
+    expect(taskCardExpandable({ text: "one line" })).toBe(false);
+    const long = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
+    expect(taskCardExpandable({ text: long })).toBe(true);
+  });
+
+  test("the boundary tracks the same wrap simulation as the height estimate", () => {
+    /* 20 hard lines × 17px = 340 — exactly at the cap: not expandable; one more
+       line crosses it. */
+    const atCap = Array.from({ length: 20 }, (_, i) => `l${i}`).join("\n");
+    const pastCap = `${atCap}\nl20`;
+    expect(taskCardExpandable({ text: atCap })).toBe(false);
+    expect(taskCardExpandable({ text: pastCap })).toBe(true);
+  });
+
+  test("an expandable card's compact height estimate stays capped — the disclosure fits inside it", () => {
+    const long = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
+    const height = taskCardHeight({ text: long, assignments: [], source: undefined });
+    /* strip 6 + capped body 340 + pad 20: the rendered preview (340−24) plus the
+       24px disclosure row exactly fills the same box. */
+    expect(height).toBe(6 + TASK_BODY_MAX + 20);
+    expect(TASK_DISCLOSURE_H).toBe(24);
   });
 });

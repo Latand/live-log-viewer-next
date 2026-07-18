@@ -242,6 +242,11 @@ test("an active pipeline-owned review keeps prior same-round bindings in the com
   expect(deckChip).toBeUndefined();
 
   const dock = dom.document.querySelector('[data-testid="mobile-pipeline-dock"]');
+  /* With a conversation focused the dock mounts collapsed (#156); the full rail
+     — and its verdict/round history — stays reachable behind the disclosure. */
+  const summary = dock!.querySelector('[data-testid="mobile-pipeline-dock-summary"]') as unknown as HTMLButtonElement;
+  flushSync(() => summary.click());
+  await settle();
   const history = ([...dock!.querySelectorAll("button")] as unknown as HTMLButtonElement[])
     .filter((button) => button.getAttribute("aria-label")?.startsWith("Open verdict for stage"))
     .at(-1);

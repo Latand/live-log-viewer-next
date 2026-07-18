@@ -954,6 +954,7 @@ export const en = {
   "pipelineStrip.roundShort": "R{n}",
   "pipelineStrip.attemptSuffix": "×{n}",
   "pipelineStrip.chipAria": "Stage {label}: {state}",
+  "pipelineStrip.compactChipAria": "{label}, {state}",
   "pipelineStrip.stageOf": "stage {k}/{n}",
 
   // pipeline stage placeholders + template picker (#196)
@@ -1041,6 +1042,8 @@ export const en = {
   "pipelineMobile.prevStage": "Previous stage {label}, state {state}",
   "pipelineMobile.nextStage": "Next stage {label}, state {state}",
   "pipelineMobile.openVerdict": "Open verdict for {label}, state {state}",
+  "pipelineMobile.expandDock": "Expand pipeline {task}",
+  "pipelineMobile.collapseDock": "Collapse pipeline {task}",
 
   "wfDraft.paneAria": "Draft of a new workflow",
   "wfDraft.notStarted": "the workflow is not launched yet",
@@ -1360,6 +1363,8 @@ export const en = {
   "tasks.attachCount": { one: "{count} image", other: "{count} images" },
   "tasks.draftDiscarded": "draft discarded",
   "tasks.editAria": "Task text",
+  "tasks.expandText": "Expand",
+  "tasks.collapseText": "Collapse",
   "tasks.spawning": "starting…",
   "tasks.deadChip": "the conversation is gone from the list",
   "tasks.source": "source",

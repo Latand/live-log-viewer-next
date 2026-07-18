@@ -1,6 +1,6 @@
 "use client";
 
-import { FoldVertical, Link2, Loader2, Send, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, FoldVertical, Link2, Loader2, Send, Trash2, X } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
@@ -14,7 +14,7 @@ import { activityDot, cleanTitle, engineBadge, engineBadgeFor } from "@/componen
 
 import type { Camera } from "./Minimap";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
-import { TASK_BODY_MAX, TASK_W, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
+import { TASK_BODY_MAX, TASK_DISCLOSURE_H, TASK_W, taskCardExpandable, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
 
 /* Below this zoom the card text is unreadable: an edit click glides first. */
 const EDIT_MIN_Z = 0.55;
@@ -163,6 +163,12 @@ export const TaskCard = memo(function TaskCard({
      bumps on the PATCH), so the card never snaps back mid-poll. */
   const [localPos, setLocalPos] = useState<{ x: number; y: number; seen: string } | null>(null);
   const [editing, setEditing] = useState(false);
+  /* Session-only full-text disclosure (issue #292): compact cards clamp with a
+     fade — never an internal scrollbar — and Expand lifts the card into the
+     same elevated overlay band editing uses, so the full body reads above the
+     board while stored geometry (placement, minimap, edges) keeps the compact
+     box. The durable stack fold (`handlers.collapse`) is a different verb. */
+  const [textExpanded, setTextExpanded] = useState(false);
   const [draft, setDraft] = useState("");
   /* The last edit ended blank: nothing was saved (the server rejects empty
      text), so handoffs/drafts are blocked until the user restores the text. */
@@ -278,7 +284,9 @@ export const TaskCard = memo(function TaskCard({
   const title = taskTitle(task.text) || t("tasks.untitled");
   const rest = task.text.includes("\n") ? task.text.slice(task.text.indexOf("\n") + 1) : "";
   const byPath = new Map(files.map((file) => [file.path, file]));
-  const lifted = editing || drag !== null;
+  const expandable = taskCardExpandable(task);
+  const showFullText = expandable && textExpanded;
+  const lifted = editing || drag !== null || showFullText;
 
   /* The handoff gesture, task-flavored: pull the arrow off the «send» pill
      onto a pane to route the task into that agent's composer (nothing is
@@ -334,12 +342,42 @@ export const TaskCard = memo(function TaskCard({
             maxLength={6000}
           />
         ) : (
-          <div data-task-body className="cursor-text overflow-y-auto px-3 py-2" style={{ maxHeight: TASK_BODY_MAX }}>
-            <div className="whitespace-pre-wrap break-words text-[12.5px] font-bold leading-[17px] text-primary">{title}</div>
-            {rest.trim() ? (
-              <div className="whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-secondary">{rest}</div>
+          <>
+            {/* Compact: fixed preview, clipped with a fade — zero internal
+                scrollbar (issue #292). The expandable card reserves the
+                disclosure row INSIDE the body cap so its rendered height stays
+                within the pure geometry estimate. */}
+            <div
+              data-task-body
+              className="relative cursor-text overflow-hidden px-3 py-2"
+              style={showFullText ? undefined : { maxHeight: expandable ? TASK_BODY_MAX - TASK_DISCLOSURE_H : TASK_BODY_MAX }}
+            >
+              <div className="whitespace-pre-wrap break-words text-[12.5px] font-bold leading-[17px] text-primary">{title}</div>
+              {rest.trim() ? (
+                <div className="whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-secondary">{rest}</div>
+              ) : null}
+              {expandable && !showFullText ? (
+                <div
+                  aria-hidden
+                  data-task-fade
+                  className="pointer-events-none absolute inset-x-0 bottom-0 h-8"
+                  style={{ background: `linear-gradient(to bottom, transparent, ${tone.soft})` }}
+                />
+              ) : null}
+            </div>
+            {expandable ? (
+              <button
+                type="button"
+                data-task-disclosure
+                aria-expanded={showFullText}
+                className="flex h-6 w-full shrink-0 items-center justify-center gap-1 text-[10.5px] font-semibold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                onClick={() => setTextExpanded((value) => !value)}
+              >
+                {showFullText ? <ChevronUp className="h-3 w-3" aria-hidden /> : <ChevronDown className="h-3 w-3" aria-hidden />}
+                {t(showFullText ? "tasks.collapseText" : "tasks.expandText")}
+              </button>
             ) : null}
-          </div>
+          </>
         )}
         {task.source || task.assignments.length ? (
           <div className="flex flex-col gap-1 px-2 pb-2">

@@ -110,15 +110,18 @@ function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, vp }: 
   );
 }
 
-export function EdgeChips({ clusters, cam, vp, hidden, onFit }: {
+export function EdgeChips({ clusters, cam, vp, hidden, obstacles = [], onFit }: {
   clusters: readonly BoardCluster[];
   cam: Camera;
   vp: { w: number; h: number };
   hidden: boolean;
+  /** Screen-space boxes of rendered conversation surfaces: a chip that would
+      paint over one folds into the edge's «+N» disclosure (issue #292). */
+  obstacles?: readonly SchemeRect[];
   onFit: (rect: SchemeRect) => void;
 }) {
   const { t } = useLocale();
-  const partition = useMemo(() => offscreenClusterChips(clusters, cam, vp), [clusters, cam, vp]);
+  const partition = useMemo(() => offscreenClusterChips(clusters, cam, vp, 4, obstacles), [clusters, cam, vp, obstacles]);
   const [openEdge, setOpenEdge] = useState<ChipEdge | null>(null);
   if (hidden || (!partition.visible.length && !partition.overflow.length)) return null;
 

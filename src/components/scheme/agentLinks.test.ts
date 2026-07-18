@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import type { Flow, FlowState, Round } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
+import type { FileEntry } from "@/lib/types";
+
+import { resolvePipelineMemberPaths } from "@/components/pipelines/pipelineModel";
 
 import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, deriveGroups, derivePipelineLinks, flowLinkKey, flowLinkPhase, groupRect, hueFromId, pipelineRailSegment } from "./agentLinks";
 import type { SchemeRect } from "./layout";
@@ -446,6 +449,37 @@ describe("group overlay derivation (issue #118)", () => {
     } as unknown as Pipeline;
     const specs = deriveGroups([], [pipeline], (key) => (["/build-1", "/build-2"].includes(key) ? key : null));
     expect([...specs[0]!.members].sort()).toEqual(["/build-1", "/build-2"]);
+  });
+
+  test("a stage transcript rotated by an account migration stays inside its pipeline halo (#353)", () => {
+    /* Production shape: the build attempt froze /old at launch; the conversation
+       migrated onto /new ("Continued from «default»"), which is the only node the
+       board draws. Without member-path resolution the halo loses the live
+       generation and it renders as a detached standalone card. */
+    const stale = {
+      id: "p1",
+      state: "running",
+      stages: [
+        { id: "plan", kind: "run", next: "build" },
+        { id: "build", kind: "run", next: null },
+      ],
+      runs: [
+        { stageId: "plan", attempts: [{ agentPath: "/plan", conversationId: null }] },
+        { stageId: "build", attempts: [{ agentPath: "/old", conversationId: "c-build" }] },
+      ],
+    } as unknown as Pipeline;
+    const files = [
+      { path: "/old", conversationId: "c-build", migratedTo: "/new" },
+      { path: "/new", conversationId: "c-build", predecessorPath: "/old" },
+    ] as unknown as FileEntry[];
+    const resolved = resolvePipelineMemberPaths([stale], files);
+    const anchorOf = (key: string) => (["/plan", "/new"].includes(key) ? key : null);
+    expect([...deriveGroups([], resolved, anchorOf)[0]!.members].sort()).toEqual(["/new", "/plan"]);
+    /* The handoff rail reaches the successor node too — the "stage 2/3 shows one
+       conversation" symptom came from this same frozen-path seam. */
+    const links = derivePipelineLinks(resolved, anchorOf);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ from: "/plan", to: "/new" });
   });
 
   test("closed flows and pipelines produce no group (dissolves on close)", () => {
