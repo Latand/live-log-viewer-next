@@ -1359,6 +1359,131 @@ test("a selected sidebar project cannot replace canonical cwd attribution after 
   expect(entry?.project).not.toBe("latand");
 });
 
+/* Production reproduction (issue #315): conversation_4840d34a… ran with
+   cwd=$HOME, projected under the home-root project, while its Viewer-owned
+   family worked in the LLV worktrees. Explicit operator ownership must move
+   the ROOT's attribution everywhere (files, catalog, lineage) without touching
+   its transcript path, identity, or the children's own attribution. */
+test("explicit operator ownership attributes a home-root conversation to its project across files and catalog", async () => {
+  const registry = agentRegistry();
+  const homeRootCwd = fs.mkdtempSync(path.join(stateDir, "home-root-"));
+  const worktreeCwd = path.join(
+    os.homedir(),
+    ".agents", "tools", "live-log-viewer-next", ".claude", "worktrees", "pipeline-315-builder",
+  );
+  const llvProject = "-agents-tools-live-log-viewer-next";
+  const rootPath = path.join(stateDir, "root-019f4906-3f67-7b72-9fbc-9ec3b5ad1401.jsonl");
+  const childPath = path.join(stateDir, "child-019f4906-3f67-7b72-9fbc-9ec3b5ad1402.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: homeRootCwd,
+    accountId: "terra",
+    explicitProject: llvProject,
+    launchProfile: emptyLaunchProfile({ cwd: homeRootCwd }),
+  });
+  if (begun.kind !== "created") throw new Error("expected an explicit-project reservation");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1401" },
+    artifactPath: rootPath,
+    cwd: homeRootCwd,
+    accountId: "terra",
+    launchProfile: emptyLaunchProfile({ cwd: homeRootCwd }),
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  const rootScan = file(rootPath);
+  rootScan.project = path.basename(homeRootCwd);
+  rootScan.cwd = homeRootCwd;
+  rootScan.projectRoot = homeRootCwd;
+  const childScan = file(childPath);
+  childScan.project = llvProject;
+  childScan.cwd = worktreeCwd;
+  childScan.worktree = "pipeline-315-builder";
+  childScan.parent = rootPath;
+  scannedFiles = [rootScan, childScan];
+  replaceConversationCatalog([
+    { path: rootPath, root: "codex-sessions", name: "root", project: path.basename(homeRootCwd), title: "root", firstPrompt: "", engine: "codex", kind: "session", fmt: "codex", mtime: 2, size: 1 },
+    { path: childPath, root: "codex-sessions", name: "child", project: llvProject, title: "child", firstPrompt: "", engine: "codex", kind: "session", fmt: "codex", mtime: 1, size: 1 },
+  ]);
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[]; projectCatalog: Array<{ project: string; conversations: number }> };
+  const root = body.files.find((entry) => entry.path === rootPath);
+  const child = body.files.find((entry) => entry.path === childPath);
+
+  expect(root?.project).toBe(llvProject);
+  expect(root?.projectOwnership).toMatchObject({ project: llvProject, source: "operator" });
+  expect(root?.conversationId).toBe(begun.receipt.conversationId);
+  expect(root?.path).toBe(rootPath);
+  expect(child?.project).toBe(llvProject);
+  expect(child?.worktree).toBe("pipeline-315-builder");
+  /* The whole family now lives under exactly one project key. */
+  expect(new Set([root?.project, child?.project]).size).toBe(1);
+  const catalogProjects = Object.fromEntries(body.projectCatalog.map((entry) => [entry.project, entry.conversations]));
+  expect(catalogProjects[llvProject]).toBe(2);
+  expect(catalogProjects[path.basename(homeRootCwd)]).toBeUndefined();
+});
+
+test("a cross-project lineage stub inherits its owner's explicit project", async () => {
+  const registry = agentRegistry();
+  const homeRootCwd = fs.mkdtempSync(path.join(stateDir, "home-root-"));
+  const llvProject = "-agents-tools-live-log-viewer-next";
+  const parentPath = path.join(stateDir, "parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1411.jsonl");
+  const childPath = path.join(stateDir, "child-019f4906-3f67-7b72-9fbc-9ec3b5ad1412.jsonl");
+  fs.writeFileSync(parentPath, "{}\n");
+  const parentSpawn = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: homeRootCwd,
+    accountId: "terra",
+    explicitProject: llvProject,
+  });
+  if (parentSpawn.kind !== "created") throw new Error("expected parent reservation");
+  registry.settleSpawn(parentSpawn.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1411" },
+    artifactPath: parentPath,
+    cwd: homeRootCwd,
+    accountId: "terra",
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const childSpawn = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: homeRootCwd,
+    accountId: "terra",
+    parentConversationId: parentSpawn.receipt.conversationId,
+  });
+  if (childSpawn.kind !== "created") throw new Error("expected child reservation");
+  registry.settleSpawn(childSpawn.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1412" },
+    artifactPath: childPath,
+    cwd: homeRootCwd,
+    accountId: "terra",
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const childScan = file(childPath);
+  childScan.cwd = homeRootCwd;
+  scannedFiles = [childScan];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const stub = body.files.find((entry) => entry.path === parentPath);
+
+  expect(stub?.activityReason).toBe("lineage_placeholder");
+  expect(stub?.project).toBe(llvProject);
+  expect(stub?.projectOwnership).toMatchObject({ project: llvProject, source: "operator" });
+});
+
 test("a staged structured card stays binding until its initial message is admitted", async () => {
   const registry = agentRegistry();
   const cwd = process.cwd();

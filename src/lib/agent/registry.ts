@@ -8,8 +8,11 @@ import { procBackend } from "@/lib/proc";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import {
   emptyLaunchProfile,
+  normalizeProjectOwnership,
+  validExplicitProject,
   type AutoBalancePolicy,
   type ConversationMigration,
+  type ConversationProjectOwnership,
   type DurableQuotaObservation,
   type HeldDelivery,
   type HeldDeliveryCommand,
@@ -147,6 +150,9 @@ export interface SpawnReceipt {
   completionMode: "route-completed" | "observed-completed" | "route-recovered" | null;
   error: string | null;
   launchProfile: LaunchProfile;
+  /** Validated explicit operator project. Becomes durable conversation
+      ownership at admission; `launchProfile.project` stays a hint. */
+  explicitProject: string | null;
 }
 
 export interface SpawnLineageEdge {
@@ -196,6 +202,9 @@ export interface SpawnRequest {
   parentArtifactPath?: string | null;
   role?: string | null;
   reviewsConversationId?: ViewerConversationId | null;
+  /** Explicit operator project intent; validated and admitted as durable
+      conversation ownership. Never inferred from sidebar selection. */
+  explicitProject?: string | null;
   memberships?: DurableMembershipInput[];
   conversationId?: ViewerConversationId;
   purpose?: SpawnReceipt["purpose"];
@@ -229,6 +238,10 @@ export interface RegistryConversation {
   continuityPaths: string[];
   /** Continuity artifacts from canceled successions that must stay outside board aliases. */
   abandonedContinuityPaths: string[];
+  /** Durable project authority (issue #315). Null for legacy sessions and
+      cwd-attributed conversations; projections then fall back to canonical
+      cwd, the launch-profile hint, and the scanner slug in that order. */
+  projectOwnership: ConversationProjectOwnership | null;
   migration: ConversationMigration | null;
   /** Explicit Stop/Keep decision for one target at one routing revision. */
   migrationOptOut: { targetId: string; updatedAt: string } | null;
@@ -559,6 +572,7 @@ function conversationMigrationForIntent(
     boardOperationId: conversation.migration?.boardOperationId ?? null,
     boardPlacementProject: conversation.migration?.boardPlacementProject
       ?? boardProject
+      ?? conversation.projectOwnership?.project
       ?? source.launchProfile.project,
     updatedAt: changedAt,
   };
@@ -872,6 +886,7 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
     generations,
     continuityPaths,
     abandonedContinuityPaths,
+    projectOwnership: normalizeProjectOwnership((value as Partial<RegistryConversation>).projectOwnership),
     migration,
     migrationOptOut,
     turn: value.turn && typeof value.turn === "object"
@@ -1432,6 +1447,7 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     target: pane?.paneId ?? (typeof value.target === "string" && /^%\d+$/.test(value.target) ? value.target : null),
     completionMode: value.completionMode === "route-completed" || value.completionMode === "observed-completed" || value.completionMode === "route-recovered" ? value.completionMode : null,
     launchProfile: emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }),
+    explicitProject: validExplicitProject(value.explicitProject),
   };
 }
 
@@ -2252,8 +2268,15 @@ export class AgentRegistry {
       const role = typeof input.role === "string" && input.role.trim() ? input.role.trim() : null;
       if (role === "reviewer" && !reviewsConversationId) throw new Error("reviewer spawn requires reviewsConversationId");
       if (reviewsConversationId && role !== "reviewer") throw new Error("reviewsConversationId requires reviewer role");
+      const explicitProject = input.explicitProject == null ? null : validExplicitProject(input.explicitProject);
+      if (input.explicitProject != null && !explicitProject) throw new Error("explicit project is not a valid project key");
       const existingConversation = conversationId ? file.conversations[conversationId] : null;
-      const requestedProfile = emptyLaunchProfile({ cwd: input.cwd, ...(input.launchProfile ?? {}), parentConversationId });
+      const requestedProfile = emptyLaunchProfile({
+        cwd: input.cwd,
+        ...(input.launchProfile ?? {}),
+        ...(explicitProject ? { project: explicitProject } : {}),
+        parentConversationId,
+      });
       const currentProfile = existingConversation?.generations.at(-1)?.launchProfile;
       const profile = input.purpose === "resume-successor" && currentProfile
         ? mergeResumeLaunchProfile(currentProfile, requestedProfile)
@@ -2271,6 +2294,7 @@ export class AgentRegistry {
             && existing.engine === input.engine
             && existing.cwd === input.cwd
             && existing.transport === (input.transport ?? null)
+            && existing.explicitProject === explicitProject
             && existing.launchProfile.permissionMode === profile.permissionMode;
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
@@ -2322,6 +2346,7 @@ export class AgentRegistry {
         completionMode: null,
         error: null,
         launchProfile: profile,
+        explicitProject,
       };
       file.receipts[receipt.launchId] = receipt;
       if (receipt.parentConversationId && receipt.parentConversationId !== receipt.conversationId) {
@@ -2601,6 +2626,7 @@ export class AgentRegistry {
       generations: [],
       continuityPaths: [],
       abandonedContinuityPaths: [],
+      projectOwnership: null,
       migration: null,
       migrationOptOut: null,
       turn: { state: "unknown" as const, source: "empty" as const, terminalAt: null, observedAt: null },
@@ -2666,6 +2692,19 @@ export class AgentRegistry {
         }
       }
     }
+    /* Explicit operator project intent becomes durable ownership exactly once,
+       at admission — and only after every conflict gate above has passed, so a
+       conflicted settlement never persists ownership onto an existing
+       conversation. An already-owned conversation (an earlier operator spawn or
+       a relocation) keeps its record — succession receipts never demote it. */
+    if (receipt.explicitProject && !conversation.projectOwnership) {
+      conversation.projectOwnership = {
+        project: receipt.explicitProject,
+        source: "operator",
+        setAt: createdAt,
+        operationId: receipt.launchId,
+      };
+    }
     if (receipt.purpose !== "migration-successor" && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
       conversation.generations.push({
         id: nativeGenerationId(entry.artifactPath),
@@ -2699,7 +2738,7 @@ export class AgentRegistry {
         pendingContinuityPaths: [],
         boardProject: null,
         boardOperationId: null,
-        boardPlacementProject: source.launchProfile.project,
+        boardPlacementProject: conversation.projectOwnership?.project ?? source.launchProfile.project,
         updatedAt: createdAt,
       };
     }
@@ -3218,6 +3257,7 @@ export class AgentRegistry {
         }],
         continuityPaths: [],
         abandonedContinuityPaths: [],
+        projectOwnership: null,
         migration: null,
         migrationOptOut: null,
         turn: { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
@@ -3385,6 +3425,7 @@ export class AgentRegistry {
             }],
             continuityPaths: [],
             abandonedContinuityPaths: [],
+            projectOwnership: null,
             migration: null,
             migrationOptOut: null,
             turn: { ...observation.turn, observedAt: observation.observedAt },

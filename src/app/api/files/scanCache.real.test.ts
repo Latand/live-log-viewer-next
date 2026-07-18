@@ -187,6 +187,93 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
   }
 }, 20_000);
 
+test("a restart warm-start never rereads a complete multi-megabyte transcript body", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "durable-multimegabyte-state");
+  const transcript = path.join(sessions, "durable-multimegabyte.jsonl");
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const originalReadFile = fs.readFileSync;
+  const tracked = new Set<number>();
+  let bytesRead = 0;
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    resetFilesRouteCacheForTests();
+    const filler = `${JSON.stringify({
+      type: "event_msg",
+      payload: { type: "agent_message_delta", delta: "x".repeat(64 * 1024) },
+    })}\n`.repeat(192);
+    fs.writeFileSync(transcript, [
+      `${JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/durable-multimegabyte", model: "gpt-5" } })}\n`,
+      filler,
+      `${JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } })}\n`,
+    ].join(""));
+    const bodyBytes = fs.statSync(transcript).size;
+    expect(bodyBytes).toBeGreaterThan(12 * 1024 * 1024);
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      if (path.resolve(String(filename)) === transcript) tracked.add(fd);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      const read = originalRead(fd, buffer, offset, length, position);
+      if (tracked.has(fd)) bytesRead += read;
+      return read;
+    }) as typeof fs.readSync;
+    fs.readFileSync = ((filename: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      const value = Reflect.apply(originalReadFile, fs, [filename, ...args]) as Buffer | string;
+      if (typeof filename !== "number" && path.resolve(String(filename)) === transcript) {
+        bytesRead += typeof value === "string" ? Buffer.byteLength(value) : value.byteLength;
+      }
+      return value;
+    }) as typeof fs.readFileSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    const initial = await currentFileScan({ fresh: true });
+    expect(initial.snapshot.files.find((entry) => entry.path === transcript)).toMatchObject({
+      derivationComplete: true,
+      activityReason: "jsonl_turn_completed",
+    });
+    const coldBytes = bytesRead;
+    expect(coldBytes).toBeGreaterThan(0);
+    expect(coldBytes).toBeLessThanOrEqual(3 * 1024 * 1024);
+    expect(coldBytes).toBeLessThan(bodyBytes);
+    expect(fs.existsSync(path.join(testStateDir, "files-scan-snapshot.json"))).toBe(true);
+
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    bytesRead = 0;
+
+    const restarted = await cachedFileScan(undefined, undefined, 0);
+    const persisted = restarted.snapshot.files.find((entry) => entry.path === transcript);
+    expect(persisted).toMatchObject({ derivationComplete: true, activityReason: "jsonl_turn_completed" });
+    activityVerdict(persisted!.root, transcript, persisted!.mtime, persisted!.size);
+    entryModels(persisted!);
+    entryEffort(persisted!);
+    planFor(persisted!);
+    goalFor(persisted!);
+    ctxFor(persisted!);
+    lastTurnFor(persisted!);
+    expect(bytesRead).toBe(0);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    fs.readFileSync = originalReadFile;
+    fs.rmSync(transcript, { force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.delete(transcript);
+  }
+}, 30_000);
+
 test("a persisted completed generation primes permanent lineage facts", async () => {
   const previousTestStateDir = process.env.LLV_STATE_DIR;
   const testStateDir = path.join(sandbox, "durable-lineage-reuse-state");

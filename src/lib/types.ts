@@ -41,6 +41,11 @@ export interface FileEntry {
   /** Path relative to its root. */
   name: string;
   project: string;
+  /** Durable conversation-level project authority (issue #315): explicit
+      operator spawn intent or a completed relocation. When present, `project`
+      was resolved from it and derived-attribution overlays must not regroup
+      the entry. */
+  projectOwnership?: { project: string; source: "operator" | "relocation"; setAt: string; operationId: string };
   /** Working directory recorded by the conversation transcript. */
   cwd?: string | null;
   /** Identity-bound session creation time parsed from the transcript header. */

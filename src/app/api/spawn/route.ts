@@ -7,7 +7,7 @@ import { after, NextRequest, NextResponse } from "next/server";
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
 import { accountManager, resolveHealthySpawnAccount } from "@/lib/accounts/manager";
-import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
@@ -136,7 +136,7 @@ async function postSpawn(
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; project?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -217,6 +217,17 @@ async function postSpawn(
   if (agentInitiated && body.allowSubagents === true && authenticatedCaller?.kind !== "operator") {
     return NextResponse.json({ error: "allowSubagents requires an authenticated Viewer operator spawn" }, { status: 403 });
   }
+  /* Explicit project ownership (issue #315): a deliberate operator decision,
+     validated here and admitted as the conversation's durable projectOwnership.
+     Sidebar selection or worker-initiated spawns never create ownership. */
+  let explicitProject: string | null = null;
+  if (body.project !== undefined && body.project !== null) {
+    explicitProject = typeof body.project === "string" ? validExplicitProject(body.project) : null;
+    if (!explicitProject) return NextResponse.json({ error: "project must be a valid project key" }, { status: 400 });
+    if (agentInitiated && authenticatedCaller?.kind !== "operator") {
+      return NextResponse.json({ error: "explicit project requires an authenticated Viewer operator spawn" }, { status: 403 });
+    }
+  }
 
   const rawCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
   if (!rawCwd) return NextResponse.json({ error: "working directory is required" }, { status: 400 });
@@ -260,6 +271,7 @@ async function postSpawn(
       accountId: account.accountId,
       role: role.value?.role ?? null,
       ...(body.allowSubagents === true ? { allowSubagents: true } : {}),
+      ...(explicitProject ? { project: explicitProject } : {}),
       parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
       ...(reviewedConversationId ? { reviews: spawnParentSelector({ parentConversationId: reviewedConversationId }) } : {}),
       prompt,
@@ -290,6 +302,7 @@ async function postSpawn(
         parentConversationId,
         allowSubagents: body.allowSubagents === true,
         permissionMode,
+        ...(explicitProject ? { project: explicitProject } : {}),
       }),
     };
     const begun = registry.beginSpawnRequest({
@@ -302,6 +315,7 @@ async function postSpawn(
       parentArtifactPath,
       role: role.value?.role ?? null,
       reviewsConversationId: reviewedConversationId,
+      explicitProject,
       liveChildrenCap: authenticatedCaller?.liveChildrenCap,
       launchProfile: spec.launchProfile,
       clientAttemptId,

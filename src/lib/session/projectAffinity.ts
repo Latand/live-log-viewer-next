@@ -33,9 +33,11 @@ import type { FileEntry } from "@/lib/types";
  */
 
 /** A member whose project came from a bare directory: nothing resolved a
-    worktree/repo mapping for its cwd, so its attribution is just the cwd. */
+    worktree/repo mapping for its cwd, so its attribution is just the cwd.
+    Durable conversation ownership (issue #315) is never weak — an explicit
+    operator or relocation decision must not be regrouped by lineage. */
 function isWeakAttribution(file: FileEntry): boolean {
-  return Boolean(file.cwd) && !file.worktree && file.projectRoot === file.cwd;
+  return Boolean(file.cwd) && !file.worktree && file.projectRoot === file.cwd && !file.projectOwnership;
 }
 
 /** Is `ancestor` a strict path ancestor of `descendant`? */

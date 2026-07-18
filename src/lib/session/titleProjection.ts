@@ -3,8 +3,9 @@ import fs from "node:fs";
 import { agentRegistry, normalizeRegistry, RegistryReadError } from "@/lib/agent/registry";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { statePath } from "@/lib/configDir";
-import { projectInfoFromCwd } from "@/lib/scanner/describe";
 import type { FileEntry } from "@/lib/types";
+
+import { resolveProjectAttribution } from "./projectResolution";
 
 import { isRenameableSessionEntry } from "./renameEligibility";
 import { applyTitleOverride, indexSessionTitles, loadSessionTitles } from "./titleStore";
@@ -58,7 +59,11 @@ function projectRegistrySnapshot(snapshot: RegistrySnapshot, signature: string):
     for (const pathname of owned) if (!conversationByPath.has(pathname)) conversationByPath.set(pathname, conversation.id);
     const latest = conversation.generations.at(-1);
     if (!latest) continue;
-    const project = projectInfoFromCwd(latest.launchProfile.cwd)?.project ?? latest.launchProfile.project;
+    const { project } = resolveProjectAttribution({
+      projectOwnership: conversation.projectOwnership,
+      cwd: latest.launchProfile.cwd,
+      launchProfileProject: latest.launchProfile.project,
+    });
     if (project) projectByPath.set(latest.path, project);
     for (const generation of conversation.generations) {
       if (generation.path !== latest.path) archivedPaths.add(generation.path);
@@ -169,9 +174,13 @@ function sessionTitleProjector(
     const latest = conversation?.generations.at(-1);
     if (latest?.path === entry.path) {
       entry.title = latest.launchProfile.title ?? entry.title;
-      entry.project = projectInfoFromCwd(latest.launchProfile.cwd)?.project
-        ?? latest.launchProfile.project
-        ?? entry.project;
+      entry.project = resolveProjectAttribution({
+        projectOwnership: conversation?.projectOwnership,
+        cwd: latest.launchProfile.cwd,
+        launchProfileProject: latest.launchProfile.project,
+        fallbackProject: entry.project,
+      }).project ?? entry.project;
+      if (conversation?.projectOwnership) entry.projectOwnership = { ...conversation.projectOwnership };
     }
     if (includeRenameEligibility) entry.renamable = isRenameableSessionEntry(entry);
     if (index.size > 0) {
