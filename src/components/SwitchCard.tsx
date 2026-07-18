@@ -3,6 +3,7 @@
 import { CornerDownRight } from "lucide-react";
 
 import { X } from "@/components/icons";
+import { projectDisplayName } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -93,7 +94,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           }`}
           title={project}
         >
-          {project}
+          {projectDisplayName(project)}
         </span>
       </div>
       <div className={`relative mt-2 min-w-0 ${large ? "text-[14px]" : "text-[12.5px]"} font-bold leading-snug`} title={title}>

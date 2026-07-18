@@ -13,6 +13,7 @@ import { useBoardState } from "@/hooks/useBoardState";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewPresence } from "@/hooks/useViewPresence";
 import { OVERVIEW_CONTEXT, OVERVIEW_SLICE, viewBus } from "@/hooks/viewPresenceBus";
+import { projectDisplayName } from "@/lib/displayNames";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -539,8 +540,8 @@ export function Viewer() {
                 <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-primary">
                   {cleanTitle(item.file.title, 90)}
                 </span>
-                <span className="shrink-0 rounded-full border border-border bg-canvas px-1.5 text-[10px] font-semibold text-muted">
-                  {item.project}
+                <span className="shrink-0 rounded-full border border-border bg-canvas px-1.5 text-[10px] font-semibold text-muted" title={item.project}>
+                  {projectDisplayName(item.project)}
                 </span>
                 <span className="shrink-0 text-[10.5px] text-muted">{fmtAge(item.since)}</span>
               </span>

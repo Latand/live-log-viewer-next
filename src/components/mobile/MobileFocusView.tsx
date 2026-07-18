@@ -7,6 +7,7 @@ import { Loader2, X } from "@/components/icons";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
 import { viewBus } from "@/hooks/viewPresenceBus";
+import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
@@ -481,7 +482,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
         <div className="fixed inset-0 z-50 flex flex-col bg-canvas pb-[env(safe-area-inset-bottom)]">
           <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-border bg-card px-2 py-1.5">
             <span className="shrink-0 pl-1 text-[13px] font-bold">{t("mobile.map")}</span>
-            <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{project}</span>
+            <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{projectDisplayName(project)}</span>
             {/* role="group" — aria-label on a role-less div is ignored by
                 accessibility APIs, so AT would hear two bare toggle buttons
                 with no "Map framing" context (round-1 review). */}

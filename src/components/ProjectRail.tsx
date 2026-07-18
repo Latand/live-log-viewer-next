@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { projectDisplayName, projectMatchesQuery } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -43,8 +44,7 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
   const [archiveOpen, setArchiveOpen] = useState(false);
   const summaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines), [files, now, workflows, projectCatalog, pipelines]);
   const visible = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return q ? summaries.filter((summary) => summary.project.toLowerCase().includes(q)) : summaries;
+    return summaries.filter((summary) => projectMatchesQuery(summary.project, query));
   }, [summaries, query]);
   const activeRows = useMemo(() => visible.filter((summary) => !archivedProjects.has(summary.project)), [visible, archivedProjects]);
   const archivedRows = useMemo(() => visible.filter((summary) => archivedProjects.has(summary.project)), [visible, archivedProjects]);
@@ -124,7 +124,7 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
           {activeRows.map((summary) => (
             <div key={summary.project} data-flip-key={summary.project}>
               <RailRow
-                label={summary.project}
+                label={projectDisplayName(summary.project)}
                 live={summary.liveCount}
                 attention={summary.attentionCount}
                 total={summary.conversations}
@@ -157,7 +157,7 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
               ? archivedRows.map((summary) => (
                   <RailRow
                     key={summary.project}
-                    label={summary.project}
+                    label={projectDisplayName(summary.project)}
                     live={summary.liveCount}
                     attention={summary.attentionCount}
                     total={summary.conversations}
