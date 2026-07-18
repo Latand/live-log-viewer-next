@@ -9,7 +9,7 @@ const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-links-performance-tes
 const REAL_STATE = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
-const { linkEntries } = await import("./links");
+const { linkEntries, primePersistedLineageFacts } = await import("./links");
 const { ROOTS } = await import("./roots");
 
 afterAll(() => {
@@ -309,6 +309,38 @@ test("proven background commands survive restart without source transcript reads
   }
 });
 
+test("a snapshot heuristic edge cannot outrank a provable compaction predecessor", async () => {
+  const slug = "-repo-heuristic-compaction";
+  const successorPath = path.join(SANDBOX, "heuristic-successor.jsonl");
+  const provenPath = path.join(SANDBOX, "heuristic-proven.jsonl");
+  const strayPath = path.join(SANDBOX, "heuristic-stray.jsonl");
+  const logicalParentUuid = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+  fs.writeFileSync(successorPath, `${JSON.stringify({
+    type: "system",
+    subtype: "compact_boundary",
+    logicalParentUuid,
+  })}\n`);
+  fs.writeFileSync(provenPath, `${JSON.stringify({ type: "assistant", uuid: logicalParentUuid })}\n`);
+  fs.writeFileSync(strayPath, `${JSON.stringify({ type: "user", uuid: "unrelated" })}\n`);
+  const successor = entry(successorPath, `${slug}/heuristic-successor.jsonl`, 3);
+  successor.activity = "live";
+  const proven = entry(provenPath, `${slug}/heuristic-proven.jsonl`, 2);
+  const stray = entry(strayPath, `${slug}/heuristic-stray.jsonl`, 1);
+
+  /* The persisted snapshot carried the nearest-older fallback taken while the
+     live successor had no provable predecessor on disk. That edge is a guess,
+     not an immutable fact, so a later generation with the true predecessor
+     visible must re-prove instead of trusting the primed guess. */
+  const snapshotSuccessor = { ...successor };
+  const snapshotStray = { ...stray, parent: successor.path };
+  primePersistedLineageFacts([snapshotSuccessor, snapshotStray]);
+
+  await linkEntries([successor, proven, stray], { persist: false });
+
+  expect(proven.parent).toBe(successor.path);
+  expect(stray.parent).toBeNull();
+});
+
 test("proven compaction chains survive restart after predecessor growth", async () => {
   const slug = "-repo-restart-compaction";
   const predecessorPath = path.join(SANDBOX, "restart-predecessor.jsonl");
@@ -364,6 +396,6 @@ test("proven compaction chains survive restart after predecessor growth", async 
     fs.closeSync = originalClose;
   }
 
-  expect(predecessor.parent).toBe(successor.path);
+  expect(predecessor.parent as string | null).toBe(successor.path);
   expect(bytesRead).toBeLessThanOrEqual(512 * 1024);
 });

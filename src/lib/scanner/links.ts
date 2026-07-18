@@ -17,7 +17,7 @@ import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative"
 import { persistWorktreeMap } from "./describe";
 import { taskParts } from "./discover";
 import { readJson, recordValue, recordsValue, stringValue } from "./json";
-import { fileHasNeedle, fileTailHasNeedle, findNeedle } from "./needle";
+import { fileTailHasNeedle, findNeedle } from "./needle";
 import { readPpid } from "./process";
 import { ROOTS } from "./roots";
 
@@ -165,40 +165,26 @@ function rememberCompactChain(successor: string, predecessor: string): void {
 }
 
 /**
- * Prime permanent lineage facts carried by a completed route snapshot. These
- * proofs survive later source growth because Claude transcripts are append-only
- * and both the spawning tool result and compaction edge are immutable history.
+ * Prime permanent lineage facts carried by a completed route snapshot. A
+ * background command survives later source growth because the spawning tool
+ * result is immutable append-only history, and it is only present in the
+ * snapshot after an authoritative same-file extraction. Compaction edges are
+ * deliberately not primed: a snapshot parent can also carry the nearest-older
+ * fallback taken while the successor was live, and only needle-proven edges
+ * (kept in the compact-chains sidecar) may bypass re-proof.
  */
 export function primePersistedLineageFacts(entries: readonly FileEntry[]): void {
-  const completeMains = new Map(
-    entries
-      .filter((entry) => entry.derivationComplete === true
-        && entry.root === "claude-projects"
-        && entry.name.split(path.sep).length === 2)
-      .map((entry) => [entry.path, entry]),
-  );
   for (const entry of entries) {
     if (entry.derivationComplete !== true) continue;
-    if (entry.root === "claude-tasks" && entry.parent && (entry.cmd || entry.cmdDesc)) {
-      const parts = taskParts(ROOTS["claude-tasks"], entry.path);
-      const tid = parts?.[2];
-      if (tid) {
-        cappedSet(bgcmdCache, tid, {
-          command: entry.cmd ?? "",
-          description: entry.cmdDesc ?? "",
-          source: entry.parent,
-        });
-      }
-      continue;
-    }
-    if (entry.root !== "claude-projects" || entry.handoff || !entry.parent) continue;
-    const predecessor = completeMains.get(entry.path);
-    const successor = completeMains.get(entry.parent);
-    if (!predecessor || !successor) continue;
-    const predecessorSlug = predecessor.name.split(path.sep)[0];
-    const successorSlug = successor.name.split(path.sep)[0];
-    if (predecessorSlug && predecessorSlug === successorSlug) {
-      cappedSet(compactLinkCache, successor.path, predecessor.path);
+    if (entry.root !== "claude-tasks" || !entry.parent || (!entry.cmd && !entry.cmdDesc)) continue;
+    const parts = taskParts(ROOTS["claude-tasks"], entry.path);
+    const tid = parts?.[2];
+    if (tid) {
+      cappedSet(bgcmdCache, tid, {
+        command: entry.cmd ?? "",
+        description: entry.cmdDesc ?? "",
+        source: entry.parent,
+      });
     }
   }
 }
@@ -283,7 +269,7 @@ function chainCompactedSessions(entries: FileEntry[]): void {
     for (const successor of ordered) {
       const rememberedPath = compactLinkCache.get(successor.path);
       const remembered = rememberedPath
-        ? ordered.find((candidate) => candidate.path === rememberedPath && candidate !== successor)
+        ? ordered.find((candidate) => candidate.path === rememberedPath && candidate !== successor && !candidate.parent)
         : undefined;
       if (remembered && !chainsBack(successor, remembered, mains)) {
         remembered.parent = successor.path;

@@ -265,11 +265,12 @@ test("a persisted completed generation primes permanent lineage facts", async ()
       description: "Run durable worker",
       source,
     });
-    expect(cacheStore.__llvCaches?.["compact-links-v1"]?.get(successor)).toBe(predecessor);
+    /* A snapshot parent between two mains may be the unproven nearest-older
+       fallback, so it must not prime the proven compact-chain store. */
+    expect(cacheStore.__llvCaches?.["compact-links-v1"]?.get(successor)).toBeUndefined();
     taskEntry.parent = null;
     taskEntry.cmd = "";
     taskEntry.cmdDesc = "";
-    predecessorEntry.parent = null;
     await linkEntries([sourceEntry, taskEntry, predecessorEntry, successorEntry], { persist: false });
     expect(taskEntry).toMatchObject({
       parent: source,
@@ -277,7 +278,6 @@ test("a persisted completed generation primes permanent lineage facts", async ()
       cmdDesc: "Run durable worker",
       title: "Run durable worker",
     });
-    expect(predecessorEntry.parent).toBe(successor);
   } finally {
     for (const pathname of [source, task, predecessor, successor]) fs.rmSync(pathname, { force: true });
     process.env.LLV_STATE_DIR = previousTestStateDir;
