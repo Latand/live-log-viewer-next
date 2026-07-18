@@ -243,8 +243,13 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         />
         {/* Two deliberate rows: identity + actions on top (the close X pinned
             to the corner at every width), the metadata chips below. */}
+        {/* reasoning-host (issue #270): the header's width is imposed by the
+            pane (column, scheme node, phone viewport), never by its content,
+            so inline-size containment is free. It gives the effort meter a
+            defined narrow-pane behavior: below 260px the meter collapses
+            (tooltip keeps the tier) instead of crowding the chip row. */}
         <header
-          className={`flex shrink-0 flex-col gap-y-1 border-b border-border px-2.5 py-1.5 ${tone.header} ${
+          className={`reasoning-host flex shrink-0 flex-col gap-y-1 border-b border-border px-2.5 py-1.5 ${tone.header} ${
             dragHandle ? "cursor-grab active:cursor-grabbing" : ""
           }`}
           {...dragHandle}
@@ -327,7 +332,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                     {file.effort ? `${file.model} · ${file.effort}` : file.model}
                   </span>
                 ) : (
-                  <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
+                  <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style} title={effortTitle(file)}>
                     {badge.label}
                   </span>
                 )
@@ -342,7 +347,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                       {file.model}
                     </span>
                   ) : (
-                    <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
+                    <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style} title={effortTitle(file)}>
                       {badge.label}
                     </span>
                   )}

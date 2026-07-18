@@ -45,6 +45,22 @@ body {
   }
 }
 
+/* Reasoning meter slot (issue #270): the effort bars are a plain in-flow flex
+   item, so they can never overlap neighbors — but on width-capped cards they
+   still crowd the identity row. A host that owns a definite width declares
+   itself a `reasoning-host` container and the meter (`.reasoning-slot`,
+   EffortPills) collapses below the threshold instead of squeezing the chips
+   beside it. A named query never matches without an ancestor declaring the
+   name, so hosts that wrap or scroll instead keep the meter at any width. */
+.reasoning-host {
+  container: reasoning-host / inline-size;
+}
+@container reasoning-host (max-width: 259px) {
+  .reasoning-slot {
+    display: none;
+  }
+}
+
 /* Attention border: two soft comets orbiting the card edge in the state's
    color (--pane-glow) — visibly "waiting for you" without stealing focus. */
 @property --pane-angle {
