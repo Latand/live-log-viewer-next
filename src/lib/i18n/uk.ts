@@ -309,6 +309,46 @@ export const uk: Record<keyof typeof en, Message> = {
   "spawnCard.retrySafe": "Цей запуск завершено. Можна створити нову спробу.",
   "spawnCard.launch": "Запуск {id}",
 
+  // Agent control strip (issue #241)
+  "strip.live": "наживо",
+  "strip.resume": "відновити",
+  "strip.deadMode": "мертвий хост",
+  "strip.moreActions": "Більше дій",
+  "strip.stopSubagent": "перериває кореневого агента",
+  "strip.compactSubagent": "недоступно для субагентів",
+  "strip.structuredUnsupported": "структурований хост поки не підтримує цю дію",
+  "strip.resolving": "визначаємо середовище агента…",
+
+  // Dead-host banner (issue #247)
+  "deadHost.title": "Хост агента помер · {since} тому",
+  "deadHost.body": "Повідомлення не доставляються. Очікувані підтвердження застаріли.",
+  "deadHost.respawn": "Відновити розмову",
+  "deadHost.attach": "Відкрити в терміналі",
+  "deadHost.recheck": "Перевірити знову",
+  "deadHost.recheckFailed": "Не вдалося зʼєднатися зі середовищем — спробуйте ще раз.",
+  "deadHost.respawnFailed": "Не вдалося перезапустити — спробуйте ще раз.",
+  "deadHost.sendBlocked": "хост мертвий — відновіть, щоб продовжити",
+  "deadHost.expiredCard": "застаріло — хост помер, перш ніж на це відповіли",
+
+  // Attach-to-terminal dialog (issue #247)
+  "attach.dialogTitle": "Підключитися у своєму терміналі",
+  "attach.dialogIntro": "Запускає цю розмову у вашому власному терміналі з тим самим акаунтом ({account}) і робочою директорією.",
+  "attach.copyCwd": "Скопіювати робочу директорію",
+  "attach.copyCommand": "Скопіювати команду",
+  "attach.copyFull": "Скопіювати повну команду",
+  "attach.takeoverWarning": "Відновлення тут перебирає розмову у переглядача.",
+  "attach.subagentNote": "Субагенти відновлюються через свою кореневу сесію.",
+  "attach.secondaryViewer": "Відкрити панель перегляду лише для читання в tmux",
+  "attach.secondaryFailed": "Не вдалося відкрити панель перегляду — спробуйте ще раз.",
+
+  // Human receipt reasons (issue #247 §7)
+  "receipt.human.deadHost": "хост агента помер",
+  "receipt.human.staleKey": "ключ доставки застарів",
+  "receipt.human.duplicate": "вже доставлено",
+  "receipt.human.turnActive": "агент посеред ходу",
+  "receipt.human.noTurn": "немає активного ходу",
+  "receipt.human.verbatim": "не доставлено: {reason}",
+
   "draft.readPrompt": "Прочитай розмову агента у файлі {src} і продовж роботу звідти: ",
   "draft.needDir": "вкажи робочу директорію",
   "draft.launchFailed": "не вдалося запустити",
@@ -1282,6 +1322,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "task.finishedBadge": "завершено",
   "task.stopFailed": "помилка зупинки",
   "task.signalSent": "надіслано {signal} PID {pid}",
+  "task.killRequested": "запит на зупинку надіслано",
   "task.confirmKill": "Точно вбити PID {pid}?",
   "task.killPid": "Вбити {pid}",
   "task.confirmKillYes": "Так, вбити",

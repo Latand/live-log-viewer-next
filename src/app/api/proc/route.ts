@@ -6,7 +6,7 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { outputHolders, pidAlive, pidHoldsPath } from "@/lib/scanner/process";
 import { pathAllowed, ROOTS } from "@/lib/scanner/roots";
-import { transcriptEngine, verifyTranscriptPid } from "@/lib/scanner/transcripts";
+import { claudeSubagentOwnerPath, transcriptEngine, verifyTranscriptPid } from "@/lib/scanner/transcripts";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -29,13 +29,18 @@ async function derivePid(pathname: string): Promise<number | null | "invalid" | 
     return pidHoldsPath(pid, pathname) ? pid : "stale";
   }
   if (transcriptEngine(pathname) !== null) {
+    // A Claude subagent transcript has no process of its own — the root session's
+    // process writes it (see transcripts.ts). Killing a subagent therefore lands
+    // on its canonical root, exactly as the §4 live-subagent matrix documents.
+    const ownerPath = claudeSubagentOwnerPath(pathname);
+    const target = ownerPath ?? pathname;
     // The pid always comes from the scanner's own attribution; client-supplied
     // pids are ignored. verifyTranscriptPid then re-checks /proc at kill time
     // so a recycled pid is rejected instead of signalled.
-    const entry = (await listFiles()).find((candidate) => candidate.path === pathname);
+    const entry = (await listFiles()).find((candidate) => candidate.path === target);
     const pid = entry?.pid ?? null;
     if (pid === null || !pidAlive(pid)) return null;
-    return verifyTranscriptPid(pathname, pid) ? pid : "stale";
+    return verifyTranscriptPid(target, pid) ? pid : "stale";
   }
   return "invalid";
 }

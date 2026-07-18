@@ -1,15 +1,18 @@
 import { afterEach, expect, test } from "bun:test";
+import { act } from "react";
+import { useActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
-import { setLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
+import { setLocale, translate } from "@/lib/i18n";
 
 import { appendComposerDraft, mergeRuntimeReceipts, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
 
 const dom = new Window();
+useActEnv();
 Object.assign(globalThis, {
   window: dom,
   document: dom.document,
@@ -44,37 +47,25 @@ afterEach(() => {
   sessionStorage.clear();
 });
 
-function renderInterruptAutoRetry(locale: "en" | "uk") {
-  setLocale(locale);
+/** Render into a fresh root, flushing mount effects (target poll) inside act. */
+async function renderInto(node: React.ReactElement): Promise<{ host: HTMLElement; root: Root }> {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-
-  flushSync(() => root.render(
-    <RuntimeComposerReceipts
-      receipts={[{
-        operationId: `op-interrupt-auto-retry-${locale}`,
-        idempotencyKey: `key-interrupt-auto-retry-${locale}`,
-        conversationId: "conv-one",
-        kind: "send",
-        status: "queued",
-        reason: "interrupt-auto-retry",
-        text: "keep going",
-        at: "2026-07-13T00:00:00.000Z",
-        revision: 3,
-      }]}
-      onRetry={() => {}}
-      onEdit={() => {}}
-    />,
-  ));
+  await act(async () => {
+    root.render(node);
+    await new Promise((r) => setTimeout(r, 0));
+  });
   return { host, root };
 }
 
-function expectTransportDetailsHidden(host: HTMLElement) {
-  for (const transportText of ["thread/read", "interrupt-auto-retry", "delivery-auto-retry"]) {
-    expect(host.textContent).not.toContain(transportText);
-  }
-}
+/** Run a DOM interaction and let its async state updates settle inside act. */
+const settle = async (fn: () => void) => {
+  await act(async () => {
+    fn();
+    await new Promise((r) => setTimeout(r, 0));
+  });
+};
 
 function expectAccessibleBusyFeedback(host: HTMLElement, locale: "en" | "uk") {
   // The collapsed summary announces busy-retry accessibly: the pending badge
@@ -92,15 +83,15 @@ function expectAccessibleBusyFeedback(host: HTMLElement, locale: "en" | "uk") {
   expectTransportDetailsHidden(host);
 }
 
-test("interrupt automatic retry announces busy feedback accessibly in English", () => {
-  const { host, root } = renderInterruptAutoRetry("en");
+test("interrupt automatic retry announces busy feedback accessibly in English", async () => {
+  const { host, root } = await renderInterruptAutoRetry("en");
 
   expectAccessibleBusyFeedback(host, "en");
   flushSync(() => root.unmount());
 });
 
-test("interrupt automatic retry announces busy feedback accessibly in Ukrainian", () => {
-  const { host, root } = renderInterruptAutoRetry("uk");
+test("interrupt automatic retry announces busy feedback accessibly in Ukrainian", async () => {
+  const { host, root } = await renderInterruptAutoRetry("uk");
 
   expectAccessibleBusyFeedback(host, "uk");
   flushSync(() => root.unmount());
@@ -169,7 +160,7 @@ test("transitive retry composition exposes one current leaf and keeps independen
     const attemptCount = host.querySelector("[data-receipt-attempt-count]")!;
     expect(attemptCount.textContent).toContain("×2");
     expect(host.querySelector("[data-receipt-history]")?.textContent)
-      .toContain(translate("en", "runtime.receipt.failed", { reason: "dead-host" }));
+      .toContain(translate("en", "receipt.human.deadHost"));
     expect(host.querySelectorAll("button")).toHaveLength(0);
     flushSync(() => root.unmount());
     host.remove();
@@ -228,9 +219,9 @@ test("repeated identical attempts share one grouped row with counts and final st
   expect(attemptCount.textContent).toContain("×3");
   expect(attemptCount.getAttribute("aria-label")).toBe(translate("uk", "runtime.receipt.attemptCount", { count: 3 }));
   expect(details.querySelector('[data-receipt-status="failed"]')?.textContent)
-    .toBe(translate("uk", "runtime.receipt.failed", { reason: "dead-host" }));
+    .toBe(translate("uk", "receipt.human.deadHost"));
   const history = details.querySelector("[data-receipt-history]")!;
-  expect(history.textContent).toBe(`${translate("uk", "runtime.receipt.rejected", { reason: "no-claim" })} ×2`);
+  expect(history.textContent).toBe(`${translate("uk", "receipt.human.verbatim", { reason: "no-claim" })} ×2`);
 
   // One action set for the group, owned by the final failed attempt.
   const actions = [...details.querySelectorAll("button")];
@@ -240,8 +231,8 @@ test("repeated identical attempts share one grouped row with counts and final st
   ]);
 
   const status = host.querySelector("[data-runtime-receipt-status]")!;
-  expect(status.textContent).toContain(translate("uk", "runtime.receipt.failed", { reason: "dead-host" }));
-  expect(status.textContent).toContain(`${translate("uk", "runtime.receipt.rejected", { reason: "no-claim" })} ×2`);
+  expect(status.textContent).toContain(translate("uk", "receipt.human.deadHost"));
+  expect(status.textContent).toContain(`${translate("uk", "receipt.human.verbatim", { reason: "no-claim" })} ×2`);
   flushSync(() => root.unmount());
 });
 
@@ -321,7 +312,7 @@ test("multiple delivery attempts collapse into one bounded accessible receipt st
   expect(details.querySelectorAll("[data-receipt-message]")).toHaveLength(1);
   expect(details.querySelector("[data-receipt-attempt-count]")?.textContent).toContain("×3");
   expect(details.querySelector("[data-receipt-history]")?.textContent)
-    .toBe(`${translate("uk", "runtime.receipt.rejected", { reason: "stale-turn" })} ×2`);
+    .toBe(`${translate("uk", "receipt.human.verbatim", { reason: "stale-turn" })} ×2`);
   expect(details.querySelector('[data-optimistic-message="true"]')?.textContent).toContain(text);
   expect(details.querySelectorAll("button")).toHaveLength(0);
 
@@ -650,7 +641,7 @@ test("expanded active attempts retain localized lifecycle status and aggregate c
     expect(details.querySelector('[data-receipt-status="delivering"]')?.textContent)
       .toBe(translate(locale, "runtime.receipt.delivering"));
     expect(details.querySelector('[data-receipt-status="failed"]')?.textContent)
-      .toBe(translate(locale, "runtime.receipt.failed", { reason: "dead-host" }));
+      .toBe(translate(locale, "receipt.human.deadHost"));
     flushSync(() => root.unmount());
     host.remove();
   }
@@ -688,14 +679,10 @@ test("expanded receipt rows expose long multiline message text", () => {
   flushSync(() => root.unmount());
 });
 
-test("editing a rejected receipt does not submit the composer form", () => {
+test("editing a rejected receipt does not submit the composer form", async () => {
   let edits = 0;
   let submits = 0;
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-
-  flushSync(() => root.render(
+  const { host, root } = await renderInto(
     <form onSubmit={(event) => { event.preventDefault(); submits += 1; }}>
       <RuntimeComposerReceipts
         receipts={[{
@@ -713,16 +700,16 @@ test("editing a rejected receipt does not submit the composer form", () => {
         onEdit={() => { edits += 1; }}
       />
     </form>,
-  ));
+  );
 
   const edit = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Edit"));
   expect(edit).toBeDefined();
-  flushSync(() => edit!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await settle(() => edit!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
 
   expect(edits).toBe(1);
   expect(submits).toBe(0);
   expect(edit!.getAttribute("type")).toBe("button");
-  flushSync(() => root.unmount());
+  await act(async () => root.unmount());
 });
 
 test("editing and resending a rejected receipt uses a fresh delivery key", async () => {
@@ -796,28 +783,171 @@ test("editing and resending a rejected receipt uses a fresh delivery key", async
     waitingInput: null,
   } as FileEntry;
   sessionStorage.setItem("llvDraft:conv-one", "try this again");
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  flushSync(() => root.render(<TmuxComposer file={file} />));
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
 
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   expect(textarea.value).toBe("try this again");
-  flushSync(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await settle(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
 
   expect(sentKeys).toHaveLength(1);
   const edit = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Edit"));
   expect(edit).toBeDefined();
-  flushSync(() => edit!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  flushSync(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await settle(() => edit!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await settle(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
 
   expect(sentKeys).toHaveLength(2);
   expect(sentKeys[1]).not.toBe(sentKeys[0]);
+  // #258: the resent message surfaces as an optimistic in-flight bubble, not a
+  // "delivery queued" toast.
   expect(host.textContent).not.toContain("Queued for durable delivery");
   expect(host.querySelector('[data-optimistic-message="true"]')?.textContent).toContain("try this again");
-  flushSync(() => root.unmount());
+  await act(async () => root.unmount());
+});
+
+/** An in-flight message whose backend reason is an auto-retry (issue #258): the
+    bubble must show a visible busy note, never the raw transport reason. */
+async function renderInterruptAutoRetry(locale: "en" | "uk") {
+  setLocale(locale);
+  return renderInto(
+    <RuntimeComposerReceipts
+      receipts={[{
+        operationId: `op-interrupt-auto-retry-${locale}`,
+        idempotencyKey: `key-interrupt-auto-retry-${locale}`,
+        conversationId: "conv-one",
+        kind: "send",
+        status: "queued",
+        reason: "interrupt-auto-retry",
+        text: "keep going",
+        at: "2026-07-13T00:00:00.000Z",
+        revision: 3,
+      }]}
+      onRetry={() => {}}
+      onEdit={() => {}}
+    />,
+  );
+}
+
+function expectTransportDetailsHidden(host: HTMLElement) {
+  for (const transportText of ["thread/read", "interrupt-auto-retry", "delivery-auto-retry"]) {
+    expect(host.textContent).not.toContain(transportText);
+  }
+}
+
+test("interrupt automatic retry shows visible busy feedback in English", async () => {
+  const { host, root } = await renderInterruptAutoRetry("en");
+  const status = host.querySelector('[role="status"]');
+  expect(status?.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));
+  expect(status?.querySelector(".sr-only")).toBeNull();
+  expectTransportDetailsHidden(host);
+  await act(async () => root.unmount());
+});
+
+test("interrupt automatic retry shows visible busy feedback in Ukrainian", async () => {
+  const { host, root } = await renderInterruptAutoRetry("uk");
+  const status = host.querySelector('[role="status"]');
+  expect(status?.textContent).toContain(translate("uk", "runtime.receipt.busyRetry"));
+  expect(status?.querySelector(".sr-only")).toBeNull();
+  expectTransportDetailsHidden(host);
+  await act(async () => root.unmount());
+});
+
+test("a dead host leaves the mic and send inert and never POSTs (§5, finding 5)", async () => {
+  const posts: string[] = [];
+  globalThis.fetch = (async (input: string) => {
+    posts.push(String(input));
+    return { ok: true, json: async () => ({ targets: {} }) } as Response;
+  }) as typeof fetch;
+  const file = {
+    path: "/codex.jsonl", root: "codex-sessions", name: "codex.jsonl", project: "viewer", title: "Codex",
+    engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 1, activity: "idle",
+    proc: "running", pid: null, conversationId: "conv-dead", pendingQuestion: null, waitingInput: null,
+  } as FileEntry;
+  const { host, root } = await renderInto(<TmuxComposer file={file} deadHost />);
+
+  const buttons = [...host.querySelectorAll("button")];
+  const mic = buttons.find((b) => (b.getAttribute("aria-label") ?? "").includes("Dictate")) as HTMLButtonElement;
+  const send = host.querySelector('button[type="submit"]') as HTMLButtonElement | null;
+  // dictation is disabled — a spoken message could never be delivered
+  expect(mic.disabled).toBe(true);
+  // send stays present as a draft surface but is inert (aria-disabled), no POST
+  expect(send?.getAttribute("aria-disabled")).toBe("true");
+  await settle(() => host.querySelector("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  expect(posts.some((u) => u === "/api/tmux")).toBe(false);
+  await act(async () => root.unmount());
+});
+
+test("an unresolved host blocks the send POST with a localized reason (finding 1)", async () => {
+  const posts: string[] = [];
+  globalThis.fetch = (async (input: string) => {
+    posts.push(String(input));
+    if (String(input) === "/api/tmux/targets") return { ok: true, json: async () => ({ targets: { "0": "%1" } }) } as Response;
+    return { ok: true, json: async () => ({ ok: true }) } as Response;
+  }) as typeof fetch;
+  const file = {
+    path: "/codex.jsonl", root: "codex-sessions", name: "codex.jsonl", project: "viewer", title: "Codex",
+    engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 1, activity: "idle",
+    proc: "running", pid: null, conversationId: "conv-unresolved", pendingQuestion: null, waitingInput: null,
+  } as FileEntry;
+  sessionStorage.setItem("llvDraft:conv-unresolved", "hello");
+  const { host, root } = await renderInto(<TmuxComposer file={file} sendBlockedReason="resolving the agent host…" />);
+
+  const send = host.querySelector('button[type="submit"]') as HTMLButtonElement | null;
+  expect(send?.getAttribute("aria-disabled")).toBe("true");
+  await settle(() => host.querySelector("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  // never messaged the legacy tmux endpoint while the host was unresolved
+  expect(posts.some((u) => u === "/api/tmux")).toBe(false);
+  await act(async () => root.unmount());
+});
+
+/* ------------------------------ quick-ack gating (round-3 MEDIUM) ------------------------------ */
+
+const quickAckLabel = translate("en", "composer.quickAckLabel");
+/* A live Claude subagent relays into its root, so quick-ack applies. In
+   pure-legacy test mode (runtime plane off) a running proc makes this the
+   `live-subagent` surface — Send enabled, so the composer renders and the
+   quick-ack gating below is driven purely by the dead/unresolved props. A
+   proc-null child would resolve to `inert` (Send hidden → no composer at all,
+   finding 2), which is covered by the wrapper suites. */
+const relaySubagent = {
+  path: "/child.jsonl", root: "claude-projects", name: "child.jsonl", project: "viewer", title: "child",
+  engine: "claude", kind: "subagent", fmt: "claude", parent: "/root.jsonl", mtime: 1, size: 1, activity: "live",
+  proc: "running", pid: null, conversationId: "conv-child", pendingQuestion: null, waitingInput: null,
+} as FileEntry;
+
+const openSendMenu = async (host: HTMLElement) => {
+  const send = host.querySelector('button[type="submit"]') as HTMLButtonElement;
+  await settle(() => send.dispatchEvent(new dom.MouseEvent("contextmenu", { bubbles: true }) as unknown as Event));
+};
+const quickAckItems = (host: HTMLElement) =>
+  [...host.querySelectorAll('[role="menuitem"]')].filter((n) => (n.textContent ?? "").includes(quickAckLabel));
+
+test("a live composer offers an enabled quick-ack in the send menu", async () => {
+  globalThis.fetch = (async (input: string) => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as typeof fetch;
+  const { host, root } = await renderInto(<TmuxComposer file={relaySubagent} />);
+  await openSendMenu(host);
+  const items = quickAckItems(host);
+  expect(items.length).toBe(1);
+  expect((items[0] as HTMLButtonElement).disabled).toBe(false);
+  await act(async () => root.unmount());
+});
+
+test("a dead-host composer exposes no quick-ack action (finding: dead composer)", async () => {
+  globalThis.fetch = (async (input: string) => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as typeof fetch;
+  const { host, root } = await renderInto(<TmuxComposer file={relaySubagent} deadHost />);
+  await openSendMenu(host);
+  // the menu never opens (no actions) and no quick-ack item exists anywhere
+  expect(host.querySelector('[role="menu"]')).toBeNull();
+  expect(quickAckItems(host).length).toBe(0);
+  await act(async () => root.unmount());
+});
+
+test("an unresolved-host composer exposes no quick-ack action (finding: unresolved composer)", async () => {
+  globalThis.fetch = (async (input: string) => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as typeof fetch;
+  const { host, root } = await renderInto(<TmuxComposer file={relaySubagent} sendBlockedReason="resolving the agent host…" />);
+  await openSendMenu(host);
+  expect(host.querySelector('[role="menu"]')).toBeNull();
+  expect(quickAckItems(host).length).toBe(0);
+  await act(async () => root.unmount());
 });
 
 test("receipt editing stays disabled while a newer send is in flight", async () => {
@@ -875,28 +1005,23 @@ test("receipt editing stays disabled while a newer send is in flight", async () 
     waitingInput: null,
   } as FileEntry;
   sessionStorage.setItem("llvDraft:conv-race", "first attempt");
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  flushSync(() => root.render(<TmuxComposer file={file} />));
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   const form = textarea.closest("form")!;
 
-  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  flushSync(() => appendComposerDraft("conv-race", "second attempt"));
+  await settle(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await settle(() => appendComposerDraft("conv-race", "second attempt"));
   expect(textarea.value).toBe("first attempt\n\nsecond attempt");
 
-  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await settle(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
   expect(tmuxRequests).toBe(2);
   const edit = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Edit")) as HTMLButtonElement;
   expect(edit).toBeDefined();
   expect(edit.disabled).toBe(true);
-  flushSync(() => edit.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await settle(() => edit.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   expect(textarea.value).toBe("first attempt\n\nsecond attempt");
 
-  resolveSecond({
+  await settle(() => resolveSecond({
     ok: true,
     status: 200,
     json: async () => ({
@@ -913,10 +1038,9 @@ test("receipt editing stays disabled while a newer send is in flight", async () 
         revision: 1,
       },
     }),
-  } as Response);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  } as Response));
   expect(textarea.value).toBe("");
-  flushSync(() => root.unmount());
+  await act(async () => root.unmount());
 });
 
 test("an idempotent retry whose first attempt already landed clears the draft", async () => {

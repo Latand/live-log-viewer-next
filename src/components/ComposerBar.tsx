@@ -50,6 +50,9 @@ export interface ComposerBarProps {
   onImageFiles?: (files: File[]) => void;
   imageDisabled?: boolean;
   imageDisabledReason?: string;
+  /** When set, Send is disabled with this tooltip and no submit is attempted
+      (issue #247 §5: a dead host blocks sends so no rejected receipts stack). */
+  sendDisabledReason?: string;
   /** Durable runtime receipt chips for the last sends on this target (issue
       #25). Rendered under the status line; absent while the runtime bus is off,
       so the composer is unchanged on the landing-disabled path. */
@@ -133,6 +136,7 @@ export function ComposerBar({
   onImageFiles,
   imageDisabled = false,
   imageDisabledReason,
+  sendDisabledReason,
   receipts,
 }: ComposerBarProps) {
   const {
@@ -155,7 +159,8 @@ export function ComposerBar({
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
   const hasSendMenu = sendMenuActions.length > 0;
   const imageSendBlocked = imageDisabled && attachments.images.length > 0;
-  const sendDisabled = (!canSend && !hasSendMenu) || imageSendBlocked;
+  const sendBlocked = Boolean(sendDisabledReason);
+  const sendDisabled = sendBlocked || (!canSend && !hasSendMenu) || imageSendBlocked;
   /* Composer action buttons (send, image) are a 32px visual control with a 44px
      touch hit area via a pseudo-element (design doc §3.5, matching the anchored
      mic), so the accent send never renders as a full 44×44 block on a phone;
@@ -170,7 +175,10 @@ export function ComposerBar({
      the controls sit inline at the field's right edge as before. */
   const controls = (
     <>
-      <MicButtonView {...dictation} busy={voiceSending} onText={insertSpoken} anchored />
+      {/* Dictation is inert while the host is dead (§5): a spoken message could
+          never be delivered, so the mic disables alongside Send — no half-open
+          affordance that records into a void. */}
+      <MicButtonView {...dictation} busy={voiceSending || sendBlocked} onText={insertSpoken} anchored />
       <span
         className="relative inline-flex shrink-0"
         onContextMenu={(event) => {
@@ -179,22 +187,22 @@ export function ComposerBar({
           setSendMenuOpen((open) => !open);
         }}
       >
-        <Hint label={dictationRecording ? (sendTitleRecording ?? sendLabelRecording) : sendLabelIdle} align="right">
+        <Hint label={sendBlocked ? sendDisabledReason! : dictationRecording ? (sendTitleRecording ?? sendLabelRecording) : sendLabelIdle} align="right">
           <button
-            type={dictationRecording ? "button" : "submit"}
+            type={dictationRecording && !sendBlocked ? "button" : "submit"}
             onClick={
-              dictationRecording
+              dictationRecording && !sendBlocked
                 ? () => void stopAndSend()
                 : (event) => {
-                    if (!canSend) {
+                    if (sendBlocked || !canSend) {
                       event.preventDefault();
                       event.stopPropagation();
                     }
                   }
             }
             disabled={sendDisabled}
-            aria-disabled={!canSend || imageSendBlocked}
-            aria-label={dictationRecording ? sendLabelRecording : sendLabelIdle}
+            aria-disabled={sendBlocked || !canSend || imageSendBlocked}
+            aria-label={sendBlocked ? sendDisabledReason! : dictationRecording ? sendLabelRecording : sendLabelIdle}
             style={dictationRecording ? undefined : sendIdleStyle}
             className={`inline-flex shrink-0 items-center justify-center rounded-control border text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 aria-disabled:opacity-40 ${iconBtn} ${
               dictationRecording ? "border-danger bg-danger hover:opacity-90" : sendIdleClassName

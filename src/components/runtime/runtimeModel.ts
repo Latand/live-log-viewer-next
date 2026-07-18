@@ -18,6 +18,7 @@
  */
 
 import type { Flow } from "@/lib/flows/types";
+import type { MessageKey } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { Activity } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
@@ -621,6 +622,30 @@ export function hasBlockingAttention(store: RuntimeStore, session: RuntimeSessio
 /** A receipt is terminal once no further transition is expected. */
 export function receiptIsTerminal(status: ReceiptStatus): boolean {
   return status === "delivered" || status === "answered" || status === "rejected" || status === "failed" || status === "interrupted";
+}
+
+/**
+ * Reason codes mapped to human sentence keys (§7 "human words, both
+ * languages"). Unknown reasons are printed verbatim by the caller, prefixed
+ * "not delivered:". Keyed on the sanitized lowercase reason — no Cyrillic in the
+ * discriminant, keys only (§9).
+ */
+export const RECEIPT_REASON_KEYS: Record<string, MessageKey> = {
+  "dead-host": "receipt.human.deadHost",
+  "host-dead": "receipt.human.deadHost",
+  "no-host": "receipt.human.deadHost",
+  unhosted: "receipt.human.deadHost",
+  "host-unavailable": "receipt.human.deadHost",
+  "stale-delivery-key": "receipt.human.staleKey",
+  "duplicate": "receipt.human.duplicate",
+  "turn-active": "receipt.human.turnActive",
+  "no-active-turn": "receipt.human.noTurn",
+};
+
+/** The human sentence key for a receipt's reason, or null for an unknown one. */
+export function humanReceiptReasonKey(reason: string | null | undefined): MessageKey | null {
+  if (!reason) return null;
+  return RECEIPT_REASON_KEYS[reason.trim().toLowerCase()] ?? null;
 }
 
 /**

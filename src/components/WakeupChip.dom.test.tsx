@@ -1,7 +1,7 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { act } from "react";
+import { useActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
-import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { PendingWakeup } from "@/lib/types";
@@ -9,8 +9,8 @@ import type { PendingWakeup } from "@/lib/types";
 import { WakeupChip, wakeupChipKey } from "./WakeupChip";
 
 const dom = new Window();
+useActEnv();
 Object.assign(globalThis, {
-  IS_REACT_ACT_ENVIRONMENT: true,
   window: dom,
   document: dom.document,
   navigator: dom.navigator,
@@ -22,8 +22,8 @@ Object.assign(globalThis, {
 });
 
 let root: Root | null = null;
-afterEach(() => {
-  if (root) flushSync(() => root!.unmount());
+afterEach(async () => {
+  if (root) await act(async () => root!.unmount());
   root = null;
   setSystemTime();
 });

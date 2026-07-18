@@ -9,6 +9,7 @@ import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { AttentionCard } from "./AttentionCard";
+import { isDeadHostSession } from "./DeadHostBanner";
 import { mintIdempotencyKey, type RuntimeAttention } from "./runtimeModel";
 
 export function approvalResolution(attention: RuntimeAttention, approved: boolean): unknown {
@@ -53,6 +54,12 @@ export function ConversationAttention({ file }: { file: FileEntry }) {
     return file.pendingQuestion || file.waitingInput ? <QuestionCard file={file} /> : null;
   }
 
+  /* When the host died the banner (§5) owns recovery: these cards can never be
+     answered (the request died with the host), so they render as inert history
+     — dimmed, buttons removed, a one-line "expired" caption. No POST is ever
+     attempted from an archived card. */
+  const archived = isDeadHostSession(runtime);
+
   const answer = async (attention: RuntimeAttention, resolution: unknown) => {
     setBusyId(attention.id);
     setError(null);
@@ -72,17 +79,18 @@ export function ConversationAttention({ file }: { file: FileEntry }) {
         <AttentionCard
           key={attention.id}
           attention={attention}
+          archived={archived}
           busy={busyId === attention.id}
-          onApprove={attention.kind === "approval" || attention.kind === "permission"
+          onApprove={!archived && (attention.kind === "approval" || attention.kind === "permission")
             ? () => void answer(attention, approvalResolution(attention, true))
             : undefined}
-          onDeny={attention.kind === "approval" || attention.kind === "permission"
+          onDeny={!archived && (attention.kind === "approval" || attention.kind === "permission")
             ? () => void answer(attention, approvalResolution(attention, false))
             : undefined}
-          onAnswerQuestion={attention.kind === "question"
+          onAnswerQuestion={!archived && attention.kind === "question"
             ? (optionIndex) => void answer(attention, questionResolution(attention, optionIndex))
             : undefined}
-          onAnswerQuestions={attention.kind === "question"
+          onAnswerQuestions={!archived && attention.kind === "question"
             ? (optionIndices) => void answer(attention, questionsResolution(attention, optionIndices))
             : undefined}
         />

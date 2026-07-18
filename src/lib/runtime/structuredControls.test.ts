@@ -98,6 +98,14 @@ test("dead structured resume falls through to canonical recovery", async () => {
   });
 
   expect(result).toBeNull();
+
+  // every other control on the dead entry stays fenced (only resume recovers)
+  const compact = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "compact" }, {
+    registry: fixture.registry,
+    client: null,
+    enabled: () => true,
+  });
+  expect(compact).toEqual({ status: 409, body: { error: "structured host does not support the compact control" } });
 });
 
 test("structured interrupt uses the runtime command channel", async () => {

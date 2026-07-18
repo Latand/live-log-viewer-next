@@ -264,5 +264,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
     text,
     images,
+    // The "on resume" profile (issue #241 §4): honored only when this send
+    // reopens a finished conversation; a live pane ignores it.
+    ...(typeof body.model === "string" ? { resumeModel: body.model } : {}),
+    ...(typeof body.effort === "string" ? { resumeEffort: body.effort } : {}),
+    ...(typeof body.fast === "boolean" ? { resumeFast: body.fast } : {}),
   }));
 }

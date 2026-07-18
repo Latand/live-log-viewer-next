@@ -79,23 +79,46 @@ export interface RuntimeSessionView {
   structuredControlsEnabled: boolean;
 }
 
+/** Build the derived view for a resolved session record. */
+function sessionViewFor(
+  store: RuntimeStore,
+  session: RuntimeSession,
+  structuredControlsEnabled: boolean,
+): RuntimeSessionView {
+  return {
+    session,
+    uiState: deriveSessionState(session, hasBlockingAttention(store, session)),
+    attentions: openAttentions(store, session),
+    receipts: session.recentReceipts,
+    legacy: session.hostKind === "tmux-legacy",
+    structuredControlsEnabled,
+  };
+}
+
 /** Derived view for one hosted session, or null when the bus doesn't carry it. */
 export function useRuntimeSession(conversationId: string | null): RuntimeSessionView | null {
   const { store, structuredHostsEnabled } = useRuntime();
   return useMemo(() => {
     if (!conversationId) return null;
     const session = store.sessions[conversationId];
-    if (!session) return null;
-    const attentions = openAttentions(store, session);
-    return {
-      session,
-      uiState: deriveSessionState(session, hasBlockingAttention(store, session)),
-      attentions,
-      receipts: session.recentReceipts,
-      legacy: session.hostKind === "tmux-legacy",
-      structuredControlsEnabled: structuredHostsEnabled,
-    };
+    return session ? sessionViewFor(store, session, structuredHostsEnabled) : null;
   }, [store, structuredHostsEnabled, conversationId]);
+}
+
+/**
+ * The runtime session hosting a given transcript artifact (its `artifactPath`),
+ * or null. Used to resolve a Claude subagent's canonical ROOT host liveness: the
+ * scanner leaves child `proc`/`pid` null because the root process writes the
+ * child transcript, so the child's liveness *is* the root host's (issue #241
+ * finding 2). Keyed on the root transcript path — a subagent's `parent`.
+ */
+export function useRuntimeSessionByArtifact(artifactPath: string | null): RuntimeSessionView | null {
+  const { store, structuredHostsEnabled } = useRuntime();
+  return useMemo(() => {
+    if (!artifactPath) return null;
+    const session = Object.values(store.sessions).find((s) => s.artifactPath === artifactPath);
+    return session ? sessionViewFor(store, session, structuredHostsEnabled) : null;
+  }, [store, structuredHostsEnabled, artifactPath]);
 }
 
 /**
@@ -174,6 +197,14 @@ export function sendRuntimeMessage(options: SendOptions): Promise<CommandResult>
 
 export function interruptRuntime(conversationId: string, operationId: string): Promise<CommandResult> {
   return postCommand("/api/runtime/interrupt", { conversationId, operationId });
+}
+
+/** Force a fresh runtime snapshot into the tab-wide store (dead-host Re-check,
+    §5). Resolves `true` when a snapshot was installed, `false` on failure so the
+    caller can surface it. A no-op resolving `false` when the bus is inert. */
+export function refreshRuntime(): Promise<boolean> {
+  if (typeof window === "undefined" || !isRuntimeUiEnabled()) return Promise.resolve(false);
+  return getRuntimeBus().refresh();
 }
 
 export function answerRuntime(conversationId: string, attentionId: string, resolution: unknown, operationId: string): Promise<CommandResult> {

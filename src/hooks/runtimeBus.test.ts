@@ -708,3 +708,44 @@ describe("runtimeBus stop", () => {
     expect(h.sources).toHaveLength(1);
   });
 });
+
+describe("runtimeBus refresh (dead-host Re-check, §5)", () => {
+  let h: Harness;
+  beforeEach(() => (h = harness()));
+
+  test("installs a fresh snapshot into the store and resolves true", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    // The host recovered: a later snapshot flips the axis from dead to hosted.
+    h.setSnapshot(snapshot(200, { sessions: [{ ...snapshot(200).sessions[0]!, host: "hosted", revision: 5 }] }));
+    const ok = await h.bus.refresh();
+    expect(ok).toBe(true);
+    expect(h.bus.getState().store.sessions["conv_a"]?.host).toBe("hosted");
+  });
+
+  test("refreshes the structured-host gate alongside the store (issue #241 finding 1)", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    expect(h.bus.getState().structuredHostsEnabled).toBeTrue();
+    // A manual Re-check after a rollback flip must carry the new gate, not just
+    // the store — otherwise the tab keeps offering structured controls.
+    h.setSnapshot(snapshot(200, { structuredHostsEnabled: false }));
+    const ok = await h.bus.refresh();
+    expect(ok).toBe(true);
+    expect(h.bus.getState().structuredHostsEnabled).toBeFalse();
+  });
+
+  test("resolves false on a failed fetch and leaves the store untouched", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    const before = h.bus.getState().store.sessions["conv_a"];
+    h.failFetch(true);
+    const ok = await h.bus.refresh();
+    expect(ok).toBe(false);
+    // the failure is reported to the caller, not swallowed into a stale banner
+    expect(h.bus.getState().store.sessions["conv_a"]).toBe(before);
+  });
+});

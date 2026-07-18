@@ -3,7 +3,16 @@
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useLocale, type TFunction } from "@/lib/i18n";
 
-import { receiptIsTerminal, type ReceiptStatus, type RuntimeReceipt } from "./runtimeModel";
+import { humanReceiptReasonKey, receiptIsTerminal, type ReceiptStatus, type RuntimeReceipt } from "./runtimeModel";
+
+/** Human sentence for a rejected/failed reason: a mapped sentence for a known
+    code, else the sanitized reason printed verbatim behind a "not delivered:"
+    prefix — never the raw `rejected: dead-host` stream (design §7). */
+export function humanReason(t: TFunction, reason: string | null | undefined): string {
+  const key = humanReceiptReasonKey(reason);
+  if (key) return t(key);
+  return reason ? t("receipt.human.verbatim", { reason }) : t("composer.receiptFailed");
+}
 
 /** Badge tone per receipt status. Text carries the meaning; color reinforces. */
 function tone(status: ReceiptStatus): BadgeTone {
@@ -20,9 +29,8 @@ export function runtimeReceiptStatusText(t: TFunction, receipt: RuntimeReceipt):
         ? t("runtime.receipt.queuedPos", { position: receipt.queuePosition })
         : t("runtime.receipt.queued");
     case "rejected":
-      return t("runtime.receipt.rejected", { reason: receipt.reason ?? "" });
     case "failed":
-      return t("runtime.receipt.failed", { reason: receipt.reason ?? "" });
+      return humanReason(t, receipt.reason);
     default:
       return t(`runtime.receipt.${receipt.status}`);
   }
