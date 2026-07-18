@@ -82,6 +82,27 @@ test("an unhosted axis is treated as dead recovery", () => {
   expect(surfaceFor(file({ proc: "running" }), rv("claude-broker", "unhosted"))).toBe<StripSurface>("dead");
 });
 
+/* --------------------- superseded rounds (issue #383) --------------------- */
+
+test("a superseded round wins over dead and structured, hides everything but the terminal escape hatch", () => {
+  const supersededBy = { conversationId: "conversation_next", path: "/next.jsonl", at: "2026-07-18T13:37:51.000Z", reason: "recovery-spawn" };
+  // Wins over the dead-host banner: navigation replaces recovery.
+  expect(surfaceFor(file({ supersededBy }), rv("claude-broker", "dead"))).toBe<StripSurface>("superseded");
+  // Durable registry evidence needs no runtime resolution — flag-off and
+  // unresolved sessions classify identically.
+  expect(surfaceFor(file({ supersededBy }), null)).toBe<StripSurface>("superseded");
+  expect(surfaceFor(file({ supersededBy }), null, { runtimeEnabled: true })).toBe<StripSurface>("superseded");
+  const caps = capabilitiesFor(file({ supersededBy }), null);
+  for (const c of ["stop", "compact", "runtime", "kill", "images"] as ControlName[]) {
+    expect(caps.controls[c].state).toBe("hidden");
+  }
+  expect(caps.controls.terminal.state).toBe("enabled");
+  expect(caps.controls.send.state).toBe("disabled");
+  expect(caps.controls.send.state === "disabled" && caps.controls.send.reason).toBe("superseded.sendBlocked");
+  // shell still wins first — a background task can never be a superseded round
+  expect(surfaceFor(file({ engine: "shell", proc: "running", supersededBy }), null)).toBe<StripSurface>("shell");
+});
+
 test("a tmux-legacy session never counts as a structured host", () => {
   expect(surfaceFor(file({ proc: "running" }), rv("tmux-legacy", "hosted", true))).toBe<StripSurface>("live-root");
 });

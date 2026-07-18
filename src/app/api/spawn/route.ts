@@ -136,7 +136,7 @@ async function postSpawn(
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; project?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; project?: unknown; supersedes?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -229,6 +229,33 @@ async function postSpawn(
     }
   }
 
+  /* Supersedence admission (issue #383): the spawn terminally retires the
+     named predecessor once it settles. The reference must resolve, a spawn
+     can never supersede a conversation whose chain still ends live (the 409
+     names it so the caller can redirect), and the durable edge itself commits
+     only at settlement inside the registry. */
+  let supersedesConversationId: `conversation_${string}` | null = null;
+  if (body.supersedes !== undefined && body.supersedes !== null) {
+    if (typeof body.supersedes !== "string" || !body.supersedes.trim()) {
+      return NextResponse.json({ error: "supersedes must name a conversation id or transcript path" }, { status: 400 });
+    }
+    const reference = body.supersedes.trim();
+    const predecessor = reference.startsWith("conversation_")
+      ? registry.conversation(reference as `conversation_${string}`)
+      : registry.conversationForPath(reference);
+    if (!predecessor) {
+      return NextResponse.json({ error: "supersedes does not resolve to a known conversation" }, { status: 404 });
+    }
+    const liveTail = registry.supersedenceConflict(predecessor.id);
+    if (liveTail) {
+      return NextResponse.json({
+        error: `supersedes conflicts with the live conversation ${liveTail}`,
+        successorConversationId: liveTail,
+      }, { status: 409 });
+    }
+    supersedesConversationId = predecessor.id;
+  }
+
   const rawCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
   if (!rawCwd) return NextResponse.json({ error: "working directory is required" }, { status: 400 });
   const cwd = path.resolve(rawCwd === "~" || rawCwd.startsWith("~/") ? path.join(os.homedir(), rawCwd.slice(1)) : rawCwd);
@@ -274,6 +301,7 @@ async function postSpawn(
       ...(explicitProject ? { project: explicitProject } : {}),
       parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
       ...(reviewedConversationId ? { reviews: spawnParentSelector({ parentConversationId: reviewedConversationId }) } : {}),
+      ...(supersedesConversationId ? { supersedes: spawnParentSelector({ parentConversationId: supersedesConversationId }) } : {}),
       prompt,
       images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
     });
@@ -316,6 +344,8 @@ async function postSpawn(
       role: role.value?.role ?? null,
       reviewsConversationId: reviewedConversationId,
       explicitProject,
+      supersedes: supersedesConversationId,
+      supersedesReason: "recovery-spawn",
       liveChildrenCap: authenticatedCaller?.liveChildrenCap,
       launchProfile: spec.launchProfile,
       clientAttemptId,

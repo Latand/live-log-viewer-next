@@ -1290,6 +1290,85 @@ test("admitted structured spawn returns its reserved card identity while host bi
   }
 });
 
+test("spawn supersedes admission validates the predecessor and stages the settlement edge", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "supersedes-admission-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const store = new AgentRegistry(path.join(cwd, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const sessionId = "0af7a2b1-1111-4111-8111-111111111111";
+  const predecessorPath = path.join(cwd, `${sessionId}.jsonl`);
+  const predecessor = store.ensureConversation("claude", predecessorPath, "claude-test");
+  const hostEntry = {
+    key: { engine: "claude" as const, sessionId },
+    artifactPath: predecessorPath,
+    cwd,
+    accountId: "claude-test",
+    status: "live" as const,
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  };
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => store,
+  } satisfies SpawnRouteTestDependencies;
+  const post = (body: Record<string, unknown>) => POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      origin: "http://127.0.0.1:8898",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ engine: "claude", cwd, prompt: "recover round", ...body }),
+  }), dependencies);
+
+  try {
+    const unknown = await post({ supersedes: "conversation_missing" });
+    expect(unknown.status).toBe(404);
+
+    store.upsert(hostEntry);
+    const conflicted = await post({ supersedes: predecessor.id });
+    expect(conflicted.status).toBe(409);
+    expect(await conflicted.json()).toMatchObject({ successorConversationId: predecessor.id });
+    expect(store.conversation(predecessor.id)?.supersededBy).toBeNull();
+
+    store.upsert({ ...hostEntry, status: "dead" });
+    /* Transcript-path references resolve too — the orchestrator recovers by
+       worktree transcript, not by conversation id. */
+    const accepted = await post({ supersedes: predecessorPath, clientAttemptId: "supersede_admission_0001" });
+    expect(accepted.status).toBe(202);
+    const spawned = await accepted.json() as { launchId: string };
+    expect(store.snapshot().receipts[spawned.launchId]?.supersedes).toMatchObject({
+      conversationId: predecessor.id,
+      reason: "recovery-spawn",
+    });
+    /* The durable edge waits for settlement — an unfinished spawn must not
+       hide the predecessor. */
+    expect(store.conversation(predecessor.id)?.supersededBy).toBeNull();
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
 test("a terminal structured replay returns its reserved identity and retry-safe message outcome", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "p0-282-terminal-replay-"));
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;

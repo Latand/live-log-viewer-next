@@ -15,6 +15,8 @@ export interface SpawnRequestIdentity {
   project?: string;
   parent: SpawnParentSelector;
   reviews?: SpawnParentSelector;
+  /** Predecessor conversation this spawn terminally supersedes (issue #383). */
+  supersedes?: SpawnParentSelector;
   prompt: string;
   images: Array<{ mime: string; digest: string }>;
 }

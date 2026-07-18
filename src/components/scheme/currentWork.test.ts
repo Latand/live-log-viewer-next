@@ -119,6 +119,16 @@ describe("currentWorkRect", () => {
     expect(currentWorkRect(board, [task({ status: "done" })], new Set())).toBeNull();
   });
 
+  test("a superseded round never frames current work, even with stale attention signals (#383)", () => {
+    const superseded = node(file({
+      activity: "live",
+      pendingQuestion: { id: "q", question: "stale?" } as unknown as FileEntry["pendingQuestion"],
+      waitingInput: { question: "stale?" } as unknown as FileEntry["waitingInput"],
+      supersededBy: { conversationId: "conversation_next", path: "/next.jsonl", at: "2026-07-18T13:37:51.000Z", reason: "recovery-spawn" },
+    }), 100);
+    expect(currentWorkRect(layout({ nodes: [superseded] }), [], new Set())).toBeNull();
+  });
+
   test("is deterministic for identical inputs", () => {
     const active = node(file({ activity: "stalled" }), 500);
     const board = layout({ nodes: [active] });

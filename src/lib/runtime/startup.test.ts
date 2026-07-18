@@ -1054,6 +1054,26 @@ test("startup adoption boots a terminal host with a pending delivery", async () 
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
+test("startup adoption never revives a superseded round, even with pending work (#383)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-superseded-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "38338383-8383-4383-8383-838383838383";
+  const { conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "dead",
+    turn: "terminal",
+  });
+  /* Pending work alone would adopt this host (test above) — the terminal
+     supersedence edge must outrank it: the successor owns the work now. */
+  registry.holdDelivery(conversation.id, "deliver after restart", "pending-superseded");
+  const successor = registry.ensureConversation("codex", path.join(directory, "successor.jsonl"), null);
+  registry.recordSupersedence(conversation.id, successor.id, "recovery-spawn");
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([]);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test.each(["text", "ephemeral-images"] as const)(
   "startup adoption leaves a terminal host dead when its %s delivery has failed",
   async (payloadKind) => {

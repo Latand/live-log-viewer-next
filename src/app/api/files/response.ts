@@ -5,7 +5,7 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
-import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
+import { agentRegistry, conversationLookupFromSnapshot, supersedenceChainTail } from "@/lib/agent/registry";
 import { preallocatedStructuredSpawnCards } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
@@ -18,6 +18,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { loadTasks } from "@/lib/tasks/store";
+import { projectSupersededTaskHandoffs } from "@/lib/tasks/supersedence";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
@@ -164,6 +165,28 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     if (responsePinOverlayPaths.has(child.path)) responsePinOverlayPaths.add(parentPath);
   }
   const scannedPaths = new Set(files.map((file) => file.path));
+  /* Supersedence lineage (issue #383): the reverse edge map gives each chain
+     tail its immediate predecessor and its round number (chain depth + 1),
+     bounded so a malformed chain can never hang the scan. */
+  const supersedencePredecessors = new Map<string, string>();
+  for (const candidate of Object.values(registrySnapshot.conversations)) {
+    if (!candidate.supersededBy) continue;
+    const successorId = conversationLookup.canonicalConversationId(candidate.supersededBy.conversationId);
+    if (successorId !== candidate.id && !supersedencePredecessors.has(successorId)) {
+      supersedencePredecessors.set(successorId, candidate.id);
+    }
+  }
+  const supersedenceRound = (conversationId: string): number => {
+    let round = 1;
+    const seen = new Set<string>([conversationId]);
+    let current = supersedencePredecessors.get(conversationId);
+    while (current && !seen.has(current) && round < 64) {
+      seen.add(current);
+      round += 1;
+      current = supersedencePredecessors.get(current);
+    }
+    return round;
+  };
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
     if (file.spawn) continue;
@@ -194,6 +217,55 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
           source: "lifecycle",
           terminalAt: registryEntry.updatedAt,
         };
+      }
+      /* Terminal supersedence demotion (issue #383): a retired round never
+         projects working/waiting or a stale attention signal — it folds into
+         round history while the successor carries the live card. Fail-open:
+         with no materialized successor generation the card keeps today's
+         dead-host rendering instead of hiding behind a dangling link. */
+      if (conversation.supersededBy) {
+        const successorId = conversationLookup.canonicalConversationId(conversation.supersededBy.conversationId);
+        const successorGeneration = successorId !== conversation.id
+          ? registrySnapshot.conversations[successorId]?.generations.at(-1)
+          : undefined;
+        if (successorGeneration) {
+          /* Primary navigation resolves the live chain END (A→B→C opens C)
+             while the immediate edge stays the round history. A tail without a
+             materialized generation falls back to the immediate successor so
+             the affordance never points at a dangling round. */
+          const tailId = supersedenceChainTail(registrySnapshot, conversation.id);
+          const tailGeneration = tailId !== successorId
+            ? registrySnapshot.conversations[tailId]?.generations.at(-1)
+            : successorGeneration;
+          file.supersededBy = {
+            conversationId: successorId,
+            path: successorGeneration.path,
+            at: conversation.supersededBy.at,
+            reason: conversation.supersededBy.reason,
+            tailConversationId: tailGeneration ? tailId : successorId,
+            tailPath: tailGeneration ? tailGeneration.path : successorGeneration.path,
+          };
+          file.activity = "idle";
+          file.activityReason = "superseded";
+          file.proc = "killed";
+          file.authoritativeTurn = {
+            state: "terminal",
+            source: "lifecycle",
+            terminalAt: conversation.supersededBy.at,
+          };
+          file.pendingQuestion = null;
+          file.waitingInput = null;
+          delete file.rateLimit;
+        }
+      } else {
+        const predecessorId = supersedencePredecessors.get(conversation.id);
+        if (predecessorId) {
+          file.continues = {
+            conversationId: predecessorId,
+            path: registrySnapshot.conversations[predecessorId]?.generations.at(-1)?.path ?? null,
+            round: supersedenceRound(conversation.id),
+          };
+        }
       }
       const profile = latest.launchProfile;
       file.title = profile.title ?? file.title;
@@ -397,6 +469,17 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       ? conversationLookup.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
       : null,
   });
+  /* Task-deck absorption for supersedence chains (issue #383): tasks assigned
+     to a retired round also project a handoff assignment for the live chain
+     end, so the successor joins the same deck. Read-model overlay only — the
+     durable task store is never mutated by a scan. */
+  tasks.tasks = projectSupersededTaskHandoffs(
+    tasks.tasks,
+    registrySnapshot.conversations,
+    (conversationId) => conversationId.startsWith("conversation_")
+      ? conversationLookup.canonicalConversationId(conversationId as `conversation_${string}`)
+      : conversationId,
+  );
   const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);
   /* The pipelines store fails closed on malformed or future-schema state
      (both viewer instances share one config dir, so skew is a normal

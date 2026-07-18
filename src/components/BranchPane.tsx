@@ -23,6 +23,7 @@ import { EffortPills } from "./EffortPills";
 import { AgentControlStrip } from "./AgentControlStrip";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { DeadHostBanner } from "./runtime/DeadHostBanner";
+import { SupersededBanner } from "./runtime/SupersededBanner";
 import { FlipRow } from "./FlipRow";
 import { LogFeed } from "./LogFeed";
 import { paneState, type PaneState } from "./paneState";
@@ -172,6 +173,10 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      conversation is never messaged through the legacy /api/tmux path (finding 1). */
   const { caps } = useAgentCapabilities(file);
   const deadHost = caps.surface === "dead";
+  /* A terminally superseded round (issue #383): the banner replaces recovery
+     with navigation to the live successor, and the composer unmounts — the
+     retired round takes no input unless the operator explicitly forks it. */
+  const superseded = caps.surface === "superseded";
   const sendCap = caps.controls.send;
   const sendBlockedReason = !deadHost && sendCap.state === "disabled" ? t(sendCap.reason) : null;
   /* A failed per-card retry/rollback must be announced, not swallowed (finding
@@ -359,6 +364,19 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                   surface, phone included, since it is actionable status. */}
               <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
               {file.parentRemoved ? <ParentRemovedChip /> : null}
+              {/* Supersedence lineage chip (issue #383): the chain tail names
+                  its round and deep-links the retired predecessor with the
+                  durable #c= form, so history stays one click away. */}
+              {file.continues ? (
+                <a
+                  href={"#c=" + encodeURIComponent(file.continues.conversationId)}
+                  data-continues-chip
+                  className="inline-flex shrink-0 items-center gap-0.5 truncate rounded-full border border-accent/40 bg-accent-soft px-1.5 py-0.5 text-[9.5px] font-semibold text-accent hover:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  title={t("lineage.continuesTitle", { round: file.continues.round })}
+                >
+                  <CornerDownRight className="h-2.5 w-2.5 shrink-0" aria-hidden /> {t("lineage.continues", { round: file.continues.round })}
+                </a>
+              ) : null}
               {/* Desktop keeps ctx inline here; on mobile it is pinned ahead of
                   this scroller. */}
               {!isMobile && file.ctx ? <CtxChip ctx={file.ctx} /> : null}
@@ -407,6 +425,10 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             family, between the header and the feed. Owns recovery so the stale
             attention cards and composer stand down below. */}
         {deadHost ? <DeadHostBanner file={file} /> : null}
+        {/* Superseded-round banner (issue #383): same slot family; wins over
+            the dead-host banner via surface classification and swaps recovery
+            for navigation to the live successor plus the explicit fork. */}
+        {superseded ? <SupersededBanner file={file} /> : null}
         {relatedTasks?.length && onOpenTask ? <TaskRelationStrip relations={relatedTasks} onOpenTask={onOpenTask} /> : null}
         {tasks.length ? (
           <FlipRow className="shrink-0 border-b border-border bg-sunken" enter="fade">
@@ -441,7 +463,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                 (the dormant-node contract): the strip returns on activation, and
                 active review panes keep it regardless of `noComposer`. */}
             {dormant ? null : <AgentControlStrip file={file} />}
-            {noComposer ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} sendBlockedReason={sendBlockedReason} />}
+            {noComposer || superseded ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} sendBlockedReason={sendBlockedReason} />}
           </>
         )}
       </section>

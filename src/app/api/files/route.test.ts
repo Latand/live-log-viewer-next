@@ -7,7 +7,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
-import { projectInfoFromCwd } from "@/lib/scanner/describe";
+import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry } from "@/lib/types";
 import { createFilesClientCache } from "@/hooks/useFiles";
@@ -1033,6 +1033,92 @@ test("a dead registry generation closes an interrupted transcript after its proc
   });
 });
 
+test("a superseded round demotes terminally while the chain tail projects its lineage (#383)", async () => {
+  const paths = [
+    "/sessions/11111111-1111-4111-8111-111111111111.jsonl",
+    "/sessions/22222222-2222-4222-8222-222222222222.jsonl",
+    "/sessions/33333333-3333-4333-8333-333333333333.jsonl",
+  ] as const;
+  scannedFiles = paths.map((pathname, index) => ({
+    ...file(pathname),
+    activity: index === 2 ? "live" as const : "recent" as const,
+    mtime: Date.now() / 1000,
+    pendingQuestion: index === 0
+      ? { id: "q1", question: "stale approval?", options: [], createdAt: "2026-07-18T12:00:00.000Z" } as unknown as FileEntry["pendingQuestion"]
+      : null,
+    waitingInput: index === 0 ? { question: "stale?", options: [] } as unknown as FileEntry["waitingInput"] : null,
+  }));
+  const registry = agentRegistry();
+  const first = registry.ensureConversation("codex", paths[0], null);
+  const second = registry.ensureConversation("codex", paths[1], null);
+  const third = registry.ensureConversation("codex", paths[2], null);
+  registry.recordSupersedence(first.id, second.id, "recovery-spawn");
+  /* Repeated recovery names the ORIGINAL round; the edge chains at the tail. */
+  registry.recordSupersedence(first.id, third.id, "stage-retry");
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const byPath = new Map(body.files.map((entry) => [entry.path, entry]));
+
+  /* Primary navigation resolves the chain TAIL (A→B→C opens C) while the
+     immediate edge stays as the round history (#383 repair). */
+  expect(byPath.get(paths[0])).toMatchObject({
+    supersededBy: {
+      conversationId: second.id,
+      path: paths[1],
+      reason: "recovery-spawn",
+      tailConversationId: third.id,
+      tailPath: paths[2],
+    },
+    activity: "idle",
+    activityReason: "superseded",
+    proc: "killed",
+    authoritativeTurn: { state: "terminal", source: "lifecycle" },
+    pendingQuestion: null,
+    waitingInput: null,
+  });
+  expect(byPath.get(paths[1])).toMatchObject({
+    supersededBy: {
+      conversationId: third.id,
+      path: paths[2],
+      reason: "stage-retry",
+      tailConversationId: third.id,
+      tailPath: paths[2],
+    },
+    activity: "idle",
+  });
+  /* The live tail is untouched by demotion and numbers its round from chain
+     depth: round 3 of the recovered work, continuing round 2. */
+  expect(byPath.get(paths[2])).toMatchObject({
+    activity: "live",
+    continues: { conversationId: second.id, path: paths[1], round: 3 },
+  });
+  expect(byPath.get(paths[2])?.supersededBy).toBeUndefined();
+});
+
+test("a dangling supersedence successor fails open to today's rendering (#383)", async () => {
+  const pathname = "/sessions/44444444-4444-4444-8444-444444444444.jsonl";
+  scannedFiles = [{ ...file(pathname), activity: "recent" as const, mtime: Date.now() / 1000 }];
+  const registry = agentRegistry();
+  const conversation = registry.ensureConversation("codex", pathname, null);
+  const raw = JSON.parse(fs.readFileSync(path.join(registryRoot, "registry.json"), "utf8")) as {
+    conversations: Record<string, { supersededBy: unknown }>;
+  };
+  raw.conversations[conversation.id]!.supersededBy = {
+    conversationId: "conversation_never_settled",
+    at: "2026-07-18T12:41:00.000Z",
+    reason: "recovery-spawn",
+  };
+  fs.writeFileSync(path.join(registryRoot, "registry.json"), JSON.stringify(raw));
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const entry = body.files.find((candidate) => candidate.path === pathname);
+
+  expect(entry?.supersededBy).toBeUndefined();
+  expect(entry?.activity).toBe("recent");
+});
+
 test("unique pinned snapshots use bounded LRU retention while recent pins stay warm", async () => {
   const global = file("/sessions/global.jsonl");
   scannedFiles = [global];
@@ -1301,7 +1387,7 @@ test("a no-transcript structured reservation projects its card from canonical cw
     path: `spawn:${begun.receipt.launchId}`,
     project: projectInfoFromCwd(cwd)?.project,
     cwd,
-    projectRoot: path.resolve(cwd, "../.."),
+    projectRoot: projectRootForCwd(cwd),
     engine: "codex",
     kind: "session",
     activity: "live",

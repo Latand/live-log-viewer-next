@@ -331,6 +331,17 @@ export const uk: Record<keyof typeof en, Message> = {
   "deadHost.sendBlocked": "хост мертвий — відновіть, щоб продовжити",
   "deadHost.expiredCard": "застаріло — хост помер, перш ніж на це відповіли",
 
+  // Банер заміненого раунду (issue #383)
+  "superseded.title": "Раунд замінено · {since}",
+  "superseded.body": "Відновлення замінило цей раунд живим наступником. Ця розмова лишається як історія раундів.",
+  "superseded.open": "Відкрити живий раунд",
+  "superseded.resumeHere": "Продовжити тут",
+  "superseded.resumeConfirm": "Продовжити цей закритий раунд? Це розгалужить роботу: картка знову стане живою поруч із наступником.",
+  "superseded.resumeFailed": "Не вдалося зняти звʼязок заміни — спробуйте ще раз.",
+  "superseded.sendBlocked": "раунд замінено — відкрийте живий наступник",
+  "lineage.continues": "раунд {round} · продовжує попередній",
+  "lineage.continuesTitle": "Раунд {round}: продовжує замінений попередній раунд — натисніть, щоб відкрити його",
+
   // Attach-to-terminal dialog (issue #247)
   "attach.dialogTitle": "Підключитися у своєму терміналі",
   "attach.dialogIntro": "Запускає цю розмову у вашому власному терміналі з тим самим акаунтом ({account}) і робочою директорією.",

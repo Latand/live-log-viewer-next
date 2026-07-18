@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
 
-import { AgentRegistry, conversationLookupFromSnapshot, CORRUPT_HELD_DELIVERY_IMAGES_ERROR, DeliveryReservationConflictError, SPAWN_STARTING_ADMISSION_LEASE_MS } from "@/lib/agent/registry";
+import { AgentRegistry, conversationLookupFromSnapshot, CORRUPT_HELD_DELIVERY_IMAGES_ERROR, DeliveryReservationConflictError, SPAWN_STARTING_ADMISSION_LEASE_MS, SupersedenceConflictError } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { structuredContent } from "@/lib/runtime/structuredContent";
 
@@ -3117,5 +3117,207 @@ describe("agent registry", () => {
     const settled = store.settleSpawn(receipt.receipt.launchId, spawnEntry(path, "target"));
 
     expect(settled).toMatchObject({ kind: "settled", entry: { accountId: "birth" }, conversation: { migration: { intentId: intent.id, targetId: "target" } } });
+  });
+});
+
+describe("supersedence contract (issue #383)", () => {
+  test("records the edge, replays idempotently, and chains repeated recoveries to the tail", () => {
+    const store = registry();
+    const first = store.ensureConversation("codex", "/rounds/one.jsonl", "a");
+    const second = store.ensureConversation("codex", "/rounds/two.jsonl", "a");
+    const third = store.ensureConversation("codex", "/rounds/three.jsonl", "a");
+
+    const recorded = store.recordSupersedence(first.id, second.id, "recovery-spawn");
+    expect(recorded.supersededBy).toMatchObject({ conversationId: second.id, reason: "recovery-spawn" });
+
+    /* Replay is a no-op: the chain already ends at the successor. */
+    store.recordSupersedence(first.id, second.id, "recovery-spawn");
+    expect(store.conversation(second.id)?.supersededBy).toBeNull();
+
+    /* A second recovery names the ORIGINAL predecessor; the edge lands on the
+       chain tail so rounds chain instead of fanning out parallel orphans. */
+    store.recordSupersedence(first.id, third.id, "recovery-spawn");
+    expect(store.conversation(first.id)?.supersededBy?.conversationId).toBe(second.id);
+    expect(store.conversation(second.id)?.supersededBy?.conversationId).toBe(third.id);
+    expect(store.conversation(third.id)?.supersededBy).toBeNull();
+    expect(store.supersedenceChainTail(first.id)).toBe(third.id);
+  });
+
+  test("rejects self-supersede and chain cycles", () => {
+    const store = registry();
+    const first = store.ensureConversation("codex", "/cycle/one.jsonl", "a");
+    const second = store.ensureConversation("codex", "/cycle/two.jsonl", "a");
+    store.recordSupersedence(first.id, second.id);
+
+    expect(() => store.recordSupersedence(first.id, first.id)).toThrow("cannot supersede itself");
+    expect(() => store.recordSupersedence(second.id, first.id)).toThrow("cycle");
+    expect(store.conversation(second.id)?.supersededBy).toBeNull();
+  });
+
+  test("refuses to retire an actively hosted chain end and names the live conversation", () => {
+    const store = registry();
+    const path = "/repo/119f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const live = store.ensureConversation("codex", path, "a");
+    store.upsert({ ...spawnEntry(path), key: { engine: "codex", sessionId: "119f4906-3f67-7b72-9fbc-9ec3b5ad1326" } });
+    const successor = store.ensureConversation("codex", "/repo/successor.jsonl", "a");
+
+    let conflict: unknown;
+    try {
+      store.recordSupersedence(live.id, successor.id);
+    } catch (error) {
+      conflict = error;
+    }
+    expect(conflict).toBeInstanceOf(SupersedenceConflictError);
+    expect((conflict as SupersedenceConflictError).successorConversationId).toBe(live.id);
+    expect(store.conversation(live.id)?.supersededBy).toBeNull();
+  });
+
+  test("commits the staged edge only at settlement; a failed spawn leaves the predecessor untouched", () => {
+    const store = registry();
+    const predecessor = store.ensureConversation("codex", "/stage/predecessor.jsonl", "a");
+
+    const failed = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id });
+    if (failed.kind !== "created") throw new Error("expected create");
+    store.failSpawn(failed.receipt.launchId, "host never came up");
+    expect(store.conversation(predecessor.id)?.supersededBy).toBeNull();
+
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "a",
+      supersedes: predecessor.id,
+      supersedesReason: "stage-retry",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    expect(begun.receipt.supersedes).toMatchObject({ conversationId: predecessor.id, reason: "stage-retry" });
+    expect(store.conversation(predecessor.id)?.supersededBy).toBeNull();
+
+    const settled = store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+    expect(settled.kind).toBe("settled");
+    const retired = store.conversation(predecessor.id)!;
+    expect(retired.supersededBy).toMatchObject({
+      conversationId: begun.receipt.conversationId,
+      reason: "stage-retry",
+    });
+    /* History preserved: the predecessor keeps its generations and identity. */
+    expect(retired.generations).toHaveLength(1);
+    expect(retired.generations[0]?.path).toBe("/stage/predecessor.jsonl");
+  });
+
+  test("survives restart, normalizes legacy records to null, and clears on explicit resume-here", () => {
+    const store = registry();
+    const predecessor = store.ensureConversation("codex", "/durable/predecessor.jsonl", "a");
+    const successor = store.ensureConversation("codex", "/durable/successor.jsonl", "a");
+    store.recordSupersedence(predecessor.id, successor.id, "manual");
+
+    const restarted = new AgentRegistry(store.filename);
+    expect(restarted.conversation(predecessor.id)?.supersededBy).toMatchObject({
+      conversationId: successor.id,
+      reason: "manual",
+    });
+    expect(restarted.conversation(successor.id)?.supersededBy).toBeNull();
+
+    /* A registry written by an older binary has no supersededBy key at all. */
+    const raw = JSON.parse(fs.readFileSync(store.filename, "utf8")) as { conversations: Record<string, Record<string, unknown>> };
+    for (const conversation of Object.values(raw.conversations)) delete conversation.supersededBy;
+    fs.writeFileSync(store.filename, JSON.stringify(raw));
+    expect(new AgentRegistry(store.filename).conversation(predecessor.id)?.supersededBy).toBeNull();
+
+    const cleared = restarted.clearSupersedence(predecessor.id);
+    expect(cleared?.supersededBy).toBeNull();
+    expect(restarted.conversation(predecessor.id)?.supersededBy).toBeNull();
+  });
+
+  test("a live predecessor stages the retry edge durably and commits it when the host dies (#383 repair)", () => {
+    const store = registry();
+    const predecessorPath = "/repo/219f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const predecessor = store.ensureConversation("codex", predecessorPath, "a");
+    store.upsert(spawnEntry(predecessorPath));
+
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "a",
+      supersedes: predecessor.id,
+      supersedesReason: "stage-retry",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const settled = store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/319f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+    expect(settled.kind).toBe("settled");
+
+    /* Live-host safety invariant: the actively hosted chain end is never
+       retired behind the edge... */
+    expect(store.conversation(predecessor.id)?.supersededBy).toBeNull();
+    /* ...and the edge is never silently discarded either: it stages durably. */
+    expect(Object.values(store.snapshot().pendingSupersedence)).toMatchObject([{
+      predecessorConversationId: predecessor.id,
+      successorConversationId: begun.receipt.conversationId,
+      reason: "stage-retry",
+    }]);
+
+    /* The transition that records the host's death retires the round in the
+       same transaction. */
+    store.upsert({ ...spawnEntry(predecessorPath), status: "dead" as const });
+    expect(store.conversation(predecessor.id)?.supersededBy).toMatchObject({
+      conversationId: begun.receipt.conversationId,
+      reason: "stage-retry",
+    });
+    expect(store.snapshot().pendingSupersedence).toEqual({});
+  });
+
+  test("a staged pending edge survives restart before committing (#383 repair)", () => {
+    const store = registry();
+    const predecessorPath = "/repo/419f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const predecessor = store.ensureConversation("codex", predecessorPath, "a");
+    store.upsert(spawnEntry(predecessorPath));
+    const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id, supersedesReason: "stage-retry" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/519f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+
+    const restarted = new AgentRegistry(store.filename);
+    expect(Object.keys(restarted.snapshot().pendingSupersedence)).toHaveLength(1);
+    expect(restarted.conversation(predecessor.id)?.supersededBy).toBeNull();
+
+    restarted.upsert({ ...spawnEntry(predecessorPath), status: "dead" as const });
+    expect(restarted.conversation(predecessor.id)?.supersededBy?.conversationId).toBe(begun.receipt.conversationId);
+    expect(restarted.snapshot().pendingSupersedence).toEqual({});
+  });
+
+  test("an explicit resume-here fork discards the staged edge instead of re-retiring the round (#383 repair)", () => {
+    const store = registry();
+    const predecessorPath = "/repo/619f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const predecessor = store.ensureConversation("codex", predecessorPath, "a");
+    store.upsert(spawnEntry(predecessorPath));
+    const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id, supersedesReason: "stage-retry" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/719f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+    expect(Object.keys(store.snapshot().pendingSupersedence)).toHaveLength(1);
+
+    store.clearSupersedence(predecessor.id);
+    expect(store.snapshot().pendingSupersedence).toEqual({});
+
+    /* The operator's decision is final: the later host death records nothing. */
+    store.upsert({ ...spawnEntry(predecessorPath), status: "dead" as const });
+    expect(store.conversation(predecessor.id)?.supersededBy).toBeNull();
+  });
+
+  test("replays one supersedence spawn attempt and rejects a changed predecessor", () => {
+    const store = registry();
+    const predecessor = store.ensureConversation("codex", "/replay/predecessor.jsonl", "a");
+    const other = store.ensureConversation("codex", "/replay/other.jsonl", "a");
+    const request = {
+      engine: "codex" as const,
+      cwd: "/repo",
+      accountId: "a",
+      clientAttemptId: "attempt_supersede_1",
+      requestDigest: "digest-s",
+      supersedes: predecessor.id,
+    };
+    const first = store.beginSpawnRequest(request);
+    if (first.kind !== "created") throw new Error("expected create");
+
+    expect(store.beginSpawnRequest(request)).toMatchObject({ kind: "replay", receipt: { launchId: first.receipt.launchId } });
+    expect(store.beginSpawnRequest({ ...request, supersedes: other.id })).toMatchObject({ kind: "conflict" });
+    expect(() => store.beginSpawnRequest({ engine: "codex", cwd: "/repo", supersedes: "conversation_missing" })).toThrow("predecessor is unknown");
   });
 });

@@ -17,6 +17,7 @@ const ROW_COLLECTIONS = [
   "heldDeliveries",
   "deliveryOperationOwners",
   "pendingSuccessorCleanups",
+  "pendingSupersedence",
 ] as const satisfies ReadonlyArray<keyof RegistryFile>;
 
 const META_FIELDS = [

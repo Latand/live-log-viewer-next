@@ -87,10 +87,10 @@ function harness() {
       return null;
     },
     spawnReceipt: () => null,
-    spawnAgent: async ({ parentPath, clientAttemptId, membership }, onReserved) => {
+    spawnAgent: async ({ parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
       spawn += 1;
-      calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}`);
-      calls.push(`membership:${membership.kind}:${membership.containerId}:${membership.slot}:${membership.role}:${membership.stageOrder}`);
+      calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}:supersedes=${supersedes ?? "none"}`);
+      calls.push(`membership:${membership.kind}:${membership.containerId}:${membership.slot}:${membership.role}:${membership.stageOrder}:round=${membership.round}`);
       onReserved({ launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}` });
       return { launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}`, sessionId: `session-${spawn}`, transcript: `/codex/stage-${spawn}.jsonl`, paneId: `%${spawn}` };
     },
@@ -399,7 +399,7 @@ test("pipeline stage membership is supplied before every stage spawn", async () 
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
 
-  expect(h.calls).toContain(`membership:pipeline:${pipeline.id}:plan:1:architect:0`);
+  expect(h.calls).toContain(`membership:pipeline:${pipeline.id}:plan:1:architect:0:round=1`);
 });
 
 test("controller ticks follow a stage conversation to its resumed transcript", async () => {
@@ -926,6 +926,48 @@ test("failed stages park and retry resets to the last passed commit", async () =
   expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(true);
   await tickPipelines([], h.ports);
   expect(loadPipelines()[0]!.runs[0]!.attempts).toHaveLength(2);
+});
+
+test("a stage retry supersedes the prior attempt's conversation and numbers its round (#383)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_1:parent=root:supersedes=none`);
+
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
+  await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  await tickPipelines([], h.ports);
+
+  /* Attempt 2 chains onto attempt 1's conversation; the durable membership
+     carries the round so decks number chained recoveries. */
+  expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_2:parent=root:supersedes=conversation_stage_1`);
+  expect(h.calls).toContain(`membership:pipeline:${pipeline.id}:plan:2:architect:0:round=2`);
+
+  /* A second failure and retry chains again from attempt 2, never re-naming
+     attempt 1 — chains stay linear across repeated recovery. */
+  await tickPipelines([h.finish("/codex/stage-2.jsonl", "fail", "still blocked")], h.ports);
+  await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  await tickPipelines([], h.ports);
+  expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_3:parent=root:supersedes=conversation_stage_2`);
+});
+
+test("a retried attempt whose predecessor never reserved a conversation records nothing (#383)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  h.ports.spawnAgent = async (input, onReserved) => {
+    h.calls.push(`spawn:${input.clientAttemptId}:supersedes=${input.supersedes ?? "none"}`);
+    if (input.clientAttemptId.endsWith("_1")) throw new Error("spawn transport unavailable");
+    onReserved({ launchId: "launch-late", conversationId: "conversation_stage_late" });
+    return { launchId: "launch-late", conversationId: "conversation_stage_late", sessionId: "session-late", transcript: "/codex/stage-late.jsonl", paneId: "%9" };
+  };
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+
+  await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  await tickPipelines([], h.ports);
+  expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_2:supersedes=none`);
 });
 
 test("skip-stage cleans failed work before advancing", async () => {

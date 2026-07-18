@@ -91,6 +91,68 @@ for (const version of [1, 2]) {
   });
 }
 
+test("supersedence edges round-trip JSON ↔ SQLite with parity intact", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-supersede-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const store = new AgentRegistry(filename);
+  const predecessor = store.ensureConversation("codex", "/rounds/predecessor.jsonl", "a");
+  const successor = store.ensureConversation("codex", "/rounds/successor.jsonl", "a");
+  store.recordSupersedence(predecessor.id, successor.id, "recovery-spawn");
+  const expected = store.snapshot();
+
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" });
+  expect(sqlite.snapshot()).toEqual(expected);
+  expect(sqlite.conversation(predecessor.id)?.supersededBy).toMatchObject({
+    conversationId: successor.id,
+    reason: "recovery-spawn",
+  });
+
+  sqlite.clearSupersedence(predecessor.id);
+  expect(sqlite.conversation(predecessor.id)?.supersededBy).toBeNull();
+  expect(new AgentRegistry(filename).conversation(predecessor.id)?.supersededBy).toBeNull();
+});
+
+test("a staged pending supersedence edge round-trips JSON ↔ SQLite with parity intact (#383 repair)", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-pending-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const store = new AgentRegistry(filename);
+  const predecessorPath = "/repo/819f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const predecessor = store.ensureConversation("codex", predecessorPath, "a");
+  store.upsert({
+    key: { engine: "codex", sessionId: "819f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    artifactPath: predecessorPath,
+    cwd: "/repo",
+    accountId: "a",
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id, supersedesReason: "stage-retry" });
+  if (begun.kind !== "created") throw new Error("expected create");
+  store.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "919f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    artifactPath: "/sessions/919f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+    cwd: "/repo",
+    accountId: "a",
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(Object.keys(store.snapshot().pendingSupersedence)).toHaveLength(1);
+
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" });
+  expect(sqlite.snapshot()).toEqual(store.snapshot());
+  expect(Object.values(sqlite.snapshot().pendingSupersedence)).toMatchObject([{
+    predecessorConversationId: predecessor.id,
+    successorConversationId: begun.receipt.conversationId,
+    reason: "stage-retry",
+  }]);
+});
+
 test("dual-write keeps JSON authoritative and SQLite reads require parity", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-parity-"));
   const filename = path.join(directory, "agent-registry.json");

@@ -34,6 +34,14 @@ export function isMigrationSuccessor(file: Pick<FileEntry, "predecessorPath">): 
   return Boolean(file.predecessorPath);
 }
 
+/** A terminally superseded round (issue #383): a successor conversation
+    replaced this one after a recovery spawn or stage retry. The card stays
+    reachable (deep links and halo minis keep working) but folds into round
+    history — it is never current work and never projects attention. */
+export function isSupersededRound(file: Pick<FileEntry, "supersededBy">): boolean {
+  return Boolean(file.supersededBy);
+}
+
 // ── Deep links ────────────────────────────────────────────────────────────────
 
 export interface ConversationHash {

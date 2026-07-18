@@ -1,4 +1,4 @@
-import { conversationIdentity } from "@/lib/accounts/identity";
+import { conversationIdentity, isSupersededRound } from "@/lib/accounts/identity";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -7,8 +7,11 @@ import type { SchemeGroup, SchemeLayout, SchemeRect } from "./layout";
 
 const EMPTY_TEXT_EXPANDED_IDS: ReadonlySet<string> = new Set();
 
-/** Activity signals that deserve the operator's next framing. */
+/** Activity signals that deserve the operator's next framing. A terminally
+    superseded round (issue #383) short-circuits: even a stale attention
+    signal surviving on its transcript tail must not re-frame retired work. */
 export function isCurrentWorkFile(file: FileEntry): boolean {
+  if (isSupersededRound(file)) return false;
   return (
     file.activity === "live" ||
     file.activity === "stalled" ||

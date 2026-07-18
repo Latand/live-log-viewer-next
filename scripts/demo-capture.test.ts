@@ -77,6 +77,16 @@ describe("demo capture contract", () => {
     expect(env.LANG).toBe("C.UTF-8");
   });
 
+  test("parks only the tmux socket outside the fixture home when the override names a short dir", () => {
+    const repoRoot = "/workspace/agent-log-viewer";
+    const env = buildDemoEnvironment(repoRoot, 1200, { PATH: "/usr/bin", LLV_DEMO_TMUX_TMPDIR: "/tmp/llv-demo-tmux" });
+    expect(env.TMUX_TMPDIR).toBe("/tmp/llv-demo-tmux");
+    const runtimeRoot = path.join(repoRoot, "fixtures/demo-home/.capture");
+    for (const name of ["HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "LLV_STATE_DIR"] as const) {
+      expect(path.resolve(env[name]!)).toStartWith(path.resolve(runtimeRoot) + path.sep);
+    }
+  });
+
   test("pins the browser image and isolates the Docker client environment", () => {
     expect(PUPPETEER_IMAGE).toMatch(/^mcp\/puppeteer@sha256:[0-9a-f]{64}$/);
     expect(buildDockerClientEnvironment({

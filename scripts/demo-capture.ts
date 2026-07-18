@@ -185,7 +185,12 @@ export function buildDemoEnvironment(
     TMPDIR: tmp,
     TMP: tmp,
     TEMP: tmp,
-    TMUX_TMPDIR: path.join(root, "tmux"),
+    /* The fixture socket dir overflows the ~108-byte unix-socket path limit in
+       deep checkouts (tmux resolves it to its realpath, so a short symlink
+       cannot help). The override lets such hosts park ONLY the tmux socket in
+       a short-lived external dir; every other mutable path stays inside the
+       generated fixture home. */
+    TMUX_TMPDIR: source.LLV_DEMO_TMUX_TMPDIR || path.join(root, "tmux"),
     XDG_CONFIG_HOME: config,
     XDG_CACHE_HOME: path.join(root, "cache"),
     XDG_RUNTIME_DIR: path.join(root, "runtime"),

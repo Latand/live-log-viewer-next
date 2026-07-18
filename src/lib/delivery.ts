@@ -1,6 +1,6 @@
 import { resumeSpecFor } from "@/lib/agent/cli";
 import type { AgentReconfiguration } from "@/lib/agent/reconfigure";
-import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type RegistryConversation, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
@@ -39,6 +39,27 @@ export interface DeliveryFailure {
   error: string;
   status: number;
   actuation?: "started";
+  /** Set on a superseded-round rejection (issue #383): the live chain end the
+      caller should redirect to instead of forking retired work. */
+  successorConversationId?: string;
+}
+
+/** A send or resume addressed to a terminally superseded round (issue #383)
+    must never implicitly fork it through recovery — it answers with a
+    redirectable pointer to the live chain end instead. Explicit "resume here"
+    clears the edge first and never reaches this guard. */
+function supersededRejection(
+  registry: AgentRegistry,
+  conversation: Pick<RegistryConversation, "id" | "supersededBy"> | null,
+): DeliveryFailure | null {
+  if (!conversation?.supersededBy) return null;
+  return {
+    ok: false,
+    outcome: "failed",
+    error: "superseded",
+    status: 409,
+    successorConversationId: registry.supersedenceChainTail(conversation.id),
+  };
 }
 
 export interface DeliverySuccess {
@@ -283,6 +304,8 @@ export async function resumeConversation(
     return failure("the conversation path is required to open", 400);
   }
   const registry = overrides.registry ?? agentRegistry();
+  const rejected = supersededRejection(registry, registry.conversationForPath(filePath));
+  if (rejected) return rejected;
   try {
     const recovered = await (overrides.recover ?? recoverDeadStructuredConversation)(
       { path: filePath },
@@ -436,6 +459,8 @@ export async function deliverConversationMessage(message: ConversationMessage, o
   const conversation = message.conversationId?.startsWith("conversation_")
     ? registry.conversation(message.conversationId as `conversation_${string}`)
     : registry.conversationForPath(message.path);
+  const rejected = supersededRejection(registry, conversation);
+  if (rejected) return rejected;
   if (conversation) {
     try {
       const recovered = await (overrides.recover ?? recoverDeadStructuredConversation)(
