@@ -17,6 +17,7 @@ const RUN_STAGES = [
   { id: "plan", kind: "run", role: { roleId: "architect" }, access: "read-only", prompt: "Plan {{task}}", next: "build" },
   { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Build from {{prev.output}}", next: null },
 ] as const;
+const ORIGIN_MAIN_SHA = "48c739bbcc87b3244aee7fb0e2d1b3f8e312548f";
 
 function entry(pathname: string): FileEntry {
   return {
@@ -39,8 +40,9 @@ function harness() {
     exec: (command, args) => {
       calls.push(`${command} ${args.join(" ")}`);
       if (args[0] === "rev-parse" && args[1] === "--git-dir") return { code: 0, stdout: ".git\n", stderr: "" };
+      if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return { code: 0, stdout: "main\n", stderr: "" };
-      if (args[0] === "rev-parse") return { code: 0, stdout: `sha-${calls.length}\n`, stderr: "" };
+      if (args[0] === "rev-parse") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     },
@@ -122,6 +124,95 @@ test("creation validates linear 2–4 stage chains and optional roles", async ()
   ] as never }, ports)).error).toContain("role only accepts roleId");
 });
 
+test("auto-start creation persists the fetched origin/main identity before provisioning", async () => {
+  const h = harness();
+  savePipelines([]);
+  const result = await createPipelineFromRequest({ task: "Pinned base", repoDir: "/repo", stages: RUN_STAGES as never }, h.ports);
+
+  expect(result.pipeline).toMatchObject({
+    state: "provisioning",
+    baseBranch: "main",
+    baseRef: ORIGIN_MAIN_SHA,
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
+  expect(loadPipelines()[0]).toMatchObject({
+    baseBranch: "main",
+    baseRef: ORIGIN_MAIN_SHA,
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
+  expect(h.calls).toContain("git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main");
+});
+
+test("auto-start creation rejects an unavailable remote without persisting a pipeline", async () => {
+  const h = harness();
+  savePipelines([]);
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => args[0] === "fetch"
+    ? { code: 128, stdout: "", stderr: "origin unavailable" }
+    : baseExec(command, args, cwd);
+
+  const result = await createPipelineFromRequest({ task: "No remote", repoDir: "/repo", stages: RUN_STAGES as never }, h.ports);
+
+  expect(result).toEqual({ error: "fetching origin/main: origin unavailable", status: 409 });
+  expect(loadPipelines()).toEqual([]);
+  expect(h.calls.some((call) => call.includes("worktree add"))).toBe(false);
+});
+
+test("a parked provisioning retry reuses the pinned base and provisions again", async () => {
+  const h = harness();
+  savePipelines([]);
+  const baseExec = h.ports.exec;
+  let failWorktreeAdd = true;
+  h.ports.exec = (command, args, cwd) => {
+    if (args[0] === "worktree" && failWorktreeAdd) return { code: 128, stdout: "", stderr: "worktree unavailable" };
+    if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && cwd?.includes("-pipeline-")) {
+      return failWorktreeAdd
+        ? { code: 128, stdout: "", stderr: "missing worktree" }
+        : { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+  const created = await createPipelineFromRequest({ task: "Recover provision", repoDir: "/repo", stages: RUN_STAGES as never }, h.ports);
+
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]).toMatchObject({
+    state: "needs_decision",
+    baseRef: ORIGIN_MAIN_SHA,
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
+
+  failWorktreeAdd = false;
+  const retried = await patchPipeline(created.pipeline!.id, { action: "retry-stage" }, h.ports);
+  expect(retried.pipeline?.state).toBe("provisioning");
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", baseRef: ORIGIN_MAIN_SHA, lastPassedCommit: ORIGIN_MAIN_SHA });
+});
+
+test("controller recovery stamps an older unresolved provisioning record before creating its worktree", async () => {
+  const h = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Recover legacy provision",
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, h.ports);
+  const legacy = loadPipelines()[0]!;
+  legacy.state = "provisioning";
+  savePipelines([legacy]);
+
+  await tickPipelines([], h.ports);
+
+  expect(loadPipelines()[0]).toMatchObject({
+    id: created.pipeline!.id,
+    state: "running",
+    baseBranch: "main",
+    baseRef: ORIGIN_MAIN_SHA,
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
+  expect(h.calls).toContain("git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main");
+});
+
 test("autoStart false persists a draft without provisioning or spawning", async () => {
   const h = harness();
   savePipelines([]);
@@ -143,6 +234,36 @@ test("autoStart false persists a draft without provisioning or spawning", async 
   expect(h.calls.some((call) => call.startsWith("spawn:"))).toBe(false);
 });
 
+test("an explicit draft base remains pinned when the draft starts", async () => {
+  const h = harness();
+  savePipelines([]);
+  const explicitRef = "release-candidate";
+  const created = await createPipelineFromRequest({
+    task: "Pinned draft",
+    repoDir: "/repo",
+    baseBranch: "release",
+    baseRef: explicitRef,
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, h.ports);
+
+  expect(created.pipeline).toMatchObject({
+    state: "draft",
+    baseBranch: "release",
+    baseRef: ORIGIN_MAIN_SHA,
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
+  const callsBeforeStart = h.calls.length;
+  const started = await patchPipeline(created.pipeline!.id, { action: "start" }, h.ports);
+  expect(started.pipeline).toMatchObject({
+    state: "provisioning",
+    baseBranch: "release",
+    baseRef: ORIGIN_MAIN_SHA,
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
+  expect(h.calls.slice(callsBeforeStart)).toEqual([]);
+});
+
 test("starting a draft enters the existing provision and stage-spawn path", async () => {
   const h = harness();
   savePipelines([]);
@@ -155,7 +276,12 @@ test("starting a draft enters the existing provision and stage-spawn path", asyn
   const id = created.pipeline!.id;
 
   const started = await patchPipeline(id, { action: "start" }, h.ports);
-  expect(started.pipeline?.state).toBe("provisioning");
+  expect(started.pipeline).toMatchObject({
+    state: "provisioning",
+    baseBranch: "main",
+    baseRef: ORIGIN_MAIN_SHA,
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
   await tickPipelines([], h.ports);
   expect(loadPipelines()[0]!.state).toBe("running");
   await tickPipelines([], h.ports);
@@ -228,7 +354,7 @@ test("linear run stages persist sessions, structured outputs, commits, and linea
   await tickPipelines([h.finish("/codex/stage-2.jsonl", "pass", "build output")], h.ports);
   current = loadPipelines()[0]!;
   expect(current.state).toBe("completed");
-  expect(current.lastPassedCommit).toStartWith("sha-");
+  expect(current.lastPassedCommit).toBe(ORIGIN_MAIN_SHA);
 });
 
 test("pipeline stage membership is supplied before every stage spawn", async () => {
@@ -744,6 +870,8 @@ test("draft metadata can be revised before the pipeline starts", async () => {
     task: "Initial task",
     spec: "Initial AC",
     repoDir: "/repo",
+    baseBranch: "main",
+    baseRef: ORIGIN_MAIN_SHA,
     stages: RUN_STAGES as never,
     autoStart: false,
   }, ports);
@@ -755,7 +883,15 @@ test("draft metadata can be revised before the pipeline starts", async () => {
     repoDir: "/other-repo",
   }, ports);
 
-  expect(updated.pipeline).toMatchObject({ task: "Revised task", spec: "Revised AC", repoDir: "/other-repo", project: "viewer" });
+  expect(updated.pipeline).toMatchObject({
+    task: "Revised task",
+    spec: "Revised AC",
+    repoDir: "/other-repo",
+    project: "viewer",
+    baseBranch: "",
+    baseRef: "",
+    lastPassedCommit: "",
+  });
   expect(updated.pipeline?.worktreeDir).toContain("other-repo-pipeline-");
   expect(updated.pipeline?.branch).toContain("revised-task");
 });

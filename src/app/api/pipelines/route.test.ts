@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import { NextRequest } from "next/server";
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-route-"));
 const { GET, POST } = await import("./route");
 const { registerPipelineTick } = await import("@/lib/pipelines/controllerSignal");
+const CURRENT_HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: process.cwd(), encoding: "utf8" }).trim();
 
 afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
 
@@ -21,6 +23,7 @@ test("pipeline collection route mirrors flow GET and POST shapes", async () => {
     body: JSON.stringify({
       task: "ship",
       repoDir: process.cwd(),
+      baseRef: CURRENT_HEAD,
       stages: [
         { id: "build", kind: "run", prompt: "build", next: "verify" },
         { id: "verify", kind: "run", prompt: "verify", next: null },
@@ -29,9 +32,12 @@ test("pipeline collection route mirrors flow GET and POST shapes", async () => {
   });
   const response = await POST(request);
   expect(response.status).toBe(201);
-  const body = await response.json() as { ok: boolean; pipeline: { id: string; state: string; stages: { id: string; effectiveRole: { effort: string } }[] } };
+  const body = await response.json() as { ok: boolean; pipeline: { id: string; state: string; baseBranch: string; baseRef: string; lastPassedCommit: string; stages: { id: string; effectiveRole: { effort: string } }[] } };
   expect(body.ok).toBe(true);
   expect(body.pipeline.state).toBe("provisioning");
+  expect(body.pipeline.baseBranch).toBe("main");
+  expect(body.pipeline.baseRef).toMatch(/^[0-9a-f]{40}$/);
+  expect(body.pipeline.lastPassedCommit).toBe(body.pipeline.baseRef);
   expect(body.pipeline.stages.map((stage) => stage.id)).toEqual(["build", "verify"]);
   expect(body.pipeline.stages[0]!.effectiveRole.effort).toBe("medium");
   await Promise.resolve();

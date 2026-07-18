@@ -129,6 +129,10 @@ export type CreatePipelineRequest = {
   task: string;
   spec?: string;
   repoDir: string;
+  /** Merge target branch; defaults to main when the pipeline starts. */
+  baseBranch?: string;
+  /** Explicit git commit-ish to pin; defaults to the fetched origin branch. */
+  baseRef?: string;
   stages: PipelineStageInput[];
   src?: string;
   autoStart?: boolean;

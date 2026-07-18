@@ -28,6 +28,7 @@ describe("compact pipeline lineage copy (#353)", () => {
     "pipelineStrip.evidenceAria",
     "pipelineStrip.linkedTasks",
     "pipelineStrip.openTask",
+    "pipelineStrip.baseSha",
   ] as const;
 
   test("English and Ukrainian define every compact-stage accessibility label", () => {
@@ -60,6 +61,8 @@ describe("compact pipeline lineage copy (#353)", () => {
     expect(translate("uk", "pipelineStrip.openVerdict", { label: "Збірка", state: "пройдено" })).toContain("пройдено");
     expect(translate("en", "pipelineMobile.prevStage", { label: "Build", state: "passed" })).toContain("Build");
     expect(translate("uk", "pipelineMobile.nextStage", { label: "Рев’ю", state: "очікує" })).toContain("очікує");
+    expect(translate("en", "pipelineStrip.baseSha", { sha: "48c739bb" })).toContain("48c739bb");
+    expect(translate("uk", "pipelineStrip.baseSha", { sha: "48c739bb" })).toContain("48c739bb");
   });
 });
 
