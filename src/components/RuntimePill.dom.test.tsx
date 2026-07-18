@@ -132,8 +132,11 @@ test("the model drill-down swaps panels in place with a back row; codex per-turn
   // perTurnModel is false: disabled with the reason in the accessible name.
   expect(modelRows[1]!.hasAttribute("disabled")).toBe(true);
   expect(modelRows[1]!.getAttribute("aria-label")).toContain("applies when the conversation is next resumed");
-  // The back row returns to the root panel.
-  await click(host.querySelector('[data-runtime-row="back"]')!);
+  // The back row returns to the root panel; its accessible name is the wired
+  // composer.backTo copy, distinct from the submenu row's "Model" (#405).
+  const backRow = host.querySelector('[data-runtime-row="back"]')!;
+  expect(backRow.getAttribute("aria-label")).toBe("Back — Model");
+  await click(backRow);
   expect(host.querySelectorAll('[data-runtime-row="tier"]').length).toBe(6);
   await act(async () => root.unmount());
 });

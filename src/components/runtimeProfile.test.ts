@@ -111,6 +111,22 @@ test("adoptRuntimeProfile moves profile/resume/draft records across an identity 
   expect(localStorage.getItem("llvAgentRuntime:prov-1:resume")).toBeNull();
 });
 
+test("adoptRuntimeProfile carries the live reconfigure :phase so pending/confirming convergence survives id rotation (#405)", () => {
+  localStorage.setItem("llvAgentRuntime:prov-2", JSON.stringify({ model: "gpt-5.6-sol", effort: "medium", fast: false }));
+  localStorage.setItem("llvAgentRuntime:prov-2:phase", "confirming");
+  adoptRuntimeProfile("prov-2", "canon-2");
+  expect(localStorage.getItem("llvAgentRuntime:canon-2:phase")).toBe("confirming");
+  expect(localStorage.getItem("llvAgentRuntime:canon-2")).toContain("medium");
+  expect(localStorage.getItem("llvAgentRuntime:prov-2:phase")).toBeNull();
+  // A phase already filed under the canonical id wins — a stale provisional
+  // marker never regresses an adopted conversation's convergence state.
+  localStorage.setItem("llvAgentRuntime:prov-3:phase", "pending");
+  localStorage.setItem("llvAgentRuntime:canon-3:phase", "confirming");
+  adoptRuntimeProfile("prov-3", "canon-3");
+  expect(localStorage.getItem("llvAgentRuntime:canon-3:phase")).toBe("confirming");
+  expect(localStorage.getItem("llvAgentRuntime:prov-3:phase")).toBeNull();
+});
+
 test("defaults synthesize a catalog model and lowest in-scale effort for unknown observed runtimes", () => {
   const unknown: FileEntry = { ...file, model: "gpt-9-experimental", effort: "warp" };
   expect(defaults(unknown)).toEqual({ model: "gpt-5.6-sol", effort: "low", fast: false });
