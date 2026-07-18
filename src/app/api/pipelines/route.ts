@@ -1,17 +1,19 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-
 import { NextRequest, NextResponse } from "next/server";
 
 import { createPipelineFromRequest, getPipelines } from "@/lib/pipelines/engine";
-import type { CreatePipelineRequest, Pipeline, PipelinesResponse } from "@/lib/pipelines/types";
+import type { CreatePipelineRequest, Pipeline, PipelineRepoPreflightErrorCode, PipelinesResponse } from "@/lib/pipelines/types";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+type PipelineApiError = ApiError & {
+  code?: PipelineRepoPreflightErrorCode;
+  field?: "repoDir";
+  path?: string;
+};
 
 export async function GET(): Promise<NextResponse<PipelinesResponse | ApiError>> {
   try {
@@ -20,7 +22,7 @@ export async function GET(): Promise<NextResponse<PipelinesResponse | ApiError>>
     return NextResponse.json({ error: error instanceof Error ? error.message : "pipeline registry unreadable" }, { status: 500 });
   }
 }
-export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; pipeline: Pipeline } | ApiError>> {
+export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; pipeline: Pipeline } | PipelineApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
   let body: CreatePipelineRequest;
@@ -31,19 +33,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; p
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
-  const rawDir = typeof body.repoDir === "string" ? body.repoDir.trim() : "";
-  if (!rawDir) return NextResponse.json({ error: "repository directory is required" }, { status: 400 });
-  const repoDir = path.resolve(rawDir === "~" || rawDir.startsWith("~/") ? path.join(os.homedir(), rawDir.slice(1)) : rawDir);
-  let stat: fs.Stats;
   try {
-    stat = fs.statSync(repoDir);
-  } catch {
-    return NextResponse.json({ error: `directory does not exist: ${repoDir}` }, { status: 400 });
-  }
-  if (!stat.isDirectory()) return NextResponse.json({ error: `not a directory: ${repoDir}` }, { status: 400 });
-  try {
-    const result = await createPipelineFromRequest({ ...body, repoDir });
-    if (!result.pipeline) return NextResponse.json({ error: result.error ?? "could not create pipeline" }, { status: result.status ?? 400 });
+    const result = await createPipelineFromRequest(body);
+    if (!result.pipeline) return NextResponse.json({
+      error: result.error ?? "could not create pipeline",
+      ...(result.code ? { code: result.code, field: result.field, path: result.path } : {}),
+    }, { status: result.status ?? 400 });
     if (result.pipeline.state !== "draft") requestPipelineTick();
     return NextResponse.json({ ok: true, pipeline: result.pipeline }, { status: 201 });
   } catch (error) {

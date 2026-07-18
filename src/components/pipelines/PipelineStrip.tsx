@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, ArrowRight, Pause, Play, RefreshCw, Settings2, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, Copy, MoreHorizontal, Pause, Play, RefreshCw, Settings2, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
@@ -19,6 +19,7 @@ import {
   STAGE_TONES,
   latestAttempt,
   patchPipeline,
+  pipelineStagePresentation,
   pipelineStateLabel,
   stageAccess,
   stageAttempts,
@@ -118,6 +119,37 @@ function AnchoredVerdict({ anchorRef, children }: { anchorRef: RefObject<HTMLEle
   );
 }
 
+function AnchoredActionMenu({ anchorRef, children }: { anchorRef: RefObject<HTMLButtonElement | null>; children: ReactNode }) {
+  const [position, setPosition] = useState({ left: -9999, top: 0, above: false });
+  useLayoutEffect(() => {
+    const measure = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const above = window.innerHeight - rect.bottom < 108;
+      setPosition({
+        left: Math.max(8, Math.min(window.innerWidth - 188, rect.right - 180)),
+        top: above ? rect.top - 6 : rect.bottom + 6,
+        above,
+      });
+    };
+    measure();
+    window.addEventListener("scroll", measure, true);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("scroll", measure, true);
+      window.removeEventListener("resize", measure);
+    };
+  }, [anchorRef]);
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <span className="fixed z-[70]" style={{ left: position.left, top: position.top, transform: position.above ? "translateY(-100%)" : undefined }}>
+      {children}
+    </span>,
+    document.body,
+  );
+}
+
 /** The parked stage's first finding, when present, is the most useful summary. */
 function parkedDetail(pipeline: Pipeline): string | null {
   if (!PIPELINE_ATTENTION_STATES.has(pipeline.state) || !pipeline.cursor) return pipeline.stateDetail;
@@ -148,6 +180,8 @@ function StageChip({
   files,
   renderableFlows,
   renderablePaths,
+  materializedPaths,
+  materializedFlows,
   mobile,
   open,
   configurationOpen,
@@ -168,6 +202,8 @@ function StageChip({
   renderableFlows: ReadonlySet<string>;
   /** Transcript paths still in the scan; gates run-stage actions. */
   renderablePaths?: ReadonlySet<string>;
+  materializedPaths: ReadonlySet<string>;
+  materializedFlows: ReadonlySet<string>;
   mobile: boolean;
   open: boolean;
   configurationOpen: boolean;
@@ -183,6 +219,7 @@ function StageChip({
   const tone = STAGE_TONES[state];
   const glyph = STAGE_GLYPH[state];
   const attempt = latestAttempt(pipeline, stage.id);
+  const presentation = pipelineStagePresentation(pipeline, stage, materializedPaths, materializedFlows);
   const label = stageChipLabel(t, stage);
   const access = stageAccess(pipeline, stage);
   /* Paused keeps the active tone (pipelineCursorActive) but freezes motion. */
@@ -243,7 +280,10 @@ function StageChip({
      verdict sheet, history, or open-transcript could reveal — renders as a
      glyph-only round chip so an empty/draft/terminal plan stays compact. A
      configurable draft stage compacts too but keeps its tap → configuration. */
-  const dockCompact = mobile && stageDockCompact(pipeline, stage, attempt, flows, renderableFlows, renderablePaths, files);
+  const dockCompact = mobile
+    && presentation !== "queued"
+    && presentation !== "waiting"
+    && stageDockCompact(pipeline, stage, attempt, flows, renderableFlows, renderablePaths, files);
 
   const previousTarget = previousStage ? targetFor(previousStage) : null;
   const previousConfigurable = previousStage ? stageConfigurable(previousStage) : false;
@@ -262,7 +302,7 @@ function StageChip({
   };
 
   return (
-    <li ref={chipRef} className="relative flex shrink-0 items-center gap-1.5" data-pipeline-stage={stage.id} data-stage-state={state}>
+    <li ref={chipRef} className="relative flex shrink-0 items-center gap-1.5" data-pipeline-stage={stage.id} data-stage-state={state} data-stage-presentation={presentation}>
       {previousStage && !mobile ? (
         <span
           role="group"
@@ -328,7 +368,7 @@ function StageChip({
           <span aria-hidden>{configurable ? <Settings2 className="h-3 w-3" /> : stage.kind === "review-loop" ? "⟳" : "▸"}</span>
           <span className="min-w-0 truncate">{label}</span>
           {glyph ? <span aria-hidden>{glyph}</span> : null}
-          <span className="text-caption font-semibold opacity-80">{chipState}</span>
+          <span className="text-caption font-semibold opacity-80">{presentation === "queued" || presentation === "waiting" ? t(`pipelinePresentation.${presentation}`) : chipState}</span>
           {round > 0 ? <span aria-hidden>{t("pipelineStrip.roundShort", { n: round })}</span> : null}
           {attemptCount > 1 ? <span aria-hidden>{t("pipelineStrip.attemptSuffix", { n: attemptCount })}</span> : null}
         </button>
@@ -405,6 +445,8 @@ export function PipelineStrip({
   files = [],
   renderablePaths,
   renderableFlows = EMPTY_PATHS,
+  materializedPaths = renderablePaths ?? EMPTY_PATHS,
+  materializedFlows = renderableFlows,
   compact = false,
   mobile = false,
   linkedTasks = [],
@@ -421,6 +463,8 @@ export function PipelineStrip({
   /** Flow ids that actually have a board deck (their implementer is placed);
       review-loop chip / "Open review" is disabled for a flow absent from it. */
   renderableFlows?: ReadonlySet<string>;
+  materializedPaths?: ReadonlySet<string>;
+  materializedFlows?: ReadonlySet<string>;
   /** Board variant (§2.2): trimmed to node width — drops the "PIPELINE" kicker
       and tightens padding so the chips + controls fit over a single node. */
   compact?: boolean;
@@ -435,6 +479,11 @@ export function PipelineStrip({
   const [error, setError] = useState<string | null>(null);
   const [openVerdict, setOpenVerdict] = useState<string | null>(null);
   const [openConfiguration, setOpenConfiguration] = useState<string | null>(null);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const actionsTriggerRef = useRef<HTMLButtonElement>(null);
+  const firstActionRef = useRef<HTMLButtonElement>(null);
+  const actionsWereOpen = useRef(false);
   useEffect(() => {
     if (!openConfiguration) return;
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -445,12 +494,37 @@ export function PipelineStrip({
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [openConfiguration]);
+  useLayoutEffect(() => {
+    if (actionsOpen) firstActionRef.current?.focus();
+    else if (actionsWereOpen.current) actionsTriggerRef.current?.focus();
+    actionsWereOpen.current = actionsOpen;
+  }, [actionsOpen]);
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setActionsOpen(false);
+      actionsTriggerRef.current?.focus();
+    };
+    window.addEventListener("keydown", closeOnEscape, true);
+    return () => window.removeEventListener("keydown", closeOnEscape, true);
+  }, [actionsOpen]);
   const mutate = async (action: PipelineAction) => {
     if (busy) return;
     setBusy(true);
     setError(null);
     setError(await patchPipeline(pipeline.id, action));
     setBusy(false);
+    setActionsOpen(false);
+  };
+  const copyBaseRef = async () => {
+    try {
+      await navigator.clipboard.writeText(pipeline.baseRef);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
   };
   const attention = PIPELINE_ATTENTION_STATES.has(pipeline.state);
   const busyState = PIPELINE_BUSY_STATES.has(pipeline.state);
@@ -475,23 +549,18 @@ export function PipelineStrip({
         : "bg-sunken text-muted";
   const actionBtn =
     "inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-control border px-2.5 text-ui font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40";
+  const primaryActionSlot = compact && !mobile ? "w-7 px-0" : "";
   const neutralBtn = `${actionBtn} border-border bg-card text-secondary hover:text-primary`;
-  const quietDangerBtn = `${actionBtn} border-border bg-card text-secondary hover:border-danger/40 hover:text-danger`;
   return (
     <div
       data-scheme-ui
       role="group"
       aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
-      className={`pointer-events-auto flex min-h-9 w-full items-center gap-x-2.5 gap-y-1 rounded-surface border bg-card/95 py-1 shadow-1 ${
-        /* Board mounts (#353/#156 "task links covering chats"): the compact
-           strip hovers inside the group's 44px headroom band / above a node's
-           pane, anchored by its top — any wrapped second row paints OVER the
-           chat below it. Single row + internal horizontal scroll keeps the
-           height bounded; every popover already escapes through a body portal. */
-        compact ? "no-scrollbar flex-nowrap overflow-x-auto px-2.5" : "flex-wrap px-3"
-      } ${mobile ? "max-w-full overflow-hidden [&_button]:min-h-11 [&_button]:min-w-11" : ""} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-border"}`}
+      className={`pointer-events-auto relative flex min-h-9 w-full max-w-full items-center gap-x-2.5 gap-y-1 overflow-visible rounded-surface border bg-card/95 py-1 shadow-1 ${
+        compact ? "flex-nowrap px-2.5" : mobile ? "flex-wrap px-2" : "flex-nowrap px-3"
+      } ${mobile ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-border"}`}
     >
-      <span className="flex min-w-0 max-w-full shrink-0 items-center gap-2 sm:max-w-[46%]">
+      <span data-pipeline-header className={`flex min-w-0 items-center gap-2 ${mobile ? "order-1 flex-1" : "max-w-[34%] shrink-0"}`}>
         <span
           className={`h-2.5 w-2.5 shrink-0 rounded-full ${
             busyState ? "animate-pulse bg-accent" : attention ? "bg-warning" : pipeline.state === "completed" ? "bg-success" : draft ? "bg-warning" : "bg-strong"
@@ -516,12 +585,23 @@ export function PipelineStrip({
         ) : null}
         {detail ? <span className={`min-w-0 truncate text-ui font-semibold ${attention ? "text-warning" : "text-danger"}`} title={detail}>{detail}</span> : null}
       </span>
-      {!mobile && pipeline.baseRef ? (
-        <span className="shrink-0 rounded-control border border-border bg-sunken px-1.5 py-0.5 font-mono text-caption text-muted" title={t("pipelineStrip.baseSha", { sha: pipeline.baseRef })}>
-          {t("pipelineStrip.baseSha", { sha: pipeline.baseRef })}
-        </span>
+      {pipeline.baseRef ? (
+        <button
+          type="button"
+          data-pipeline-base-ref
+          title={t("pipelineStrip.baseShaFull", { sha: pipeline.baseRef })}
+          aria-label={t("pipelineStrip.copyBaseSha", { sha: pipeline.baseRef })}
+          onClick={() => void copyBaseRef()}
+          className={`inline-flex shrink-0 items-center gap-1 rounded-control border border-border bg-sunken px-1.5 py-0.5 font-mono text-caption text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${mobile ? "order-2" : ""}`}
+        >
+          {t("pipelineStrip.baseSha", { sha: pipeline.baseRef.slice(0, 8) })}
+          {copyState === "copied" ? <Check className="h-3 w-3 text-success" aria-hidden /> : <Copy className="h-3 w-3" aria-hidden />}
+        </button>
       ) : null}
-      <ol className={`no-scrollbar flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto ${mobile ? "justify-start" : "justify-center"}`} aria-label={t("pipelineStrip.stagesAria")}>
+      <span className={`sr-only`} aria-live="polite" role="status">
+        {copyState === "copied" ? t("pipelineStrip.copiedBaseSha") : copyState === "failed" ? t("pipelineStrip.copyBaseShaFailed") : ""}
+      </span>
+      <ol data-pipeline-stage-rail className={`no-scrollbar flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto ${mobile ? "order-4 basis-full justify-start border-t border-border/70 pt-1" : "justify-center"}`} aria-label={t("pipelineStrip.stagesAria")}>
         {pipeline.stages.map((stage, index) => (
           <StageChip
             key={stage.id}
@@ -533,6 +613,8 @@ export function PipelineStrip({
             files={files}
             renderableFlows={renderableFlows}
             renderablePaths={renderablePaths}
+            materializedPaths={materializedPaths}
+            materializedFlows={materializedFlows}
             mobile={mobile}
             open={openVerdict === stage.id}
             configurationOpen={openConfiguration === stage.id}
@@ -552,7 +634,7 @@ export function PipelineStrip({
         ))}
       </ol>
       {linkedTasks.length ? (
-        <span className="no-scrollbar flex max-w-[420px] min-w-0 shrink items-center gap-1 overflow-x-auto" aria-label={t("pipelineStrip.linkedTasks")}>
+        <span className={`no-scrollbar flex max-w-[420px] min-w-0 shrink items-center gap-1 overflow-x-auto ${mobile ? "order-5 basis-full" : ""}`} aria-label={t("pipelineStrip.linkedTasks")}>
           <span className="text-caption font-semibold text-muted" aria-hidden>↗</span>
           {linkedTasks.map((task) => {
             const label = task.text.split("\n", 1)[0]?.trim() || task.id;
@@ -571,47 +653,56 @@ export function PipelineStrip({
           })}
         </span>
       ) : null}
-      {/* Mobile (#156 AC6): the action row must SHRINK to the rail width so its
-          own flex-wrap engages — `shrink-0` keeps it max-content wide and the
-          rail's overflow clip cuts the trailing buttons off-screen. Desktop
-          keeps shrink-0: full-size buttons stay reachable by the compact
-          scroller instead of shrinking. */}
-      <span className={`flex flex-wrap items-center gap-1.5 ${mobile ? "min-w-0 shrink" : "shrink-0"}`}>
-        {error ? <span className="max-w-[220px] truncate text-caption font-semibold text-danger" title={error}>{error}</span> : null}
+      <span data-pipeline-actions className={`relative flex shrink-0 items-center gap-1.5 ${mobile ? "order-3" : ""}`}>
+        {error ? <span role="alert" className="max-w-[220px] truncate text-caption font-semibold text-danger" title={error}>{error}</span> : null}
         {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted" aria-hidden /> : null}
         {draft ? (
-          /* A draft may be empty (assembled on the canvas, #136) — Start is gated on
-             the 2-stage floor here too, matching the builder panel and mobile dock,
-             so the halo strip never fires a rejected PATCH. */
           <button
-            className={`${actionBtn} border-warning bg-warning text-white hover:opacity-90`}
+            className={`${actionBtn} ${primaryActionSlot} border-warning bg-warning text-white hover:opacity-90`}
             aria-label={t("pipelineStrip.start")}
             disabled={busy || pipeline.stages.length < 2}
             title={pipeline.stages.length < 2 ? t("groupOverride.startNeedsStages") : undefined}
             onClick={() => void mutate("start")}
           >
-            <Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.start")}
+            <Play className="h-3.5 w-3.5" aria-hidden /> {compact && !mobile ? null : t("pipelineStrip.start")}
           </button>
         ) : pipeline.state === "needs_decision" ? (
-          <>
-            <button className={`${actionBtn} border-accent bg-accent text-white hover:opacity-90`} aria-label={t("pipelineStrip.retryStage")} disabled={busy} onClick={() => void mutate("retry-stage")}>
-              <RefreshCw className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.retryStage")}
-            </button>
-            <button className={neutralBtn} aria-label={t("pipelineStrip.skipStage")} disabled={busy} onClick={() => void mutate("skip-stage")}>{t("pipelineStrip.skipStage")}</button>
-          </>
-        ) : null}
-        {draft || finished ? null : pipeline.state === "paused" ? (
-          <button className={`${actionBtn} border-success/40 bg-success-soft text-success hover:opacity-90`} aria-label={t("pipelineStrip.resume")} disabled={busy} onClick={() => void mutate("resume")}>
-            <Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.resume")}
+          <button className={`${actionBtn} ${primaryActionSlot} border-accent bg-accent text-white hover:opacity-90`} aria-label={t("pipelineStrip.retryStage")} disabled={busy} onClick={() => void mutate("retry-stage")}>
+            <RefreshCw className="h-3.5 w-3.5" aria-hidden /> {compact && !mobile ? null : t("pipelineStrip.retryStage")}
+          </button>
+        ) : finished ? (
+          <span className={mobile ? "h-11 w-11" : "h-7 w-7"} aria-hidden />
+        ) : pipeline.state === "paused" ? (
+          <button className={`${actionBtn} ${primaryActionSlot} border-success/40 bg-success-soft text-success hover:opacity-90`} aria-label={t("pipelineStrip.resume")} disabled={busy} onClick={() => void mutate("resume")}>
+            <Play className="h-3.5 w-3.5" aria-hidden /> {compact && !mobile ? null : t("pipelineStrip.resume")}
           </button>
         ) : (
-          <button className={neutralBtn} aria-label={t("pipelineStrip.pause")} disabled={busy} onClick={() => void mutate("pause")}>
-            <Pause className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.pause")}
+          <button className={`${neutralBtn} ${primaryActionSlot}`} aria-label={t("pipelineStrip.pause")} disabled={busy} onClick={() => void mutate("pause")}>
+            <Pause className="h-3.5 w-3.5" aria-hidden /> {compact && !mobile ? null : t("pipelineStrip.pause")}
           </button>
         )}
-        <button className={quietDangerBtn} aria-label={t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")} disabled={busy} onClick={() => void mutate(draft ? "delete" : "close")}>
-          <X className="h-3.5 w-3.5" aria-hidden /> {t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}
+        <button
+          ref={actionsTriggerRef}
+          type="button"
+          aria-label={t("pipelineStrip.moreActions")}
+          aria-haspopup="menu"
+          aria-expanded={actionsOpen}
+          disabled={busy}
+          onClick={() => setActionsOpen((current) => !current)}
+          className={`${actionBtn} border-border bg-card px-2 text-secondary hover:text-primary`}
+        >
+          <MoreHorizontal className="h-4 w-4" aria-hidden />
         </button>
+        {actionsOpen ? (
+          <AnchoredActionMenu anchorRef={actionsTriggerRef}>
+          <span role="menu" aria-label={t("pipelineStrip.moreActions")} className="flex min-w-[180px] flex-col gap-1 rounded-[10px] border border-border bg-card p-1.5 shadow-3">
+            {pipeline.state === "needs_decision" ? (
+              <button ref={firstActionRef} role="menuitem" type="button" disabled={busy} onClick={() => void mutate("skip-stage")} className="inline-flex min-h-9 items-center rounded-control px-2 text-left text-ui font-semibold text-secondary hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">{t("pipelineStrip.skipStage")}</button>
+            ) : null}
+            <button ref={pipeline.state === "needs_decision" ? undefined : firstActionRef} role="menuitem" type="button" disabled={busy} onClick={() => void mutate(draft ? "delete" : "close")} className="inline-flex min-h-9 items-center rounded-control px-2 text-left text-ui font-semibold text-danger hover:bg-danger-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">{t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}</button>
+          </span>
+          </AnchoredActionMenu>
+        ) : null}
       </span>
     </div>
   );

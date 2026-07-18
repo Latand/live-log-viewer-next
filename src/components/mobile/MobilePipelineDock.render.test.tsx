@@ -3,8 +3,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { Pipeline } from "@/lib/pipelines/types";
 
-import type { SchemeGroup } from "@/components/scheme/layout";
-
 import { MobilePipelineDock, pipelinesToDock } from "./MobileFocusView";
 
 /* A provisioning pipeline with zero materialized stage nodes — the exact case the
@@ -28,31 +26,22 @@ test("mobile dock surfaces the full plan + 44px controls for a memberless pipeli
   expect(html).toContain("plan");
   expect(html).toContain("build");
   expect(html).toContain("review");
-  /* Pipeline-level controls (pause + close) are rendered as 44px (h-11) targets. */
+  /* The primary action and overflow trigger are rendered as 44px targets. */
   expect(html).toContain("aria-label=\"Pause pipeline\"");
-  expect(html).toContain("aria-label=\"Close pipeline\"");
+  expect(html).toContain("aria-label=\"More pipeline actions\"");
   const controlRows = html.match(/h-11/g) ?? [];
   expect(controlRows.length).toBeGreaterThanOrEqual(2);
-  /* Evidence-less stages compact to glyph chips on mobile (#156) but a
-     configurable stage keeps its tap → configuration disclosure. */
-  expect(html).toContain('data-stage-compact="true"');
-  expect(html).toContain('aria-label="plan, pending"');
+  expect(html).toContain('data-stage-presentation="waiting"');
+  expect(html).toContain("Waiting");
+  expect(html).not.toContain('data-stage-compact="true"');
   expect(html).toContain('data-pipeline-stage="plan"');
 });
 
-test("pipelinesToDock docks every active pipeline group — memberful ones too (#156)", () => {
+test("pipelinesToDock consumes memberful and shelf partitions directly (#388)", () => {
   const other = { ...provisioning, id: "p2", task: "Ship the map" } as Pipeline;
-  const group = (pipeline: Pipeline, members: string[]): SchemeGroup =>
-    ({ key: `group::pipeline::${pipeline.id}`, kind: "pipeline", id: pipeline.id, hue: 0, members, pipeline, label: pipeline.task, x: 0, y: 0, w: 1, h: 1 }) as SchemeGroup;
-  const flowGroup = { key: "group::flow::f1", kind: "flow", id: "f1", hue: 0, members: ["/a"], label: "f", x: 0, y: 0, w: 1, h: 1 } as SchemeGroup;
+  const hidden = { ...provisioning, id: "p3", state: "closed" } as Pipeline;
+  const docked = pipelinesToDock([provisioning, other, hidden], new Set([other.id]));
 
-  const docked = pipelinesToDock([
-    group(provisioning, []), // memberless placeholder (issue #136)
-    flowGroup, // a plain flow group carries no pipeline — never docked
-    group(other, ["/x", "/y"]), // memberful pipeline — previously skipped
-  ]);
-
-  /* Both pipelines dock, in group order; the flow group contributes nothing. */
   expect(docked.map((p) => p.id)).toEqual(["p1", "p2"]);
 });
 
@@ -84,7 +73,7 @@ test("a collapsed dock is one warning-aware summary row; expanded reveals the fu
   expect(draft).toContain("bg-warning-soft");
 });
 
-test("a paused pipeline shows Resume; a completed one keeps Close but drops pause/resume", () => {
+test("a paused pipeline shows Resume; a completed one keeps the overflow actions", () => {
   const paused = renderToStaticMarkup(<MobilePipelineDock pipeline={{ ...provisioning, state: "paused" } as Pipeline} />);
   expect(paused).toContain("aria-label=\"Resume pipeline\"");
 
@@ -93,11 +82,11 @@ test("a paused pipeline shows Resume; a completed one keeps Close but drops paus
   const done = renderToStaticMarkup(<MobilePipelineDock pipeline={{ ...provisioning, state: "completed" } as Pipeline} />);
   expect(done).not.toContain("aria-label=\"Pause pipeline\"");
   expect(done).not.toContain("aria-label=\"Resume pipeline\"");
-  expect(done).toContain("aria-label=\"Close pipeline\"");
+  expect(done).toContain("aria-label=\"More pipeline actions\"");
 
-  /* The shared strip keeps its dismissal action when rendered directly. */
+  /* The shared strip keeps its action menu when rendered directly. */
   const closed = renderToStaticMarkup(<MobilePipelineDock pipeline={{ ...provisioning, state: "closed" } as Pipeline} />);
-  expect(closed).toContain("aria-label=\"Close pipeline\"");
+  expect(closed).toContain("aria-label=\"More pipeline actions\"");
 });
 
 test("mobile renders a read-only draft plan with a 44px Start action", () => {
@@ -122,6 +111,6 @@ test("mobile renders a read-only draft plan with a 44px Start action", () => {
   expect(html).toContain("review");
   expect(html).toContain("Start pipeline");
   expect(html).toContain("h-11");
-  expect(html).toContain("Discard draft");
+  expect(html).toContain("More pipeline actions");
   expect(html).not.toContain("Pause pipeline");
 });

@@ -26,11 +26,11 @@ import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 
-import { PIPELINE_ATTENTION_STATES, PIPELINE_BUSY_STATES, STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, pipelineLinkedTasks, pipelineStateLabel, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
+import { PIPELINE_ATTENTION_STATES, PIPELINE_BUSY_STATES, STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, partitionPipelineSurfaces, pipelineLinkedTasks, pipelineStateLabel, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { deckKey } from "@/components/scheme/agentLinks";
-import { buildSchemeLayout, type SchemeGroup } from "@/components/scheme/layout";
+import { buildSchemeLayout } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
 
@@ -62,8 +62,7 @@ interface Props {
       flow control (renderableFlows and the pipeline focus row read real flows). */
   reviewGroups?: Flow[];
   pipelines: Pipeline[];
-  /** Active project pipelines needing a scheme surface with no placed stage node
-      yet (issue #136): docked as placeholder groups in the map layout. */
+  /** Active project pipelines consumed directly by the mobile pipeline dock. */
   surfacePipelines?: Pipeline[];
   /** Collapsed worker stacks (issue #136): one dot per origin on the full-map
       minimap, so folded workers read as a handful of dots there too. */
@@ -96,15 +95,11 @@ interface Props {
   taskSheetNonce?: number;
 }
 
-/**
- * Every active pipeline that gets a full-plan dock card on the phone (issue
- * #156): both memberless placeholder groups (no board node — issue #136) and
- * memberful pipelines, whose complete stage plan the mobile lite map never
- * paints. One card per pipeline group, so no active pipeline is left with only
- * the three-stage hop window and no complete plan.
- */
-export function pipelinesToDock(groups: SchemeGroup[]): Pipeline[] {
-  return groups.flatMap((group) => (group.pipeline ? [group.pipeline] : []));
+/** The phone consumes the same memberful/shelf partition directly. */
+export function pipelinesToDock(pipelines: readonly Pipeline[], memberfulGroupIds: ReadonlySet<string>): Pipeline[] {
+  const partition = partitionPipelineSurfaces(pipelines, memberfulGroupIds);
+  const visible = new Set([...partition.memberful, ...partition.shelf].map((pipeline) => pipeline.id));
+  return pipelines.filter((pipeline) => visible.has(pipeline.id));
 }
 
 /**
@@ -215,14 +210,14 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
     onActiveChange?.(activeNode?.file ?? null);
   }, [activeNode, onActiveChange]);
   useEffect(() => () => onActiveChange?.(null), [onActiveChange]);
-  /* EVERY active pipeline gets a dedicated 44px full-plan/control card on the
-     phone (issue #156, HIGH). The mobile lite map passes no pipelineControls, so
-     GroupsLayer never paints the past/current/future strip there; a memberful
-     pipeline (placed stage nodes) would otherwise expose only the three-stage
-     hop window (PipelineFocusRow) and never its complete plan. Docking all
-     pipeline groups — memberless placeholders included (issue #136) — makes the
-     dock the single full-plan surface for both, with no reliance on the map. */
-  const dockedPipelines = useMemo(() => pipelinesToDock(layout.groups), [layout]);
+  const memberfulPipelineIds = useMemo(
+    () => new Set(layout.groups.filter((group) => group.kind === "pipeline" && group.pipeline).map((group) => group.id)),
+    [layout.groups],
+  );
+  const dockedPipelines = useMemo(
+    () => pipelinesToDock(surfacePipelines, memberfulPipelineIds),
+    [surfacePipelines, memberfulPipelineIds],
+  );
 
   /* Presence: the phone reports the pinned pane as the sole visible transcript
      (a deck/draft carries no transcript path, so focus is null there); opening

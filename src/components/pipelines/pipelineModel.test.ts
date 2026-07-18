@@ -33,7 +33,8 @@ import {
   stageHasEvidence,
   stageHasNavigableHistory,
   stageOpenTarget,
-  pipelinePlaceholderStages,
+  partitionPipelineSurfaces,
+  pipelineStagePresentation,
   stageOverrideBody,
   templateStageInputs,
   buildStagePrompt,
@@ -897,7 +898,7 @@ describe("optimistic stage mutations (issue #221 §3 — instant add/remove)", (
   });
 });
 
-describe("template-first drafts + stage placeholders (issue #196)", () => {
+describe("template-first drafts (issue #196)", () => {
   test("templateStageInputs folds a template into POSTable stages with roles and no pinned runtime", () => {
     const template = PIPELINE_TEMPLATES.find((candidate) => candidate.id === "planBuildReview")!;
     const inputs = templateStageInputs(template);
@@ -913,42 +914,54 @@ describe("template-first drafts + stage placeholders (issue #196)", () => {
     }
   });
 
-  test("pipelinePlaceholderStages lists every stage without a live board surface, in order", () => {
-    const stages = [stage("plan"), stage("build"), stage("review", "review-loop")];
-    const draft = pipeline({ state: "draft", stages });
-    expect(pipelinePlaceholderStages(draft, new Set(), new Set()).map((item) => item.id)).toEqual(["plan", "build", "review"]);
-
-    /* Stage 1 materialized a placed node → only the later stages keep slots. */
-    const running = pipeline({
-      state: "running",
-      stages,
-      cursor: { stageId: "plan", state: "running" },
-      runs: [{ stageId: "plan", attempts: [{ n: 1, state: "running", agentPath: "/plan" } as never] }],
-    });
-    expect(pipelinePlaceholderStages(running, new Set(["/plan"]), new Set()).map((item) => item.id)).toEqual(["build", "review"]);
-    /* An unplaced attempt path is NOT presence — the transcript must be on the board. */
-    expect(pipelinePlaceholderStages(running, new Set(), new Set()).map((item) => item.id)).toEqual(["plan", "build", "review"]);
-  });
-
-  test("a review-loop stage is present through its flow's deck, never its reviewer transcript", () => {
-    const stages = [stage("build"), stage("review", "review-loop")];
-    const p = pipeline({
-      state: "running",
-      stages,
-      runs: [
-        { stageId: "build", attempts: [{ n: 1, state: "passed", agentPath: "/build" } as never] },
-        { stageId: "review", attempts: [{ n: 1, state: "reviewing", agentPath: "/reviewer", flowId: "f1" } as never] },
-      ],
-    });
-    /* Reviewer transcript placed but the flow has no deck → still a placeholder. */
-    expect(pipelinePlaceholderStages(p, new Set(["/build", "/reviewer"]), new Set()).map((item) => item.id)).toEqual(["review"]);
-    /* The flow's deck placed → the review stage is materialized. */
-    expect(pipelinePlaceholderStages(p, new Set(["/build"]), new Set(["f1"]))).toEqual([]);
-  });
-
-  test("completed and closed pipelines never grow placeholders", () => {
-    const stages = [stage("build"), stage("verify")];
-    expect(pipelinePlaceholderStages(pipeline({ state: "completed", stages }), new Set(), new Set())).toEqual([]);
-    expect(pipelinePlaceholderStages(pipeline({ state: "closed", stages }), new Set(), new Set())).toEqual([]);
-  });
 })
+
+describe("pipeline full-plan surface partition", () => {
+  test("assigns each visible pipeline to one memberful group or the non-spatial shelf", () => {
+    const memberless = pipeline({ id: "memberless", state: "draft" });
+    const memberful = pipeline({ id: "memberful", state: "running" });
+    const completed = pipeline({ id: "completed", state: "completed" });
+    const hidden = pipeline({ id: "hidden", state: "closed" });
+    const restored = pipeline({ id: "restored", state: "closed", restored: true });
+
+    const partition = partitionPipelineSurfaces(
+      [memberless, memberful, completed, hidden, restored],
+      new Set(["memberful", "restored"]),
+    );
+
+    expect(partition.memberful.map((item) => item.id)).toEqual(["memberful", "restored"]);
+    expect(partition.shelf.map((item) => item.id)).toEqual(["memberless", "completed"]);
+    expect([...partition.memberful, ...partition.shelf].map((item) => item.id).sort()).toEqual([
+      "completed", "memberful", "memberless", "restored",
+    ]);
+  });
+});
+
+describe("pipelineStagePresentation", () => {
+  const stages = [stage("plan"), stage("build"), stage("review", "review-loop")];
+
+  test("separates materialized, evidence, queued, and waiting stages", () => {
+    const active = pipeline({
+      state: "running",
+      stages,
+      cursor: { stageId: "build", state: "spawning" },
+      runs: [{ stageId: "plan", attempts: [{ n: 1, state: "passed", agentPath: "/plan" } as never] }],
+    });
+
+    expect(pipelineStagePresentation(active, stages[0]!, new Set(["/plan"]), new Set())).toBe("materialized");
+    expect(pipelineStagePresentation(active, stages[0]!, new Set(), new Set())).toBe("evidence");
+    expect(pipelineStagePresentation(active, stages[1]!, new Set(), new Set())).toBe("queued");
+    expect(pipelineStagePresentation(active, stages[2]!, new Set(), new Set())).toBe("waiting");
+  });
+
+  test("a review deck materializes its stage and every draft stage waits", () => {
+    const review = pipeline({
+      state: "running",
+      stages,
+      cursor: { stageId: "review", state: "reviewing" },
+      runs: [{ stageId: "review", attempts: [{ n: 1, state: "reviewing", flowId: "flow-1" } as never] }],
+    });
+    expect(pipelineStagePresentation(review, stages[2]!, new Set(), new Set(["flow-1"]))).toBe("materialized");
+    expect(pipelineStagePresentation(pipeline({ state: "draft", stages }), stages[0]!, new Set(), new Set())).toBe("waiting");
+  });
+});

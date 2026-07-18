@@ -14,6 +14,8 @@ import type {
   PipelineAccess,
   PipelineAction,
   PipelineAttemptState,
+  PipelineRepoPreflight,
+  PipelineRepoPreflightErrorCode,
   PipelineStage,
   PipelineStageAttempt,
   PipelineRoleId,
@@ -762,14 +764,45 @@ export function draftStagesToInput(drafts: DraftStage[]): PipelineStageInput[] {
   });
 }
 
-export async function createPipeline(req: CreatePipelineRequest): Promise<{ pipeline?: Pipeline; error?: string }> {
+export type PipelineClientResult = {
+  pipeline?: Pipeline;
+  error?: string;
+  code?: PipelineRepoPreflightErrorCode;
+  field?: "repoDir";
+  path?: string;
+};
+
+export type PipelinePreflightClientResult = PipelineRepoPreflight & { error?: string };
+
+export async function preflightPipelineRepository(
+  repoDir: string,
+  signal?: AbortSignal,
+): Promise<PipelinePreflightClientResult> {
+  try {
+    const response = await fetch("/api/pipelines/preflight", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repoDir }),
+      signal,
+    });
+    const json = (await response.json().catch(() => null)) as (PipelineRepoPreflight & { error?: string }) | null;
+    if (response.ok && json?.ok) return json;
+    if (json && !json.ok && json.code) return { ok: false, code: json.code, path: json.path };
+    return { ok: false, code: "missing", path: repoDir, error: translate(getLocale(), "pipelineModel.failed", { status: response.status }) };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    return { ok: false, code: "missing", path: repoDir, error: translate(getLocale(), "common.serverUnavailable") };
+  }
+}
+
+export async function createPipeline(req: CreatePipelineRequest): Promise<PipelineClientResult> {
   try {
     const response = await fetch("/api/pipelines", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(req),
     });
-    const json = (await response.json().catch(() => null)) as { pipeline?: Pipeline; error?: string } | null;
+    const json = (await response.json().catch(() => null)) as PipelineClientResult | null;
     if (response.ok && json?.pipeline) {
       /* The POST echo IS the new record — apply it straight into the client
          cache so the draft's builder appears immediately (issue #221 §3). An
@@ -779,7 +812,10 @@ export async function createPipeline(req: CreatePipelineRequest): Promise<{ pipe
       if (req.autoStart !== false) window.dispatchEvent(new Event(PIPELINES_CHANGED_EVENT));
       return { pipeline: json.pipeline };
     }
-    return { error: json?.error ?? translate(getLocale(), "pipelineModel.failed", { status: response.status }) };
+    return {
+      error: json?.error ?? translate(getLocale(), "pipelineModel.failed", { status: response.status }),
+      ...(json?.code ? { code: json.code, field: json.field, path: json.path } : {}),
+    };
   } catch {
     return { error: translate(getLocale(), "common.serverUnavailable") };
   }
@@ -808,35 +844,21 @@ export function templateStageInputs(template: PipelineTemplate): PipelineStageIn
 }
 
 /**
- * Creates a draft pipeline straight on the canvas (#136, #196), with no form: it
- * resolves the project's repo directory from the spawn endpoint (the same source
- * the dialog seeds from), then POSTs `autoStart:false`. With a template the draft
- * carries the template's full role chain from the first render — every stage
- * lands on the canvas as a dashed placeholder window before anything spawns
- * (issue #196 template-first flow); without one it starts EMPTY and the operator
- * assembles stages visually. Both run entirely on the #189 draft machinery — no
- * second data path; the 2-stage floor is enforced only at Start.
+ * Creates a draft pipeline from a repository that passed the picker preflight,
+ * then POSTs `autoStart:false`. A template carries the full role chain from the
+ * first render, and the shelf shows that chain before any stage materializes.
+ * Empty drafts are assembled visually through the shared editor; the 2-stage
+ * floor is enforced at Start.
  */
 export async function createDraftPipeline(
-  project: string,
+  _project: string,
   repoPrefill?: string,
   template?: PipelineTemplate,
   /** Source transcript wired as stage 0's lineage (the node `⇢ pipeline` entry);
       its cwd also wins the repo resolution, like a handoff draft's does. */
   src?: string,
-): Promise<{ pipeline?: Pipeline; error?: string }> {
-  let repoDir = (repoPrefill ?? "").trim();
-  if (!repoDir) {
-    try {
-      const res = await fetch(
-        "/api/spawn?project=" + encodeURIComponent(project) + (src ? "&src=" + encodeURIComponent(src) : ""),
-      );
-      const json = (await res.json().catch(() => null)) as { dirs?: string[]; cwd?: string | null } | null;
-      repoDir = (typeof json?.cwd === "string" ? json.cwd : "") || json?.dirs?.[0] || "";
-    } catch {
-      /* fall through to the empty-repo error below */
-    }
-  }
+): Promise<PipelineClientResult> {
+  const repoDir = (repoPrefill ?? "").trim();
   if (!repoDir) return { error: translate(getLocale(), "common.serverUnavailable") };
   return createPipeline({
     task: translate(getLocale(), "pipelineBuilder.untitledTask"),
@@ -846,19 +868,6 @@ export async function createDraftPipeline(
     autoStart: false,
   });
 }
-
-/* ── Stage placeholders (issue #196) ────────────────────────────────────── */
-
-/** Pipeline states whose not-yet-materialized stages render as dashed
-    placeholder windows on the canvas. Completed/closed pipelines have no
-    upcoming stages, so they never grow placeholders. */
-export const PIPELINE_PLACEHOLDER_STATES: ReadonlySet<PipelineState> = new Set([
-  "draft",
-  "provisioning",
-  "running",
-  "needs_decision",
-  "paused",
-]);
 
 /**
  * Does a stage already have a live board surface? A run stage is present once
@@ -878,21 +887,35 @@ export function stageHasBoardPresence(
   return Boolean(attempt.agentPath && placedPaths.has(attempt.agentPath));
 }
 
-/**
- * The stages of an active pipeline that need a dashed placeholder window on the
- * canvas (issue #196): every planned stage without a live board surface, in
- * stage order. For a draft this is the whole chain — the template's shape is
- * visible before anything spawns; for a running pipeline the placeholders are
- * the stages an agent hasn't attached to yet, and each placeholder dissolves in
- * place the moment its stage materializes a node/deck.
- */
-export function pipelinePlaceholderStages(
+export type PipelineStagePresentation = "materialized" | "evidence" | "queued" | "waiting";
+
+const EVIDENCE_ATTEMPT_STATES = new Set(["passed", "failed", "needs_decision", "skipped"]);
+
+export function pipelineStagePresentation(
   pipeline: Pipeline,
+  stage: PipelineStage,
   placedPaths: ReadonlySet<string>,
   placedFlowIds: ReadonlySet<string>,
-): PipelineStage[] {
-  if (!PIPELINE_PLACEHOLDER_STATES.has(pipeline.state)) return [];
-  return pipeline.stages.filter((stage) => !stageHasBoardPresence(pipeline, stage, placedPaths, placedFlowIds));
+): PipelineStagePresentation {
+  if (stageHasBoardPresence(pipeline, stage, placedPaths, placedFlowIds)) return "materialized";
+  const attempts = stageAttempts(pipeline, stage.id);
+  if (attempts.some((attempt) => EVIDENCE_ATTEMPT_STATES.has(attempt.state))) return "evidence";
+  if (pipeline.cursor?.stageId === stage.id && pipelineCursorActive(pipeline)) return "queued";
+  return "waiting";
+}
+
+export function partitionPipelineSurfaces(
+  pipelines: readonly Pipeline[],
+  memberfulGroupIds: ReadonlySet<string>,
+): { memberful: Pipeline[]; shelf: Pipeline[] } {
+  const memberful: Pipeline[] = [];
+  const shelf: Pipeline[] = [];
+  for (const pipeline of pipelines) {
+    if (pipeline.state === "closed" && !pipeline.restored) continue;
+    if (memberfulGroupIds.has(pipeline.id)) memberful.push(pipeline);
+    else shelf.push(pipeline);
+  }
+  return { memberful, shelf };
 }
 
 /** Actions whose side effects reach past the pipeline record (spawned/killed

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { patchPipeline } from "@/lib/pipelines/engine";
-import type { PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
+import type { PatchPipelineRequest, Pipeline, PipelineAction, PipelineRepoPreflightErrorCode } from "@/lib/pipelines/types";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
@@ -16,10 +16,16 @@ const ACTIONS = new Set<PipelineAction>([
 
 const CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
 
+type PipelineApiError = ApiError & {
+  code?: PipelineRepoPreflightErrorCode;
+  field?: "repoDir";
+  path?: string;
+};
+
 export async function PATCH(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
-): Promise<NextResponse<{ ok: true; pipeline: Pipeline } | ApiError>> {
+): Promise<NextResponse<{ ok: true; pipeline: Pipeline } | PipelineApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
   let body: PatchPipelineRequest;
@@ -34,7 +40,10 @@ export async function PATCH(
   const { id } = await ctx.params;
   try {
     const result = await patchPipeline(id, body);
-    if (!result.pipeline) return NextResponse.json({ error: result.error ?? "could not update pipeline" }, { status: result.status ?? 400 });
+    if (!result.pipeline) return NextResponse.json({
+      error: result.error ?? "could not update pipeline",
+      ...(result.code ? { code: result.code, field: result.field, path: result.path } : {}),
+    }, { status: result.status ?? 400 });
     if (CONTROLLER_ACTIONS.has(body.action)) requestPipelineTick();
     return NextResponse.json({ ok: true, pipeline: result.pipeline });
   } catch (error) {
