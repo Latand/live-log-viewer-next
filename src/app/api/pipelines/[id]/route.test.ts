@@ -6,7 +6,13 @@ const pipeline = { id: "pipeline-1" };
 mock.module("@/lib/pipelines/engine", () => ({
   getPipelines: () => ({ pipelines: [pipeline] }),
   createPipelineFromRequest: () => ({ pipeline }),
-  patchPipeline: async (id: string, body: unknown) => id === pipeline.id ? { pipeline: { ...pipeline, body } } : { error: "pipeline not found", status: 404 },
+  patchPipeline: async (id: string, body: unknown) => {
+    if (id !== pipeline.id) return { error: "pipeline not found", status: 404 };
+    if ((body as { repoDir?: string }).repoDir === "/blocked") {
+      return { error: "Git metadata is not writable: /blocked/.git", status: 403, code: "git_metadata_unwritable", field: "repoDir", path: "/blocked/.git" };
+    }
+    return { pipeline: { ...pipeline, body } };
+  },
 }));
 
 const { DELETE, PATCH } = await import("./route");
@@ -52,4 +58,22 @@ test("pipeline PATCH rejects non-object JSON", async () => {
     );
     expect(response.status).toBe(400);
   }
+});
+
+test("pipeline PATCH forwards repository-admission fields from final revalidation", async () => {
+  const response = await PATCH(
+    new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", {
+      method: "PATCH",
+      headers: { host: "127.0.0.1" },
+      body: JSON.stringify({ action: "update-draft", repoDir: "/blocked" }),
+    }),
+    { params: Promise.resolve({ id: "pipeline-1" }) },
+  );
+  expect(response.status).toBe(403);
+  expect(await response.json()).toEqual({
+    error: "Git metadata is not writable: /blocked/.git",
+    code: "git_metadata_unwritable",
+    field: "repoDir",
+    path: "/blocked/.git",
+  });
 });

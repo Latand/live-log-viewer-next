@@ -80,6 +80,12 @@ function harness() {
       if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     },
+    preflightRepo: (repoDir) => ({
+      ok: true,
+      repoDir,
+      gitCommonDir: path.join(repoDir, ".git"),
+      worktreeParent: path.dirname(repoDir),
+    }),
     roleLookup: (roleId) => {
       if (roleId === "builder") return { engine: "codex", model: "gpt-5.6-sol", effort: builderEffort, access: "read-write", promptScaffold: "Builder guidance" };
       if (roleId === "reviewer") return { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh", access: "read-only", promptScaffold: "Reviewer guidance" };
@@ -192,6 +198,50 @@ test("auto-start creation rejects an unavailable remote without persisting a pip
   expect(result).toEqual({ error: "fetching origin/main: origin unavailable", status: 409 });
   expect(loadPipelines()).toEqual([]);
   expect(h.calls.some((call) => call.includes("worktree add"))).toBe(false);
+});
+
+test("repository admission fails before pipeline persistence or provisioning", async () => {
+  const h = harness();
+  savePipelines([]);
+  h.ports.preflightRepo = () => ({ ok: false, code: "repo_unreadable", path: "/repo" });
+
+  const result = await createPipelineFromRequest({ task: "Private repo", repoDir: "/repo", stages: RUN_STAGES as never }, h.ports);
+
+  expect(result).toEqual({
+    error: "repository is not readable: /repo",
+    status: 403,
+    code: "repo_unreadable",
+    field: "repoDir",
+    path: "/repo",
+  });
+  expect(loadPipelines()).toEqual([]);
+  expect(h.calls).toEqual([]);
+});
+
+test("create, draft repo edits, and Start share canonical repository admission", async () => {
+  const h = harness();
+  const checked: string[] = [];
+  h.ports.preflightRepo = (repoDir) => {
+    checked.push(repoDir);
+    return { ok: true, repoDir: "/canonical/repo", gitCommonDir: "/canonical/repo/.git", worktreeParent: "/canonical" };
+  };
+  savePipelines([]);
+
+  const created = await createPipelineFromRequest({ task: "Canonical", repoDir: "/alias", stages: RUN_STAGES as never, autoStart: false }, h.ports);
+  expect(created.pipeline?.repoDir).toBe("/canonical/repo");
+
+  h.ports.preflightRepo = (repoDir) => {
+    checked.push(repoDir);
+    if (repoDir === "/second") return { ok: true, repoDir: "/canonical/second", gitCommonDir: "/canonical/second/.git", worktreeParent: "/canonical" };
+    return { ok: false, code: "git_metadata_unwritable", path: "/canonical/second/.git" };
+  };
+  const updated = await patchPipeline(created.pipeline!.id, { action: "update-draft", repoDir: "/second" }, h.ports);
+  expect(updated.pipeline?.repoDir).toBe("/canonical/second");
+
+  const blocked = await patchPipeline(created.pipeline!.id, { action: "start" }, h.ports);
+  expect(blocked).toMatchObject({ status: 403, code: "git_metadata_unwritable", field: "repoDir" });
+  expect(loadPipelines()[0]).toMatchObject({ state: "draft", repoDir: "/canonical/second" });
+  expect(checked).toEqual(["/alias", "/second", "/canonical/second"]);
 });
 
 test("a parked provisioning retry reuses the pinned base and provisions again", async () => {

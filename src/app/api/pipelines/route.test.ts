@@ -82,3 +82,24 @@ test("pipeline POST rejects non-object JSON", async () => {
     expect(response.status).toBe(400);
   }
 });
+
+test("pipeline POST returns the stable admission payload without creating a record", async () => {
+  const plainDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-plain-"));
+  try {
+    const response = await POST(new NextRequest("http://127.0.0.1/api/pipelines", {
+      method: "POST",
+      headers: { host: "127.0.0.1", "content-type": "application/json" },
+      body: JSON.stringify({ task: "blocked", repoDir: plainDir, autoStart: false, stages: [] }),
+    }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: `not a git repository: ${plainDir}`,
+      code: "not_git",
+      field: "repoDir",
+      path: plainDir,
+    });
+    expect((await GET()).status).toBe(200);
+  } finally {
+    fs.rmSync(plainDir, { recursive: true, force: true });
+  }
+});

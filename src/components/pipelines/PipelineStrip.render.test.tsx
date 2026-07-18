@@ -116,11 +116,15 @@ test("the status dot follows the tone matrix (accent busy, amber attention, ok d
   expect(render(pipeline({ state: "needs_decision" }))).not.toContain("rounded-full bg-danger");
 });
 
-test("the compact pipeline surface exposes the full pinned base SHA", () => {
+test("the compact pipeline surface shows the 8-character base SHA and copies the full ref (#388)", () => {
   const baseRef = "48c739bbcc87b3244aee7fb0e2d1b3f8e312548f";
   const html = renderToStaticMarkup(<PipelineStrip pipeline={pipeline({ baseRef, lastPassedCommit: baseRef })} compact />);
 
-  expect(html).toContain(`Base ${baseRef}`);
+  expect(html).toContain(`Base ${baseRef.slice(0, 8)}`);
+  expect(html).not.toContain(`Base ${baseRef}`);
+  /* The copy affordance carries the complete 40-character ref. */
+  expect(html).toContain(`Copy full base commit ${baseRef}`);
+  expect(html).toContain("data-pipeline-base-ref");
 });
 
 test("mobile contains the rail and defers diagnostics while desktop markup stays complete", () => {
@@ -147,19 +151,24 @@ test("mobile contains the rail and defers diagnostics while desktop markup stays
   );
 
   expect(mobile).toContain("max-w-full");
-  expect(mobile).toContain("overflow-hidden");
+  /* The strip itself stays overflow-visible; only the labeled stage rail
+     scrolls, on its own full-width row below the metadata/action slots (#388). */
+  expect(mobile).toContain("overflow-visible");
   expect(mobile).toContain("justify-start");
-  expect(mobile).not.toContain(`Base ${baseRef}`);
+  expect(mobile).toContain("order-4 basis-full");
+  expect(mobile).toContain(`Base ${baseRef.slice(0, 8)}`);
+  expect(mobile).not.toContain(`>Base ${baseRef}<`);
   expect(mobile).not.toContain("data-stage-evidence");
   expect(mobile).not.toContain("Open previous stage plan");
 
   expect(desktop).toContain("justify-center");
-  expect(desktop).toContain(`Base ${baseRef}`);
+  expect(desktop).toContain(`Base ${baseRef.slice(0, 8)}`);
+  expect(desktop).toContain(`Copy full base commit ${baseRef}`);
   expect(desktop).toContain('data-stage-evidence="passed"');
   expect(desktop).toContain("Open previous stage plan");
 });
 
-test("mobile compacts empty stages while a parked decision keeps its full controls", () => {
+test("mobile labels empty stages as waiting placeholders while a parked decision keeps its controls (#388)", () => {
   const build = stage("build");
   const pending = renderToStaticMarkup(
     <PipelineStrip
@@ -179,15 +188,19 @@ test("mobile compacts empty stages while a parked decision keeps its full contro
     />,
   );
 
-  expect(pending).toContain('data-stage-compact="true"');
-  expect(pending).toContain('aria-label="build, pending"');
-  expect(pending).toContain("h-11 w-11");
-  expect(pending).not.toContain(">build</span>");
+  /* A planned stage is never an anonymous glyph dot: it keeps its role label
+     plus a queued/waiting state so stage 1/2 always shows stage two (#388). */
+  expect(pending).not.toContain('data-stage-compact="true"');
+  expect(pending).toContain('data-stage-presentation="waiting"');
+  expect(pending).toContain("Waiting");
+  expect(pending).toContain(">build</span>");
 
   expect(parked).not.toContain("data-stage-compact");
   expect(parked).toContain("max-w-[180px]");
   expect(parked).toContain('aria-label="Retry stage"');
-  expect(parked).toContain('aria-label="Skip"');
+  /* Skip moved into the overflow menu; the trigger is the stable slot. */
+  expect(parked).not.toContain('aria-label="Skip"');
+  expect(parked).toContain('aria-label="More pipeline actions"');
 });
 
 test("compact history exposes evidence, configuration, and ordered lineage controls (#353)", () => {
@@ -257,25 +270,42 @@ test("the compact board strip is one bounded scrolling row — it can never wrap
   const compact = renderToStaticMarkup(<PipelineStrip pipeline={parked} linkedTasks={linkedTasks} compact onOpenTask={() => undefined} />);
   /* The board mounts anchor the strip's TOP inside the group's 44px headroom /
      above a node's pane; a wrapped second row paints over the chat. The compact
-     root therefore never wraps — it scrolls internally instead. */
+     root therefore never wraps — the labeled stage rail scrolls instead (#388). */
   const root = compact.slice(compact.indexOf("Pipeline "), compact.indexOf("<span"));
   expect(root).toContain("flex-nowrap");
-  expect(root).toContain("overflow-x-auto");
   expect(root).not.toContain("flex-wrap");
+  expect(compact).toContain("data-pipeline-stage-rail");
+  expect(compact).toContain("overflow-x-auto");
+  const retryAt = compact.indexOf('aria-label="Retry stage"');
+  const retryButton = compact.slice(compact.lastIndexOf("<button", retryAt), compact.indexOf("</button>", retryAt));
+  expect(retryButton).toContain("w-7");
+  expect(retryButton.slice(retryButton.indexOf(">") + 1)).not.toContain("Retry stage");
   /* Everything stays reachable inside the scroller: tasks + full controls. */
   for (let index = 1; index <= 4; index += 1) expect(compact).toContain(`Open linked task Linked ${index}`);
   expect(compact).toContain("Retry stage");
-  /* The standalone (builder-panel) strip keeps its wrapping layout. */
+  /* The standalone desktop strip is single-row too, so header, SHA, and the
+     action slots can never stack over each other (#388). */
   const standalone = renderToStaticMarkup(<PipelineStrip pipeline={parked} linkedTasks={linkedTasks} onOpenTask={() => undefined} />);
-  expect(standalone.slice(standalone.indexOf("Pipeline "), standalone.indexOf("<span"))).toContain("flex-wrap");
+  expect(standalone.slice(standalone.indexOf("Pipeline "), standalone.indexOf("<span"))).toContain("flex-nowrap");
 });
 
-test("the mobile action row shrinks and wraps inside the rail — no button is clipped off-screen (#156 AC6)", () => {
+test("the mobile action slot stays stable while the rail takes its own row — no button is clipped off-screen (#388)", () => {
   const parked = pipeline({ state: "needs_decision", cursor: { stageId: "build", state: "running" } });
   const mobile = renderToStaticMarkup(<PipelineStrip mobile pipeline={parked} />);
-  /* `shrink-0` keeps the row max-content wide and the rail's overflow clip cuts
-     the trailing buttons (Close pipeline) off-screen at 390px. */
-  expect(mobile).toContain('class="flex flex-wrap items-center gap-1.5 min-w-0 shrink"');
+  /* Actions hold a fixed-order slot beside the header/SHA; the stage rail wraps
+     to a dedicated full-width scrolling row underneath, so no control is ever
+     pushed off-screen at 390px. */
+  const mobileActionsAt = mobile.indexOf("data-pipeline-actions");
+  const mobileActions = mobile.slice(mobileActionsAt, mobile.indexOf(">", mobileActionsAt));
+  expect(mobileActions).toContain("shrink-0");
+  expect(mobileActions).toContain("order-3");
+  const railAt = mobile.indexOf("data-pipeline-stage-rail");
+  const rail = mobile.slice(railAt, mobile.indexOf(">", railAt));
+  expect(rail).toContain("order-4");
+  expect(rail).toContain("basis-full");
   const desktop = renderToStaticMarkup(<PipelineStrip pipeline={parked} />);
-  expect(desktop).toContain('class="flex flex-wrap items-center gap-1.5 shrink-0"');
+  const desktopActionsAt = desktop.indexOf("data-pipeline-actions");
+  const desktopActions = desktop.slice(desktopActionsAt, desktop.indexOf(">", desktopActionsAt));
+  expect(desktopActions).toContain("shrink-0");
+  expect(desktopActions).not.toContain("order-3");
 });

@@ -14,7 +14,6 @@ import {
   deriveGroups,
   derivePipelineLinks,
   groupRect,
-  hueFromId,
   type AgentLink,
   type SchemeGroupSpec,
 } from "./agentLinks";
@@ -223,10 +222,8 @@ export function buildSchemeLayout(
   flows: Flow[] = [],
   draftIds: string[] = [],
   pipelines: Pipeline[] = [],
-  /** Active project pipelines that must have a scheme surface even with no
-      materialized/placed stage node yet (issue #136): each such pipeline that
-      `deriveGroups` did not already frame gets a docked placeholder group
-      carrying its plan, so a provisioning pipeline is never surfaceless. */
+  /** Active project pipelines are accepted for call-site compatibility. Their
+      memberless presentation lives in the screen-space pipeline shelf. */
   surfacePipelines: Pipeline[] = [],
   /** Durable identities (`conversationIdentity`) the user has crowned (issue
       #224). A group/manual root whose identity is favorited is lifted into a
@@ -237,6 +234,7 @@ export function buildSchemeLayout(
       chain remains represented by the pipeline evidence rail. */
   isolatedManualPaths: ReadonlySet<string> = new Set(),
 ): SchemeLayout {
+  void surfacePipelines;
   const byAll = new Map(files.map((file) => [file.path, file]));
   const kids = kidsIndex(files);
   const nodes: SchemeNode[] = [];
@@ -571,22 +569,6 @@ export function buildSchemeLayout(
   }
   const restTop = hasFavorites ? bandBottom + FAV_BAND_GAP : PAD;
 
-  /* Reserve the row head for compact pipeline rails. This is presentation-only:
-     no pipeline/task record is rewritten. Pipelines with a materialized member
-     receive their surface from that member's own halo. */
-  const materializedPipelineIds = new Set(
-    [...groupKeyOfPath]
-      .filter(([path, owner]) => owner.startsWith("pipe:") && byAll.has(path))
-      .map(([, owner]) => owner.slice(5)),
-  );
-  const surfaceHead = surfacePipelines.filter(
-    (pipeline) => (pipeline.state !== "closed" || pipeline.restored) && !materializedPipelineIds.has(pipeline.id),
-  );
-  const surfaceHeadWidth = surfaceHead.length ? NODE_W + GROUP_PAD * 2 + GROUP_GAP : 0;
-  const surfaceHeadBottom = surfaceHead.length
-    ? restTop + surfaceHead.length * (150 + GROUP_GAP) - GROUP_GAP
-    : restTop;
-
   type PlacementMark = { nodes: number; edges: number; stacks: number; decks: number; loops: number; drafts: number };
   const markPlacement = (): PlacementMark => ({
     nodes: nodes.length,
@@ -614,8 +596,8 @@ export function buildSchemeLayout(
   };
 
   let rowTop = restTop;
-  let rowBottom = surfaceHeadBottom;
-  let rowStartX = PAD + surfaceHeadWidth;
+  let rowBottom = restTop;
+  let rowStartX = PAD;
   cursor = rowStartX;
   const placeRestItem = (place: (top: number) => void) => {
     const mark = markPlacement();
@@ -707,40 +689,6 @@ export function buildSchemeLayout(
     groupHalos.push({ ...spec, ...framed, label: groupLabel(spec) });
   }
 
-  const framedPipelineIds = new Set(groupHalos.filter((halo) => halo.pipeline).map((halo) => halo.id));
-  let dockRight = 0;
-  let dockBottom = 0;
-  /* Pipelines without a placed current pane receive one compact rail card.
-     Only pipelines the head reservation counted may use the reserved column:
-     a pipeline can be "materialized" (a member path exists in the file list)
-     yet still unframed — quiet history folded into a node's under-deck never
-     enters the anchor index — and with no slot reserved a rail at
-     `(PAD, restTop)` would sit under the first rest-band card. Such leftovers
-     dock below everything placed instead, where nothing can collide. */
-  const reservedRailIds = new Set(surfaceHead.map((pipeline) => pipeline.id));
-  let dockY = restTop;
-  let overflowDockY = Math.max(bottom, surfaceHeadBottom) + REST_BAND_ROW_GAP;
-  for (const pipeline of surfacePipelines) {
-    if ((pipeline.state === "closed" && !pipeline.restored) || framedPipelineIds.has(pipeline.id)) continue;
-    framedPipelineIds.add(pipeline.id);
-    const reserved = reservedRailIds.has(pipeline.id);
-    const rect = { x: PAD, y: reserved ? dockY : overflowDockY, w: NODE_W + GROUP_PAD * 2, h: 150 };
-    groupHalos.push({
-      key: `group::pipeline::${pipeline.id}`,
-      kind: "pipeline",
-      id: pipeline.id,
-      hue: hueFromId(pipeline.id),
-      members: [],
-      pipeline,
-      ...rect,
-      label: cleanTitle(pipeline.task, 60),
-    });
-    if (reserved) dockY = rect.y + rect.h + GROUP_GAP;
-    else overflowDockY = rect.y + rect.h + GROUP_GAP;
-    dockRight = Math.max(dockRight, rect.x + rect.w);
-    dockBottom = Math.max(dockBottom, rect.y + rect.h);
-  }
-
   return {
     nodes,
     edges,
@@ -758,9 +706,8 @@ export function buildSchemeLayout(
     width: Math.max(
       right + PAD,
       PAD * 2 + NODE_W,
-      dockRight + PAD,
     ),
     /* Extra room under the last generation for decks and expanded panels. */
-    height: Math.max(bottom + PAD + 140, dockBottom + PAD),
+    height: bottom + PAD + 140,
   };
 }

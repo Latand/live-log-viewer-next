@@ -3,8 +3,7 @@ import { Window } from "happy-dom";
 
 import { PIPELINE_TEMPLATES, createDraftPipeline } from "./pipelineModel";
 
-/* createDraftPipeline resolves the repo from /api/spawn and POSTs a draft; it uses
-   getLocale() and dispatches a window event, so it needs a browser-ish env. */
+/* createDraftPipeline posts a preflight-approved repository as a draft. */
 const dom = new Window();
 Object.assign(globalThis, {
   window: dom,
@@ -18,26 +17,26 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-test("resolves the repo from /api/spawn and POSTs an EMPTY autoStart:false draft (#136)", async () => {
+test("POSTs an EMPTY autoStart:false draft with zero spawn or file discovery calls", async () => {
   const requests: Array<{ url: string; body?: unknown }> = [];
   globalThis.fetch = (async (url: string, init?: { body?: string }) => {
     requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
-    if (url.startsWith("/api/spawn")) return { ok: true, json: async () => ({ cwd: "/home/me/repo", dirs: ["/home/me/repo"] }) };
     return { ok: true, json: async () => ({ pipeline: { id: "p9" } }) };
   }) as unknown as typeof fetch;
 
-  const result = await createDraftPipeline("demo");
+  const result = await createDraftPipeline("demo", "/home/me/repo");
   expect(result.pipeline?.id).toBe("p9");
   const post = requests.find((request) => request.url === "/api/pipelines");
   const body = post?.body as { autoStart?: boolean; repoDir?: string; stages?: unknown[] };
   expect(body?.autoStart).toBe(false);
   expect(body?.repoDir).toBe("/home/me/repo");
+  expect(requests.map((request) => request.url)).toEqual(["/api/pipelines"]);
   /* The draft is created EMPTY (#136 recast) — the operator assembles stages on
      the canvas; the 2-stage floor is enforced only at Start. */
   expect(body?.stages).toEqual([]);
 });
 
-test("prefers an explicit repo prefill over the spawn lookup (#136)", async () => {
+test("uses the explicit canonical repo prefill", async () => {
   const requests: string[] = [];
   globalThis.fetch = (async (url: string) => {
     requests.push(url);
@@ -46,14 +45,12 @@ test("prefers an explicit repo prefill over the spawn lookup (#136)", async () =
 
   const result = await createDraftPipeline("demo", "/explicit/repo");
   expect(result.pipeline?.id).toBe("p10");
-  /* With a prefill it must not consult /api/spawn at all. */
   expect(requests.some((url) => url.startsWith("/api/spawn"))).toBe(false);
 });
 
-test("surfaces an error and never POSTs when no repo can be resolved (#136)", async () => {
+test("surfaces an error and never fetches when the preflight repo is absent", async () => {
   let posted = false;
-  globalThis.fetch = (async (url: string) => {
-    if (url.startsWith("/api/spawn")) return { ok: true, json: async () => ({ cwd: null, dirs: [] }) };
+  globalThis.fetch = (async () => {
     posted = true;
     return { ok: true, json: async () => ({ pipeline: { id: "x" } }) };
   }) as unknown as typeof fetch;
@@ -68,12 +65,11 @@ test("a template POSTs the draft WITH the template's full role chain (#196 templ
   const requests: Array<{ url: string; body?: unknown }> = [];
   globalThis.fetch = (async (url: string, init?: { body?: string }) => {
     requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
-    if (url.startsWith("/api/spawn")) return { ok: true, json: async () => ({ cwd: "/home/me/repo", dirs: [] }) };
     return { ok: true, json: async () => ({ pipeline: { id: "p11" } }) };
   }) as unknown as typeof fetch;
 
   const template = PIPELINE_TEMPLATES.find((candidate) => candidate.id === "planBuildReview")!;
-  const result = await createDraftPipeline("demo", undefined, template);
+  const result = await createDraftPipeline("demo", "/home/me/repo", template);
   expect(result.pipeline?.id).toBe("p11");
   const post = requests.find((request) => request.url === "/api/pipelines");
   const body = post?.body as { autoStart?: boolean; stages?: Array<{ kind: string; role?: { roleId: string }; next: string | null }> };
