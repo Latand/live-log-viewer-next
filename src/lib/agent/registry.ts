@@ -128,6 +128,10 @@ export interface SpawnReceipt {
   /** Reserved at receipt birth so path discovery cannot choose the identity. */
   conversationId: ViewerConversationId;
   purpose: "launch" | "migration-successor" | "resume-successor";
+  /** Staged supersedence intent (issue #383). The durable predecessor edge
+      commits only when this receipt settles, so a failed spawn never hides
+      its predecessor behind a dead link. */
+  supersedes: { conversationId: ViewerConversationId; reason: SupersedenceReason } | null;
   /** Generation current when a resume receipt was created. A completed
       source observation may advance from this path exactly once. */
   resumeSourcePath: string | null;
@@ -208,6 +212,10 @@ export interface SpawnRequest {
   memberships?: DurableMembershipInput[];
   conversationId?: ViewerConversationId;
   purpose?: SpawnReceipt["purpose"];
+  /** Predecessor conversation this spawn terminally supersedes (issue #383).
+      Staged on the receipt; the durable edge commits at settlement. */
+  supersedes?: ViewerConversationId | null;
+  supersedesReason?: SupersedenceReason;
   expectedArtifactPath?: string | null;
   /** Atomic direct-child admission guard for agent-initiated Viewer spawns. */
   liveChildrenCap?: number;
@@ -229,6 +237,28 @@ export type SpawnSettlement =
   | { kind: "settled"; receipt: SpawnReceipt; entry: AgentRegistryEntry; conversation: RegistryConversation }
   | { kind: "conflict"; receipt: SpawnReceipt; code: "spawn_artifact_conflict" | "spawn_pane_conflict" | "spawn_identity_conflict" };
 
+export type SupersedenceReason = "stage-retry" | "recovery-spawn" | "manual";
+
+/** Terminal cross-conversation supersedence edge (issue #383): a recovery
+    spawn or a stage retry replaced this conversation with a successor. Edges
+    form chains (out-degree ≤ 1, acyclic) and are projection-only — identity is
+    never derived from them, and the predecessor's history stays intact. */
+export interface ConversationSupersedence {
+  conversationId: ViewerConversationId;
+  at: string;
+  reason: SupersedenceReason;
+}
+
+/** A conflicting supersedence claim: the predecessor chain already ends at a
+    conversation that is still actively hosted. Carries the live chain end so
+    callers can answer with a redirect instead of fanning out a second edge. */
+export class SupersedenceConflictError extends Error {
+  constructor(readonly successorConversationId: ViewerConversationId, message: string) {
+    super(message);
+    this.name = "SupersedenceConflictError";
+  }
+}
+
 export interface RegistryConversation {
   id: ViewerConversationId;
   engine: Extract<AgentEngine, "claude" | "codex">;
@@ -245,6 +275,10 @@ export interface RegistryConversation {
   migration: ConversationMigration | null;
   /** Explicit Stop/Keep decision for one target at one routing revision. */
   migrationOptOut: { targetId: string; updatedAt: string } | null;
+  /** Set when a successor conversation terminally retired this one (issue
+      #383). Null for every non-superseded conversation, including all legacy
+      records. Cleared only by an explicit operator "resume here" fork. */
+  supersededBy: ConversationSupersedence | null;
   turn: TurnState & { observedAt: string | null };
   createdAt: string;
   updatedAt: string;
@@ -881,6 +915,19 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
     && typeof rawOptOut.updatedAt === "string"
     ? { targetId: rawOptOut.targetId, updatedAt: rawOptOut.updatedAt }
     : null;
+  const rawSupersededBy = (value as Partial<RegistryConversation>).supersededBy;
+  const supersededBy = rawSupersededBy
+    && typeof rawSupersededBy.conversationId === "string"
+    && rawSupersededBy.conversationId.startsWith("conversation_")
+    && typeof rawSupersededBy.at === "string"
+    ? {
+        conversationId: rawSupersededBy.conversationId as ViewerConversationId,
+        at: rawSupersededBy.at,
+        reason: rawSupersededBy.reason === "stage-retry" || rawSupersededBy.reason === "manual"
+          ? rawSupersededBy.reason
+          : "recovery-spawn" as const,
+      }
+    : null;
   return {
     ...value,
     generations,
@@ -889,6 +936,7 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
     projectOwnership: normalizeProjectOwnership((value as Partial<RegistryConversation>).projectOwnership),
     migration,
     migrationOptOut,
+    supersededBy,
     turn: value.turn && typeof value.turn === "object"
       ? { state: value.turn.state, source: value.turn.source, terminalAt: value.turn.terminalAt ?? null, observedAt: value.turn.observedAt ?? null }
       : { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
@@ -1251,6 +1299,81 @@ function resolveConversationAlias(file: Pick<RegistryFile, "conversationAliases"
   return current;
 }
 
+const SUPERSEDENCE_CHAIN_LIMIT = 64;
+
+/** Alias-canonical end of a supersedence chain: the one conversation in the
+    chain that is not itself superseded. Bounded and cycle-guarded so a
+    malformed registry can never hang resolution. */
+function supersedenceChainTail(
+  file: Pick<RegistryFile, "conversations" | "conversationAliases">,
+  id: ViewerConversationId,
+): ViewerConversationId {
+  const seen = new Set<ViewerConversationId>();
+  let current = resolveConversationAlias(file, id);
+  while (seen.size < SUPERSEDENCE_CHAIN_LIMIT && !seen.has(current)) {
+    seen.add(current);
+    const next = file.conversations[current]?.supersededBy?.conversationId;
+    if (!next) break;
+    current = resolveConversationAlias(file, next);
+  }
+  return current;
+}
+
+/** Whether the conversation's current generation is actively hosted (starting
+    or live). An actively hosted chain end must never be retired behind an
+    edge — that would hide running work. */
+function conversationActivelyHosted(file: RegistryFile, conversation: RegistryConversation): boolean {
+  const current = conversation.generations.at(-1);
+  if (!current) return false;
+  const entry = file.entries[sessionKeyId({ engine: conversation.engine, sessionId: current.id })];
+  return Boolean(entry
+    && entry.artifactPath === current.path
+    && (entry.status === "starting" || entry.status === "live"));
+}
+
+/**
+ * Records predecessor → successor supersedence (issue #383) under the current
+ * registry mutation. Resolves the predecessor chain to its tail so repeated
+ * recoveries chain instead of fanning out; replaying an already-recorded edge
+ * is a no-op. `strict` throws on conflicts (unknown parties, cycles, a live
+ * chain end); `fail-open` records nothing and leaves the board truthful.
+ */
+function recordSupersedenceInFile(
+  file: RegistryFile,
+  predecessorId: ViewerConversationId,
+  successorId: ViewerConversationId,
+  reason: SupersedenceReason,
+  mode: "strict" | "fail-open",
+): RegistryConversation | null {
+  const successor = resolveConversationAlias(file, successorId);
+  const tailId = supersedenceChainTail(file, predecessorId);
+  const fail = (error: Error): RegistryConversation | null => {
+    if (mode === "strict") throw error;
+    return null;
+  };
+  if (!file.conversations[resolveConversationAlias(file, predecessorId)]) {
+    return fail(new Error("supersedence predecessor is unknown"));
+  }
+  if (!file.conversations[successor]) return fail(new Error("supersedence successor is unknown"));
+  if (tailId === successor) {
+    /* Already chained onto this successor (or a self-supersede after alias
+       repair): idempotent no-op. */
+    return file.conversations[tailId] ?? null;
+  }
+  const tail = file.conversations[tailId];
+  if (!tail) return fail(new Error("supersedence predecessor is unknown"));
+  if (supersedenceChainTail(file, successor) === tailId) {
+    return fail(new Error("supersedence chain would form a cycle"));
+  }
+  if (conversationActivelyHosted(file, tail)) {
+    return fail(new SupersedenceConflictError(tailId, "supersedence chain already ends at a live conversation"));
+  }
+  tail.supersededBy = { conversationId: successor, at: now(), reason };
+  tail.updatedAt = tail.supersededBy.at;
+  file.conversationRevision[tail.engine] += 1;
+  return tail;
+}
+
 function recordMembership(
   file: RegistryFile,
   conversationId: ViewerConversationId,
@@ -1429,6 +1552,16 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
       ? value.conversationId as ViewerConversationId
       : `conversation_${crypto.randomUUID()}`,
     purpose: value.purpose === "migration-successor" || value.purpose === "resume-successor" ? value.purpose : "launch",
+    supersedes: value.supersedes
+      && typeof value.supersedes.conversationId === "string"
+      && value.supersedes.conversationId.startsWith("conversation_")
+      ? {
+          conversationId: value.supersedes.conversationId as ViewerConversationId,
+          reason: value.supersedes.reason === "stage-retry" || value.supersedes.reason === "manual"
+            ? value.supersedes.reason
+            : "recovery-spawn",
+        }
+      : null,
     resumeSourcePath: typeof value.resumeSourcePath === "string" ? value.resumeSourcePath : null,
     pathCorrelation: value.pathCorrelation
       && typeof value.pathCorrelation.cwd === "string"
@@ -2270,6 +2403,11 @@ export class AgentRegistry {
       if (reviewsConversationId && role !== "reviewer") throw new Error("reviewsConversationId requires reviewer role");
       const explicitProject = input.explicitProject == null ? null : validExplicitProject(input.explicitProject);
       if (input.explicitProject != null && !explicitProject) throw new Error("explicit project is not a valid project key");
+      const supersedes = input.supersedes ? resolveConversationAlias(file, input.supersedes) : null;
+      if (supersedes) {
+        if (!file.conversations[supersedes]) throw new Error("supersedence predecessor is unknown");
+        if (conversationId === supersedes) throw new Error("a conversation cannot supersede itself");
+      }
       const existingConversation = conversationId ? file.conversations[conversationId] : null;
       const requestedProfile = emptyLaunchProfile({
         cwd: input.cwd,
@@ -2295,6 +2433,7 @@ export class AgentRegistry {
             && existing.cwd === input.cwd
             && existing.transport === (input.transport ?? null)
             && existing.explicitProject === explicitProject
+            && (existing.supersedes?.conversationId ?? null) === supersedes
             && existing.launchProfile.permissionMode === profile.permissionMode;
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
@@ -2327,6 +2466,7 @@ export class AgentRegistry {
           : null,
         conversationId: conversationId ?? `conversation_${crypto.randomUUID()}`,
         purpose: input.purpose ?? "launch",
+        supersedes: supersedes ? { conversationId: supersedes, reason: input.supersedesReason ?? "recovery-spawn" } : null,
         resumeSourcePath: input.purpose === "resume-successor" ? existingConversation?.generations.at(-1)?.path ?? null : null,
         pathCorrelation: input.engine === "codex" && (input.purpose ?? "launch") === "launch"
           ? { cwd: input.cwd, startedAt: createdAt }
@@ -2629,6 +2769,7 @@ export class AgentRegistry {
       projectOwnership: null,
       migration: null,
       migrationOptOut: null,
+      supersededBy: null,
       turn: { state: "unknown" as const, source: "empty" as const, terminalAt: null, observedAt: null },
       createdAt,
       updatedAt: createdAt,
@@ -2767,6 +2908,12 @@ export class AgentRegistry {
       receipt.completionMode = receipt.completionMode === "observed-completed" && completionMode === "route-completed"
         ? "route-recovered"
         : receipt.completionMode ?? completionMode;
+      /* The staged predecessor edge (issue #383) commits only here, with a
+         settled successor. Fail-open: a live chain end or a vanished
+         predecessor records nothing and the board keeps today's rendering. */
+      if (receipt.supersedes) {
+        recordSupersedenceInFile(file, receipt.supersedes.conversationId, receipt.conversationId, receipt.supersedes.reason, "fail-open");
+      }
     }
     return { kind: "settled", receipt: clone(receipt), entry: clone(full), conversation: clone(conversation) };
   }
@@ -2813,6 +2960,9 @@ export class AgentRegistry {
       receipt.state = "completed";
       receipt.error = null;
       receipt.completionMode = "route-completed";
+      if (receipt.supersedes) {
+        recordSupersedenceInFile(file, receipt.supersedes.conversationId, receipt.conversationId, receipt.supersedes.reason, "fail-open");
+      }
       return { kind: "settled", receipt: clone(receipt), entry: clone(entry), conversation: clone(conversation) };
     });
   }
@@ -2850,6 +3000,9 @@ export class AgentRegistry {
       receipt.state = "completed";
       receipt.error = null;
       receipt.completionMode = receipt.completionMode ?? "route-recovered";
+      if (receipt.supersedes) {
+        recordSupersedenceInFile(file, receipt.supersedes.conversationId, receipt.conversationId, receipt.supersedes.reason, "fail-open");
+      }
       advanceMigrationScopeRevision(file, receipt.key.engine, readinessBefore, changedHostPaths);
       return { kind: "settled", receipt: clone(receipt), entry: clone(entry), conversation: clone(conversation) };
     });
@@ -3260,6 +3413,7 @@ export class AgentRegistry {
         projectOwnership: null,
         migration: null,
         migrationOptOut: null,
+        supersededBy: null,
         turn: { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
         createdAt,
         updatedAt: createdAt,
@@ -3428,6 +3582,7 @@ export class AgentRegistry {
             projectOwnership: null,
             migration: null,
             migrationOptOut: null,
+            supersededBy: null,
             turn: { ...observation.turn, observedAt: observation.observedAt },
             createdAt,
             updatedAt: createdAt,
@@ -3493,6 +3648,48 @@ export class AgentRegistry {
 
   canonicalConversationId(id: ViewerConversationId): ViewerConversationId {
     return resolveConversationAlias(this.readOnlySnapshot(), id);
+  }
+
+  /** Records the terminal predecessor → successor edge (issue #383) outside
+      spawn settlement — operator backfill and explicit chain repair. Resolves
+      the predecessor chain to its tail (repeated recoveries chain, never fan
+      out), refuses cycles and actively hosted chain ends, and replays
+      idempotently. Throws {@link SupersedenceConflictError} on a live end. */
+  recordSupersedence(
+    predecessorId: ViewerConversationId,
+    successorId: ViewerConversationId,
+    reason: SupersedenceReason = "manual",
+  ): RegistryConversation {
+    return this.mutate((file) => {
+      const predecessor = resolveConversationAlias(file, predecessorId);
+      const successor = resolveConversationAlias(file, successorId);
+      if (predecessor === successor) throw new Error("a conversation cannot supersede itself");
+      const recorded = recordSupersedenceInFile(file, predecessor, successor, reason, "strict");
+      if (!recorded) throw new Error("supersedence could not be recorded");
+      return clone(recorded);
+    });
+  }
+
+  /** The alias-canonical end of a supersedence chain (the one conversation in
+      the chain that is not itself superseded). */
+  supersedenceChainTail(id: ViewerConversationId): ViewerConversationId {
+    return supersedenceChainTail(this.readOnlySnapshot(), id);
+  }
+
+  /** Explicit operator fork (issue #383 invariant 5): "resume here" clears the
+      edge so a superseded card may go live again. A card is never
+      simultaneously superseded and live. */
+  clearSupersedence(conversationId: ViewerConversationId): RegistryConversation | null {
+    return this.mutate((file) => {
+      const conversation = file.conversations[resolveConversationAlias(file, conversationId)];
+      if (!conversation) return null;
+      if (conversation.supersededBy) {
+        conversation.supersededBy = null;
+        conversation.updatedAt = now();
+        file.conversationRevision[conversation.engine] += 1;
+      }
+      return clone(conversation);
+    });
   }
 
   conversation(id: ViewerConversationId): RegistryConversation | null {

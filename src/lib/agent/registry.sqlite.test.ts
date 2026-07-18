@@ -91,6 +91,27 @@ for (const version of [1, 2]) {
   });
 }
 
+test("supersedence edges round-trip JSON ↔ SQLite with parity intact", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-supersede-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const store = new AgentRegistry(filename);
+  const predecessor = store.ensureConversation("codex", "/rounds/predecessor.jsonl", "a");
+  const successor = store.ensureConversation("codex", "/rounds/successor.jsonl", "a");
+  store.recordSupersedence(predecessor.id, successor.id, "recovery-spawn");
+  const expected = store.snapshot();
+
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" });
+  expect(sqlite.snapshot()).toEqual(expected);
+  expect(sqlite.conversation(predecessor.id)?.supersededBy).toMatchObject({
+    conversationId: successor.id,
+    reason: "recovery-spawn",
+  });
+
+  sqlite.clearSupersedence(predecessor.id);
+  expect(sqlite.conversation(predecessor.id)?.supersededBy).toBeNull();
+  expect(new AgentRegistry(filename).conversation(predecessor.id)?.supersededBy).toBeNull();
+});
+
 test("dual-write keeps JSON authoritative and SQLite reads require parity", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-parity-"));
   const filename = path.join(directory, "agent-registry.json");
