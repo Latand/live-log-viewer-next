@@ -1,6 +1,6 @@
 import type { FileEntry, TurnBoundary } from "../types";
 import { turnStateFromRecords as structuredTurnStateFromRecords } from "@/lib/accounts/migration/turnState";
-import { isClaudeProtocolUser } from "@/lib/claudeProtocolUser";
+import { isClaudeTurnWindowMeta } from "@/lib/claudeProtocolUser";
 import { tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
@@ -22,10 +22,10 @@ function parseMillis(value: unknown): number | null {
     NOT harness metadata. Both engines are covered: Claude `type:"user"` with
     real prompt content, Codex `user_message` / `message`(role user) payloads.
     Tool-result user records carry only `tool_result`/`function_call_output`
-    parts, so they yield no text and are correctly skipped. Claude meta and
-    command records (`isMeta`, `promptSource`, caveat/task wrappers) share the
-    feed's classification: they carry text but never initiate or steer a
-    window (issue #406). */
+    parts, so they yield no text and are correctly skipped. Claude journaled
+    metadata (command echoes, caveats, task notifications, interrupts,
+    compaction summaries) carries text but never initiates or steers a window;
+    SDK and idle-delivered peer/coordinator prompts DO (issue #406). */
 function isTurnStart(record: RecordLike, codex: boolean): boolean {
   if (codex) {
     const payload = recordValue(record.payload) ?? {};
@@ -40,7 +40,7 @@ function isTurnStart(record: RecordLike, codex: boolean): boolean {
     return false;
   }
   if (record.type !== "user") return false;
-  if (isClaudeProtocolUser(record)) return false;
+  if (isClaudeTurnWindowMeta(record)) return false;
   const content = recordValue(record.message)?.content;
   if (typeof content === "string") return content.trim().length > 0;
   // An image part is prompt content in its own right: a screenshot-only
@@ -141,11 +141,11 @@ export function lastTurnFromRecords(records: RecordLike[], codex: boolean): Turn
   }
   if (startedAt === null) return null;
 
-  // Meta/command user records are invisible to the terminal-state check too:
-  // a trailing notification or command echo after `end_turn` must not flip a
+  // Journaled metadata is invisible to the terminal-state check too: a
+  // trailing notification or command echo after `end_turn` must not flip a
   // finished turn back to busy and restart a dead timer (issue #406). Tool
-  // results and genuine prompts pass through untouched.
-  const stateRecords = codex ? records : records.filter((record) => record.type !== "user" || !isClaudeProtocolUser(record));
+  // results and genuine prompts — typed, SDK, peer — pass through untouched.
+  const stateRecords = codex ? records : records.filter((record) => record.type !== "user" || !isClaudeTurnWindowMeta(record));
   const state = structuredTurnStateFromRecords(stateRecords, codex);
   // The turn is complete on a terminal lifecycle record, or — when none was
   // ever written — on authoritative failure evidence (interrupt sentinel,

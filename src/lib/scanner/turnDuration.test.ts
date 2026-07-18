@@ -25,6 +25,11 @@ const claudeAssistantEnd = (timestamp: string) => ({
   timestamp,
   message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "done" }] },
 });
+const claudeAssistantTool = (timestamp: string) => ({
+  type: "assistant",
+  timestamp,
+  message: { role: "assistant", stop_reason: null, content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] },
+});
 const claudeInterrupt = (timestamp: string, extra: Record<string, unknown> = { interruptedMessageId: "msg-1" }) => ({
   type: "user",
   timestamp,
@@ -297,6 +302,79 @@ describe("lastTurnFromRecords — Claude", () => {
   test("an ordinary prompt still opens a window under the shared contract", () => {
     const boundary = lastTurnFromRecords([claudeUser("2026-07-14T10:00:00.000Z", "plain prompt")], false);
     expect(boundary).toEqual({ startedAt: ms("2026-07-14T10:00:00.000Z"), endedAt: null });
+  });
+
+  test("an sdk prompt after a finished turn starts a fresh window over new tool work", () => {
+    // Headless/conveyor lanes prompt through the SDK (`promptSource:"sdk"`,
+    // no origin). The feed renders the envelope as a system row, but it is a
+    // genuine initiator: the window must open at the sdk prompt, not tick
+    // from the previous human turn's start (issue #406 review).
+    const sdkPrompt = {
+      type: "user",
+      timestamp: "2026-07-14T12:00:00.000Z",
+      promptSource: "sdk",
+      message: { role: "user", content: "You are a Verifier. Confirm the checkout is clean." },
+    };
+    const running = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "earlier human turn"),
+        claudeAssistantEnd("2026-07-14T10:01:00.000Z"),
+        sdkPrompt,
+        claudeAssistantTool("2026-07-14T12:00:05.000Z"),
+      ],
+      false,
+    );
+    expect(running).toEqual({ startedAt: ms("2026-07-14T12:00:00.000Z"), endedAt: null });
+
+    // A session whose prompts are ALL sdk-sourced still carries a boundary.
+    const headless = lastTurnFromRecords([sdkPrompt, claudeAssistantEnd("2026-07-14T12:10:00.000Z")], false);
+    expect(headless).toEqual({
+      startedAt: ms("2026-07-14T12:00:00.000Z"),
+      endedAt: ms("2026-07-14T12:10:00.000Z"),
+    });
+  });
+
+  test("idle-delivered peer and coordinator messages start fresh windows", () => {
+    // Peer/coordinator deliveries are journaled with isMeta:true, yet they
+    // initiate the turn that follows — provenance outranks the meta flag.
+    for (const kind of ["peer", "coordinator"] as const) {
+      const boundary = lastTurnFromRecords(
+        [
+          claudeUser("2026-07-14T10:00:00.000Z", "earlier human turn"),
+          claudeAssistantEnd("2026-07-14T10:01:00.000Z"),
+          {
+            type: "user",
+            timestamp: "2026-07-14T12:00:00.000Z",
+            isMeta: true,
+            origin: { kind },
+            message: { role: "user", content: [{ type: "text", text: "please pick up the review" }] },
+          },
+          claudeAssistantTool("2026-07-14T12:00:05.000Z"),
+        ],
+        false,
+      );
+      expect(boundary).toEqual({ startedAt: ms("2026-07-14T12:00:00.000Z"), endedAt: null });
+    }
+  });
+
+  test("a compaction summary never opens a window", () => {
+    const boundary = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "hi"),
+        claudeAssistantEnd("2026-07-14T10:01:00.000Z"),
+        {
+          type: "user",
+          timestamp: "2026-07-14T10:02:00.000Z",
+          isCompactSummary: true,
+          message: { role: "user", content: "This session is being continued from a previous conversation…" },
+        },
+      ],
+      false,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:01:00.000Z"),
+    });
   });
 
   test("a survived API error keeps the run open and steering continuous", () => {
