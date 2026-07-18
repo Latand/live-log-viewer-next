@@ -6,6 +6,7 @@ import { statePath } from "@/lib/configDir";
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { primeTranscriptTurnEvidence } from "@/lib/scanner/activity";
 import { globalCache } from "@/lib/scanner/caches";
+import { primePersistedLineageFacts } from "@/lib/scanner/links";
 import type { FileEntry, PendingQuestion } from "@/lib/types";
 import type { TurnState } from "@/lib/accounts/migration/contracts";
 
@@ -144,6 +145,7 @@ function persistedQuestionDraft(entry: FileEntry): Omit<PendingQuestion, "pid" |
 }
 
 function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
+  primePersistedLineageFacts(snapshot.files);
   for (const entry of snapshot.files) {
     if (entry.derivationComplete !== true) continue;
     let current: fs.Stats;

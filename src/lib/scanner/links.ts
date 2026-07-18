@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
 
 import { statePath } from "@/lib/configDir";
 
@@ -16,16 +17,191 @@ import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative"
 import { persistWorktreeMap } from "./describe";
 import { taskParts } from "./discover";
 import { readJson, recordValue, recordsValue, stringValue } from "./json";
-import { fileHasNeedle, findNeedle } from "./needle";
+import { fileHasNeedle, fileTailHasNeedle, findNeedle } from "./needle";
 import { readPpid } from "./process";
 import { ROOTS } from "./roots";
 
 const sidSlugCache = globalCache<string>("sid-slug");
-const bgcmdCache = globalCache<{ command: string; description: string; source: string } | null>("bgcmd");
+type BackgroundCommand = { command: string; description: string; source: string };
+type BackgroundTranscriptIndex = {
+  size: number;
+  mtimeMs: number;
+  offset: number;
+  carry: Buffer;
+  toolUses: Map<string, Omit<BackgroundCommand, "source">>;
+  taskToolUses: Map<string, string>;
+  commands: Map<string, Omit<BackgroundCommand, "source">>;
+  complete: boolean;
+};
+
+const bgcmdCache = globalCache<BackgroundCommand>("bgcmd");
+const backgroundIndexCache = globalCache<BackgroundTranscriptIndex>("background-index-v1");
 const chainCache = globalCache<[number, string | null]>("chain-uuid");
+const compactLinkCache = globalCache<string>("compact-links-v1");
+const lineageStoreState = globalCache<{
+  backgroundLoaded: boolean;
+  backgroundDirty: boolean;
+  compactLoaded: boolean;
+  compactDirty: boolean;
+}>("lineage-store-state-v1");
 
 const CHAIN_HEAD_BYTES = 512 * 1024;
+const BACKGROUND_SCAN_BUDGET_BYTES = 256 * 1024;
+const BACKGROUND_SCAN_CHUNK_BYTES = 64 * 1024;
+const BACKGROUND_INDEX_ENTRY_CAP = 20_000;
+const BACKGROUND_COMMANDS_FILE = "bg-commands.json";
+const BACKGROUND_COMMANDS_VERSION = 1;
+const COMPACT_CHAINS_FILE = "compact-chains.json";
+const COMPACT_CHAINS_VERSION = 1;
 type Limit = <T>(work: () => Promise<T>) => Promise<T>;
+type ReadBudget = { remaining: number };
+
+function currentLineageStoreState() {
+  const filename = statePath(BACKGROUND_COMMANDS_FILE);
+  let state = lineageStoreState.get(filename);
+  if (!state) {
+    state = {
+      backgroundLoaded: false,
+      backgroundDirty: false,
+      compactLoaded: false,
+      compactDirty: false,
+    };
+    lineageStoreState.set(filename, state);
+  }
+  return state;
+}
+
+function loadBackgroundCommands(): void {
+  const state = currentLineageStoreState();
+  if (state.backgroundLoaded) return;
+  state.backgroundLoaded = true;
+  const stored = readJson(statePath(BACKGROUND_COMMANDS_FILE));
+  if (stored?.version !== BACKGROUND_COMMANDS_VERSION) return;
+  const commands = recordValue(stored.commands);
+  if (!commands) return;
+  for (const [tid, value] of Object.entries(commands)) {
+    const command = recordValue(value);
+    if (!command || typeof command.command !== "string" || typeof command.description !== "string"
+      || typeof command.source !== "string" || (!command.command && !command.description)) continue;
+    if (!bgcmdCache.has(tid)) {
+      cappedSet(bgcmdCache, tid, {
+        command: command.command,
+        description: command.description,
+        source: command.source,
+      });
+    }
+  }
+}
+
+function loadCompactChains(): void {
+  const state = currentLineageStoreState();
+  if (state.compactLoaded) return;
+  state.compactLoaded = true;
+  const stored = readJson(statePath(COMPACT_CHAINS_FILE));
+  if (stored?.version !== COMPACT_CHAINS_VERSION) return;
+  const links = recordValue(stored.links);
+  if (!links) return;
+  for (const [successor, predecessor] of Object.entries(links)) {
+    if (typeof predecessor === "string" && predecessor !== successor && !compactLinkCache.has(successor)) {
+      cappedSet(compactLinkCache, successor, predecessor);
+    }
+  }
+}
+
+function writeStateFile(filename: string, value: unknown): boolean {
+  let temporary: string | null = null;
+  try {
+    fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.dirname(filename), 0o700);
+    temporary = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+    fs.writeFileSync(temporary, JSON.stringify(value) + "\n", { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporary, filename);
+    return true;
+  } catch {
+    if (temporary) {
+      try {
+        fs.unlinkSync(temporary);
+      } catch {
+        // The temporary file may be absent when directory creation failed.
+      }
+    }
+    return false;
+  }
+}
+
+function persistBackgroundCommands(): void {
+  const state = currentLineageStoreState();
+  if (!state.backgroundDirty) return;
+  const commands = Object.fromEntries(
+    [...bgcmdCache].filter(([, info]) => info.command || info.description),
+  );
+  if (writeStateFile(statePath(BACKGROUND_COMMANDS_FILE), {
+    version: BACKGROUND_COMMANDS_VERSION,
+    commands,
+  })) state.backgroundDirty = false;
+}
+
+function persistCompactChains(): void {
+  const state = currentLineageStoreState();
+  if (!state.compactDirty) return;
+  if (writeStateFile(statePath(COMPACT_CHAINS_FILE), {
+    version: COMPACT_CHAINS_VERSION,
+    links: Object.fromEntries(compactLinkCache),
+  })) state.compactDirty = false;
+}
+
+function rememberBackgroundCommand(tid: string, info: BackgroundCommand): void {
+  if (bgcmdCache.get(tid)?.command === info.command
+    && bgcmdCache.get(tid)?.description === info.description
+    && bgcmdCache.get(tid)?.source === info.source) return;
+  cappedSet(bgcmdCache, tid, info);
+  currentLineageStoreState().backgroundDirty = true;
+}
+
+function rememberCompactChain(successor: string, predecessor: string): void {
+  if (successor === predecessor || compactLinkCache.get(successor) === predecessor) return;
+  cappedSet(compactLinkCache, successor, predecessor);
+  currentLineageStoreState().compactDirty = true;
+}
+
+/**
+ * Prime permanent lineage facts carried by a completed route snapshot. These
+ * proofs survive later source growth because Claude transcripts are append-only
+ * and both the spawning tool result and compaction edge are immutable history.
+ */
+export function primePersistedLineageFacts(entries: readonly FileEntry[]): void {
+  const completeMains = new Map(
+    entries
+      .filter((entry) => entry.derivationComplete === true
+        && entry.root === "claude-projects"
+        && entry.name.split(path.sep).length === 2)
+      .map((entry) => [entry.path, entry]),
+  );
+  for (const entry of entries) {
+    if (entry.derivationComplete !== true) continue;
+    if (entry.root === "claude-tasks" && entry.parent && (entry.cmd || entry.cmdDesc)) {
+      const parts = taskParts(ROOTS["claude-tasks"], entry.path);
+      const tid = parts?.[2];
+      if (tid) {
+        cappedSet(bgcmdCache, tid, {
+          command: entry.cmd ?? "",
+          description: entry.cmdDesc ?? "",
+          source: entry.parent,
+        });
+      }
+      continue;
+    }
+    if (entry.root !== "claude-projects" || entry.handoff || !entry.parent) continue;
+    const predecessor = completeMains.get(entry.path);
+    const successor = completeMains.get(entry.parent);
+    if (!predecessor || !successor) continue;
+    const predecessorSlug = predecessor.name.split(path.sep)[0];
+    const successorSlug = successor.name.split(path.sep)[0];
+    if (predecessorSlug && predecessorSlug === successorSlug) {
+      cappedSet(compactLinkCache, successor.path, predecessor.path);
+    }
+  }
+}
 
 function createLimiter(max: number): Limit {
   let active = 0;
@@ -105,6 +281,14 @@ function chainCompactedSessions(entries: FileEntry[]): void {
   for (const mains of mainsBySlug.values()) {
     const ordered = [...mains].sort((a, b) => a.mtime - b.mtime);
     for (const successor of ordered) {
+      const rememberedPath = compactLinkCache.get(successor.path);
+      const remembered = rememberedPath
+        ? ordered.find((candidate) => candidate.path === rememberedPath && candidate !== successor)
+        : undefined;
+      if (remembered && !chainsBack(successor, remembered, mains)) {
+        remembered.parent = successor.path;
+        continue;
+      }
       const uuid = compactParentUuid(successor.path, successor.size);
       if (!uuid) continue;
       // Late system records (away_summary…) can bump the predecessor's mtime
@@ -115,9 +299,9 @@ function chainCompactedSessions(entries: FileEntry[]): void {
         .filter((candidate) => candidate !== successor && !candidate.parent)
         .sort((a, b) => b.mtime - a.mtime);
       const alive = successor.activity === "live" || successor.activity === "recent";
-      const predecessor =
-        candidates.find((candidate) => fileHasNeedle(uuid, candidate.path)) ??
-        (alive ? candidates.find((candidate) => candidate.activity !== "live") : undefined);
+      const proven = candidates.find((candidate) => fileTailHasNeedle(uuid, candidate.path));
+      if (proven) rememberCompactChain(successor.path, proven.path);
+      const predecessor = proven ?? (alive ? candidates.find((candidate) => candidate.activity !== "live") : undefined);
       if (predecessor && !chainsBack(successor, predecessor, mains)) predecessor.parent = successor.path;
     }
   }
@@ -189,57 +373,144 @@ function slugMainTranscripts(slug: string, excludeSid: string): string[] {
     .map((candidate) => candidate.pathname);
 }
 
-function extractBgInfo(needle: string, src: string): { command: string; description: string } | null {
-  let toolId: string | null = null;
-  try {
-    for (const line of fs.readFileSync(src, "utf8").split("\n")) {
-      if (!line.includes(needle)) continue;
-      toolId = line.match(/"tool_use_id"\s*:\s*"([^"]+)"/)?.[1] ?? null;
-      break;
-    }
-    if (!toolId) return null;
-    for (const line of fs.readFileSync(src, "utf8").split("\n")) {
-      if (!line.includes(toolId) || !line.includes('"tool_use"')) continue;
-      try {
-        const obj = JSON.parse(line);
-        const content = recordsValue(recordValue(obj.message)?.content);
-        for (const part of content) {
-          if (part.type === "tool_use" && part.id === toolId) {
-            const input = recordValue(part.input) ?? {};
-            return {
-              command: String(input.command ?? ""),
-              description: String(input.description ?? ""),
-            };
-          }
-        }
-      } catch {
-        /* skip */
-      }
-    }
-  } catch {
-    /* skip */
+function cappedSet<K, V>(map: Map<K, V>, key: K, value: V): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > BACKGROUND_INDEX_ENTRY_CAP) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
   }
-  return null;
 }
 
-function bgCommand(tid: string, transcripts: (string | null)[], fallbackTranscripts: string[]) {
-  if (bgcmdCache.has(tid)) return bgcmdCache.get(tid) ?? null;
-  const needle = "background with ID: " + tid;
-  // A transcript may quote the needle without owning the task (a grep over
-  // logs, a pasted excerpt), so a hit only counts as authoritative when the
-  // spawning tool_use with its command is recovered from the same file.
-  let weak: { command: string; description: string; source: string } | null = null;
-  for (const src of [...transcripts, ...fallbackTranscripts]) {
-    if (!src || !fileHasNeedle(needle, src)) continue;
-    const info = extractBgInfo(needle, src);
-    if (info && (info.command || info.description)) {
-      const full = { ...info, source: src };
-      bgcmdCache.set(tid, full);
-      return full;
-    }
-    weak ??= { command: "", description: "", source: src };
+function resolveIndexedBackgroundCommands(index: BackgroundTranscriptIndex): void {
+  for (const [tid, toolUseId] of index.taskToolUses) {
+    const toolUse = index.toolUses.get(toolUseId);
+    if (toolUse && (toolUse.command || toolUse.description)) cappedSet(index.commands, tid, toolUse);
   }
-  if (weak) bgcmdCache.set(tid, weak);
+}
+
+function indexBackgroundLine(index: BackgroundTranscriptIndex, line: string): void {
+  if (line.includes('"tool_use"')) {
+    try {
+      const obj = JSON.parse(line);
+      const content = recordsValue(recordValue(obj.message)?.content);
+      for (const part of content) {
+        if (part.type !== "tool_use" || typeof part.id !== "string") continue;
+        const input = recordValue(part.input) ?? {};
+        const command = typeof input.command === "string" ? input.command : "";
+        const description = typeof input.description === "string" ? input.description : "";
+        if (command || description) cappedSet(index.toolUses, part.id, { command, description });
+      }
+    } catch {
+      // A malformed or incomplete record remains eligible after the file grows.
+    }
+  }
+
+  if (line.includes("background with ID: ")) {
+    const toolUseId = line.match(/"tool_use_id"\s*:\s*"([^"]+)"/)?.[1];
+    if (toolUseId) {
+      for (const match of line.matchAll(/background with ID: ([A-Za-z0-9_-]+)/g)) {
+        const tid = match[1];
+        if (tid) cappedSet(index.taskToolUses, tid, toolUseId);
+      }
+    }
+  }
+  resolveIndexedBackgroundCommands(index);
+}
+
+function consumeBackgroundChunk(index: BackgroundTranscriptIndex, chunk: Buffer): void {
+  const bytes = index.carry.length ? Buffer.concat([index.carry, chunk]) : chunk;
+  let lineStart = 0;
+  for (let newline = bytes.indexOf(0x0a, lineStart); newline >= 0; newline = bytes.indexOf(0x0a, lineStart)) {
+    indexBackgroundLine(index, bytes.toString("utf8", lineStart, newline));
+    lineStart = newline + 1;
+  }
+  index.carry = lineStart < bytes.length ? Buffer.from(bytes.subarray(lineStart)) : Buffer.alloc(0);
+}
+
+function freshBackgroundIndex(size: number, mtimeMs: number): BackgroundTranscriptIndex {
+  return {
+    size,
+    mtimeMs,
+    offset: 0,
+    carry: Buffer.alloc(0),
+    toolUses: new Map(),
+    taskToolUses: new Map(),
+    commands: new Map(),
+    complete: size === 0,
+  };
+}
+
+function indexedBackgroundCommand(tid: string, source: string, budget: ReadBudget): BackgroundCommand | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(source);
+  } catch {
+    return null;
+  }
+  let index = backgroundIndexCache.get(source);
+  if (!index || stat.size < index.offset || (stat.size === index.size && stat.mtimeMs !== index.mtimeMs)) {
+    index = freshBackgroundIndex(stat.size, stat.mtimeMs);
+    backgroundIndexCache.set(source, index);
+  } else {
+    index.size = stat.size;
+    index.mtimeMs = stat.mtimeMs;
+    index.complete = index.offset >= stat.size;
+  }
+
+  const cached = index.commands.get(tid);
+  if (cached) return { ...cached, source };
+  if (!index.complete && budget.remaining > 0) {
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(source, "r");
+      while (index.offset < stat.size && budget.remaining > 0 && !index.commands.has(tid)) {
+        const requested = Math.min(
+          BACKGROUND_SCAN_CHUNK_BYTES,
+          budget.remaining,
+          stat.size - index.offset,
+        );
+        const chunk = Buffer.allocUnsafe(requested);
+        const read = fs.readSync(fd, chunk, 0, requested, index.offset);
+        if (read === 0) break;
+        index.offset += read;
+        budget.remaining -= read;
+        consumeBackgroundChunk(index, read === chunk.length ? chunk : Buffer.from(chunk.subarray(0, read)));
+      }
+      index.complete = index.offset >= stat.size;
+      if (index.complete && index.carry.length > 0) indexBackgroundLine(index, index.carry.toString("utf8"));
+    } catch {
+      // The next refresh resumes from the last completely consumed byte.
+    } finally {
+      if (fd !== null) fs.closeSync(fd);
+    }
+  }
+
+  const resolved = index.commands.get(tid);
+  if (resolved) return { ...resolved, source };
+  return index.taskToolUses.has(tid) ? { command: "", description: "", source } : null;
+}
+
+function bgCommand(
+  tid: string,
+  transcripts: (string | null)[],
+  fallbackTranscripts: string[],
+  budget: ReadBudget,
+): BackgroundCommand | null {
+  const cached = bgcmdCache.get(tid);
+  if (cached) return cached;
+  let weak: BackgroundCommand | null = null;
+  for (const source of new Set([...transcripts, ...fallbackTranscripts])) {
+    if (!source) continue;
+    const info = indexedBackgroundCommand(tid, source, budget);
+    if (!info) continue;
+    if (info.command || info.description) {
+      rememberBackgroundCommand(tid, info);
+      return info;
+    }
+    weak ??= info;
+  }
   return weak;
 }
 
@@ -391,7 +662,10 @@ function attachHandoffParents(entries: FileEntry[], persist: boolean): void {
 
 export async function linkEntries(entries: FileEntry[], options: { persist?: boolean } = {}): Promise<void> {
   const persist = options.persist !== false;
+  loadBackgroundCommands();
+  loadCompactChains();
   const limit = createLimiter(48);
+  const backgroundReadBudget = { remaining: BACKGROUND_SCAN_BUDGET_BYTES };
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   for (const entry of entries) {
     if (entry.root === "claude-projects") {
@@ -417,7 +691,12 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
       if (!parts) continue;
       const [slug, sid, tid] = parts;
       const [main, subs] = await sessionTranscripts(sid, limit, slug);
-      const info = bgCommand(tid, (main ? [main] : []).concat(subs), slugMainTranscripts(slug, sid));
+      const info = bgCommand(
+        tid,
+        (main ? [main] : []).concat(subs),
+        slugMainTranscripts(slug, sid),
+        backgroundReadBudget,
+      );
       if (info) {
         entry.parent = info.source;
         entry.cmd = info.command;
@@ -457,5 +736,9 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
     if (!entry.parent || !byPath.has(entry.parent)) entry.parent = null;
     else entry.project = rootProject(entry);
   }
-  if (persist) persistWorktreeMap();
+  if (persist) {
+    persistBackgroundCommands();
+    persistCompactChains();
+    persistWorktreeMap();
+  }
 }
