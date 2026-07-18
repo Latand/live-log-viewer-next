@@ -63,6 +63,9 @@ export interface PipelinePorts {
     parentPath: string | null;
     clientAttemptId: string;
     membership: DurableMembershipInput;
+    /** Prior-attempt conversation this stage retry terminally supersedes
+        (issue #383); attempt chains become round chains automatically. */
+    supersedes?: string | null;
   }, onReserved: (reservation: PipelineStageLaunchReservation) => void): Promise<PipelineStageSpawn>;
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
   paneAgentAlive(paneId: string): Promise<boolean>;
@@ -129,15 +132,24 @@ async function spawnPipelineAgent(
     cwd: input.cwd,
     parentConversationId: parent.conversationId,
   });
+  const registry = agentRegistry();
+  /* Stage-retry supersedence (issue #383): the retry names the prior attempt's
+     conversation so its round terminally retires once this spawn settles. A
+     reference the registry cannot resolve is dropped, never parks the
+     pipeline — the board then simply keeps today's sibling rendering. */
+  const supersedes = input.supersedes?.startsWith("conversation_")
+    && registry.conversation(input.supersedes as ViewerConversationId)
+    ? registry.canonicalConversationId(input.supersedes as ViewerConversationId)
+    : null;
   const digest = crypto.createHash("sha256").update(JSON.stringify({
     engine: input.role.engine,
     model: input.role.model,
     effort: input.role.effort,
     cwd: input.cwd,
     parentConversationId: parent.conversationId,
+    ...(supersedes ? { supersedes } : {}),
     prompt: input.prompt,
   })).digest("hex");
-  const registry = agentRegistry();
   const begun = registry.beginSpawnRequest({
     engine: input.role.engine,
     cwd: input.cwd,
@@ -150,6 +162,8 @@ async function spawnPipelineAgent(
     launchProfile,
     clientAttemptId: input.clientAttemptId,
     requestDigest: digest,
+    supersedes,
+    supersedesReason: "stage-retry",
   });
   if (begun.kind === "conflict") throw new Error("pipeline spawn attempt conflicts with its original request");
   onReserved({ launchId: begun.receipt.launchId, conversationId: begun.receipt.conversationId });
@@ -455,12 +469,16 @@ async function tickRunStage(
     persist();
     try {
       const prompt = renderStagePrompt(pipeline, stage, attempt.effectiveRole, normalizedOutput(pipeline));
+      /* The retried attempt supersedes its predecessor's round (issue #383):
+         the prior attempt of the SAME stage that carries a conversation. */
+      const priorAttempt = runFor(pipeline, stage.id)?.attempts.at(-2) ?? null;
       const spawned = await ports.spawnAgent({
         role: attempt.effectiveRole,
         cwd: pipeline.worktreeDir,
         prompt,
         parentPath: latestCompletedAgentPath(pipeline, stage.id),
         clientAttemptId: clientAttemptId(pipeline, stage, attempt),
+        supersedes: priorAttempt?.conversationId ?? null,
         membership: {
           kind: "pipeline",
           containerId: pipeline.id,
@@ -468,7 +486,7 @@ async function tickRunStage(
           slot: `${stage.id}:${attempt.n}`,
           stageId: stage.id,
           stageOrder: pipeline.stages.indexOf(stage),
-          round: null,
+          round: attempt.n,
           parentConversationId: null,
         },
       }, (reservation) => {
