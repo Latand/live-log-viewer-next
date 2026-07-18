@@ -1,6 +1,6 @@
 import { afterAll, afterEach, expect, mock, test } from "bun:test";
 import { act } from "react";
-import { useActEnv } from "@/test-helpers/actEnv";
+import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -20,7 +20,7 @@ import type { HostAxis, HostKind } from "@/components/runtime/runtimeModel";
    - a live tmux-legacy root → Stop keeps the canonical /api/tmux child path. */
 
 const dom = new Window();
-useActEnv();
+installActEnv();
 Object.assign(globalThis, {
   window: dom, document: dom.document, navigator: dom.navigator,
   Node: dom.Node, HTMLElement: dom.HTMLElement, Event: dom.Event,

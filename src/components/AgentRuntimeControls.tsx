@@ -276,12 +276,14 @@ export function DisabledRuntimeControls({ file, reason }: { file: FileEntry; rea
  */
 export function ResumeRuntimeControls({ file }: { file: FileEntry }) {
   const engine = file.engine as "claude" | "codex";
-  const [draft, setDraft] = useState<RuntimeDraft>(() => defaults(file));
+  const [draft, setDraft] = useState<RuntimeDraft>(() => readResumeDraft(file));
   const [state, setState] = useState<RuntimeApplyState>("idle");
-
-  useEffect(() => {
+  const [draftPath, setDraftPath] = useState(file.path);
+  if (draftPath !== file.path) {
+    setDraftPath(file.path);
     setDraft(readResumeDraft(file));
-  }, [file.path]);
+    setState("idle");
+  }
 
   const editDraft = (update: (current: RuntimeDraft) => RuntimeDraft) => {
     setDraft(update);

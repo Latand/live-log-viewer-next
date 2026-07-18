@@ -15,7 +15,6 @@ import {
   humanReceiptReasonKey,
   type RuntimeAttention,
   type RuntimeEnvelope,
-  type ReceiptStatus,
   type RuntimeReceipt,
   type RuntimeSession,
   type RuntimeSnapshot,

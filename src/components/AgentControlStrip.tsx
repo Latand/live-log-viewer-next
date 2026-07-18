@@ -18,7 +18,6 @@ import { useAgentCapabilities } from "./useAgentCapabilities";
 import {
   stripHasVisibleControls,
   type Capability,
-  type ControlName,
   type StripCapabilities,
   type StripSurface,
 } from "./agentCapabilities";

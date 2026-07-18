@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { act } from "react";
-import { useActEnv } from "@/test-helpers/actEnv";
+import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -12,7 +12,7 @@ import { setLocale, translate } from "@/lib/i18n";
 import { appendComposerDraft, mergeRuntimeReceipts, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
 
 const dom = new Window();
-useActEnv();
+installActEnv();
 Object.assign(globalThis, {
   window: dom,
   document: dom.document,
@@ -922,7 +922,7 @@ const quickAckItems = (host: HTMLElement) =>
   [...host.querySelectorAll('[role="menuitem"]')].filter((n) => (n.textContent ?? "").includes(quickAckLabel));
 
 test("a live composer offers an enabled quick-ack in the send menu", async () => {
-  globalThis.fetch = (async (input: string) => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as typeof fetch;
+  globalThis.fetch = (async () => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as unknown as typeof fetch;
   const { host, root } = await renderInto(<TmuxComposer file={relaySubagent} />);
   await openSendMenu(host);
   const items = quickAckItems(host);
@@ -932,7 +932,7 @@ test("a live composer offers an enabled quick-ack in the send menu", async () =>
 });
 
 test("a dead-host composer exposes no quick-ack action (finding: dead composer)", async () => {
-  globalThis.fetch = (async (input: string) => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as typeof fetch;
+  globalThis.fetch = (async () => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as unknown as typeof fetch;
   const { host, root } = await renderInto(<TmuxComposer file={relaySubagent} deadHost />);
   await openSendMenu(host);
   // the menu never opens (no actions) and no quick-ack item exists anywhere
@@ -942,7 +942,7 @@ test("a dead-host composer exposes no quick-ack action (finding: dead composer)"
 });
 
 test("an unresolved-host composer exposes no quick-ack action (finding: unresolved composer)", async () => {
-  globalThis.fetch = (async (input: string) => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as typeof fetch;
+  globalThis.fetch = (async () => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as unknown as typeof fetch;
   const { host, root } = await renderInto(<TmuxComposer file={relaySubagent} sendBlockedReason="resolving the agent host…" />);
   await openSendMenu(host);
   expect(host.querySelector('[role="menu"]')).toBeNull();

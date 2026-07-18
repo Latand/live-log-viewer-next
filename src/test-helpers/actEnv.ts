@@ -7,7 +7,7 @@ import { afterAll } from "bun:test";
  * later `flushSync`-based suite emit spurious "not wrapped in act(...)" warnings.
  * Registering the reset here keeps the flag scoped to the file that opts in.
  */
-export function useActEnv(): void {
+export function installActEnv(): void {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   afterAll(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = false;

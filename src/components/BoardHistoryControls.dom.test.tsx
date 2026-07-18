@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { act } from "react";
-import { useActEnv } from "@/test-helpers/actEnv";
+import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -9,7 +9,7 @@ import type { BoardHistoryEntry } from "@/lib/board/history";
 import { BoardHistoryControls } from "./BoardHistoryControls";
 
 const dom = new Window();
-useActEnv();
+installActEnv();
 Object.assign(globalThis, {
   window: dom,
   document: dom.document,

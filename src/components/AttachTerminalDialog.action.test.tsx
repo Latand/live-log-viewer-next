@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { act } from "react";
-import { useActEnv } from "@/test-helpers/actEnv";
+import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -15,7 +15,7 @@ import { AttachTerminalDialog } from "./AttachTerminalDialog";
    action must surface a failure rather than appear to complete. */
 
 const dom = new Window();
-useActEnv();
+installActEnv();
 Object.assign(globalThis, {
   window: dom, document: dom.document, navigator: dom.navigator,
   Node: dom.Node, HTMLElement: dom.HTMLElement, Event: dom.Event,
@@ -73,7 +73,7 @@ test("resume mode requests the attach-command endpoint", async () => {
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ engine: "claude", accountId: "d", accountLabel: "D", cwd: "/x", command: "claude --resume 1", cdCommand: "cd '/x'", fullCommand: "cd '/x' && claude --resume 1" }) } as unknown as Response);
   }) as typeof fetch;
 
-  const { host, root } = await mount("resume");
+  const { root } = await mount("resume");
   expect(urls.some((u) => u.includes("/api/attach-command"))).toBe(true);
   expect(urls.some((u) => u.includes("attach=1"))).toBe(false);
   await act(async () => root.unmount());
