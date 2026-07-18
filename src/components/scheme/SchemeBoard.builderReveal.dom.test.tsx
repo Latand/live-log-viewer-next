@@ -44,8 +44,7 @@ afterEach(() => {
   dom.sessionStorage.clear();
 });
 
-/* A fresh empty draft — the exact shape `createDraftPipeline` produces on the
-   canvas — surfaced so SchemeBoard docks a placeholder group for it. */
+/* A fresh empty draft in the screen-space pipeline shelf. */
 const draft: Pipeline = {
   id: "d1", task: "New pipeline", project: "demo", repoDir: "/r",
   worktreeDir: "/r-pipeline-d1", branch: "pipeline/new-pipeline-d1",
@@ -84,7 +83,7 @@ const settle = async () => {
   flushSync(() => undefined);
 };
 
-test("the builder reveal ends an active selection session so the panel opens (#136)", async () => {
+test("the builder reveal ends an active selection session and opens the shelf editor (#388)", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -100,14 +99,12 @@ test("the builder reveal ends an active selection session so the panel opens (#1
   flushSync(() => lasso.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   await settle();
 
-  /* While a session is active the group halo is non-interactive: no panel, and the
-     draft's label chip is disabled. */
+  /* The shelf remains reachable while the world selection session is active. */
   expect(host.querySelector("[data-group-override]")).toBeNull();
-  const chip = host.querySelector('[data-scheme-group] button[aria-haspopup="dialog"]') as HTMLButtonElement;
-  expect(chip.disabled).toBe(true);
+  expect(host.querySelector('[data-pipeline-shelf-item="d1"]')).toBeTruthy();
+  expect(host.querySelector('[data-scheme-group]')).toBeNull();
 
-  /* The canvas builder now targets this draft: the reveal must clear the session
-     and open its builder panel, freeing the operator from exiting selection by hand. */
+  /* Targeting this draft clears the world session and opens the shared editor. */
   flushSync(() => root.render(board("d1")));
   await settle();
   expect(host.querySelector("[data-group-override]")).toBeTruthy();

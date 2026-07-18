@@ -162,3 +162,105 @@ test("desktop history opens both durable bindings from one logical review round 
   flushSync(() => current!.click());
   expect(opened).toEqual(["/review-prior.jsonl", currentPath]);
 });
+
+function stableHeaderPipeline(): Pipeline {
+  return {
+    ...draftPipeline(),
+    id: "pipeline-388",
+    task: "Repair pipeline UX",
+    baseRef: "1234567890abcdef1234567890abcdef12345678",
+    lastPassedCommit: "1234567890abcdef1234567890abcdef12345678",
+    stages: [
+      { id: "build", kind: "run", prompt: "", next: "review", effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-5.6", effort: "xhigh", access: "read-write", promptScaffold: null } },
+      { id: "review", kind: "review-loop", prompt: "", next: null, effectiveRole: { roleId: "reviewer", engine: "claude", model: "fable", effort: "high", access: "read-only", promptScaffold: null } },
+    ],
+    cursor: { stageId: "build", state: "spawning" },
+    state: "running",
+  } as Pipeline;
+}
+
+function mountStable(pipeline = stableHeaderPipeline(), mobile = false): HTMLElement {
+  const element = dom.document.createElement("div");
+  dom.document.body.append(element);
+  const host = element as unknown as HTMLElement;
+  root = createRoot(host);
+  flushSync(() => root!.render(<PipelineStrip pipeline={pipeline} mobile={mobile} />));
+  return host;
+}
+
+async function settleStable(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  flushSync(() => undefined);
+}
+
+test("the stable header shows eight base characters and copies the complete commit (#388)", async () => {
+  let copied = "";
+  Object.defineProperty(dom.navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => { copied = value; } } });
+  const pipeline = stableHeaderPipeline();
+  const host = mountStable(pipeline);
+  const button = host.querySelector("[data-pipeline-base-ref]") as HTMLButtonElement;
+
+  expect(button.textContent).toContain("12345678");
+  expect(button.textContent).not.toContain("90abcdef");
+  flushSync(() => button.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await settleStable();
+
+  expect(copied).toBe(pipeline.baseRef);
+  expect(host.textContent).toContain("Full base commit copied");
+});
+
+test("the base-commit live region announces clipboard failure (#388)", async () => {
+  Object.defineProperty(dom.navigator, "clipboard", { configurable: true, value: { writeText: async () => { throw new Error("denied"); } } });
+  const host = mountStable();
+  const button = host.querySelector("[data-pipeline-base-ref]") as HTMLButtonElement;
+  flushSync(() => button.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await settleStable();
+  expect(host.textContent).toContain("Could not copy the base commit");
+});
+
+test("the overflow menu focuses its first action and Escape restores trigger focus (#388)", async () => {
+  const host = mountStable();
+  const trigger = host.querySelector('[aria-label="More pipeline actions"]') as HTMLButtonElement;
+  flushSync(() => trigger.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await settleStable();
+
+  const menu = dom.document.body.querySelector('[role="menu"]') as unknown as HTMLElement;
+  const first = menu.querySelector('[role="menuitem"]') as HTMLButtonElement;
+  expect(first.textContent).toContain("Close pipeline");
+  expect(dom.document.activeElement?.getAttribute("role")).toBe("menuitem");
+
+  flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event));
+  await settleStable();
+  expect(dom.document.body.querySelector('[role="menu"]')).toBeNull();
+  expect(dom.document.activeElement?.getAttribute("aria-label")).toBe(trigger.getAttribute("aria-label"));
+});
+
+test("the overflow trigger regains focus after a menu action settles (#388)", async () => {
+  globalThis.fetch = mock(async () => new Response(JSON.stringify({ pipeline: stableHeaderPipeline() }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  })) as unknown as typeof fetch;
+  const host = mountStable();
+  const trigger = host.querySelector('[aria-label="More pipeline actions"]') as HTMLButtonElement;
+  flushSync(() => trigger.click());
+  await settleStable();
+
+  const close = dom.document.body.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement;
+  flushSync(() => close.click());
+  await settleStable();
+
+  expect(dom.document.body.querySelector('[role="menu"]')).toBeNull();
+  expect(dom.document.activeElement?.getAttribute("aria-label")).toBe(trigger.getAttribute("aria-label"));
+});
+
+test("the mobile rail keeps queued and waiting labels inside isolated overflow (#388)", () => {
+  const host = mountStable(stableHeaderPipeline(), true);
+  const strip = host.querySelector('[role="group"]') as HTMLElement;
+  const rail = host.querySelector("[data-pipeline-stage-rail]") as HTMLElement;
+  expect(strip.className).toContain("overflow-visible");
+  expect(strip.className).not.toContain("overflow-x-auto");
+  expect(rail.className).toContain("overflow-x-auto");
+  expect(host.querySelector('[data-stage-presentation="queued"]')?.textContent).toContain("Queued");
+  expect(host.querySelector('[data-stage-presentation="waiting"]')?.textContent).toContain("Waiting");
+  expect(host.querySelector('[data-stage-compact="true"]')).toBeNull();
+});

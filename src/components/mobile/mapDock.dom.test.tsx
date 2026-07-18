@@ -147,12 +147,16 @@ test("opening the mobile map keeps every active pipeline's full plan on a dock i
   expect(summary).not.toBeNull();
   flushSync(() => summary!.click());
   await settle();
-  /* Evidence-less stages render as glyph chips (#156): the full stage graph is
-     present with each stage named to assistive tech. */
-  expect(overlay!.querySelector('[data-pipeline-stage="plan"]')).not.toBeNull();
-  expect(overlay!.querySelector('[data-pipeline-stage="build"]')).not.toBeNull();
-  expect(overlay!.querySelector('[aria-label="plan, pending"]')).not.toBeNull();
-  expect(overlay!.querySelector('[aria-label="build, pending"]')).not.toBeNull();
+  /* Every planned stage keeps a labeled queued/waiting placeholder (#388): the
+     full stage graph is present with each stage named and its state visible. */
+  const plan = overlay!.querySelector('[data-pipeline-stage="plan"]');
+  const build = overlay!.querySelector('[data-pipeline-stage="build"]');
+  expect(plan).not.toBeNull();
+  expect(build).not.toBeNull();
+  expect(plan!.getAttribute("data-stage-presentation")).toBe("waiting");
+  expect(build!.getAttribute("data-stage-presentation")).toBe("waiting");
+  expect(plan!.textContent).toContain("Waiting");
+  expect(build!.textContent).toContain("Waiting");
 
   const framing = overlay!.querySelector('[aria-label="Map framing"]')!;
   const all = Array.from(framing.querySelectorAll("button")).find((button) => button.textContent === "All");

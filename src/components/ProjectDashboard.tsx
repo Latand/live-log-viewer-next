@@ -38,7 +38,7 @@ import { MobileBottomShelf } from "./MobileBottomShelf";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
-import { TaskToastHost, pushTaskToast } from "./tasks/taskToast";
+import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
@@ -376,14 +376,13 @@ export function ProjectDashboard({
   const [taskSheetNonce, setTaskSheetNonce] = useState(0);
   /* Place-on-map: the unplaced task whose next board click pins it. */
   const [placeTask, setPlaceTask] = useState<BoardTask | null>(null);
-  /* Template-first pipeline entry (#196): `+ Пайплайн` opens this picker; the
-     chosen template lands as a draft with its whole role chain on the canvas. */
+  /* Template-first pipeline entry (#196, #388): `+ Пайплайн` opens repository
+     admission; a successful choice lands in the owning shelf or group. */
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   /* The canvas builder (#136): the draft pipeline whose group panel auto-opens
      right after `+ Пайплайн` drops it, so the operator lands in the builder with
      no hunting for its chip. */
   const [builderPipelineId, setBuilderPipelineId] = useState<string | null>(null);
-  const [draftBusy, setDraftBusy] = useState(false);
   const [highlight, setHighlight] = useState<string | null>(null);
   /* Jump targets the scheme would otherwise skip (a stalled root builds no
      automatic group; a stalled branch hides inside a mini stack) materialize
@@ -851,19 +850,12 @@ export function ProjectDashboard({
     pendingFocusRef.current = "draft::" + id;
   };
 
-  /* `+ Пайплайн` (#136, #196): the picker's template lands as a DRAFT whose
-     whole role chain renders as dashed placeholder windows on the canvas; the
-     blank choice drops an empty draft and opens its builder panel. The legacy
-     creation form is gone — a failed POST (unresolvable repo etc.) surfaces as
-     a toast and the operator fixes the repo on the draft itself. */
-  const addPipelineDraft = async (template: PipelineTemplate | null) => {
-    if (draftBusy) return;
+  /* `+ Пайплайн` (#136, #196, #388): the picker admits a repository before it
+     creates a DRAFT. The draft opens in the screen-space shelf, where the full
+     role chain and shared editor remain available before the first run. */
+  const addPipelineDraft = async (template: PipelineTemplate | null, repoDir: string) => {
     onUserNavigate?.();
-    setDraftBusy(true);
-    const result = await createDraftPipeline(project, undefined, template ?? undefined);
-    setDraftBusy(false);
-    if (result.pipeline) setBuilderPipelineId(result.pipeline.id);
-    else if (result.error) pushTaskToast("err", result.error);
+    return createDraftPipeline(project, repoDir, template ?? undefined);
   };
 
   /* The handoff handle under a pane: a draft that continues this conversation
@@ -1106,10 +1098,9 @@ export function ProjectDashboard({
      canvas instead of hanging as lone stub nodes in the middle of it. */
   const dockedTasks = visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
   const schemeGroups = visibleGroups.filter((group) => !group.orphanTask);
-  /* Active pipelines for this project (issue #136): the scheme must be available
-     — and carry each pipeline's plan — even before its first stage transcript
-     lands or after every stage node is hidden, now the persistent band is gone.
-     They dock as placeholder groups in the layout (buildSchemeLayout). */
+  /* Active pipelines for this project keep the scheme available before the
+     first stage transcript lands. Memberless drafts use the screen-space shelf;
+     materialized pipelines retain their world-space group halo. */
   const activePipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
   const visibleDrafts = drafts.filter((id) => !pendingRestoredHandoffs.has(id));
   const hasNodes =
@@ -1320,11 +1311,12 @@ export function ProjectDashboard({
 
       {templatePickerOpen ? (
         <PipelineTemplatePicker
-          busy={draftBusy}
+          repoDir={resolvedDraftCwd}
           onClose={() => setTemplatePickerOpen(false)}
-          onPick={(template) => {
+          onCreate={addPipelineDraft}
+          onCreated={(pipeline) => {
             setTemplatePickerOpen(false);
-            void addPipelineDraft(template);
+            setBuilderPipelineId(pipeline.id);
           }}
         />
       ) : null}
@@ -1465,7 +1457,7 @@ export function ProjectDashboard({
               <button
                 type="button"
                 onClick={() => setTemplatePickerOpen(true)}
-                disabled={draftBusy}
+                disabled={!loaded}
                 aria-label={t("pipelineBuilder.createDraftAria")}
                 className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-border bg-card px-3 py-1.5 text-[11.5px] font-bold text-primary shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
               >

@@ -25,6 +25,7 @@ import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
 import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase } from "./git";
 import { MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "./limits";
+import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipelineRepo } from "./preflight";
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
 import { buildPipeline, isEffectiveRole, loadPipelines, pipelineIdentity, PipelineStoreError, withPipelineMutation } from "./store";
@@ -34,6 +35,8 @@ import type {
   PatchPipelineRequest,
   Pipeline,
   PipelineRoleId,
+  PipelineRepoPreflight,
+  PipelineRepoPreflightErrorCode,
   PipelineStage,
   PipelineStageInput,
   PipelineStageAttempt,
@@ -55,6 +58,7 @@ export type PipelineSpawnReceipt = PipelineStageSpawn & {
 
 export interface PipelinePorts {
   exec: ExecPort;
+  preflightRepo(repoDir: string): PipelineRepoPreflight;
   roleLookup?: PipelineRoleLookup | null;
   spawnAgent(input: {
     role: EffectivePipelineRole;
@@ -210,6 +214,7 @@ export function defaultPipelinePorts(): PipelinePorts {
   let runtimeSnapshot: ReturnType<NonNullable<ReturnType<typeof runtimeHostClient>>["snapshot"]> | null = null;
   return {
     exec: realExec,
+    preflightRepo: preflightPipelineRepo,
     roleLookup: pipelineRoleLookup,
     spawnAgent: spawnPipelineAgent,
     spawnReceipt: (launchId) => {
@@ -924,10 +929,29 @@ function replaceDraftStages(
   return {};
 }
 
+type PipelineMutationResult = {
+  pipeline?: Pipeline;
+  error?: string;
+  status?: number;
+  code?: PipelineRepoPreflightErrorCode;
+  field?: "repoDir";
+  path?: string;
+};
+
+function preflightFailure(result: Extract<PipelineRepoPreflight, { ok: false }>): PipelineMutationResult {
+  return {
+    error: pipelineRepoPreflightError(result),
+    status: pipelineRepoPreflightStatus(result.code),
+    code: result.code,
+    field: "repoDir",
+    path: result.path,
+  };
+}
+
 export async function createPipelineFromRequest(
   req: CreatePipelineRequest,
   ports: PipelinePorts = defaultPipelinePorts(),
-): Promise<{ pipeline?: Pipeline; error?: string; status?: number }> {
+): Promise<PipelineMutationResult> {
   const task = typeof req.task === "string" ? req.task.trim() : "";
   if (!task) return { error: "task is required", status: 400 };
   if (task.length > MAX_TASK_LENGTH) return { error: `task exceeds ${MAX_TASK_LENGTH} characters`, status: 400 };
@@ -937,10 +961,11 @@ export async function createPipelineFromRequest(
   if (req.autoStart !== undefined && typeof req.autoStart !== "boolean") return { error: "autoStart must be a boolean", status: 400 };
   if (req.baseBranch !== undefined && typeof req.baseBranch !== "string") return { error: "baseBranch must be a string", status: 400 };
   if (req.baseRef !== undefined && typeof req.baseRef !== "string") return { error: "baseRef must be a string", status: 400 };
-  const repoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
-  if (!repoDir) return { error: "repoDir is required", status: 400 };
-  const git = ports.exec("git", ["rev-parse", "--git-dir"], repoDir);
-  if (git.code !== 0) return { error: `not a git repository: ${repoDir}`, status: 400 };
+  const requestedRepoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
+  if (!requestedRepoDir) return { error: "repoDir is required", status: 400 };
+  const admission = ports.preflightRepo(requestedRepoDir);
+  if (!admission.ok) return preflightFailure(admission);
+  const repoDir = admission.repoDir;
   /* A draft (autoStart:false) may be created empty and assembled on the canvas
      (#136); an immediately-started pipeline still needs its full 2–4 stage plan. */
   const normalized = normalizeStages(req.stages, ports.roleLookup, undefined, req.autoStart === false ? 0 : 2);
@@ -996,7 +1021,7 @@ export async function patchPipeline(
   id: string,
   req: PatchPipelineRequest,
   ports: PipelinePorts = defaultPipelinePorts(),
-): Promise<{ pipeline?: Pipeline; error?: string; status?: number }> {
+): Promise<PipelineMutationResult> {
   return withPipelineMutation(async (pipelines, persist) => {
     const pipeline = pipelines.find((item) => item.id === id);
     if (!pipeline) return { error: "pipeline not found", status: 404 };
@@ -1010,6 +1035,13 @@ export async function patchPipeline(
          while it is assembled on the canvas, and it needs a full stage plan to run.
          The review-loop-needs-a-preceding-run rule already held on every draft edit. */
       if (pipeline.stages.length < 2) return { error: "add at least 2 stages before starting", status: 409 };
+      const admission = ports.preflightRepo(pipeline.repoDir);
+      if (!admission.ok) return preflightFailure(admission);
+      if (admission.repoDir !== pipeline.repoDir) {
+        pipeline.repoDir = admission.repoDir;
+        pipeline.project = ports.projectForCwd(admission.repoDir) ?? path.basename(admission.repoDir);
+        Object.assign(pipeline, pipelineIdentity(pipeline.id, pipeline.task, admission.repoDir));
+      }
       if (!pipeline.baseBranch || !pipeline.baseRef || !pipeline.lastPassedCommit) {
         const base = resolvePipelineBase(pipeline.repoDir, {}, ports.exec);
         if (!base.ok) return { error: base.error, status: 409 };
@@ -1028,13 +1060,15 @@ export async function patchPipeline(
       if (req.spec !== undefined && typeof req.spec !== "string") return { error: "spec must be a string", status: 400 };
       const spec = req.spec === undefined ? pipeline.spec : req.spec.trim() || undefined;
       if (spec && spec.length > MAX_SPEC_LENGTH) return { error: `spec exceeds ${MAX_SPEC_LENGTH} characters`, status: 400 };
-      const repoDir = req.repoDir === undefined ? pipeline.repoDir : typeof req.repoDir === "string" ? req.repoDir.trim() : "";
-      if (!repoDir) return { error: "repoDir is required", status: 400 };
-      const repoChanged = repoDir !== pipeline.repoDir;
-      if (repoChanged) {
-        const git = ports.exec("git", ["rev-parse", "--git-dir"], repoDir);
-        if (git.code !== 0) return { error: `not a git repository: ${repoDir}`, status: 400 };
+      const requestedRepoDir = req.repoDir === undefined ? pipeline.repoDir : typeof req.repoDir === "string" ? req.repoDir.trim() : "";
+      if (!requestedRepoDir) return { error: "repoDir is required", status: 400 };
+      let repoDir = pipeline.repoDir;
+      if (requestedRepoDir !== pipeline.repoDir) {
+        const admission = ports.preflightRepo(requestedRepoDir);
+        if (!admission.ok) return preflightFailure(admission);
+        repoDir = admission.repoDir;
       }
+      const repoChanged = repoDir !== pipeline.repoDir;
       pipeline.task = task;
       if (spec) pipeline.spec = spec;
       else delete pipeline.spec;

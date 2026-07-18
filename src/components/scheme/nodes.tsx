@@ -804,6 +804,7 @@ function NodeShell({
   onHandoff,
   onSpawnRetry,
   onExpand,
+  onPipelineCreated,
 }: {
   node: SchemeNode;
   ringed: boolean;
@@ -847,12 +848,12 @@ function NodeShell({
   onSpawnRetry?: (file: FileEntry) => void;
   /** Header control: open this conversation as the full-window overlay. */
   onExpand: (path: string) => void;
+  onPipelineCreated?: (pipeline: Pipeline) => void;
 }) {
   const { t } = useLocale();
   const [underOpen, setUnderOpen] = useState(false);
   const [flowOpen, setFlowOpen] = useState(false);
   const [pipelineOpen, setPipelineOpen] = useState(false);
-  const [pipelineBusy, setPipelineBusy] = useState(false);
   /* The compact board strip sits in FlowStrip's slot; a review-loop current
      stage never reaches here (its node carries the flow, and the strip map
      already excludes it), but gate on !flow so the two can never stack. */
@@ -922,21 +923,16 @@ function NodeShell({
           <FlowDialog file={node.file} onClose={() => setFlowOpen(false)} />
         </div>
       ) : null}
-      {/* The node's `⇢ pipeline` entry (#196): the template picker replaces the
-          deleted creation form. A pick drops a draft wired to this conversation
-          (src lineage + its cwd as the repo); a failure lands as a toast. */}
+      {/* The node's `⇢ pipeline` entry (#196): a successful repository admission
+          creates a draft wired to this conversation and opens its shelf editor. */}
       {pipelineOpen ? (
         <PipelineTemplatePicker
-          busy={pipelineBusy}
+          repoDir={node.file.projectRoot?.trim() || node.file.cwd?.trim() || ""}
           onClose={() => setPipelineOpen(false)}
-          onPick={(template) => {
-            if (pipelineBusy) return;
-            setPipelineBusy(true);
-            void createDraftPipeline(node.file.project, undefined, template ?? undefined, node.file.path).then((result) => {
-              setPipelineBusy(false);
-              setPipelineOpen(false);
-              if (result.error) pushTaskToast("err", result.error);
-            });
+          onCreate={(template, repoDir) => createDraftPipeline(node.file.project, repoDir, template ?? undefined, node.file.path)}
+          onCreated={(created) => {
+            setPipelineOpen(false);
+            onPipelineCreated?.(created);
           }}
         />
       ) : null}
@@ -1181,6 +1177,7 @@ export const NodesLayer = memo(function NodesLayer({
   onSpawnRetry,
   onOpenTask,
   onExpand,
+  onPipelineCreated,
 }: {
   layout: SchemeLayout;
   project: string;
@@ -1218,6 +1215,7 @@ export const NodesLayer = memo(function NodesLayer({
   onOpenTask?: (task: BoardTask) => void;
   /** Opens a conversation as the full-window overlay (desktop panes only). */
   onExpand: (path: string) => void;
+  onPipelineCreated?: (pipeline: Pipeline) => void;
 }) {
   /* Hosted session nodes take their status dot from the runtime bus's
      session-status events instead of the poll-derived activity (Fable §7).
@@ -1361,6 +1359,7 @@ export const NodesLayer = memo(function NodesLayer({
             onHandoff={onHandoff}
             onSpawnRetry={onSpawnRetry}
             onExpand={onExpand}
+            onPipelineCreated={onPipelineCreated}
           />
         );
       })}

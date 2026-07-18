@@ -23,7 +23,8 @@ import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
-import { compactPipelineLayoutFlows, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
+import { compactPipelineLayoutFlows, partitionPipelineSurfaces, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
+import { PipelineShelf } from "@/components/pipelines/PipelineShelf";
 import { BulkActionBar } from "./BulkActionBar";
 import { EdgeChips } from "./EdgeChips";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
@@ -84,8 +85,8 @@ interface Props {
   /** Collapsed worker stacks (issue #136): drawn as one minimap dot per origin so
       folded workers read as a handful of dots, not an agent flood. */
   workerStacks?: WorkerStack[];
-  /** Active project pipelines that must keep a scheme surface even with no placed
-      stage node yet (issue #136): each gets a docked placeholder group + plan. */
+  /** Active project pipelines. Memberless drafts render in the screen-space
+      shelf; pipelines with board occupants retain their group halo. */
   surfacePipelines?: Pipeline[];
   /** Ids of not-yet-spawned conversation drafts drawn as full panes. */
   drafts: string[];
@@ -211,6 +212,15 @@ export function SchemeBoard({
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
   const [selected, setSelected] = useState<string | null>(null);
+  const [localBuilderPipelineId, setLocalBuilderPipelineId] = useState<string | null>(null);
+  const activeBuilderPipelineId = builderPipelineId ?? localBuilderPipelineId;
+  const handleBuilderOpened = useCallback(() => {
+    setLocalBuilderPipelineId(null);
+    onBuilderOpened?.();
+  }, [onBuilderOpened]);
+  const handlePipelineCreated = useCallback((created: Pipeline) => {
+    setLocalBuilderPipelineId(created.id);
+  }, []);
   /* The ephemeral selection session: a set of node paths plus an "armed"
      latch for the toolbar button. Session ⇔ armed or non-empty — a plain
      single-click ring never enters it. */
@@ -233,6 +243,14 @@ export function SchemeBoard({
   const layout = useMemo(
     () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths),
     [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths],
+  );
+  const memberfulPipelineIds = useMemo(
+    () => new Set(layout.groups.filter((group) => group.kind === "pipeline" && group.pipeline).map((group) => group.id)),
+    [layout.groups],
+  );
+  const shelfPipelines = useMemo(
+    () => partitionPipelineSurfaces(surfacePipelines, memberfulPipelineIds).shelf,
+    [surfacePipelines, memberfulPipelineIds],
   );
 
   /* Selection keys are transcript paths, so the 10s poll relayout keeps the
@@ -755,26 +773,22 @@ export function SchemeBoard({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires only on a new `+ Task` press
   }, [newTaskNonce]);
 
-  /* The canvas builder (#136): when `+ Пайплайн` drops a fresh draft, reveal its
-     placeholder group so its builder panel opens on screen. GroupsLayer opens the
-     panel only while interactive, and both the hand tool and an active selection
-     session (armed or a non-empty multi-set) suspend interactivity — so end the
-     session, switch to select mode, and glide the camera onto the group. Fires
-     once per id, once the group appears in the layout (the POST→refetch
-     round-trip). */
+  /* A fresh draft opens its editor on the surface that owns it. Materialized
+     pipelines glide to their world halo; memberless drafts stay in screen space. */
   const builderRevealed = useRef<string | null>(null);
   useEffect(() => {
-    if (!builderPipelineId || mapMode) return;
-    if (builderRevealed.current === builderPipelineId) return;
-    const group = layout.groups.find((candidate) => candidate.id === builderPipelineId && candidate.pipeline);
-    if (!group) return;
-    builderRevealed.current = builderPipelineId;
+    if (!activeBuilderPipelineId || mapMode) return;
+    if (builderRevealed.current === activeBuilderPipelineId) return;
+    const group = layout.groups.find((candidate) => candidate.id === activeBuilderPipelineId && candidate.pipeline);
+    const onShelf = shelfPipelines.some((pipeline) => pipeline.id === activeBuilderPipelineId);
+    if (!group && !onShelf) return;
+    builderRevealed.current = activeBuilderPipelineId;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot reveal syncing camera + selection to a new draft
     clearSession();
     setMode("select");
-    centerOn(group, 0.75);
+    if (group) centerOn(group, 0.75);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires when the new draft's group first renders
-  }, [builderPipelineId, layout]);
+  }, [activeBuilderPipelineId, layout, shelfPipelines]);
 
   /* Spatial keyboard navigation: live only on the desktop board — a selection
      session, an expanded overlay, or map mode all suspend it. */
@@ -1049,7 +1063,7 @@ export function SchemeBoard({
       >
         {/* Group halos sit behind every edge and card so a running flow/pipeline
             reads as one framed region; the label chip stays live off the map. */}
-        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} pipelineControls={mapMode ? undefined : pipelineControls} autoOpenGroupId={builderPipelineId} onAutoOpen={onBuilderOpened} />
+        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} pipelineControls={mapMode ? undefined : pipelineControls} autoOpenGroupId={activeBuilderPipelineId} onAutoOpen={handleBuilderOpened} />
         <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
@@ -1083,6 +1097,7 @@ export function SchemeBoard({
           onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
           onOpenTask={onOpenTask ? stableOpenTask : undefined}
           onExpand={stableExpand}
+          onPipelineCreated={handlePipelineCreated}
         />
         <TaskEdgesLayer edges={taskEdges} world={world} routes={taskRoutes} onRetry={retryEdge} />
         <TasksLayer
@@ -1151,6 +1166,24 @@ export function SchemeBoard({
         obstacles={chipObstacles}
         onFit={fitRect}
       />
+
+      {!mapMode ? (
+        <PipelineShelf
+          pipelines={shelfPipelines}
+          flows={flows}
+          files={files}
+          renderablePaths={renderablePipelinePaths}
+          renderableFlows={renderableGroupFlows}
+          materializedPaths={placedNodePaths}
+          materializedFlows={renderableGroupFlows}
+          linkedTasksByPipeline={linkedTasksByPipeline}
+          autoOpenPipelineId={activeBuilderPipelineId}
+          onAutoOpen={handleBuilderOpened}
+          onOpenPath={openPipelinePath}
+          onOpenFlow={openPipelineFlow}
+          onOpenTask={stableOpenTask}
+        />
+      ) : null}
 
       <div data-scheme-ui className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-border bg-card/95 p-1 shadow-1">
         {mapMode ? null : (

@@ -2,6 +2,19 @@ import type { FlowEngine, RoleConfig } from "@/lib/flows/types";
 
 export type PipelineAccess = "read-only" | "read-write";
 
+export type PipelineRepoPreflightErrorCode =
+  | "missing"
+  | "not_directory"
+  | "repo_unreadable"
+  | "repo_untraversable"
+  | "not_git"
+  | "git_metadata_unwritable"
+  | "worktree_parent_unwritable";
+
+export type PipelineRepoPreflight =
+  | { ok: true; repoDir: string; gitCommonDir: string; worktreeParent: string }
+  | { ok: false; code: PipelineRepoPreflightErrorCode; path: string };
+
 export type PipelineRoleId =
   | "orchestrator"
   | "reviewer"

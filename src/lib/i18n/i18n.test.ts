@@ -48,10 +48,10 @@ describe("compact pipeline lineage copy (#353)", () => {
     expect(evidence).toContain("GPT-5.6");
   });
 
-  test("template guidance describes compact groups and on-demand configuration in both locales", () => {
-    expect(en["pipelineTemplates.subtitle"]).toContain("compact group");
+  test("template guidance describes the shelf and on-demand configuration in both locales", () => {
+    expect(en["pipelineTemplates.subtitle"]).toContain("pipeline shelf");
     expect(en["pipelineTemplates.subtitle"]).toContain("on demand");
-    expect(uk["pipelineTemplates.subtitle"]).toContain("компакт");
+    expect(uk["pipelineTemplates.subtitle"]).toContain("полиці пайплайнів");
     expect(uk["pipelineTemplates.subtitle"]).toContain("за запитом");
   });
 
