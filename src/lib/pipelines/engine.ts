@@ -86,6 +86,16 @@ function engineForTranscript(transcript: string): "claude" | "codex" | null {
   return null;
 }
 
+/**
+ * Viewer-managed Claude stages run autonomously. Their role access remains a
+ * product-scope contract, while the CLI permission mode must allow ordinary
+ * repository reads, GitHub inspection, screenshots, and verification commands
+ * without an interactive permission wall.
+ */
+export function pipelineClaudePermissionMode(role: EffectivePipelineRole): string | null {
+  return role.engine === "claude" ? "bypassPermissions" : null;
+}
+
 function parentIdentity(parentPath: string | null): {
   conversationId: ViewerConversationId | null;
   sessionKey: ReturnType<typeof sessionKeyFromTranscript>;
@@ -111,7 +121,7 @@ async function spawnPipelineAgent(
     model: input.role.model,
     effort: input.role.effort,
     readOnly: input.role.access === "read-only",
-    permissionMode: input.role.engine === "claude" && input.role.access === "read-only" ? "dontAsk" : null,
+    permissionMode: pipelineClaudePermissionMode(input.role),
     codexHome: input.role.engine === "codex" ? account.home : null,
     claudeConfigDir: input.role.engine === "claude" ? account.home : null,
     claudeProjectsDir: input.role.engine === "claude" ? account.transcriptRoot : null,

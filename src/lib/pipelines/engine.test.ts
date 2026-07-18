@@ -7,7 +7,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
-const { createPipelineFromRequest, patchPipeline, reviewNote, tickPipelines } = await import("./engine");
+const { createPipelineFromRequest, patchPipeline, pipelineClaudePermissionMode, reviewNote, tickPipelines } = await import("./engine");
 const { loadPipelines, savePipelines } = await import("./store");
 type PipelinePorts = import("./engine").PipelinePorts;
 
@@ -18,6 +18,33 @@ const RUN_STAGES = [
   { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Build from {{prev.output}}", next: null },
 ] as const;
 const ORIGIN_MAIN_SHA = "48c739bbcc87b3244aee7fb0e2d1b3f8e312548f";
+
+test("Claude pipeline roles keep autonomous tool access under read-only scope fences", () => {
+  expect(pipelineClaudePermissionMode({
+    roleId: "architect",
+    engine: "claude",
+    model: "fable",
+    effort: "high",
+    access: "read-only",
+    promptScaffold: "Read-only architecture contract",
+  })).toBe("bypassPermissions");
+  expect(pipelineClaudePermissionMode({
+    roleId: "builder",
+    engine: "claude",
+    model: "fable",
+    effort: "high",
+    access: "read-write",
+    promptScaffold: "Builder contract",
+  })).toBe("bypassPermissions");
+  expect(pipelineClaudePermissionMode({
+    roleId: "reviewer",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+    effort: "xhigh",
+    access: "read-only",
+    promptScaffold: "Reviewer contract",
+  })).toBeNull();
+});
 
 function entry(pathname: string): FileEntry {
   return {
