@@ -21,6 +21,9 @@ export interface AttentionCardProps {
   onAnswerQuestion?: (optionIndex: number, questionIndex?: number) => void;
   onAnswerQuestions?: (answers: number[][]) => void;
   busy?: boolean;
+  /** Dead-host archive (issue #247 §5): the request died with its host, so the
+      card stays as history — dimmed, no buttons, no focus trap, one caption. */
+  archived?: boolean;
 }
 
 /**
@@ -31,7 +34,7 @@ export interface AttentionCardProps {
  * reduced motion. The `autoResolutionMs` countdown is display-only — only an
  * engine-confirmed resolution closes the card (Sol: no client auto-resolve).
  */
-export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, onAnswerQuestions, busy }: AttentionCardProps) {
+export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, onAnswerQuestions, busy, archived = false }: AttentionCardProps) {
   const { t } = useLocale();
   const cardRef = useRef<HTMLDivElement>(null);
   const heuristic = attention.kind === "waiting_heuristic";
@@ -44,7 +47,9 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
   }
 
   // Focus the first control and trap Tab within the card while it is open.
+  // Archived cards are inert history — no focus trap, no keyboard resolution.
   useEffect(() => {
+    if (archived) return;
     const node = cardRef.current;
     if (!node) return;
     const focusables = () => Array.from(node.querySelectorAll<HTMLElement>('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')).filter((el) => !el.hasAttribute("disabled"));
@@ -82,7 +87,7 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
     };
     node.addEventListener("keydown", onKey);
     return () => node.removeEventListener("keydown", onKey);
-  }, [attention.id, onApprove, onDeny]);
+  }, [attention.id, onApprove, onDeny, archived]);
 
   const questions = attention.request.questions
     ?? (attention.request.question ? [attention.request.question] : []);
@@ -98,10 +103,11 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
       role="group"
       aria-label={t("runtime.attention.title")}
       data-attention-kind={attention.kind}
-      className={`my-3 rounded-[8px] border p-4 shadow-1 ${border}`}
+      data-attention-archived={archived || undefined}
+      className={`my-3 rounded-[8px] border p-4 shadow-1 ${border} ${archived ? "opacity-60 saturate-50" : ""}`}
     >
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        {attention.unowned ? (
+        {attention.unowned && !archived ? (
           <span className="inline-flex items-center gap-1 rounded-full bg-danger/15 px-2 py-0.5 text-[11px] font-bold text-danger" role="alert">
             <AlertTriangle className="h-3.5 w-3.5" aria-hidden /> {t("runtime.attention.unowned")}
           </span>
@@ -110,7 +116,7 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
           {t(KIND_LABEL[attention.kind])}
         </span>
         {heuristic ? <span className="text-[11px] text-muted">{t("runtime.attention.heuristicNote")}</span> : null}
-        {remaining !== null ? (
+        {remaining !== null && !archived ? (
           <span className="text-[11px] font-semibold text-muted" role="timer" aria-live="off">
             {t("runtime.attention.expiresIn", { seconds: remaining })}
           </span>
@@ -135,7 +141,7 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
 
       {attention.request.detail ? <div className="mt-2 text-[12px] text-muted">{attention.request.detail}</div> : null}
 
-      {questions.length > 0 ? (
+      {questions.length > 0 && !archived ? (
         <div className="mt-2 space-y-3">
           {questions.map((question, questionIndex) => {
             const staged = questions.length > 1 || question.multiSelect === true;
@@ -187,7 +193,7 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
           </div>
       ) : null}
 
-      {(attention.kind === "approval" || attention.kind === "permission") && (onApprove || onDeny) ? (
+      {(attention.kind === "approval" || attention.kind === "permission") && (onApprove || onDeny) && !archived ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {onApprove ? (
             <button
@@ -211,10 +217,15 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
         </div>
       ) : null}
 
-      {busy ? (
+      {busy && !archived ? (
         <div className="mt-2 inline-flex items-center gap-1.5 text-[12px] font-semibold text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden /> {t("runtime.attention.answering")}
         </div>
+      ) : null}
+      {/* Archived history (§5): the request died with its host, so the card keeps
+          the agent's question visible but stops pretending to be answerable. */}
+      {archived ? (
+        <div className="mt-3 text-[12px] font-semibold text-muted">{t("deadHost.expiredCard")}</div>
       ) : null}
     </div>
   );

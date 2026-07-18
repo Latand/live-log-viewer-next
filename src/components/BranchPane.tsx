@@ -20,7 +20,9 @@ import { DeleteFileButton } from "./DeleteFileButton";
 import { FavoriteCrown, FavoriteCrownMarker } from "./FavoriteCrown";
 import { MigrationDivider, MigrationRibbon } from "./MigrationRibbon";
 import { EffortPills } from "./EffortPills";
-import { AgentRuntimeControls } from "./AgentRuntimeControls";
+import { AgentControlStrip } from "./AgentControlStrip";
+import { useAgentCapabilities } from "./useAgentCapabilities";
+import { DeadHostBanner } from "./runtime/DeadHostBanner";
 import { FlipRow } from "./FlipRow";
 import { LogFeed } from "./LogFeed";
 import { paneState, type PaneState } from "./paneState";
@@ -142,14 +144,6 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
   const badge = engineBadge(file);
   const state = paneState(file);
   const tone = PANE_TONES[state];
-  /* The live runtime pill (model/effort picker) applies only to a running,
-     top-level claude/codex agent, where reconfigure has a tmux session to act
-     on. On the phone it is the single tappable model·reasoning control for those
-     panes (issue #177 item 2). Every other phone pane collapses its model and
-     reasoning into one compact read-only chip below, so the card carries exactly
-     one model·reasoning element in all states. Desktop keeps its own chip +
-     effort-bar pair. */
-  const showRuntimeControls = !file.spawn && file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex");
   const migState = cardMigrationState(file.migration);
   /* The phone metadata row scrolls horizontally to stay one line (issue #177
      item 4); this tracks whether more is clipped to the right so a fade
@@ -171,6 +165,15 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      the chime pane registry, the composer's held receipts, and per-card recovery
      all key on this — never on `path`, which is active-generation metadata. */
   const cardId = conversationIdentity(file);
+  /* The one capability read (issue #241 §4): drives the dead-host banner (§5)
+     and the composer send gate. When the structured host died the banner owns
+     recovery and the composer/attention cards stand down; while the runtime
+     plane has not yet resolved the host, Send is blocked so a structured/dead
+     conversation is never messaged through the legacy /api/tmux path (finding 1). */
+  const { caps } = useAgentCapabilities(file);
+  const deadHost = caps.surface === "dead";
+  const sendCap = caps.controls.send;
+  const sendBlockedReason = !deadHost && sendCap.state === "disabled" ? t(sendCap.reason) : null;
   /* A failed per-card retry/rollback must be announced, not swallowed (finding
      3): the previous code ignored the POST result entirely. */
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
@@ -309,16 +312,13 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               }`}
             >
               <LastActivity file={file} />
-              {/* Model + reasoning. The phone shows one element (issue #177 item
-                  2): a running root claude/codex pane gets the tappable picker
-                  pill, every other phone pane a single «model · reasoning»
-                  read-only chip. Desktop is unchanged — the observed model chip
-                  and effort bars always render, and the runtime picker rides
-                  alongside them for a running root agent. */}
+              {/* Model + reasoning is now read-only identity only (issue #241):
+                  the model/effort *picker* moved out of the header into the
+                  unified control strip. The phone shows a single «model ·
+                  reasoning» chip; desktop shows the observed model chip + effort
+                  bars. */}
               {isMobile ? (
-                showRuntimeControls ? (
-                  <AgentRuntimeControls file={file} />
-                ) : file.model ? (
+                file.model ? (
                   <span
                     className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold"
                     style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
@@ -347,7 +347,6 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                     </span>
                   )}
                   <EffortPills file={file} />
-                  {showRuntimeControls ? <AgentRuntimeControls file={file} /> : null}
                 </>
               )}
               <RateLimitBadge rateLimit={file.rateLimit} />
@@ -399,6 +398,10 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
           />
         ) : null}
         {banner ?? null}
+        {/* Dead-host banner (issue #247 §5): sits in the MigrationRibbon slot
+            family, between the header and the feed. Owns recovery so the stale
+            attention cards and composer stand down below. */}
+        {deadHost ? <DeadHostBanner file={file} /> : null}
         {relatedTasks?.length && onOpenTask ? <TaskRelationStrip relations={relatedTasks} onOpenTask={onOpenTask} /> : null}
         {tasks.length ? (
           <FlipRow className="shrink-0 border-b border-border bg-sunken" enter="fade">
@@ -426,7 +429,14 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               setFollow={noop}
               compact
             />
-            {noComposer ? null : <TmuxComposer file={file} pollPaused={feedPaused} />}
+            {/* Unified control strip (issue #241): the single action surface, mounted
+                once here so it exists on every surface — including `noComposer`
+                review rounds that still need Stop. Renders nothing on surfaces where
+                no control applies. Dormant far-zoom board nodes suppress it entirely
+                (the dormant-node contract): the strip returns on activation, and
+                active review panes keep it regardless of `noComposer`. */}
+            {dormant ? null : <AgentControlStrip file={file} />}
+            {noComposer ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} sendBlockedReason={sendBlockedReason} />}
           </>
         )}
       </section>

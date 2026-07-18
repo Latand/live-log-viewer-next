@@ -67,6 +67,22 @@ test("an immediate retry receipt supersedes an older failed bus receipt", () => 
   expect(mergeRuntimeReceipts([failed], [queued])).toEqual([queued]);
 });
 
+test("the newest immediate operation surfaces over an older durable failure (finding 3)", () => {
+  // Different operations: the durable failure is older, the immediate queued send
+  // is newer. Insertion order alone would surface the stale failure; newest-first
+  // timestamp ordering surfaces the queued receipt.
+  const oldFailure = {
+    operationId: "op-old", idempotencyKey: "k-old", conversationId: "c", kind: "send" as const,
+    status: "failed" as const, reason: "dead-host", text: "first", at: "2026-07-13T00:00:00.000Z", revision: 5,
+  };
+  const newQueued = {
+    operationId: "op-new", idempotencyKey: "k-new", conversationId: "c", kind: "send" as const,
+    status: "queued" as const, reason: null, text: "second", at: "2026-07-13T00:05:00.000Z", revision: 1,
+  };
+  const merged = mergeRuntimeReceipts([oldFailure], [newQueued]);
+  expect(merged.map((r) => r.operationId)).toEqual(["op-new", "op-old"]);
+});
+
 test("the highest receipt revision wins before wall-clock ordering", () => {
   const delivering: RuntimeReceipt = {
     operationId: "op-clock-rollback",

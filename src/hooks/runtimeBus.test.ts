@@ -708,3 +708,71 @@ describe("runtimeBus stop", () => {
     expect(h.sources).toHaveLength(1);
   });
 });
+
+describe("runtimeBus refresh (dead-host Re-check, §5)", () => {
+  let h: Harness;
+  beforeEach(() => (h = harness()));
+
+  test("installs a fresh snapshot into the store and resolves true", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    // The host recovered: a later snapshot flips the axis from dead to hosted.
+    h.setSnapshot(snapshot(200, { sessions: [{ ...snapshot(200).sessions[0]!, host: "hosted", revision: 5 }] }));
+    const ok = await h.bus.refresh();
+    expect(ok).toBe(true);
+    expect(h.bus.getState().store.sessions["conv_a"]?.host).toBe("hosted");
+  });
+
+  test("refreshes the structured-host gate alongside the store (issue #241 finding 1)", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    expect(h.bus.getState().structuredHostsEnabled).toBeTrue();
+    // A manual Re-check after a rollback flip must carry the new gate, not just
+    // the store — otherwise the tab keeps offering structured controls.
+    h.setSnapshot(snapshot(200, { structuredHostsEnabled: false }));
+    const ok = await h.bus.refresh();
+    expect(ok).toBe(true);
+    expect(h.bus.getState().structuredHostsEnabled).toBeFalse();
+  });
+
+  test("resolves false on a failed fetch and leaves the store untouched", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    const before = h.bus.getState().store.sessions["conv_a"];
+    h.failFetch(true);
+    const ok = await h.bus.refresh();
+    expect(ok).toBe(false);
+    // the failure is reported to the caller, not swallowed into a stale banner
+    expect(h.bus.getState().store.sessions["conv_a"]).toBe(before);
+  });
+
+  test("a slow refresh response never regresses the store below the live cursor (#257)", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+
+    // refresh's snapshot fetch is in flight while newer events land on the stream
+    const slow = h.deferNextFetch();
+    const pending = h.bus.refresh();
+    h.sources[0]!.message(sessionEvent(101, 2, "running", "t1"));
+    expect(h.bus.getState().store.cursor).toBe(101);
+
+    // the stale response (snapshotSeq 100 < cursor 101) finally arrives: it must
+    // NOT be installed — pollFallback semantics — yet the refresh still reports
+    // success, because fresher state than the response is already live.
+    slow.resolveSnapshot(snapshot(100));
+    expect(await pending).toBe(true);
+    expect(h.bus.getState().store.cursor).toBe(101);
+    expect(h.bus.getState().store.sessions["conv_a"]?.turn).toBe("running");
+    expect(h.bus.getState().store.sessions["conv_a"]?.activeTurnId).toBe("t1");
+
+    // an equal-or-newer snapshot still installs (the dead-host Re-check works)
+    h.setSnapshot(snapshot(200, { sessions: [{ ...snapshot(200).sessions[0]!, host: "dead", revision: 5 }] }));
+    expect(await h.bus.refresh()).toBe(true);
+    expect(h.bus.getState().store.cursor).toBe(200);
+    expect(h.bus.getState().store.sessions["conv_a"]?.host).toBe("dead");
+  });
+});

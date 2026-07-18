@@ -2,16 +2,15 @@
 
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
-import { ArrowRight, ArrowUpToLine, ChevronRight, FoldVertical, Loader2, Play, Square, SquareTerminal, X } from "@/components/icons";
-import { Check, Plus, RotateCcw } from "lucide-react";
+import { ArrowRight, ArrowUpToLine, ChevronRight, Loader2, Play, X } from "@/components/icons";
+import { RotateCcw } from "lucide-react";
 
 import type { TFunction } from "@/lib/i18n";
 
-import { Hint } from "@/components/Hint";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { interruptRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, useRuntimeSession, type RuntimeSessionView } from "@/hooks/useRuntime";
+import { sendRuntimeMessage, useRuntimeReceiptsForArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
@@ -19,10 +18,27 @@ import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
+import { savedResumeProfile } from "./AgentRuntimeControls";
 import { ComposerBar } from "./ComposerBar";
-import { ImagePickerButton, type PendingImage } from "./imageAttachments";
+import { type PendingImage } from "./imageAttachments";
 import { ReceiptChip, runtimeReceiptStatusText } from "./runtime/ReceiptChip";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
+import { useAgentCapabilities } from "./useAgentCapabilities";
+
+/** The persisted "on resume" runtime profile as a POST body fragment (issue
+    #241 §4). `fast` is a codex-only service-tier override. */
+function resumeProfileBody(file: FileEntry): { model?: string; effort?: string; fast?: boolean } {
+  // Only an *explicitly applied* profile overrides the resume — absent one, the
+  // send carries zero model/effort/fast so the native resume boots with the
+  // conversation's own recorded runtime (finding 4).
+  const draft = savedResumeProfile(file);
+  if (!draft) return {};
+  return {
+    ...(draft.model ? { model: draft.model } : {}),
+    ...(draft.effort ? { effort: draft.effort } : {}),
+    ...(file.engine === "codex" ? { fast: draft.fast } : {}),
+  };
+}
 
 /**
  * A delivery receipt shown above the composer. `state` tracks whether the
@@ -672,16 +688,35 @@ export function structuredComposerSession(runtimeSession: RuntimeSessionView | n
  * agent window in the current tmux session with the text as the first prompt.
  * Sent messages stay visible as a queue above the input until dismissed.
  */
-export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; pollPaused?: boolean }) {
+export function TmuxComposer({
+  file,
+  pollPaused = false,
+  deadHost = false,
+  sendBlockedReason = null,
+}: {
+  file: FileEntry;
+  pollPaused?: boolean;
+  deadHost?: boolean;
+  /** Localized reason Send is inert on a non-dead surface (e.g. the host is
+      still unresolved under the runtime plane — issue #241 finding 1). No POST
+      is attempted while it is set, so no /api/tmux request can fire against an
+      as-yet-unclassified host. */
+  sendBlockedReason?: string | null;
+}) {
   const { t } = useLocale();
   /* Draft text and delivery receipts key on the stable conversation identity,
      not the transcript path: a committed account migration gives the card a new
      path under the target account, and the draft/held receipts must ride along
      (falls back to path pre-migration). */
   const cardId = conversationIdentity(file);
-  const runtimeSession = useRuntimeSession(cardId);
-  const structuredSession = structuredComposerSession(runtimeSession);
-  const structuredImageCapability = structuredSession?.session.capabilities.imageInput;
+  // The structured session Stop/Send route through — the conversation's own
+  // structured host, or the ROOT's for a structured-root subagent (finding 1),
+  // so a claude-broker root's child sends via /api/runtime/send, never /api/tmux.
+  // `caps` also carries the Send capability: a *hidden* Send (a gated
+  // scanner-shaped subagent, a shell task) means this surface exposes no message
+  // path at all, so the whole composer stands down below (finding 2).
+  const { caps, structuredSession } = useAgentCapabilities(file);
+  const structuredImageCapability = structuredSession?.session.capabilities?.imageInput;
   const structuredImagesDisabled = Boolean(structuredSession && !structuredImageCapability?.supported);
   const structuredImagesReason = structuredImagesDisabled
     ? t("composer.structuredImagesProtocol")
@@ -712,15 +747,9 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   });
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const isMobile = useIsMobile();
-  /* The phone folds the secondary controls (target chip, interrupt, compact,
-     images) behind one toggle: mic and send stay, the row stops crowding. */
-  const [toolsOpen, setToolsOpen] = useState(false);
-  const [interrupting, setInterrupting] = useState(false);
-  const [attachingTerminal, setAttachingTerminal] = useState(false);
-  const [compacting, setCompacting] = useState(false);
-  /* Two-step compact: the first click arms the button, only the second sends
-     /compact — a stray click must never condense a live agent's context. */
-  const [compactArmed, setCompactArmed] = useState(false);
+  /* Interrupt / compact / attach-terminal / mode chip moved into the unified
+     control strip (issue #241) — the composer keeps only the message surface
+     (text, images, mic, send) and its delivery receipts. */
   const [sent, setSent] = useState<SentEntry[]>([]);
   const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>([]);
   /* One idempotency key per message draft: reused verbatim on a retry (never a
@@ -743,12 +772,6 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
   const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
-
-  useEffect(() => {
-    if (!compactArmed) return;
-    const timer = window.setTimeout(() => setCompactArmed(false), 4_000);
-    return () => window.clearTimeout(timer);
-  }, [compactArmed]);
 
   const persistPendingDeliveries = (next: PendingDelivery[]) => {
     pendingDeliveries.current = next;
@@ -853,6 +876,13 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     return () => clearInterval(timer);
   }, [file.mtime, cardId]);
 
+  // A surface whose Send capability is hidden exposes NO message surface — no
+  // Send, quick-ack, mic, or image path, and fires zero requests. This gates the
+  // gated scanner-shaped subagent (inert row) that `canMessageWithoutPane` would
+  // otherwise treat as resumable and let POST /api/tmux (finding 2). Dead and
+  // unresolved hosts keep a *disabled* Send (not hidden), so their composer stays
+  // visible-but-blocked via `deadHost`/`sendBlockedReason`.
+  if (caps.controls.send.state === "hidden") return null;
   const resumable = canMessageWithoutPane(file);
   if (target === null && !resumable) return null;
   const spawnMode = target === null && !structuredSession;
@@ -870,6 +900,20 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
        still sends and later clears the same set. */
     const sentImages: PendingImage[] = attachments.imagesRef.current.map((image) => ({ ...image }));
     if (busy || voiceSending || (!payloadText.trim() && !sentImages.length)) return;
+    /* Dead host (§5): the draft survives but no POST is attempted, so no new
+       `rejected: dead-host` receipts can stack. The banner is the single source
+       of the bad news; the composer only says why Send is inert. */
+    if (deadHost) {
+      setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
+      return;
+    }
+    /* Host not yet resolved under the runtime plane: block the POST so a
+       structured/dead conversation is never sent to via the legacy /api/tmux
+       path before its real host capability arrives (finding 1). */
+    if (sendBlockedReason) {
+      setStatus({ kind: "err", text: sendBlockedReason });
+      return;
+    }
     if (structuredSession && sentImages.length && !attachments.validate()) return;
     setBusy(true);
     setStatus(null);
@@ -944,6 +988,10 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
               idempotencyKey: clientMessageId,
               clientMessageId,
               images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
+              /* The "on resume" profile (issue #241 §4): when this send reopens a
+                 finished root conversation, boot it with the model/effort the
+                 strip's picker saved. Ignored for a live pane or a subagent relay. */
+              ...(spawnMode && !relayMode ? resumeProfileBody(file) : {}),
             }),
           }).then(async (response) => {
             const body = await response.json() as typeof json;
@@ -1099,175 +1147,21 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     });
   };
 
-  const interrupt = async () => {
-    if (interrupting) return;
-    setInterrupting(true);
-    setStatus(null);
-    try {
-      const result = structuredSession
-        ? await interruptRuntime(structuredSession.session.conversationId, mintIdempotencyKey())
-        : await fetch("/api/tmux", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "interrupt", path: file.path }),
-          }).then(async (response) => {
-            const body = await response.json() as { ok?: boolean; error?: string };
-            return { ok: response.ok && body.ok === true, error: body.error };
-          });
-      if (!result.ok) {
-        setStatus({ kind: "err", text: result.error ?? t("composer.failedInterrupt") });
-        return;
-      }
-      setStatus({ kind: "ok", text: t("composer.escapeSent") });
-    } catch {
-      setStatus({ kind: "err", text: t("common.serverUnavailable") });
-    } finally {
-      setInterrupting(false);
-    }
-  };
-
-  const attachTerminal = async () => {
-    if (attachingTerminal) return;
-    setAttachingTerminal(true);
-    setStatus(null);
-    try {
-      const response = await fetch("/api/tmux", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "attach-terminal", path: file.path }),
-      });
-      const body = await response.json() as { ok?: boolean; target?: string; error?: string };
-      if (!response.ok || !body.ok) {
-        setStatus({ kind: "err", text: body.error ?? t("composer.attachTerminalFailed") });
-        return;
-      }
-      setStatus({ kind: "ok", text: t("composer.attachTerminalReady", { target: body.target ?? "" }) });
-    } catch {
-      setStatus({ kind: "err", text: t("common.serverUnavailable") });
-    } finally {
-      setAttachingTerminal(false);
-    }
-  };
-
-  /* Types /compact into the live pane; the compaction band then appears in
-     the feed on its own once the transcript grows the marker. */
-  const compact = async () => {
-    if (compacting) return;
-    setCompacting(true);
-    setStatus(null);
-    try {
-      const res = await fetch("/api/tmux", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "compact", path: file.path }),
-      });
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || !json.ok) {
-        setStatus({ kind: "err", text: json.error ?? t("composer.failedCompact") });
-        return;
-      }
-      setStatus({ kind: "ok", text: t("composer.compactSent") });
-    } catch {
-      setStatus({ kind: "err", text: t("common.serverUnavailable") });
-    } finally {
-      setCompacting(false);
-    }
-  };
-
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     void send();
   };
 
-  const modeChip = (
-    <span
-      className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"
-      title={structuredSession ? t("composer.structuredHost") : relayMode ? t("composer.titleRelay") : spawnMode ? t("composer.titleSpawnResumed") : `tmux ${target}`}
-    >
-      {structuredSession ? (
-        <>
-          <SquareTerminal className="h-3 w-3 shrink-0" aria-hidden /> {t("composer.structured")}
-        </>
-      ) : relayMode ? (
-        <>
-          <ArrowUpToLine className="h-3 w-3 shrink-0" aria-hidden /> {t("composer.root")}
-        </>
-      ) : spawnMode ? (
-        <>
-          <Play className="h-3 w-3 shrink-0" aria-hidden /> resume
-        </>
-      ) : (
-        <>
-          <SquareTerminal className="h-3 w-3 shrink-0" aria-hidden /> <span className="truncate font-mono">{target}</span>
-        </>
-      )}
-    </span>
-  );
+  /* Mode chip, interrupt, compact, and attach-terminal now live in the unified
+     control strip (issue #241); the composer no longer renders them. */
 
-  /* Phone composer controls meet the 44px minimum; desktop keeps the compact p-2. */
-  const iconBtn = isMobile ? "h-11 w-11" : "p-2";
-  const liveControls = !spawnMode ? (
-    <>
-      <Hint label={t("composer.interruptTitle")}>
-        <button
-          type="button"
-          aria-label={t("composer.interruptAria")}
-          disabled={interrupting}
-          onClick={() => void interrupt()}
-          className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${iconBtn}`}
-        >
-          {interrupting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Square className="h-4 w-4" fill="currentColor" aria-hidden />}
-        </button>
-      </Hint>
-      {structuredSession ? (
-        <Hint label={t("composer.attachTerminal")}>
-          <button
-            type="button"
-            aria-label={t("composer.attachTerminal")}
-            disabled={attachingTerminal}
-            onClick={() => void attachTerminal()}
-            className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${iconBtn}`}
-          >
-            {attachingTerminal ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <SquareTerminal className="h-4 w-4" aria-hidden />}
-          </button>
-        </Hint>
-      ) : <Hint label={compactArmed ? t("composer.compactConfirmTitle") : t("composer.compactTitle")}>
-        <button
-          type="button"
-          aria-label={compactArmed ? t("composer.compactConfirmTitle") : t("composer.compactAria")}
-          disabled={compacting}
-          onClick={() => {
-            if (!compactArmed) {
-              setCompactArmed(true);
-              return;
-            }
-            setCompactArmed(false);
-            void compact();
-          }}
-          className={`inline-flex shrink-0 items-center justify-center gap-1 rounded-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${
-            isMobile ? "min-h-11 px-2.5" : "p-2"
-          } ${
-            compactArmed
-              ? "bg-info/10 text-info"
-              : "text-muted hover:bg-sunken hover:text-info"
-          }`}
-        >
-          {compacting ? (
-            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-          ) : compactArmed ? (
-            <>
-              <Check className="h-4 w-4" aria-hidden />
-              <span className="text-[10.5px] font-bold">{t("composer.compactConfirm")}</span>
-            </>
-          ) : (
-            <FoldVertical className="h-4 w-4" aria-hidden />
-          )}
-        </button>
-      </Hint>}
-    </>
-  ) : null;
-
-  const canQuickAck = !spawnMode || relayMode;
+  /* The main send surface is inert on a dead host (§5) or an unresolved host
+     (finding 1); quick-ack calls the same `send()`, so it must obey the same
+     block — otherwise the menu offers a control whose POST the inner guard
+     silently swallows (round-3 finding). Blocked ⇒ the action leaves the menu
+     entirely, so neither pointer nor keyboard can reach an enabled quick-ack. */
+  const sendBlocked = deadHost || Boolean(sendBlockedReason);
+  const canQuickAck = (!spawnMode || relayMode) && !sendBlocked;
   const quickAckDisabled = busy || voiceSending || attachments.images.length > 0;
 
   return (
@@ -1365,53 +1259,21 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
               ]
             : []
         }
-        showImage={!isMobile}
+        showImage={!deadHost}
         imageDisabled={structuredImagesDisabled}
         imageDisabledReason={structuredImagesReason}
+        sendDisabledReason={deadHost ? t("deadHost.sendBlocked") : sendBlockedReason ?? undefined}
         receipts={
           displayedRuntimeReceipts.length
             ? <RuntimeComposerReceipts
                 receipts={displayedRuntimeReceipts}
-                actionsDisabled={busy || voiceSending}
+                actionsDisabled={busy || voiceSending || deadHost}
                 onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
                 onEdit={editRuntimeReceipt}
               />
             : undefined
         }
-        leftSlot={
-          isMobile ? (
-            <div className="flex min-w-0 items-center gap-1.5">
-              <button
-                type="button"
-                aria-expanded={toolsOpen}
-                aria-label={t("composer.moreTools")}
-                title={t("composer.moreTools")}
-                onClick={() => setToolsOpen((value) => !value)}
-                className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
-              >
-                <Plus className={`h-4 w-4 transition-transform ${toolsOpen ? "rotate-45" : ""}`} aria-hidden />
-              </button>
-              {toolsOpen ? (
-                <>
-                  {modeChip}
-                  {liveControls}
-                  <ImagePickerButton
-                    ariaLabel={t("composer.addImages")}
-                    className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
-                    onFiles={attachments.addFiles}
-                    disabled={structuredImagesDisabled}
-                    disabledReason={structuredImagesReason}
-                  />
-                </>
-              ) : null}
-            </div>
-          ) : (
-            <div className="flex min-w-0 items-center gap-1.5">
-              {modeChip}
-              {liveControls}
-            </div>
-          )
-        }
+        leftSlot={null}
       />
     </form>
   );

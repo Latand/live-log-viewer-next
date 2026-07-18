@@ -239,6 +239,112 @@ export function RuntimeControlsView({
   );
 }
 
+/**
+ * Structured-host runtime face (issue #241 §4): the model/effort pickers are
+ * shown but Apply is disabled with a tooltip until the structured reconfigure
+ * plane ships (#240). The shared view's `disabled` flag freezes both selects and
+ * the button; the reason rides the wrapper `title` so a hover explains why.
+ */
+export function DisabledRuntimeControls({ file, reason }: { file: FileEntry; reason: string }) {
+  const engine = file.engine as "claude" | "codex";
+  const draft = useMemo(() => defaults(file), [file]);
+  const observedModelLabel = ENGINE_MODELS[engine].find((model) => model.id === draft.model)?.label ?? draft.model;
+  return (
+    <span title={reason} aria-label={reason}>
+      <RuntimeControlsView
+        engine={engine}
+        draft={draft}
+        state="idle"
+        error=""
+        observedModelLabel={observedModelLabel}
+        observedEffort={draft.effort}
+        draftPending={false}
+        disabled
+        onEdit={() => undefined}
+        onApply={() => undefined}
+      />
+    </span>
+  );
+}
+
+/**
+ * Finished-conversation runtime face (issue #241 §4 "on resume"): picks the
+ * profile the next resume/send boots with. `resumeSpecFor` already accepts
+ * `model`/`effort`, so the draft is persisted under a `:resume` key for the
+ * spawn path to read. There is nothing to observe until the resume boots, so the
+ * lifecycle skips pending/confirming — Apply just saves and shows `saved ✓`.
+ */
+export function ResumeRuntimeControls({ file }: { file: FileEntry }) {
+  const engine = file.engine as "claude" | "codex";
+  const [draft, setDraft] = useState<RuntimeDraft>(() => readResumeDraft(file));
+  const [state, setState] = useState<RuntimeApplyState>("idle");
+  const [draftPath, setDraftPath] = useState(file.path);
+  if (draftPath !== file.path) {
+    setDraftPath(file.path);
+    setDraft(readResumeDraft(file));
+    setState("idle");
+  }
+
+  const editDraft = (update: (current: RuntimeDraft) => RuntimeDraft) => {
+    setDraft(update);
+    setState("idle");
+  };
+  const apply = () => {
+    localStorage.setItem(resumeKey(file), JSON.stringify(draft));
+    setState("applied");
+  };
+  const observedModelLabel = ENGINE_MODELS[engine].find((model) => model.id === draft.model)?.label ?? draft.model;
+
+  return (
+    <RuntimeControlsView
+      engine={engine}
+      draft={draft}
+      state={state}
+      error=""
+      observedModelLabel={observedModelLabel}
+      observedEffort={draft.effort}
+      draftPending={state !== "applied"}
+      onEdit={editDraft}
+      onApply={apply}
+    />
+  );
+}
+
+function resumeKey(file: FileEntry): string {
+  return storageKey(file) + ":resume";
+}
+
+/** The persisted resume profile for a conversation, or its defaults — for
+    *display* only (the picker always needs a concrete model/effort to show). */
+export function readResumeDraft(file: FileEntry): RuntimeDraft {
+  return savedResumeProfile(file) ?? defaults(file);
+}
+
+/**
+ * The *explicitly saved* resume profile, or `null` when the user never applied
+ * one. This is the send-path source of truth (issue #241 finding 4): a display
+ * default must never become a silent model/effort override on resume, because
+ * `defaults()` synthesizes a first-catalog model even for unknown legacy models
+ * — sending that would swap the model the native resume would have booted.
+ */
+export function savedResumeProfile(file: FileEntry): RuntimeDraft | null {
+  const fallback = defaults(file);
+  try {
+    const value = JSON.parse(localStorage.getItem(resumeKey(file)) ?? "null") as Partial<RuntimeDraft> | null;
+    if (!value) return null;
+    const engine = file.engine as "claude" | "codex";
+    const model = ENGINE_MODELS[engine].some((item) => item.id === value.model) ? value.model! : fallback.model;
+    const efforts = effortScale(engine, model) ?? [];
+    return {
+      model,
+      effort: efforts.includes(value.effort ?? "") ? value.effort! : fallback.effort,
+      fast: engine === "codex" && typeof value.fast === "boolean" ? value.fast : fallback.fast,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** The live conversation window's runtime controls: the shared view wired to
     the tmux reconfigure lifecycle (persisted draft, converging re-apply,
     confirm-by-observation). */

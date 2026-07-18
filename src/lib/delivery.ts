@@ -397,6 +397,13 @@ export interface ConversationMessage {
   reservedDeliveryId?: string | null;
   text: string;
   images: InboxImagePayload[];
+  /** The "on resume" profile chosen in the control strip (issue #241 §4): when a
+      finished conversation is reopened, boot with these instead of the last
+      generation's model/effort. Ignored on a live pane (nothing to reconfigure)
+      and on the subagent relay (the root owns its own runtime). */
+  resumeModel?: string | null;
+  resumeEffort?: string | null;
+  resumeFast?: boolean | null;
 }
 
 interface DeliveryOverrides {
@@ -574,8 +581,9 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       return settle(failure("file is unknown to the viewer", 403));
     }
     const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
-      model: entry.launchModel ?? entry.model,
-      effort: entry.effort,
+      model: message.resumeModel ?? entry.launchModel ?? entry.model,
+      effort: message.resumeEffort ?? entry.effort,
+      ...(typeof message.resumeFast === "boolean" ? { fast: message.resumeFast } : {}),
       allowSubagents: registry.launchProfileForPath(entry.path)?.allowSubagents,
     });
     if (spec) {

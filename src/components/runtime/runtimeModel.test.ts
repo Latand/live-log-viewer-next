@@ -12,6 +12,7 @@ import {
   mintIdempotencyKey,
   openAttentions,
   receiptIsTerminal,
+  humanReceiptReasonKey,
   type RuntimeAttention,
   type RuntimeEnvelope,
   type RuntimeReceipt,
@@ -363,5 +364,17 @@ describe("mintIdempotencyKey", () => {
     const b = mintIdempotencyKey();
     expect(a.startsWith("op_")).toBe(true);
     expect(a).not.toBe(b);
+  });
+});
+
+/* --------------------- receipt-row redesign (issue #247 §7) --------------------- */
+
+describe("humanReceiptReasonKey", () => {
+  test("maps known dead-host aliases to one sentence key, unknowns to null", () => {
+    expect(humanReceiptReasonKey("dead-host")).toBe("receipt.human.deadHost");
+    expect(humanReceiptReasonKey("HOST-DEAD")).toBe("receipt.human.deadHost"); // case-insensitive
+    expect(humanReceiptReasonKey(" unhosted ")).toBe("receipt.human.deadHost"); // trimmed
+    expect(humanReceiptReasonKey("quota-exceeded")).toBeNull();
+    expect(humanReceiptReasonKey(null)).toBeNull();
   });
 });

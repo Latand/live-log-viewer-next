@@ -79,16 +79,26 @@ test("delivering receipt is localized in English and Ukrainian", () => {
   expect(translate("uk", "runtime.receipt.delivering")).toBe("доставляється…");
 });
 
-test("failed receipt is announced politely, shows the reason verbatim, and offers retry/edit", () => {
+test("failed receipt is announced politely, humanizes the known reason, and offers retry/edit", () => {
   const html = renderToStaticMarkup(
     <ReceiptChip receipt={receipt({ status: "failed", reason: "dead-host" })} onRetry={() => {}} onEdit={() => {}} />,
   );
   expect(html).toContain('role="status"');
   expect(html).toContain('aria-live="polite"');
-  expect(html).toContain("dead-host");
+  // §7: reason codes map to human sentences — never the raw `rejected: dead-host` stream.
+  // (the apostrophe in "the agent's host has died" is HTML-escaped in static markup)
+  expect(html).toContain("host has died");
+  expect(html).not.toContain("dead-host");
   expect(html).toContain(translate("en", "runtime.receipt.retry"));
   expect(html).toContain("resend"); // "Edit & resend" — the & is HTML-escaped in static markup
   expect(html.match(/min-h-11/g)?.length).toBe(2);
+});
+
+test("failed receipt prints an unknown reason verbatim behind a 'not delivered:' prefix", () => {
+  const html = renderToStaticMarkup(
+    <ReceiptChip receipt={receipt({ status: "failed", reason: "quota-exceeded" })} onRetry={() => {}} onEdit={() => {}} />,
+  );
+  expect(html).toContain(translate("en", "receipt.human.verbatim", { reason: "quota-exceeded" }));
 });
 
 /* ------------------------------ AttentionCard ------------------------------ */
