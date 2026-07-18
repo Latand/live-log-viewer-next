@@ -24,7 +24,7 @@ import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, repla
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { directReviewFlows, isDirectReviewFlow, splitDirectReviewGroups } from "./flows/directReviewGroups";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
-import { createDraftPipeline, pipelinesForProject, type PipelineTemplate } from "./pipelines/pipelineModel";
+import { compactPipelineArtifactPaths, compactPipelineLayoutFlows, createDraftPipeline, excludeCompactPipelineArtifacts, pipelinesForProject, replaceCompactPipelineEphemeral, type PipelineTemplate } from "./pipelines/pipelineModel";
 import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
@@ -549,12 +549,22 @@ export function ProjectDashboard({
     () => new Set([...board.explicitManual, ...prefs.expanded]),
     [board.explicitManual, prefs.expanded],
   );
-  /* Fold every reviewer transcript into its round deck. Reviewers with no deck
-     that must stay visible — an owner-pinned one opened from a worker stack, or
-     one carrying authorship protection — are recovered by protectedReviewerNodes
-     and materialized as standalone nodes (issue #112), so folding is
-     unconditional here. */
+  /* Fold every claimed reviewer transcript out of branch groups. Active
+     non-pipeline flows represent them in round decks; pipeline rounds use the
+     compact evidence rail. Reviewers with no retained surface that must stay
+     visible are recovered by protectedReviewerNodes (issue #112). */
   const groupFiles = useMemo(() => foldClaimedReviewers(files, deckFlows), [files, deckFlows]);
+  /* Passed stages and prior retries are represented by the pipeline's compact
+     evidence rail. Remove those transcripts from the world scene immediately;
+     explicit history navigation can still materialize one on demand below. */
+  const compactPipelinePaths = useMemo(
+    () => compactPipelineArtifactPaths(pipelines, deckFlows),
+    [pipelines, deckFlows],
+  );
+  const compactLayoutFlows = useMemo(
+    () => compactPipelineLayoutFlows(pipelines, layoutDeckFlows),
+    [pipelines, layoutDeckFlows],
+  );
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
      full-size cards (a spawned worker stays a column under an active parent
@@ -603,10 +613,13 @@ export function ProjectDashboard({
      from `groupFiles` so board-membership reconciliation still sees the full
      catalog and never retires a collapsed worker's durable placement. */
   const sceneFiles = useMemo(
-    () => (collapsedPaths.size || launchHistoryPaths.size
-      ? groupFiles.filter((file) => !collapsedPaths.has(file.path) && !launchHistoryPaths.has(file.path))
+    () => (collapsedPaths.size || launchHistoryPaths.size || compactPipelinePaths.size
+      ? excludeCompactPipelineArtifacts(
+        groupFiles.filter((file) => !collapsedPaths.has(file.path) && !launchHistoryPaths.has(file.path)),
+        compactPipelinePaths,
+      )
       : groupFiles),
-    [groupFiles, collapsedPaths, launchHistoryPaths],
+    [groupFiles, collapsedPaths, launchHistoryPaths, compactPipelinePaths],
   );
   const groups = useMemo(
     () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations }),
@@ -675,11 +688,12 @@ export function ProjectDashboard({
      collapsed worker as a transient node (#112). */
   const schemeManual = useMemo(() => {
     const byPath = new Map(groupFiles.map((file) => [file.path, file]));
+    const compactByPath = new Map(files.filter((file) => compactPipelinePaths.has(file.path)).map((file) => [file.path, file]));
     const manualPaths = new Set(manualNodes.map((file) => file.path));
     /* A hidden column's file still materializes: the user closed the column
        earlier, but a jump must land somewhere visible. */
     const extra = ephemeral
-      .map((path) => byPath.get(path))
+      .map((path) => byPath.get(path) ?? compactByPath.get(path))
       .filter(
         (file): file is FileEntry =>
           file !== undefined &&
@@ -701,10 +715,10 @@ export function ProjectDashboard({
       ...extra.map((file) => file.path),
     ]);
     const protectedNodes = protectedReviewerNodes({ files, flows: layoutDeckFlows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths })
-      .filter((file) => projectKey(file) === project);
+      .filter((file) => projectKey(file) === project && !compactPipelinePaths.has(file.path));
     const extras = [...extra, ...protectedNodes];
     return extras.length ? [...manualNodes, ...extras] : manualNodes;
-  }, [ephemeral, groupFiles, files, layoutDeckFlows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
+  }, [ephemeral, groupFiles, files, compactPipelinePaths, layoutDeckFlows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
   const liveCount = useMemo(
     () =>
       groups.reduce(
@@ -751,8 +765,10 @@ export function ProjectDashboard({
   useEffect(() => {
     if (!focusRequest) return;
     pendingFocusRef.current = focusRequest.path;
-    setEphemeral((prev) => (prev.includes(focusRequest.path) ? prev : [...prev, focusRequest.path]));
-  }, [focusRequest]);
+    setEphemeral((prev) => compactPipelinePaths.has(focusRequest.path)
+      ? replaceCompactPipelineEphemeral(prev, focusRequest.path, pipelines, deckFlows)
+      : prev.includes(focusRequest.path) ? prev : [...prev, focusRequest.path]);
+  }, [focusRequest, compactPipelinePaths, pipelines, deckFlows]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* A node added from the switchboard enters the layout on the next render;
@@ -990,6 +1006,14 @@ export function ProjectDashboard({
       gotoProject(fileProject);
       return;
     }
+    /* Compact pipeline history stays out of Fit All/minimap until requested.
+       A transcript click restores one ephemeral pane for inspection without
+       changing durable board membership or duplicating the evidence row. */
+    if (compactPipelinePaths.has(file.path)) {
+      pendingFocusRef.current = file.path;
+      setEphemeral((prev) => replaceCompactPipelineEphemeral(prev, file.path, pipelines, deckFlows));
+      return;
+    }
     const visible =
       (autoPaths.has(file.path) && !hiddenSet.has(file.path)) || manualNodes.some((item) => item.path === file.path);
     if (visible) {
@@ -1090,27 +1114,34 @@ export function ProjectDashboard({
   );
   const historyRows = useMemo(() => quietHistoryRows(files, project), [files, project]);
   /* The archive fallback rebuilds from the full catalog, so it must honor the
-     same two removals the live scene does — closed columns (`hiddenSet`) AND
-     auto-collapsed workers (`collapsedPaths`). Without the collapse filter a
+     live scene's closed, collapsed, launch-history, and compact-pipeline
+     removals. Without the collapse filter a
      quiet worker-only or closed-flow project would resurrect every folded
      worker as a full archive card, undoing the collapse the stacks promise. */
   const archiveGroups = useMemo(
     () => (hasNodes
       ? []
       : buildArchiveBranchGroups(
-        groupFiles.filter((file) => !hiddenSet.has(file.path) && !collapsedPaths.has(file.path) && !launchHistoryPaths.has(file.path)),
+        excludeCompactPipelineArtifacts(
+          groupFiles.filter((file) => !hiddenSet.has(file.path) && !collapsedPaths.has(file.path) && !launchHistoryPaths.has(file.path)),
+          compactPipelinePaths,
+        ),
         project,
         100,
       )),
-    [hasNodes, groupFiles, hiddenSet, collapsedPaths, launchHistoryPaths, project],
+    [hasNodes, groupFiles, hiddenSet, collapsedPaths, launchHistoryPaths, compactPipelinePaths, project],
   );
   const hasArchiveNodes = archiveGroups.length > 0;
   const schemeAvailable = hasNodes || hasArchiveNodes;
+  const isolatedCompactHistoryPaths = useMemo(
+    () => new Set(ephemeral.filter((path) => compactPipelinePaths.has(path))),
+    [ephemeral, compactPipelinePaths],
+  );
   /* A review-loop action only lands if its flow has a rendered deck, and a deck
      exists only for an implementer placed as a board node — the same layout the
      scheme draws. Derive availability from that layout's nodes, so a scanned but
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
-  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, layoutDeckFlows, hasNodes ? visibleDrafts : [], pipelines);
+  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, compactLayoutFlows, hasNodes ? visibleDrafts : [], pipelines, [], new Set(), isolatedCompactHistoryPaths);
   /* Worker rows the scheme still draws in a retained form — an active flow's
      reviewer round deck keeps its finished rounds as deck tabs. Those are
      re-admitted here so a folded reviewer is never listed twice (its deck AND a
@@ -1125,7 +1156,7 @@ export function ProjectDashboard({
      exclude set: a closed worker is a tombstone — it must not resurface as a
      stack member (its manual/expanded pin was dropped on close, so it would
      otherwise re-qualify as a plain collapse candidate). */
-  const workerStacks = groupWorkerStacks(collapsibleWorkers, deckFlows, new Set([...deckReviewerPaths, ...hiddenSet, ...launchHistoryPaths]), {
+  const workerStacks = groupWorkerStacks(collapsibleWorkers, deckFlows, new Set([...deckReviewerPaths, ...hiddenSet, ...launchHistoryPaths, ...compactPipelinePaths]), {
     pipelineIdOf,
     originOf: spawnerRootOf,
   });
@@ -1329,6 +1360,7 @@ export function ProjectDashboard({
               sheetTasks={projectTasks}
               drafts={hasNodes ? visibleDrafts : []}
               favorites={favoriteIdSet}
+              isolatedManualPaths={isolatedCompactHistoryPaths}
               loaded={loaded}
               focus={highlight}
               onSelect={openSwitchboardFile}
@@ -1368,9 +1400,11 @@ export function ProjectDashboard({
                 pipelines={pipelines}
                 surfacePipelines={activePipelines}
                 tasks={hasNodes ? boardTasks : []}
+                allTasks={projectTasks}
                 workerStacks={workerStacks}
                 drafts={hasNodes ? visibleDrafts : []}
                 favorites={favoriteIdSet}
+                isolatedManualPaths={isolatedCompactHistoryPaths}
                 focus={highlight}
                 attentionPaths={attentionPaths}
                 onSelect={openSwitchboardFile}
@@ -1380,6 +1414,7 @@ export function ProjectDashboard({
                 onHandoff={addHandoffDraft}
                 onSpawnRetry={retryLaunch}
                 onTaskDraft={openTaskDraft}
+                onOpenTask={openTask}
                 placeTaskId={placeTask?.id ?? null}
                 onTaskPlaced={() => setPlaceTask(null)}
                 newTaskNonce={newTaskNonce}

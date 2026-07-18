@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { FileEntry } from "@/lib/types";
 import type { Pipeline, PipelineStage } from "@/lib/pipelines/types";
+import type { BoardTask } from "@/lib/tasks/types";
 
 import type { TFunction } from "@/lib/i18n";
 
@@ -14,10 +15,15 @@ import {
   deriveStageId,
   draftStagesToInput,
   normalizeStageOrder,
+  compactPipelineArtifactPaths,
+  compactStageOpenTarget,
+  excludeCompactPipelineArtifacts,
   pipelineAnnouncement,
   pipelineBoardStripPath,
   pipelineCursorActive,
   pipelineNeedsAttention,
+  pipelineLinkedTasks,
+  replaceCompactPipelineEphemeral,
   pipelineStripByPath,
   renderableFlowIds,
   stageChipState,
@@ -120,6 +126,49 @@ describe("stageChipState", () => {
   });
 });
 
+test("pipelineLinkedTasks keeps assignment and source lineage directly navigable (#353)", () => {
+  const p = pipeline({
+    srcPath: "/origin",
+    srcConversationId: "conv-origin",
+    runs: [
+      { stageId: "build", attempts: [{ agentPath: "/build", conversationId: "conv-build" } as never] },
+      { stageId: "review", attempts: [{ agentPath: "/review", flowId: "flow-1" } as never] },
+    ],
+  });
+  const task = (id: string, assignmentPath: string | null, sourcePath?: string): BoardTask => ({
+    id,
+    project: "proj",
+    status: "assigned",
+    text: id,
+    placement: "unplaced",
+    assignments: assignmentPath ? [{ path: assignmentPath, panePid: null, state: "delivered", error: null, at: "2026-07-18T00:00:00Z" }] : [],
+    ...(sourcePath ? { source: { path: sourcePath, ts: null, text: "", fingerprint: "x", engine: "codex" as const } } : {}),
+    createdAt: "2026-07-18T00:00:00Z",
+    updatedAt: "2026-07-18T00:00:00Z",
+  });
+  const conversationLinked = task("conversation", null);
+  conversationLinked.assignments = [{ path: null, conversationId: "conv-build", panePid: null, state: "spawning", error: null, at: "2026-07-18T00:00:00Z" }];
+  const sourceConversation = task("source-conversation", null);
+  sourceConversation.assignments = [{ path: null, conversationId: "conv-origin", panePid: null, state: "spawning", error: null, at: "2026-07-18T00:00:00Z" }];
+  const roundLinked = task("round", "/review-round-1");
+  const roundConversation = task("round-conversation", null);
+  roundConversation.assignments = [{ path: null, conversationId: "conv-round-1", panePid: null, state: "spawning", error: null, at: "2026-07-18T00:00:00Z" }];
+  const tasks = [task("assigned", "/build"), task("sourced", null, "/review"), task("origin", null, "/origin"), conversationLinked, sourceConversation, roundLinked, roundConversation, task("elsewhere", "/other")];
+  const flows = [{ id: "flow-1", implementerPath: "/build", implementerConversationId: "conv-build", rounds: [{ reviewerPath: "/review-round-1", reviewerConversationId: "conv-round-1" }] }] as unknown as Flow[];
+  expect(pipelineLinkedTasks(p, tasks, flows).map((item) => item.id)).toEqual(["assigned", "sourced", "origin", "conversation", "source-conversation", "round", "round-conversation"]);
+});
+
+test("opening compact history replaces the prior inspected pane from the same pipeline", () => {
+  const p = pipeline({
+    runs: [{ stageId: "build", attempts: [
+      { agentPath: "/retry-1", flowId: null } as never,
+      { agentPath: "/retry-2", flowId: null } as never,
+    ] }],
+  });
+
+  expect(replaceCompactPipelineEphemeral(["/retry-1", "/other"], "/retry-2", [p], [])).toEqual(["/other", "/retry-2"]);
+});
+
 describe("pipelineCursorActive", () => {
   const stages = [stage("plan"), stage("build")];
   test("is true while busy and while paused-from-busy, false when parked", () => {
@@ -127,6 +176,79 @@ describe("pipelineCursorActive", () => {
     expect(pipelineCursorActive(pipeline({ stages, state: "paused", pausedState: "running" }))).toBe(true);
     expect(pipelineCursorActive(pipeline({ stages, state: "paused", pausedState: "needs_decision" }))).toBe(false);
     expect(pipelineCursorActive(pipeline({ stages, state: "needs_decision" }))).toBe(false);
+  });
+});
+
+describe("compactPipelineArtifactPaths", () => {
+  const stages = [stage("architect"), stage("builder"), stage("review", "review-loop")];
+
+  test("keeps one current run pane and compacts passed stages plus prior retries", () => {
+    const p = pipeline({
+      stages,
+      cursor: { stageId: "builder", state: "running" },
+      runs: [
+        { stageId: "architect", attempts: [{ state: "passed", agentPath: "/architect" } as never] },
+        {
+          stageId: "builder",
+          attempts: [
+            { state: "failed", agentPath: "/builder-attempt-1" } as never,
+            { state: "running", agentPath: "/builder-attempt-2" } as never,
+          ],
+        },
+      ],
+    });
+
+    expect([...compactPipelineArtifactPaths([p], [])].sort()).toEqual(["/architect", "/builder-attempt-1"]);
+  });
+
+  test("keeps the review target pane while folding review transcripts into compact evidence", () => {
+    const p = pipeline({
+      stages,
+      cursor: { stageId: "review", state: "reviewing" },
+      runs: [
+        { stageId: "builder", attempts: [{ state: "passed", agentPath: "/builder" } as never] },
+        { stageId: "review", attempts: [{ state: "reviewing", agentPath: "/reviewer", flowId: "f1" } as never] },
+      ],
+    });
+    const flows = [{ id: "f1", implementerPath: "/builder", rounds: [{ reviewerPath: "/reviewer" }] }] as unknown as Flow[];
+
+    expect([...compactPipelineArtifactPaths([p], flows)]).toEqual(["/reviewer"]);
+  });
+
+  test("keeps the latest passed run pane while a review flow is materializing", () => {
+    const p = pipeline({
+      stages,
+      cursor: { stageId: "review", state: "reviewing" },
+      runs: [
+        { stageId: "architect", attempts: [{ state: "passed", agentPath: "/architect" } as never] },
+        { stageId: "builder", attempts: [{ state: "passed", agentPath: "/builder" } as never] },
+        { stageId: "review", attempts: [{ state: "reviewing", agentPath: null, flowId: null } as never] },
+      ],
+    });
+
+    expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/architect"]);
+  });
+
+  test("a completed pipeline represents every transcript through compact history", () => {
+    const p = pipeline({
+      stages,
+      state: "completed",
+      runs: stages.map((item, index) => ({
+        stageId: item.id,
+        attempts: [{ state: "passed", agentPath: `/stage-${index + 1}` } as never],
+      })),
+    });
+
+    expect(compactPipelineArtifactPaths([p], [])).toEqual(new Set(["/stage-1", "/stage-2", "/stage-3"]));
+  });
+
+  test("filters compact transcript artifacts from live and archive scene inputs", () => {
+    const files = [{ path: "/passed" }, { path: "/current" }, { path: "/unrelated" }];
+
+    expect(excludeCompactPipelineArtifacts(files, new Set(["/passed"]))).toEqual([
+      { path: "/current" },
+      { path: "/unrelated" },
+    ]);
   });
 });
 
@@ -312,6 +434,31 @@ describe("stageOpenTarget (reviewer paths route to the flow deck, never the fold
     expect(stageOpenTarget(runStage, attempt({ agentPath: "/gone" }), undefined, present)).toBeNull();
     /* Without the set (no gating) the path opens as before. */
     expect(stageOpenTarget(runStage, attempt({ agentPath: "/gone" }))).toEqual({ kind: "path", path: "/gone" });
+  });
+});
+
+describe("compactStageOpenTarget", () => {
+  const reviewStage = stage("review", "review-loop");
+  const reviewAttempt = { n: 1, state: "reviewing", agentPath: "/reviewer", flowId: "f1" } as never;
+  const flow = {
+    id: "f1",
+    implementerPath: "/builder",
+    rounds: [{ n: 1, reviewerPath: "/reviewer" }],
+    state: "reviewing",
+  } as unknown as Flow;
+
+  test("opens the latest reviewer transcript after compact history removes the flow deck", () => {
+    expect(compactStageOpenTarget(reviewStage, reviewAttempt, [flow], new Set(), new Set(["/reviewer"]))).toEqual({
+      kind: "path",
+      path: "/reviewer",
+    });
+  });
+
+  test("falls back to the implementer when the reviewer transcript is unavailable", () => {
+    expect(compactStageOpenTarget(reviewStage, reviewAttempt, [flow], new Set(), new Set(["/builder"]))).toEqual({
+      kind: "path",
+      path: "/builder",
+    });
   });
 });
 

@@ -6,6 +6,8 @@ import { flushSync } from "react-dom";
 import { emptyStore } from "@/components/runtime/runtimeModel";
 import type { BranchGroup } from "@/components/projectModel";
 import type { FileEntry } from "@/lib/types";
+import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 
 /*
  * Issue #325 — 390px coverage: a direct one-shot review group must surface on
@@ -170,4 +172,47 @@ test("a direct review group rides the phone strip as a round deck with accessibl
   await settle();
   const banner = [...dom.document.querySelectorAll("div")].find((el) => el.textContent?.trim().startsWith("Round 1 · ✖ REQUEST_CHANGES"));
   expect(banner).toBeDefined();
+});
+
+test("a pipeline-owned review stays in the compact mobile rail without a deck (#353)", async () => {
+  const builder = entry({ path: "/pipeline-builder", title: "Pipeline builder", conversationId: "conversation-builder", activity: "live", mtime: 9_000 });
+  const reviewer = entry({ path: "/pipeline-reviewer", parent: builder.path, conversationId: "conversation-reviewer", activity: "live", mtime: 10_000 });
+  const flow = {
+    id: "pipeline-flow",
+    implementerPath: builder.path,
+    rounds: [{ n: 1, reviewerPath: reviewer.path, reviewerConversationId: reviewer.conversationId }],
+    state: "reviewing",
+  } as unknown as Flow;
+  const pipeline = {
+    id: "pipeline-1", task: "Compact mobile review", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
+    stages: [
+      { id: "build", kind: "run", prompt: "", next: "review" },
+      { id: "review", kind: "review-loop", prompt: "", next: null },
+    ],
+    runs: [
+      { stageId: "build", attempts: [{ n: 1, state: "passed", agentPath: builder.path, flowId: null, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } }] },
+      { stageId: "review", attempts: [{ n: 1, state: "reviewing", agentPath: reviewer.path, flowId: flow.id, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-only", promptScaffold: null } }] },
+    ],
+    cursor: { stageId: "review", state: "reviewing" }, state: "reviewing", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2026-07-18T00:00:00Z", closedAt: null,
+  } as unknown as Pipeline;
+  const group: BranchGroup = { key: builder.path, columns: [{ file: builder, tasks: [] }], returnable: [], finished: [], smt: builder.mtime, orphanTask: false };
+
+  roots.push(mount(
+    <MobileFocusView
+      project="demo" groups={[group]} manual={[]} files={[builder, reviewer]} flows={[flow]} pipelines={[pipeline]}
+      surfacePipelines={[pipeline]} workerStacks={[]} tasks={[]} drafts={[]} loaded focus={null}
+      onSelect={() => {}} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
+    />,
+  ));
+  await settle();
+
+  expect(dom.document.querySelector("[data-review-deck-collapse]")).toBeNull();
+  expect(dom.document.querySelector('[data-testid="mobile-pipeline-dock"]')).not.toBeNull();
+  const focusRow = dom.document.querySelector('[data-testid="mobile-pipeline-focus-row"]');
+  expect(focusRow).not.toBeNull();
+  const focusLabels = [...focusRow!.querySelectorAll("button")].map((button) => button.getAttribute("aria-label"));
+  expect(focusLabels.some((label) => label?.startsWith("Previous stage"))).toBe(false);
+  expect(focusLabels.some((label) => /^Next stage .+, state .+$/.test(label ?? ""))).toBe(true);
+  const deckChip = [...dom.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "R Flow");
+  expect(deckChip).toBeUndefined();
 });

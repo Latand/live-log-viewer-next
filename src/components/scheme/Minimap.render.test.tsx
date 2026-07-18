@@ -71,6 +71,19 @@ test("no worker stacks → no legend dots", () => {
   expect(html).not.toContain("collapsed stack");
 });
 
+test("the minimap draws one compact outline per pipeline group (#353)", () => {
+  const layout: SchemeLayout = {
+    ...emptyLayout,
+    groups: [
+      { key: "group::pipeline::p1", kind: "pipeline", id: "p1", hue: 210, members: [], pipeline: { id: "p1" } as never, label: "Pipeline", x: 100, y: 120, w: 692, h: 150 },
+    ],
+  };
+  const html = renderToStaticMarkup(
+    <Minimap layout={layout} world={world} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  expect((html.match(/data-minimap-pipeline=/g) ?? []).length).toBe(1);
+});
+
 test("a direct review group's deck shows on the minimap like any managed deck (#325)", () => {
   const builder: FileEntry = {
     root: "claude-projects", name: "/builder", project: "demo", title: "Builder", engine: "claude",

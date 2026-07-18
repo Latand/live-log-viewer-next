@@ -5,10 +5,11 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import { directReviewFlows } from "@/components/flows/directReviewGroups";
+import { compactPipelineLayoutFlows } from "@/components/pipelines/pipelineModel";
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
 
 import { deckKey, flowLinkKey } from "./agentLinks";
-import { INDENT, buildSchemeLayout } from "./layout";
+import { GROUP_PAD, NODE_W, buildSchemeLayout } from "./layout";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   return {
@@ -278,20 +279,15 @@ describe("surface pipelines — memberless active pipelines keep a scheme surfac
       srcConversationId: null, createdAt: "1970", closedAt: null, ...over,
     }) as unknown as Pipeline;
 
-  test("a provisioning pipeline with no stage node yet gets placeholder slots and a halo enclosing them (#196)", () => {
+  test("a provisioning pipeline with no stage node gets one compact halo and no full placeholder panes (#353)", () => {
     const layout = buildSchemeLayout([], [], [], [], [], [], [pipeline({})]);
     const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p1");
     expect(halo).toBeTruthy();
     expect(halo!.pipeline?.id).toBe("p1");
-    /* Every planned stage renders as a dashed placeholder window (#196), and the
-       halo members ARE those slots, so the region wraps the whole staged row. */
-    expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["build"]);
-    const slot = layout.slots[0]!;
-    expect(halo!.members).toEqual([slot.key]);
-    expect(slot.x).toBeGreaterThanOrEqual(halo!.x);
-    expect(slot.x + slot.w).toBeLessThanOrEqual(halo!.x + halo!.w);
-    expect(slot.y + slot.h).toBeLessThanOrEqual(halo!.y + halo!.h);
-    /* The placeholder is inside the world box so the camera/minimap can reach it. */
+    expect(layout.slots).toHaveLength(0);
+    expect(halo!.members).toEqual([]);
+    expect(halo!.w).toBeLessThanOrEqual(NODE_W + GROUP_PAD * 2);
+    /* The compact group remains inside the world box for camera and minimap navigation. */
     expect(halo!.x + halo!.w).toBeLessThanOrEqual(layout.width);
     expect(halo!.y + halo!.h).toBeLessThanOrEqual(layout.height);
   });
@@ -350,7 +346,7 @@ describe("sibling pipeline halos never overlap (#136 finding 1)", () => {
   });
 });
 
-describe("pipeline stage placeholder slots (issue #196)", () => {
+describe("compact pipeline groups (#353)", () => {
   const staged = (over: Record<string, unknown>): Pipeline =>
     ({
       id: "p9", task: "Template draft", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b",
@@ -364,32 +360,17 @@ describe("pipeline stage placeholder slots (issue #196)", () => {
       srcConversationId: null, createdAt: "1970", closedAt: null, ...over,
     }) as unknown as Pipeline;
 
-  test("a template draft renders EVERY role stage as a placeholder slot, in stage order, under one halo", () => {
-    const layout = buildSchemeLayout([], [], [], [], [], [staged({})], [staged({})]);
-    expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["architect", "builder", "review"]);
-    /* Left-to-right in stage order, node-width footprints. */
-    const [a, b, c] = layout.slots;
-    expect(a!.x).toBeLessThan(b!.x);
-    expect(b!.x).toBeLessThan(c!.x);
-    expect(a!.y).toBe(b!.y);
-    /* Chain-adjacent slots carry the incoming handoff badge; the head does not. */
-    expect(a!.incoming).toBeUndefined();
-    expect(b!.incoming).toBe("run");
-    expect(c!.incoming).toBe("review-loop");
-    /* One halo wraps the full dashed row. */
+  test("a template draft renders one compact group and allocates no stage windows", () => {
+    const pipeline = staged({});
+    const layout = buildSchemeLayout([], [], [], [], [], [pipeline], [pipeline]);
+    expect(layout.slots).toHaveLength(0);
+    expect(layout.groups.filter((group) => group.kind === "pipeline")).toHaveLength(1);
     const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p9")!;
-    for (const slot of layout.slots) {
-      expect(slot.x).toBeGreaterThanOrEqual(halo.x);
-      expect(slot.x + slot.w).toBeLessThanOrEqual(halo.x + halo.w);
-      expect(slot.y + slot.h).toBeLessThanOrEqual(halo.y + halo.h);
-    }
-    /* Slots are camera-reachable board citizens. */
-    for (const slot of layout.slots) expect(layout.byPath.get(slot.key)).toBe(slot);
-    expect(layout.width).toBeGreaterThanOrEqual(c!.x + c!.w);
-    expect(layout.height).toBeGreaterThanOrEqual(c!.y + c!.h);
+    expect(halo.w).toBeLessThanOrEqual(NODE_W + GROUP_PAD * 2);
+    expect(halo.h).toBeLessThan(200);
   });
 
-  test("a materialized stage dissolves exactly its slot; the next slot sits where the tree drops the tip's child (attach IN PLACE)", () => {
+  test("a materialized current stage stays as the group's single full pane", () => {
     const root = entry({ path: "/arch", activity: "live" });
     const group: BranchGroup = { key: "/arch", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
     const running = staged({
@@ -398,47 +379,56 @@ describe("pipeline stage placeholder slots (issue #196)", () => {
       runs: [{ stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] }],
     });
     const layout = buildSchemeLayout([group], [], [root], [], [], [running], [running]);
-    /* The architect window is live — only builder + review keep placeholders. */
-    expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["builder", "review"]);
+    expect(layout.slots).toHaveLength(0);
     const node = layout.nodes.find((candidate) => candidate.file.path === "/arch")!;
-    /* Review round-1 finding 3: the next stage's live window lands as the tip's
-       child at (tip.x + INDENT, one generation below) — the slot must sit on
-       EXACTLY those coordinates so the dashed card becomes the solid window in
-       place, with no relocation. */
-    const next = layout.slots[0]!;
-    expect(next.x).toBe(node.x + INDENT);
-    expect(next.y).toBeGreaterThanOrEqual(node.y + node.h);
-    const builder = entry({ path: "/builder", parent: "/arch", kind: "subagent" });
-    const attachedFiles = [root, builder];
-    const attached = buildSchemeLayout(
-      buildBranchGroups(attachedFiles, "demo"),
-      [],
-      attachedFiles,
-      [],
-      [],
-      [staged({
-        state: "running",
-        cursor: { stageId: "review", state: "spawning" },
-        runs: [
-          { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] },
-          { stageId: "builder", attempts: [{ n: 1, state: "running", agentPath: "/builder", flowId: null }] },
-        ],
-      })],
-      [],
-    );
-    const attachedBuilder = attached.nodes.find((candidate) => candidate.file.path === builder.path)!;
-    expect({ x: attachedBuilder.x, y: attachedBuilder.y, w: attachedBuilder.w })
-      .toEqual({ x: next.x, y: next.y, w: next.w });
-    expect(attached.slots.map((slot) => slot.stage.id)).toEqual(["review"]);
-    /* Exactly one halo encloses both the live node and the remaining slots. */
     const halos = layout.groups.filter((candidate) => candidate.kind === "pipeline" && candidate.id === "p9");
     expect(halos).toHaveLength(1);
     const halo = halos[0]!;
     expect(node.x).toBeGreaterThanOrEqual(halo.x);
-    for (const slot of layout.slots) {
-      expect(slot.x + slot.w).toBeLessThanOrEqual(halo.x + halo.w);
-      expect(slot.y + slot.h).toBeLessThanOrEqual(halo.y + halo.h);
-    }
+    expect(node.x + node.w).toBeLessThanOrEqual(halo.x + halo.w);
+    expect(node.y + node.h).toBeLessThanOrEqual(halo.y + halo.h);
+  });
+
+  test("an active review stage keeps one conversation pane and folds its review deck", () => {
+    const implementer = entry({ path: "/builder", activity: "live" });
+    const reviewer = entry({ path: "/reviewer", parent: "/builder", kind: "subagent", activity: "live" });
+    const group: BranchGroup = { key: "/builder", columns: [{ file: implementer, tasks: [] }], returnable: [], finished: [], smt: implementer.mtime, orphanTask: false };
+    const reviewing = staged({
+      state: "reviewing",
+      cursor: { stageId: "review", state: "reviewing" },
+      runs: [
+        { stageId: "builder", attempts: [{ n: 1, state: "passed", agentPath: "/builder", flowId: null }] },
+        { stageId: "review", attempts: [{ n: 1, state: "reviewing", agentPath: "/reviewer", flowId: "flow-1" }] },
+      ],
+    });
+    const reviewFlow = flow({ id: "flow-1", implementerPath: "/builder" });
+    const layoutFlows = compactPipelineLayoutFlows([reviewing], [reviewFlow]);
+    const layout = buildSchemeLayout([group], [], [implementer, reviewer], layoutFlows, [], [reviewing], [reviewing]);
+
+    expect(layout.nodes.map((node) => node.file.path)).toEqual(["/builder"]);
+    expect(layout.decks).toHaveLength(0);
+    expect(layout.groups.filter((candidate) => candidate.kind === "pipeline" && candidate.id === "p9")).toHaveLength(1);
+  });
+
+  test("an inspected compact transcript stays isolated from its descendant history", () => {
+    const earlier = entry({ path: "/earlier", activity: "idle" });
+    const later = entry({ path: "/later", parent: earlier.path, kind: "subagent", activity: "idle" });
+    const layout = buildSchemeLayout(
+      [],
+      [earlier],
+      [earlier, later],
+      [],
+      [],
+      [],
+      [],
+      new Set(),
+      new Set([earlier.path]),
+    );
+
+    expect(layout.nodes.map((node) => node.file.path)).toEqual([earlier.path]);
+    expect(layout.stacks).toHaveLength(0);
+    expect(layout.nodes[0]?.under).toHaveLength(0);
+    expect(layout.byPath.has(later.path)).toBe(false);
   });
 
   test("a foreign project's memberless draft never grows slots or a halo on this canvas (round-1 finding 2)", () => {
@@ -448,10 +438,27 @@ describe("pipeline stage placeholder slots (issue #196)", () => {
     const layout = buildSchemeLayout([], [], [], [], [], [foreign], []);
     expect(layout.slots).toHaveLength(0);
     expect(layout.groups.filter((group) => group.kind === "pipeline")).toHaveLength(0);
-    /* The same pipeline offered through the surface list (this project) renders. */
+    /* Project-scoped surface membership creates one compact group. */
     const local = buildSchemeLayout([], [], [], [], [], [foreign], [foreign]);
-    expect(local.slots.length).toBeGreaterThan(0);
+    expect(local.slots).toHaveLength(0);
+    expect(local.groups.filter((group) => group.kind === "pipeline")).toHaveLength(1);
   });
+
+  for (const count of [1, 3, 10]) {
+    test(`${count} pipeline${count === 1 ? "" : "s"} stay bounded at 15%, 30%, 100%, and Fit All`, () => {
+      const pipelines = Array.from({ length: count }, (_, index) => staged({ id: `p${index}` }));
+      const layout = buildSchemeLayout([], [], [], [], [], pipelines, pipelines);
+      const pipelineGroups = layout.groups.filter((group) => group.kind === "pipeline");
+      expect(pipelineGroups).toHaveLength(count);
+      expect(layout.nodes).toHaveLength(0);
+      expect(layout.slots).toHaveLength(0);
+      const fitAll = Math.min(1, 1920 / layout.width, 1080 / layout.height);
+      for (const zoom of [0.15, 0.3, 1, fitAll]) {
+        expect(pipelineGroups.filter((group) => group.w * zoom > 0 && group.h * zoom > 0)).toHaveLength(count);
+      }
+      expect(layout.byPath.size).toBe(0);
+    });
+  }
 });
 
 describe("buildSchemeLayout favorites band (issue #224)", () => {

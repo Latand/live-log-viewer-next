@@ -1,13 +1,13 @@
 "use client";
 
-import { ListTodo, Map as MapIcon, Pause, Play } from "lucide-react";
+import { ListTodo, Map as MapIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Loader2, X } from "@/components/icons";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
-import type { Pipeline, PipelineAction } from "@/lib/pipelines/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
@@ -24,7 +24,8 @@ import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 
-import { PIPELINE_ATTENTION_STATES, PIPELINE_BUSY_STATES, STAGE_GLYPH, STAGE_TONES, latestAttempt, patchPipeline, pipelineStateLabel, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageOpenTarget } from "@/components/pipelines/pipelineModel";
+import { STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, pipelineLinkedTasks, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence } from "@/components/pipelines/pipelineModel";
+import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { deckKey } from "@/components/scheme/agentLinks";
 import { buildSchemeLayout, type SchemeGroup } from "@/components/scheme/layout";
@@ -39,6 +40,7 @@ const STATE_SCORE: Record<PaneState, number> = { waiting: 5, stalled: 4, live: 3
 
 /* Swipe on the pane header: mostly-horizontal and long enough to be deliberate. */
 const SWIPE_MIN_X = 56;
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 interface Entry {
   key: string;
@@ -75,6 +77,8 @@ interface Props {
   /** Durable identities the user has crowned (issue #224): their roots lift into
       the pinned top band on the map, mirroring the desktop scheme. */
   favorites?: ReadonlySet<string>;
+  /** Compact transcript paths opened as isolated history panes. */
+  isolatedManualPaths?: ReadonlySet<string>;
   loaded: boolean;
   /** Path an opener wants on screen (same signal the scheme camera gets). */
   focus: string | null;
@@ -108,7 +112,7 @@ export function pipelinesToDock(groups: SchemeGroup[]): Pipeline[] {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -136,7 +140,11 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
      beside the reviewed conversation exactly like managed loops (issue #325);
      everything action-backed below keeps reading the real `flows`. */
   const deckFlows = useMemo(() => (reviewGroups.length ? [...flows, ...reviewGroups] : flows), [flows, reviewGroups]);
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, deckFlows, drafts, pipelines, surfacePipelines, favorites), [groups, manual, files, deckFlows, drafts, pipelines, surfacePipelines, favorites]);
+  const layoutFlows = useMemo(() => compactPipelineLayoutFlows(pipelines, deckFlows), [pipelines, deckFlows]);
+  const layout = useMemo(
+    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths),
+    [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths],
+  );
   /* Scheme order (depth-first, groups left to right) becomes the strip order,
      so chips and the map agree on what "next" means. */
   const entries = useMemo<Entry[]>(
@@ -239,7 +247,11 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
      flow has a rendered deck, which exists only for a placed implementer node —
      so the availability set comes from the layout's placed nodes. */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
-  const renderableFlows = useMemo(() => renderableFlowIds(flows, new Set(layout.nodes.map((node) => node.file.path))), [flows, layout]);
+  const renderableFlows = useMemo(() => renderableFlowIds(layoutFlows, new Set(layout.nodes.map((node) => node.file.path))), [layoutFlows, layout]);
+  const linkedTasksByPipeline = useMemo(
+    () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, sheetTasks ?? tasks, flows)] as const)),
+    [pipelines, sheetTasks, tasks, flows],
+  );
 
   const openStagePath = useCallback(
     (path: string) => {
@@ -253,10 +265,8 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
     if (!pipelineFocus) return;
     const stage = pipelineFocus.pipeline.stages[index];
     if (!stage) return;
-    const target = stageOpenTarget(stage, latestAttempt(pipelineFocus.pipeline, stage.id), renderableFlows, renderablePaths);
+    const target = compactStageOpenTarget(stage, latestAttempt(pipelineFocus.pipeline, stage.id), flows, renderableFlows, renderablePaths);
     if (!target) return;
-    /* Review-loop targets land on the flow's round deck (an entry key), since the
-       reviewer transcript is folded away; run stages open their own node by path. */
     if (target.kind === "flow") {
       const key = deckKey(target.flowId);
       if (byKey.has(key)) setFocusPath(key);
@@ -264,6 +274,12 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
     }
     openStagePath(target.path);
   };
+
+  const openPipelineTask = useCallback((task: BoardTask) => setTaskSheet({ taskId: task.id }), []);
+  const openPipelineFlow = useCallback((flowId: string) => {
+    const key = deckKey(flowId);
+    if (byKey.has(key)) setFocusPath(key);
+  }, [byKey]);
 
   const step = useCallback(
     (dir: number) => {
@@ -331,7 +347,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
             <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1.5">
               {pipelineFocus ? (
                 <>
-                  <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
+                  <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} flows={flows} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
                   {entries.length > 1 ? <span aria-hidden className="mx-0.5 h-7 w-px shrink-0 bg-border" /> : null}
                 </>
               ) : null}
@@ -430,7 +446,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
                plan + controls ARE the surface here (issue #136 / review). */
             <div className="flex min-h-0 flex-1 flex-col divide-y divide-border overflow-y-auto">
               {dockedPipelines.map((pipeline) => (
-                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} />
+                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
               ))}
             </div>
           ) : (
@@ -449,7 +465,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
       {(activeNode || activeDeck || activeDraft) && dockedPipelines.length ? (
         <div className="max-h-[42vh] shrink-0 divide-y divide-border overflow-y-auto border-t border-border bg-card">
           {dockedPipelines.map((pipeline) => (
-            <MobilePipelineDock key={pipeline.id} pipeline={pipeline} />
+            <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
           ))}
         </div>
       ) : null}
@@ -479,6 +495,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
             workerStacks={workerStacks}
             tasks={tasks}
             drafts={drafts}
+            isolatedManualPaths={isolatedManualPaths}
             focus={null}
             ring={resolvedKey}
             onSelect={onSelect}
@@ -496,7 +513,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
           {dockedPipelines.length ? (
             <div className="max-h-[38vh] shrink-0 divide-y divide-border overflow-y-auto border-t border-border bg-card">
               {dockedPipelines.map((pipeline) => (
-                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} />
+                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
               ))}
             </div>
           ) : null}
@@ -535,7 +552,7 @@ function findPipelineStage(pipelines: Pipeline[], path: string | null, flowId: s
     stage/state, and prev/next stage chips as hop targets along the chain. The
     current-stage chip opens a verdict bottom sheet (#93 §2.3) when its stage has
     run, surfacing findings/confidence and parked Retry/Skip on mobile. */
-function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, onHop, onOpenPath }: { pipeline: Pipeline; index: number; renderableFlows: ReadonlySet<string>; renderablePaths: ReadonlySet<string>; onHop: (index: number) => void; onOpenPath: (path: string) => void }) {
+function PipelineFocusRow({ pipeline, index, flows, renderableFlows, renderablePaths, onHop, onOpenPath }: { pipeline: Pipeline; index: number; flows: Flow[]; renderableFlows: ReadonlySet<string>; renderablePaths: ReadonlySet<string>; onHop: (index: number) => void; onOpenPath: (path: string) => void }) {
   const { t } = useLocale();
   const [sheetOpen, setSheetOpen] = useState(false);
   const total = pipeline.stages.length;
@@ -547,9 +564,14 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
   /* A hop resolves through stageOpenTarget, so a neighbor is reachable only while
      its flow still has a deck (renderableFlows) or its run transcript is still in
      the scan (renderablePaths). */
-  const prevHopEnabled = prev ? Boolean(stageOpenTarget(prev, latestAttempt(pipeline, prev.id), renderableFlows, renderablePaths)) : false;
-  const nextHopEnabled = next ? Boolean(stageOpenTarget(next, latestAttempt(pipeline, next.id), renderableFlows, renderablePaths)) : false;
+  const prevHopEnabled = prev ? Boolean(compactStageOpenTarget(prev, latestAttempt(pipeline, prev.id), flows, renderableFlows, renderablePaths)) : false;
+  const nextHopEnabled = next ? Boolean(compactStageOpenTarget(next, latestAttempt(pipeline, next.id), flows, renderableFlows, renderablePaths)) : false;
   const attempt = latestAttempt(pipeline, stage.id);
+  const stateLabel = t(`pipelineChipState.${state}`);
+  const prevLabel = prev ? stageChipLabel(t, prev) : "";
+  const prevState = prev ? t(`pipelineChipState.${stageChipState(pipeline, prev)}`) : "";
+  const nextLabel = next ? stageChipLabel(t, next) : "";
+  const nextState = next ? t(`pipelineChipState.${stageChipState(pipeline, next)}`) : "";
   /* Match the desktop evidence predicate: a running attempt has no verdict sheet
      to open, so the button stays disabled and never shows an empty "no findings". */
   const canOpenVerdict = stageHasEvidence(pipeline, stage, attempt);
@@ -558,23 +580,25 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
   return (
     /* Inline chip group living inside the shared conversation-chip strip (finding
        4): no separate row. Every hop/verdict control is a 44px tap target. */
-    <div className="flex shrink-0 items-center gap-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
+    <div className="flex shrink-0 items-center gap-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })} data-testid="mobile-pipeline-focus-row">
       <span className="shrink-0 rounded-full bg-sunken px-1.5 py-1 text-[10px] font-bold text-muted" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
-      <button
-        type="button"
-        disabled={!prevHopEnabled}
-        onClick={() => onHop(index - 1)}
-        aria-label={t("pipelineMobile.prevStage")}
-        className="inline-flex h-11 shrink-0 items-center rounded-full border border-border bg-card px-3 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
-      >
-        ‹ {prev ? stageChipLabel(t, prev) : ""}
-      </button>
+      {prev ? (
+        <button
+          type="button"
+          disabled={!prevHopEnabled}
+          onClick={() => onHop(index - 1)}
+          aria-label={t("pipelineMobile.prevStage", { label: prevLabel, state: prevState })}
+          className="inline-flex h-11 shrink-0 items-center rounded-full border border-border bg-card px-3 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+        >
+          ‹ {stageChipLabel(t, prev)}
+        </button>
+      ) : null}
       <button
         type="button"
         disabled={!canOpenVerdict}
         onClick={() => setSheetOpen(true)}
         aria-haspopup="dialog"
-        aria-label={t("pipelineMobile.openVerdict", { label: stageChipLabel(t, stage) })}
+        aria-label={t("pipelineMobile.openVerdict", { label: stageChipLabel(t, stage), state: stateLabel })}
         className="inline-flex h-11 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
         style={{ backgroundColor: tone.soft, color: tone.color }}
       >
@@ -584,15 +608,17 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
         <span className="text-[9px] font-semibold opacity-80">{t(`pipelineChipState.${state}`)}</span>
         {attempt?.verdict ? <span aria-hidden>{attempt.verdict.status === "pass" ? "✓" : attempt.verdict.status === "fail" ? "✕" : "●"}</span> : null}
       </button>
-      <button
-        type="button"
-        disabled={!nextHopEnabled}
-        onClick={() => onHop(index + 1)}
-        aria-label={t("pipelineMobile.nextStage")}
-        className="inline-flex h-11 shrink-0 items-center rounded-full border border-border bg-card px-3 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
-      >
-        {next ? stageChipLabel(t, next) : ""} ›
-      </button>
+      {next ? (
+        <button
+          type="button"
+          disabled={!nextHopEnabled}
+          onClick={() => onHop(index + 1)}
+          aria-label={t("pipelineMobile.nextStage", { label: nextLabel, state: nextState })}
+          className="inline-flex h-11 shrink-0 items-center rounded-full border border-border bg-card px-3 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+        >
+          {stageChipLabel(t, next)} ›
+        </button>
+      ) : null}
       {sheetOpen && attempt ? (
         <div
           className="fixed inset-0 z-[70] flex items-end justify-center bg-black/40"
@@ -607,6 +633,8 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
               pipeline={pipeline}
               stage={stage}
               attempt={attempt}
+              flows={flows}
+              availablePaths={renderablePaths}
               canOpenFlow={canOpenFlow}
               canOpenPath={canOpenPath}
               onClose={() => setSheetOpen(false)}
@@ -619,96 +647,43 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
   );
 }
 
-/** Pipeline state → the header dot tone (busy accent, attention amber, done ok). */
-function pipelineDotColor(pipeline: Pipeline): string {
-  if (pipeline.state === "draft") return "var(--color-warning)";
-  if (PIPELINE_BUSY_STATES.has(pipeline.state)) return "var(--color-accent)";
-  if (PIPELINE_ATTENTION_STATES.has(pipeline.state)) return "var(--color-warning)";
-  if (pipeline.state === "completed") return "var(--color-success)";
-  return "var(--color-muted)";
-}
-
 /**
- * The docked mobile full-plan surface for an active pipeline (issues #136, #156).
- * It backs two cases the phone cannot otherwise plan out: a memberless pipeline
- * (no board node yet — the pick-only lite map needs ≥2 nodes to surface it), and
- * a memberful pipeline whose complete plan the mobile map suppresses (it passes
- * no pipelineControls, so GroupsLayer paints no strip there). This card shows the
- * full planned stage graph (past ✓ / current ▸ / ghost ○) and the pipeline-level
- * controls, every one a 44px tap target, so the plan and its actions live on the
- * phone board for every active pipeline, memberful ones included.
+ * The phone uses the shared compact pipeline rail with 44px tap targets. This
+ * preserves configuration, evidence history, transcript navigation, task links,
+ * and pipeline actions on every mobile surface.
  */
-export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
-  const { t } = useLocale();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const mutate = async (action: PipelineAction) => {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    const fail = await patchPipeline(pipeline.id, action);
-    if (fail) setError(fail);
-    setBusy(false);
-  };
+export function MobilePipelineDock({
+  pipeline,
+  flows = [],
+  renderablePaths,
+  renderableFlows,
+  linkedTasks = [],
+  onOpenPath,
+  onOpenFlow,
+  onOpenTask,
+}: {
+  pipeline: Pipeline;
+  flows?: Flow[];
+  renderablePaths?: ReadonlySet<string>;
+  renderableFlows?: ReadonlySet<string>;
+  linkedTasks?: BoardTask[];
+  onOpenPath?: (path: string) => void;
+  onOpenFlow?: (flowId: string) => void;
+  onOpenTask?: (task: BoardTask) => void;
+}) {
   const draft = pipeline.state === "draft";
-  const finished = pipeline.state === "completed" || pipeline.state === "closed";
-  const parked = pipeline.state === "needs_decision";
   return (
-    <div className={`flex flex-col gap-2 px-3 py-2 ${draft ? "border-y border-dashed border-warning/70 bg-warning-soft" : ""}`} data-testid="mobile-pipeline-dock" data-pipeline-draft={draft || undefined} role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
-      <div className="flex items-center gap-2">
-        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: pipelineDotColor(pipeline) }} aria-hidden />
-        {/* One title, one status marker (issue #221 §2): the state label already
-            says "draft", so no separate DRAFT badge. */}
-        <span className="min-w-0 flex-1 truncate text-[12.5px] font-bold text-primary">{cleanTitle(pipeline.task, 60)}</span>
-        <span className="shrink-0 text-[11px] font-semibold text-muted">{pipelineStateLabel(t, pipeline.state)}</span>
-      </div>
-      {/* The whole planned stage graph, scrolled horizontally — past/current/ghost. */}
-      <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-        {pipeline.stages.map((stage) => {
-          const state = stageChipState(pipeline, stage);
-          const tone = STAGE_TONES[state];
-          return (
-            <span
-              key={stage.id}
-              className="inline-flex h-11 shrink-0 items-center gap-1 rounded-full border px-3 text-[11px] font-bold"
-              style={{ borderColor: tone.color, color: tone.color, backgroundColor: tone.soft }}
-            >
-              <span aria-hidden>{STAGE_GLYPH[state]}</span> {stageChipLabel(t, stage)}
-            </span>
-          );
-        })}
-      </div>
-      {error ? <span className="text-[11px] font-semibold text-danger" role="alert">{error}</span> : null}
-      {/* A closed pipeline is gone, so no controls; every other state — including
-          completed — keeps Close so the operator can always dismiss it. Only
-          pause/resume and retry/skip are gated on `finished` (mirrors the desktop
-          PipelineStrip). Fixes the completed-pipeline dead end (review round 4). */}
-      {pipeline.state === "closed" ? null : (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {draft ? (
-            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-accent bg-accent px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40" disabled={busy || pipeline.stages.length < 2} onClick={() => void mutate("start")}>
-              <Play className="h-4 w-4" aria-hidden /> {t("pipelineStrip.start")}
-            </button>
-          ) : parked ? (
-            <>
-              <button type="button" className="inline-flex h-11 items-center rounded-full border border-accent bg-accent px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void mutate("retry-stage")}>{t("pipelineStrip.retryStage")}</button>
-              <button type="button" className="inline-flex h-11 items-center rounded-full border border-border bg-canvas px-3.5 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void mutate("skip-stage")}>{t("pipelineStrip.skipStage")}</button>
-            </>
-          ) : null}
-          {draft || finished ? null : pipeline.state === "paused" ? (
-            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-success/40 bg-success-soft px-3.5 text-[11px] font-bold text-success focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.resume")} onClick={() => void mutate("resume")}>
-              <Play className="h-4 w-4" aria-hidden /> {t("pipelineStrip.resume")}
-            </button>
-          ) : (
-            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-border bg-canvas px-3.5 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.pause")} onClick={() => void mutate("pause")}>
-              <Pause className="h-4 w-4" aria-hidden /> {t("pipelineStrip.pause")}
-            </button>
-          )}
-          <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-border bg-canvas px-3.5 text-[11px] font-bold text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")} onClick={() => void mutate(draft ? "delete" : "close")}>
-            <X className="h-4 w-4" aria-hidden /> {t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}
-          </button>
-        </div>
-      )}
+    <div className="px-2 py-1.5 [&_button]:!h-11 [&_button]:!min-h-11" data-testid="mobile-pipeline-dock" data-pipeline-draft={draft || undefined}>
+      <PipelineStrip
+        pipeline={pipeline}
+        flows={flows}
+        renderablePaths={renderablePaths}
+        renderableFlows={renderableFlows}
+        linkedTasks={linkedTasks}
+        onOpenPath={onOpenPath}
+        onOpenFlow={onOpenFlow}
+        onOpenTask={onOpenTask}
+      />
     </div>
   );
 }
