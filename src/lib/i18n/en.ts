@@ -1068,6 +1068,7 @@ export const en = {
   "pipelineTemplates.ready": "Repository ready",
   "pipelineTemplates.creating": "Creating pipeline…",
   "pipelineTemplates.retry": "Retry",
+  "pipelinePreflight.empty": "Enter a repository directory",
   "pipelinePreflight.missing": "The directory does not exist: {path}",
   "pipelinePreflight.not_directory": "Choose a directory: {path}",
   "pipelinePreflight.repo_unreadable": "The repository cannot be read: {path}",

@@ -91,6 +91,78 @@ test("checks the selected directory before enabling templates and stays mounted 
   expect((completed as Pipeline | null)?.id).toBe(pipeline.id);
 });
 
+test("an empty repository directory mounts blocked with a focused input and no phantom spinner", async () => {
+  const requests: string[] = [];
+  const resolvers = new Map<string, (response: Response) => void>();
+  globalThis.fetch = ((_: string, init?: RequestInit) => {
+    const repoDir = JSON.parse(String(init?.body)).repoDir as string;
+    requests.push(repoDir);
+    return new Promise<Response>((resolve) => resolvers.set(repoDir, resolve));
+  }) as unknown as typeof fetch;
+  const host = mount(
+    <PipelineTemplatePicker repoDir="" onCreate={async () => ({})} onCreated={() => undefined} onClose={() => undefined} />,
+  );
+
+  const picker = host.querySelector("[data-pipeline-picker-state]")!;
+  expect(picker.getAttribute("data-pipeline-picker-state")).toBe("blocked");
+  expect(host.textContent).not.toContain(translate("en", "pipelineTemplates.checking"));
+  expect(host.querySelector(".animate-spin")).toBeNull();
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain(translate("en", "pipelinePreflight.empty"));
+
+  const input = host.querySelector("input") as HTMLInputElement;
+  expect(input.disabled).toBe(false);
+  expect(document.activeElement).toBe(input);
+  const template = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Plan → Build → Review"))!;
+  expect(template.disabled).toBe(true);
+
+  await settle();
+  expect(picker.getAttribute("data-pipeline-picker-state")).toBe("blocked");
+  expect(requests).toEqual([]);
+
+  const retry = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(translate("en", "pipelineTemplates.retry")))!;
+  flushSync(() => retry.click());
+  await settle();
+  expect(picker.getAttribute("data-pipeline-picker-state")).toBe("blocked");
+  expect(host.querySelector(".animate-spin")).toBeNull();
+  expect(requests).toEqual([]);
+
+  flushSync(() => {
+    Object.getOwnPropertyDescriptor(dom.HTMLInputElement.prototype, "value")!.set!.call(input, "/repo");
+    input.dispatchEvent(new dom.Event("input", { bubbles: true }) as unknown as Event);
+  });
+  expect(picker.getAttribute("data-pipeline-picker-state")).toBe("checking");
+  await settle();
+  expect(host.querySelector(".animate-spin")).not.toBeNull();
+  expect(requests).toEqual(["/repo"]);
+  resolvers.get("/repo")!(new Response(JSON.stringify({ ok: true, repoDir: "/repo", gitCommonDir: "/repo/.git", worktreeParent: "/" })));
+  await settle();
+  expect(picker.getAttribute("data-pipeline-picker-state")).toBe("ready");
+  expect(host.querySelector(".animate-spin")).toBeNull();
+  expect(template.disabled).toBe(false);
+});
+
+test("mount-empty and typed-empty share the same Ukrainian copy", async () => {
+  setLocale("uk");
+  globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true, repoDir: "/repo", gitCommonDir: "/repo/.git", worktreeParent: "/" }))) as unknown as typeof fetch;
+  const emptyHost = mount(
+    <PipelineTemplatePicker repoDir="" onCreate={async () => ({})} onCreated={() => undefined} onClose={() => undefined} />,
+  );
+  const mountedCopy = emptyHost.querySelector('[role="alert"]')?.textContent;
+  expect(mountedCopy).toContain(translate("uk", "pipelinePreflight.empty"));
+
+  const typedHost = mount(
+    <PipelineTemplatePicker repoDir="/repo" onCreate={async () => ({})} onCreated={() => undefined} onClose={() => undefined} />,
+  );
+  await settle();
+  const input = typedHost.querySelector("input") as HTMLInputElement;
+  flushSync(() => {
+    Object.getOwnPropertyDescriptor(dom.HTMLInputElement.prototype, "value")!.set!.call(input, "");
+    input.dispatchEvent(new dom.Event("input", { bubbles: true }) as unknown as Event);
+  });
+  await settle();
+  expect(typedHost.querySelector('[role="alert"]')?.textContent).toBe(mountedCopy);
+});
+
 test("keeps a localized inline admission error and retries the current directory", async () => {
   setLocale("uk");
   let attempts = 0;

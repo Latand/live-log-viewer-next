@@ -40,7 +40,10 @@ export function PipelineTemplatePicker({
   const { t } = useLocale();
   const [repoInput, setRepoInput] = useState(repoDir);
   const [retry, setRetry] = useState(0);
-  const [state, setState] = useState<PickerState>({ phase: "checking" });
+  // An empty directory mounts already blocked (#404): "checking" — and its
+  // spinner — exists only while a preflight request is actually in flight.
+  const [state, setState] = useState<PickerState>(() =>
+    repoDir.trim() ? { phase: "checking" } : { phase: "blocked", code: "missing", path: "" });
   const generation = useRef(0);
 
   useEffect(() => {
@@ -90,8 +93,11 @@ export function PipelineTemplatePicker({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [creating, onClose]);
   const templates = PIPELINE_TEMPLATES.filter((template) => template.id !== "blank");
+  const blockedPath = state.phase === "blocked" ? (state.path || shownRepoDir).trim() : "";
   const blockedMessage = state.phase === "blocked"
-    ? state.error ?? t(`pipelinePreflight.${state.code}`, { path: state.path || shownRepoDir })
+    ? state.error ?? (blockedPath
+      ? t(`pipelinePreflight.${state.code}`, { path: blockedPath })
+      : t("pipelinePreflight.empty"))
     : null;
   return (
     <div
@@ -128,6 +134,7 @@ export function PipelineTemplatePicker({
           <input
             value={shownRepoDir}
             disabled={creating}
+            autoFocus={!repoDir.trim()}
             onInput={(event) => {
               const value = event.currentTarget.value;
               setRepoInput(value);
@@ -149,7 +156,9 @@ export function PipelineTemplatePicker({
                 type="button"
                 className="min-h-8 shrink-0 rounded-control border border-danger/30 px-2 text-label font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40"
                 onClick={() => {
-                  setState({ phase: "checking" });
+                  // Retrying an empty input has no request to wait for (#404):
+                  // stay blocked instead of stranding a "checking" spinner.
+                  if (repoInput.trim()) setState({ phase: "checking" });
                   setRetry((value) => value + 1);
                 }}
               >

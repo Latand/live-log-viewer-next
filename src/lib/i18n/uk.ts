@@ -1040,6 +1040,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineTemplates.ready": "Репозиторій готовий",
   "pipelineTemplates.creating": "Створюємо пайплайн…",
   "pipelineTemplates.retry": "Повторити",
+  "pipelinePreflight.empty": "Вкажи каталог репозиторію",
   "pipelinePreflight.missing": "Каталог не існує: {path}",
   "pipelinePreflight.not_directory": "Обери каталог: {path}",
   "pipelinePreflight.repo_unreadable": "Репозиторій недоступний для читання: {path}",
