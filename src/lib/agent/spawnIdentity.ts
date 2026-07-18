@@ -11,6 +11,8 @@ export interface SpawnRequestIdentity {
   accountId: string | null;
   role: string | null;
   allowSubagents?: boolean;
+  /** Explicit operator project ownership; absent for cwd-attributed spawns. */
+  project?: string;
   parent: SpawnParentSelector;
   reviews?: SpawnParentSelector;
   prompt: string;

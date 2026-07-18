@@ -22,11 +22,12 @@ import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlayLineageProjectAffinity } from "@/lib/session/projectAffinity";
+import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import { overlayRoleSessionTitles } from "@/lib/session/roleTitles";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
-import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
+import { projectRootForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryFallbacks } from "@/lib/scanner/projectDirectories";
 import type { FilesResponse, ProjectCatalogEntry } from "@/lib/types";
 
@@ -48,7 +49,11 @@ function projectedProjectCatalog(
   for (const conversation of Object.values(snapshot.conversations)) {
     const latest = conversation.generations.at(-1);
     if (!latest) continue;
-    const project = projectInfoFromCwd(latest.launchProfile.cwd)?.project ?? latest.launchProfile.project;
+    const { project } = resolveProjectAttribution({
+      projectOwnership: conversation.projectOwnership,
+      cwd: latest.launchProfile.cwd,
+      launchProfileProject: latest.launchProfile.project,
+    });
     if (project) projectByPath.set(latest.path, project);
     for (const generation of conversation.generations) {
       if (generation.path !== latest.path) archivedPaths.add(generation.path);
@@ -122,9 +127,16 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       path: parentPath,
       root: parentConversation.engine === "codex" ? "codex-sessions" as const : "claude-projects" as const,
       name: rootPath ? path.relative(rootPath, parentPath) : path.basename(parentPath),
-      project: projectInfoFromCwd(parentGeneration.launchProfile.cwd)?.project
-        ?? parentGeneration.launchProfile.project
-        ?? child.project,
+      /* Cross-project lineage stub: the foreign parent groups under ITS owning
+         project (ownership → canonical cwd → profile hint), falling back to
+         the child's project only when the parent has no attribution at all. */
+      project: resolveProjectAttribution({
+        projectOwnership: parentConversation.projectOwnership,
+        cwd: parentGeneration.launchProfile.cwd,
+        launchProfileProject: parentGeneration.launchProfile.project,
+        fallbackProject: child.project,
+      }).project ?? child.project,
+      ...(parentConversation.projectOwnership ? { projectOwnership: { ...parentConversation.projectOwnership } } : {}),
       cwd: parentGeneration.launchProfile.cwd,
       projectRoot: parentGeneration.launchProfile.cwd ? projectRootForCwd(parentGeneration.launchProfile.cwd) : null,
       title: parentGeneration.launchProfile.title ?? path.basename(parentPath, path.extname(parentPath)),
@@ -184,7 +196,13 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       }
       const profile = latest.launchProfile;
       file.title = profile.title ?? file.title;
-      file.project = projectInfoFromCwd(profile.cwd)?.project ?? profile.project ?? file.project;
+      file.project = resolveProjectAttribution({
+        projectOwnership: conversation.projectOwnership,
+        cwd: profile.cwd,
+        launchProfileProject: profile.project,
+        fallbackProject: file.project,
+      }).project ?? file.project;
+      if (conversation.projectOwnership) file.projectOwnership = { ...conversation.projectOwnership };
       file.launchModel = profile.model ?? file.launchModel;
       file.effort = profile.effort ?? file.effort;
       file.goal = profile.goal ?? file.goal;

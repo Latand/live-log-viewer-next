@@ -8,6 +8,46 @@ export type MigrationOrigin = "manual" | "auto";
 export type MigrationPhase = "requested" | "waiting-turn" | "preparing" | "successor-starting" | "verifying" | "committed" | "failed-recoverable" | "rolled-back";
 export type MigrationIntentState = "draining" | "complete" | "stopped";
 
+/**
+ * Durable conversation-level project authority (issue #315). Distinct from
+ * `launchProfile.project`, which stays a workflow/legacy hint: ownership is
+ * written only by an explicit operator spawn or a relocation operation, and
+ * every files/catalog/board projection must rank it above cwd derivation.
+ */
+export interface ConversationProjectOwnership {
+  project: string;
+  source: "operator" | "relocation";
+  setAt: string;
+  operationId: string;
+}
+
+/* Project keys are scanner slugs (`projectFromSlug` output): dash-joined
+   alphanumerics, optionally rooted with a leading dash, plus the dots that a
+   home-directory basename can contribute. Anything outside that shape (path
+   separators, whitespace, empty) is an ambiguous alias and must be rejected
+   before it becomes durable ownership. */
+const PROJECT_KEY_PATTERN = /^-?[A-Za-z0-9][A-Za-z0-9._-]{0,126}$/;
+
+export function validExplicitProject(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const project = value.trim();
+  return PROJECT_KEY_PATTERN.test(project) ? project : null;
+}
+
+export function normalizeProjectOwnership(value: unknown): ConversationProjectOwnership | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const ownership = value as Record<string, unknown>;
+  const project = validExplicitProject(ownership.project);
+  if (!project) return null;
+  if (ownership.source !== "operator" && ownership.source !== "relocation") return null;
+  return {
+    project,
+    source: ownership.source,
+    setAt: typeof ownership.setAt === "string" ? ownership.setAt : "1970-01-01T00:00:00.000Z",
+    operationId: typeof ownership.operationId === "string" ? ownership.operationId : "",
+  };
+}
+
 export interface LaunchProfile {
   cwd: string;
   model: string | null;
