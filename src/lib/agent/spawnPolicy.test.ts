@@ -43,12 +43,23 @@ test("Claude spawn policy installs a multi-agent deny hook with Viewer lineage g
 test("Claude spawn policy pins the audited multi-agent set and denies Workflow and team tools (#381)", async () => {
   expect([...NATIVE_MULTI_AGENT_TOOLS]).toEqual(["Task", "Agent", "Workflow", "TeamCreate", "TeamDelete", "SendMessage"]);
   expect(NATIVE_MULTI_AGENT_HOOK_MATCHER).toBe("Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage");
-  /* The hook matcher is a regex over tool names: every audited entry point must
-     match, while shell/filesystem and background-shell tools must stay free. */
-  const matcher = new RegExp(NATIVE_MULTI_AGENT_HOOK_MATCHER);
-  for (const tool of NATIVE_MULTI_AGENT_TOOLS) expect(matcher.test(tool)).toBe(true);
-  for (const tool of ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "NotebookEdit"]) {
-    expect(matcher.test(tool)).toBe(false);
+  /* The installed Claude CLI (2.1.214) applies a PreToolUse matcher by splitting
+     it on "|" and testing exact membership of the tool name, so "Task" denies
+     only Task and never TaskOutput. A substring or unanchored-regex model would
+     wrongly swallow the task-list tools, so the assertions below model the exact
+     split-membership semantics. */
+  const deniedByMatcher = (tool: string): boolean => NATIVE_MULTI_AGENT_HOOK_MATCHER.split("|").includes(tool);
+  for (const tool of NATIVE_MULTI_AGENT_TOOLS) expect(deniedByMatcher(tool)).toBe(true);
+  /* Task-list tools, background-shell tools, and full Bash/filesystem access
+     must remain allowed on denied structured hosts. */
+  const allowedTools = [
+    "TaskOutput", "TaskStop", "TaskCreate",
+    "BashOutput", "KillShell",
+    "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "NotebookEdit",
+  ];
+  for (const tool of allowedTools) {
+    expect(deniedByMatcher(tool)).toBe(false);
+    expect(NATIVE_MULTI_AGENT_TOOLS).not.toContain(tool);
   }
 
   const installed = applyClaudeSpawnPolicy(home(), { profileId: "audited" });

@@ -23,13 +23,13 @@ Templates map 1:1 to `agent:*` labels on GitHub issues (`Latand/live-log-viewer-
 
 | Template (engine) | Use for | Avoid |
 |---|---|---|
-| **GPT-5.6-Sol** (Codex) | Architecture, planning, bug diagnosis, adversarial review — default owner of issues | LLV UX/UI implementation |
+| **GPT-5.6-Sol** (Codex) | Visible review swarms of five or more reviewers (Viewer pipeline stages) and tasks the operator explicitly assigns to it | Default ownership of LLV UX/UI or Viewer bug work — that is Fable's |
 | **GPT-5.6-Terra** (Codex) | Well-scoped implementation when the operator explicitly assigns it; parked otherwise | Unassigned pickup, open-ended design |
 | **Opus 4.8** (Claude) | Frontend styling, icons, visual polish outside LLV | Bug-finding, deep logic |
-| **Fable 5** (Claude) | LLV UX/UI design, implementation, and debugging; planning/architecture; reviewing results; orchestrator/advisor | — |
+| **Fable 5** (Claude) | All LLV UX/UI and Viewer bug investigation, implementation, and review; planning/architecture; orchestrator/advisor | — |
 | **Sonnet 5** (Claude) | Web/docs research, lightweight tasks (Haiku 4.5 for cheap throughput) | Deep design/review |
 
-Assignment defaults: issues → Sol; LLV UX/UI design, implementation, and debugging → Fable; diagnosis → Sol xhigh; research → Sonnet; Terra stays parked until the operator explicitly assigns a task to it. Reviews go to Fable 5 (at most one or two independent passes) or Sol xhigh; Codex work and adversarial reviews stay with those two.
+Assignment defaults: all LLV UX/UI and Viewer bug investigation, implementation, and review go to Fable by default. Sol is reserved for visible review swarms of five or more reviewers and for explicit operator exceptions. Research goes to Sonnet, and Terra stays parked until the operator explicitly assigns a task to it. Fable runs at most one or two independent review passes on any change.
 
 **Review-pass policy (#381).** Fable performs at most **one or two independent review passes** on any change. A review swarm of **five or more reviewers is Sol-only** and runs as visible Viewer pipeline stages (explicit `/api/spawn` workers or flows the operator sees on the board). Structured Fable hosts deny the native Claude multi-agent tools (`Task`, `Agent`, `Workflow`, `TeamCreate`, `TeamDelete`, `SendMessage`); spawn every helper through the Viewer API so it appears on the board with correct lineage.
 
