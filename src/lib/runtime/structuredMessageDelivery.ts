@@ -8,7 +8,7 @@ import {
 } from "@/lib/agent/registry";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
-import type { HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt, RuntimeSession } from "./contracts";
@@ -80,6 +80,7 @@ async function withAdmissionSection<T>(key: string | null, run: () => T | Promis
 
 export interface HeldStructuredMessageRequest {
   conversationId: string;
+  runtimeConversationId?: string;
   path: string;
   deliveryId: string;
   clientMessageId: string;
@@ -261,6 +262,34 @@ function requestMigrationProgress(
   if (phase && !["committed", "rolled-back"].includes(phase)) requestTick();
 }
 
+function deliveredReservationReplay(
+  reservation: HeldDelivery,
+  idempotencyKey: string,
+  target: ViewerConversationId | null,
+  spawned: boolean,
+): StructuredMessageResult {
+  const receipt: RuntimeOperationReceipt = {
+    operationId: reservation.command.operationId,
+    idempotencyKey,
+    conversationId: reservation.runtimeConversationId,
+    kind: reservation.command.kind,
+    status: "delivered",
+    ...(reservation.command.turnId !== undefined ? { turnId: reservation.command.turnId } : {}),
+    reason: null,
+    at: reservation.deliveredAt ?? reservation.createdAt,
+    revision: 1,
+  };
+  return {
+    ok: true,
+    structured: true,
+    target,
+    outcome: "delivered",
+    operationId: reservation.command.operationId,
+    receipt,
+    ...(spawned ? { spawned: true } : {}),
+  };
+}
+
 export async function deliverHeldStructuredMessage(
   request: HeldStructuredMessageRequest,
   dependencies: HeldStructuredMessageDependencies = {},
@@ -308,7 +337,7 @@ export async function deliverHeldStructuredMessage(
     const result = await client.command({
       kind: command.kind,
       operationId: command.operationId,
-      conversationId: request.conversationId,
+      conversationId: request.runtimeConversationId ?? request.conversationId,
       idempotencyKey: request.clientMessageId,
       text: content.content.text,
       ...(refs.length ? { images: refs } : {}),
@@ -494,6 +523,14 @@ export async function enqueueStructuredMessage(
         ...(recoveredHost ? { spawned: true } : {}),
       };
     }
+    if (reservation.state === "delivered") {
+      return deliveredReservationReplay(
+        reservation,
+        idempotencyKey,
+        recoveredHost ? null : conversation.id,
+        recoveredHost,
+      );
+    }
     if (reservation.state === "assigned" && reservation.generationId) {
       const claimed = registry.beginDeliveryAttempt(reservation.id, reservation.generationId);
       if (!claimed) {
@@ -508,7 +545,7 @@ export async function enqueueStructuredMessage(
         };
       }
       claimedReservationId = claimed.id;
-    } else if (reservation.state !== "delivered") {
+    } else {
       return {
         ok: false,
         structured: true,
@@ -520,7 +557,7 @@ export async function enqueueStructuredMessage(
     const result = await client.command({
       kind: reservation.command.kind,
       operationId: reservation.command.operationId,
-      conversationId: conversation.id,
+      conversationId: reservation.runtimeConversationId,
       idempotencyKey,
       text: content.content.text,
       ...(refs.length ? { images: refs } : {}),

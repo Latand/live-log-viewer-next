@@ -121,6 +121,196 @@ describe("agent registry", () => {
     expect(retained.map((delivery) => delivery.id)).toContain("legacy-104");
   });
 
+  test("compaction retains explicit operation ownership after its delivery tombstone expires", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/operation-owner-compaction.jsonl", "default");
+    const refs = [{ sha256: "a".repeat(64), mime: "image/png" as const, bytes: 67 }];
+    const content = structuredContent("retain operation ownership", refs);
+    const command = {
+      operationId: "operation-owner-before-compaction",
+      kind: "steer" as const,
+      policy: "steer-if-active" as const,
+      turnId: "turn-before-compaction",
+    };
+    const original = store.holdDelivery(
+      conversation.id,
+      content.content.text,
+      "operation-owner-client",
+      "runtime-images",
+      refs,
+      content.contentDigest,
+      command,
+    );
+    const claimed = store.beginDeliveryAttempt(original.id, original.generationId!);
+    expect(claimed).not.toBeNull();
+    store.recordDeliveryOutcome(original.id, "delivered");
+    for (let index = 0; index < 101; index += 1) {
+      const delivery = store.holdDelivery(
+        conversation.id,
+        `later delivery ${index}`,
+        `later-delivery-${index}`,
+      );
+      store.recordDeliveryOutcome(delivery.id, "delivered");
+    }
+    expect(store.snapshot().heldDeliveries[original.id]).toBeUndefined();
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]).toMatchObject({
+      terminalState: "delivered",
+      requestDigest: original.requestDigest,
+      contentDigest: content.contentDigest,
+    });
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]).not.toHaveProperty("settledDelivery");
+
+    const reopened = new AgentRegistry(store.filename);
+    expect(() => reopened.holdDelivery(
+      conversation.id,
+      content.content.text,
+      "second-operation-owner-client",
+      "runtime-images",
+      refs,
+      content.contentDigest,
+      command,
+    )).toThrow("operation id is already reserved for another client message");
+    expect(reopened.holdDelivery(
+      conversation.id,
+      content.content.text,
+      "operation-owner-client",
+      "runtime-images",
+      refs,
+      content.contentDigest,
+      command,
+    )).toMatchObject({
+      id: original.id,
+      command,
+      requestDigest: original.requestDigest,
+      state: "delivered",
+    });
+    const changed = structuredContent(content.content.text, [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }]);
+    expect(() => reopened.holdDelivery(
+      conversation.id,
+      changed.content.text,
+      "operation-owner-client",
+      "runtime-images",
+      changed.content.images,
+      changed.contentDigest,
+      command,
+    )).toThrow(DeliveryReservationConflictError);
+  });
+
+  test("legacy terminal owner normalization rejects a mismatched settled snapshot", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/operation-owner-legacy-mismatch.jsonl", "default");
+    const command = { operationId: "operation-owner-legacy-mismatch", kind: "send" as const, policy: "queue" as const };
+    const original = store.holdDelivery(
+      conversation.id,
+      "keep this operation active",
+      "operation-owner-legacy-mismatch-client",
+      "text",
+      [],
+      null,
+      command,
+    );
+    const unrelated = store.holdDelivery(conversation.id, "unrelated terminal payload", "unrelated-terminal-client");
+    store.recordDeliveryOutcome(unrelated.id, "delivered");
+    const snapshot = store.snapshot();
+    const legacyOwner = snapshot.deliveryOperationOwners[command.operationId] as unknown as {
+      createdAt?: string;
+      terminalState?: string | null;
+      settledDelivery?: typeof unrelated;
+    };
+    delete legacyOwner.createdAt;
+    delete legacyOwner.terminalState;
+    legacyOwner.settledDelivery = snapshot.heldDeliveries[unrelated.id];
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const reopened = new AgentRegistry(store.filename);
+
+    expect(reopened.snapshot().deliveryOperationOwners[command.operationId]).toMatchObject({
+      deliveryId: original.id,
+      terminalState: null,
+    });
+    expect(reopened.holdDelivery(
+      conversation.id,
+      "keep this operation active",
+      "operation-owner-legacy-mismatch-client",
+      "text",
+      [],
+      null,
+      command,
+    )).toMatchObject({ id: original.id, state: "assigned" });
+  });
+
+  test("retrying a failed explicit operation restores active ownership across compaction and restart", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/operation-owner-failed-retry.jsonl", "default");
+    const command = { operationId: "operation-owner-failed-retry", kind: "send" as const, policy: "queue" as const };
+    const original = store.holdDelivery(
+      conversation.id,
+      "retry this operation",
+      "operation-owner-failed-retry-client",
+      "text",
+      [],
+      null,
+      command,
+    );
+    expect(store.beginDeliveryAttempt(original.id, original.generationId!)).not.toBeNull();
+    store.recordDeliveryOutcome(original.id, "failed", "host unavailable");
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]?.terminalState).toBe("failed");
+
+    expect(store.holdDelivery(
+      conversation.id,
+      "retry this operation",
+      "operation-owner-failed-retry-client",
+      "text",
+      [],
+      null,
+      command,
+    )).toMatchObject({ id: original.id, state: "assigned" });
+    store.compactDeliveryReservations();
+
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]).toMatchObject({
+      deliveryId: original.id,
+      terminalState: null,
+    });
+    const reopened = new AgentRegistry(store.filename);
+    expect(reopened.snapshot().deliveryOperationOwners[command.operationId]).toMatchObject({
+      deliveryId: original.id,
+      terminalState: null,
+    });
+  });
+
+  test("discarding an unactuated explicit reservation releases its operation ownership", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/operation-owner-discard.jsonl", "default");
+    const command = { operationId: "operation-owner-before-discard", kind: "send" as const, policy: "queue" as const };
+    const original = store.holdDelivery(
+      conversation.id,
+      "discard before actuation",
+      "operation-owner-before-discard-client",
+      "text",
+      [],
+      null,
+      command,
+    );
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]?.deliveryId).toBe(original.id);
+
+    store.discardDelivery(original.id);
+
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]).toBeUndefined();
+    const replacement = store.holdDelivery(
+      conversation.id,
+      "reuse after discard",
+      "operation-owner-after-discard-client",
+      "text",
+      [],
+      null,
+      command,
+    );
+    expect(replacement).toMatchObject({ clientMessageId: "operation-owner-after-discard-client", command });
+    expect(store.beginDeliveryAttempt(replacement.id, replacement.generationId!)).not.toBeNull();
+    store.discardDelivery(replacement.id);
+    expect(store.snapshot().deliveryOperationOwners[command.operationId]?.deliveryId).toBe(replacement.id);
+  });
+
   test("a restarted legacy delivered tombstone replays while modern digests retain payload conflicts", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/legacy-delivered-retry.jsonl", "default");
@@ -2810,7 +3000,20 @@ describe("agent registry", () => {
       role: "reviewer",
       reviewsConversationId: provisional.id,
     });
-    const held = store.holdDelivery(provisional.id, "deliver after migration", "provisional-migration-message");
+    const held = store.holdDelivery(
+      provisional.id,
+      "deliver after migration",
+      "provisional-migration-message",
+      "text",
+      [],
+      null,
+      {
+        operationId: "operation-provisional-migration-message",
+        kind: "steer",
+        policy: "steer-if-active",
+        turnId: "turn-before-provisional-adoption",
+      },
+    );
     store.reconcileConversations([{
       engine: "claude",
       path: "/child.jsonl",
@@ -2851,13 +3054,45 @@ describe("agent registry", () => {
       parentConversationId: caller.id,
       reviewsConversationId: original.id,
     });
-    expect(snapshot.heldDeliveries[held.id]).toMatchObject({ conversationId: original.id });
-    expect(store.holdDelivery(original.id, "deliver after migration", "provisional-migration-message").id).toBe(held.id);
+    expect(snapshot.heldDeliveries[held.id]).toMatchObject({
+      conversationId: original.id,
+      command: held.command,
+      requestDigest: held.requestDigest,
+    });
+    const matchingRetry = store.holdDelivery(
+      provisional.id,
+      "deliver after migration",
+      "provisional-migration-message",
+      "text",
+      [],
+      null,
+      { ...held.command, operationId: "operation-from-matching-alias-retry" },
+    );
+    expect(matchingRetry).toMatchObject({ id: held.id, command: held.command, requestDigest: held.requestDigest });
+    expect(() => store.holdDelivery(
+      original.id,
+      "deliver after migration",
+      "second-client-provisional-migration-message",
+      "text",
+      [],
+      null,
+      held.command,
+    )).toThrow("operation id is already reserved for another client message");
     expect(store.conversationForPath("/child.jsonl")?.generations[0]?.launchProfile.parentConversationId).toBe(original.id);
     expect(snapshot.conversationAliases[provisional.id]).toBe(original.id);
     expect(store.canonicalConversationId(provisional.id)).toBe(original.id);
     expect(store.conversation(provisional.id)?.id).toBe(original.id);
-    expect(new AgentRegistry(store.filename).conversation(provisional.id)?.id).toBe(original.id);
+    const reopened = new AgentRegistry(store.filename);
+    expect(reopened.conversation(provisional.id)?.id).toBe(original.id);
+    expect(() => reopened.holdDelivery(
+      provisional.id,
+      "deliver after migration",
+      "third-client-provisional-migration-message",
+      "text",
+      [],
+      null,
+      held.command,
+    )).toThrow("operation id is already reserved for another client message");
   });
 
   test("normalizes a legacy receipt after restart without changing its schema version", () => {

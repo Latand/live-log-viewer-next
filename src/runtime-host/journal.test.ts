@@ -292,6 +292,90 @@ test("image refs remain ordered and participate in journal idempotency", () => {
   journal.close();
 });
 
+test("runtime restart migrates a legacy operation with no conversation identity", () => {
+  const dir = sandbox("operation-idempotency-missing-conversation");
+  const filename = path.join(dir, "events.sqlite");
+  const initial = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
+  const original = initial.executeOperation({
+    kind: "send",
+    operationId: "op-missing-conversation",
+    idempotencyKey: "composer-message-without-conversation",
+    conversationId: "conversation-removed-from-legacy-json",
+    text: "survive the legacy migration",
+    policy: "queue",
+  });
+  initial.close();
+
+  const legacy = new Database(filename);
+  legacy.exec(`
+    BEGIN IMMEDIATE;
+    ALTER TABLE operations RENAME TO operations_scoped_idempotency;
+    CREATE TABLE operations (
+      operation_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+      request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
+      receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL
+    );
+    INSERT INTO operations(operation_id, idempotency_key, request_hash, request_json, receipt_json, event_seq)
+    SELECT operation_id, idempotency_key, request_hash,
+      json_remove(request_json, '$.conversationId'),
+      json_remove(receipt_json, '$.conversationId'),
+      event_seq
+    FROM operations_scoped_idempotency;
+    DROP TABLE operations_scoped_idempotency;
+    COMMIT;
+  `);
+  legacy.close();
+
+  const migrated = new RuntimeJournal(filename, { maxEvents: 100, now: () => 101 });
+  expect(migrated.operationResult(original.operationId)?.receipt.operationId).toBe(original.operationId);
+  migrated.close();
+  const migratedDb = new Database(filename, { readonly: true });
+  expect(migratedDb.query<{ conversation_id: string }, []>(
+    "SELECT conversation_id FROM operations WHERE operation_id = 'op-missing-conversation'",
+  ).get()?.conversation_id).toBe("");
+  migratedDb.close();
+
+  const reopened = new RuntimeJournal(filename, { maxEvents: 100, now: () => 102 });
+  expect(reopened.operationResult(original.operationId)?.receipt.operationId).toBe(original.operationId);
+  reopened.close();
+});
+
+test("runtime restart completes an interrupted operation table rename idempotently", () => {
+  const dir = sandbox("operation-idempotency-interrupted-rename");
+  const filename = path.join(dir, "events.sqlite");
+  const command = {
+    kind: "send" as const,
+    operationId: "op-before-interrupted-rename",
+    idempotencyKey: "composer-message-before-interrupted-rename",
+    conversationId: "conversation-before-interrupted-rename",
+    text: "survive the interrupted table rename",
+    policy: "queue" as const,
+  };
+  const initial = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
+  const original = initial.executeOperation(command);
+  initial.close();
+
+  const interrupted = new Database(filename);
+  interrupted.exec("ALTER TABLE operations RENAME TO operations_global_idempotency");
+  interrupted.close();
+
+  const recovered = new RuntimeJournal(filename, { maxEvents: 100, now: () => 101 });
+  expect(recovered.executeOperation(command)).toEqual({ ...original, replayed: true });
+  recovered.close();
+  const recoveredDb = new Database(filename, { readonly: true });
+  expect(recoveredDb.query<{ count: number }, []>(
+    "SELECT COUNT(*) AS count FROM operations WHERE operation_id = 'op-before-interrupted-rename'",
+  ).get()?.count).toBe(1);
+  expect(recoveredDb.query<{ count: number }, []>(
+    "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'operations_global_idempotency'",
+  ).get()?.count).toBe(0);
+  recoveredDb.close();
+
+  const reopened = new RuntimeJournal(filename, { maxEvents: 100, now: () => 102 });
+  expect(reopened.executeOperation(command)).toEqual({ ...original, replayed: true });
+  reopened.close();
+});
+
 test("structured send receipts advance through the durable delivery lifecycle", () => {
   const dir = sandbox("structured-delivery-lifecycle");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), {

@@ -148,6 +148,182 @@ test("SQLite restart normalizes legacy held-delivery rows before parity", () => 
   });
 });
 
+test("SQLite restart derives and persists explicit operation ownership before tombstone compaction", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-operation-owner-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const sqliteFilename = path.join(directory, "agent-registry.sqlite");
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  const conversation = sqlite.ensureConversation("codex", "/sessions/sqlite-operation-owner.jsonl", "default");
+  const command = { operationId: "sqlite-operation-owner", kind: "send" as const, policy: "queue" as const };
+  const original = sqlite.holdDelivery(
+    conversation.id,
+    "retain SQLite operation ownership",
+    "sqlite-operation-owner-client",
+    "text",
+    [],
+    null,
+    command,
+  );
+  const claimed = sqlite.beginDeliveryAttempt(original.id, original.generationId!);
+  expect(claimed).not.toBeNull();
+  sqlite.recordDeliveryOutcome(original.id, "delivered");
+
+  const legacyDb = new Database(sqliteFilename);
+  legacyDb.query("DELETE FROM registry_rows WHERE collection = ?").run("deliveryOperationOwners");
+  legacyDb.close();
+
+  const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  expect(restarted.snapshot().deliveryOperationOwners[command.operationId]).toMatchObject({
+    clientMessageId: "sqlite-operation-owner-client",
+    deliveryId: original.id,
+    command,
+  });
+  for (let index = 0; index < 101; index += 1) {
+    const delivery = restarted.holdDelivery(
+      conversation.id,
+      `later SQLite delivery ${index}`,
+      `later-sqlite-delivery-${index}`,
+    );
+    restarted.recordDeliveryOutcome(delivery.id, "delivered");
+  }
+  expect(restarted.snapshot().heldDeliveries[original.id]).toBeUndefined();
+
+  const persistedDb = new Database(sqliteFilename, { readonly: true });
+  expect(persistedDb.query<{ count: number }, [string, string]>(
+    "SELECT COUNT(*) AS count FROM registry_rows WHERE collection = ? AND row_key = ?",
+  ).get("deliveryOperationOwners", command.operationId)?.count).toBe(1);
+  persistedDb.close();
+  const reopened = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  expect(reopened.snapshot().deliveryOperationOwners[command.operationId]).toMatchObject({
+    terminalState: "delivered",
+    requestDigest: original.requestDigest,
+  });
+  expect(reopened.snapshot().deliveryOperationOwners[command.operationId]).not.toHaveProperty("settledDelivery");
+  expect(() => reopened.holdDelivery(
+    conversation.id,
+    "retain SQLite operation ownership",
+    "second-sqlite-operation-owner-client",
+    "text",
+    [],
+    null,
+    command,
+  )).toThrow("operation id is already reserved for another client message");
+  expect(reopened.holdDelivery(
+    conversation.id,
+    "retain SQLite operation ownership",
+    "sqlite-operation-owner-client",
+    "text",
+    [],
+    null,
+    command,
+  )).toMatchObject({ id: original.id, state: "delivered", command });
+});
+
+test("terminal operation ownership stays bounded and payload-free in JSON and SQLite", () => {
+  for (const backend of ["json", "sqlite"] as const) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-bounded-owners-${backend}-`));
+    const filename = path.join(directory, "agent-registry.json");
+    const sqliteFilename = path.join(directory, "agent-registry.sqlite");
+    const storage = { sqliteMode: backend === "sqlite" ? "sqlite" as const : "off" as const };
+    let store = new AgentRegistry(filename, undefined, undefined, storage);
+    const conversation = store.ensureConversation("codex", `/sessions/bounded-owners-${backend}.jsonl`, "default");
+    const writeFailures = (start: number, end: number) => {
+      for (let index = start; index < end; index += 1) {
+        const suffix = String(index).padStart(3, "0");
+        const delivery = store.holdDelivery(
+          conversation.id,
+          `sensitive failed payload ${backend} ${suffix}`,
+          `bounded-owner-client-${backend}-${suffix}`,
+          "text",
+          [],
+          null,
+          {
+            operationId: `bounded-owner-operation-${backend}-${suffix}`,
+            kind: "send",
+            policy: "queue",
+          },
+        );
+        if (!store.beginDeliveryAttempt(delivery.id, delivery.generationId!)) {
+          throw new Error("expected explicit operation delivery attempt");
+        }
+        store.recordDeliveryOutcome(delivery.id, "failed", "host unavailable");
+      }
+    };
+    const sqliteOwnerStats = () => {
+      const db = new Database(sqliteFilename, { readonly: true });
+      const stats = db.query<{ count: number; bytes: number }, [string]>(
+        "SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(value_json)), 0) AS bytes FROM registry_rows WHERE collection = ?",
+      ).get("deliveryOperationOwners")!;
+      const payload = db.query<{ value_json: string }, [string]>(
+        "SELECT value_json FROM registry_rows WHERE collection = ? ORDER BY row_order",
+      ).all("deliveryOperationOwners").map((row) => row.value_json).join("\n");
+      db.close();
+      return { ...stats, payload };
+    };
+
+    writeFailures(0, 220);
+    const firstJsonBytes = fs.statSync(filename).size;
+    const firstSqliteStats = backend === "sqlite" ? sqliteOwnerStats() : null;
+    writeFailures(220, 440);
+    store.compactDeliveryReservations();
+
+    const snapshot = store.snapshot();
+    expect(Object.keys(snapshot.deliveryOperationOwners)).toHaveLength(200);
+    expect(Object.values(snapshot.deliveryOperationOwners).every((owner) =>
+      owner.terminalState === "failed" && !("settledDelivery" in owner))).toBeTrue();
+    const retainedIndex = "250";
+    const retainedOperationId = `bounded-owner-operation-${backend}-${retainedIndex}`;
+    const retainedText = `sensitive failed payload ${backend} ${retainedIndex}`;
+    const retainedClientId = `bounded-owner-client-${backend}-${retainedIndex}`;
+    expect(snapshot.deliveryOperationOwners[retainedOperationId]).toMatchObject({
+      terminalState: "failed",
+      requestDigest: expect.any(String),
+    });
+    expect(Object.values(snapshot.heldDeliveries)
+      .some((delivery) => delivery.command.operationId === retainedOperationId)).toBeFalse();
+    expect(fs.readFileSync(filename, "utf8")).not.toContain(retainedText);
+    expect(fs.statSync(filename).size).toBeLessThanOrEqual(firstJsonBytes + 16_384);
+    if (backend === "sqlite") {
+      const secondSqliteStats = sqliteOwnerStats();
+      expect(secondSqliteStats.count).toBe(200);
+      expect(secondSqliteStats.bytes).toBeLessThanOrEqual(firstSqliteStats!.bytes + 4_096);
+      expect(secondSqliteStats.payload).not.toContain(retainedText);
+    }
+
+    store = new AgentRegistry(filename, undefined, undefined, storage);
+    expect(store.holdDelivery(
+      conversation.id,
+      retainedText,
+      retainedClientId,
+      "text",
+      [],
+      null,
+      { operationId: retainedOperationId, kind: "send", policy: "queue" },
+    )).toMatchObject({ state: "failed", text: retainedText });
+    expect(Object.values(store.snapshot().heldDeliveries)
+      .some((delivery) => delivery.command.operationId === retainedOperationId)).toBeFalse();
+    expect(() => store.holdDelivery(
+      conversation.id,
+      `${retainedText} changed`,
+      retainedClientId,
+      "text",
+      [],
+      null,
+      { operationId: retainedOperationId, kind: "send", policy: "queue" },
+    )).toThrow("operation id is already reserved for another client message");
+    const unrelated = store.ensureConversation("codex", `/sessions/unrelated-${backend}.jsonl`, "default");
+    expect(() => store.holdDelivery(
+      unrelated.id,
+      retainedText,
+      retainedClientId,
+      "text",
+      [],
+      null,
+      { operationId: retainedOperationId, kind: "send", policy: "queue" },
+    )).toThrow("operation id is already reserved for another client message");
+  }
+}, 15_000);
+
 test("dual-write leaves both backends unchanged after a no-op mutation", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-noop-"));
   const filename = path.join(directory, "agent-registry.json");

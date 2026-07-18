@@ -20,6 +20,19 @@ import { recoverPendingStructuredSpawns } from "./structuredSpawn";
 
 type AdoptedStructuredHost = AdoptedCodexHost | AdoptedClaudeHost;
 let adoptedHosts: AdoptedStructuredHost[] = [];
+let retryAdoptedHosts: AdoptedStructuredHost[] = [];
+
+function retainAdoptedHosts(
+  retained: readonly AdoptedStructuredHost[],
+  adopted: readonly AdoptedStructuredHost[],
+): AdoptedStructuredHost[] {
+  const hosts = new Map(retained.map((item) => [sessionKeyId(item.key), item]));
+  for (const item of adopted) {
+    const key = sessionKeyId(item.key);
+    if (!hosts.has(key)) hosts.set(key, item);
+  }
+  return [...hosts.values()];
+}
 
 const RUNTIME_EFFECT_PAGE_SIZE = 100;
 const STRUCTURED_HOST_OPERATION_EFFECT_KINDS = [
@@ -133,6 +146,7 @@ export async function adoptStructuredHostsAtStartup(
   dependencies: StructuredStartupDependencies = {},
 ): Promise<AdoptedStructuredHost[]> {
   assertDarwinStructuredRuntime();
+  let nextAdoptedHosts = retryAdoptedHosts;
   const registry = dependencies.registry ?? agentRegistry();
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   const signals = await structuredStartupSignals(registry, client);
@@ -158,6 +172,8 @@ export async function adoptStructuredHostsAtStartup(
     process.env,
     shouldAdopt,
   );
+  nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, codex);
+  retryAdoptedHosts = nextAdoptedHosts;
   const claude = await (dependencies.adoptClaude ?? adoptClaudeRegistryHosts)(
     registry,
     (entry) => {
@@ -181,10 +197,13 @@ export async function adoptStructuredHostsAtStartup(
     process.env,
     shouldAdopt,
   );
-  adoptedHosts = [...codex, ...claude];
+  nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, claude);
+  retryAdoptedHosts = nextAdoptedHosts;
   await demoteSkippedStructuredRegistryHosts(registry, shouldAdopt);
-  await bindStructuredDeliveryQueue(adoptedHosts, { registry: dependencies.registry, client });
+  await bindStructuredDeliveryQueue(nextAdoptedHosts, { registry: dependencies.registry, client });
   if (client) await recoverPendingStructuredSpawns(registry, client);
+  adoptedHosts = nextAdoptedHosts;
+  retryAdoptedHosts = [];
   return adoptedHosts;
 }
 

@@ -4,15 +4,18 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { RuntimeJournal } from "@/runtime-host/journal";
+import { runStructuredHostStartup } from "@/instrumentation";
 
-import type { RuntimeHostClient } from "./client";
-import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
+import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
+import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./structuredDeliveryController";
 import { createFakeDeliveryLedger, FakeEngineHost } from "./fixtures/fakeEngineHost";
 import type { StructuredHostAdoptionFilter } from "./registry";
-import { enqueueStructuredMessage } from "./structuredMessageDelivery";
-import { adoptStructuredHostsAtStartup, type StructuredStartupDependencies } from "./startup";
+import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { didStructuredHostStartupFail } from "./startupStatus";
+import { adoptStructuredHostsAtStartup, structuredStartupHosts, type StructuredStartupDependencies } from "./startup";
 
 function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
   return {
@@ -357,6 +360,127 @@ test.each(["codex", "claude"] as const)("successful %s restart adoption publishe
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup socket recovery retains a partially adopted host and drains its held send once", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-partial-adoption-"));
+  const { conversation, registry, sessionId } = structuredRestartFixture(directory, "codex", "unhosted");
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const key = { engine: "codex" as const, sessionId };
+  const operationId = "operation-partial-adoption-held-send";
+  const held = registry.holdDelivery(
+    conversation.id,
+    "deliver after partial startup adoption",
+    "partial-adoption-held-send",
+    "text",
+    [],
+    null,
+    { operationId, kind: "send", policy: "queue", turnId: null },
+  );
+  const ledger = createFakeDeliveryLedger();
+  const listeners = new Set<() => void>();
+  const host = Object.assign(new FakeEngineHost(ledger), {
+    onStateChange: () => {
+      const listener = () => {};
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  });
+  const scheduled: Array<() => void> = [];
+  let adoptedProcesses = 0;
+  let effectCalls = 0;
+  const startupClient = {
+    ...client,
+    producerCursor: async (producerKind: string, eventKeyPrefix: string) =>
+      journal.producerCursor(producerKind, eventKeyPrefix),
+    effectBatch: async (kinds?: readonly string[], afterEventSeq?: number) => {
+      effectCalls += 1;
+      if (effectCalls === 2) {
+        throw new RuntimeHostUnavailableError("runtime socket failed after host adoption");
+      }
+      return journal.effectBatch(100, kinds, afterEventSeq);
+    },
+  } as RuntimeHostClient;
+  const dependencies: StructuredStartupDependencies = {
+    registry,
+    client: startupClient,
+    adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+      const entry = received.snapshot().entries[`codex:${sessionId}`];
+      if (!entry || !shouldAdopt(entry) || adoptedProcesses > 0) return [];
+      const processIdentity = { pid: process.pid, startIdentity: "partial-adoption-process" };
+      const claimed = received.claimStructuredHost(key, processIdentity, { allowUnhosted: true });
+      if (!claimed?.structuredHost || !claimed.claimOwner) throw new Error("partial adoption claim was unavailable");
+      const persisted = received.setStructuredHostClaimed(key, {
+        ...claimed.structuredHost,
+        endpoint: "fake:partial-adoption",
+        process: processIdentity,
+      }, "idle", claimed.claimOwner, claimed.claimEpoch);
+      if (!persisted) throw new Error("partial adoption writer claim was lost");
+      adoptedProcesses += 1;
+      return [{ key, host: host as never }];
+    },
+    adoptClaude: async () => [],
+  };
+
+  try {
+    await runStructuredHostStartup(
+      () => adoptStructuredHostsAtStartup(dependencies),
+      () => {},
+      {
+        schedule: (callback) => {
+          scheduled.push(callback);
+          return { unref() {} };
+        },
+      },
+    );
+
+    expect(adoptedProcesses).toBe(1);
+    expect(scheduled).toHaveLength(1);
+    scheduled.shift()!();
+    await waitFor(() => !didStructuredHostStartupFail());
+    expect(hasStructuredDeliveryHost(key)).toBe(true);
+
+    await drainHeldDeliveries(conversation.id, {
+      deliver: async ({ delivery, path: deliveryPath, clientMessageId }) =>
+        await deliverHeldStructuredMessage({
+          conversationId: conversation.id,
+          path: deliveryPath,
+          deliveryId: delivery.id,
+          clientMessageId,
+          text: delivery.text,
+          command: delivery.command,
+        }, {
+          enabled: () => true,
+          client: () => startupClient,
+          registry: () => registry,
+        }) ?? "delivery-uncertain",
+    }, registry);
+    await drainHeldDeliveries(conversation.id, {
+      deliver: async () => { throw new Error("delivered hold must not drain twice"); },
+    }, registry);
+
+    expect(structuredStartupHosts()).toMatchObject([{ key, host }]);
+    expect(ledger.writes).toEqual([expect.objectContaining({
+      id: operationId,
+      text: "deliver after partial startup adoption",
+      expectedTurnId: null,
+    })]);
+    expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({ state: "delivered", text: "" });
+    expect(listeners.size).toBe(1);
+    expect(adoptedProcesses).toBe(1);
+    expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+      claimOwner: expect.any(String),
+      structuredHost: {
+        process: { pid: process.pid, startIdentity: "partial-adoption-process" },
+        writerClaimEpoch: expect.any(Number),
+      },
+    });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("terminal structured row with a cleared ownership marker stays outside startup adoption", async () => {

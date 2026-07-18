@@ -1277,6 +1277,335 @@ test("queue binding settles a rejected journal receipt as a recoverable failure"
   await bindStructuredDeliveryQueue([], { registry, client: null });
 });
 
+test("terminal operation replay survives registry and runtime journal compaction", async () => {
+  const sessionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const directory = path.join(sandbox, "durable-operation-ownership");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-17T00:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:operation-owner",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "v2",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const runtimeFilename = path.join(directory, "runtime.sqlite");
+  let journal = new RuntimeJournal(runtimeFilename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const client = runtimeJournalClient(journal);
+  const ledger = createFakeDeliveryLedger();
+  await bindStructuredDeliveryQueue([{
+    key: { engine: "codex", sessionId },
+    host: observableFakeHost(new FakeEngineHost(ledger)),
+  }], { registry, client });
+  const original = {
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "operation-owner-client-one",
+    operationId: "operation-owned-by-client-one",
+    kind: "send" as const,
+    policy: "queue" as const,
+    turnId: null,
+    text: "actuate this command once",
+    hasImages: false,
+  };
+
+  try {
+    expect(await enqueueStructuredMessage(original, {
+      enabled: () => true,
+      client: () => client,
+      registry: () => registry,
+      kick: () => {},
+    })).toMatchObject({ ok: true, structured: true, outcome: "queued" });
+    await kickStructuredDeliveryQueue();
+    expect(ledger.writes).toEqual([expect.objectContaining({
+      id: original.operationId,
+      text: original.text,
+      expectedTurnId: original.turnId,
+    })]);
+
+    expect(await enqueueStructuredMessage({
+      ...original,
+      clientMessageId: "operation-owner-client-two",
+    }, {
+      enabled: () => true,
+      client: () => client,
+      registry: () => registry,
+      kick: () => {},
+    })).toMatchObject({
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      status: 409,
+    });
+
+    expect(await enqueueStructuredMessage(original, {
+      enabled: () => true,
+      client: () => client,
+      registry: () => registry,
+      kick: () => {},
+    })).toMatchObject({ ok: true, structured: true, outcome: "delivered" });
+    expect(ledger.writes).toHaveLength(1);
+
+    for (let index = 0; index < 101; index += 1) {
+      const later = registry.holdDelivery(
+        conversation.id,
+        `later terminal delivery ${index}`,
+        `later-terminal-delivery-${index}`,
+      );
+      registry.recordDeliveryOutcome(later.id, "delivered");
+    }
+    expect(Object.values(registry.snapshot().heldDeliveries)
+      .some((delivery) => delivery.command.operationId === original.operationId)).toBeFalse();
+    journal.append({ scope: { type: "system", id: "runtime" }, kind: "files.revision", payload: { filesRevision: 1 } });
+    journal.append({ scope: { type: "system", id: "runtime" }, kind: "files.revision", payload: { filesRevision: 2 } });
+    journal.compact(1);
+    expect(journal.operationResult(original.operationId)).toBeNull();
+    expect(journal.effectBatch()).toEqual([]);
+    journal.close();
+
+    const reopened = new AgentRegistry(registry.filename);
+    journal = new RuntimeJournal(runtimeFilename, { structuredHosts: true });
+    const restartedClient = runtimeJournalClient(journal);
+    expect(await enqueueStructuredMessage(original, {
+      enabled: () => true,
+      client: () => restartedClient,
+      registry: () => reopened,
+      kick: () => {},
+    })).toMatchObject({
+      ok: true,
+      structured: true,
+      outcome: "delivered",
+      operationId: original.operationId,
+      receipt: { status: "delivered" },
+    });
+    expect(await enqueueStructuredMessage({ ...original, text: "changed after compaction" }, {
+      enabled: () => true,
+      client: () => restartedClient,
+      registry: () => reopened,
+      kick: () => {},
+    })).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 409 });
+    expect(reopened.pendingDeliveries(conversation.id)).toEqual([]);
+    expect(journal.effectBatch()).toEqual([]);
+    expect(ledger.writes).toHaveLength(1);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
+test("provisional adoption preserves runtime idempotency across Codex and Claude", async () => {
+  const scenarios = [
+    {
+      engine: "codex" as const,
+      hostKind: "codex-app-server" as const,
+      sessionId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    },
+    {
+      engine: "claude" as const,
+      hostKind: "claude-broker" as const,
+      sessionId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const directory = path.join(sandbox, `provisional-operation-owner-${scenario.engine}`);
+    fs.mkdirSync(directory, { recursive: true });
+    const sourcePath = path.join(directory, `source-${scenario.engine}.jsonl`);
+    const targetPath = path.join(directory, `${scenario.sessionId}.jsonl`);
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const profile = emptyLaunchProfile({ cwd: directory });
+    const canonical = registry.ensureConversation(scenario.engine, sourcePath, "source");
+    registry.reconcileConversations([{
+      engine: scenario.engine,
+      path: targetPath,
+      accountId: "target",
+      launchProfile: profile,
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-17T01:00:00.000Z",
+    }]);
+    const provisional = registry.conversationForPath(targetPath)!;
+    const structuredHost = {
+      kind: scenario.hostKind,
+      endpoint: `fake:provisional-${scenario.engine}`,
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "v2",
+      writerClaimEpoch: 5,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    };
+    registry.upsert({
+      key: { engine: scenario.engine, sessionId: scenario.sessionId },
+      artifactPath: targetPath,
+      cwd: directory,
+      accountId: "target",
+      launchProfile: profile,
+      status: "idle",
+      host: null,
+      structuredHost,
+      claimEpoch: 5,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+    journal.append({
+      scope: { type: "session", id: provisional.id },
+      kind: "session-status",
+      payload: {
+        conversationId: provisional.id,
+        sessionKey: { engine: scenario.engine, sessionId: scenario.sessionId },
+        hostKind: scenario.hostKind,
+        host: "hosted",
+        turn: "idle",
+        provenance: "structured",
+        artifactPath: targetPath,
+        capabilities: { steer: scenario.engine === "codex", structuredAttention: true },
+      },
+    });
+    const client = runtimeJournalClient(journal);
+    const ledger = createFakeDeliveryLedger();
+    await bindStructuredDeliveryQueue([{
+      key: { engine: scenario.engine, sessionId: scenario.sessionId },
+      host: observableFakeHost(new FakeEngineHost(ledger)),
+    }], { registry, client });
+    const request = {
+      path: targetPath,
+      conversationId: provisional.id,
+      clientMessageId: `provisional-client-${scenario.engine}`,
+      operationId: `provisional-operation-${scenario.engine}`,
+      kind: "send" as const,
+      policy: "queue" as const,
+      turnId: null,
+      text: `deliver once through ${scenario.engine} adoption`,
+      hasImages: false,
+    };
+
+    try {
+      expect(await enqueueStructuredMessage(request, {
+        enabled: () => true,
+        client: () => client,
+        registry: () => registry,
+        kick: () => {},
+      })).toMatchObject({ ok: true, structured: true, outcome: "queued" });
+      expect(journal.effectBatch()).toHaveLength(1);
+
+      const migration = registry.beginSpawnRequest({
+        engine: scenario.engine,
+        cwd: directory,
+        accountId: "target",
+        conversationId: canonical.id,
+        purpose: "launch",
+        expectedArtifactPath: targetPath,
+      });
+      if (migration.kind !== "created") throw new Error("expected migration successor receipt");
+      expect(registry.settleSpawn(migration.receipt.launchId, {
+        key: { engine: scenario.engine, sessionId: scenario.sessionId },
+        artifactPath: targetPath,
+        cwd: directory,
+        accountId: "target",
+        launchProfile: profile,
+        status: "idle",
+        host: null,
+        structuredHost,
+        claimEpoch: 5,
+        claimOwner: null,
+        pendingAction: null,
+      })).toMatchObject({ kind: "settled", conversation: { id: canonical.id } });
+      expect(registry.canonicalConversationId(provisional.id)).toBe(canonical.id);
+
+      const unrelated = registry.ensureConversation(
+        scenario.engine,
+        path.join(directory, `unrelated-${scenario.engine}.jsonl`),
+        "target",
+      );
+      expect(() => registry.holdDelivery(
+        unrelated.id,
+        request.text,
+        request.clientMessageId,
+        "text",
+        [],
+        null,
+        {
+          operationId: request.operationId,
+          kind: request.kind,
+          policy: request.policy,
+          turnId: request.turnId,
+        },
+      )).toThrow("operation id is already reserved for another client message");
+
+      expect(await enqueueStructuredMessage(request, {
+        enabled: () => true,
+        client: () => client,
+        registry: () => registry,
+        kick: () => {},
+      })).toMatchObject({
+        ok: true,
+        structured: true,
+        outcome: "queued",
+        operationId: request.operationId,
+      });
+      expect(await enqueueStructuredMessage({ ...request, text: `${request.text} changed` }, {
+        enabled: () => true,
+        client: () => client,
+        registry: () => registry,
+        kick: () => {},
+      })).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 409 });
+
+      await kickStructuredDeliveryQueue();
+      expect(ledger.writes).toEqual([expect.objectContaining({
+        id: request.operationId,
+        text: request.text,
+        expectedTurnId: request.turnId,
+      })]);
+      expect(journal.effectBatch()).toEqual([]);
+    } finally {
+      await bindStructuredDeliveryQueue([], { registry, client: null });
+      journal.close();
+    }
+  }
+});
+
 test("a stale synchronization-held steer fails safely across Codex and Claude recovery", async () => {
   const cases = [
     {

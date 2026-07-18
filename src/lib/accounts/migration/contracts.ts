@@ -214,6 +214,7 @@ export interface HeldDeliveryCommandInput {
 export interface HeldDelivery {
   id: string;
   conversationId: ViewerConversationId;
+  runtimeConversationId: ViewerConversationId;
   text: string;
   createdAt: string;
   clientMessageId: string | null;

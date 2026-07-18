@@ -1471,24 +1471,57 @@ export class RuntimeJournal {
 
   private migrateOperationIdempotencyScope(): void {
     const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(operations)").all().map((row) => row.name));
-    if (columns.has("conversation_id")) return;
-    this.db.exec(`
-      BEGIN IMMEDIATE;
-      ALTER TABLE operations RENAME TO operations_global_idempotency;
-      CREATE TABLE operations (
-        operation_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
-        request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
-        receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL,
-        UNIQUE(conversation_id, idempotency_key)
-      );
-      INSERT INTO operations(operation_id, conversation_id, idempotency_key, request_hash, request_json, receipt_json, event_seq)
-      SELECT operation_id,
-        COALESCE(json_extract(request_json, '$.conversationId'), json_extract(receipt_json, '$.conversationId')),
-        idempotency_key, request_hash, request_json, receipt_json, event_seq
-      FROM operations_global_idempotency;
-      DROP TABLE operations_global_idempotency;
-      COMMIT;
-    `);
+    const legacyTableExists = () => Boolean(this.db.query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'operations_global_idempotency'",
+    ).get());
+    if (columns.has("conversation_id") && !legacyTableExists()) return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!columns.has("conversation_id")) {
+        this.db.exec("ALTER TABLE operations RENAME TO operations_global_idempotency");
+      }
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS operations (
+          operation_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+          request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
+          receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL,
+          UNIQUE(conversation_id, idempotency_key)
+        );
+      `);
+      if (legacyTableExists()) {
+        this.db.exec(`
+          INSERT OR IGNORE INTO operations(operation_id, conversation_id, idempotency_key, request_hash, request_json, receipt_json, event_seq)
+          SELECT operation_id,
+            COALESCE(json_extract(request_json, '$.conversationId'), json_extract(receipt_json, '$.conversationId'), ''),
+            idempotency_key, request_hash, request_json, receipt_json, event_seq
+          FROM operations_global_idempotency;
+        `);
+        const conflict = this.db.query<{ operation_id: string }, []>(`
+          SELECT legacy.operation_id
+          FROM operations_global_idempotency AS legacy
+          LEFT JOIN operations AS scoped
+            ON scoped.operation_id = legacy.operation_id
+            AND scoped.conversation_id = COALESCE(
+              json_extract(legacy.request_json, '$.conversationId'),
+              json_extract(legacy.receipt_json, '$.conversationId'),
+              ''
+            )
+            AND scoped.idempotency_key = legacy.idempotency_key
+            AND scoped.request_hash = legacy.request_hash
+            AND scoped.request_json = legacy.request_json
+            AND scoped.receipt_json = legacy.receipt_json
+            AND scoped.event_seq = legacy.event_seq
+          WHERE scoped.operation_id IS NULL
+          LIMIT 1
+        `).get();
+        if (conflict) throw new Error(`legacy runtime operation conflicts with scoped migration: ${conflict.operation_id}`);
+        this.db.exec("DROP TABLE operations_global_idempotency");
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
   }
 
   private migrateLegacyEvents(): void {
