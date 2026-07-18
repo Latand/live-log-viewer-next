@@ -190,6 +190,11 @@ export interface MigrationIntent {
   engine: MigrationEngine;
   targetId: string;
   origin: MigrationOrigin;
+  /** An engine drain moves every conversation and owns routing, the Accounts
+      panel banner, and the auto-balance outcome/cooldown. A conversation
+      intent (issue #97 reseat) moves exactly one thread and must stay
+      invisible to all engine-wide machinery. Absent on pre-#97 data: engine. */
+  scope?: "engine" | "conversation";
   revision: number;
   state: MigrationIntentState;
   createdAt: string;

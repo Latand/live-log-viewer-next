@@ -2860,4 +2860,64 @@ describe("durable account migration coordinator", () => {
     expect(JSON.stringify(failed.migration)).not.toContain("durability check failed");
     expect(cleaned).toEqual(["failed-successor"]);
   });
+
+  test("a current pane wall releases a mid-turn reseat on the next inventory pass", async () => {
+    /* Issue #97: the engine printed a live usage wall mid-turn — that turn
+       will never complete, so the reseat must not park in waiting-turn until
+       the reset hour. The wall itself is the release evidence. */
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "walled-mid-turn.jsonl");
+    fs.writeFileSync(pathname, JSON.stringify({ type: "event_msg", timestamp: "2026-07-10T18:00:00.000Z", payload: { type: "task_started" } }) + "\n");
+    store.reconcileConversations([observation(pathname, "limited", "busy")]);
+    const conversation = store.conversationForPath(pathname)!;
+    expect(store.requestConversationReseat(conversation.id, "healthy").migration?.phase).toBe("waiting-turn");
+
+    const counts = { create: 0, verify: 0 };
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, { activity: "stalled", activityReason: undefined })]);
+    await advanceConversationMigration(conversation.id, store, provider(["/walled-successor.jsonl"], counts));
+    expect(counts.create).toBe(0);
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, {
+      activity: "stalled",
+      activityReason: undefined,
+      rateLimit: { source: "pane", accountId: "limited", window: "session", resetAt: 1_784_000_000 },
+    })]);
+    expect(store.conversation(conversation.id)?.turn.state).toBe("idle");
+    const advanced = await advanceConversationMigration(conversation.id, store, provider(["/walled-successor.jsonl"], counts));
+    expect(counts.create).toBe(1);
+    expect(advanced.migration?.phase).toBe("committed");
+  });
+
+  test("a conversation reseat completes without booking the engine auto-balance outcome or cooldown", async () => {
+    const store = registry();
+    store.reconcileConversations([
+      observation("/reseat-source.jsonl", "limited", "idle"),
+      observation("/engine-source.jsonl", "limited", "idle"),
+    ]);
+    const reseated = store.conversationForPath("/reseat-source.jsonl")!;
+    store.requestConversationReseat(reseated.id, "healthy");
+    await reconcileMigrations(provider(["/reseat-successor.jsonl"]), { async deliver() { return "delivered"; } }, store);
+
+    const settled = store.conversation(reseated.id)!;
+    expect(settled.migration?.phase).toBe("committed");
+    expect(store.snapshot().migrationIntents[settled.migration!.intentId]).toMatchObject({ scope: "conversation", state: "complete" });
+    /* One thread moved: engine auto-balance stays free to act. */
+    const policy = store.autoBalancePolicy("codex");
+    expect(policy.cooldownUntil).toBeNull();
+    expect(policy.lastOutcome).toBeNull();
+
+    /* The engine-wide drain keeps its outcome/cooldown contract. */
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "engine-after-reseat",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    await reconcileMigrations(provider(["/engine-successor-1.jsonl", "/engine-successor-2.jsonl"]), { async deliver() { return "delivered"; } }, store);
+    const balanced = store.autoBalancePolicy("codex");
+    expect(balanced.cooldownUntil).not.toBeNull();
+    expect(balanced.lastOutcome?.kind).toBe("switched");
+  });
 });

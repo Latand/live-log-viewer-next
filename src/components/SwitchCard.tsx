@@ -86,7 +86,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-bold" style={badge.style} title={effortTitle(file)}>{badge.label}</span>
         )}
         <EffortPills file={file} />
-        <RateLimitBadge rateLimit={file.rateLimit} />
+        <RateLimitBadge file={file} />
         <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
         <span
           className={`ml-auto min-w-0 truncate rounded-full border border-border bg-canvas px-1.5 py-0.5 text-[9.5px] font-semibold ${

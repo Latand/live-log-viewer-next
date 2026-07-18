@@ -48,6 +48,14 @@ function engineOf(entry: FileEntry): MigrationEngine | null {
   return entry.engine === "claude" || entry.engine === "codex" ? entry.engine : null;
 }
 
+/** A current pane usage wall (issue #97): the scanner only sets `rateLimit`
+    from a live banner (historical prose is filtered per #56), which means the
+    engine has surrendered the turn — the transcript will not advance before
+    the reset, so for migration purposes the composer is effectively free. */
+function currentPaneWall(entry: FileEntry): boolean {
+  return entry.rateLimit != null;
+}
+
 function projectedInventoryTurn(
   entry: FileEntry,
   parsed: ConversationObservation["turn"] | null,
@@ -61,7 +69,7 @@ function projectedInventoryTurn(
   }
 
   const activityComplete = entry.derivationComplete !== false;
-  if (parsed.state === "busy" && activityComplete && entry.activityReason === "pane_at_composer") {
+  if (parsed.state === "busy" && activityComplete && (entry.activityReason === "pane_at_composer" || currentPaneWall(entry))) {
     return { state: "idle", source: "empty", terminalAt: null };
   }
   if (parsed.state === "unknown" && activityComplete && (entry.activity === "idle" || entry.activity === "recent")) {
@@ -101,7 +109,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const mtimeMs = entry.mtime * 1000;
     const observedTurn = transcriptTurnResult(entry.path, entry.size, mtimeMs, engine === "codex");
     const parsed = observedTurn.complete ? observedTurn.turn : null;
-    if (observedTurn.complete && entry.derivationComplete !== false && entry.activityReason === "pane_at_composer") {
+    if (observedTurn.complete && entry.derivationComplete !== false && (entry.activityReason === "pane_at_composer" || currentPaneWall(entry))) {
       recordTranscriptComposerRelease(entry.path, entry.size, mtimeMs, engine === "codex");
     }
     const turn = projectedInventoryTurn(entry, parsed, existing);
@@ -631,6 +639,10 @@ export async function reconcileMigrations(
     const owned = conversationsByIntent.get(intent.id) ?? [];
     if (!owned.length || owned.every((conversation) => ["committed", "rolled-back", "failed-recoverable"].includes(conversation.migration?.phase ?? ""))) {
       registry.setMigrationIntentState(intent.id, "complete");
+      /* A conversation-scoped reseat (issue #97) settles one thread: it must
+         not book an engine-wide balance outcome nor start the auto-balance
+         cooldown that would suppress a real engine drain. */
+      if (intent.scope === "conversation") return;
       const outcome = owned.some((conversation) => conversation.migration?.phase === "failed-recoverable") ? "failed-partial" : "complete";
       registry.recordAutoBalanceOutcome(intent.engine, outcome, intent.evidence, new Date(Date.now() + AUTO_BALANCE_COOLDOWN_MS).toISOString());
     }

@@ -318,6 +318,13 @@ export interface MigrationScopeCounts {
   alreadyTarget: number;
 }
 
+/** Engine-wide drain machinery (routing, spawn adoption, the single-drain
+    invariant, auto-balance) must never observe a conversation-scoped reseat
+    intent (issue #97). Pre-#97 persisted intents carry no scope: engine. */
+function engineScopedIntent(intent: MigrationIntent): boolean {
+  return (intent.scope ?? "engine") === "engine";
+}
+
 function migrationReadiness(
   file: RegistryFile,
   conversation: RegistryConversation,
@@ -2720,9 +2727,10 @@ export class AgentRegistry {
       file.engineRouting[conversation.engine].revision += 1;
     }
     /* A spawn that began before an account switch remains attributable to its
-       birth account. The already-active migration intent still applies to the
-       new conversation through the existing coordinator contract. */
-    const activeIntent = Object.values(file.migrationIntents).find((intent) => intent.engine === conversation.engine && intent.state === "draining");
+       birth account. The already-active engine-wide migration intent still
+       applies to the new conversation through the existing coordinator
+       contract; a conversation-scoped reseat moves only its own thread. */
+    const activeIntent = Object.values(file.migrationIntents).find((intent) => intent.engine === conversation.engine && intent.state === "draining" && engineScopedIntent(intent));
     const source = conversation.generations.at(-1);
     if (activeIntent && source && source.accountId !== activeIntent.targetId && !conversation.migration) {
       conversation.migration = {
@@ -3597,7 +3605,7 @@ export class AgentRegistry {
       if (repeated) return clone(repeated);
       const route = file.engineRouting[input.engine];
       if (route.revision !== input.expectedRevision) throw new MigrationRevisionError(input.expectedRevision, route.revision);
-      let intent = Object.values(file.migrationIntents).find((candidate) => candidate.engine === input.engine && candidate.state === "draining");
+      let intent = Object.values(file.migrationIntents).find((candidate) => candidate.engine === input.engine && candidate.state === "draining" && engineScopedIntent(candidate));
       if (intent?.origin === "manual" && input.origin === "auto") return clone(intent);
       const changedAt = now();
       if (intent) {
@@ -3687,7 +3695,7 @@ export class AgentRegistry {
 
       const changedAt = now();
       let intent = Object.values(file.migrationIntents)
-        .filter((candidate) => candidate.engine === conversation.engine && candidate.targetId === targetId && candidate.state !== "stopped")
+        .filter((candidate) => candidate.engine === conversation.engine && candidate.targetId === targetId && candidate.state !== "stopped" && engineScopedIntent(candidate))
         .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
       if (!intent) {
         intent = {
@@ -3720,9 +3728,74 @@ export class AgentRegistry {
     });
   }
 
+  /** One-click successor reseat of a rate-limited conversation (issue #97).
+      Lineage-safe by construction: a thread whose current generation already
+      runs on `targetId` (a committed migration fork) returns unchanged, and an
+      in-flight migration keeps sole ownership of the successor seat — repeat
+      requests never mint a second successor. Unlike
+      {@link requestConversationMigrationToActiveAccount} the target account is
+      explicit and the intent is conversation-scoped: only this conversation
+      moves, engine routing for future spawns stays with the Accounts panel
+      (issue #40), new spawns are never adopted into the drain, and the single
+      engine-wide drain intent (if any) is neither reused nor retargeted. */
+  requestConversationReseat(id: ViewerConversationId, targetId: string): RegistryConversation {
+    return this.mutate((file) => {
+      const canonicalId = resolveConversationAlias(file, id);
+      const conversation = file.conversations[canonicalId];
+      if (!conversation) throw new Error("viewer conversation is unknown");
+      const source = conversation.generations.at(-1);
+      if (!source || source.accountId === null || source.accountId === targetId) return clone(conversation);
+      if (conversation.migration
+        && !["committed", "rolled-back", "failed-recoverable"].includes(conversation.migration.phase)) {
+        return clone(conversation);
+      }
+
+      const changedAt = now();
+      if (conversation.migrationOptOut?.targetId === targetId) conversation.migrationOptOut = null;
+      const requestId = `reseat:${canonicalId}:${source.id}`;
+      let intent = Object.values(file.migrationIntents)
+        .filter((candidate) => candidate.scope === "conversation"
+          && candidate.engine === conversation.engine
+          && candidate.targetId === targetId
+          && candidate.state !== "stopped"
+          && candidate.requestIds.some((request) => request.startsWith(`reseat:${canonicalId}:`)))
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+      if (!intent) {
+        intent = {
+          id: crypto.randomUUID(),
+          engine: conversation.engine,
+          targetId,
+          origin: "manual",
+          scope: "conversation",
+          revision: 1,
+          state: "draining",
+          createdAt: changedAt,
+          updatedAt: changedAt,
+          requestIds: [requestId],
+          evidence: null,
+          stoppedAt: null,
+        };
+        file.migrationIntents[intent.id] = intent;
+      } else {
+        if (!intent.requestIds.includes(requestId)) intent.requestIds.push(requestId);
+        if (intent.state !== "draining") intent.revision += 1;
+        intent.state = "draining";
+        intent.updatedAt = changedAt;
+      }
+
+      const phase = migrationReadiness(file, conversation) === "busy" ? "waiting-turn" : "requested";
+      queueAbandonedMigrationCleanup(file, conversation, changedAt);
+      conversation.migration = conversationMigrationForIntent(conversation, source, intent, phase, changedAt);
+      conversation.updatedAt = changedAt;
+      file.conversationRevision[conversation.engine] += 1;
+      file.engineRouting[conversation.engine].revision += 1;
+      return clone(conversation);
+    });
+  }
+
   upsertMigrationIntent(engine: Extract<AgentEngine, "claude" | "codex">, targetId: string, origin: MigrationOrigin, requestId: string, evidence: MigrationIntent["evidence"] = null): MigrationIntent {
     return this.mutate((file) => {
-      const active = Object.values(file.migrationIntents).find((intent) => intent.engine === engine && intent.state === "draining");
+      const active = Object.values(file.migrationIntents).find((intent) => intent.engine === engine && intent.state === "draining" && engineScopedIntent(intent));
       if (active) {
         if (active.origin === "manual" && origin === "auto") return clone(active);
         if (!active.requestIds.includes(requestId)) active.requestIds.push(requestId);

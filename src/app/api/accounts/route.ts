@@ -69,6 +69,9 @@ function migrationProjection(engine: MigrationEngine, snapshot: ReturnType<Retur
   const intent = Object.values(snapshot.migrationIntents)
     .filter((candidate) => {
       if (candidate.engine !== engine) return false;
+      /* A conversation-scoped reseat (issue #97) is not an engine migration:
+         its card carries its own annotation, the panel banner stays down. */
+      if (candidate.scope === "conversation") return false;
       if (candidate.state === "draining") return true;
       return candidate.state === "complete" && Object.values(snapshot.conversations)
         .some((conversation) => conversation.migration?.intentId === candidate.id && conversation.migration.phase === "failed-recoverable");
@@ -102,7 +105,7 @@ function migrationProjection(engine: MigrationEngine, snapshot: ReturnType<Retur
 
 function autoBalanceProjection(engine: MigrationEngine, snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>, now: number) {
   const policy = snapshot.autoBalance[engine];
-  const draining = Object.values(snapshot.migrationIntents).some((intent) => intent.engine === engine && intent.state === "draining");
+  const draining = Object.values(snapshot.migrationIntents).some((intent) => intent.engine === engine && intent.state === "draining" && intent.scope !== "conversation");
   const fresh = Object.values(snapshot.quotaObservations[engine]).some((observation) =>
     liveFreshObservation(observation, now));
   const cooling = Boolean(policy.cooldownUntil && Date.parse(policy.cooldownUntil) > now);

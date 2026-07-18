@@ -1242,6 +1242,12 @@ export const uk: Record<keyof typeof en, Message> = {
   "status.flow": "флоу: {label}",
   "rateLimit.badge": "вичерпано ліміт",
   "rateLimit.badgeUntil": "ліміт до {time}",
+  "rateLimit.reseat": "продовжити на здоровому акаунті",
+  "rateLimit.reseatRequested": "пересадка…",
+  "rateLimit.reseatTitle": "Створити наступника цієї розмови на найздоровішому акаунті; вичерпана розмова паркується, прив'язані флоу переходять слідом.",
+  "rateLimit.reseatFailed": "не вдалося пересадити",
+  "rateLimit.reseatAlready": "вже пересаджено",
+  "rateLimit.reseatWaitingTurn": "Пересадку поставлено в чергу: щойно обмежений хід звільнить панель, буде створено наступника.",
 
   "dictation.capWarn": "залишилось менше хвилини запису",
   "dictation.capStopped": "Запис зупинено на 10-хвилинній межі; текст зʼявиться в полі.",
