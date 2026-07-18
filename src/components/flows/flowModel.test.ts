@@ -10,6 +10,7 @@ import {
   flowPresentation,
   foldClaimedReviewers,
   isActiveFlow,
+  reviewerBindingTargetsForRound,
   reviewerFileForRound,
   reviewerFilesForRound,
 } from "./flowModel";
@@ -121,6 +122,8 @@ describe("reviewer folding", () => {
 
     expect(reviewerFileForRound(currentFlow, currentFlow.rounds[0]!, [archived, resumed])).toBe(resumed);
     expect(reviewerFilesForRound(currentFlow, currentFlow.rounds[0]!, [archived, resumed])).toEqual([resumed]);
+    expect(reviewerBindingTargetsForRound(currentFlow, currentFlow.rounds[0]!, [archived, resumed]).map((target) => target.path))
+      .toEqual([resumed.path]);
   });
 
   test("projects every immutable reviewer retry into one logical round", () => {
@@ -152,7 +155,8 @@ describe("reviewer folding", () => {
       rounds: [{
         n: 2,
         reviewerPath: current.path,
-        reviewerConversationId: current.conversationId,
+        reviewerConversationId: failed.conversationId,
+        reviewerBindingId: "binding-b",
         findingsPath: null,
         triggeredBy: "marker",
         readyNote: null,
@@ -166,6 +170,8 @@ describe("reviewer folding", () => {
     });
 
     expect(reviewerFilesForRound(currentFlow, currentFlow.rounds[0]!, [current, failed]).map((file) => file.path))
+      .toEqual([failed.path, current.path]);
+    expect(reviewerBindingTargetsForRound(currentFlow, currentFlow.rounds[0]!, [current, failed]).map((target) => target.path))
       .toEqual([failed.path, current.path]);
   });
 

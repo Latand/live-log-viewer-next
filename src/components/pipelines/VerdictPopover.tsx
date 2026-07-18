@@ -4,9 +4,11 @@ import { RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
+import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
 import { useLocale } from "@/lib/i18n";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
+import type { FileEntry } from "@/lib/types";
 
 import { VERDICT_TONES, attemptStateLabel, patchPipeline, stageAttempts, stageChipLabel, verdictStatusLabel } from "./pipelineModel";
 
@@ -24,6 +26,7 @@ export function VerdictPopover({
   stage,
   attempt,
   flows = [],
+  files = [],
   availablePaths,
   mobile = false,
   canOpenFlow = true,
@@ -36,6 +39,7 @@ export function VerdictPopover({
   stage: PipelineStage;
   attempt: PipelineStageAttempt;
   flows?: Flow[];
+  files?: readonly FileEntry[];
   availablePaths?: ReadonlySet<string>;
   mobile?: boolean;
   /** Whether the embedded flow still has a board deck; a closed/missing flow
@@ -74,13 +78,13 @@ export function VerdictPopover({
   const seenReviewPaths = new Set<string>();
   const reviewTranscripts = flows
     .filter((flow) => stageFlowIds.has(flow.id))
-    .flatMap((flow) => flow.rounds)
-    .flatMap((round) => {
-      const path = round.reviewerPath;
-      if (!path || attemptPaths.has(path) || seenReviewPaths.has(path)) return [];
-      seenReviewPaths.add(path);
-      return [{ n: round.n, path }];
-    });
+    .flatMap((flow) => flow.rounds.flatMap((round) =>
+      reviewerBindingTargetsForRound(flow, round, files).flatMap(({ path }) => {
+        if (attemptPaths.has(path) || seenReviewPaths.has(path)) return [];
+        seenReviewPaths.add(path);
+        return [{ n: round.n, path }];
+      }),
+    ));
   const pathAvailable = (path: string) => !availablePaths || availablePaths.has(path);
   const mobileTarget = mobile ? "min-h-11 min-w-11" : "";
   const findings = verdict?.findings ?? [];

@@ -1,4 +1,7 @@
+import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
+import type { Flow, Round } from "@/lib/flows/types";
 import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
+import type { FileEntry } from "@/lib/types";
 
 import type { SchemeRect } from "./layout";
 
@@ -195,8 +198,13 @@ export function buildTaskTargetIndex(
   flows: ReadonlyArray<{
     id: string;
     implementerPath: string;
-    rounds: ReadonlyArray<{ reviewerPath: string | null }>;
+    rounds: ReadonlyArray<{
+      n?: number;
+      reviewerPath: string | null;
+      reviewerConversationId?: string | null;
+    }>;
   }> = [],
+  files: readonly FileEntry[] = [],
 ): Map<string, SchemeRect> {
   const index = new Map<string, SchemeRect>();
   const flowsById = new Map(flows.map((flow) => [flow.id, flow] as const));
@@ -210,7 +218,11 @@ export function buildTaskTargetIndex(
         const flow = attempt.flowId ? flowsById.get(attempt.flowId) : null;
         if (!flow) continue;
         index.set(flow.implementerPath, rectOf(group));
-        for (const round of flow.rounds) if (round.reviewerPath) index.set(round.reviewerPath, rectOf(group));
+        for (const round of flow.rounds) {
+          for (const { path } of reviewerBindingTargetsForRound(flow as Flow, round as Round, files)) {
+            index.set(path, rectOf(group));
+          }
+        }
       }
     }
   }

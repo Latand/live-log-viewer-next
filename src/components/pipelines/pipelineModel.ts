@@ -1,4 +1,5 @@
 import { roleNameById } from "@/components/builderCopy";
+import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
 import { applyPipelineSnapshot, revertPipelineSnapshot } from "@/hooks/useFiles";
 import { getLocale, translate, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -164,7 +165,11 @@ export function stageAttempts(pipeline: Pipeline, stageId: string): PipelineStag
  * transcripts remain reachable through the review evidence row. Completed
  * pipelines have no live pane, so their entire transcript chain is compact.
  */
-export function compactPipelineArtifactPaths(pipelines: readonly Pipeline[], flows: readonly Flow[]): Set<string> {
+export function compactPipelineArtifactPaths(
+  pipelines: readonly Pipeline[],
+  flows: readonly Flow[],
+  files: readonly FileEntry[] = [],
+): Set<string> {
   const flowsById = new Map(flows.map((flow) => [flow.id, flow] as const));
   const fullPanePaths = new Set<string>();
 
@@ -202,7 +207,9 @@ export function compactPipelineArtifactPaths(pipelines: readonly Pipeline[], flo
         if (!flow) continue;
         if (!fullPanePaths.has(flow.implementerPath)) compact.add(flow.implementerPath);
         for (const round of flow.rounds) {
-          if (round.reviewerPath && !fullPanePaths.has(round.reviewerPath)) compact.add(round.reviewerPath);
+          for (const { path } of reviewerBindingTargetsForRound(flow, round, files)) {
+            if (!fullPanePaths.has(path)) compact.add(path);
+          }
         }
       }
     }
@@ -234,7 +241,11 @@ export function compactPipelineLayoutFlows(pipelines: readonly Pipeline[], flows
 }
 
 /** Tasks whose assignment or source transcript belongs to this pipeline. */
-export function pipelineLineage(pipeline: Pipeline, flows: readonly Flow[] = []): {
+export function pipelineLineage(
+  pipeline: Pipeline,
+  flows: readonly Flow[] = [],
+  files: readonly FileEntry[] = [],
+): {
   paths: Set<string>;
   conversationIds: Set<string>;
 } {
@@ -252,8 +263,10 @@ export function pipelineLineage(pipeline: Pipeline, flows: readonly Flow[] = [])
       paths.add(flow.implementerPath);
       if (flow.implementerConversationId) conversationIds.add(flow.implementerConversationId);
       for (const round of flow.rounds) {
-        if (round.reviewerPath) paths.add(round.reviewerPath);
-        if (round.reviewerConversationId) conversationIds.add(round.reviewerConversationId);
+        for (const binding of reviewerBindingTargetsForRound(flow, round, files)) {
+          paths.add(binding.path);
+          if (binding.conversationId) conversationIds.add(binding.conversationId);
+        }
       }
     }
   }
@@ -261,8 +274,13 @@ export function pipelineLineage(pipeline: Pipeline, flows: readonly Flow[] = [])
 }
 
 /** Tasks whose assignment or source transcript belongs to this pipeline. */
-export function pipelineLinkedTasks(pipeline: Pipeline, tasks: readonly BoardTask[], flows: readonly Flow[] = []): BoardTask[] {
-  const { paths, conversationIds } = pipelineLineage(pipeline, flows);
+export function pipelineLinkedTasks(
+  pipeline: Pipeline,
+  tasks: readonly BoardTask[],
+  flows: readonly Flow[] = [],
+  files: readonly FileEntry[] = [],
+): BoardTask[] {
+  const { paths, conversationIds } = pipelineLineage(pipeline, flows, files);
   if (!paths.size && !conversationIds.size) return [];
   return tasks.filter((task) =>
     (task.source ? paths.has(task.source.path) : false) ||
@@ -281,9 +299,10 @@ export function replaceCompactPipelineEphemeral(
   nextPath: string,
   pipelines: readonly Pipeline[],
   flows: readonly Flow[],
+  files: readonly FileEntry[] = [],
 ): string[] {
-  const owner = pipelines.find((pipeline) => pipelineLineage(pipeline, flows).paths.has(nextPath));
-  const ownerPaths = owner ? pipelineLineage(owner, flows).paths : null;
+  const owner = pipelines.find((pipeline) => pipelineLineage(pipeline, flows, files).paths.has(nextPath));
+  const ownerPaths = owner ? pipelineLineage(owner, flows, files).paths : null;
   const retained = ownerPaths ? current.filter((path) => !ownerPaths.has(path)) : [...current];
   return retained.includes(nextPath) ? retained : [...retained, nextPath];
 }
@@ -395,15 +414,19 @@ export function compactStageOpenTarget(
   flows: readonly Flow[],
   renderableFlows?: ReadonlySet<string>,
   renderablePaths?: ReadonlySet<string>,
+  files: readonly FileEntry[] = [],
 ): { kind: "flow"; flowId: string } | { kind: "path"; path: string } | null {
   const direct = stageOpenTarget(stage, attempt, renderableFlows, renderablePaths);
   if (direct || stage.kind !== "review-loop" || !attempt?.flowId) return direct;
   const flow = flows.find((candidate) => candidate.id === attempt.flowId);
   if (!flow) return null;
-  const reviewerPath = [...flow.rounds].reverse().find((round) =>
-    Boolean(round.reviewerPath && (!renderablePaths || renderablePaths.has(round.reviewerPath))),
-  )?.reviewerPath;
-  if (reviewerPath) return { kind: "path", path: reviewerPath };
+  for (const round of [...flow.rounds].reverse()) {
+    const reviewerPath = [...reviewerBindingTargetsForRound(flow, round, files)]
+      .reverse()
+      .find(({ path }) => !renderablePaths || renderablePaths.has(path))
+      ?.path;
+    if (reviewerPath) return { kind: "path", path: reviewerPath };
+  }
   if (!renderablePaths || renderablePaths.has(flow.implementerPath)) return { kind: "path", path: flow.implementerPath };
   return null;
 }
@@ -432,6 +455,7 @@ export function stageHasNavigableHistory(
   attempt: PipelineStageAttempt | null,
   flows: readonly Flow[] = [],
   availablePaths?: ReadonlySet<string>,
+  files: readonly FileEntry[] = [],
 ): boolean {
   if (!attempt) return false;
   const pathAvailable = (path: string) => !availablePaths || availablePaths.has(path);
@@ -441,7 +465,9 @@ export function stageHasNavigableHistory(
   const flowIds = new Set(attempts.flatMap((item) => item.flowId ? [item.flowId] : []));
   const attemptPaths = new Set(attempts.flatMap((item) => item.agentPath ? [item.agentPath] : []));
   return flows.some((flow) => flowIds.has(flow.id) && flow.rounds.some((round) =>
-    Boolean(round.reviewerPath && !attemptPaths.has(round.reviewerPath) && pathAvailable(round.reviewerPath)),
+    reviewerBindingTargetsForRound(flow, round, files).some(({ path }) =>
+      !attemptPaths.has(path) && pathAvailable(path),
+    ),
   ));
 }
 

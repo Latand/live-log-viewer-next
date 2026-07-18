@@ -429,12 +429,12 @@ export function SchemeBoard({
     return ids;
   }, [pipelineStrips, placedNodePaths]);
   const linkedTasksByPipeline = useMemo(
-    () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, allTasks, flows)] as const)),
-    [pipelines, allTasks, flows],
+    () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, allTasks, flows, files)] as const)),
+    [pipelines, allTasks, flows, files],
   );
   const pipelineControls = useMemo<PipelineGroupControls>(
-    () => ({ flows, renderablePaths: renderablePipelinePaths, renderableFlows: renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, onOpenPath: openPipelinePath, onOpenFlow: openPipelineFlow, onOpenTask: stableOpenTask }),
-    [flows, renderablePipelinePaths, renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, openPipelinePath, openPipelineFlow, stableOpenTask],
+    () => ({ flows, files, renderablePaths: renderablePipelinePaths, renderableFlows: renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, onOpenPath: openPipelinePath, onOpenFlow: openPipelineFlow, onOpenTask: stableOpenTask }),
+    [flows, files, renderablePipelinePaths, renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, openPipelinePath, openPipelineFlow, stableOpenTask],
   );
   /* One minimap dot per collapsed worker-stack origin (issue #136): orchestration
      origins (flow/pipeline) in accent, spawner/worktree origins in gray. */
@@ -531,7 +531,7 @@ export function SchemeBoard({
     () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
     [placedTasks],
   );
-  const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout, flows)), [placedTasks, layout, flows]);
+  const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout, flows, files)), [placedTasks, layout, flows, files]);
   /* Card rects the edge router steers around, each tagged with its task so an
      edge is never counted as crossing the card it leaves from (issue #17). */
   const taskCardObstacles = useMemo(

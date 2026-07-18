@@ -2,6 +2,7 @@ import type { Flow, Round } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
+import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
 import { activityBand, isChildConversation, kidsIndex, projectKey, subtree } from "@/components/projectModel";
 
 /*
@@ -219,7 +220,11 @@ export function flowIdForPath(file: FileEntry, flows: readonly Flow[]): string |
     for a review-loop stage the embedded flow's implementer + reviewer paths are
     owned too, otherwise the flow bucket would split them off into a second stack
     (a build stage in the pipeline stack, its reviewer in a flow stack). */
-export function pipelineStagePipelineIds(pipelines: readonly Pipeline[], flows: readonly Flow[] = []): Map<string, string> {
+export function pipelineStagePipelineIds(
+  pipelines: readonly Pipeline[],
+  flows: readonly Flow[] = [],
+  files: readonly FileEntry[] = [],
+): Map<string, string> {
   const flowById = new Map(flows.map((flow) => [flow.id, flow] as const));
   const map = new Map<string, string>();
   for (const pipeline of pipelines) {
@@ -231,7 +236,9 @@ export function pipelineStagePipelineIds(pipelines: readonly Pipeline[], flows: 
           if (flow) {
             if (!map.has(flow.implementerPath)) map.set(flow.implementerPath, pipeline.id);
             for (const round of flow.rounds) {
-              if (round.reviewerPath && !map.has(round.reviewerPath)) map.set(round.reviewerPath, pipeline.id);
+              for (const { path } of reviewerBindingTargetsForRound(flow, round, files)) {
+                if (!map.has(path)) map.set(path, pipeline.id);
+              }
             }
           }
         }

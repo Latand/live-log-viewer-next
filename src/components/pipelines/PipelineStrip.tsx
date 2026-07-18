@@ -10,6 +10,7 @@ import { useLocale } from "@/lib/i18n";
 import type { Pipeline, PipelineAction, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { StageSlot } from "@/components/scheme/layout";
 import type { BoardTask } from "@/lib/tasks/types";
+import type { FileEntry } from "@/lib/types";
 
 import {
   PIPELINE_ATTENTION_STATES,
@@ -143,6 +144,7 @@ function StageChip({
   previousStage,
   index,
   flows,
+  files,
   renderableFlows,
   renderablePaths,
   mobile,
@@ -160,6 +162,7 @@ function StageChip({
   previousStage: PipelineStage | null;
   index: number;
   flows: Flow[];
+  files: readonly FileEntry[];
   /** Ids of flows that still have a board deck; gates review-loop actions. */
   renderableFlows: ReadonlySet<string>;
   /** Transcript paths still in the scan; gates run-stage actions. */
@@ -194,7 +197,7 @@ function StageChip({
      action and keep it from dead-ending (#93 §2.2, AC4). */
   const targetFor = (candidate: PipelineStage) => {
     const candidateAttempt = latestAttempt(pipeline, candidate.id);
-    return compactStageOpenTarget(candidate, candidateAttempt, flows, renderableFlows, renderablePaths);
+    return compactStageOpenTarget(candidate, candidateAttempt, flows, renderableFlows, renderablePaths, files);
   };
   const openTarget = targetFor(stage);
   const stageConfigurable = (candidate: PipelineStage) =>
@@ -226,7 +229,7 @@ function StageChip({
   /* Keep the popover available for visible evidence and openable retry or
      review-round history. */
   const evidence = stageHasEvidence(pipeline, stage, attempt)
-    || stageHasNavigableHistory(pipeline, stage, attempt, flows, renderablePaths);
+    || stageHasNavigableHistory(pipeline, stage, attempt, flows, renderablePaths, files);
   const terminalEvidence = Boolean(attempt && ["passed", "failed", "needs_decision", "skipped"].includes(attempt.state));
   const duration = attempt ? attemptDuration(attempt) : null;
   const model = attempt?.effectiveRole.model ?? t("pipelineStrip.defaultModel");
@@ -339,7 +342,7 @@ function StageChip({
       </span>
       {open && attempt ? (
         <AnchoredVerdict anchorRef={chipRef}>
-          <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} flows={flows} availablePaths={renderablePaths} mobile={mobile} canOpenFlow={canOpenFlow} canOpenPath={canOpenPath} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
+          <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} flows={flows} files={files} availablePaths={renderablePaths} mobile={mobile} canOpenFlow={canOpenFlow} canOpenPath={canOpenPath} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
         </AnchoredVerdict>
       ) : null}
       {configurationOpen ? (
@@ -375,6 +378,7 @@ function StageChip({
 export function PipelineStrip({
   pipeline,
   flows = [],
+  files = [],
   renderablePaths,
   renderableFlows = EMPTY_PATHS,
   compact = false,
@@ -386,6 +390,7 @@ export function PipelineStrip({
 }: {
   pipeline: Pipeline;
   flows?: Flow[];
+  files?: readonly FileEntry[];
   /** Transcript paths currently in the scan; a run chip / "open transcript" is
       disabled for an attempt whose path is absent (AC4). Omitted → no gating. */
   renderablePaths?: ReadonlySet<string>;
@@ -489,6 +494,7 @@ export function PipelineStrip({
             previousStage={pipeline.stages[index - 1] ?? null}
             index={index}
             flows={flows}
+            files={files}
             renderableFlows={renderableFlows}
             renderablePaths={renderablePaths}
             mobile={mobile}

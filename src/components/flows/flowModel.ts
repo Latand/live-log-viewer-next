@@ -92,6 +92,19 @@ export function claimedReviewerPaths(flows: Flow[]): Set<string> {
 
 /** Resolve the current transcript generation for a durable review round. */
 export function reviewerFileForRound(flow: Flow, round: Round, files: readonly FileEntry[]): FileEntry | null {
+  if (round.reviewerBindingId) {
+    const currentSlot = `reviewer:${round.n}:${round.reviewerBindingId}`;
+    const byBinding = withoutArchivedPredecessors([...files]).find((file) => file.durableLineage?.memberships.some((membership) =>
+      membership.kind === "flow"
+      && membership.containerId === flow.id
+      && membership.role === "reviewer"
+      && membership.round === round.n
+      && membership.slot === currentSlot
+    ));
+    if (byBinding) {
+      return byBinding.conversationId ? (currentConversationFile(files, byBinding.conversationId) ?? byBinding) : byBinding;
+    }
+  }
   if (round.reviewerConversationId) {
     const byConversation = currentConversationFile(files, round.reviewerConversationId);
     if (byConversation) return byConversation;
@@ -118,6 +131,47 @@ export function reviewerFilesForRound(flow: Flow, round: Round, files: readonly 
     && membership.round === round.n
   )).filter((file) => file !== current);
   return current ? [...history, current] : history;
+}
+
+export type ReviewerBindingTarget = {
+  path: string;
+  conversationId: string | null;
+};
+
+/**
+ * Every navigable transcript bound to one logical review round. Durable
+ * membership slots survive same-round retries, while conversation identity
+ * folds archived generations into their current path. The active binding is
+ * always last so compact history keeps a stable chronological tail.
+ */
+export function reviewerBindingTargetsForRound(
+  flow: Flow,
+  round: Round,
+  files: readonly FileEntry[] = [],
+): ReviewerBindingTarget[] {
+  const resolved = reviewerFilesForRound(flow, round, files);
+  const targets = resolved.map((file) => ({ path: file.path, conversationId: file.conversationId ?? null }));
+  const seen = new Set(targets.map((target) => target.path));
+  if (!round.reviewerPath || seen.has(round.reviewerPath)) return targets;
+
+  const pathFile = files.find((file) => file.path === round.reviewerPath) ?? null;
+  const current = reviewerFileForRound(flow, round, files);
+  const currentReplacedPath = Boolean(
+    current
+    && current.path !== round.reviewerPath
+    && current.conversationId
+    && (
+      current.conversationId === round.reviewerConversationId
+      || current.conversationId === pathFile?.conversationId
+    ),
+  );
+  if (currentReplacedPath) return targets;
+
+  targets.push({
+    path: round.reviewerPath,
+    conversationId: round.reviewerConversationId ?? pathFile?.conversationId ?? null,
+  });
+  return targets;
 }
 
 /**

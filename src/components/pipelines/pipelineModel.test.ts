@@ -154,9 +154,22 @@ test("pipelineLinkedTasks keeps assignment and source lineage directly navigable
   const roundLinked = task("round", "/review-round-1");
   const roundConversation = task("round-conversation", null);
   roundConversation.assignments = [{ path: null, conversationId: "conv-round-1", panePid: null, state: "spawning", error: null, at: "2026-07-18T00:00:00Z" }];
-  const tasks = [task("assigned", "/build"), task("sourced", null, "/review"), task("origin", null, "/origin"), conversationLinked, sourceConversation, roundLinked, roundConversation, task("elsewhere", "/other")];
-  const flows = [{ id: "flow-1", implementerPath: "/build", implementerConversationId: "conv-build", rounds: [{ reviewerPath: "/review-round-1", reviewerConversationId: "conv-round-1" }] }] as unknown as Flow[];
-  expect(pipelineLinkedTasks(p, tasks, flows).map((item) => item.id)).toEqual(["assigned", "sourced", "origin", "conversation", "source-conversation", "round", "round-conversation"]);
+  const priorRoundLinked = task("prior-round", "/review-round-prior");
+  const priorRoundConversation = task("prior-round-conversation", null);
+  priorRoundConversation.assignments = [{ path: null, conversationId: "conv-round-prior", panePid: null, state: "spawning", error: null, at: "2026-07-18T00:00:00Z" }];
+  const tasks = [task("assigned", "/build"), task("sourced", null, "/review"), task("origin", null, "/origin"), conversationLinked, sourceConversation, roundLinked, roundConversation, priorRoundLinked, priorRoundConversation, task("elsewhere", "/other")];
+  const flows = [{ id: "flow-1", implementerPath: "/build", implementerConversationId: "conv-build", rounds: [{ n: 1, reviewerPath: "/review-round-1", reviewerConversationId: "conv-round-1" }] }] as unknown as Flow[];
+  const membership = (slot: string) => ({
+    kind: "flow" as const, containerId: "flow-1", role: "reviewer", slot,
+    stageId: null, stageOrder: null, round: 1, parentConversationId: "conv-build",
+  });
+  const files = [
+    { path: "/review-round-prior", conversationId: "conv-round-prior", durableLineage: { memberships: [membership("reviewer:1:binding-a")] } },
+    { path: "/review-round-1", conversationId: "conv-round-1", durableLineage: { memberships: [membership("reviewer:1:binding-b")] } },
+  ] as unknown as FileEntry[];
+  expect(pipelineLinkedTasks(p, tasks, flows, files).map((item) => item.id)).toEqual([
+    "assigned", "sourced", "origin", "conversation", "source-conversation", "round", "round-conversation", "prior-round", "prior-round-conversation",
+  ]);
 });
 
 test("opening compact history replaces the prior inspected pane from the same pipeline", () => {
@@ -168,6 +181,26 @@ test("opening compact history replaces the prior inspected pane from the same pi
   });
 
   expect(replaceCompactPipelineEphemeral(["/retry-1", "/other"], "/retry-2", [p], [])).toEqual(["/other", "/retry-2"]);
+});
+
+test("opening a same-round reviewer binding replaces the prior binding pane", () => {
+  const p = pipeline({ runs: [{ stageId: "review", attempts: [{ agentPath: "/review-current", flowId: "flow-1" } as never] }] });
+  const flows = [{
+    id: "flow-1",
+    implementerPath: "/builder",
+    rounds: [{ n: 1, reviewerPath: "/review-current", reviewerConversationId: "conversation-current" }],
+  }] as unknown as Flow[];
+  const membership = (slot: string) => ({
+    kind: "flow" as const, containerId: "flow-1", role: "reviewer", slot,
+    stageId: null, stageOrder: null, round: 1, parentConversationId: "conversation-builder",
+  });
+  const files = [
+    { path: "/review-prior", conversationId: "conversation-prior", durableLineage: { memberships: [membership("reviewer:1:binding-a")] } },
+    { path: "/review-current", conversationId: "conversation-current", durableLineage: { memberships: [membership("reviewer:1:binding-b")] } },
+  ] as unknown as FileEntry[];
+
+  expect(replaceCompactPipelineEphemeral(["/review-prior", "/other"], "/review-current", [p], flows, files))
+    .toEqual(["/other", "/review-current"]);
 });
 
 describe("pipelineCursorActive", () => {
@@ -214,6 +247,32 @@ describe("compactPipelineArtifactPaths", () => {
     const flows = [{ id: "f1", implementerPath: "/builder", rounds: [{ reviewerPath: "/reviewer" }] }] as unknown as Flow[];
 
     expect([...compactPipelineArtifactPaths([p], flows)]).toEqual(["/reviewer"]);
+  });
+
+  test("compacts every durable binding from a retried logical review round", () => {
+    const p = pipeline({
+      stages,
+      cursor: { stageId: "review", state: "reviewing" },
+      runs: [
+        { stageId: "builder", attempts: [{ state: "passed", agentPath: "/builder" } as never] },
+        { stageId: "review", attempts: [{ state: "reviewing", agentPath: "/review-current", flowId: "f1" } as never] },
+      ],
+    });
+    const flows = [{
+      id: "f1",
+      implementerPath: "/builder",
+      rounds: [{ n: 1, reviewerPath: "/review-current", reviewerConversationId: "conversation-current" }],
+    }] as unknown as Flow[];
+    const membership = (slot: string) => ({
+      kind: "flow" as const, containerId: "f1", role: "reviewer", slot,
+      stageId: null, stageOrder: null, round: 1, parentConversationId: "conversation-builder",
+    });
+    const files = [
+      { path: "/review-prior", conversationId: "conversation-prior", durableLineage: { memberships: [membership("reviewer:1:binding-a")] } },
+      { path: "/review-current", conversationId: "conversation-current", durableLineage: { memberships: [membership("reviewer:1:binding-b")] } },
+    ] as unknown as FileEntry[];
+
+    expect(compactPipelineArtifactPaths([p], flows, files)).toEqual(new Set(["/review-prior", "/review-current"]));
   });
 
   test("keeps the latest passed run pane while a review flow is materializing", () => {
@@ -461,6 +520,28 @@ describe("compactStageOpenTarget", () => {
       path: "/builder",
     });
   });
+
+  test("opens the current resumed generation of the active durable binding", () => {
+    const resumedFlow = {
+      ...flow,
+      rounds: [{ n: 1, reviewerPath: "/reviewer-archived", reviewerConversationId: "conversation-reviewer" }],
+    } as unknown as Flow;
+    const files = [
+      { path: "/reviewer-archived", conversationId: "conversation-reviewer", migratedTo: "/reviewer-resumed" },
+      {
+        path: "/reviewer-resumed",
+        conversationId: "conversation-reviewer",
+        predecessorPath: "/reviewer-archived",
+        durableLineage: { memberships: [{
+          kind: "flow", containerId: "f1", role: "reviewer", slot: "reviewer:1:binding-a",
+          stageId: null, stageOrder: null, round: 1, parentConversationId: "conversation-builder",
+        }] },
+      },
+    ] as unknown as FileEntry[];
+
+    expect(compactStageOpenTarget(reviewStage, reviewAttempt, [resumedFlow], new Set(), new Set(["/reviewer-resumed"]), files))
+      .toEqual({ kind: "path", path: "/reviewer-resumed" });
+  });
 });
 
 describe("renderableFlowIds (a deck exists only when the implementer is placed)", () => {
@@ -534,6 +615,32 @@ describe("stageHasNavigableHistory", () => {
 
     expect(stageHasNavigableHistory(p, reviewStage, current, flows, new Set(["/round-1", "/round-2"]))).toBe(true);
     expect(stageHasNavigableHistory(p, reviewStage, current, flows, new Set(["/round-2"]))).toBe(false);
+  });
+
+  test("an active same-round retry keeps its earlier durable binding reachable", () => {
+    const reviewStage: PipelineStage = { ...runStage, id: "review", kind: "review-loop" };
+    const current = { n: 1, state: "reviewing", agentPath: "/round-current", flowId: "flow-1", verdict: null, error: null } as never;
+    const p = pipeline({
+      stages: [reviewStage],
+      cursor: { stageId: reviewStage.id, state: "reviewing" },
+      runs: [{ stageId: reviewStage.id, attempts: [current] }],
+    });
+    const flows = [{
+      id: "flow-1",
+      implementerPath: "/builder",
+      rounds: [{ n: 1, reviewerPath: "/round-current", reviewerConversationId: "conversation-current" }],
+    }] as unknown as Flow[];
+    const membership = (slot: string) => ({
+      kind: "flow" as const, containerId: "flow-1", role: "reviewer", slot,
+      stageId: null, stageOrder: null, round: 1, parentConversationId: "conversation-builder",
+    });
+    const files = [
+      { path: "/round-prior", conversationId: "conversation-prior", durableLineage: { memberships: [membership("reviewer:1:binding-a")] } },
+      { path: "/round-current", conversationId: "conversation-current", durableLineage: { memberships: [membership("reviewer:1:binding-b")] } },
+    ] as unknown as FileEntry[];
+
+    expect(stageHasNavigableHistory(p, reviewStage, current, flows, new Set(files.map((file) => file.path)), files)).toBe(true);
+    expect(stageHasNavigableHistory(p, reviewStage, current, flows, new Set(["/round-current"]), files)).toBe(false);
   });
 });
 

@@ -174,17 +174,37 @@ test("a direct review group rides the phone strip as a round deck with accessibl
   expect(banner).toBeDefined();
 });
 
-test("an active pipeline-owned review keeps prior rounds in the compact mobile rail (#353)", async () => {
+test("an active pipeline-owned review keeps prior same-round bindings in the compact mobile rail (#353)", async () => {
   const builder = entry({ path: "/pipeline-builder", title: "Pipeline builder", conversationId: "conversation-builder", activity: "live", mtime: 9_000 });
-  const priorReviewer = entry({ path: "/pipeline-reviewer-1", parent: builder.path, conversationId: "conversation-reviewer-1", mtime: 9_500 });
-  const reviewer = entry({ path: "/pipeline-reviewer-2", parent: builder.path, conversationId: "conversation-reviewer-2", activity: "live", mtime: 10_000 });
+  const membership = (slot: string) => ({
+    kind: "flow" as const,
+    containerId: "pipeline-flow",
+    role: "reviewer",
+    slot,
+    stageId: null,
+    stageOrder: null,
+    round: 1,
+    parentConversationId: builder.conversationId!,
+  });
+  const priorReviewer = entry({
+    path: "/pipeline-reviewer-1",
+    parent: builder.path,
+    conversationId: "conversation-reviewer-1",
+    mtime: 9_500,
+    durableLineage: { kind: "review", role: "reviewer", parentConversationId: builder.conversationId!, reviewsConversationId: builder.conversationId!, memberships: [membership("reviewer:1:binding-a")] },
+  });
+  const reviewer = entry({
+    path: "/pipeline-reviewer-2",
+    parent: builder.path,
+    conversationId: "conversation-reviewer-2",
+    activity: "live",
+    mtime: 10_000,
+    durableLineage: { kind: "review", role: "reviewer", parentConversationId: builder.conversationId!, reviewsConversationId: builder.conversationId!, memberships: [membership("reviewer:1:binding-b")] },
+  });
   const flow = {
     id: "pipeline-flow",
     implementerPath: builder.path,
-    rounds: [
-      { n: 1, reviewerPath: priorReviewer.path, reviewerConversationId: priorReviewer.conversationId },
-      { n: 2, reviewerPath: reviewer.path, reviewerConversationId: reviewer.conversationId },
-    ],
+    rounds: [{ n: 1, reviewerPath: reviewer.path, reviewerConversationId: reviewer.conversationId }],
     state: "reviewing",
   } as unknown as Flow;
   const pipeline = {

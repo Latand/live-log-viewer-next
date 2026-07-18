@@ -354,6 +354,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
     the lite map. Absent → group halos keep only their label chip. */
 export interface PipelineGroupControls {
   flows: Flow[];
+  files: readonly FileEntry[];
   renderablePaths: ReadonlySet<string>;
   renderableFlows: ReadonlySet<string>;
   /** Ids of pipelines whose per-node compact strip is ACTUALLY mounted on a
@@ -459,6 +460,7 @@ export const GroupsLayer = memo(function GroupsLayer({
                 <PipelineStrip
                   pipeline={group.pipeline}
                   flows={pipelineControls.flows}
+                  files={pipelineControls.files}
                   renderablePaths={pipelineControls.renderablePaths}
                   renderableFlows={pipelineControls.renderableFlows}
                   linkedTasks={pipelineControls.linkedTasksByPipeline.get(group.pipeline.id)}
@@ -783,6 +785,7 @@ function NodeShell({
   flow,
   pipeline,
   flows,
+  files,
   renderablePaths,
   renderableFlows,
   linkedTasks,
@@ -814,6 +817,7 @@ function NodeShell({
   pipeline: Pipeline | null;
   /** All flows, for the strip's review-loop round counters + open-review. */
   flows: Flow[];
+  files: readonly FileEntry[];
   /** Transcript paths still in the scan; gates the strip's run-stage actions. */
   renderablePaths: ReadonlySet<string>;
   /** Flow ids with a rendered deck; gates the strip's review-loop actions. */
@@ -873,7 +877,7 @@ function NodeShell({
           the slot to FlowStrip, so the two never coexist here). */}
       {boardStrip ? (
         <div className="absolute -top-[60px] left-0 z-[5]" style={{ width: node.w }}>
-          <PipelineStrip pipeline={boardStrip} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasks} compact onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} onOpenTask={onOpenTask} />
+          <PipelineStrip pipeline={boardStrip} flows={flows} files={files} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasks} compact onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} onOpenTask={onOpenTask} />
         </div>
       ) : null}
       {/* Flow + pipeline entry buttons. The pipeline button is decoupled from
@@ -1330,6 +1334,7 @@ export const NodesLayer = memo(function NodesLayer({
             pipeline={pipeline}
             linkedTasks={pipeline ? linkedTasksByPipeline.get(pipeline.id) ?? [] : []}
             flows={flows}
+            files={files}
             renderablePaths={renderablePaths}
             renderableFlows={renderableFlows}
             canFlow={canStartFlow(node.file, flowsByImpl)}

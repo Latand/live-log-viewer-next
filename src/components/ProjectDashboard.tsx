@@ -558,8 +558,8 @@ export function ProjectDashboard({
      evidence rail. Remove those transcripts from the world scene immediately;
      explicit history navigation can still materialize one on demand below. */
   const compactPipelinePaths = useMemo(
-    () => compactPipelineArtifactPaths(pipelines, deckFlows),
-    [pipelines, deckFlows],
+    () => compactPipelineArtifactPaths(pipelines, deckFlows, files),
+    [pipelines, deckFlows, files],
   );
   const compactLayoutFlows = useMemo(
     () => compactPipelineLayoutFlows(pipelines, layoutDeckFlows),
@@ -581,7 +581,7 @@ export function ProjectDashboard({
      rounds it bred. Pipeline ownership resolves through the ancestor chain so a
      stage's spawned child stays in the pipeline stack, not a second origin one. */
   const filesByPath = useMemo(() => new Map(files.map((file) => [file.path, file] as const)), [files]);
-  const pipelineIdByPath = useMemo(() => pipelineStagePipelineIds(pipelines, flows), [pipelines, flows]);
+  const pipelineIdByPath = useMemo(() => pipelineStagePipelineIds(pipelines, flows, files), [pipelines, flows, files]);
   const pipelineIdOf = useMemo(
     () => (path: string): string | null => {
       const file = filesByPath.get(path);
@@ -766,9 +766,9 @@ export function ProjectDashboard({
     if (!focusRequest) return;
     pendingFocusRef.current = focusRequest.path;
     setEphemeral((prev) => compactPipelinePaths.has(focusRequest.path)
-      ? replaceCompactPipelineEphemeral(prev, focusRequest.path, pipelines, deckFlows)
+      ? replaceCompactPipelineEphemeral(prev, focusRequest.path, pipelines, deckFlows, files)
       : prev.includes(focusRequest.path) ? prev : [...prev, focusRequest.path]);
-  }, [focusRequest, compactPipelinePaths, pipelines, deckFlows]);
+  }, [focusRequest, compactPipelinePaths, pipelines, deckFlows, files]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* A node added from the switchboard enters the layout on the next render;
@@ -1011,7 +1011,7 @@ export function ProjectDashboard({
        changing durable board membership or duplicating the evidence row. */
     if (compactPipelinePaths.has(file.path)) {
       pendingFocusRef.current = file.path;
-      setEphemeral((prev) => replaceCompactPipelineEphemeral(prev, file.path, pipelines, deckFlows));
+      setEphemeral((prev) => replaceCompactPipelineEphemeral(prev, file.path, pipelines, deckFlows, files));
       return;
     }
     const visible =

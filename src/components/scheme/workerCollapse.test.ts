@@ -175,13 +175,22 @@ describe("pipelineOriginOf — ancestor-chain pipeline ownership (#136)", () => 
     expect(pipelineOriginOf(b, filesByPath, new Map())).toBeNull();
   });
 
-  test("ownership map covers a stage agentPath AND an embedded flow's implementer + reviewers (#136)", () => {
-    const flows = [flow({ id: "flow1", implementerPath: "/builder", rounds: [round({ reviewerPath: "/reviewer" })] })];
+  test("ownership map covers every durable reviewer binding in one embedded flow group (#136, #353)", () => {
+    const flows = [flow({ id: "flow1", implementerPath: "/builder", rounds: [round({ n: 1, reviewerPath: "/reviewer" })] })];
     const pipelines = [
       { id: "pipe1", runs: [{ stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "flow1" }] }] } as unknown as Pipeline,
     ];
-    const map = pipelineStagePipelineIds(pipelines, flows);
+    const membership = (slot: string) => ({
+      kind: "flow" as const, containerId: "flow1", role: "reviewer", slot,
+      stageId: null, stageOrder: null, round: 1, parentConversationId: "conversation-builder",
+    });
+    const files = [
+      entry({ path: "/reviewer-prior", conversationId: "conversation-prior", durableLineage: { kind: "review", role: "reviewer", parentConversationId: "conversation-builder", reviewsConversationId: "conversation-builder", memberships: [membership("reviewer:1:binding-a")] } }),
+      entry({ path: "/reviewer", conversationId: "conversation-current", durableLineage: { kind: "review", role: "reviewer", parentConversationId: "conversation-builder", reviewsConversationId: "conversation-builder", memberships: [membership("reviewer:1:binding-b")] } }),
+    ];
+    const map = pipelineStagePipelineIds(pipelines, flows, files);
     expect(map.get("/reviewer")).toBe("pipe1");
+    expect(map.get("/reviewer-prior")).toBe("pipe1");
     expect(map.get("/builder")).toBe("pipe1");
   });
 });

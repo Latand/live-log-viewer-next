@@ -249,8 +249,8 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   const renderableFlows = useMemo(() => renderableFlowIds(layoutFlows, new Set(layout.nodes.map((node) => node.file.path))), [layoutFlows, layout]);
   const linkedTasksByPipeline = useMemo(
-    () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, sheetTasks ?? tasks, flows)] as const)),
-    [pipelines, sheetTasks, tasks, flows],
+    () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, sheetTasks ?? tasks, flows, files)] as const)),
+    [pipelines, sheetTasks, tasks, flows, files],
   );
 
   const openStagePath = useCallback(
@@ -265,7 +265,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
     if (!pipelineFocus) return;
     const stage = pipelineFocus.pipeline.stages[index];
     if (!stage) return;
-    const target = compactStageOpenTarget(stage, latestAttempt(pipelineFocus.pipeline, stage.id), flows, renderableFlows, renderablePaths);
+    const target = compactStageOpenTarget(stage, latestAttempt(pipelineFocus.pipeline, stage.id), flows, renderableFlows, renderablePaths, files);
     if (!target) return;
     if (target.kind === "flow") {
       const key = deckKey(target.flowId);
@@ -347,7 +347,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
             <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1.5">
               {pipelineFocus ? (
                 <>
-                  <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} flows={flows} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
+                  <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} flows={flows} files={files} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
                   {entries.length > 1 ? <span aria-hidden className="mx-0.5 h-7 w-px shrink-0 bg-border" /> : null}
                 </>
               ) : null}
@@ -446,7 +446,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
                plan + controls ARE the surface here (issue #136 / review). */
             <div className="flex min-h-0 flex-1 flex-col divide-y divide-border overflow-y-auto">
               {dockedPipelines.map((pipeline) => (
-                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
+                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} files={files} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
               ))}
             </div>
           ) : (
@@ -465,7 +465,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
       {(activeNode || activeDeck || activeDraft) && dockedPipelines.length ? (
         <div className="max-h-[42vh] shrink-0 divide-y divide-border overflow-y-auto border-t border-border bg-card">
           {dockedPipelines.map((pipeline) => (
-            <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
+            <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} files={files} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
           ))}
         </div>
       ) : null}
@@ -513,7 +513,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
           {dockedPipelines.length ? (
             <div className="max-h-[38vh] shrink-0 divide-y divide-border overflow-y-auto border-t border-border bg-card">
               {dockedPipelines.map((pipeline) => (
-                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
+                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} files={files} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
               ))}
             </div>
           ) : null}
@@ -552,7 +552,7 @@ function findPipelineStage(pipelines: Pipeline[], path: string | null, flowId: s
     stage/state, and prev/next stage chips as hop targets along the chain. The
     current-stage chip opens a verdict bottom sheet (#93 §2.3) when its stage has
     run, surfacing findings/confidence and parked Retry/Skip on mobile. */
-function PipelineFocusRow({ pipeline, index, flows, renderableFlows, renderablePaths, onHop, onOpenPath }: { pipeline: Pipeline; index: number; flows: Flow[]; renderableFlows: ReadonlySet<string>; renderablePaths: ReadonlySet<string>; onHop: (index: number) => void; onOpenPath: (path: string) => void }) {
+function PipelineFocusRow({ pipeline, index, flows, files, renderableFlows, renderablePaths, onHop, onOpenPath }: { pipeline: Pipeline; index: number; flows: Flow[]; files: readonly FileEntry[]; renderableFlows: ReadonlySet<string>; renderablePaths: ReadonlySet<string>; onHop: (index: number) => void; onOpenPath: (path: string) => void }) {
   const { t } = useLocale();
   const [sheetOpen, setSheetOpen] = useState(false);
   const total = pipeline.stages.length;
@@ -564,8 +564,8 @@ function PipelineFocusRow({ pipeline, index, flows, renderableFlows, renderableP
   /* A hop resolves through stageOpenTarget, so a neighbor is reachable only while
      its flow still has a deck (renderableFlows) or its run transcript is still in
      the scan (renderablePaths). */
-  const prevHopEnabled = prev ? Boolean(compactStageOpenTarget(prev, latestAttempt(pipeline, prev.id), flows, renderableFlows, renderablePaths)) : false;
-  const nextHopEnabled = next ? Boolean(compactStageOpenTarget(next, latestAttempt(pipeline, next.id), flows, renderableFlows, renderablePaths)) : false;
+  const prevHopEnabled = prev ? Boolean(compactStageOpenTarget(prev, latestAttempt(pipeline, prev.id), flows, renderableFlows, renderablePaths, files)) : false;
+  const nextHopEnabled = next ? Boolean(compactStageOpenTarget(next, latestAttempt(pipeline, next.id), flows, renderableFlows, renderablePaths, files)) : false;
   const attempt = latestAttempt(pipeline, stage.id);
   const stateLabel = t(`pipelineChipState.${state}`);
   const prevLabel = prev ? stageChipLabel(t, prev) : "";
@@ -575,7 +575,7 @@ function PipelineFocusRow({ pipeline, index, flows, renderableFlows, renderableP
   /* Match the shared strip: visible evidence and openable retry or review-round
      history both keep the mobile sheet available. */
   const canOpenVerdict = stageHasEvidence(pipeline, stage, attempt)
-    || stageHasNavigableHistory(pipeline, stage, attempt, flows, renderablePaths);
+    || stageHasNavigableHistory(pipeline, stage, attempt, flows, renderablePaths, files);
   const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
   const canOpenPath = Boolean(attempt?.agentPath && renderablePaths.has(attempt.agentPath));
   return (
@@ -635,6 +635,7 @@ function PipelineFocusRow({ pipeline, index, flows, renderableFlows, renderableP
               stage={stage}
               attempt={attempt}
               flows={flows}
+              files={files}
               availablePaths={renderablePaths}
               mobile
               canOpenFlow={canOpenFlow}
@@ -657,6 +658,7 @@ function PipelineFocusRow({ pipeline, index, flows, renderableFlows, renderableP
 export function MobilePipelineDock({
   pipeline,
   flows = [],
+  files = [],
   renderablePaths,
   renderableFlows,
   linkedTasks = [],
@@ -666,6 +668,7 @@ export function MobilePipelineDock({
 }: {
   pipeline: Pipeline;
   flows?: Flow[];
+  files?: readonly FileEntry[];
   renderablePaths?: ReadonlySet<string>;
   renderableFlows?: ReadonlySet<string>;
   linkedTasks?: BoardTask[];
@@ -679,6 +682,7 @@ export function MobilePipelineDock({
       <PipelineStrip
         pipeline={pipeline}
         flows={flows}
+        files={files}
         renderablePaths={renderablePaths}
         renderableFlows={renderableFlows}
         mobile

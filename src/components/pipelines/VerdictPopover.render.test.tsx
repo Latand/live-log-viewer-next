@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { Flow } from "@/lib/flows/types";
+import type { FileEntry } from "@/lib/types";
 
 import { VerdictPopover } from "./VerdictPopover";
 
@@ -150,4 +151,69 @@ test("bounded history keeps direct transcript actions for every retry and review
   expect(html).toContain("Open transcript for attempt 2");
   expect(html).toContain("Open review transcript 1");
   expect(html).toContain("max-h-24");
+});
+
+test("one logical round exposes every durable reviewer binding with the current binding last (#353)", () => {
+  const reviewStage: PipelineStage = { ...stage, id: "review", kind: "review-loop" };
+  const current = attempt(1, { agentPath: "/review-current.jsonl", flowId: "flow-1", state: "reviewing", verdict: null });
+  const reviewPipeline = pipeline([current]);
+  reviewPipeline.stages = [reviewStage];
+  reviewPipeline.runs = [{ stageId: reviewStage.id, attempts: [current] }];
+  const membership = (slot: string) => ({
+    kind: "flow" as const,
+    containerId: "flow-1",
+    role: "reviewer",
+    slot,
+    stageId: null,
+    stageOrder: null,
+    round: 1,
+    parentConversationId: "conversation-builder",
+  });
+  const files = [
+    {
+      path: "/review-prior.jsonl",
+      conversationId: "conversation-review-prior",
+      durableLineage: {
+        kind: "review",
+        role: "reviewer",
+        parentConversationId: "conversation-builder",
+        reviewsConversationId: "conversation-builder",
+        memberships: [membership("reviewer:1:binding-a")],
+      },
+    },
+    {
+      path: current.agentPath,
+      conversationId: "conversation-review-current",
+      durableLineage: {
+        kind: "review",
+        role: "reviewer",
+        parentConversationId: "conversation-builder",
+        reviewsConversationId: "conversation-builder",
+        memberships: [membership("reviewer:1:binding-b")],
+      },
+    },
+  ] as unknown as FileEntry[];
+  const flows = [{
+    id: "flow-1",
+    implementerPath: "/builder.jsonl",
+    rounds: [{ n: 1, reviewerPath: current.agentPath, reviewerConversationId: "conversation-review-current" }],
+  }] as unknown as Flow[];
+
+  const html = renderToStaticMarkup(
+    <VerdictPopover
+      pipeline={reviewPipeline}
+      stage={reviewStage}
+      attempt={current}
+      flows={flows}
+      files={files}
+      availablePaths={new Set(files.map((file) => file.path))}
+      onClose={() => {}}
+      onOpenPath={() => {}}
+    />,
+  );
+
+  const priorAt = html.indexOf("Open review transcript 1");
+  const currentAt = html.indexOf("Open transcript for attempt 1");
+  expect(priorAt).toBeGreaterThan(-1);
+  expect(currentAt).toBeGreaterThan(priorAt);
 });

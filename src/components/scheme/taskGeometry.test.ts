@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { BoardTask, TaskAssignment } from "@/lib/tasks/types";
+import type { FileEntry } from "@/lib/types";
 
 import {
   assignEdgeLanes,
@@ -102,6 +103,46 @@ describe("buildTaskTargetIndex — the resolution ladder", () => {
     expect(index.get("/pipeline-source")).toEqual({ x: 2400, y: 100, w: 692, h: 150 });
     expect(index.get("/pipeline-history")).toEqual({ x: 2400, y: 100, w: 692, h: 150 });
     expect(index.get("/pipeline-review-round")).toEqual({ x: 2400, y: 100, w: 692, h: 150 });
+  });
+
+  test("same-round durable reviewer bindings share the pipeline target and keep both task edges", () => {
+    const flowId = "pipeline-flow-bindings";
+    const layout: TaskTargetSource = {
+      groups: [{
+        x: 2400,
+        y: 100,
+        w: 692,
+        h: 150,
+        pipeline: { runs: [{ stageId: "review", attempts: [{ agentPath: "/review-current", flowId }] }] },
+      }],
+      nodes: [],
+      stacks: [],
+      decks: [],
+    };
+    const flows = [{
+      id: flowId,
+      implementerPath: "/builder",
+      rounds: [{ n: 1, reviewerPath: "/review-current", reviewerConversationId: "conversation-current" }],
+    }];
+    const membership = (slot: string) => ({
+      kind: "flow" as const, containerId: flowId, role: "reviewer", slot,
+      stageId: null, stageOrder: null, round: 1, parentConversationId: "conversation-builder",
+    });
+    const files = [
+      { path: "/review-prior", conversationId: "conversation-prior", durableLineage: { memberships: [membership("reviewer:1:binding-a")] } },
+      { path: "/review-current", conversationId: "conversation-current", durableLineage: { memberships: [membership("reviewer:1:binding-b")] } },
+    ] as unknown as FileEntry[];
+
+    const bindingIndex = buildTaskTargetIndex(layout, flows, files);
+    expect(bindingIndex.get("/review-prior")).toEqual({ x: 2400, y: 100, w: 692, h: 150 });
+    expect(bindingIndex.get("/review-current")).toEqual({ x: 2400, y: 100, w: 692, h: 150 });
+
+    const edges = buildTaskEdges([
+      task({ id: "prior", pos: { x: 0, y: 0 }, assignments: [assignment({ path: "/review-prior" })] }),
+      task({ id: "current", pos: { x: 0, y: 300 }, assignments: [assignment({ path: "/review-current" })] }),
+    ], bindingIndex);
+    expect(edges.map((edge) => edge.path)).toEqual(["/review-prior", "/review-current"]);
+    expect(edges.every((edge) => edge.x2 === 2400)).toBe(true);
   });
 
   test("unknown path is absent — no edge, dead chip only", () => {
