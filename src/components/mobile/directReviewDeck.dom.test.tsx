@@ -6,6 +6,8 @@ import { flushSync } from "react-dom";
 import { emptyStore } from "@/components/runtime/runtimeModel";
 import type { BranchGroup } from "@/components/projectModel";
 import type { FileEntry } from "@/lib/types";
+import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 
 /*
  * Issue #325 — 390px coverage: a direct one-shot review group must surface on
@@ -170,4 +172,126 @@ test("a direct review group rides the phone strip as a round deck with accessibl
   await settle();
   const banner = [...dom.document.querySelectorAll("div")].find((el) => el.textContent?.trim().startsWith("Round 1 · ✖ REQUEST_CHANGES"));
   expect(banner).toBeDefined();
+});
+
+test("an active pipeline-owned review keeps prior same-round bindings in the compact mobile rail (#353)", async () => {
+  const builder = entry({ path: "/pipeline-builder", title: "Pipeline builder", conversationId: "conversation-builder", activity: "live", mtime: 9_000 });
+  const membership = (slot: string) => ({
+    kind: "flow" as const,
+    containerId: "pipeline-flow",
+    role: "reviewer",
+    slot,
+    stageId: null,
+    stageOrder: null,
+    round: 1,
+    parentConversationId: builder.conversationId!,
+  });
+  const priorReviewer = entry({
+    path: "/pipeline-reviewer-1",
+    parent: builder.path,
+    conversationId: "conversation-reviewer-1",
+    mtime: 9_500,
+    durableLineage: { kind: "review", role: "reviewer", parentConversationId: builder.conversationId!, reviewsConversationId: builder.conversationId!, memberships: [membership("reviewer:1:binding-a")] },
+  });
+  const reviewer = entry({
+    path: "/pipeline-reviewer-2",
+    parent: builder.path,
+    conversationId: "conversation-reviewer-2",
+    activity: "live",
+    mtime: 10_000,
+    durableLineage: { kind: "review", role: "reviewer", parentConversationId: builder.conversationId!, reviewsConversationId: builder.conversationId!, memberships: [membership("reviewer:1:binding-b")] },
+  });
+  const flow = {
+    id: "pipeline-flow",
+    implementerPath: builder.path,
+    rounds: [{ n: 1, reviewerPath: reviewer.path, reviewerConversationId: reviewer.conversationId }],
+    state: "reviewing",
+  } as unknown as Flow;
+  const pipeline = {
+    id: "pipeline-1", task: "Compact mobile review", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
+    stages: [
+      { id: "build", kind: "run", prompt: "", next: "review" },
+      { id: "review", kind: "review-loop", prompt: "", next: null },
+    ],
+    runs: [
+      { stageId: "build", attempts: [{ n: 1, state: "passed", agentPath: builder.path, flowId: null, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } }] },
+      { stageId: "review", attempts: [{ n: 1, state: "reviewing", agentPath: reviewer.path, flowId: flow.id, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-only", promptScaffold: null } }] },
+    ],
+    cursor: { stageId: "review", state: "reviewing" }, state: "reviewing", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2026-07-18T00:00:00Z", closedAt: null,
+  } as unknown as Pipeline;
+  const group: BranchGroup = { key: builder.path, columns: [{ file: builder, tasks: [] }], returnable: [], finished: [], smt: builder.mtime, orphanTask: false };
+  const selected: { path: string | null } = { path: null };
+
+  roots.push(mount(
+    <MobileFocusView
+      project="demo" groups={[group]} manual={[]} files={[builder, priorReviewer, reviewer]} flows={[flow]} pipelines={[pipeline]}
+      surfacePipelines={[pipeline]} workerStacks={[]} tasks={[]} drafts={[]} loaded focus={null}
+      onSelect={(file) => { selected.path = file.path; }} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
+    />,
+  ));
+  await settle();
+
+  expect(dom.document.querySelector("[data-review-deck-collapse]")).toBeNull();
+  expect(dom.document.querySelector('[data-testid="mobile-pipeline-dock"]')).not.toBeNull();
+  const focusRow = dom.document.querySelector('[data-testid="mobile-pipeline-focus-row"]');
+  expect(focusRow).not.toBeNull();
+  const focusLabels = [...focusRow!.querySelectorAll("button")].map((button) => button.getAttribute("aria-label"));
+  expect(focusLabels.some((label) => label?.startsWith("Previous stage"))).toBe(false);
+  expect(focusLabels.some((label) => /^Next stage .+, state .+$/.test(label ?? ""))).toBe(true);
+  const deckChip = [...dom.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "R Flow");
+  expect(deckChip).toBeUndefined();
+
+  const dock = dom.document.querySelector('[data-testid="mobile-pipeline-dock"]');
+  const history = ([...dock!.querySelectorAll("button")] as unknown as HTMLButtonElement[])
+    .filter((button) => button.getAttribute("aria-label")?.startsWith("Open verdict for stage"))
+    .at(-1);
+  expect(history).toBeDefined();
+  expect(history!.className).toContain("min-w-11");
+  flushSync(() => (history as HTMLButtonElement).click());
+  await settle();
+
+  const priorTranscript = dom.document.querySelector('button[aria-label="Open review transcript 1"]') as unknown as HTMLButtonElement | null;
+  expect(priorTranscript).not.toBeNull();
+  expect(priorTranscript!.className).toContain("min-h-11");
+  expect(priorTranscript!.className).toContain("min-w-11");
+  flushSync(() => priorTranscript!.click());
+  expect(selected.path).toBe(priorReviewer.path);
+});
+
+test("an active retry opens prior transcript history from the mobile focus row (#353)", async () => {
+  const prior = entry({ path: "/pipeline-retry-1", title: "Pipeline retry 1", mtime: 9_000 });
+  const current = entry({ path: "/pipeline-retry-2", title: "Pipeline retry 2", activity: "live", mtime: 10_000 });
+  const pipeline = {
+    id: "pipeline-retry", task: "Retry on mobile", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
+    stages: [{ id: "build", kind: "run", prompt: "", next: null }],
+    runs: [{ stageId: "build", attempts: [
+      { n: 1, state: "failed", agentPath: prior.path, error: "failed", effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } },
+      { n: 2, state: "running", agentPath: current.path, error: null, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } },
+    ] }],
+    cursor: { stageId: "build", state: "running" }, state: "running", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2026-07-18T00:00:00Z", closedAt: null,
+  } as unknown as Pipeline;
+  const group: BranchGroup = { key: current.path, columns: [{ file: current, tasks: [] }], returnable: [], finished: [], smt: current.mtime, orphanTask: false };
+  const selected: { path: string | null } = { path: null };
+
+  roots.push(mount(
+    <MobileFocusView
+      project="demo" groups={[group]} manual={[]} files={[prior, current]} flows={[]} pipelines={[pipeline]}
+      surfacePipelines={[pipeline]} workerStacks={[]} tasks={[]} drafts={[]} loaded focus={null}
+      onSelect={(file) => { selected.path = file.path; }} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
+    />,
+  ));
+  await settle();
+
+  const focusRow = dom.document.querySelector('[data-testid="mobile-pipeline-focus-row"]');
+  const history = focusRow?.querySelector('button[aria-haspopup="dialog"]') as unknown as HTMLButtonElement | null;
+  expect(history?.disabled).toBe(false);
+  flushSync(() => history!.click());
+  await settle();
+
+  const priorTranscript = dom.document.querySelector('button[aria-label="Open transcript for attempt 1"]') as unknown as HTMLButtonElement | null;
+  expect(priorTranscript).not.toBeNull();
+  expect(priorTranscript!.className).toContain("min-h-11");
+  expect(priorTranscript!.className).toContain("min-w-11");
+  flushSync(() => priorTranscript!.click());
+  expect(selected.path).toBe(prior.path);
 });

@@ -19,7 +19,7 @@ const planPipeline = {
 } as unknown as Pipeline;
 
 const controls: PipelineGroupControls = {
-  flows: [], renderablePaths: new Set(), renderableFlows: new Set(), nodeStripPipelineIds: new Set(), onOpenPath: () => {}, onOpenFlow: () => {},
+  flows: [], files: [], renderablePaths: new Set(), renderableFlows: new Set(), nodeStripPipelineIds: new Set(), linkedTasksByPipeline: new Map(), onOpenPath: () => {}, onOpenFlow: () => {}, onOpenTask: () => {},
 };
 
 const flowGroup: SchemeGroup = {

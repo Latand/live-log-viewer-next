@@ -1,7 +1,9 @@
 import { roleNameById } from "@/components/builderCopy";
+import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
 import { applyPipelineSnapshot, revertPipelineSnapshot } from "@/hooks/useFiles";
 import { getLocale, translate, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { Flow, FlowEngine } from "@/lib/flows/types";
 import { PIPELINE_DISALLOWED_ROLE_IDS } from "@/lib/pipelines/types";
 import type {
@@ -157,6 +159,155 @@ export function stageAttempts(pipeline: Pipeline, stageId: string): PipelineStag
 }
 
 /**
+ * Transcript artifacts already represented by the compact pipeline rail.
+ * The current run keeps its latest agent pane. During a review loop the flow's
+ * implementer stays as the single full conversation pane while reviewer
+ * transcripts remain reachable through the review evidence row. Completed
+ * pipelines have no live pane, so their entire transcript chain is compact.
+ */
+export function compactPipelineArtifactPaths(
+  pipelines: readonly Pipeline[],
+  flows: readonly Flow[],
+  files: readonly FileEntry[] = [],
+): Set<string> {
+  const flowsById = new Map(flows.map((flow) => [flow.id, flow] as const));
+  const fullPanePaths = new Set<string>();
+
+  for (const pipeline of pipelines) {
+    if (!pipeline.cursor || pipeline.state === "completed" || pipeline.state === "closed" || pipeline.state === "draft") continue;
+    const stage = pipeline.stages.find((candidate) => candidate.id === pipeline.cursor!.stageId);
+    const attempt = stage ? latestAttempt(pipeline, stage.id) : null;
+    if (!stage || !attempt) continue;
+    if (stage.kind === "review-loop") {
+      const stageIndex = pipeline.stages.findIndex((candidate) => candidate.id === stage.id);
+      const priorRunPath = pipeline.stages
+        .slice(0, stageIndex)
+        .reverse()
+        .find((candidate) => {
+          const prior = latestAttempt(pipeline, candidate.id);
+          return candidate.kind === "run" && prior?.state === "passed" && prior.agentPath;
+        });
+      const implementerPath = attempt.flowId
+        ? flowsById.get(attempt.flowId)?.implementerPath
+        : priorRunPath
+          ? latestAttempt(pipeline, priorRunPath.id)?.agentPath
+          : null;
+      if (implementerPath) fullPanePaths.add(implementerPath);
+    } else if (attempt.agentPath) {
+      fullPanePaths.add(attempt.agentPath);
+    }
+  }
+
+  const compact = new Set<string>();
+  for (const pipeline of pipelines) {
+    for (const run of pipeline.runs) {
+      for (const attempt of run.attempts) {
+        if (attempt.agentPath && !fullPanePaths.has(attempt.agentPath)) compact.add(attempt.agentPath);
+        const flow = attempt.flowId ? flowsById.get(attempt.flowId) : null;
+        if (!flow) continue;
+        if (!fullPanePaths.has(flow.implementerPath)) compact.add(flow.implementerPath);
+        for (const round of flow.rounds) {
+          for (const { path } of reviewerBindingTargetsForRound(flow, round, files)) {
+            if (!fullPanePaths.has(path)) compact.add(path);
+          }
+        }
+      }
+    }
+  }
+  return compact;
+}
+
+/** Keep compact transcript evidence out of every world-scene source. */
+export function excludeCompactPipelineArtifacts<T extends { path: string }>(
+  files: T[],
+  compactPaths: ReadonlySet<string>,
+): T[] {
+  return compactPaths.size ? files.filter((file) => !compactPaths.has(file.path)) : files;
+}
+
+/**
+ * Pipeline review rounds live in the compact evidence rail, so their flow decks
+ * leave board layout and minimap bounds. The real flow catalog remains available
+ * to history controls and runtime actions.
+ */
+export function compactPipelineLayoutFlows(pipelines: readonly Pipeline[], flows: readonly Flow[]): Flow[] {
+  const compactFlowIds = new Set<string>();
+  for (const pipeline of pipelines) {
+    for (const run of pipeline.runs) {
+      for (const attempt of run.attempts) if (attempt.flowId) compactFlowIds.add(attempt.flowId);
+    }
+  }
+  return compactFlowIds.size ? flows.filter((flow) => !compactFlowIds.has(flow.id)) : [...flows];
+}
+
+/** Tasks whose assignment or source transcript belongs to this pipeline. */
+export function pipelineLineage(
+  pipeline: Pipeline,
+  flows: readonly Flow[] = [],
+  files: readonly FileEntry[] = [],
+): {
+  paths: Set<string>;
+  conversationIds: Set<string>;
+} {
+  const paths = new Set<string>();
+  const conversationIds = new Set<string>();
+  if (pipeline.srcPath) paths.add(pipeline.srcPath);
+  if (pipeline.srcConversationId) conversationIds.add(pipeline.srcConversationId);
+  const flowsById = new Map(flows.map((flow) => [flow.id, flow] as const));
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      if (attempt.agentPath) paths.add(attempt.agentPath);
+      if (attempt.conversationId) conversationIds.add(attempt.conversationId);
+      const flow = attempt.flowId ? flowsById.get(attempt.flowId) : null;
+      if (!flow) continue;
+      paths.add(flow.implementerPath);
+      if (flow.implementerConversationId) conversationIds.add(flow.implementerConversationId);
+      for (const round of flow.rounds) {
+        for (const binding of reviewerBindingTargetsForRound(flow, round, files)) {
+          paths.add(binding.path);
+          if (binding.conversationId) conversationIds.add(binding.conversationId);
+        }
+      }
+    }
+  }
+  return { paths, conversationIds };
+}
+
+/** Tasks whose assignment or source transcript belongs to this pipeline. */
+export function pipelineLinkedTasks(
+  pipeline: Pipeline,
+  tasks: readonly BoardTask[],
+  flows: readonly Flow[] = [],
+  files: readonly FileEntry[] = [],
+): BoardTask[] {
+  const { paths, conversationIds } = pipelineLineage(pipeline, flows, files);
+  if (!paths.size && !conversationIds.size) return [];
+  return tasks.filter((task) =>
+    (task.source ? paths.has(task.source.path) : false) ||
+    task.assignments.some((assignment) =>
+      Boolean(
+        (assignment.path && paths.has(assignment.path)) ||
+        (assignment.conversationId && conversationIds.has(assignment.conversationId)),
+      ),
+    ),
+  );
+}
+
+/** Keep one explicitly opened compact-history pane per pipeline. */
+export function replaceCompactPipelineEphemeral(
+  current: readonly string[],
+  nextPath: string,
+  pipelines: readonly Pipeline[],
+  flows: readonly Flow[],
+  files: readonly FileEntry[] = [],
+): string[] {
+  const owner = pipelines.find((pipeline) => pipelineLineage(pipeline, flows, files).paths.has(nextPath));
+  const ownerPaths = owner ? pipelineLineage(owner, flows, files).paths : null;
+  const retained = ownerPaths ? current.filter((path) => !ownerPaths.has(path)) : [...current];
+  return retained.includes(nextPath) ? retained : [...retained, nextPath];
+}
+
+/**
  * The board node that should host this pipeline's compact strip (§2.2 "Board
  * strip rule"): the current stage's latest attempt agent path, so controls sit
  * over the node the operator is watching. Returns null when the current stage is
@@ -256,6 +407,30 @@ export function stageOpenTarget(
   return { kind: "path", path: attempt.agentPath };
 }
 
+/** Resolve compact history after pipeline review decks leave the board. */
+export function compactStageOpenTarget(
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt | null,
+  flows: readonly Flow[],
+  renderableFlows?: ReadonlySet<string>,
+  renderablePaths?: ReadonlySet<string>,
+  files: readonly FileEntry[] = [],
+): { kind: "flow"; flowId: string } | { kind: "path"; path: string } | null {
+  const direct = stageOpenTarget(stage, attempt, renderableFlows, renderablePaths);
+  if (direct || stage.kind !== "review-loop" || !attempt?.flowId) return direct;
+  const flow = flows.find((candidate) => candidate.id === attempt.flowId);
+  if (!flow) return null;
+  for (const round of [...flow.rounds].reverse()) {
+    const reviewerPath = [...reviewerBindingTargetsForRound(flow, round, files)]
+      .reverse()
+      .find(({ path }) => !renderablePaths || renderablePaths.has(path))
+      ?.path;
+    if (reviewerPath) return { kind: "path", path: reviewerPath };
+  }
+  if (!renderablePaths || renderablePaths.has(flow.implementerPath)) return { kind: "path", path: flow.implementerPath };
+  return null;
+}
+
 /**
  * Does a stage attempt have something the verdict popover can show — a
  * structured verdict, an error, or a park on this stage (inline Retry/Skip)? A
@@ -266,6 +441,34 @@ export function stageHasEvidence(pipeline: Pipeline, stage: PipelineStage, attem
   if (!attempt) return false;
   if (attempt.verdict || attempt.error) return true;
   return pipeline.state === "needs_decision" && pipeline.cursor?.stageId === stage.id;
+}
+
+/**
+ * Active retries and review rounds still need a bounded history entry point
+ * even before the current attempt produces a verdict. Only count transcript
+ * paths the board can actually open, matching the actions rendered by
+ * VerdictPopover.
+ */
+export function stageHasNavigableHistory(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt | null,
+  flows: readonly Flow[] = [],
+  availablePaths?: ReadonlySet<string>,
+  files: readonly FileEntry[] = [],
+): boolean {
+  if (!attempt) return false;
+  const pathAvailable = (path: string) => !availablePaths || availablePaths.has(path);
+  const attempts = stageAttempts(pipeline, stage.id);
+  if (attempts.some((prior) => prior.n < attempt.n && Boolean(prior.agentPath && pathAvailable(prior.agentPath)))) return true;
+
+  const flowIds = new Set(attempts.flatMap((item) => item.flowId ? [item.flowId] : []));
+  const attemptPaths = new Set(attempts.flatMap((item) => item.agentPath ? [item.agentPath] : []));
+  return flows.some((flow) => flowIds.has(flow.id) && flow.rounds.some((round) =>
+    reviewerBindingTargetsForRound(flow, round, files).some(({ path }) =>
+      !attemptPaths.has(path) && pathAvailable(path),
+    ),
+  ));
 }
 
 /** Localized label for a raw attempt state (the prior-attempt audit), so a

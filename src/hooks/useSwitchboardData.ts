@@ -95,7 +95,7 @@ export function useSwitchboardData(
        claim their reviewers the same way, but they are synthetic read-model
        flows — the status-line/attention override stays with REAL flows only. */
     const flowByImpl = flowByImplementer(flows.filter((flow) => !isDirectReviewFlow(flow)));
-    const claimed = claimedReviewerPaths(flows);
+    const claimed = claimedReviewerPaths(flows, files);
     const normalized = query.trim().toLowerCase();
     const base = files
       .filter(

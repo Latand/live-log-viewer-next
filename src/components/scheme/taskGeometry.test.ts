@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { BoardTask, TaskAssignment } from "@/lib/tasks/types";
+import type { FileEntry } from "@/lib/types";
 
 import {
   assignEdgeLanes,
@@ -44,6 +45,18 @@ function task(overrides: Partial<BoardTask> & { id: string }): BoardTask & { pos
 }
 
 const LAYOUT: TaskTargetSource = {
+  groups: [
+    {
+      x: 2400,
+      y: 100,
+      w: 692,
+      h: 150,
+      pipeline: {
+        srcPath: "/pipeline-source",
+        runs: [{ stageId: "build", attempts: [{ agentPath: "/pipeline-history", flowId: "pipeline-flow" }] }],
+      },
+    },
+  ],
   nodes: [
     { x: 1000, y: 100, w: 600, h: 680, file: { path: "/node" }, under: [{ path: "/under-item" }] },
   ],
@@ -63,7 +76,11 @@ const LAYOUT: TaskTargetSource = {
 };
 
 describe("buildTaskTargetIndex — the resolution ladder", () => {
-  const index = buildTaskTargetIndex(LAYOUT);
+  const index = buildTaskTargetIndex(LAYOUT, [{
+    id: "pipeline-flow",
+    implementerPath: "/pipeline-history",
+    rounds: [{ reviewerPath: "/pipeline-review-round" }],
+  }]);
 
   test("full node rect wins", () => {
     expect(index.get("/node")).toEqual({ x: 1000, y: 100, w: 600, h: 680 });
@@ -82,12 +99,59 @@ describe("buildTaskTargetIndex — the resolution ladder", () => {
     expect(index.get("/reviewer-2")).toEqual({ x: 1770, y: 100, w: 600, h: 680 });
   });
 
+  test("a compacted stage transcript resolves to its pipeline group", () => {
+    expect(index.get("/pipeline-source")).toEqual({ x: 2400, y: 100, w: 692, h: 150 });
+    expect(index.get("/pipeline-history")).toEqual({ x: 2400, y: 100, w: 692, h: 150 });
+    expect(index.get("/pipeline-review-round")).toEqual({ x: 2400, y: 100, w: 692, h: 150 });
+  });
+
+  test("same-round durable reviewer bindings share the pipeline target and keep both task edges", () => {
+    const flowId = "pipeline-flow-bindings";
+    const layout: TaskTargetSource = {
+      groups: [{
+        x: 2400,
+        y: 100,
+        w: 692,
+        h: 150,
+        pipeline: { runs: [{ stageId: "review", attempts: [{ agentPath: "/review-current", flowId }] }] },
+      }],
+      nodes: [],
+      stacks: [],
+      decks: [],
+    };
+    const flows = [{
+      id: flowId,
+      implementerPath: "/builder",
+      rounds: [{ n: 1, reviewerPath: "/review-current", reviewerConversationId: "conversation-current" }],
+    }];
+    const membership = (slot: string) => ({
+      kind: "flow" as const, containerId: flowId, role: "reviewer", slot,
+      stageId: null, stageOrder: null, round: 1, parentConversationId: "conversation-builder",
+    });
+    const files = [
+      { path: "/review-prior", conversationId: "conversation-prior", durableLineage: { memberships: [membership("reviewer:1:binding-a")] } },
+      { path: "/review-current", conversationId: "conversation-current", durableLineage: { memberships: [membership("reviewer:1:binding-b")] } },
+    ] as unknown as FileEntry[];
+
+    const bindingIndex = buildTaskTargetIndex(layout, flows, files);
+    expect(bindingIndex.get("/review-prior")).toEqual({ x: 2400, y: 100, w: 692, h: 150 });
+    expect(bindingIndex.get("/review-current")).toEqual({ x: 2400, y: 100, w: 692, h: 150 });
+
+    const edges = buildTaskEdges([
+      task({ id: "prior", pos: { x: 0, y: 0 }, assignments: [assignment({ path: "/review-prior" })] }),
+      task({ id: "current", pos: { x: 0, y: 300 }, assignments: [assignment({ path: "/review-current" })] }),
+    ], bindingIndex);
+    expect(edges.map((edge) => edge.path)).toEqual(["/review-prior", "/review-current"]);
+    expect(edges.every((edge) => edge.x2 === 2400)).toBe(true);
+  });
+
   test("unknown path is absent — no edge, dead chip only", () => {
     expect(index.has("/gone")).toBe(false);
   });
 
   test("a path drawn both as a node and inside a container resolves to the node", () => {
     const overlapping: TaskTargetSource = {
+      groups: [{ x: 800, y: 800, w: 20, h: 20, pipeline: { runs: [{ stageId: "x", attempts: [{ agentPath: "/dup" }] }] } }],
       nodes: [{ x: 5, y: 5, w: 10, h: 10, file: { path: "/dup" }, under: [] }],
       stacks: [{ x: 900, y: 900, w: 10, h: 10, items: [{ file: { path: "/dup" } }] }],
       decks: [],

@@ -211,6 +211,7 @@ function renderLayer(root: Root, next: SchemeLayout, options: { lite?: boolean; 
         flowsByImpl={new Map()}
         flows={flows}
         pipelineStrips={new Map()}
+        linkedTasksByPipeline={new Map()}
         deckFocus={null}
         onSelect={() => undefined}
         onClose={() => undefined}

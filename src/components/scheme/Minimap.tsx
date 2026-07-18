@@ -124,6 +124,20 @@ export function Minimap({
           {layout.decks.map((deck) => (
             <rect key={deck.key} x={deck.x} y={deck.y} width={deck.w} height={deck.h} rx={18} fill="var(--color-accent)" opacity={0.3} />
           ))}
+          {layout.groups.filter((group) => group.kind === "pipeline").map((group) => (
+            <rect
+              key={group.key}
+              data-minimap-pipeline={group.id}
+              x={group.x}
+              y={group.y}
+              width={group.w}
+              height={group.h}
+              rx={18}
+              fill={`hsl(${group.hue} 62% 42% / 0.08)`}
+              stroke={`hsl(${group.hue} 62% 42%)`}
+              strokeWidth={2 / scale}
+            />
+          ))}
           {layout.nodes.map((node) => (
             <rect
               key={node.file.path}

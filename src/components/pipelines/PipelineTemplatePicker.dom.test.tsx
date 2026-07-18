@@ -42,6 +42,8 @@ test("lists every stage-carrying template as a role chain and picks the chosen o
   expect(host.textContent).toContain("architect");
   expect(host.textContent).toContain("builder");
   expect(host.textContent).toContain("⟳ reviewer");
+  expect(host.textContent).toContain("compact group");
+  expect(host.textContent).toContain("on demand");
 
   const target = rows.find((button) => button.textContent?.includes("architect"))!;
   flushSync(() => {

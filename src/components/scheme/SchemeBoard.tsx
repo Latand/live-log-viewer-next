@@ -21,7 +21,7 @@ import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
-import { pipelineAnnouncement, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
+import { compactPipelineLayoutFlows, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
 import { BulkActionBar } from "./BulkActionBar";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { resolveExpandedNode } from "./expandedNode";
@@ -74,6 +74,8 @@ interface Props {
   pipelines?: Pipeline[];
   /** This project's board tasks — sticky cards over the panes. */
   tasks: BoardTask[];
+  /** Full project task list, including compact status stacks. */
+  allTasks?: BoardTask[];
   /** Collapsed worker stacks (issue #136): drawn as one minimap dot per origin so
       folded workers read as a handful of dots, not an agent flood. */
   workerStacks?: WorkerStack[];
@@ -85,6 +87,8 @@ interface Props {
   /** Durable identities the user has crowned (issue #224): their roots lift into
       a band pinned at the top of the scheme. */
   favorites?: ReadonlySet<string>;
+  /** Compact transcript paths opened for one-pane history inspection. */
+  isolatedManualPaths?: ReadonlySet<string>;
   /** Path to glide the camera to and ring briefly (set by openers). */
   focus: string | null;
   /** Path to ring without moving the camera, used by the mobile full-map overlay. */
@@ -106,6 +110,8 @@ interface Props {
   /** «Send» on a task card with no aimed agent: seed a fresh draft conversation
       with the task text. Absent in map mode. */
   onTaskDraft?: (task: BoardTask) => void;
+  /** Reveal a task linked from a compact pipeline rail. */
+  onOpenTask?: (task: BoardTask) => void;
   /** Fold a full card back into its status stack (drops the durable expand
       pin). Absent in map mode and while status stacks are unavailable. */
   onTaskCollapse?: (task: BoardTask) => void;
@@ -169,10 +175,12 @@ export function SchemeBoard({
   reviewGroups = [],
   pipelines = [],
   tasks,
+  allTasks = tasks,
   workerStacks = [],
   surfacePipelines = [],
   drafts,
   favorites,
+  isolatedManualPaths = EMPTY_PATHS,
   focus,
   ring,
   attentionPaths,
@@ -184,6 +192,7 @@ export function SchemeBoard({
   onHandoff,
   onSpawnRetry,
   onTaskDraft,
+  onOpenTask,
   onTaskCollapse,
   placeTaskId,
   onTaskPlaced,
@@ -212,7 +221,11 @@ export function SchemeBoard({
      beside the reviewed conversation exactly like managed loops (issue #325);
      flowsByImpl and every strip/hub below keep reading the real `flows`. */
   const deckFlows = useMemo(() => (reviewGroups.length ? [...flows, ...reviewGroups] : flows), [flows, reviewGroups]);
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, deckFlows, drafts, pipelines, surfacePipelines, favorites), [groups, manual, files, deckFlows, drafts, pipelines, surfacePipelines, favorites]);
+  const layoutFlows = useMemo(() => compactPipelineLayoutFlows(pipelines, deckFlows), [pipelines, deckFlows]);
+  const layout = useMemo(
+    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths),
+    [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths],
+  );
 
   /* Selection keys are transcript paths, so the 10s poll relayout keeps the
      set for free; nodes that left the board are pruned out of the state
@@ -359,6 +372,7 @@ export function SchemeBoard({
   const handoffRef = useRef(onHandoff);
   const spawnRetryRef = useRef(onSpawnRetry);
   const taskDraftRef = useRef(onTaskDraft);
+  const openTaskRef = useRef(onOpenTask);
   const taskCollapseRef = useRef(onTaskCollapse);
   useEffect(() => {
     selectRef.current = onSelect;
@@ -369,6 +383,7 @@ export function SchemeBoard({
     handoffRef.current = onHandoff;
     spawnRetryRef.current = onSpawnRetry;
     taskDraftRef.current = onTaskDraft;
+    openTaskRef.current = onOpenTask;
     taskCollapseRef.current = onTaskCollapse;
   });
   const stableSelect = useCallback((file: FileEntry) => {
@@ -384,6 +399,7 @@ export function SchemeBoard({
   const stableDraftSpawned = useCallback((id: string, file: FileEntry) => draftSpawnedRef.current(id, file), []);
   const stableHandoff = useCallback((file: FileEntry) => handoffRef.current?.(file), []);
   const stableSpawnRetry = useCallback((file: FileEntry) => spawnRetryRef.current?.(file), []);
+  const stableOpenTask = useCallback((task: BoardTask) => openTaskRef.current?.(task), []);
   /* The handle renders only when the opener wired a handler (not in map mode). */
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
   const stableExpand = useCallback((path: string) => setExpanded(path), []);
@@ -403,7 +419,7 @@ export function SchemeBoard({
   }, [flows, focusRound]);
   const renderablePipelinePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   const placedNodePaths = useMemo(() => new Set(layout.nodes.map((node) => node.file.path)), [layout]);
-  const renderableGroupFlows = useMemo(() => renderableFlowIds(flows, placedNodePaths), [flows, placedNodePaths]);
+  const renderableGroupFlows = useMemo(() => renderableFlowIds(layoutFlows, placedNodePaths), [layoutFlows, placedNodePaths]);
   /* Pipelines whose per-node compact strip is actually mounted: its board-strip
      node must be PLACED on the layout, not merely resolvable. A pipeline missing
      here has no on-board plan surface, so its group halo renders one (finding 1). */
@@ -412,9 +428,13 @@ export function SchemeBoard({
     for (const [path, pipeline] of pipelineStrips) if (placedNodePaths.has(path)) ids.add(pipeline.id);
     return ids;
   }, [pipelineStrips, placedNodePaths]);
+  const linkedTasksByPipeline = useMemo(
+    () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, allTasks, flows, files)] as const)),
+    [pipelines, allTasks, flows, files],
+  );
   const pipelineControls = useMemo<PipelineGroupControls>(
-    () => ({ flows, renderablePaths: renderablePipelinePaths, renderableFlows: renderableGroupFlows, nodeStripPipelineIds, onOpenPath: openPipelinePath, onOpenFlow: openPipelineFlow }),
-    [flows, renderablePipelinePaths, renderableGroupFlows, nodeStripPipelineIds, openPipelinePath, openPipelineFlow],
+    () => ({ flows, files, renderablePaths: renderablePipelinePaths, renderableFlows: renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, onOpenPath: openPipelinePath, onOpenFlow: openPipelineFlow, onOpenTask: stableOpenTask }),
+    [flows, files, renderablePipelinePaths, renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, openPipelinePath, openPipelineFlow, stableOpenTask],
   );
   /* One minimap dot per collapsed worker-stack origin (issue #136): orchestration
      origins (flow/pipeline) in accent, spawner/worktree origins in gray. */
@@ -511,7 +531,7 @@ export function SchemeBoard({
     () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
     [placedTasks],
   );
-  const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout)), [placedTasks, layout]);
+  const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout, flows, files)), [placedTasks, layout, flows, files]);
   /* Card rects the edge router steers around, each tagged with its task so an
      edge is never counted as crossing the card it leaves from (issue #17). */
   const taskCardObstacles = useMemo(
@@ -933,6 +953,7 @@ export function SchemeBoard({
           flowsByImpl={flowsByImpl}
           flows={flows}
           pipelineStrips={pipelineStrips}
+          linkedTasksByPipeline={linkedTasksByPipeline}
           deckFocus={deckFocus}
           onSelect={stableSelect}
           onClose={stableClose}
@@ -941,6 +962,7 @@ export function SchemeBoard({
           onDraftSpawned={stableDraftSpawned}
           onHandoff={handoffForNodes}
           onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
+          onOpenTask={onOpenTask ? stableOpenTask : undefined}
           onExpand={stableExpand}
         />
         <TaskEdgesLayer edges={taskEdges} world={world} routes={taskRoutes} onRetry={retryEdge} />

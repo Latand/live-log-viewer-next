@@ -1,4 +1,7 @@
+import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
+import type { Flow, Round } from "@/lib/flows/types";
 import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
+import type { FileEntry } from "@/lib/types";
 
 import type { SchemeRect } from "./layout";
 
@@ -172,6 +175,12 @@ export function rectAnchor(rect: SchemeRect, toward: { x: number; y: number }): 
 /* Structural slice of SchemeLayout the target index needs — keeps the module
    testable with plain literals instead of full FileEntry/Flow fixtures. */
 export interface TaskTargetSource {
+  groups?: ReadonlyArray<SchemeRect & {
+    pipeline?: {
+      srcPath?: string | null;
+      runs: ReadonlyArray<{ stageId: string; attempts: ReadonlyArray<{ agentPath: string | null; flowId?: string | null }> }>;
+    } | null;
+  }>;
   nodes: ReadonlyArray<SchemeRect & { file: { path: string }; under: ReadonlyArray<{ path: string }> }>;
   stacks: ReadonlyArray<SchemeRect & { items: ReadonlyArray<{ file: { path: string } }> }>;
   decks: ReadonlyArray<SchemeRect & { rounds: ReadonlyArray<{ file: { path: string } | null; round: { reviewerPath: string | null } }> }>;
@@ -179,14 +188,44 @@ export interface TaskTargetSource {
 
 /**
  * Where an assignment path is drawn on the board — the edge-endpoint
- * resolution ladder: a full node rect wins; a path shown only as a mini-card
- * in a quiet stack, an under-deck item, or a review-deck round resolves to
- * that container's rect; anything else is absent (dead chip, no edge).
+ * resolution ladder: a full node rect wins; compact pipeline evidence and a
+ * path shown inside a quiet stack, under-deck item, or review-deck round resolve
+ * to their container rect. Unknown paths are absent (dead chip, no edge).
  * Containers are inserted first so the later node entries override them.
  */
-export function buildTaskTargetIndex(layout: TaskTargetSource): Map<string, SchemeRect> {
+export function buildTaskTargetIndex(
+  layout: TaskTargetSource,
+  flows: ReadonlyArray<{
+    id: string;
+    implementerPath: string;
+    rounds: ReadonlyArray<{
+      n?: number;
+      reviewerPath: string | null;
+      reviewerConversationId?: string | null;
+    }>;
+  }> = [],
+  files: readonly FileEntry[] = [],
+): Map<string, SchemeRect> {
   const index = new Map<string, SchemeRect>();
+  const flowsById = new Map(flows.map((flow) => [flow.id, flow] as const));
   const rectOf = ({ x, y, w, h }: SchemeRect): SchemeRect => ({ x, y, w, h });
+  for (const group of layout.groups ?? []) {
+    if (!group.pipeline) continue;
+    if (group.pipeline.srcPath) index.set(group.pipeline.srcPath, rectOf(group));
+    for (const run of group.pipeline.runs) {
+      for (const attempt of run.attempts) {
+        if (attempt.agentPath) index.set(attempt.agentPath, rectOf(group));
+        const flow = attempt.flowId ? flowsById.get(attempt.flowId) : null;
+        if (!flow) continue;
+        index.set(flow.implementerPath, rectOf(group));
+        for (const round of flow.rounds) {
+          for (const { path } of reviewerBindingTargetsForRound(flow as Flow, round as Round, files)) {
+            index.set(path, rectOf(group));
+          }
+        }
+      }
+    }
+  }
   for (const stack of layout.stacks) {
     for (const item of stack.items) index.set(item.file.path, rectOf(stack));
   }
