@@ -24,6 +24,7 @@ import {
   stageChipLabel,
   stageChipState,
   stageHasEvidence,
+  stageHasNavigableHistory,
   compactStageOpenTarget,
   verdictStatusLabel,
 } from "./pipelineModel";
@@ -223,7 +224,8 @@ function StageChip({
   /* The verdict popover also carries verdict-less evidence (a spawn/tick error,
      or parked Retry/Skip), but a plain running attempt has none — the shared
      predicate keeps the trigger from opening a misleading "no findings" sheet. */
-  const evidence = stageHasEvidence(pipeline, stage, attempt);
+  const evidence = stageHasEvidence(pipeline, stage, attempt)
+    || stageHasNavigableHistory(pipeline, stage, attempt, flows, renderablePaths);
   const terminalEvidence = Boolean(attempt && ["passed", "failed", "needs_decision", "skipped"].includes(attempt.state));
   const duration = attempt ? attemptDuration(attempt) : null;
   const model = attempt?.effectiveRole.model ?? t("pipelineStrip.defaultModel");

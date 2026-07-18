@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { Pipeline, PipelineStage, PipelineStageAttempt, PipelineState } from "@/lib/pipelines/types";
+import type { Flow } from "@/lib/flows/types";
 
 import { PipelineStrip } from "./PipelineStrip";
 
@@ -46,6 +47,43 @@ test("a parked stage without a verdict exposes the trigger for Retry/Skip", () =
 test("a running attempt with no verdict, error, or park shows no trigger", () => {
   const p = pipeline({ cursor: { stageId: "build", state: "running" }, runs: [{ stageId: "build", attempts: [attempt({ state: "running", error: null })] }] });
   expect(render(p)).not.toContain("Open verdict for stage");
+});
+
+test("a running retry exposes its prior failed transcript through history", () => {
+  const p = pipeline({
+    cursor: { stageId: "build", state: "running" },
+    runs: [{ stageId: "build", attempts: [
+      attempt({ n: 1, state: "failed", agentPath: "/build-1.jsonl", error: "failed" }),
+      attempt({ n: 2, state: "running", agentPath: "/build-2.jsonl", error: null }),
+    ] }],
+  });
+  const html = renderToStaticMarkup(
+    <PipelineStrip pipeline={p} renderablePaths={new Set(["/build-1.jsonl", "/build-2.jsonl"])} onOpenPath={() => undefined} />,
+  );
+  expect(html).toContain("Open verdict for stage");
+});
+
+test("an active multi-round review exposes its earlier reviewer transcript through history", () => {
+  const review = stage("review", "review-loop");
+  const p = pipeline({
+    stages: [stage("build"), review],
+    cursor: { stageId: "review", state: "reviewing" },
+    runs: [{ stageId: "review", attempts: [attempt({ n: 1, state: "reviewing", agentPath: "/round-2.jsonl", flowId: "flow-1" })] }],
+  });
+  const flows = [{
+    id: "flow-1",
+    implementerPath: "/builder.jsonl",
+    rounds: [{ n: 1, reviewerPath: "/round-1.jsonl" }, { n: 2, reviewerPath: "/round-2.jsonl" }],
+  }] as unknown as Flow[];
+  const html = renderToStaticMarkup(
+    <PipelineStrip
+      pipeline={p}
+      flows={flows}
+      renderablePaths={new Set(["/round-1.jsonl", "/round-2.jsonl"])}
+      onOpenPath={() => undefined}
+    />,
+  );
+  expect(html).toContain("Open verdict for stage");
 });
 
 test("an empty draft's strip disables Start until it holds 2 stages (#136)", () => {

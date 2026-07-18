@@ -28,6 +28,7 @@ import {
   renderableFlowIds,
   stageChipState,
   stageHasEvidence,
+  stageHasNavigableHistory,
   stageOpenTarget,
   pipelinePlaceholderStages,
   stageOverrideBody,
@@ -498,6 +499,41 @@ describe("stageHasEvidence (running attempts have no verdict sheet)", () => {
   });
   test("no attempt is no evidence", () => {
     expect(stageHasEvidence(p({}), runStage, null)).toBe(false);
+  });
+});
+
+describe("stageHasNavigableHistory", () => {
+  const runStage = stage("build");
+
+  test("a running retry keeps its prior failed transcript reachable", () => {
+    const prior = { n: 1, state: "failed", agentPath: "/build-1", error: "failed" } as never;
+    const current = { n: 2, state: "running", agentPath: "/build-2", verdict: null, error: null } as never;
+    const p = pipeline({
+      stages: [runStage],
+      cursor: { stageId: runStage.id, state: "running" },
+      runs: [{ stageId: runStage.id, attempts: [prior, current] }],
+    });
+
+    expect(stageHasNavigableHistory(p, runStage, current, [], new Set(["/build-1", "/build-2"]))).toBe(true);
+    expect(stageHasNavigableHistory(p, runStage, current, [], new Set(["/build-2"]))).toBe(false);
+  });
+
+  test("an active review keeps an earlier round transcript reachable", () => {
+    const reviewStage: PipelineStage = { ...runStage, id: "review", kind: "review-loop" };
+    const current = { n: 1, state: "reviewing", agentPath: "/round-2", flowId: "flow-1", verdict: null, error: null } as never;
+    const p = pipeline({
+      stages: [reviewStage],
+      cursor: { stageId: reviewStage.id, state: "reviewing" },
+      runs: [{ stageId: reviewStage.id, attempts: [current] }],
+    });
+    const flows = [{
+      id: "flow-1",
+      implementerPath: "/builder",
+      rounds: [{ n: 1, reviewerPath: "/round-1" }, { n: 2, reviewerPath: "/round-2" }],
+    }] as unknown as Flow[];
+
+    expect(stageHasNavigableHistory(p, reviewStage, current, flows, new Set(["/round-1", "/round-2"]))).toBe(true);
+    expect(stageHasNavigableHistory(p, reviewStage, current, flows, new Set(["/round-2"]))).toBe(false);
   });
 });
 

@@ -420,6 +420,31 @@ export function stageHasEvidence(pipeline: Pipeline, stage: PipelineStage, attem
   return pipeline.state === "needs_decision" && pipeline.cursor?.stageId === stage.id;
 }
 
+/**
+ * Active retries and review rounds still need a bounded history entry point
+ * even before the current attempt produces a verdict. Only count transcript
+ * paths the board can actually open, matching the actions rendered by
+ * VerdictPopover.
+ */
+export function stageHasNavigableHistory(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt | null,
+  flows: readonly Flow[] = [],
+  availablePaths?: ReadonlySet<string>,
+): boolean {
+  if (!attempt) return false;
+  const pathAvailable = (path: string) => !availablePaths || availablePaths.has(path);
+  const attempts = stageAttempts(pipeline, stage.id);
+  if (attempts.some((prior) => prior.n < attempt.n && Boolean(prior.agentPath && pathAvailable(prior.agentPath)))) return true;
+
+  const flowIds = new Set(attempts.flatMap((item) => item.flowId ? [item.flowId] : []));
+  const attemptPaths = new Set(attempts.flatMap((item) => item.agentPath ? [item.agentPath] : []));
+  return flows.some((flow) => flowIds.has(flow.id) && flow.rounds.some((round) =>
+    Boolean(round.reviewerPath && !attemptPaths.has(round.reviewerPath) && pathAvailable(round.reviewerPath)),
+  ));
+}
+
 /** Localized label for a raw attempt state (the prior-attempt audit), so a
     verdict-less attempt never shows an English identifier in the uk UI. */
 export function attemptStateLabel(t: TFunction, state: PipelineAttemptState): string {
