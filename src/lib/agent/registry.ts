@@ -3720,6 +3720,62 @@ export class AgentRegistry {
     });
   }
 
+  /** One-click successor reseat of a rate-limited conversation (issue #97).
+      Lineage-safe by construction: a thread whose current generation already
+      runs on `targetId` (a committed migration fork) returns unchanged, and an
+      in-flight migration keeps sole ownership of the successor seat — repeat
+      requests never mint a second successor. Unlike
+      {@link requestConversationMigrationToActiveAccount} the target account is
+      explicit, and engine routing for future spawns is left to the Accounts
+      panel (issue #40): only this conversation moves. */
+  requestConversationReseat(id: ViewerConversationId, targetId: string): RegistryConversation {
+    return this.mutate((file) => {
+      const canonicalId = resolveConversationAlias(file, id);
+      const conversation = file.conversations[canonicalId];
+      if (!conversation) throw new Error("viewer conversation is unknown");
+      const source = conversation.generations.at(-1);
+      if (!source || source.accountId === null || source.accountId === targetId) return clone(conversation);
+      if (conversation.migration
+        && !["committed", "rolled-back", "failed-recoverable"].includes(conversation.migration.phase)) {
+        return clone(conversation);
+      }
+
+      const changedAt = now();
+      if (conversation.migrationOptOut?.targetId === targetId) conversation.migrationOptOut = null;
+      let intent = Object.values(file.migrationIntents)
+        .filter((candidate) => candidate.engine === conversation.engine && candidate.targetId === targetId && candidate.state !== "stopped")
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+      if (!intent) {
+        intent = {
+          id: crypto.randomUUID(),
+          engine: conversation.engine,
+          targetId,
+          origin: "manual",
+          revision: 1,
+          state: "draining",
+          createdAt: changedAt,
+          updatedAt: changedAt,
+          requestIds: [`reseat:${canonicalId}:${source.id}`],
+          evidence: null,
+          stoppedAt: null,
+        };
+        file.migrationIntents[intent.id] = intent;
+      } else {
+        if (intent.state !== "draining") intent.revision += 1;
+        intent.state = "draining";
+        intent.updatedAt = changedAt;
+      }
+
+      const phase = migrationReadiness(file, conversation) === "busy" ? "waiting-turn" : "requested";
+      queueAbandonedMigrationCleanup(file, conversation, changedAt);
+      conversation.migration = conversationMigrationForIntent(conversation, source, intent, phase, changedAt);
+      conversation.updatedAt = changedAt;
+      file.conversationRevision[conversation.engine] += 1;
+      file.engineRouting[conversation.engine].revision += 1;
+      return clone(conversation);
+    });
+  }
+
   upsertMigrationIntent(engine: Extract<AgentEngine, "claude" | "codex">, targetId: string, origin: MigrationOrigin, requestId: string, evidence: MigrationIntent["evidence"] = null): MigrationIntent {
     return this.mutate((file) => {
       const active = Object.values(file.migrationIntents).find((intent) => intent.engine === engine && intent.state === "draining");

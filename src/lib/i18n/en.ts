@@ -1270,6 +1270,10 @@ export const en = {
   "status.flow": "flow: {label}",
   "rateLimit.badge": "rate-limited",
   "rateLimit.badgeUntil": "rate-limited until {time}",
+  "rateLimit.reseat": "continue on a healthy account",
+  "rateLimit.reseatRequested": "reseating…",
+  "rateLimit.reseatTitle": "Spawn a successor of this conversation on the healthiest signed-in account; the rate-limited one is parked, attached flows follow.",
+  "rateLimit.reseatFailed": "reseat failed",
 
   // useDictation errors
   "dictation.capWarn": "less than a minute of recording left",

@@ -28,6 +28,26 @@ function entry(): FileEntry {
   };
 }
 
+test("a stale historical limit banner above a ready composer raises no rate limit", async () => {
+  /* Issue #97 guard against the #56 inverse: transcript prose that merely
+     mentions an old usage limit must never mark the card rate-limited (and so
+     never offer a successor reseat) while the composer is ready. */
+  const screen = [
+    "You've hit your usage limit. Try again at 7:55 PM.",
+    "Later the run resumed and finished the task.",
+    "❯ ",
+    "  ? for shortcuts",
+  ].join("\n");
+  const result = await waitingInputProbe(entry(), {
+    now: () => NOW,
+    resolveTarget: async () => "agents:3.0",
+    paneScreen: async () => screen,
+  });
+
+  expect(result.rateLimit).toBeNull();
+  expect(result.waiting).toBeNull();
+});
+
 test("a live usage wall bypasses the stable-screen delay", async () => {
   const result = await waitingInputProbe(entry(), {
     now: () => NOW,

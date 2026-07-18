@@ -646,7 +646,7 @@ function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringe
             {badge.label}
           </span>
           {node.file.model ? <span className="min-w-0 truncate font-mono text-[11px] text-muted">{node.file.model}</span> : null}
-          <RateLimitBadge rateLimit={node.file.rateLimit} />
+          <RateLimitBadge file={node.file} />
           {/* pointer-events-auto re-enables taps for just the chip inside the
               map's pointer-events-none layer, so its reason disclosure works at
               390px; the chip's own guard keeps the tap from opening the pane. */}

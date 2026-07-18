@@ -349,7 +349,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                   <EffortPills file={file} />
                 </>
               )}
-              <RateLimitBadge rateLimit={file.rateLimit} />
+              <RateLimitBadge file={file} />
               {/* Scheduled-wakeup chip (#165): a pending self-wake shows on every
                   surface, phone included, since it is actionable status. */}
               <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
