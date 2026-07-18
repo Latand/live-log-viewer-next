@@ -69,6 +69,46 @@ test("structured delivery preserves queue order within one conversation", async 
   ]);
 });
 
+test("a runtime settings snapshot on the durable effect rides the queue entry to the host (issue #390 §10)", async () => {
+  const entries: QueueEntry[] = [];
+  const port: StructuredDeliveryQueuePort = {
+    effects: async () => [
+      {
+        id: "effect:op-runtime",
+        kind: "runtime.send",
+        eventSeq: 1,
+        payload: {
+          kind: "send", operationId: "op-runtime", conversationId: "conversation-one",
+          text: "run at ultra", idempotencyKey: "one", policy: "queue",
+          runtime: { effort: "ultra", fast: true },
+        },
+      },
+      {
+        id: "effect:op-plain",
+        kind: "runtime.send",
+        eventSeq: 2,
+        payload: {
+          kind: "send", operationId: "op-plain", conversationId: "conversation-one",
+          text: "host defaults", idempotencyKey: "two", policy: "queue",
+          // A malformed snapshot drops silently — the message itself delivers.
+          runtime: "ultra",
+        },
+      },
+    ],
+    transition: async () => {},
+  };
+  const queue = new StructuredDeliveryQueue(port, () => host(async (entry) => {
+    entries.push(entry);
+    return { outcome: "turn-started", turnId: `turn-${entry.id}` };
+  }));
+
+  await queue.drain();
+
+  expect(entries).toHaveLength(2);
+  expect(entries[0]!.runtime).toEqual({ effort: "ultra", fast: true });
+  expect(entries[1]!.runtime).toBeUndefined();
+});
+
 test("unrelated outbox effects cannot starve structured message delivery", async () => {
   const allEffects = [
     ...Array.from({ length: 100 }, (_, index) => ({

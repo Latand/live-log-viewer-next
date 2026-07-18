@@ -35,11 +35,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "runtimeConfig.effort": "Зусилля міркування активного агента",
   "runtimeConfig.speedTitle": "Fast використовує пріоритетний рівень Codex",
   "runtimeConfig.apply": "Застосувати",
-  "runtimeConfig.openSheet": "Змінити модель і зусилля активного агента",
-  "runtimeConfig.pending": "Після ходу",
-  "runtimeConfig.confirming": "Наступний хід",
-  "runtimeConfig.applied": "Застосовано",
-  "runtimeConfig.pendingDraft": "Незастосована чернетка: {model} · {effort} — торкніться, щоб переглянути",
+  // Ключі життєвого циклу застосування вилучені разом із контролами стрічки
+  // (issue #390) — таблетка застосовує вибір автоматично.
   "runtimeConfig.failed": "Не вдалося змінити конфігурацію активного агента",
   "time.agoSec": "{n} с тому",
   "time.agoMin": "{n} хв тому",
@@ -254,8 +251,15 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.queueAria": "Черга надісланих повідомлень",
   "composer.removeFromQueue": "Прибрати з черги",
   "composer.deliveryHeld": "Притримано для «{label}» — доставиться після зміни акаунта",
-  "composer.structured": "структурований",
-  "composer.structuredHost": "Структурований runtime-хост",
+  "composer.runtimePill": "Модель і міркування — застосується до наступного повідомлення",
+  "composer.reasoningGroup": "Міркування",
+  "composer.modelGroup": "Модель",
+  "composer.speedGroup": "Швидкість",
+  "composer.speedStandard": "Стандартна",
+  "composer.speedFastTier": "Швидка — пріоритетний тариф",
+  "composer.backTo": "Назад",
+  "composer.nextMessageUses": "Наступне повідомлення: {model} · {effort}",
+  "composer.settingsNextResume": "застосується під час наступного відновлення розмови",
   "composer.structuredImagesUnavailable": "Структуровані розмови поки не підтримують картинки",
   "composer.codexImagesTextOnly": "Обрана модель Codex приймає лише текст.",
   "composer.structuredImagesProtocol": "Цей структурований хост не узгодив підтримку зображень.",
@@ -424,6 +428,15 @@ export const uk: Record<keyof typeof en, Message> = {
   "effortTier.xhigh": "дуже високі",
   "effortTier.max": "максимальні",
   "effortTier.ultra": "ультра",
+
+  // Окремі назви рівнів міркувань для меню композера (issue #390)
+  "reasoningTier.minimal": "Мінімальні",
+  "reasoningTier.low": "Легкі",
+  "reasoningTier.medium": "Середні",
+  "reasoningTier.high": "Високі",
+  "reasoningTier.xhigh": "Дуже високі",
+  "reasoningTier.max": "Максимальні",
+  "reasoningTier.ultra": "Ультра",
 
   // Локалізація каталогу ролей (issue #221 §1). Реєстр лишається англійським —
   // це лише підписи в UI; промпти агентам не змінюються.

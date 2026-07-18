@@ -18,8 +18,9 @@ import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
-import { savedResumeProfile } from "./AgentRuntimeControls";
 import { ComposerBar } from "./ComposerBar";
+import { RuntimePill } from "./RuntimePill";
+import { savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
 import { type PendingImage } from "./imageAttachments";
 import { ReceiptChip, runtimeReceiptStatusText } from "./runtime/ReceiptChip";
 import {
@@ -807,6 +808,12 @@ export function TmuxComposer({
      for a consumed key, must neither report a false failure, re-arm a pending
      entry, nor clear text the user typed afterwards. Bounded, newest last. */
   const settledSendKeys = useRef<Set<string>>(new Set());
+  /* Per-idempotency-key snapshot of the runtime settings a structured send
+     carries (issue #390 §10): a same-key replay must re-send *identical*
+     settings — a pill selection made between attempts changes only the NEXT
+     message, and a drifted payload would 409 the idempotent replay. Bounded,
+     newest last. */
+  const runtimeSendSnapshots = useRef<Map<string, RuntimeProfile | undefined>>(new Map());
   /* Durable receipts for this session from the runtime bus (empty while the bus
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
@@ -851,6 +858,7 @@ export function TmuxComposer({
     setDismissedReceiptIds(readDismissedReceipts(cardId));
     pendingDeliveries.current = readPendingDeliveries(cardId);
     settledSendKeys.current = new Set();
+    runtimeSendSnapshots.current = new Map();
     /* Keyed by identity alone: a path migration under a stable id must not
        wipe the immediate receipts or the settled-key memory (`file.path` is
        only read to adopt records the old identity left behind). */
@@ -972,6 +980,17 @@ export function TmuxComposer({
     /* Idempotency key: the backend can dedupe a retried held/failed delivery
        against this id so the successor never receives the same prompt twice. */
     const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
+    /* The runtime settings this key rides with, frozen at its first attempt so
+       a replay stays byte-identical (issue #390 §10). */
+    if (structuredSession && !runtimeSendSnapshots.current.has(clientMessageId)) {
+      runtimeSendSnapshots.current.set(clientMessageId, sendRuntimeFrom(file));
+      while (runtimeSendSnapshots.current.size > SETTLED_SEND_KEY_LIMIT) {
+        const oldest = runtimeSendSnapshots.current.keys().next().value;
+        if (oldest === undefined) break;
+        runtimeSendSnapshots.current.delete(oldest);
+      }
+    }
+    const runtimeOverride = runtimeSendSnapshots.current.get(clientMessageId);
     /* A local pre-flight rejection (image protocol gate) never reaches the
        wire, so it must not arm a pending generation either. */
     const reachesWire = !(structuredSession && structuredImagesDisabled && sentImages.length > 0);
@@ -1020,6 +1039,7 @@ export function TmuxComposer({
               images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
               idempotencyKey: clientMessageId,
               policy: "interrupt-active",
+              ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
             }).then((result) => ({
               ok: result.ok,
               structured: true,
@@ -1352,7 +1372,18 @@ export function TmuxComposer({
               />
             : undefined
         }
-        leftSlot={null}
+        leftSlot={
+          /* The compact model/reasoning pill (issue #390): lives in the quiet
+             bottom row, left of the image picker, on exactly the surfaces the
+             capability matrix keeps the runtime control visible. */
+          caps.controls.runtime.state !== "hidden" ? (
+            <RuntimePill
+              file={file}
+              surface={caps.surface}
+              runtimeSettings={structuredSession?.session.capabilities?.runtimeSettings ?? null}
+            />
+          ) : null
+        }
       />
     </form>
   );
