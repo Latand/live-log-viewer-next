@@ -287,7 +287,10 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             ) : null}
           </div>
           <div
-            className="relative flex min-w-0 items-center gap-x-1.5"
+            /* `@container` sizes the effort meter's collapse threshold off THIS
+               row's width (issue #270): a pane too narrow to seat the bars
+               beside the model chip drops them instead of overlapping. */
+            className="@container relative flex min-w-0 items-center gap-x-1.5"
             /* The metadata row owns its own touch gestures on the phone so a
                horizontal scroll to reveal clipped chips stays here and never
                reaches MobileFocusView's header swipe (which would switch

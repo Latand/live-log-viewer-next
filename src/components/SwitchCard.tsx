@@ -65,7 +65,9 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           <X className="h-3 w-3" aria-hidden />
         </button>
       )}
-      <div className="relative flex min-w-0 items-center gap-1.5">
+      {/* `@container` lets the effort meter collapse below its width threshold
+          (issue #270): the small card's row is too narrow to seat the bars. */}
+      <div className="@container relative flex min-w-0 items-center gap-1.5">
         <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} />
         {/* One identity chip: the model when known (engine lives in the tint
             and the tooltip), the engine label as fallback. */}
