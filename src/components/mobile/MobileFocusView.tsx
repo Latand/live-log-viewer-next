@@ -476,7 +476,10 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
           <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-border bg-card px-2 py-1.5">
             <span className="shrink-0 pl-1 text-[13px] font-bold">{t("mobile.map")}</span>
             <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{project}</span>
-            <div className="flex shrink-0 rounded-full border border-border bg-canvas p-0.5" aria-label={t("mobile.mapFrame")}>
+            {/* role="group" — aria-label on a role-less div is ignored by
+                accessibility APIs, so AT would hear two bare toggle buttons
+                with no "Map framing" context (round-1 review). */}
+            <div role="group" className="flex shrink-0 rounded-full border border-border bg-canvas p-0.5" aria-label={t("mobile.mapFrame")}>
               {(["all", "current"] as const).map((value) => (
                 <button
                   key={value}

@@ -710,12 +710,21 @@ export function buildSchemeLayout(
   const framedPipelineIds = new Set(groupHalos.filter((halo) => halo.pipeline).map((halo) => halo.id));
   let dockRight = 0;
   let dockBottom = 0;
-  /* Pipelines without a placed current pane receive one compact rail card. */
+  /* Pipelines without a placed current pane receive one compact rail card.
+     Only pipelines the head reservation counted may use the reserved column:
+     a pipeline can be "materialized" (a member path exists in the file list)
+     yet still unframed — quiet history folded into a node's under-deck never
+     enters the anchor index — and with no slot reserved a rail at
+     `(PAD, restTop)` would sit under the first rest-band card. Such leftovers
+     dock below everything placed instead, where nothing can collide. */
+  const reservedRailIds = new Set(surfaceHead.map((pipeline) => pipeline.id));
   let dockY = restTop;
+  let overflowDockY = Math.max(bottom, surfaceHeadBottom) + REST_BAND_ROW_GAP;
   for (const pipeline of surfacePipelines) {
     if ((pipeline.state === "closed" && !pipeline.restored) || framedPipelineIds.has(pipeline.id)) continue;
     framedPipelineIds.add(pipeline.id);
-    const rect = { x: PAD, y: dockY, w: NODE_W + GROUP_PAD * 2, h: 150 };
+    const reserved = reservedRailIds.has(pipeline.id);
+    const rect = { x: PAD, y: reserved ? dockY : overflowDockY, w: NODE_W + GROUP_PAD * 2, h: 150 };
     groupHalos.push({
       key: `group::pipeline::${pipeline.id}`,
       kind: "pipeline",
@@ -726,7 +735,8 @@ export function buildSchemeLayout(
       ...rect,
       label: cleanTitle(pipeline.task, 60),
     });
-    dockY += rect.h + GROUP_GAP;
+    if (reserved) dockY = rect.y + rect.h + GROUP_GAP;
+    else overflowDockY = rect.y + rect.h + GROUP_GAP;
     dockRight = Math.max(dockRight, rect.x + rect.w);
     dockBottom = Math.max(dockBottom, rect.y + rect.h);
   }

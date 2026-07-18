@@ -590,10 +590,10 @@ export function SchemeBoard({
     (kind: "current" | "all") => {
       const count = kind === "current"
         ? currentWorkCount
-        : layout.nodes.length + layout.drafts.length + layout.groups.length + placedTasks.length;
+        : layout.nodes.length + layout.drafts.length + layout.groups.length + layout.stacks.length + layout.decks.length + placedTasks.length;
       setFrameAnnouncement(t(kind === "current" ? "scheme.framedCurrent" : "scheme.framedAll", { count }));
     },
-    [currentWorkCount, layout.nodes.length, layout.drafts.length, layout.groups.length, placedTasks.length, t],
+    [currentWorkCount, layout.nodes.length, layout.drafts.length, layout.groups.length, layout.stacks.length, layout.decks.length, placedTasks.length, t],
   );
 
   /* Place-on-map arms this ref with the id of an existing unplaced task; the
@@ -675,11 +675,29 @@ export function SchemeBoard({
     onFit: announceFit,
   });
 
+  /* The fit functions change identity on every poll-driven relayout (useFiles
+     hands a fresh `files` array ~10s, re-memoizing the layout), so the framing
+     effect reads them through a ref and re-applies only on a real mapFrame
+     transition — an open mobile map must hold a pinched/panned camera across
+     polls. The applied frame resets while the board is still empty so the
+     initial framing lands once content arrives. */
+  const mapFitRef = useRef({ fit, fitCurrent });
   useEffect(() => {
-    if (!mapMode || !mapFrame) return;
-    if (mapFrame === "current") fitCurrent();
-    else fit();
-  }, [mapMode, mapFrame, fitCurrent, fit]);
+    mapFitRef.current = { fit, fitCurrent };
+  });
+  const appliedMapFrame = useRef<"all" | "current" | null>(null);
+  const hasMapContent =
+    layout.nodes.length > 0 || layout.drafts.length > 0 || layout.groups.length > 0 || taskRects.size > 0;
+  useEffect(() => {
+    if (!mapMode || !mapFrame || !hasMapContent) {
+      appliedMapFrame.current = null;
+      return;
+    }
+    if (appliedMapFrame.current === mapFrame) return;
+    appliedMapFrame.current = mapFrame;
+    if (mapFrame === "current") mapFitRef.current.fitCurrent();
+    else mapFitRef.current.fit();
+  }, [mapMode, mapFrame, hasMapContent]);
 
   /* Place-on-map requested from the panel: arm the crosshair so the next click
      pins the task (the camera reverts to select once it lands). */
