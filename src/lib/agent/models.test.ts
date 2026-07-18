@@ -11,8 +11,8 @@ import {
 
 test("the Codex catalog exposes Sol for review and Terra for implementation", () => {
   expect(ENGINE_MODELS.codex).toEqual([
-    { id: CODEX_SOL_MODEL, label: "GPT-5.6-Sol", use: "review" },
-    { id: CODEX_TERRA_MODEL, label: "GPT-5.6-Terra", use: "implement" },
+    { id: CODEX_SOL_MODEL, label: "GPT-5.6-Sol", shortLabel: "5.6-Sol", use: "review" },
+    { id: CODEX_TERRA_MODEL, label: "GPT-5.6-Terra", shortLabel: "5.6-Terra", use: "implement" },
   ]);
   expect(defaultModelFor("codex")).toBe(CODEX_SOL_MODEL);
   expect(defaultModelFor("claude")).toBe("");

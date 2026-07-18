@@ -33,7 +33,6 @@ function render(f: FileEntry, view: RuntimeSessionView | null, extra: Partial<Pa
       isMobile={false}
       caps={caps}
       layout="full"
-      runtimeSlot={caps.controls.runtime.state !== "hidden" ? <div data-runtime-slot /> : null}
       compactArmed={false}
       stopBusy={false}
       compactBusy={false}
@@ -48,21 +47,23 @@ function render(f: FileEntry, view: RuntimeSessionView | null, extra: Partial<Pa
   );
 }
 
-test("live-root strip renders stop, compact, terminal, and the runtime slot", () => {
+test("live-root strip renders stop, compact, and terminal — no runtime selects (they moved to the composer pill)", () => {
   const html = render(file({ proc: "running" }), null);
   expect(html).toContain('data-strip-surface="live-root"');
   expect(html).toContain(`aria-label="${translate("en", "composer.interruptAria")}"`);
   // (the apostrophe in "the agent's context" is HTML-escaped in static markup)
   expect(html).toContain("context (/compact)");
-  expect(html).toContain("data-runtime-slot");
+  // Issue #390: the strip no longer hosts model/effort/Apply anywhere.
+  expect(html).not.toContain("<select");
+  expect(html).not.toContain(`>${translate("en", "runtimeConfig.apply")}<`);
 });
 
 test("hidden controls never reach the DOM (resume hides stop/compact/kill)", () => {
   const html = render(file({ proc: null }), null);
   expect(html).toContain('data-strip-surface="resume"');
   expect(html).not.toContain(translate("en", "composer.interruptAria"));
-  // runtime IS visible on resume (on-resume profile), terminal too
-  expect(html).toContain("data-runtime-slot");
+  // terminal keeps the resume strip alive; runtime lives in the composer pill
+  expect(html).toContain(`aria-label="${translate("en", "attach.dialogTitle")}"`);
 });
 
 test("a disabled control keeps aria-disabled and appends the reason to its aria-label", () => {
@@ -74,11 +75,19 @@ test("a disabled control keeps aria-disabled and appends the reason to its aria-
   expect(html).toContain(`context (/compact) — ${reason}`);
 });
 
+test("the structured surface renders no mode chip — the «structured» badge is gone (issue #390)", () => {
+  const structured = render(file({ proc: "running" }), rv("codex-app-server", "hosted"));
+  expect(structured).not.toContain(">structured<");
+  // Surfaces that carry routing information keep their chips.
+  const resume = render(file({ proc: null }), null);
+  expect(resume).toContain(`>${translate("en", "strip.resume")}<`);
+});
+
 test("mobile targets are 44px (h-11 w-11) and fold secondary controls behind overflow", () => {
   const caps = capabilitiesFor(file({ proc: "running" }), null);
   const html = renderToStaticMarkup(
     <AgentControlStripView
-      t={t} isMobile caps={caps} layout="full" runtimeSlot={null}
+      t={t} isMobile caps={caps} layout="full"
       compactArmed={false} stopBusy={false} compactBusy={false} overflowOpen={false}
       onStop={() => {}} onCompact={() => {}} onTerminal={() => {}} onToggleOverflow={() => {}} status={null}
     />,

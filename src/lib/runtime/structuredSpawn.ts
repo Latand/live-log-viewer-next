@@ -17,7 +17,7 @@ import { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import { CodexAppServerHost } from "./codexAppServerHost";
 import { isRuntimeHostTransportFailure, type RuntimeHostClient } from "./client";
 import { StructuredHostAdoptionCleanupError, type EngineHost, type HostState } from "./engineHost";
-import type { RuntimeOperationResult, RuntimeSession } from "./contracts";
+import { runtimeSettingsCapability, type RuntimeOperationResult, type RuntimeSession } from "./contracts";
 import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
 import { publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "./structuredDeliveryController";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -304,6 +304,7 @@ async function projectDeadStructuredSpawn(
         steer: key.engine === "codex",
         structuredAttention: true,
         imageInput: runtimeImageCapability(key.engine, false),
+        runtimeSettings: runtimeSettingsCapability(key.engine),
       },
       activeTurnId: null,
     },

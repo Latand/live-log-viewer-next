@@ -21,6 +21,14 @@ export function isEngineEffort(engine: AgentEngineName, value: string): boolean 
 /** Canonical low→high ordering across every tier either CLI has ever recorded. */
 const EFFORT_ORDER: readonly string[] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
+/** Whether a token belongs to the canonical CLI tier vocabulary at all —
+    engine/model fit is the engine's own verdict (a per-model scale like
+    sol/terra's `ultra` exceeds the base engine list, and pre-guessing it
+    here would silently downgrade a legitimate selection). */
+export function isKnownEffortTier(value: string): boolean {
+  return EFFORT_ORDER.includes(value);
+}
+
 /* Codex reasoning scales vary per model (`supported_reasoning_levels` in
    ~/.codex/models_cache.json): gpt-5.6 sol/terra add max+ultra above xhigh,
    the rest of the 5.6 family adds max, and everything older (or unknown) runs
@@ -66,6 +74,26 @@ export function effortMeter(
   if (rank < 0) return { level: 0, slots: 0 };
   const below = scale.filter((s) => EFFORT_ORDER.indexOf(s) < rank).length;
   return { level: Math.min(Math.max(below, 1), slots), slots };
+}
+
+/**
+ * The tier to keep when a model switch changes the reasoning scale (issue #390
+ * §4.3): an effort already in the new scale is preserved; otherwise it clamps to
+ * the nearest end via the same {@link effortMeter} ranking, so a sol→terra
+ * switch drops `ultra`/`max` down to the target's top tier instead of an invalid
+ * value. Returns null only for an engine with no reasoning dial.
+ */
+export function clampEffortToScale(
+  engine: string,
+  model: string | null | undefined,
+  effort: string | null | undefined,
+): string | null {
+  const scale = effortScale(engine, model);
+  if (!scale || scale.length === 0) return null;
+  const tier = (effort ?? "").trim().toLowerCase();
+  if (scale.includes(tier)) return tier;
+  const { level } = effortMeter(engine, model, tier);
+  return level > 0 ? scale[level - 1]! : scale[0]!;
 }
 
 /** Validates the optional effort/fast fields of a spawn request body. An

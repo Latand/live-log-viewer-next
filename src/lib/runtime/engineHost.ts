@@ -1,3 +1,4 @@
+import type { RuntimeSendSettings } from "./contracts";
 import {
   structuredContent,
   type StructuredImageRef,
@@ -13,6 +14,10 @@ export interface QueueEntry {
   images?: StructuredImageRef[];
   /** Optional caller fence. A mismatch is rejected before any engine write. */
   expectedTurnId?: string | null;
+  /** Per-turn runtime settings snapshotted on the durable send effect (issue
+      #390 §10). A host applies what its protocol can honor and ignores the
+      rest; absent = the host's own configuration, exactly as before. */
+  runtime?: RuntimeSendSettings;
 }
 
 export interface NormalizedQueueEntry {
@@ -20,6 +25,7 @@ export interface NormalizedQueueEntry {
   content: StructuredMessageContent;
   contentDigest: string;
   expectedTurnId?: string | null;
+  runtime?: RuntimeSendSettings;
 }
 
 export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
@@ -30,6 +36,7 @@ export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
     content: envelope.content,
     contentDigest: envelope.contentDigest,
     ...(entry.expectedTurnId !== undefined ? { expectedTurnId: entry.expectedTurnId } : {}),
+    ...(entry.runtime ? { runtime: entry.runtime } : {}),
   };
 }
 

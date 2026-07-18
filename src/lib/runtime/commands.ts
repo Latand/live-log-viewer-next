@@ -1,7 +1,32 @@
-import type { RuntimeOperationCommand, RuntimeOperationKind } from "./contracts";
+import { modelFromBody } from "@/lib/agent/models";
+
+import type { RuntimeOperationCommand, RuntimeOperationKind, RuntimeSendSettings } from "./contracts";
 import { parseStructuredImageRefs, structuredContent } from "./structuredContent";
 
 const MAX_OPERATION_BYTES = 256 * 1024;
+
+/** The optional per-turn runtime snapshot a send may carry (issue #390 §10).
+    Model reuses the CLI-argument bounds; effort is a bounded lowercase tier
+    token (the host/capability enforces the engine catalog). Absent = today. */
+function parseRuntimeSendSettings(value: unknown): RuntimeSendSettings | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error("runtime settings are invalid");
+  const body = value as Record<string, unknown>;
+  const settings: RuntimeSendSettings = {};
+  if (body.model !== undefined && body.model !== null && body.model !== "") {
+    const parsed = modelFromBody({ model: body.model });
+    if (parsed.error) throw new Error(parsed.error);
+    if (parsed.model) settings.model = parsed.model;
+  }
+  if (body.effort !== undefined && body.effort !== null && body.effort !== "") {
+    if (typeof body.effort !== "string") throw new Error("runtime effort must be a string");
+    const effort = body.effort.trim().toLowerCase();
+    if (!effort || effort.length > 32 || !/^[a-z]+$/.test(effort)) throw new Error("runtime effort is invalid");
+    settings.effort = effort;
+  }
+  if (typeof body.fast === "boolean") settings.fast = body.fast;
+  return Object.keys(settings).length ? settings : undefined;
+}
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("request body must be an object");
@@ -45,6 +70,7 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
     if (policy !== undefined && policy !== "queue" && policy !== "steer-if-active" && policy !== "interrupt-active") {
       throw new Error("policy is invalid");
     }
+    const runtime = parseRuntimeSendSettings(body.runtime);
     return {
       kind,
       conversationId,
@@ -55,6 +81,7 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
       contentDigest: content.contentDigest,
       ...(policy ? { policy } : {}),
       ...(turnId !== undefined ? { turnId } : {}),
+      ...(runtime ? { runtime } : {}),
     };
   }
 

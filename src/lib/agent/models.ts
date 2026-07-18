@@ -2,6 +2,9 @@
 export type AgentModelOption = {
   id: string;
   label: string;
+  /** Compact face label for the composer runtime pill (issue #390 §3.1); the
+      full `label` stays in menu rows and accessible names. */
+  shortLabel: string;
   use: "implement" | "review" | "general";
 };
 
@@ -25,14 +28,14 @@ export function codexModelSupportsImages(model: string | null | undefined): bool
 
 export const ENGINE_MODELS: Record<"claude" | "codex", readonly AgentModelOption[]> = {
   claude: [
-    { id: "fable", label: "Fable", use: "review" },
-    { id: "opus", label: "Opus", use: "general" },
-    { id: "sonnet", label: "Sonnet", use: "implement" },
-    { id: "haiku", label: "Haiku", use: "general" },
+    { id: "fable", label: "Fable", shortLabel: "Fable", use: "review" },
+    { id: "opus", label: "Opus", shortLabel: "Opus", use: "general" },
+    { id: "sonnet", label: "Sonnet", shortLabel: "Sonnet", use: "implement" },
+    { id: "haiku", label: "Haiku", shortLabel: "Haiku", use: "general" },
   ],
   codex: [
-    { id: CODEX_SOL_MODEL, label: "GPT-5.6-Sol", use: "review" },
-    { id: CODEX_TERRA_MODEL, label: "GPT-5.6-Terra", use: "implement" },
+    { id: CODEX_SOL_MODEL, label: "GPT-5.6-Sol", shortLabel: "5.6-Sol", use: "review" },
+    { id: CODEX_TERRA_MODEL, label: "GPT-5.6-Terra", shortLabel: "5.6-Terra", use: "implement" },
   ],
 };
 

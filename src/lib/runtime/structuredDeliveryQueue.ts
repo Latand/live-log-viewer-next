@@ -1,3 +1,4 @@
+import type { RuntimeSendSettings } from "./contracts";
 import type { DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import type { RuntimeHostClient } from "./client";
 import {
@@ -46,7 +47,21 @@ interface SendEffect {
   turnId?: string | null;
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   kind: "send" | "steer";
+  runtime?: RuntimeSendSettings;
   eventSeq: number;
+}
+
+/** The per-turn runtime snapshot off a durable send effect (issue #390 §10).
+    A malformed field drops silently — absent settings mean today's behavior,
+    and a settings blemish must never strand the message itself. */
+function runtimeSendSettings(value: unknown): RuntimeSendSettings | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const body = value as Record<string, unknown>;
+  const settings: RuntimeSendSettings = {};
+  if (typeof body.model === "string" && body.model) settings.model = body.model;
+  if (typeof body.effort === "string" && body.effort) settings.effort = body.effort;
+  if (typeof body.fast === "boolean") settings.fast = body.fast;
+  return Object.keys(settings).length ? settings : undefined;
 }
 
 interface ControlEffect {
@@ -84,6 +99,7 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
     || effect.payload.policy === "interrupt-active"
     ? effect.payload.policy
     : undefined;
+  const runtime = runtimeSendSettings(effect.payload.runtime);
   return {
     operationId,
     conversationId,
@@ -93,6 +109,7 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
     eventSeq: effect.eventSeq,
     ...(turnId !== undefined ? { turnId } : {}),
     ...(policy ? { policy } : {}),
+    ...(runtime ? { runtime } : {}),
   };
 }
 
@@ -266,6 +283,7 @@ export class StructuredDeliveryQueue {
         text: effect.content.text,
         images: effect.content.images,
         expectedTurnId: effect.policy === "interrupt-active" ? null : deliveryFence,
+        ...(effect.runtime ? { runtime: effect.runtime } : {}),
       };
       await this.port.transition(
         effect.operationId,
