@@ -4,6 +4,7 @@ import { Menu } from "lucide-react";
 import { useMemo } from "react";
 
 import { useColumns } from "@/hooks/useColumns";
+import { projectDisplayName } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -99,7 +100,7 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
             >
               <span className="flex items-center gap-2">
                 <span className={`h-2 w-2 shrink-0 rounded-full ${summary.liveCount ? "animate-pulse bg-success" : "bg-strong"}`} />
-                <span className="min-w-0 flex-1 truncate text-[13px] font-bold">{summary.project}</span>
+                <span className="min-w-0 flex-1 truncate text-[13px] font-bold">{projectDisplayName(summary.project)}</span>
                 {summary.liveCount ? (
                   <span className="shrink-0 text-caption font-semibold tabular-nums text-muted">{summary.liveCount}</span>
                 ) : null}

@@ -9,6 +9,7 @@ import { FavoritesProvider, type FavoritesApi } from "./favorites/FavoritesConte
 import { resolveFavoriteRows } from "./favorites/favoriteRows";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { viewBus } from "@/hooks/viewPresenceBus";
+import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -1219,7 +1220,7 @@ export function ProjectDashboard({
             <Menu className={isMobile ? "h-5 w-5" : "h-4 w-4"} aria-hidden />
           </button>
         ) : null}
-        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 flex-1" : ""}`}>{project}</h1>
+        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 flex-1" : ""}`} title={project}>{projectDisplayName(project)}</h1>
         <BoardHistoryControls
           canUndo={history.canUndo}
           canRedo={history.canRedo}

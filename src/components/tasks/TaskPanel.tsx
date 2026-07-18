@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link2, X } from "@/components/icons";
 import { activityDot, cleanTitle, fmtAge } from "@/components/utils";
 import { useTaskDraft } from "@/hooks/useTaskDraft";
+import { projectDisplayName } from "@/lib/displayNames";
 import { getLocale, useLocale } from "@/lib/i18n";
 import { formatDue, isOverdue } from "@/lib/tasks/helpers";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -62,7 +63,7 @@ function FavoritesSection({
               <span className="min-w-0 flex-1 truncate text-ui font-semibold">
                 {cleanTitle(file.title, 90) || t("tasks.untitled")}
               </span>
-              {scopeAll ? <span className="max-w-[90px] shrink-0 truncate text-caption text-muted">{project}</span> : null}
+              {scopeAll ? <span className="max-w-[90px] shrink-0 truncate text-caption text-muted">{projectDisplayName(project)}</span> : null}
             </button>
             <button
               type="button"

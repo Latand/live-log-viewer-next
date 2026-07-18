@@ -7,6 +7,7 @@ import { useArchivedPaths } from "@/hooks/useArchivedPaths";
 import { useConversationCatalog } from "@/hooks/useConversationCatalog";
 import { useTimeline } from "@/hooks/useTimeline";
 import { useSwitchboardData, type SwitchboardItem } from "@/hooks/useSwitchboardData";
+import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import { cleanTitle } from "@/lib/title";
@@ -181,7 +182,7 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
                         }}
                       >
                         <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-primary">{cleanTitle(file.title, 100)}</span>
-                        <span className="max-w-[240px] shrink-0 truncate rounded-full border border-border bg-canvas px-2 py-0.5 text-[10.5px] font-semibold text-muted">{file.project}</span>
+                        <span className="max-w-[240px] shrink-0 truncate rounded-full border border-border bg-canvas px-2 py-0.5 text-[10.5px] font-semibold text-muted" title={file.project}>{projectDisplayName(file.project)}</span>
                       </button>
                     ))}
                   </div>
@@ -264,7 +265,7 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
                           className="flex min-w-0 items-center gap-2 rounded-[8px] border border-border bg-card/60 px-3 py-1.5 text-[11.5px] text-muted"
                         >
                           <span className="min-w-0 flex-1 truncate">{item.title}</span>
-                          <span className="shrink-0 truncate text-[10.5px]">{item.project}</span>
+                          <span className="shrink-0 truncate text-[10.5px]" title={item.project}>{projectDisplayName(item.project)}</span>
                           <button
                             className="shrink-0 rounded-full border border-border bg-canvas px-2 py-0.5 text-[10.5px] font-semibold text-primary hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                             onClick={() => unarchive(item.file.path)}

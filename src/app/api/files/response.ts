@@ -11,6 +11,7 @@ import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
+import { overlayPromptDisplayTitles } from "@/lib/displayNames";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { loadPipelines } from "@/lib/pipelines/store";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -304,6 +305,12 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      explicit user rename keeps final precedence (the role title becomes its
      Reset base), and never rewrites native transcripts. */
   overlayRoleSessionTitles({ files, flows, tasks: storedTasks, conversationAliases: registrySnapshot.conversationAliases });
+  /* Prompt-title fallback (issue #345): sessions the role overlay could not
+     claim — legacy spawns without durable lineage, fresh role spawns with no
+     owning task yet — still show the raw «You are the Orchestrator…» scaffold
+     as their title. Compact those to the role word; user renames keep final
+     precedence exactly as above. */
+  overlayPromptDisplayTitles(files);
   markTiming("files-role-titles");
   timings.push(`files-flows;dur=${(performance.now() - flowsStartedAt).toFixed(1)}`);
   /* Human-authorship pin for the board's worker-class auto-collapse (issue
