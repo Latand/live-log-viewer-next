@@ -23,8 +23,8 @@ import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { directReviewFlows, isDirectReviewFlow, splitDirectReviewGroups } from "./flows/directReviewGroups";
-import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
-import { compactPipelineArtifactPaths, compactPipelineLayoutFlows, createDraftPipeline, excludeCompactPipelineArtifacts, pipelinesForProject, replaceCompactPipelineEphemeral, type PipelineTemplate } from "./pipelines/pipelineModel";
+import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow, resolveFlowMemberPaths } from "./flows/flowModel";
+import { compactPipelineArtifactPaths, compactPipelineLayoutFlows, createDraftPipeline, excludeCompactPipelineArtifacts, pipelinesForProject, replaceCompactPipelineEphemeral, resolvePipelineMemberPaths, type PipelineTemplate } from "./pipelines/pipelineModel";
 import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
@@ -286,8 +286,8 @@ function HeaderMenuItem({ icon, label, onSelect, disabled = false }: { icon: Rea
 
 export function ProjectDashboard({
   files,
-  flows,
-  pipelines,
+  flows: rawFlows,
+  pipelines: rawPipelines,
   pipelinesError,
   workflows,
   tasks,
@@ -312,6 +312,15 @@ export function ProjectDashboard({
 }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
+  /* Durable flow/pipeline records freeze member transcript paths at launch; an
+     account migration rotates a conversation onto a new path and every
+     projection that string-matches the frozen one (halos, decks, claiming,
+     stacks, strips, counts) drops the live generation — it resurfaces as a
+     detached standalone card (#325/#353). Canonicalize member paths to current
+     generations ONCE at this data boundary so every consumer below agrees.
+     PATCH-backed actions key on flow/pipeline ids and are unaffected. */
+  const flows = useMemo(() => resolveFlowMemberPaths(rawFlows, files), [rawFlows, files]);
+  const pipelines = useMemo(() => resolvePipelineMemberPaths(rawPipelines, files), [rawPipelines, files]);
   const highlightTimer = useRef<number | null>(null);
   const pendingFocusRef = useRef<string | null>(null);
   /* The board arrangement (which windows, hidden/expanded, view mode, task

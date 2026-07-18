@@ -18,7 +18,8 @@ export function isPlacedTask(task: BoardTask): task is PlacedTask {
 
 /* Task card geometry in world pixels (docs/design/sticky-notes.md). */
 export const TASK_W = 260;
-/** Body height cap; past it the card body scrolls internally. */
+/** Compact body height cap; past it the preview clamps with a fade and an
+    in-card Expand control (issue #292 — never an internal scrollbar). */
 export const TASK_BODY_MAX = 340;
 const TASK_MIN_H = 64;
 /* Card body geometry: 12.5px text on 17px lines inside 12px (px-3) horizontal
@@ -55,6 +56,12 @@ const CHARS_PER_LINE = Math.max(1, Math.floor(BODY_CONTENT_W / MAX_GLYPH_W));
    bound for any row count. */
 const CHIP_ROW_H = 28;
 const CHIP_PAD = 8;
+/* The compact body's own vertical padding (py-2 → 8px top + 8px bottom). The
+   preview clamp is a border-box max-height, so this padding lives INSIDE
+   TASK_BODY_MAX and the text itself gets only TASK_BODY_MAX − 16px: exactly 19
+   hard lines (19 × 17 + 16 = 339) fit the plain clamp, while a 20th line
+   crosses it and must expose the disclosure. */
+const BODY_PAD_Y = 16;
 
 /**
  * Worst-case rendered row count for one hard line under `whitespace-pre-wrap` +
@@ -98,23 +105,49 @@ function hardLineRows(line: string): number {
   return rows;
 }
 
+/* Worst-case rendered row count for the whole body text. Split on every hard
+   break `whitespace-pre-wrap` renders — CRLF, a lone CR, or a lone LF — so a
+   string of standalone `\r`s can't hide extra rendered rows inside one counted
+   line and undercount the height. */
+function taskTextRows(text: string): number {
+  let lines = 0;
+  for (const raw of text.split(/\r\n?|\n/)) {
+    lines += hardLineRows(raw);
+  }
+  return lines;
+}
+
+/** Height of the in-card Expand/Collapse disclosure row (h-6). A compact
+    expandable card reserves this INSIDE the body cap, so its rendered height
+    never exceeds the {@link taskCardHeight} estimate. */
+export const TASK_DISCLOSURE_H = 24;
+
+/**
+ * Whether the card's body text can outgrow the compact preview cap — the
+ * disclosure gate (issue #292: compact cards clamp with a fade + Expand
+ * control; they never scroll internally). The clamp is a border-box
+ * max-height, so the body's 16px vertical padding is spent inside it and the
+ * gate compares padded content height — text alone against TASK_BODY_MAX let
+ * an exactly-20-hard-line card (340px of text + 16px padding) clip its last
+ * line with no fade and no Expand. Uses the same upper-bound wrap simulation
+ * as the height estimate, so a genuinely overflowing card is always
+ * expandable; a borderline card may offer Expand for text that already fits,
+ * which is harmless.
+ */
+export function taskCardExpandable(task: Pick<BoardTask, "text">): boolean {
+  return taskTextRows(task.text) * LINE_H + BODY_PAD_Y > TASK_BODY_MAX;
+}
+
 /**
  * Estimated on-board height of a task card: status strip + wrapped text
- * (capped at the internal-scroll threshold) + one chip row per assignment.
+ * (capped at the compact preview threshold) + one chip row per assignment.
  * A conservative upper bound of the rendered card — the wrap simulation counts
  * rows against upper-bound glyph widths and every hard break — so the returned
  * box always contains the rendered card and the collision pass never lets two
  * cards overlap on screen.
  */
 export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "source">): number {
-  let lines = 0;
-  /* Split on every hard break `whitespace-pre-wrap` renders — CRLF, a lone CR,
-     or a lone LF — so a string of standalone `\r`s can't hide extra rendered
-     rows inside one counted line and undercount the height. */
-  for (const raw of task.text.split(/\r\n?|\n/)) {
-    lines += hardLineRows(raw);
-  }
-  const bodyH = Math.min(lines * LINE_H, TASK_BODY_MAX) + PAD_Y;
+  const bodyH = Math.min(taskTextRows(task.text) * LINE_H, TASK_BODY_MAX) + PAD_Y;
   const chipRows = task.assignments.length + (task.source ? 1 : 0);
   const chipsH = chipRows ? chipRows * CHIP_ROW_H + CHIP_PAD : 0;
   return Math.max(TASK_MIN_H, STRIP_H + bodyH + chipsH);

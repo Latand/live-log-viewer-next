@@ -8,7 +8,7 @@ import { drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { turnStateFromRecords } from "@/lib/scanner/activity";
 import { RuntimeJournal } from "@/runtime-host/journal";
-import { runStructuredHostStartup } from "@/instrumentation";
+import { runStructuredHostStartup } from "@/lib/viewerInstrumentation";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./structuredDeliveryController";

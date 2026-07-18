@@ -14,8 +14,10 @@ import {
   routeTaskEdge,
   routeTaskEdges,
   TASK_BODY_MAX,
+  TASK_DISCLOSURE_H,
   TASK_W,
   TASK_WORLD_MARGIN,
+  taskCardExpandable,
   taskCardHeight,
   taskEdgesSignature,
   taskRect,
@@ -1088,5 +1090,35 @@ describe("taskEdgesSignature — poll-stable route cache key (Finding 2)", () =>
     expect(taskEdgesSignature([geom("a", 0, 40, 300, 300)], cards, [])).not.toBe(base);
     expect(taskEdgesSignature(edges, [{ id: "a", x: 80, y: 10, w: 260, h: 100 }], [])).not.toBe(base);
     expect(taskEdgesSignature(edges, cards, [{ x: 0, y: 0, w: 10, h: 10 }])).not.toBe(base);
+  });
+});
+
+describe("taskCardExpandable (issue #292: compact preview + Expand, no internal scroll)", () => {
+  test("short text is not expandable; text past the compact cap is", () => {
+    expect(taskCardExpandable({ text: "one line" })).toBe(false);
+    const long = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
+    expect(taskCardExpandable({ text: long })).toBe(true);
+  });
+
+  test("the boundary accounts for the body's 16px vertical padding (Finding)", () => {
+    /* The compact clamp is a border-box max-height: the body's py-2 padding
+       (16px) is spent inside TASK_BODY_MAX, so the plain preview holds only
+       19 full hard lines (19 × 17 + 16 = 339 ≤ 340). Exactly 20 hard lines
+       (20 × 17 + 16 = 356 > 340) would clip their last line — they must
+       expose Expand. The pre-fix gate compared bare text height (20 × 17 =
+       340 ≯ 340) and silently clipped line 20 with no fade and no control. */
+    const nineteen = Array.from({ length: 19 }, (_, i) => `l${i}`).join("\n");
+    const twenty = `${nineteen}\nl19`;
+    expect(taskCardExpandable({ text: nineteen })).toBe(false);
+    expect(taskCardExpandable({ text: twenty })).toBe(true);
+  });
+
+  test("an expandable card's compact height estimate stays capped — the disclosure fits inside it", () => {
+    const long = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
+    const height = taskCardHeight({ text: long, assignments: [], source: undefined });
+    /* strip 6 + capped body 340 + pad 20: the rendered preview (340−24) plus the
+       24px disclosure row exactly fills the same box. */
+    expect(height).toBe(6 + TASK_BODY_MAX + 20);
+    expect(TASK_DISCLOSURE_H).toBe(24);
   });
 });

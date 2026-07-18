@@ -141,9 +141,18 @@ test("opening the mobile map keeps every active pipeline's full plan on a dock i
   expect(found).toBe(true);
 
   const overlay = dom.document.querySelector('[aria-label="Close the map"]')!.closest("div.fixed");
-  // The whole planned stage graph rides on that dock card.
-  expect(overlay!.textContent).toContain("plan");
-  expect(overlay!.textContent).toContain("build");
+  /* Docks mount collapsed inside the overlay (#156); the whole planned stage
+     graph stays one disclosure tap away. */
+  const summary = overlay!.querySelector('[data-testid="mobile-pipeline-dock-summary"]') as HTMLButtonElement | null;
+  expect(summary).not.toBeNull();
+  flushSync(() => summary!.click());
+  await settle();
+  /* Evidence-less stages render as glyph chips (#156): the full stage graph is
+     present with each stage named to assistive tech. */
+  expect(overlay!.querySelector('[data-pipeline-stage="plan"]')).not.toBeNull();
+  expect(overlay!.querySelector('[data-pipeline-stage="build"]')).not.toBeNull();
+  expect(overlay!.querySelector('[aria-label="plan, pending"]')).not.toBeNull();
+  expect(overlay!.querySelector('[aria-label="build, pending"]')).not.toBeNull();
 
   const framing = overlay!.querySelector('[aria-label="Map framing"]')!;
   const all = Array.from(framing.querySelectorAll("button")).find((button) => button.textContent === "All");

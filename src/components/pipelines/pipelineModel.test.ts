@@ -16,6 +16,9 @@ import {
   draftStagesToInput,
   normalizeStageOrder,
   compactPipelineArtifactPaths,
+  latestAttempt,
+  resolvePipelineMemberPaths,
+  stageDockCompact,
   compactStageOpenTarget,
   excludeCompactPipelineArtifacts,
   pipelineAnnouncement,
@@ -581,6 +584,84 @@ describe("stageHasEvidence (running attempts have no verdict sheet)", () => {
   test("no attempt is no evidence", () => {
     expect(stageHasEvidence(p({}), runStage, null)).toBe(false);
   });
+});
+
+describe("resolvePipelineMemberPaths (durable members follow path rotation — #325/#353)", () => {
+  const build = stage("build");
+  const fileAt = (path: string, over: Partial<FileEntry> = {}): FileEntry => ({ path, ...over }) as FileEntry;
+  const rotated = [
+    fileAt("/old.jsonl", { conversationId: "c1", migratedTo: "/new.jsonl" }),
+    fileAt("/new.jsonl", { conversationId: "c1", predecessorPath: "/old.jsonl" }),
+  ];
+  const staleAttempt = { n: 1, state: "passed", conversationId: "c1", agentPath: "/old.jsonl", flowId: null, verdict: null, error: null } as never;
+
+  test("an attempt whose conversation migrated resolves to the current generation path", () => {
+    const stale = pipeline({ stages: [build], runs: [{ stageId: build.id, attempts: [staleAttempt] }] });
+    const [resolved] = resolvePipelineMemberPaths([stale], rotated);
+    expect(latestAttempt(resolved!, build.id)?.agentPath).toBe("/new.jsonl");
+  });
+
+  test("a recorded path that became an archived predecessor redirects without a stored conversation id", () => {
+    const idless = { n: 1, state: "passed", conversationId: null, agentPath: "/old.jsonl", flowId: null, verdict: null, error: null } as never;
+    const stale = pipeline({ stages: [build], runs: [{ stageId: build.id, attempts: [idless] }] });
+    const [resolved] = resolvePipelineMemberPaths([stale], rotated);
+    expect(latestAttempt(resolved!, build.id)?.agentPath).toBe("/new.jsonl");
+  });
+
+  test("a conversation whose current generation left the scan keeps the recorded path", () => {
+    const stale = pipeline({ stages: [build], runs: [{ stageId: build.id, attempts: [staleAttempt] }] });
+    const [resolved] = resolvePipelineMemberPaths([stale], []);
+    expect(latestAttempt(resolved!, build.id)?.agentPath).toBe("/old.jsonl");
+  });
+
+  test("records that need no rewrite keep their identity", () => {
+    const current = { n: 1, state: "passed", conversationId: "c1", agentPath: "/same.jsonl", flowId: null, verdict: null, error: null } as never;
+    const stable = pipeline({ stages: [build], runs: [{ stageId: build.id, attempts: [current] }] });
+    const out = resolvePipelineMemberPaths([stable], [fileAt("/same.jsonl", { conversationId: "c1" })]);
+    expect(out[0]).toBe(stable);
+  });
+
+  test("claiming follows the rotation: the successor transcript is compact evidence, never a standalone card (#353)", () => {
+    const stale = pipeline({
+      stages: [build],
+      state: "completed",
+      runs: [{ stageId: build.id, attempts: [staleAttempt] }],
+    });
+    const resolved = resolvePipelineMemberPaths([stale], rotated);
+    const compact = compactPipelineArtifactPaths(resolved, [], rotated);
+    expect(compact.has("/new.jsonl")).toBe(true);
+  });
+});
+
+test("stageDockCompact keeps every stage with transcript evidence fully disclosed", () => {
+  const build = stage("build");
+  const skipped = { n: 1, state: "skipped", agentPath: null, verdict: null, error: null } as never;
+  const parked = { n: 1, state: "needs_decision", agentPath: null, verdict: null, error: null } as never;
+  const passedWithVerdict = { n: 1, state: "passed", agentPath: null, verdict: { status: "pass" }, error: null } as never;
+  const passedWithPath = { n: 1, state: "passed", agentPath: "/build.jsonl", verdict: null, error: null } as never;
+  const pendingPipeline = pipeline({ stages: [build], state: "draft", cursor: { stageId: build.id, state: "pending" } });
+
+  expect(stageDockCompact(pendingPipeline, build, null, [], new Set(), new Set(), [])).toBe(true);
+  expect(stageDockCompact(pipeline({ stages: [build] }), build, skipped, [], new Set(), new Set(), [])).toBe(true);
+  expect(stageDockCompact(
+    pipeline({ stages: [build], state: "needs_decision", cursor: { stageId: build.id, state: "running" } }),
+    build,
+    parked,
+    [],
+    new Set(),
+    new Set(),
+    [],
+  )).toBe(false);
+  expect(stageDockCompact(pipeline({ stages: [build] }), build, passedWithVerdict, [], new Set(), new Set(), [])).toBe(false);
+  expect(stageDockCompact(
+    pipeline({ stages: [build] }),
+    build,
+    passedWithPath,
+    [],
+    new Set(),
+    new Set(["/build.jsonl"]),
+    [],
+  )).toBe(false);
 });
 
 describe("stageHasNavigableHistory", () => {
