@@ -38,6 +38,26 @@ import { cleanTitle, engineTintOf } from "./utils";
 import { draftWorkingDirectory } from "./projectModel";
 
 type Engine = "claude" | "codex";
+
+/** Secret-free slice of one stored account that the launch selector needs. */
+type SpawnAccountOption = { id: string; label: string; authPresent: boolean };
+type SpawnAccountCatalog = Record<Engine, { active: string; accounts: SpawnAccountOption[] }>;
+
+/** Crash-safe read of one engine section of `/api/accounts`: a malformed body
+    yields an empty section, which simply hides that engine's selector. */
+function spawnAccountSection(raw: unknown): SpawnAccountCatalog[Engine] {
+  const section = raw as { active?: unknown; accounts?: unknown } | null;
+  const accounts = Array.isArray(section?.accounts)
+    ? section.accounts.flatMap((entry): SpawnAccountOption[] => {
+        const account = entry as { id?: unknown; label?: unknown; authPresent?: unknown };
+        return typeof account.id === "string" && typeof account.label === "string"
+          ? [{ id: account.id, label: account.label, authPresent: account.authPresent !== false }]
+          : [];
+      })
+    : [];
+  return { active: typeof section?.active === "string" ? section.active : "", accounts };
+}
+
 const STRUCTURED_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 type SpawnImageNegotiation = {
   spawnTransport: "tmux" | "structured";
@@ -412,7 +432,7 @@ export function DraftAgentPane({
   const [roleParams, setRoleParamsState] = useState(() => readRoleParams(draftId));
   const [reviews, setReviewsState] = useState(() => readField(draftId, "reviews"));
   const [deployConfirm, setDeployConfirmState] = useState(() => readField(draftId, "confirm"));
-  const [accounts, setAccounts] = useState<{ id: string; label: string }[]>([]);
+  const [accountCatalog, setAccountCatalog] = useState<SpawnAccountCatalog | null>(null);
   const [dirs, setDirs] = useState<string[]>([]);
   const spawnImageNegotiationKey = `${project}\n${src ?? ""}\n${engine}`;
   const [storedSpawnImageNegotiation, setSpawnImageNegotiation] = useState<SpawnImageNegotiationState>({
@@ -458,6 +478,10 @@ export function DraftAgentPane({
     setSpawnImageNegotiation({ status: "loading", requestKey: `${project}\n${src ?? ""}\n${value}` });
     setEngineState(value);
     writeField(draftId, "engine", value);
+    /* An account id belongs to one engine's catalog; flipping engines drops the
+       explicit choice so the new engine launches on its own active account. */
+    setAccountIdState("");
+    writeField(draftId, "accountId", "");
     setModel(defaultModelFor(value));
     /* Tier lists differ per engine (claude has "max", codex does not) — a
        carried-over invalid tier falls back to the CLI default. */
@@ -590,9 +614,8 @@ export function DraftAgentPane({
   useEffect(() => {
     void fetch("/api/accounts").then(async (res) => {
       if (!res.ok) return;
-      const body = await res.json() as { codex: { active: string; accounts: { id: string; label: string }[] } };
-      setAccounts(body.codex.accounts);
-      setAccountIdState((value) => value || body.codex.active);
+      const body = await res.json() as { claude?: unknown; codex?: unknown };
+      setAccountCatalog({ claude: spawnAccountSection(body.claude), codex: spawnAccountSection(body.codex) });
     }).catch(() => {});
   }, []);
 
@@ -682,6 +705,14 @@ export function DraftAgentPane({
   }, [attempt, submitAttempt]);
 
   const selectedRole = roles.find((role) => role.id === roleId) ?? null;
+  /* Per-launch account choice (issue #40): the selector always shows which
+     stored profile this draft will spawn on. A stored id from another engine
+     (or a removed account) falls back to the engine's active account, so the
+     value shown is always the value sent. */
+  const engineAccounts = accountCatalog?.[engine] ?? null;
+  const spawnAccountId = engineAccounts?.accounts.some((account) => account.id === accountId)
+    ? accountId
+    : (engineAccounts?.active ?? "");
   const spawnImagesDisabled = spawnImageNegotiation.status !== "ready"
     || (readySpawnImageNegotiation?.spawnTransport === "structured" && !structuredSpawnImageCapability?.supported);
   const spawnImagesReason = spawnImageNegotiation.status === "loading"
@@ -736,7 +767,7 @@ export function DraftAgentPane({
       cwd: cwd.trim(),
       effort,
       fast: engine === "codex" && speed ? speed === "fast" : null,
-      accountId: engine === "codex" ? accountId : "",
+      accountId: spawnAccountId,
       prompt: payloadText,
       images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
       src,
@@ -776,7 +807,28 @@ export function DraftAgentPane({
     >
       <span aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tint.color }} />
       <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5" style={{ backgroundColor: tint.soft }}>
-        {engine === "codex" && accounts.length ? <Select value={accountId} onChange={(event) => { setAccountIdState(event.target.value); writeField(draftId, "accountId", event.target.value); }} className="max-w-28" aria-label={t("accounts.activeAria")}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.label}</option>)}</Select> : null}
+        {engineAccounts && engineAccounts.accounts.length ? (
+          <Select
+            value={spawnAccountId}
+            disabled={fieldsDisabled}
+            onChange={(event) => { setAccountIdState(event.target.value); writeField(draftId, "accountId", event.target.value); }}
+            className="max-w-28"
+            aria-label={t("draft.accountAria", { engine: engine === "codex" ? "Codex" : "Claude" })}
+          >
+            {engineAccounts.accounts.map((account) => (
+              /* The engine's active account is the default for future launches;
+                 a signed-out profile stays listed (history preserved) but can't
+                 be picked until it signs back in via Accounts. */
+              <option key={account.id} value={account.id} disabled={!account.authPresent}>
+                {account.id === engineAccounts.active
+                  ? t("draft.accountDefault", { label: account.label })
+                  : account.authPresent
+                    ? account.label
+                    : t("draft.accountNeedsLogin", { label: account.label })}
+              </option>
+            ))}
+          </Select>
+        ) : null}
         <span className="h-2 w-2 shrink-0 rounded-full bg-strong" title={t("draft.notStarted")} />
         <EngineRadioGroup engine={engine} disabled={fieldsDisabled} onChange={setEngine} />
         <span
