@@ -23,7 +23,7 @@ import { paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
-import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage } from "./git";
+import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase } from "./git";
 import { MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "./limits";
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
@@ -677,6 +677,17 @@ async function tickReviewStage(
 async function tickPipeline(pipeline: Pipeline, entries: FileEntry[], ports: PipelinePorts, persist: () => void): Promise<boolean> {
   const before = JSON.stringify(pipeline);
   if (pipeline.state === "provisioning") {
+    if (!pipeline.baseBranch || !pipeline.baseRef || !pipeline.lastPassedCommit) {
+      const base = resolvePipelineBase(pipeline.repoDir, {}, ports.exec);
+      if (!base.ok) {
+        park(pipeline, base.error);
+        return JSON.stringify(pipeline) !== before;
+      }
+      pipeline.baseBranch = base.baseBranch;
+      pipeline.baseRef = base.baseRef;
+      pipeline.lastPassedCommit = base.baseRef;
+      persist();
+    }
     const provisioned = provisionPipelineWorktree(pipeline, ports.exec);
     if (!provisioned.ok) park(pipeline, provisioned.error);
     else {
@@ -849,6 +860,8 @@ export async function createPipelineFromRequest(
   if (req.spec !== undefined && typeof req.spec !== "string") return { error: "spec must be a string", status: 400 };
   if (spec && spec.length > MAX_SPEC_LENGTH) return { error: `spec exceeds ${MAX_SPEC_LENGTH} characters`, status: 400 };
   if (req.autoStart !== undefined && typeof req.autoStart !== "boolean") return { error: "autoStart must be a boolean", status: 400 };
+  if (req.baseBranch !== undefined && typeof req.baseBranch !== "string") return { error: "baseBranch must be a string", status: 400 };
+  if (req.baseRef !== undefined && typeof req.baseRef !== "string") return { error: "baseRef must be a string", status: 400 };
   const repoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
   if (!repoDir) return { error: "repoDir is required", status: 400 };
   const git = ports.exec("git", ["rev-parse", "--git-dir"], repoDir);
@@ -857,6 +870,14 @@ export async function createPipelineFromRequest(
      (#136); an immediately-started pipeline still needs its full 2–4 stage plan. */
   const normalized = normalizeStages(req.stages, ports.roleLookup, undefined, req.autoStart === false ? 0 : 2);
   if (!normalized.stages) return { error: normalized.error ?? "invalid stages", status: 400 };
+  const explicitBaseRef = req.baseRef?.trim();
+  if (req.autoStart === false && req.baseBranch?.trim() && !explicitBaseRef) {
+    return { error: "a draft baseBranch requires an explicit baseRef", status: 400 };
+  }
+  const base = req.autoStart === false && !explicitBaseRef
+    ? null
+    : resolvePipelineBase(repoDir, { baseBranch: req.baseBranch, baseRef: explicitBaseRef }, ports.exec);
+  if (base && !base.ok) return { error: base.error, status: 409 };
   const srcPath = typeof req.src === "string" && req.src.trim() ? req.src.trim() : null;
   const pipeline = buildPipeline({
     id: crypto.randomUUID().slice(0, 8),
@@ -870,6 +891,11 @@ export async function createPipelineFromRequest(
     now: ports.now(),
     state: req.autoStart === false ? "draft" : "provisioning",
   });
+  if (base?.ok) {
+    pipeline.baseBranch = base.baseBranch;
+    pipeline.baseRef = base.baseRef;
+    pipeline.lastPassedCommit = base.baseRef;
+  }
   return withPipelineMutation((pipelines, persist) => {
     pipelines.push(pipeline);
     persist();
@@ -909,6 +935,13 @@ export async function patchPipeline(
          while it is assembled on the canvas, and it needs a full stage plan to run.
          The review-loop-needs-a-preceding-run rule already held on every draft edit. */
       if (pipeline.stages.length < 2) return { error: "add at least 2 stages before starting", status: 409 };
+      if (!pipeline.baseBranch || !pipeline.baseRef || !pipeline.lastPassedCommit) {
+        const base = resolvePipelineBase(pipeline.repoDir, {}, ports.exec);
+        if (!base.ok) return { error: base.error, status: 409 };
+        pipeline.baseBranch = base.baseBranch;
+        pipeline.baseRef = base.baseRef;
+        pipeline.lastPassedCommit = base.baseRef;
+      }
       pipeline.state = "provisioning";
       pipeline.stateDetail = null;
     } else if (req.action === "update-draft") {
@@ -922,7 +955,8 @@ export async function patchPipeline(
       if (spec && spec.length > MAX_SPEC_LENGTH) return { error: `spec exceeds ${MAX_SPEC_LENGTH} characters`, status: 400 };
       const repoDir = req.repoDir === undefined ? pipeline.repoDir : typeof req.repoDir === "string" ? req.repoDir.trim() : "";
       if (!repoDir) return { error: "repoDir is required", status: 400 };
-      if (repoDir !== pipeline.repoDir) {
+      const repoChanged = repoDir !== pipeline.repoDir;
+      if (repoChanged) {
         const git = ports.exec("git", ["rev-parse", "--git-dir"], repoDir);
         if (git.code !== 0) return { error: `not a git repository: ${repoDir}`, status: 400 };
       }
@@ -932,6 +966,11 @@ export async function patchPipeline(
       pipeline.repoDir = repoDir;
       pipeline.project = ports.projectForCwd(repoDir) ?? path.basename(repoDir);
       Object.assign(pipeline, pipelineIdentity(pipeline.id, task, repoDir));
+      if (repoChanged) {
+        pipeline.baseBranch = "";
+        pipeline.baseRef = "";
+        pipeline.lastPassedCommit = "";
+      }
     } else if (req.action === "add-stage") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       if (!req.stage || typeof req.stage !== "object" || Array.isArray(req.stage)) return { error: "stage is required", status: 400 };
@@ -994,7 +1033,9 @@ export async function patchPipeline(
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
       if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
-      if (pipeline.lastPassedCommit) {
+      if (pipeline.runs.every((run) => run.attempts.length === 0)) {
+        pipeline.state = "provisioning";
+      } else if (pipeline.lastPassedCommit) {
         const reset = resetPipelineStage(pipeline, ports.exec);
         if (!reset.ok) return { error: reset.error, status: 409 };
         pipeline.state = "running";

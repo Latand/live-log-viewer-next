@@ -935,6 +935,7 @@ export const en = {
   "pipelineStrip.readOnly": "read-only",
   "pipelineStrip.readWrite": "read-write",
   "pipelineStrip.groupAria": "Pipeline {task}",
+  "pipelineStrip.baseSha": "Base {sha}",
   "pipelineStrip.announce": "Pipeline {task}: {state}, stage {stage} {k} of {n}",
   "pipelineStrip.openStage": "Open stage {label}",
   "pipelineStrip.openVerdict": "Open verdict for stage {label}, state {state}",

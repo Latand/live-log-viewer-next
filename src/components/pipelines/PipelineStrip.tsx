@@ -485,6 +485,11 @@ export function PipelineStrip({
         ) : null}
         {detail ? <span className={`min-w-0 truncate text-ui font-semibold ${attention ? "text-warning" : "text-danger"}`} title={detail}>{detail}</span> : null}
       </span>
+      {pipeline.baseRef ? (
+        <span className="shrink-0 rounded-control border border-border bg-sunken px-1.5 py-0.5 font-mono text-caption text-muted" title={t("pipelineStrip.baseSha", { sha: pipeline.baseRef })}>
+          {t("pipelineStrip.baseSha", { sha: pipeline.baseRef })}
+        </span>
+      ) : null}
       <ol className="no-scrollbar flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-x-auto" aria-label={t("pipelineStrip.stagesAria")}>
         {pipeline.stages.map((stage, index) => (
           <StageChip

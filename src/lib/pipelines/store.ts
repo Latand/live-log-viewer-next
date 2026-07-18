@@ -170,7 +170,13 @@ function isPipeline(value: unknown): value is Pipeline {
       if (cursor !== null) return false;
     } else if (cursor?.stageId !== stages[0]!.id || cursor.state !== "pending") return false;
     if (runs.some((run) => run.attempts.length > 0)) return false;
-    if (pipeline.baseBranch || pipeline.baseRef || pipeline.lastPassedCommit || pipeline.closedAt) return false;
+    const baseEmpty = !pipeline.baseBranch && !pipeline.baseRef && !pipeline.lastPassedCommit;
+    const basePinned = Boolean(
+      pipeline.baseBranch &&
+      /^[0-9a-f]{40}$/i.test(pipeline.baseRef!) &&
+      pipeline.lastPassedCommit === pipeline.baseRef,
+    );
+    if ((!baseEmpty && !basePinned) || pipeline.closedAt) return false;
   }
   return true;
 }

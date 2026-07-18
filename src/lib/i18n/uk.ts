@@ -908,6 +908,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineStrip.readOnly": "лише читання",
   "pipelineStrip.readWrite": "читання й запис",
   "pipelineStrip.groupAria": "Пайплайн {task}",
+  "pipelineStrip.baseSha": "База {sha}",
   "pipelineStrip.announce": "Пайплайн {task}: {state}, етап {stage} {k} з {n}",
   "pipelineStrip.openStage": "Відкрити етап {label}",
   "pipelineStrip.openVerdict": "Відкрити вердикт етапу {label}, стан: {state}",
