@@ -18,6 +18,7 @@ export interface Camera {
 
 const MAP_W = 216;
 const MAP_H = 148;
+const EMPTY_TEXT_EXPANDED_IDS: ReadonlySet<string> = new Set();
 
 /** One collapsed worker-stack origin, drawn as a single legend dot (issue #136). */
 export interface StackDot {
@@ -47,6 +48,7 @@ export function Minimap({
   layout,
   world,
   tasks = [],
+  textExpandedIds = EMPTY_TEXT_EXPANDED_IDS,
   currentWork = null,
   stackDots = [],
   cam,
@@ -60,6 +62,8 @@ export function Minimap({
   world: SchemeRect;
   /** Tasks render as 3 px status-colored dots; their edges never show here. */
   tasks?: PlacedTask[];
+  /** Session-only cards showing complete durable text. */
+  textExpandedIds?: ReadonlySet<string>;
   /** Faint outline of the operator's current-work framing. */
   currentWork?: SchemeRect | null;
   /** Collapsed worker stacks (issue #136): one dot per origin, shown as a compact
@@ -159,7 +163,7 @@ export function Minimap({
             <circle
               key={task.id}
               cx={task.pos.x + TASK_W / 2}
-              cy={task.pos.y + taskCardHeight(task) / 2}
+              cy={task.pos.y + taskCardHeight(task, textExpandedIds.has(task.id)) / 2}
               r={3 / scale}
               fill={TASK_TONES[task.status].color}
               opacity={task.status === "done" ? 0.5 : 0.95}

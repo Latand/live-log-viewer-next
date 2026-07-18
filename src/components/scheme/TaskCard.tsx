@@ -1,10 +1,10 @@
 "use client";
 
-import { FoldVertical, Link2, Loader2, Send, Trash2, X } from "lucide-react";
-import { memo, useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronUp, Crosshair, FoldVertical, Link2, Loader2, Send, Trash2, X } from "lucide-react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
-import type { BoardTask } from "@/lib/tasks/types";
+import type { AssignmentRef, BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { useLinkDrag } from "@/components/AgentLink";
@@ -14,7 +14,11 @@ import { activityDot, cleanTitle, engineBadge, engineBadgeFor } from "@/componen
 
 import type { Camera } from "./Minimap";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
-import { TASK_BODY_MAX, TASK_W, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
+import { assignmentAgentState, assignmentOpenable } from "./assignmentState";
+import { TASK_W, taskCardExpandable, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
+
+const TITLE_CLAMP_CLASS = "line-clamp-2";
+const PREVIEW_CLAMP_CLASS = "line-clamp-3";
 
 /* Below this zoom the card text is unreadable: an edit click glides first. */
 const EDIT_MIN_Z = 0.55;
@@ -42,12 +46,48 @@ export interface TaskCardHandlers {
   /** Route the task to a brand-new agent: seed a draft conversation, launch
       nothing. */
   draft: (task: BoardTask) => void;
-  /** Detach one assignment — the undo for a wrong handoff. */
-  unassign: (task: BoardTask, path: string) => void;
+  /** Detach one assignment through its durable identity. */
+  unassign: (task: BoardTask, ref: AssignmentRef) => void;
   center: (rect: SchemeRect) => void;
   /** Fold the card back into its compact status stack (drops its durable
       expand pin); the stack strip re-lists it immediately. */
   collapse?: (task: BoardTask) => void;
+  /** Toggle compact and full-text presentation. */
+  toggleExpand: (id: string) => void;
+  /** Open the current assigned-agent generation. */
+  openAgent: (file: FileEntry) => void;
+}
+
+function ChipAction({
+  icon,
+  ariaLabel,
+  title,
+  hoverClass,
+  disabled,
+  onClick,
+  openAgent,
+}: {
+  icon: React.ReactNode;
+  ariaLabel: string;
+  title: string;
+  hoverClass: string;
+  disabled?: boolean;
+  onClick: () => void;
+  openAgent?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      {...(openAgent ? { "data-task-open-agent": "" } : {})}
+      className={`-my-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${hoverClass} disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted`}
+      aria-label={ariaLabel}
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {icon}
+    </button>
+  );
 }
 
 function AssignmentChip({
@@ -55,42 +95,71 @@ function AssignmentChip({
   assignment,
   file,
   onDetach,
+  onOpen,
 }: {
   task: BoardTask;
   assignment: BoardTask["assignments"][number];
   file: FileEntry | null;
-  onDetach: (task: BoardTask, path: string) => void;
+  onDetach: (task: BoardTask, ref: AssignmentRef) => void;
+  onOpen: (file: FileEntry) => void;
 }) {
   const { t } = useLocale();
-  if (!assignment.path) {
+  const state = assignmentAgentState(assignment, file);
+  const detachRef: AssignmentRef = {
+    path: assignment.path,
+    conversationId: assignment.conversationId ?? null,
+    panePid: assignment.panePid,
+  };
+  if (state === "spawning") {
     return (
-      <span className="flex h-6 items-center gap-1.5 rounded-[6px] bg-sunken px-1.5 text-[10.5px] font-semibold text-muted">
+      <span className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[7px] border border-border bg-card/80 px-2 text-[10.5px] font-semibold text-muted">
         <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden />
-        {t("tasks.spawning")}
+        <span className="min-w-0 flex-1 truncate">{t("tasks.spawning")}</span>
+        <ChipAction
+          icon={<X className="h-3 w-3" aria-hidden />}
+          ariaLabel={t("tasks.detachAria", { title: t("tasks.spawning") })}
+          title={t("tasks.detach")}
+          hoverClass="hover:bg-black/5 hover:text-danger"
+          onClick={() => onDetach(task, detachRef)}
+        />
       </span>
     );
   }
-  const dead = !file;
-  const failed = assignment.state === "failed";
+  const failed = state === "failed";
+  const openable = assignmentOpenable(state);
   const handoff = assignment.state === "handoff";
   const badge = file ? engineBadge(file) : null;
-  const title = file ? cleanTitle(file.title, 40) : (assignment.path.split("/").pop() ?? assignment.path);
-  const wrapTitle = failed
-    ? t("tasks.chipFailedTitle", { error: assignment.error ?? "" })
-    : dead
+  const title = file
+    ? cleanTitle(file.title, 40)
+    : assignment.path
+      ? (assignment.path.split("/").pop() ?? assignment.path)
+      : t("tasks.failedChip");
+  const stateTitle = failed
+    ? assignment.error
+      ? t("tasks.chipFailedTitle", { error: assignment.error })
+      : t("tasks.failedChip")
+    : state === "gone"
       ? t("tasks.deadChip")
-      : handoff
-        ? t("tasks.handoffChip")
-        : file
-          ? cleanTitle(file.title)
-          : undefined;
+      : state === "migrating"
+        ? t("tasks.migratingChip")
+        : state === "killed"
+          ? t("tasks.killedChip")
+          : state === "unhosted"
+            ? t("tasks.unhostedChip")
+            : handoff
+              ? t("tasks.handoffChip")
+              : file
+                ? cleanTitle(file.title)
+                : undefined;
+  const wrapClass = failed
+    ? "border-danger/25 bg-danger-soft text-danger"
+    : state === "gone" || state === "killed"
+      ? "border-border bg-sunken text-muted opacity-70"
+      : state === "migrating" || state === "unhosted"
+        ? "border-border bg-sunken text-muted"
+        : "border-border bg-card/80";
   return (
-    <span
-      className={`flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] px-1.5 ${
-        failed ? "bg-danger-soft text-danger" : dead ? "bg-sunken text-muted opacity-70" : "bg-sunken"
-      }`}
-      title={wrapTitle}
-    >
+    <span className={`flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[7px] border px-2 ${wrapClass}`} title={stateTitle}>
       {handoff ? <Link2 className="h-3 w-3 shrink-0 text-info" aria-hidden /> : null}
       {file ? <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} /> : null}
       {badge ? (
@@ -100,15 +169,24 @@ function AssignmentChip({
       ) : null}
       <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold">{title}</span>
       {failed ? <span aria-hidden>⚠</span> : null}
-      <button
-        type="button"
-        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-muted hover:bg-black/5 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        aria-label={t("tasks.detachAria", { title })}
+      <ChipAction
+        icon={<Crosshair className="h-3 w-3" aria-hidden />}
+        ariaLabel={t("tasks.openAgentAria", { title })}
+        title={openable ? t("tasks.openAgent") : (stateTitle ?? t("tasks.openAgent"))}
+        hoverClass="hover:bg-black/5 hover:text-accent"
+        disabled={!openable}
+        onClick={() => {
+          if (file && openable) onOpen(file);
+        }}
+        openAgent
+      />
+      <ChipAction
+        icon={<X className="h-3 w-3" aria-hidden />}
+        ariaLabel={t("tasks.detachAria", { title })}
         title={t("tasks.detach")}
-        onClick={() => onDetach(task, assignment.path!)}
-      >
-        <X className="h-3 w-3" aria-hidden />
-      </button>
+        hoverClass="hover:bg-black/5 hover:text-danger"
+        onClick={() => onDetach(task, detachRef)}
+      />
     </span>
   );
 }
@@ -124,7 +202,7 @@ function SourceChip({ task, file }: { task: BoardTask; file: FileEntry | null })
   const badge = engineBadgeFor(source.engine);
   return (
     <span
-      className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] bg-sunken px-1.5 text-info"
+      className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[7px] border border-info/20 bg-info-soft px-2 text-info"
       title={`${t("tasks.sourceTitle")}: ${source.text}`}
     >
       <Link2 className="h-3 w-3 shrink-0" aria-hidden />
@@ -139,9 +217,9 @@ function SourceChip({ task, file }: { task: BoardTask; file: FileEntry | null })
 
 /**
  * A task as a sticky card on the board: tinted by status with a colored top
- * strip, first line bold, body scrolling past the cap, assignment chips and
- * a hover action row. Owns its drag (world deltas via the camera ref, one
- * PATCH on drop) and its inline editing (blur/Esc saves, autosave debounce).
+ * strip, compact/full text disclosure, assignment chips and a hover action
+ * row. Owns its drag (world deltas via the camera ref, one PATCH on drop) and
+ * its inline editing (blur/Esc saves, autosave debounce).
  */
 export const TaskCard = memo(function TaskCard({
   task,
@@ -149,12 +227,14 @@ export const TaskCard = memo(function TaskCard({
   camRef,
   handlers,
   selected = false,
+  expanded = false,
 }: {
   task: PlacedTask;
   files: FileEntry[];
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
   selected?: boolean;
+  expanded?: boolean;
 }) {
   const { t } = useLocale();
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
@@ -216,7 +296,7 @@ export const TaskCard = memo(function TaskCard({
 
   const beginEdit = () => {
     if (editing) return;
-    if ((camRef.current?.z ?? 1) < EDIT_MIN_Z) handlers.center(taskRect(task));
+    if ((camRef.current?.z ?? 1) < EDIT_MIN_Z) handlers.center(taskRect(task, expanded));
     setDraft(task.text);
     setEditing(true);
     requestAnimationFrame(() => {
@@ -277,7 +357,18 @@ export const TaskCard = memo(function TaskCard({
   const tone = TASK_TONES[task.status];
   const title = taskTitle(task.text) || t("tasks.untitled");
   const rest = task.text.includes("\n") ? task.text.slice(task.text.indexOf("\n") + 1) : "";
-  const byPath = new Map(files.map((file) => [file.path, file]));
+  const byPath = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
+  const byConversationId = useMemo(
+    () => new Map(files.filter((file) => file.conversationId).map((file) => [file.conversationId!, file])),
+    [files],
+  );
+  const resolveAgent = (assignment: BoardTask["assignments"][number]): FileEntry | null => {
+    if (assignment.conversationId) {
+      const current = byConversationId.get(assignment.conversationId);
+      if (current) return current;
+    }
+    return assignment.path ? (byPath.get(assignment.path) ?? null) : null;
+  };
   const lifted = editing || drag !== null;
 
   /* The handoff gesture, task-flavored: pull the arrow off the «send» pill
@@ -310,12 +401,14 @@ export const TaskCard = memo(function TaskCard({
       onPointerUp={onPointerUp}
     >
       <div
-        className={`flex flex-col overflow-hidden rounded-[8px] border border-border shadow-1 ${
+        className={`flex flex-col overflow-hidden rounded-[10px] border border-border shadow-1 transition-shadow ${
           task.status === "done" ? "opacity-60 saturate-50" : ""
-        } ${editing || selected ? "ring-2 ring-accent/50" : ""}`}
+        } ${lifted ? "shadow-2" : "group-hover:shadow-2"} ${
+          editing ? "ring-2 ring-accent/50" : selected ? "ring-2 ring-accent ring-offset-1 ring-offset-canvas" : ""
+        }`}
         style={{ backgroundColor: tone.soft }}
       >
-        <div aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tone.color }} />
+        <div aria-hidden className="h-1.5 w-full shrink-0" style={{ backgroundColor: tone.color }} />
         {editing ? (
           <textarea
             ref={editRef}
@@ -334,10 +427,18 @@ export const TaskCard = memo(function TaskCard({
             maxLength={6000}
           />
         ) : (
-          <div data-task-body className="cursor-text overflow-y-auto px-3 py-2" style={{ maxHeight: TASK_BODY_MAX }}>
-            <div className="whitespace-pre-wrap break-words text-[12.5px] font-bold leading-[17px] text-primary">{title}</div>
+          <div data-task-body className="cursor-text px-3 py-2">
+            <div
+              className={`whitespace-pre-wrap break-words text-[12.5px] font-semibold leading-[17px] tracking-[-0.006em] text-primary ${
+                expanded ? "" : TITLE_CLAMP_CLASS
+              }`}
+            >
+              {title}
+            </div>
             {rest.trim() ? (
-              <div className="whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-secondary">{rest}</div>
+              <div className={`whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-secondary ${expanded ? "" : PREVIEW_CLAMP_CLASS}`}>
+                {rest}
+              </div>
             ) : null}
           </div>
         )}
@@ -346,13 +447,28 @@ export const TaskCard = memo(function TaskCard({
             <SourceChip task={task} file={task.source ? (byPath.get(task.source.path) ?? null) : null} />
             {task.assignments.map((assignment, index) => (
               <AssignmentChip
-                key={(assignment.path ?? "spawning") + "::" + index}
+                key={assignment.conversationId ?? assignment.path ?? (assignment.panePid != null ? `pane:${assignment.panePid}` : `index:${index}`)}
                 task={task}
                 assignment={assignment}
-                file={assignment.path ? (byPath.get(assignment.path) ?? null) : null}
-                onDetach={(target, path) => handlers.unassign(target, path)}
+                file={resolveAgent(assignment)}
+                onDetach={(target, ref) => handlers.unassign(target, ref)}
+                onOpen={handlers.openAgent}
               />
             ))}
+          </div>
+        ) : null}
+        {!editing && taskCardExpandable(task) ? (
+          <div className="px-2 pb-2">
+            <button
+              type="button"
+              data-task-disclosure
+              aria-expanded={expanded}
+              className="flex h-6 w-full items-center justify-center gap-1 rounded-[7px] border border-border bg-card/60 text-[10.5px] font-semibold text-muted transition-colors hover:bg-card hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              onClick={() => handlers.toggleExpand(task.id)}
+            >
+              {expanded ? <ChevronUp className="h-3 w-3" aria-hidden /> : <ChevronDown className="h-3 w-3" aria-hidden />}
+              {t(expanded ? "tasks.collapse" : "tasks.expand")}
+            </button>
           </div>
         ) : null}
       </div>
@@ -360,7 +476,7 @@ export const TaskCard = memo(function TaskCard({
       {/* Action row floats under the card on hover/edit so the card's own
           height keeps matching the pure geometry estimate. */}
       <div
-        className={`absolute left-0 top-full flex -translate-y-8 items-center gap-1 ${
+        className={`absolute left-0 top-full flex -translate-y-8 items-center gap-1.5 ${
           lifted ? "" : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100"
         } transition-opacity`}
       >
@@ -382,12 +498,13 @@ export const TaskCard = memo(function TaskCard({
         </button>
         <button
           type="button"
-          className="inline-flex h-7 items-center rounded-full border px-2 text-[10.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          style={{ backgroundColor: "var(--color-card)", color: tone.color, borderColor: tone.color }}
+          className="inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[10.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          style={{ backgroundColor: tone.soft, color: tone.color, borderColor: tone.color }}
           title={t("tasks.statusTitle", { label: t(`tasks.status.${task.status}`) })}
           onClick={() => void handlers.patch(task.id, { status: nextTaskStatus(task.status) })}
         >
-          {t("tasks.statusPrefix")}: {t(`tasks.status.${task.status}`)}
+          <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: tone.color }} />
+          {t(`tasks.status.${task.status}`)}
         </button>
         {handlers.collapse ? (
           <button

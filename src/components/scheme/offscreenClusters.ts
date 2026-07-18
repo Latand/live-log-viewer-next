@@ -9,6 +9,8 @@ import type { SchemeLayout, SchemeRect } from "./layout";
 import type { Camera } from "./Minimap";
 import { isPlacedTask, taskRect } from "./taskGeometry";
 
+const EMPTY_TEXT_EXPANDED_IDS: ReadonlySet<string> = new Set();
+
 export type ChipEdge = "top" | "right" | "bottom" | "left";
 
 export interface BoardCluster {
@@ -85,6 +87,7 @@ export function boardClusters(
   layout: SchemeLayout,
   tasks: readonly BoardTask[],
   favorites: ReadonlySet<string>,
+  textExpandedIds: ReadonlySet<string> = EMPTY_TEXT_EXPANDED_IDS,
 ): BoardCluster[] {
   const clusters: BoardCluster[] = [];
   for (const group of layout.groups) {
@@ -116,7 +119,7 @@ export function boardClusters(
     clusters.push({
       key: `task::${task.id}`,
       label: taskTitle(task.text),
-      rect: taskRect(task),
+      rect: taskRect(task, textExpandedIds.has(task.id)),
       priority: 1,
       color: TASK_TONES[task.status].color,
     });

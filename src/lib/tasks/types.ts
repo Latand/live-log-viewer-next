@@ -23,6 +23,15 @@ export interface TaskAssignment {
   engine?: "claude" | "codex" | null;
 }
 
+/** Stable assignment identity used when transcript attribution is incomplete or
+ * a conversation has moved to a newer path. Matching uses conversation id,
+ * path, and pane pid in that order. */
+export interface AssignmentRef {
+  path?: string | null;
+  conversationId?: string | null;
+  panePid?: number | null;
+}
+
 export interface TaskSource {
   path: string;
   ts: string | null;

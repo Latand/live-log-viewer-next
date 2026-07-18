@@ -18,8 +18,13 @@ export function isPlacedTask(task: BoardTask): task is PlacedTask {
 
 /* Task card geometry in world pixels (docs/design/sticky-notes.md). */
 export const TASK_W = 260;
-/** Body height cap; past it the card body scrolls internally. */
-export const TASK_BODY_MAX = 340;
+/** Collapsed text rows rendered by TaskCard's literal Tailwind clamp classes. */
+export const TASK_TITLE_CLAMP = 2;
+export const TASK_PREVIEW_CLAMP = 3;
+/** Disclosure control: h-6 plus the card's 8px bottom padding. */
+export const TASK_DISCLOSURE_H = 32;
+/** Reserved footprint for the hover/edit action row below the visual card. */
+export const TASK_ACTION_ROW_H = 36;
 const TASK_MIN_H = 64;
 /* Card body geometry: 12.5px text on 17px lines inside 12px (px-3) horizontal
    padding, so the wrap width is TASK_W − 24 = 236px. This estimate must be an
@@ -27,7 +32,7 @@ const TASK_MIN_H = 64;
    past its computed box and overlap its neighbour (issue #17) — so line count is
    figured against the widest glyphs a proportional bold font produces (W/M run
    ~13px). Real text of the same length wraps to fewer lines, so the estimate is
-   conservative, and the body is capped either way. */
+   conservative for compact clamps and full-text expansion. */
 const STRIP_H = 6;
 const PAD_Y = 20;
 const LINE_H = 17;
@@ -98,31 +103,47 @@ function hardLineRows(line: string): number {
   return rows;
 }
 
-/**
- * Estimated on-board height of a task card: status strip + wrapped text
- * (capped at the internal-scroll threshold) + one chip row per assignment.
- * A conservative upper bound of the rendered card — the wrap simulation counts
- * rows against upper-bound glyph widths and every hard break — so the returned
- * box always contains the rendered card and the collision pass never lets two
- * cards overlap on screen.
- */
-export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "source">): number {
-  let lines = 0;
-  /* Split on every hard break `whitespace-pre-wrap` renders — CRLF, a lone CR,
-     or a lone LF — so a string of standalone `\r`s can't hide extra rendered
-     rows inside one counted line and undercount the height. */
-  for (const raw of task.text.split(/\r\n?|\n/)) {
-    lines += hardLineRows(raw);
-  }
-  const bodyH = Math.min(lines * LINE_H, TASK_BODY_MAX) + PAD_Y;
-  const chipRows = task.assignments.length + (task.source ? 1 : 0);
-  const chipsH = chipRows ? chipRows * CHIP_ROW_H + CHIP_PAD : 0;
-  return Math.max(TASK_MIN_H, STRIP_H + bodyH + chipsH);
+/** Upper-bound row counts for the title and remaining body text. */
+function taskTextRows(text: string): { title: number; rest: number } {
+  const lines = text.split(/\r\n?|\n/);
+  const title = hardLineRows(lines[0] ?? "");
+  let rest = 0;
+  for (let index = 1; index < lines.length; index += 1) rest += hardLineRows(lines[index]!);
+  return { title, rest };
 }
 
-/** World-space box of a task card, derived from its owned position. */
-export function taskRect(task: Pick<PlacedTask, "pos" | "text" | "assignments" | "source">): SchemeRect {
-  return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task) };
+/** Whether compact presentation hides at least one estimated text row. */
+export function taskCardExpandable(task: Pick<BoardTask, "text">): boolean {
+  const rows = taskTextRows(task.text);
+  return rows.title > TASK_TITLE_CLAMP || rows.rest > TASK_PREVIEW_CLAMP;
+}
+
+/**
+ * Estimated visual height of a task card. Compact cards count the same title
+ * and preview rows as TaskCard's line clamps. Expanded cards count the complete
+ * durable text and contain no internal scrolling. The wrap model remains a
+ * conservative upper bound for placement and camera geometry.
+ */
+export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "source">, expanded = false): number {
+  const rows = taskTextRows(task.text);
+  const expandable = rows.title > TASK_TITLE_CLAMP || rows.rest > TASK_PREVIEW_CLAMP;
+  const lines = expanded && expandable
+    ? rows.title + rows.rest
+    : Math.min(rows.title, TASK_TITLE_CLAMP) + Math.min(rows.rest, TASK_PREVIEW_CLAMP);
+  const bodyH = lines * LINE_H + PAD_Y;
+  const chipRows = task.assignments.length + (task.source ? 1 : 0);
+  const chipsH = chipRows ? chipRows * CHIP_ROW_H + CHIP_PAD : 0;
+  return Math.max(TASK_MIN_H, STRIP_H + bodyH + chipsH + (expandable ? TASK_DISCLOSURE_H : 0));
+}
+
+/** Full DOM footprint used by collision, edges, navigation, and world bounds. */
+export function taskBoxHeight(task: Pick<BoardTask, "text" | "assignments" | "source">, expanded = false): number {
+  return taskCardHeight(task, expanded) + TASK_ACTION_ROW_H;
+}
+
+/** World-space box of a task card, including its action-row reservation. */
+export function taskRect(task: Pick<PlacedTask, "pos" | "text" | "assignments" | "source">, expanded = false): SchemeRect {
+  return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskBoxHeight(task, expanded) };
 }
 
 export function rectCenter(rect: SchemeRect): { x: number; y: number } {
@@ -262,10 +283,14 @@ export interface TaskEdgeGeom {
  * Spawning assignments without a transcript and dead assignments (path
  * absent from the index) draw no edge — they stay chips on the card.
  */
-export function buildTaskEdges(tasks: readonly PlacedTask[], index: ReadonlyMap<string, SchemeRect>): TaskEdgeGeom[] {
+export function buildTaskEdges(
+  tasks: readonly PlacedTask[],
+  index: ReadonlyMap<string, SchemeRect>,
+  expandedIds?: ReadonlySet<string>,
+): TaskEdgeGeom[] {
   const edges: TaskEdgeGeom[] = [];
   for (const task of tasks) {
-    const card = taskRect(task);
+    const card = taskRect(task, expandedIds?.has(task.id) ?? false);
     const cardCenter = rectCenter(card);
     if (task.source) {
       const target = index.get(task.source.path);

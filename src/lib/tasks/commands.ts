@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 
 import { isTaskAttachment } from "./attachments";
 import { isoNow } from "./helpers";
-import type { BoardTask, TaskAttachment, TaskAssignment, TaskSource, TaskStatus } from "./types";
+import type { AssignmentRef, BoardTask, TaskAttachment, TaskAssignment, TaskSource, TaskStatus } from "./types";
 
 export const TASK_TEXT_LIMIT = 6000;
 export const TASKS_PER_PROJECT_LIMIT = 300;
@@ -289,16 +289,39 @@ export function deleteTask(existing: BoardTask[], id: string): { ok: true; tasks
   return { ok: true, tasks };
 }
 
+/** Parse a usable assignment handle from the DELETE request body. */
+export function assignmentRefFromBody(body: unknown): AssignmentRef | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const record = body as { path?: unknown; conversationId?: unknown; panePid?: unknown };
+  const ref: AssignmentRef = {};
+  if (typeof record.path === "string" && record.path.trim()) ref.path = record.path.trim();
+  if (typeof record.conversationId === "string" && record.conversationId.trim()) {
+    ref.conversationId = record.conversationId.trim();
+  }
+  if (typeof record.panePid === "number" && Number.isInteger(record.panePid) && record.panePid > 0) {
+    ref.panePid = record.panePid;
+  }
+  return ref.conversationId != null || ref.path != null || ref.panePid != null ? ref : null;
+}
+
+function assignmentMatchesRef(assignment: TaskAssignment, ref: AssignmentRef): boolean {
+  if (ref.conversationId != null) return assignment.conversationId === ref.conversationId;
+  if (ref.path != null) return assignment.path === ref.path;
+  if (ref.panePid != null) return assignment.panePid === ref.panePid;
+  return false;
+}
+
 /**
- * Detaches one assignment from a task by its target path — the undo for a
- * wrong handoff. Idempotent: a path that is not assigned leaves the task
- * untouched but still succeeds, so a double-click never 404s.
+ * Detach one assignment through its strongest available identity. A string
+ * keeps the original path-based interface. An unmatched handle succeeds and
+ * leaves the task object unchanged, which makes repeated recovery safe.
  */
-export function removeAssignment(existing: BoardTask[], id: string, path: string, now = isoNow()): TaskCommandResult {
+export function removeAssignment(existing: BoardTask[], id: string, handle: string | AssignmentRef, now = isoNow()): TaskCommandResult {
   const index = existing.findIndex((task) => task.id === id);
   if (index < 0) return { ok: false, error: "task not found", status: 404 };
+  const ref: AssignmentRef = typeof handle === "string" ? { path: handle } : handle;
   const task = existing[index]!;
-  const assignments = task.assignments.filter((assignment) => assignment.path !== path);
+  const assignments = task.assignments.filter((assignment) => !assignmentMatchesRef(assignment, ref));
   if (assignments.length === task.assignments.length) return { ok: true, tasks: existing, task };
   const updated: BoardTask = { ...task, assignments, updatedAt: now };
   const tasks = existing.slice();

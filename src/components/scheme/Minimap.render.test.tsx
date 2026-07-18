@@ -94,6 +94,25 @@ test("the minimap draws the current-work frame separately from the viewport", ()
   expect((html.match(/stroke="var\(--color-accent\)"/g) ?? []).length).toBe(1);
 });
 
+test("an expanded task dot follows the full rendered card height", () => {
+  const item = {
+    id: "expanded-task", project: "demo", status: "assigned", placement: "pinned",
+    text: Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n"),
+    pos: { x: 100, y: 120 }, assignments: [],
+    createdAt: "2026-07-18T00:00:00.000Z", updatedAt: "2026-07-18T00:00:00.000Z",
+  } as never;
+  const compact = renderToStaticMarkup(
+    <Minimap layout={emptyLayout} world={world} tasks={[item]} textExpandedIds={new Set()} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  const full = renderToStaticMarkup(
+    <Minimap layout={emptyLayout} world={world} tasks={[item]} textExpandedIds={new Set(["expanded-task"])} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  expect(full).not.toBe(compact);
+  const compactCy = Number(compact.match(/cy="([\d.]+)"/)?.[1]);
+  const fullCy = Number(full.match(/cy="([\d.]+)"/)?.[1]);
+  expect(fullCy).toBeGreaterThan(compactCy);
+});
+
 test("a direct review group's deck shows on the minimap like any managed deck (#325)", () => {
   const builder: FileEntry = {
     root: "claude-projects", name: "/builder", project: "demo", title: "Builder", engine: "claude",
