@@ -7,9 +7,11 @@ import { protectedReviewerNodes } from "@/components/scheme/workerCollapse";
 
 import {
   claimedReviewerDescendantPaths,
+  flowByImplementer,
   flowPresentation,
   foldClaimedReviewers,
   isActiveFlow,
+  resolveFlowMemberPaths,
   reviewerBindingTargetsForRound,
   reviewerFileForRound,
   reviewerFilesForRound,
@@ -73,6 +75,39 @@ function flow(overrides: Partial<Flow> & { implementerPath: string; reviewerPath
     ...overrides,
   };
 }
+
+describe("resolveFlowMemberPaths (durable members follow path rotation — #325/#353)", () => {
+  test("an implementer whose conversation migrated anchors its flow on the current generation", () => {
+    const files = [
+      entry({ path: "/impl-old", conversationId: "conversation-impl", migratedTo: "/impl-new" }),
+      entry({ path: "/impl-new", conversationId: "conversation-impl", predecessorPath: "/impl-old" }),
+    ];
+    const stale = flow({ implementerPath: "/impl-old", reviewerPath: "/reviewer", implementerConversationId: "conversation-impl" });
+    const resolved = resolveFlowMemberPaths([stale], files);
+    expect(resolved[0]!.implementerPath).toBe("/impl-new");
+    /* The deck keys off the implementer path — the successor node hosts it. */
+    expect(flowByImplementer(resolved).has("/impl-new")).toBe(true);
+  });
+
+  test("a rotated reviewer round points its raw path at the current generation", () => {
+    const files = [
+      entry({ path: "/rev-old", conversationId: "conversation-rev", migratedTo: "/rev-new" }),
+      entry({ path: "/rev-new", conversationId: "conversation-rev", predecessorPath: "/rev-old" }),
+    ];
+    const stale = flow({ implementerPath: "/impl", reviewerPath: "/rev-old" });
+    stale.rounds[0]!.reviewerConversationId = "conversation-rev";
+    const resolved = resolveFlowMemberPaths([stale], files);
+    expect(resolved[0]!.rounds[0]!.reviewerPath).toBe("/rev-new");
+  });
+
+  test("stable flows keep their identity", () => {
+    const stable = flow({ implementerPath: "/impl", reviewerPath: "/rev" });
+    const input = [stable];
+    const resolved = resolveFlowMemberPaths(input, [entry({ path: "/impl" }), entry({ path: "/rev" })]);
+    expect(resolved).toBe(input);
+    expect(resolved[0]).toBe(stable);
+  });
+});
 
 describe("reviewer folding", () => {
   test("resolves a resumed reviewer through its stable durable edge", () => {

@@ -24,6 +24,7 @@ import {
   stageAttempts,
   stageChipLabel,
   stageChipState,
+  stageDockCompact,
   stageHasEvidence,
   stageHasNavigableHistory,
   compactStageOpenTarget,
@@ -238,6 +239,12 @@ function StageChip({
   const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
   const canOpenPath = Boolean(attempt?.agentPath && (!renderablePaths || renderablePaths.has(attempt.agentPath)));
 
+  /* Mobile dock (#156): a stage with NO transcript evidence — nothing the
+     verdict sheet, history, or open-transcript could reveal — renders as a
+     glyph-only round chip so an empty/draft/terminal plan stays compact. A
+     configurable draft stage compacts too but keeps its tap → configuration. */
+  const dockCompact = mobile && stageDockCompact(pipeline, stage, attempt, flows, renderableFlows, renderablePaths, files);
+
   const previousTarget = previousStage ? targetFor(previousStage) : null;
   const previousConfigurable = previousStage ? stageConfigurable(previousStage) : false;
   const previousLabel = previousStage ? stageChipLabel(t, previousStage) : "";
@@ -286,6 +293,22 @@ function StageChip({
           </button>
         </span>
       ) : null}
+      {dockCompact ? (
+        <button
+          ref={stageButtonRef}
+          type="button"
+          data-stage-compact="true"
+          disabled={!canOpen}
+          onClick={openStage}
+          aria-expanded={configurable ? configurationOpen : undefined}
+          aria-label={t("pipelineStrip.compactChipAria", { label, state: chipState })}
+          className={`inline-flex h-11 w-11 items-center justify-center rounded-full text-label font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${pulse ? "animate-pulse" : ""}`}
+          style={{ backgroundColor: tone.soft, color: tone.color }}
+          title={title}
+        >
+          <span aria-hidden>{configurable ? <Settings2 className="h-3.5 w-3.5" /> : glyph || (stage.kind === "review-loop" ? "⟳" : "▸")}</span>
+        </button>
+      ) : (
       <span className={`inline-flex items-stretch rounded-control border ${terminalEvidence ? "border-border bg-sunken" : "border-transparent"}`}>
         <button
           ref={stageButtonRef}
@@ -340,6 +363,7 @@ function StageChip({
           </span>
         ) : null}
       </span>
+      )}
       {open && attempt ? (
         <AnchoredVerdict anchorRef={chipRef}>
           <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} flows={flows} files={files} availablePaths={renderablePaths} mobile={mobile} canOpenFlow={canOpenFlow} canOpenPath={canOpenPath} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
@@ -458,7 +482,14 @@ export function PipelineStrip({
       data-scheme-ui
       role="group"
       aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
-      className={`pointer-events-auto flex min-h-9 w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-surface border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-3"} ${mobile ? "max-w-full overflow-hidden [&_button]:min-h-11 [&_button]:min-w-11" : ""} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-border"}`}
+      className={`pointer-events-auto flex min-h-9 w-full items-center gap-x-2.5 gap-y-1 rounded-surface border bg-card/95 py-1 shadow-1 ${
+        /* Board mounts (#353/#156 "task links covering chats"): the compact
+           strip hovers inside the group's 44px headroom band / above a node's
+           pane, anchored by its top — any wrapped second row paints OVER the
+           chat below it. Single row + internal horizontal scroll keeps the
+           height bounded; every popover already escapes through a body portal. */
+        compact ? "no-scrollbar flex-nowrap overflow-x-auto px-2.5" : "flex-wrap px-3"
+      } ${mobile ? "max-w-full overflow-hidden [&_button]:min-h-11 [&_button]:min-w-11" : ""} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-border"}`}
     >
       <span className="flex min-w-0 max-w-full shrink-0 items-center gap-2 sm:max-w-[46%]">
         <span
@@ -540,7 +571,12 @@ export function PipelineStrip({
           })}
         </span>
       ) : null}
-      <span className="flex shrink-0 flex-wrap items-center gap-1.5">
+      {/* Mobile (#156 AC6): the action row must SHRINK to the rail width so its
+          own flex-wrap engages — `shrink-0` keeps it max-content wide and the
+          rail's overflow clip cuts the trailing buttons off-screen. Desktop
+          keeps shrink-0: full-size buttons stay reachable by the compact
+          scroller instead of shrinking. */}
+      <span className={`flex flex-wrap items-center gap-1.5 ${mobile ? "min-w-0 shrink" : "shrink-0"}`}>
         {error ? <span className="max-w-[220px] truncate text-caption font-semibold text-danger" title={error}>{error}</span> : null}
         {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted" aria-hidden /> : null}
         {draft ? (

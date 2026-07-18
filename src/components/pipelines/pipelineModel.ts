@@ -1,5 +1,6 @@
 import { roleNameById } from "@/components/builderCopy";
 import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
+import { currentMemberPath } from "@/lib/accounts/identity";
 import { applyPipelineSnapshot, revertPipelineSnapshot } from "@/hooks/useFiles";
 import { getLocale, translate, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -76,6 +77,41 @@ export function canSourcePipeline(file: FileEntry): boolean {
     reveal the always-available detailed surface (#93 §2.2). */
 export function pipelineStripDomId(pipelineId: string): string {
   return `pipeline-strip-${pipelineId}`;
+}
+
+/**
+ * Canonicalizes every stage attempt's `agentPath` to the transcript that
+ * currently hosts its conversation (issues #325/#353). Durable pipeline records
+ * freeze the launch-time path; an account migration rotates the member onto a
+ * new transcript, and every projection that string-matches the frozen path —
+ * group halos, rails, compact claiming, worker stacks, strip mounting, open
+ * actions — silently drops the live generation, which then renders as a
+ * detached standalone card while the pipeline group under-counts its members.
+ * Applying this at the dashboard's data boundary repairs all of them at once.
+ * Identity-stable: untouched records (the common case) return the same
+ * references, so memoized consumers don't churn.
+ */
+export function resolvePipelineMemberPaths(pipelines: Pipeline[], files: readonly FileEntry[]): Pipeline[] {
+  let changedAny = false;
+  const out = pipelines.map((pipeline) => {
+    let changed = false;
+    const runs = pipeline.runs.map((run) => {
+      let runChanged = false;
+      const attempts = run.attempts.map((attempt) => {
+        const path = currentMemberPath(attempt.agentPath, attempt.conversationId, files);
+        if (path === attempt.agentPath) return attempt;
+        runChanged = true;
+        return { ...attempt, agentPath: path };
+      });
+      if (!runChanged) return run;
+      changed = true;
+      return { ...run, attempts };
+    });
+    if (!changed) return pipeline;
+    changedAny = true;
+    return { ...pipeline, runs };
+  });
+  return changedAny ? out : pipelines;
 }
 
 export function pipelinesForProject(pipelines: Pipeline[], project: string, files: FileEntry[]): Pipeline[] {

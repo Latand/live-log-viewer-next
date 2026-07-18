@@ -247,3 +247,35 @@ test("every linked task keeps a direct control inside the bounded rail (#353)", 
   expect(html).toContain("overflow-x-auto");
   expect(html).not.toContain("+2");
 });
+
+test("the compact board strip is one bounded scrolling row — it can never wrap over the pane below (#353)", () => {
+  const linkedTasks = Array.from({ length: 4 }, (_, index) => ({
+    id: `task-${index + 1}`, project: "proj", status: "assigned" as const, text: `Linked ${index + 1}`,
+    placement: "unplaced" as const, assignments: [], createdAt: "2026-07-18T00:00:00Z", updatedAt: "2026-07-18T00:00:00Z",
+  }));
+  const parked = pipeline({ state: "needs_decision", cursor: { stageId: "build", state: "running" } });
+  const compact = renderToStaticMarkup(<PipelineStrip pipeline={parked} linkedTasks={linkedTasks} compact onOpenTask={() => undefined} />);
+  /* The board mounts anchor the strip's TOP inside the group's 44px headroom /
+     above a node's pane; a wrapped second row paints over the chat. The compact
+     root therefore never wraps — it scrolls internally instead. */
+  const root = compact.slice(compact.indexOf("Pipeline "), compact.indexOf("<span"));
+  expect(root).toContain("flex-nowrap");
+  expect(root).toContain("overflow-x-auto");
+  expect(root).not.toContain("flex-wrap");
+  /* Everything stays reachable inside the scroller: tasks + full controls. */
+  for (let index = 1; index <= 4; index += 1) expect(compact).toContain(`Open linked task Linked ${index}`);
+  expect(compact).toContain("Retry stage");
+  /* The standalone (builder-panel) strip keeps its wrapping layout. */
+  const standalone = renderToStaticMarkup(<PipelineStrip pipeline={parked} linkedTasks={linkedTasks} onOpenTask={() => undefined} />);
+  expect(standalone.slice(standalone.indexOf("Pipeline "), standalone.indexOf("<span"))).toContain("flex-wrap");
+});
+
+test("the mobile action row shrinks and wraps inside the rail — no button is clipped off-screen (#156 AC6)", () => {
+  const parked = pipeline({ state: "needs_decision", cursor: { stageId: "build", state: "running" } });
+  const mobile = renderToStaticMarkup(<PipelineStrip mobile pipeline={parked} />);
+  /* `shrink-0` keeps the row max-content wide and the rail's overflow clip cuts
+     the trailing buttons (Close pipeline) off-screen at 390px. */
+  expect(mobile).toContain('class="flex flex-wrap items-center gap-1.5 min-w-0 shrink"');
+  const desktop = renderToStaticMarkup(<PipelineStrip pipeline={parked} />);
+  expect(desktop).toContain('class="flex flex-wrap items-center gap-1.5 shrink-0"');
+});

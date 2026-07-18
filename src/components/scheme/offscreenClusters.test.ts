@@ -46,3 +46,37 @@ describe("offscreen cluster chips", () => {
     expect(reverse).toEqual(forward);
   });
 });
+
+describe("pane-overlap folding (issue #292: navigation chips never cover chat content)", () => {
+  test("a chip whose pill would paint over a conversation pane folds into the edge overflow", () => {
+    /* A focused pane fills the whole viewport — production shape from the
+       rejection screenshot: left-edge task chips floated over the transcript. */
+    const fullPane = { x: 0, y: 0, w: 1_000, h: 700 };
+    const chips = offscreenClusterChips([cluster("left-task", -700, 300)], cam, vp, 4, [fullPane]);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["left-task"]);
+  });
+
+  test("a pane elsewhere on screen leaves a non-overlapping chip visible", () => {
+    /* Pane in the right half; the left-edge chip band stays free. */
+    const rightPane = { x: 500, y: 0, w: 500, h: 700 };
+    const chips = offscreenClusterChips([cluster("left-task", -700, 300)], cam, vp, 4, [rightPane]);
+    expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["left-task"]);
+    expect(chips.overflow).toHaveLength(0);
+  });
+
+  test("folding respects the camera projection of the obstacle", () => {
+    /* World-space pane at the viewport's left edge only after the camera pans. */
+    const pane = { x: 2_000, y: 0, w: 500, h: 700 };
+    const panned = { x: -2_000, y: 0, z: 1 };
+    const chips = offscreenClusterChips(
+      [cluster("left-task", 1_000, 300)],
+      panned,
+      vp,
+      4,
+      [{ x: pane.x * panned.z + panned.x, y: pane.y, w: pane.w, h: pane.h }],
+    );
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow).toHaveLength(1);
+  });
+});

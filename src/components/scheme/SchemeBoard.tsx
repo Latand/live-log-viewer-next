@@ -675,6 +675,20 @@ export function SchemeBoard({
     onFit: announceFit,
   });
 
+  /* Screen-space boxes of every rendered conversation surface (panes + review
+     decks): an edge-navigation chip that would paint over one folds into the
+     «+N» disclosure instead of covering chat content (issue #292 rejection). */
+  const chipObstacles = useMemo(
+    () =>
+      [...layout.nodes, ...layout.decks].map((surface) => ({
+        x: surface.x * cam.z + cam.x,
+        y: surface.y * cam.z + cam.y,
+        w: surface.w * cam.z,
+        h: surface.h * cam.z,
+      })),
+    [layout, cam],
+  );
+
   /* The fit functions change identity on every poll-driven relayout (useFiles
      hands a fresh `files` array ~10s, re-memoizing the layout), so the framing
      effect reads them through a ref and re-applies only on a real mapFrame
@@ -1093,6 +1107,7 @@ export function SchemeBoard({
         cam={cam}
         vp={vp}
         hidden={mapMode || Boolean(marquee) || panning}
+        obstacles={chipObstacles}
         onFit={fitRect}
       />
 

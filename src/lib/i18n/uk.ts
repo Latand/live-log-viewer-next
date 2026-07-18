@@ -927,6 +927,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineStrip.roundShort": "Р{n}",
   "pipelineStrip.attemptSuffix": "×{n}",
   "pipelineStrip.chipAria": "Етап {label}: {state}",
+  "pipelineStrip.compactChipAria": "{label}, {state}",
   "pipelineStrip.stageOf": "етап {k}/{n}",
 
   // плейсхолдери етапів пайплайна + вибір шаблону (#196)
@@ -1014,6 +1015,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineMobile.prevStage": "Попередній етап {label}, стан: {state}",
   "pipelineMobile.nextStage": "Наступний етап {label}, стан: {state}",
   "pipelineMobile.openVerdict": "Відкрити вердикт для {label}, стан: {state}",
+  "pipelineMobile.expandDock": "Розгорнути пайплайн {task}",
+  "pipelineMobile.collapseDock": "Згорнути пайплайн {task}",
 
   "wfDraft.paneAria": "Чернетка нового воркфлоу",
   "wfDraft.notStarted": "воркфлоу ще не запущений",
@@ -1318,6 +1321,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "tasks.attachCount": { one: "{count} зображення", other: "{count} зображень" },
   "tasks.draftDiscarded": "чернетку відкинуто",
   "tasks.editAria": "Текст задачі",
+  "tasks.expandText": "Розгорнути",
+  "tasks.collapseText": "Згорнути",
   "tasks.spawning": "запускається…",
   "tasks.deadChip": "розмови вже немає у списку",
   "tasks.source": "джерело",

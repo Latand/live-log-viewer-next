@@ -16,6 +16,8 @@ import {
   draftStagesToInput,
   normalizeStageOrder,
   compactPipelineArtifactPaths,
+  latestAttempt,
+  resolvePipelineMemberPaths,
   stageDockCompact,
   compactStageOpenTarget,
   excludeCompactPipelineArtifacts,
@@ -581,6 +583,53 @@ describe("stageHasEvidence (running attempts have no verdict sheet)", () => {
   });
   test("no attempt is no evidence", () => {
     expect(stageHasEvidence(p({}), runStage, null)).toBe(false);
+  });
+});
+
+describe("resolvePipelineMemberPaths (durable members follow path rotation — #325/#353)", () => {
+  const build = stage("build");
+  const fileAt = (path: string, over: Partial<FileEntry> = {}): FileEntry => ({ path, ...over }) as FileEntry;
+  const rotated = [
+    fileAt("/old.jsonl", { conversationId: "c1", migratedTo: "/new.jsonl" }),
+    fileAt("/new.jsonl", { conversationId: "c1", predecessorPath: "/old.jsonl" }),
+  ];
+  const staleAttempt = { n: 1, state: "passed", conversationId: "c1", agentPath: "/old.jsonl", flowId: null, verdict: null, error: null } as never;
+
+  test("an attempt whose conversation migrated resolves to the current generation path", () => {
+    const stale = pipeline({ stages: [build], runs: [{ stageId: build.id, attempts: [staleAttempt] }] });
+    const [resolved] = resolvePipelineMemberPaths([stale], rotated);
+    expect(latestAttempt(resolved!, build.id)?.agentPath).toBe("/new.jsonl");
+  });
+
+  test("a recorded path that became an archived predecessor redirects without a stored conversation id", () => {
+    const idless = { n: 1, state: "passed", conversationId: null, agentPath: "/old.jsonl", flowId: null, verdict: null, error: null } as never;
+    const stale = pipeline({ stages: [build], runs: [{ stageId: build.id, attempts: [idless] }] });
+    const [resolved] = resolvePipelineMemberPaths([stale], rotated);
+    expect(latestAttempt(resolved!, build.id)?.agentPath).toBe("/new.jsonl");
+  });
+
+  test("a conversation whose current generation left the scan keeps the recorded path", () => {
+    const stale = pipeline({ stages: [build], runs: [{ stageId: build.id, attempts: [staleAttempt] }] });
+    const [resolved] = resolvePipelineMemberPaths([stale], []);
+    expect(latestAttempt(resolved!, build.id)?.agentPath).toBe("/old.jsonl");
+  });
+
+  test("records that need no rewrite keep their identity", () => {
+    const current = { n: 1, state: "passed", conversationId: "c1", agentPath: "/same.jsonl", flowId: null, verdict: null, error: null } as never;
+    const stable = pipeline({ stages: [build], runs: [{ stageId: build.id, attempts: [current] }] });
+    const out = resolvePipelineMemberPaths([stable], [fileAt("/same.jsonl", { conversationId: "c1" })]);
+    expect(out[0]).toBe(stable);
+  });
+
+  test("claiming follows the rotation: the successor transcript is compact evidence, never a standalone card (#353)", () => {
+    const stale = pipeline({
+      stages: [build],
+      state: "completed",
+      runs: [{ stageId: build.id, attempts: [staleAttempt] }],
+    });
+    const resolved = resolvePipelineMemberPaths([stale], rotated);
+    const compact = compactPipelineArtifactPaths(resolved, [], rotated);
+    expect(compact.has("/new.jsonl")).toBe(true);
   });
 });
 
