@@ -1,7 +1,8 @@
 import path from "node:path";
 
 import type { RegistryFile, SpawnReceipt } from "./registry";
-import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
+import { projectRootForCwd } from "@/lib/scanner/describe";
+import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
 
 const TERMINAL_SPAWN_RECENT_MS = 15 * 60 * 1_000;
@@ -78,7 +79,18 @@ export function preallocatedStructuredSpawnCards(
   const scannedPaths = new Set(files.map((file) => file.path));
   return newestUnscannedReceipts(files, snapshot).map((receipt) => {
     const spawn = cardState(snapshot, receipt);
-    const project = projectInfoFromCwd(receipt.cwd);
+    /* Pre-admission cards honor the explicit operator project the moment the
+       receipt exists; once admitted, the conversation record is authoritative. */
+    const projectOwnership = snapshot.conversations[receipt.conversationId]?.projectOwnership
+      ?? (receipt.explicitProject
+        ? { project: receipt.explicitProject, source: "operator" as const, setAt: receipt.createdAt, operationId: receipt.launchId }
+        : null);
+    const attribution = resolveProjectAttribution({
+      projectOwnership,
+      cwd: receipt.cwd,
+      launchProfileProject: receipt.launchProfile.project,
+      fallbackProject: path.basename(receipt.cwd),
+    });
     const edge = snapshot.lineageEdges[receipt.conversationId];
     const parentConversationId = edge?.parentConversationId ?? receipt.parentConversationId;
     const parentPath = parentConversationId
@@ -89,10 +101,11 @@ export function preallocatedStructuredSpawnCards(
       path: `spawn:${receipt.launchId}`,
       root: receipt.engine === "codex" ? "codex-sessions" : "claude-projects",
       name: `spawn:${receipt.launchId}`,
-      project: project?.project ?? path.basename(receipt.cwd),
+      project: attribution.project ?? path.basename(receipt.cwd),
+      ...(projectOwnership ? { projectOwnership } : {}),
       cwd: receipt.cwd,
       projectRoot: projectRootForCwd(receipt.cwd) ?? null,
-      ...(project?.worktree ? { worktree: project.worktree } : {}),
+      ...(attribution.worktree ? { worktree: attribution.worktree } : {}),
       title: receipt.launchProfile.title ?? (receipt.engine === "codex" ? "Codex" : "Claude"),
       engine: receipt.engine,
       kind: "session",
