@@ -1,7 +1,23 @@
 import { describe, expect, test } from "bun:test";
 
 import type { FileEntry } from "@/lib/types";
-import { humanizeDuration, recencyTurnInfo, turnDurationSeconds, workedCaption } from "./turnDuration";
+import { clockDuration, humanizeDuration, recencyTurnInfo, turnDurationSeconds, workedCaption } from "./turnDuration";
+
+describe("clockDuration", () => {
+  test("minutes and padded seconds", () => {
+    expect(clockDuration(0)).toBe("0:00");
+    expect(clockDuration(7)).toBe("0:07");
+    expect(clockDuration(4 * 60 + 32)).toBe("4:32");
+  });
+  test("hours pad both lower fields", () => {
+    expect(clockDuration(3600 + 4 * 60 + 9)).toBe("1:04:09");
+    expect(clockDuration(2 * 3600)).toBe("2:00:00");
+  });
+  test("clamps negatives and fractions", () => {
+    expect(clockDuration(-5)).toBe("0:00");
+    expect(clockDuration(59.9)).toBe("0:59");
+  });
+});
 
 describe("humanizeDuration", () => {
   test("seconds only", () => {

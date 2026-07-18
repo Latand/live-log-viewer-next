@@ -45,6 +45,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "turn.worked": "Працював {d}",
   "turn.running": "працює {d}",
   "turn.lastRun": "останній прогін: {d}",
+  "turn.timer": "час роботи",
 
   "kind.session": "сесія",
   "kind.subagent": "субагент",
