@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { applyAssignmentPatches, removeAssignment, type AssignmentPatch } from "@/lib/tasks/commands";
+import { applyAssignmentPatches, assignmentRefFromBody, removeAssignment, type AssignmentPatch } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
 import { mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -60,12 +60,12 @@ export async function DELETE(req: NextRequest, ctx: TaskRouteContext): Promise<N
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
-  const path = pathFromBody(body);
-  if (!path) return NextResponse.json({ error: "path is required" }, { status: 400 });
+  const ref = assignmentRefFromBody(body);
+  if (!ref) return NextResponse.json({ error: "launchId, path, conversationId or panePid is required" }, { status: 400 });
 
   const { id } = await ctx.params;
   const result = mutateTasks((tasks) => {
-    const outcome = removeAssignment(tasks, id, path);
+    const outcome = removeAssignment(tasks, id, ref);
     return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });

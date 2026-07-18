@@ -18,9 +18,13 @@ export function isPlacedTask(task: BoardTask): task is PlacedTask {
 
 /* Task card geometry in world pixels (docs/design/sticky-notes.md). */
 export const TASK_W = 260;
-/** Compact body height cap; past it the preview clamps with a fade and an
-    in-card Expand control (issue #292 — never an internal scrollbar). */
-export const TASK_BODY_MAX = 340;
+/** Collapsed text rows rendered by TaskCard's literal Tailwind clamp classes. */
+export const TASK_TITLE_CLAMP = 2;
+export const TASK_PREVIEW_CLAMP = 3;
+/** Disclosure control: h-6 plus the card's 8px bottom padding. */
+export const TASK_DISCLOSURE_H = 32;
+/** Reserved footprint for the hover/edit action row below the visual card. */
+export const TASK_ACTION_ROW_H = 36;
 const TASK_MIN_H = 64;
 /* Card body geometry: 12.5px text on 17px lines inside 12px (px-3) horizontal
    padding, so the wrap width is TASK_W − 24 = 236px. This estimate must be an
@@ -28,7 +32,7 @@ const TASK_MIN_H = 64;
    past its computed box and overlap its neighbour (issue #17) — so line count is
    figured against the widest glyphs a proportional bold font produces (W/M run
    ~13px). Real text of the same length wraps to fewer lines, so the estimate is
-   conservative, and the body is capped either way. */
+   conservative for compact clamps and full-text expansion. */
 const STRIP_H = 6;
 const PAD_Y = 20;
 const LINE_H = 17;
@@ -56,12 +60,6 @@ const CHARS_PER_LINE = Math.max(1, Math.floor(BODY_CONTENT_W / MAX_GLYPH_W));
    bound for any row count. */
 const CHIP_ROW_H = 28;
 const CHIP_PAD = 8;
-/* The compact body's own vertical padding (py-2 → 8px top + 8px bottom). The
-   preview clamp is a border-box max-height, so this padding lives INSIDE
-   TASK_BODY_MAX and the text itself gets only TASK_BODY_MAX − 16px: exactly 19
-   hard lines (19 × 17 + 16 = 339) fit the plain clamp, while a 20th line
-   crosses it and must expose the disclosure. */
-const BODY_PAD_Y = 16;
 
 /**
  * Worst-case rendered row count for one hard line under `whitespace-pre-wrap` +
@@ -105,57 +103,51 @@ function hardLineRows(line: string): number {
   return rows;
 }
 
-/* Worst-case rendered row count for the whole body text. Split on every hard
-   break `whitespace-pre-wrap` renders — CRLF, a lone CR, or a lone LF — so a
-   string of standalone `\r`s can't hide extra rendered rows inside one counted
-   line and undercount the height. */
-function taskTextRows(text: string): number {
-  let lines = 0;
-  for (const raw of text.split(/\r\n?|\n/)) {
-    lines += hardLineRows(raw);
-  }
-  return lines;
+/* Worst-case row counts split on every hard break `whitespace-pre-wrap`
+   renders — CRLF, a lone CR, or a lone LF — so a string of standalone `\r`s
+   can't hide extra rendered rows inside one counted line and undercount the
+   height. */
+/** Upper-bound row counts for the title and remaining body text. */
+function taskTextRows(text: string): { title: number; rest: number } {
+  const lines = text.split(/\r\n?|\n/);
+  const title = hardLineRows(lines[0] ?? "");
+  let rest = 0;
+  for (let index = 1; index < lines.length; index += 1) rest += hardLineRows(lines[index]!);
+  return { title, rest };
 }
 
-/** Height of the in-card Expand/Collapse disclosure row (h-6). A compact
-    expandable card reserves this INSIDE the body cap, so its rendered height
-    never exceeds the {@link taskCardHeight} estimate. */
-export const TASK_DISCLOSURE_H = 24;
-
-/**
- * Whether the card's body text can outgrow the compact preview cap — the
- * disclosure gate (issue #292: compact cards clamp with a fade + Expand
- * control; they never scroll internally). The clamp is a border-box
- * max-height, so the body's 16px vertical padding is spent inside it and the
- * gate compares padded content height — text alone against TASK_BODY_MAX let
- * an exactly-20-hard-line card (340px of text + 16px padding) clip its last
- * line with no fade and no Expand. Uses the same upper-bound wrap simulation
- * as the height estimate, so a genuinely overflowing card is always
- * expandable; a borderline card may offer Expand for text that already fits,
- * which is harmless.
- */
+/** Whether compact presentation hides at least one estimated text row. */
 export function taskCardExpandable(task: Pick<BoardTask, "text">): boolean {
-  return taskTextRows(task.text) * LINE_H + BODY_PAD_Y > TASK_BODY_MAX;
+  const rows = taskTextRows(task.text);
+  return rows.title > TASK_TITLE_CLAMP || rows.rest > TASK_PREVIEW_CLAMP;
 }
 
 /**
- * Estimated on-board height of a task card: status strip + wrapped text
- * (capped at the compact preview threshold) + one chip row per assignment.
- * A conservative upper bound of the rendered card — the wrap simulation counts
- * rows against upper-bound glyph widths and every hard break — so the returned
- * box always contains the rendered card and the collision pass never lets two
- * cards overlap on screen.
+ * Estimated visual height of a task card. Compact cards count the same title
+ * and preview rows as TaskCard's line clamps. Expanded cards count the complete
+ * durable text and contain no internal scrolling. The wrap model remains a
+ * conservative upper bound for placement and camera geometry.
  */
-export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "source">): number {
-  const bodyH = Math.min(taskTextRows(task.text) * LINE_H, TASK_BODY_MAX) + PAD_Y;
+export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "source">, expanded = false): number {
+  const rows = taskTextRows(task.text);
+  const expandable = rows.title > TASK_TITLE_CLAMP || rows.rest > TASK_PREVIEW_CLAMP;
+  const lines = expanded && expandable
+    ? rows.title + rows.rest
+    : Math.min(rows.title, TASK_TITLE_CLAMP) + Math.min(rows.rest, TASK_PREVIEW_CLAMP);
+  const bodyH = lines * LINE_H + PAD_Y;
   const chipRows = task.assignments.length + (task.source ? 1 : 0);
   const chipsH = chipRows ? chipRows * CHIP_ROW_H + CHIP_PAD : 0;
-  return Math.max(TASK_MIN_H, STRIP_H + bodyH + chipsH);
+  return Math.max(TASK_MIN_H, STRIP_H + bodyH + chipsH + (expandable ? TASK_DISCLOSURE_H : 0));
 }
 
-/** World-space box of a task card, derived from its owned position. */
-export function taskRect(task: Pick<PlacedTask, "pos" | "text" | "assignments" | "source">): SchemeRect {
-  return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task) };
+/** Full DOM footprint used by collision, edges, navigation, and world bounds. */
+export function taskBoxHeight(task: Pick<BoardTask, "text" | "assignments" | "source">, expanded = false): number {
+  return taskCardHeight(task, expanded) + TASK_ACTION_ROW_H;
+}
+
+/** World-space box of a task card, including its action-row reservation. */
+export function taskRect(task: Pick<PlacedTask, "pos" | "text" | "assignments" | "source">, expanded = false): SchemeRect {
+  return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskBoxHeight(task, expanded) };
 }
 
 export function rectCenter(rect: SchemeRect): { x: number; y: number } {
@@ -292,13 +284,27 @@ export interface TaskEdgeGeom {
 
 /**
  * Edge geometry from every task card to each resolvable assignment target.
- * Spawning assignments without a transcript and dead assignments (path
- * absent from the index) draw no edge — they stay chips on the card.
+ * An assignment resolves through its durable conversation id first — the
+ * transcript may have migrated to a newer path since the assignment was
+ * recorded, and the edge must land on the *current* generation, not the stale
+ * `assignment.path` (issue #292 fresh review) — falling back to the recorded
+ * path when the conversation is not in `files`. Spawning assignments without
+ * any resolvable transcript and dead assignments (resolved path absent from
+ * the index) draw no edge — they stay chips on the card.
  */
-export function buildTaskEdges(tasks: readonly PlacedTask[], index: ReadonlyMap<string, SchemeRect>): TaskEdgeGeom[] {
+export function buildTaskEdges(
+  tasks: readonly PlacedTask[],
+  index: ReadonlyMap<string, SchemeRect>,
+  expandedIds?: ReadonlySet<string>,
+  files: ReadonlyArray<Pick<FileEntry, "path" | "conversationId">> = [],
+): TaskEdgeGeom[] {
+  const pathByConversationId = new Map<string, string>();
+  for (const file of files) {
+    if (file.conversationId) pathByConversationId.set(file.conversationId, file.path);
+  }
   const edges: TaskEdgeGeom[] = [];
   for (const task of tasks) {
-    const card = taskRect(task);
+    const card = taskRect(task, expandedIds?.has(task.id) ?? false);
     const cardCenter = rectCenter(card);
     if (task.source) {
       const target = index.get(task.source.path);
@@ -320,17 +326,25 @@ export function buildTaskEdges(tasks: readonly PlacedTask[], index: ReadonlyMap<
         });
       }
     }
+    /* One edge per resolved transcript: a migration can collapse a stale-path
+       assignment and a current one onto the same conversation, and duplicate
+       keys must never reach the render layer. */
+    const seenPaths = new Set<string>();
     for (const assignment of task.assignments) {
-      if (!assignment.path) continue;
-      const target = index.get(assignment.path);
+      const path =
+        (assignment.conversationId ? pathByConversationId.get(assignment.conversationId) : undefined) ??
+        assignment.path;
+      if (!path || seenPaths.has(path)) continue;
+      const target = index.get(path);
       if (!target) continue;
+      seenPaths.add(path);
       const from = rectAnchor(card, rectCenter(target));
       const to = rectAnchor(target, cardCenter);
       edges.push({
-        key: task.id + "::" + assignment.path,
+        key: task.id + "::" + path,
         taskId: task.id,
         relation: "assignment",
-        path: assignment.path,
+        path,
         x1: from.x,
         y1: from.y,
         x2: to.x,

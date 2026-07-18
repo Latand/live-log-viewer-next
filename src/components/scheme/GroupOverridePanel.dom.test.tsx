@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
@@ -37,7 +37,10 @@ afterEach(() => {
   document.body.replaceChildren();
   calls.length = 0;
 });
-process.on("exit", () => { globalThis.fetch = realFetch; });
+/* Restore fetch as soon as THIS file finishes: a process-exit restore left the
+   answer-everything mock live for every later test file in the run, poisoning
+   any component that fetches real JSON shapes (SpeakButton's backend info). */
+afterAll(() => { globalThis.fetch = realFetch; });
 
 function mount(node: React.ReactElement): { host: HTMLElement; root: Root } {
   const host = document.createElement("div");

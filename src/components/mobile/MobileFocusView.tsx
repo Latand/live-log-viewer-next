@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Loader2, X } from "@/components/icons";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
+import { taskRelationsByPath } from "@/components/tasks/taskRelations";
 import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -253,6 +254,9 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
     () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, sheetTasks ?? tasks, flows, files)] as const)),
     [pipelines, sheetTasks, tasks, flows, files],
   );
+  /* Conversation-side relation strip (issue #292): the focused phone pane lists
+     its assigned/captured tasks; a tap opens that task in the sheet. */
+  const relatedTasksByPath = useMemo(() => taskRelationsByPath(files, sheetTasks ?? tasks), [files, sheetTasks, tasks]);
 
   const openStagePath = useCallback(
     (path: string) => {
@@ -416,6 +420,8 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
               showFavorite
               onClose={() => onClose(activeNode.file.path)}
               dragHandle={swipeHandle}
+              relatedTasks={relatedTasksByPath.get(activeNode.file.path)}
+              onOpenTask={openPipelineTask}
             />
           </div>
         ) : activeDeck ? (

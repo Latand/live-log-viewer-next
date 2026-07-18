@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
-import { applyAssignmentPatches, createTask, deleteTask, mergeAssignments, patchTask, pinnedAccountId, TASKS_PER_PROJECT_LIMIT } from "./commands";
+import { applyAssignmentPatches, assignmentRefFromBody, createTask, deleteTask, mergeAssignments, patchTask, pinnedAccountId, removeAssignment, TASKS_PER_PROJECT_LIMIT } from "./commands";
 import { firstLineTitle } from "./helpers";
 import { reconcileTasks } from "./reconcile";
 import { assembleSendResults } from "./send";
@@ -143,6 +143,103 @@ describe("task store", () => {
     const final = loadTasks(filePath);
     expect(final.find((item) => item.id === "task-1")!.status).toBe("done");
     expect(final.find((item) => item.id === "task-2")!.text).toBe("edited by B");
+  });
+});
+
+describe("stable assignment detach", () => {
+  const assignedTask = () => task({
+    assignments: [
+      { path: "/current.jsonl", conversationId: "conversation-a", panePid: 11, state: "delivered", error: null, at: "old" },
+      { path: "/stale.jsonl", conversationId: "conversation-b", panePid: 42, state: "delivered", error: null, at: "old" },
+      { path: null, conversationId: null, panePid: 77, state: "spawning", error: null, at: "old" },
+    ],
+  });
+
+  test("a string handle preserves path detach", () => {
+    const result = removeAssignment([assignedTask()], "task-1", "/current.jsonl", "now");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.task.assignments.map((item) => item.path)).toEqual(["/stale.jsonl", null]);
+  });
+
+  test("conversation identity has precedence over stale path and pane values", () => {
+    const result = removeAssignment([assignedTask()], "task-1", {
+      conversationId: "conversation-a",
+      path: "/stale.jsonl",
+      panePid: 42,
+    }, "now");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.task.assignments.map((item) => item.conversationId)).toEqual(["conversation-b", null]);
+  });
+
+  test("a pathless launch detaches by pane pid", () => {
+    const result = removeAssignment([assignedTask()], "task-1", { panePid: 77 }, "now");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.task.assignments.some((item) => item.panePid === 77)).toBe(false);
+  });
+
+  test("an unmatched handle is an idempotent success", () => {
+    const before = assignedTask();
+    const result = removeAssignment([before], "task-1", { panePid: 999 }, "now");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.task).toBe(before);
+  });
+
+  test("request-body parsing keeps usable fields and rejects empty input", () => {
+    expect(assignmentRefFromBody({ path: " /a ", conversationId: " conversation-a ", panePid: 7 })).toEqual({
+      path: "/a",
+      conversationId: "conversation-a",
+      panePid: 7,
+    });
+    expect(assignmentRefFromBody({ path: " ", conversationId: "", panePid: Number.NaN })).toBeNull();
+    expect(assignmentRefFromBody([])).toBeNull();
+  });
+
+  test("request-body parsing accepts a launch id alone", () => {
+    expect(assignmentRefFromBody({ launchId: " launch-9 " })).toEqual({ launchId: "launch-9" });
+    expect(assignmentRefFromBody({ launchId: "  " })).toBeNull();
+  });
+
+  test("a pathless spawning assignment detaches through its launch id", () => {
+    /* No path, no conversation id, no pane pid: the launch id minted at spawn
+       time is the only handle this assignment ever had (issue #292 fresh
+       review) — without it the chip's detach control matched nothing. */
+    const spawning = task({
+      assignments: [
+        { launchId: "launch-9", path: null, conversationId: null, panePid: null, state: "spawning", error: null, at: "old" },
+        { path: "/current.jsonl", conversationId: "conversation-a", panePid: 11, state: "delivered", error: null, at: "old" },
+      ],
+    });
+    const result = removeAssignment(
+      [spawning],
+      "task-1",
+      { launchId: "launch-9", path: null, conversationId: null, panePid: null },
+      "now",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.task.assignments.map((item) => item.path)).toEqual(["/current.jsonl"]);
+  });
+
+  test("launch identity outranks every other handle", () => {
+    const twins = task({
+      assignments: [
+        { launchId: "launch-a", path: "/shared.jsonl", conversationId: "conversation-a", panePid: 11, state: "delivered", error: null, at: "old" },
+        { launchId: "launch-b", path: "/shared.jsonl", conversationId: "conversation-a", panePid: 11, state: "spawning", error: null, at: "old" },
+      ],
+    });
+    const result = removeAssignment(
+      [twins],
+      "task-1",
+      { launchId: "launch-b", path: "/shared.jsonl", conversationId: "conversation-a", panePid: 11 },
+      "now",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.task.assignments.map((item) => item.launchId)).toEqual(["launch-a"]);
   });
 });
 

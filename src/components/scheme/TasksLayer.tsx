@@ -15,7 +15,7 @@ import { TASK_W, taskCardHeight, type PlacedTask } from "./taskGeometry";
 
 /** Static tinted mini-card for the phone's full-screen map: a tap resolves
     through the camera's geometry pick, so the card itself stays inert. */
-function LiteTaskCard({ task }: { task: PlacedTask }) {
+function LiteTaskCard({ task, expanded }: { task: PlacedTask; expanded: boolean }) {
   const { t } = useLocale();
   const tone = TASK_TONES[task.status];
   return (
@@ -27,13 +27,15 @@ function LiteTaskCard({ task }: { task: PlacedTask }) {
       style={{
         transform: `translate(${task.pos.x}px, ${task.pos.y}px)`,
         width: TASK_W,
-        height: taskCardHeight(task),
+        height: taskCardHeight(task, expanded),
         backgroundColor: tone.soft,
       }}
     >
       <div aria-hidden className="h-1 w-full" style={{ backgroundColor: tone.color }} />
       <div className="px-3 py-2 text-[12.5px] font-bold leading-[17px] text-primary">
-        <span className="line-clamp-4 whitespace-pre-wrap break-words">{taskTitle(task.text) || t("tasks.untitled")}</span>
+        <span className={`${expanded ? "" : "line-clamp-4"} whitespace-pre-wrap break-words`}>
+          {expanded ? task.text : (taskTitle(task.text) || t("tasks.untitled"))}
+        </span>
       </div>
     </div>
   );
@@ -53,6 +55,7 @@ export const TasksLayer = memo(function TasksLayer({
   camRef,
   handlers,
   selectedTaskId,
+  textExpandedIds,
   pending,
   onStickyCreated,
   onCreateCancel,
@@ -67,6 +70,8 @@ export const TasksLayer = memo(function TasksLayer({
   handlers: TaskCardHandlers;
   /** Spatial-navigation ring; DOM focus remains on the board viewport. */
   selectedTaskId?: string | null;
+  /** Session-only cards showing complete durable text. */
+  textExpandedIds: ReadonlySet<string>;
   /** World point where the «task» tool / double-click / `+ Task` dropped a
       not-yet-saved sticky composer. */
   pending: { x: number; y: number } | null;
@@ -77,9 +82,17 @@ export const TasksLayer = memo(function TasksLayer({
     <div className={interactive ? undefined : "pointer-events-none select-none"}>
       {tasks.map((task) =>
         lite ? (
-          <LiteTaskCard key={task.id} task={task} />
+          <LiteTaskCard key={task.id} task={task} expanded={textExpandedIds.has(task.id)} />
         ) : (
-          <TaskCard key={task.id} task={task} files={files} camRef={camRef} handlers={handlers} selected={selectedTaskId === task.id} />
+          <TaskCard
+            key={task.id}
+            task={task}
+            files={files}
+            camRef={camRef}
+            handlers={handlers}
+            selected={selectedTaskId === task.id}
+            expanded={textExpandedIds.has(task.id)}
+          />
         ),
       )}
       {pending && !lite ? (

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { SchemeRect } from "./layout";
 import { AUTO_OVERFLOW_Y, isAutoPlaceable, MAX_AUTO_DRIFT, resolveTaskPlacements, TASK_GUTTER, type PlaceableTask } from "./taskPlacement";
-import { TASK_W, taskCardHeight, taskRect } from "./taskGeometry";
+import { TASK_W, taskBoxHeight, taskCardHeight, taskRect } from "./taskGeometry";
 
 /* A prompt-captured source — what curator.ts and inboxScanner.ts stamp on every
    card they create. A card with one is auto-placeable only while it also rests
@@ -215,5 +215,44 @@ describe("resolveTaskPlacements", () => {
     const before = JSON.stringify(tasks);
     resolveTaskPlacements(tasks, [{ x: 700, y: 60, w: 600, h: 680 }]);
     expect(JSON.stringify(tasks)).toBe(before);
+  });
+});
+
+describe("resolveTaskPlacements — full-text expansion", () => {
+  const LONG = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n");
+
+  test("the expanded card holds a clear spot and displaces a younger covered card", () => {
+    const older = task("older", 0, 0, { text: LONG, createdAt: "2026-07-01T00:00:00.000Z" });
+    const younger = task("younger", 0, 200, { createdAt: "2026-07-02T00:00:00.000Z" });
+    const collapsed = resolveTaskPlacements([older, younger], []);
+    expect(collapsed.get("older")).toEqual(older.pos);
+    expect(collapsed.get("younger")).toEqual(younger.pos);
+
+    const expanded = resolveTaskPlacements([older, younger], [], new Set(["older"]));
+    expect(expanded.get("older")).toEqual(older.pos);
+    expect(expanded.get("younger")).not.toEqual(younger.pos);
+    const olderRect = { ...expanded.get("older")!, w: TASK_W, h: taskBoxHeight(older, true) };
+    const youngerRect = { ...expanded.get("younger")!, w: TASK_W, h: taskBoxHeight(younger) };
+    expect(clash(olderRect, youngerRect, TASK_GUTTER - 1)).toBe(false);
+  });
+
+  test("an expanded card spirals clear of a pane", () => {
+    const pane: SchemeRect = { x: 0, y: 200, w: 600, h: 680 };
+    const item = task("item", 0, 0, { text: LONG });
+    expect(resolveTaskPlacements([item], [pane]).get("item")).toEqual(item.pos);
+    const expanded = resolveTaskPlacements([item], [pane], new Set(["item"]));
+    expect(expanded.get("item")).not.toEqual(item.pos);
+    expect(clash({ ...expanded.get("item")!, w: TASK_W, h: taskBoxHeight(item, true) }, pane, 0)).toBe(false);
+  });
+
+  test("collapse restores stored positions byte-for-byte after display-only displacement", () => {
+    const older = task("older", 0, 0, { text: LONG });
+    const younger = task("younger", 0, 200);
+    const before = JSON.stringify([older, younger]);
+    resolveTaskPlacements([older, younger], [], new Set(["older"]));
+    expect(JSON.stringify([older, younger])).toBe(before);
+    const collapsed = resolveTaskPlacements([older, younger], []);
+    expect(collapsed.get("older")).toEqual(older.pos);
+    expect(collapsed.get("younger")).toEqual(younger.pos);
   });
 });

@@ -7,6 +7,7 @@ import { ChevronRight, X } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { registerPane } from "@/lib/chime";
 import { type TFunction, useLocale } from "@/lib/i18n";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { cardMigrationState, postConversationMigration } from "@/lib/accounts/migration";
@@ -29,6 +30,8 @@ import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { RateLimitBadge } from "./RateLimitBadge";
 import { StructuredSpawnStatus } from "./StructuredSpawnStatus";
+import { TaskRelationStrip } from "./tasks/TaskRelationStrip";
+import type { TaskRelation } from "./tasks/taskRelations";
 import { WakeupChip, wakeupChipKey } from "./WakeupChip";
 import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge, fmtAge } from "./utils";
 
@@ -123,9 +126,16 @@ interface Props {
   showFavorite?: boolean;
   /** Opens a fresh editable draft from a terminal structured launch receipt. */
   onSpawnRetry?: (file: FileEntry) => void;
+  /** Board tasks related to this conversation (assigned into it or captured
+      from it), shown as a reserved relation strip between the header and the
+      transcript — in flow, never overlaying conversation content (issue #292). */
+  relatedTasks?: readonly TaskRelation[];
+  /** Opens/centers a related task card — the conversation-side half of the
+      bidirectional task↔agent navigation. The strip renders only when wired. */
+  onOpenTask?: (task: BoardTask) => void;
 }
 
-export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, headerActions, onToggleExpand, expanded, dormant, autoEditToken, showFavorite, onSpawnRetry }: Props) {
+export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, headerActions, onToggleExpand, expanded, dormant, autoEditToken, showFavorite, onSpawnRetry, relatedTasks, onOpenTask }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const paneRef = useRef<HTMLElement | null>(null);
@@ -389,6 +399,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
           />
         ) : null}
         {banner ?? null}
+        {relatedTasks?.length && onOpenTask ? <TaskRelationStrip relations={relatedTasks} onOpenTask={onOpenTask} /> : null}
         {tasks.length ? (
           <FlipRow className="shrink-0 border-b border-border bg-sunken" enter="fade">
             {tasks.map((task) => (

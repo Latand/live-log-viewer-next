@@ -17,6 +17,7 @@ import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
 import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
+import { taskRelationsByPath } from "@/components/tasks/taskRelations";
 import { taskTitle } from "@/components/tasks/taskModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
@@ -503,6 +504,17 @@ export function SchemeBoard({
     const fresh = localTasks.filter((task) => !have.has(task.id) && task.project === project);
     return fresh.length ? [...tasks, ...fresh] : tasks;
   }, [tasks, localTasks, project]);
+  /* Session-only full-text state. Every geometry consumer reads this set, while
+     durable task records and pinned positions stay unchanged. */
+  const [textExpandedIds, setTextExpandedIds] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    const present = new Set(mergedTasks.map((task) => task.id));
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- prune-only state synchronization */
+    setTextExpandedIds((previous) => {
+      if (![...previous].some((id) => !present.has(id))) return previous;
+      return new Set([...previous].filter((id) => present.has(id)));
+    });
+  }, [mergedTasks]);
   /* Panes, decks, stacks and drafts the cards must not bury (issue #17): the
      placement pass spreads any pileup into their gaps. Group halos are derived
      from these same rects, so nudging cards never disturbs a flow/pipeline
@@ -524,7 +536,10 @@ export function SchemeBoard({
   /* Collision-aware display positions: cards keep their stored spot unless they
      overlap another card or pane, so hand-arranged boards pass through untouched
      while the curator/inbox lattice pileup gets spread out and stays readable. */
-  const placement = useMemo(() => resolveTaskPlacements(boardTasks, taskObstacles), [boardTasks, taskObstacles]);
+  const placement = useMemo(
+    () => resolveTaskPlacements(boardTasks, taskObstacles, textExpandedIds),
+    [boardTasks, taskObstacles, textExpandedIds],
+  );
   const placedTasks = useMemo(
     () =>
       boardTasks.map((task) => {
@@ -535,19 +550,23 @@ export function SchemeBoard({
   );
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
-    () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
-    [placedTasks],
+    () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task, textExpandedIds.has(task.id))] as const)),
+    [placedTasks, textExpandedIds],
   );
   const taskNavLabels = useMemo(
     () => new Map(placedTasks.map((task) => [`task::${task.id}`, taskTitle(task.text) || t("tasks.untitled")] as const)),
     [placedTasks, t],
   );
-  const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout, flows, files)), [placedTasks, layout, flows, files]);
+  const taskTargetIndex = useMemo(() => buildTaskTargetIndex(layout, flows, files), [layout, flows, files]);
+  const taskEdges = useMemo(
+    () => buildTaskEdges(placedTasks, taskTargetIndex, textExpandedIds, files),
+    [placedTasks, taskTargetIndex, textExpandedIds, files],
+  );
   /* Card rects the edge router steers around, each tagged with its task so an
      edge is never counted as crossing the card it leaves from (issue #17). */
   const taskCardObstacles = useMemo(
-    () => placedTasks.map((task) => ({ id: task.id, ...taskRect(task) })),
-    [placedTasks],
+    () => placedTasks.map((task) => ({ id: task.id, ...taskRect(task, textExpandedIds.has(task.id)) })),
+    [placedTasks, textExpandedIds],
   );
   /* Route all task edges here — the layer only renders them — so the world box below can grow
      to include the routed geometry. Cached on a rounded geometry signature: the
@@ -574,17 +593,19 @@ export function SchemeBoard({
     return taskWorldBounds(layout.width, layout.height, rects);
   }, [layout.width, layout.height, taskRects, taskRoutes]);
   const currentWork = useMemo(
-    () => currentWorkRect(layout, placedTasks, favorites ?? EMPTY_PATHS),
-    [layout, placedTasks, favorites],
+    () => currentWorkRect(layout, placedTasks, favorites ?? EMPTY_PATHS, textExpandedIds),
+    [layout, placedTasks, favorites, textExpandedIds],
   );
   const currentWorkCount = useMemo(
-    () => currentWorkRects(layout, placedTasks, favorites ?? EMPTY_PATHS).length,
-    [layout, placedTasks, favorites],
+    () => currentWorkRects(layout, placedTasks, favorites ?? EMPTY_PATHS, textExpandedIds).length,
+    [layout, placedTasks, favorites, textExpandedIds],
   );
-  const clusters = useMemo(
-    () => boardClusters(layout, placedTasks, favorites ?? EMPTY_PATHS),
-    [layout, placedTasks, favorites],
-  );
+  const clusters = useMemo(() => boardClusters(layout, favorites ?? EMPTY_PATHS), [layout, favorites]);
+  /* Conversation-side relation controls (issue #292): each pane reserves a
+     strip naming its assigned/captured tasks, mirroring the cards' own open
+     controls, so the task↔agent relation navigates in both directions without
+     any chip ever floating over conversation content. */
+  const relatedTasksByPath = useMemo(() => taskRelationsByPath(files, allTasks), [files, allTasks]);
   const [frameAnnouncement, setFrameAnnouncement] = useState("");
   const announceFit = useCallback(
     (kind: "current" | "all") => {
@@ -880,6 +901,11 @@ export function SchemeBoard({
      cleaned up by a click — nothing is ever re-delivered from the board. */
   const retryEdge = useCallback((taskId: string, path: string) => void unassignTask(taskId, path), []);
 
+  const taskTargetIndexRef = useRef(taskTargetIndex);
+  useEffect(() => {
+    taskTargetIndexRef.current = taskTargetIndex;
+  }, [taskTargetIndex]);
+
   const taskHandlers = useMemo<TaskCardHandlers>(
     () => ({
       patch: async (id, patch) => {
@@ -917,13 +943,26 @@ export function SchemeBoard({
       /* Fold-back rides the same ref pattern: the button renders only where a
          collapse target exists (the dashboard always wires one on desktop). */
       collapse: (task) => taskCollapseRef.current?.(task),
-      unassign: async (task, path) => {
-        const error = await unassignTask(task.id, path);
+      unassign: async (task, ref) => {
+        const error = await unassignTask(task.id, ref);
         if (error) pushTaskToast("err", error);
       },
       center: (rect: SchemeRect) => centerOn(rect, 0.75),
+      toggleExpand: (id) => {
+        setTextExpandedIds((previous) => {
+          const next = new Set(previous);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+      },
+      openAgent: (file) => {
+        const target = taskTargetIndexRef.current.get(file.path);
+        if (target) centerOn(target, 0.75);
+        stableSelect(file);
+      },
     }),
-    [centerOn],
+    [centerOn, stableSelect],
   );
 
   /* The sticky composer owns the create (text, voice, images, deadline); the
@@ -1033,6 +1072,7 @@ export function SchemeBoard({
           flows={flows}
           pipelineStrips={pipelineStrips}
           linkedTasksByPipeline={linkedTasksByPipeline}
+          relatedTasksByPath={relatedTasksByPath}
           deckFocus={deckFocus}
           onSelect={stableSelect}
           onClose={stableClose}
@@ -1054,6 +1094,7 @@ export function SchemeBoard({
           camRef={camRef}
           handlers={taskHandlers}
           selectedTaskId={selected?.startsWith("task::") ? selected.slice("task::".length) : null}
+          textExpandedIds={textExpandedIds}
           pending={pendingTask}
           onStickyCreated={handleStickyCreated}
           onCreateCancel={cancelCreate}
@@ -1176,7 +1217,7 @@ export function SchemeBoard({
         />
       ) : null}
 
-      <Minimap layout={layout} world={world} tasks={placedTasks} currentWork={currentWork} stackDots={stackDots} cam={cam} vp={vp} onJump={jump} />
+      <Minimap layout={layout} world={world} tasks={placedTasks} textExpandedIds={textExpandedIds} currentWork={currentWork} stackDots={stackDots} cam={cam} vp={vp} onJump={jump} />
     </div>
     {/* The full-window conversation: the same pane component over the whole
         viewport, with the live feed and the composer of exactly this
@@ -1202,6 +1243,10 @@ export function SchemeBoard({
           onToggleExpand={() => setExpanded(null)}
           autoEditToken={autoEditTokenFor(renameRequest, expandedNode.file.path)}
           onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
+          relatedTasks={relatedTasksByPath.get(expandedNode.file.path)}
+          /* Opening a task from the full-window conversation returns to the
+             board first — the card the camera centers must be visible. */
+          onOpenTask={onOpenTask ? (task) => { setExpanded(null); stableOpenTask(task); } : undefined}
         />
       </div>
     ) : null}

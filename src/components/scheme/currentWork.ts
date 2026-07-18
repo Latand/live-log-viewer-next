@@ -5,6 +5,8 @@ import type { FileEntry } from "@/lib/types";
 import { isPlacedTask, taskRect } from "./taskGeometry";
 import type { SchemeGroup, SchemeLayout, SchemeRect } from "./layout";
 
+const EMPTY_TEXT_EXPANDED_IDS: ReadonlySet<string> = new Set();
+
 /** Activity signals that deserve the operator's next framing. */
 export function isCurrentWorkFile(file: FileEntry): boolean {
   return (
@@ -47,8 +49,9 @@ export function currentWorkRect(
   layout: SchemeLayout,
   tasks: readonly BoardTask[],
   favorites: ReadonlySet<string>,
+  textExpandedIds: ReadonlySet<string> = EMPTY_TEXT_EXPANDED_IDS,
 ): SchemeRect | null {
-  return rectUnion(currentWorkRects(layout, tasks, favorites));
+  return rectUnion(currentWorkRects(layout, tasks, favorites, textExpandedIds));
 }
 
 /** Individual members, also used for spoken counts and minimap/chip geometry. */
@@ -56,6 +59,7 @@ export function currentWorkRects(
   layout: SchemeLayout,
   tasks: readonly BoardTask[],
   favorites: ReadonlySet<string>,
+  textExpandedIds: ReadonlySet<string> = EMPTY_TEXT_EXPANDED_IDS,
 ): SchemeRect[] {
   const rects: SchemeRect[] = [];
   for (const node of layout.nodes) {
@@ -63,6 +67,8 @@ export function currentWorkRects(
   }
   for (const group of layout.groups) if (isCurrentWorkGroup(group)) rects.push(group);
   rects.push(...layout.drafts);
-  for (const task of tasks) if (task.status !== "done" && isPlacedTask(task)) rects.push(taskRect(task));
+  for (const task of tasks) {
+    if (task.status !== "done" && isPlacedTask(task)) rects.push(taskRect(task, textExpandedIds.has(task.id)));
+  }
   return rects;
 }

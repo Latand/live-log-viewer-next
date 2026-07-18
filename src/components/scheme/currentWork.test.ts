@@ -5,6 +5,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { currentWorkRect } from "./currentWork";
 import type { SchemeLayout, SchemeNode } from "./layout";
+import { taskRect } from "./taskGeometry";
 
 const file = (over: Partial<FileEntry> = {}): FileEntry => ({
   path: "/quiet",
@@ -94,7 +95,7 @@ describe("currentWorkRect", () => {
       x: 900,
       y: 80,
       w: 3_900,
-      h: 1_184,
+      h: 1_220,
     });
   });
 
@@ -122,5 +123,14 @@ describe("currentWorkRect", () => {
     const active = node(file({ activity: "stalled" }), 500);
     const board = layout({ nodes: [active] });
     expect(currentWorkRect(board, [], new Set())).toEqual(currentWorkRect(board, [], new Set()));
+  });
+
+  test("full-text expansion grows the current-work frame through shared task geometry", () => {
+    const item = task({ text: Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n") });
+    const collapsed = currentWorkRect(layout(), [item], new Set())!;
+    const expanded = currentWorkRect(layout(), [item], new Set(), new Set([item.id]))!;
+    expect(collapsed.h).toBe(taskRect(item as Parameters<typeof taskRect>[0]).h);
+    expect(expanded.h).toBe(taskRect(item as Parameters<typeof taskRect>[0], true).h);
+    expect(expanded.h).toBeGreaterThan(collapsed.h);
   });
 });

@@ -13,10 +13,13 @@ import {
   routePathsBounds,
   routeTaskEdge,
   routeTaskEdges,
-  TASK_BODY_MAX,
+  TASK_ACTION_ROW_H,
   TASK_DISCLOSURE_H,
+  TASK_PREVIEW_CLAMP,
+  TASK_TITLE_CLAMP,
   TASK_W,
   TASK_WORLD_MARGIN,
+  taskBoxHeight,
   taskCardExpandable,
   taskCardHeight,
   taskEdgesSignature,
@@ -168,11 +171,43 @@ describe("taskRect / taskCardHeight", () => {
     expect(rect).toMatchObject({ x: 40, y: 60, w: TASK_W });
   });
 
-  test("height grows with text but the body caps at the scroll threshold", () => {
-    const short = taskCardHeight(task({ id: "t", text: "x" }));
+  test("collapsed height stays bounded by the title and preview clamps", () => {
+    const medium = taskCardHeight(task({ id: "t", text: "x".repeat(600) }));
     const long = taskCardHeight(task({ id: "t", text: "x".repeat(6000) }));
-    expect(long).toBeGreaterThan(short);
-    expect(long).toBeLessThanOrEqual(TASK_BODY_MAX + 40);
+    expect(long).toBe(medium);
+    const clampBound = 6 + (TASK_TITLE_CLAMP + TASK_PREVIEW_CLAMP) * 17 + 20 + TASK_DISCLOSURE_H;
+    expect(long).toBeLessThanOrEqual(clampBound);
+  });
+
+  test("expanded height covers every text row without a nested-scroll cap", () => {
+    const item = task({ id: "t", text: "x".repeat(6000) });
+    const collapsed = taskCardHeight(item);
+    const expanded = taskCardHeight(item, true);
+    expect(expanded).toBeGreaterThan(collapsed);
+    expect(expanded).toBeGreaterThanOrEqual(Math.ceil(6000 / 18) * 17);
+  });
+
+  test("disclosure and expansion agree at the clamp boundary", () => {
+    const short = task({ id: "short", text: "title\nline 1\nline 2\nline 3" });
+    const tall = task({ id: "tall", text: "title\nline 1\nline 2\nline 3\nline 4" });
+    expect(taskCardExpandable(short)).toBe(false);
+    expect(taskCardExpandable(tall)).toBe(true);
+    expect(taskCardHeight(short, true)).toBe(taskCardHeight(short));
+    expect(taskCardHeight(tall)).toBe(taskCardHeight(short) + TASK_DISCLOSURE_H);
+  });
+
+  test("the board box reserves the floating action row", () => {
+    const item = task({ id: "t", text: "one line" });
+    expect(taskBoxHeight(item)).toBe(taskCardHeight(item) + TASK_ACTION_ROW_H);
+    expect(taskRect(item).h).toBe(taskBoxHeight(item));
+  });
+
+  test("taskRect grows at the same origin when full text expands", () => {
+    const item = task({ id: "t", pos: { x: 40, y: 60 }, text: "x".repeat(2000) });
+    const collapsed = taskRect(item);
+    const expanded = taskRect(item, true);
+    expect(expanded).toMatchObject({ x: 40, y: 60, w: TASK_W });
+    expect(expanded.h).toBeGreaterThan(collapsed.h);
   });
 
   test("assignments add chip rows", () => {
@@ -189,11 +224,11 @@ describe("taskRect / taskCardHeight", () => {
     expect(sourced).toBeGreaterThan(bare);
   });
 
-  test("height is a conservative upper bound for wide-glyph titles (Finding 2)", () => {
+  test("expanded height is a conservative upper bound for wide-glyph titles (Finding 2)", () => {
     /* 300 'W's (the widest glyph) with two assignment chips renders ~337px in
        Chromium. The estimate must not fall short of that, or the collision pass
        leaves the next card overlapping the rendered one. */
-    const h = taskCardHeight(task({ id: "t", text: "W".repeat(300), assignments: [assignment({}), assignment({ path: "/b" })] }));
+    const h = taskCardHeight(task({ id: "t", text: "W".repeat(300), assignments: [assignment({}), assignment({ path: "/b" })] }), true);
     expect(h).toBeGreaterThanOrEqual(337);
   });
 
@@ -214,7 +249,7 @@ describe("taskRect / taskCardHeight", () => {
     for (const chars of [1, 40, 120, 250, 340]) {
       for (const chips of [0, 1, 3]) {
         const chipList = Array.from({ length: chips }, (_, i) => assignment({ path: "/c" + i }));
-        const h = taskCardHeight(task({ id: "t", text: "W".repeat(chars), assignments: chipList }));
+        const h = taskCardHeight(task({ id: "t", text: "W".repeat(chars), assignments: chipList }), true);
         expect(h).toBeGreaterThanOrEqual(model(chars, chips));
       }
     }
@@ -236,6 +271,7 @@ describe("taskRect / taskCardHeight", () => {
     const twentyWords = Array.from({ length: 20 }, () => "WWWWWWWWWW").join(" ");
     const h = taskCardHeight(
       task({ id: "t", text: twentyWords, source: { path: "/n", ts: null, text: "x", fingerprint: "fp", engine: "codex" } }),
+      true,
     );
     expect(h).toBeGreaterThanOrEqual(378);
   });
@@ -244,8 +280,8 @@ describe("taskRect / taskCardHeight", () => {
     /* `whitespace-pre-wrap` expands each tab to the next 8-space stop, so a
        `W\t`×50 run wraps to ~6 rows (~128px body); counting a tab as a single
        space undercounts to ~94px and overlaps the following card. */
-    const tabbed = taskCardHeight(task({ id: "t", text: "W\t".repeat(50) }));
-    const spaced = taskCardHeight(task({ id: "t", text: "W ".repeat(50) }));
+    const tabbed = taskCardHeight(task({ id: "t", text: "W\t".repeat(50) }), true);
+    const spaced = taskCardHeight(task({ id: "t", text: "W ".repeat(50) }), true);
     expect(tabbed).toBeGreaterThanOrEqual(128);
     expect(tabbed).toBeGreaterThanOrEqual(spaced);
   });
@@ -254,7 +290,7 @@ describe("taskRect / taskCardHeight", () => {
     /* `whitespace-pre-wrap` breaks on a lone \r, so 100 of them are 101 rendered
        rows (body hits its 340px cap ≈ 346px card). A LF-only split would keep
        them in one line and undercount to ~230px, overlapping the next card. */
-    const h = taskCardHeight(task({ id: "t", text: "x\r".repeat(100) + "x" }));
+    const h = taskCardHeight(task({ id: "t", text: "x\r".repeat(100) + "x" }), true);
     expect(h).toBeGreaterThanOrEqual(346);
     /* CRLF and lone LF still count identically — the split treats all three the same. */
     const lf = taskCardHeight(task({ id: "t", text: "ab\ncd\nef" }));
@@ -524,6 +560,68 @@ describe("buildTaskEdges", () => {
     expect(edges[0]!.key).toBe("t4::source::/node");
     expect(edges[0]!.relation).toBe("source");
     expect(edges[0]!.failed).toBe(false);
+  });
+
+  test("a migrated conversation resolves its edge through the current identity, not the stale path", () => {
+    /* The assignment recorded «/retired», but the conversation has since moved
+       to «/node» (issue #292 fresh review): the edge must land on the current
+       generation — the retry handle included — not vanish with the old path. */
+    const edges = buildTaskEdges(
+      [
+        task({
+          id: "t5",
+          pos: { x: 0, y: 300 },
+          assignments: [assignment({ path: "/retired", conversationId: "conversation-live" })],
+        }),
+      ],
+      index,
+      undefined,
+      [{ path: "/node", conversationId: "conversation-live" }],
+    );
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.key).toBe("t5::/node");
+    expect(edges[0]!.path).toBe("/node");
+  });
+
+  test("an unknown conversation keeps the recorded-path fallback and a migration collapse dedupes to one edge", () => {
+    const fallback = buildTaskEdges(
+      [task({ id: "t6", assignments: [assignment({ path: "/node", conversationId: "conversation-unknown" })] })],
+      index,
+      undefined,
+      [{ path: "/other", conversationId: "conversation-other" }],
+    );
+    expect(fallback.map((edge) => edge.path)).toEqual(["/node"]);
+
+    const collapsed = buildTaskEdges(
+      [
+        task({
+          id: "t7",
+          assignments: [
+            assignment({ path: "/stale", conversationId: "conversation-live" }),
+            assignment({ path: "/node" }),
+          ],
+        }),
+      ],
+      index,
+      undefined,
+      [{ path: "/node", conversationId: "conversation-live" }],
+    );
+    expect(collapsed.map((edge) => edge.key)).toEqual(["t7::/node"]);
+  });
+
+  test("anchors a downward edge on the expanded card boundary", () => {
+    const long = task({
+      id: "expanded-edge",
+      text: Array.from({ length: 20 }, (_, row) => `row ${row}`).join("\n"),
+      pos: { x: 1000, y: -1000 },
+      assignments: [assignment({ path: "/node" })],
+    });
+    const collapsed = buildTaskEdges([long], index)[0]!;
+    const expanded = buildTaskEdges([long], index, new Set([long.id]))[0]!;
+
+    expect(collapsed.y1).toBe(taskRect(long).y + taskRect(long).h);
+    expect(expanded.y1).toBe(taskRect(long, true).y + taskRect(long, true).h);
+    expect(expanded.y1).toBeGreaterThan(collapsed.y1);
   });
 });
 
@@ -1090,35 +1188,5 @@ describe("taskEdgesSignature — poll-stable route cache key (Finding 2)", () =>
     expect(taskEdgesSignature([geom("a", 0, 40, 300, 300)], cards, [])).not.toBe(base);
     expect(taskEdgesSignature(edges, [{ id: "a", x: 80, y: 10, w: 260, h: 100 }], [])).not.toBe(base);
     expect(taskEdgesSignature(edges, cards, [{ x: 0, y: 0, w: 10, h: 10 }])).not.toBe(base);
-  });
-});
-
-describe("taskCardExpandable (issue #292: compact preview + Expand, no internal scroll)", () => {
-  test("short text is not expandable; text past the compact cap is", () => {
-    expect(taskCardExpandable({ text: "one line" })).toBe(false);
-    const long = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
-    expect(taskCardExpandable({ text: long })).toBe(true);
-  });
-
-  test("the boundary accounts for the body's 16px vertical padding (Finding)", () => {
-    /* The compact clamp is a border-box max-height: the body's py-2 padding
-       (16px) is spent inside TASK_BODY_MAX, so the plain preview holds only
-       19 full hard lines (19 × 17 + 16 = 339 ≤ 340). Exactly 20 hard lines
-       (20 × 17 + 16 = 356 > 340) would clip their last line — they must
-       expose Expand. The pre-fix gate compared bare text height (20 × 17 =
-       340 ≯ 340) and silently clipped line 20 with no fade and no control. */
-    const nineteen = Array.from({ length: 19 }, (_, i) => `l${i}`).join("\n");
-    const twenty = `${nineteen}\nl19`;
-    expect(taskCardExpandable({ text: nineteen })).toBe(false);
-    expect(taskCardExpandable({ text: twenty })).toBe(true);
-  });
-
-  test("an expandable card's compact height estimate stays capped — the disclosure fits inside it", () => {
-    const long = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
-    const height = taskCardHeight({ text: long, assignments: [], source: undefined });
-    /* strip 6 + capped body 340 + pad 20: the rendered preview (340−24) plus the
-       24px disclosure row exactly fills the same box. */
-    expect(height).toBe(6 + TASK_BODY_MAX + 20);
-    expect(TASK_DISCLOSURE_H).toBe(24);
   });
 });

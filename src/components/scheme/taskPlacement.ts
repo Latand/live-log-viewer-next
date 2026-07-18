@@ -2,7 +2,7 @@ import type { BoardTask } from "@/lib/tasks/types";
 import { AUTO_LATTICE_MAX_Y, AUTO_LATTICE_X, isAutoTaskSeed } from "@/lib/tasks/lattice";
 
 import type { SchemeRect } from "./layout";
-import { TASK_W, taskCardHeight } from "./taskGeometry";
+import { TASK_W, taskBoxHeight } from "./taskGeometry";
 
 /* Minimum clear gap between a task card and any card or pane it is nudged
    away from — the board reads as sticky notes, so a small breathing gutter is
@@ -131,35 +131,56 @@ export function isAutoPlaceable(task: PlaceableTask): boolean {
  * anchor and each new one flows around those already there — adding a task can
  * never reshuffle the cards that predate it.
  */
-export function resolveTaskPlacements(tasks: readonly PlaceableTask[], obstacles: readonly SchemeRect[]): Map<string, { x: number; y: number }> {
-  const cards = tasks.map((task) => ({
-    id: task.id,
-    createdAt: task.createdAt,
-    x: task.pos.x,
-    y: task.pos.y,
-    w: TASK_W,
-    h: taskCardHeight(task),
-    auto: isAutoPlaceable(task),
-  }));
+export function resolveTaskPlacements(
+  tasks: readonly PlaceableTask[],
+  obstacles: readonly SchemeRect[],
+  expandedIds?: ReadonlySet<string>,
+): Map<string, { x: number; y: number }> {
+  const cards = tasks.map((task) => {
+    const expanded = expandedIds?.has(task.id) ?? false;
+    return {
+      id: task.id,
+      createdAt: task.createdAt,
+      x: task.pos.x,
+      y: task.pos.y,
+      w: TASK_W,
+      h: taskBoxHeight(task, expanded),
+      auto: !expanded && isAutoPlaceable(task),
+      expanded,
+    };
+  });
+  const byAge = (a: (typeof cards)[number], b: (typeof cards)[number]) =>
+    a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id.localeCompare(b.id);
 
   const placed: SchemeRect[] = [];
+  const expandedRects: SchemeRect[] = [];
   const result = new Map<string, { x: number; y: number }>();
-  /* Held cards land first at their exact spot and join `placed` as anchors, so
-     auto cards flow around them no matter the input order. */
-  for (const card of cards) {
-    if (card.auto) continue;
-    const spot = { x: card.x, y: card.y };
+  const land = (card: (typeof cards)[number], spot: { x: number; y: number }) => {
     result.set(card.id, spot);
-    placed.push({ x: spot.x, y: spot.y, w: card.w, h: card.h });
+    const rect = { x: spot.x, y: spot.y, w: card.w, h: card.h };
+    placed.push(rect);
+    if (card.expanded) expandedRects.push(rect);
+  };
+
+  /* Expanded cards get the first placement pass. Each clear stored position
+     remains fixed; pane or older-expanded collisions resolve through the same
+     bounded spiral used for auto placement. */
+  for (const card of cards.filter((candidate) => candidate.expanded).sort(byAge)) {
+    land(card, findSlot(card, placed, obstacles));
   }
 
-  const order = cards
-    .filter((card) => card.auto)
-    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  for (const card of order) {
-    const spot = findSlot(card, placed, obstacles);
-    result.set(card.id, spot);
-    placed.push({ x: spot.x, y: spot.y, w: card.w, h: card.h });
+  /* Held cards retain stored coordinates unless an expanded card covers their
+     rendered box. Covered cards move for this render and keep durable `pos`.
+     Ordering by age makes the result independent from input array order. */
+  for (const card of cards.filter((candidate) => !candidate.expanded && !candidate.auto).sort(byAge)) {
+    const spot = clashesAny(card, expandedRects, TASK_GUTTER)
+      ? findSlot(card, placed, obstacles)
+      : { x: card.x, y: card.y };
+    land(card, spot);
+  }
+
+  for (const card of cards.filter((candidate) => candidate.auto).sort(byAge)) {
+    land(card, findSlot(card, placed, obstacles));
   }
   return result;
 }

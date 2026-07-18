@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { offscreenClusterChips, type BoardCluster } from "./offscreenClusters";
+import type { FileEntry } from "@/lib/types";
+
+import type { SchemeLayout } from "./layout";
+import { boardClusters, offscreenClusterChips, type BoardCluster } from "./offscreenClusters";
 
 const cam = { x: 0, y: 0, z: 1 };
 const vp = { w: 1_000, h: 700 };
@@ -10,6 +13,24 @@ const cluster = (key: string, x: number, y: number, priority = 1): BoardCluster 
   rect: { x, y, w: 100, h: 100 },
   priority,
   color: "red",
+});
+
+describe("board clusters", () => {
+  test("wayfinding chips represent work regions only — task navigation lives in the reserved relation controls", () => {
+    const live: FileEntry = {
+      path: "/live.jsonl", root: "codex-sessions", name: "live.jsonl", project: "project", title: "Live agent",
+      engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 1, activity: "live",
+      proc: "running", pid: 1, model: null, pendingQuestion: null, waitingInput: null,
+    };
+    const layout = {
+      groups: [],
+      nodes: [{ x: 0, y: 0, w: 600, h: 780, file: live, isRoot: true }],
+      stacks: [], decks: [], drafts: [], slots: [],
+    } as unknown as SchemeLayout;
+    const clusters = boardClusters(layout, new Set<string>());
+    expect(clusters.map((cluster) => cluster.key)).toEqual(["/live.jsonl"]);
+    expect(clusters.some((cluster) => cluster.key.startsWith("task::"))).toBe(false);
+  });
 });
 
 describe("offscreen cluster chips", () => {
