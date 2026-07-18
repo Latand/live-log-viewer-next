@@ -1,0 +1,54 @@
+{
+  "capturedAt": "2026-07-18T16:58:22.427Z",
+  "viewer": "production next start",
+  "checks": [
+    {
+      "id": "desktop-pane-in-flow",
+      "detail": "meter classes \"reasoning-slot inline-flex h-[12px] shrink-0 items-end gap-px\" — plain flex item, no positioned escape"
+    },
+    {
+      "id": "desktop-pane-meter-visible",
+      "detail": "computed display \"flex\" in the wide pane header"
+    },
+    {
+      "id": "desktop-pane-row-wraps",
+      "detail": "meter and model chip are siblings of one wrapping meta row"
+    },
+    {
+      "id": "desktop-pane-tooltip",
+      "detail": "meter tooltip \"Reasoning effort: high\""
+    },
+    {
+      "id": "desktop-fallback-tooltip",
+      "detail": "engine-badge fallback title \"Reasoning effort: low\" with model=null"
+    },
+    {
+      "id": "desktop-fallback-no-model-chip",
+      "detail": "no model identity chip renders — the engine badge is the identity fallback"
+    },
+    {
+      "id": "switchboard-large-meter",
+      "detail": "300px card meter computed display \"flex\" — visible above the threshold"
+    },
+    {
+      "id": "switchboard-small-collapse",
+      "detail": "220px card meter computed display \"none\" — container query collapses it"
+    },
+    {
+      "id": "switchboard-small-fallback-tooltip",
+      "detail": "collapsed card engine-badge title \"Reasoning effort: low\" keeps the tier reachable"
+    },
+    {
+      "id": "switchboard-large-chip-tooltip",
+      "detail": "model chip title \"Claude · Reasoning effort: high\""
+    },
+    {
+      "id": "mobile-merged-chip",
+      "detail": "phone header shows the merged \"opus-4-8 · high\" chip; the bar meter never renders"
+    },
+    {
+      "id": "mobile-fallback-tooltip",
+      "detail": "phone engine-badge fallback title \"Reasoning effort: low\" with model=null"
+    }
+  ]
+}
