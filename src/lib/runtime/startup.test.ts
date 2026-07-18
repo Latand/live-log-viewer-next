@@ -1,11 +1,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
 import { AgentRegistry } from "@/lib/agent/registry";
+import { turnStateFromRecords } from "@/lib/scanner/activity";
 import { RuntimeJournal } from "@/runtime-host/journal";
 import { runStructuredHostStartup } from "@/instrumentation";
 
@@ -578,17 +579,25 @@ function addStructuredRestartConversation(
   registry: AgentRegistry,
   directory: string,
   input: {
+    engine?: "codex" | "claude";
     sessionId: string;
     status: "live" | "dead";
     turn: "busy" | "terminal";
     activeTurnRef?: string | null;
+    transcriptRecords?: Record<string, unknown>[];
+    transcriptSuffix?: string;
+    alignFirstRecordToTailBoundary?: boolean;
   },
 ) {
+  const engine = input.engine ?? "codex";
   const artifactPath = path.join(directory, `${input.sessionId}.jsonl`);
-  fs.writeFileSync(artifactPath, "");
+  const transcript = (input.transcriptRecords ?? []).map((record) => JSON.stringify(record)).join("\n") + (input.transcriptSuffix ?? "");
+  fs.writeFileSync(artifactPath, input.alignFirstRecordToTailBoundary
+    ? `${JSON.stringify({ padding: "before-window" })}\n${transcript}${" ".repeat(128 * 1024 - Buffer.byteLength(transcript))}`
+    : transcript);
   const launchProfile = emptyLaunchProfile({ cwd: directory });
   registry.reconcileConversations([{
-    engine: "codex",
+    engine,
     path: artifactPath,
     accountId: null,
     launchProfile,
@@ -601,7 +610,7 @@ function addStructuredRestartConversation(
   }]);
   const conversation = registry.conversationForPath(artifactPath)!;
   registry.upsert({
-    key: { engine: "codex", sessionId: input.sessionId },
+    key: { engine, sessionId: input.sessionId },
     artifactPath,
     cwd: directory,
     accountId: null,
@@ -609,7 +618,7 @@ function addStructuredRestartConversation(
     status: input.status,
     host: null,
     structuredHost: {
-      kind: "codex-app-server",
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
       endpoint: "stdio:retained",
       process: null,
       eventCursor: 8,
@@ -655,6 +664,14 @@ async function startupAdoptionAttempts(
   return attempts;
 }
 
+function claudeTerminalRecord() {
+  return {
+    type: "assistant",
+    timestamp: "2026-07-15T10:00:00.000Z",
+    message: { role: "assistant", content: [], stop_reason: "end_turn" },
+  };
+}
+
 test("startup adoption boots one live unfinished host across terminal history", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-adoption-gate-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -677,6 +694,347 @@ test("startup adoption boots one live unfinished host across terminal history", 
 
   expect(await startupAdoptionAttempts(registry)).toEqual([`codex:${liveSessionId}`]);
 
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup adoption reads terminal transcripts before booting production-shaped stale registry rows", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-transcript-gate-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const activeSessionId = "11111111-aaaa-4111-8111-111111111111";
+  addStructuredRestartConversation(registry, directory, {
+    sessionId: activeSessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-active",
+    transcriptRecords: [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started" } }],
+  });
+  for (const engine of ["codex", "claude"] as const) {
+    for (let index = 0; index < 10; index += 1) {
+      const sessionId = `${engine === "codex" ? "2" : "3"}0000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+      addStructuredRestartConversation(registry, directory, {
+        engine,
+        sessionId,
+        status: "live",
+        turn: "busy",
+        activeTurnRef: `stale-${engine}-${index}`,
+        transcriptRecords: engine === "codex"
+          ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+          : [claudeTerminalRecord()],
+      });
+    }
+  }
+
+  const startedAt = performance.now();
+  expect(await startupAdoptionAttempts(registry)).toEqual([`codex:${activeSessionId}`]);
+  expect(performance.now() - startedAt).toBeLessThan(1_000);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test.each(["codex", "claude"] as const)(
+  "startup adopts a persisted terminal %s conversation whose transcript starts a new turn before restart",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-reopened-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "2" : "3"}1000000-0000-4000-8000-000000000001`;
+    const { conversation } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "terminal",
+      activeTurnRef: `fresh-${engine}-turn`,
+      transcriptRecords: engine === "codex"
+        ? [{ timestamp: "2026-07-15T10:01:00.000Z", payload: { type: "task_started" } }]
+        : [{ type: "user", timestamp: "2026-07-15T10:01:00.000Z", message: { role: "user", content: [] } }],
+    });
+
+    expect(await startupAdoptionAttempts(registry)).toEqual([`${engine}:${sessionId}`]);
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("busy");
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
+
+test("startup keeps a Codex host eligible when the bounded tail cuts off an unmatched tool call", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-cutoff-tool-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "41000000-0000-4000-8000-000000000001";
+  const transcriptRecords = [
+    { timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started", turn_id: "turn-1" } },
+    {
+      timestamp: "2026-07-15T10:00:01.000Z",
+      payload: { type: "function_call", call_id: "tool-before-cutoff", arguments: "x".repeat(128 * 1024) },
+    },
+    { timestamp: "2026-07-15T10:00:02.000Z", payload: { type: "task_complete", turn_id: "turn-1" } },
+  ];
+  expect(turnStateFromRecords(transcriptRecords, true)).toBe("busy");
+  addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-1",
+    transcriptRecords,
+  });
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([`codex:${sessionId}`]);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test.each(["codex", "claude"] as const)(
+  "a clean terminal %s transcript stays retired across repeated startup",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-repeat-terminal-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "f" : "1"}0000000-0000-4000-8000-000000000001`;
+    const { conversation } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      activeTurnRef: `stale-${engine}`,
+      transcriptRecords: engine === "codex"
+        ? [
+            { timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started", turn_id: "turn-1" } },
+            { timestamp: "2026-07-15T10:00:01.000Z", payload: { type: "function_call", call_id: "tool-1" } },
+            { timestamp: "2026-07-15T10:00:02.000Z", payload: { type: "function_call_output", call_id: "tool-1" } },
+            { timestamp: "2026-07-15T10:00:03.000Z", payload: { type: "task_complete", turn_id: "turn-1" } },
+          ]
+        : [claudeTerminalRecord()],
+    });
+
+    expect(await startupAdoptionAttempts(registry)).toEqual([]);
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+    expect(await startupAdoptionAttempts(registry)).toEqual([]);
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
+
+test("a production-shaped Claude broker transcript ending in end_turn stays retired across repeated startup", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-repeat-broker-terminal-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "10000000-0000-4000-8000-000000000002";
+  const { conversation } = addStructuredRestartConversation(registry, directory, {
+    engine: "claude",
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "stale-claude-broker-turn",
+    transcriptRecords: [
+      {
+        type: "user",
+        uuid: "20000000-0000-4000-8000-000000000001",
+        parentUuid: null,
+        sessionId,
+        timestamp: "2026-07-15T10:00:00.000Z",
+        message: { role: "user", content: [] },
+      },
+      {
+        type: "assistant",
+        uuid: "20000000-0000-4000-8000-000000000002",
+        parentUuid: "20000000-0000-4000-8000-000000000001",
+        sessionId,
+        timestamp: "2026-07-15T10:00:01.000Z",
+        message: { role: "assistant", content: [], stop_reason: "end_turn" },
+      },
+    ],
+  });
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([]);
+  expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+  expect(await startupAdoptionAttempts(registry)).toEqual([]);
+  expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test.each(["codex", "claude"] as const)(
+  "a 128 KiB-aligned terminal %s transcript stays retired across repeated startup",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-repeat-aligned-terminal-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "4" : "5"}0000000-0000-4000-8000-000000000001`;
+    const { conversation } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      activeTurnRef: `stale-${engine}`,
+      transcriptRecords: engine === "codex"
+        ? [
+            { timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started", turn_id: "turn-1" } },
+            { timestamp: "2026-07-15T10:00:01.000Z", payload: { type: "function_call", call_id: "tool-1" } },
+            { timestamp: "2026-07-15T10:00:02.000Z", payload: { type: "function_call_output", call_id: "tool-1" } },
+            { timestamp: "2026-07-15T10:00:03.000Z", payload: { type: "task_complete", turn_id: "turn-1" } },
+          ]
+        : [claudeTerminalRecord()],
+      alignFirstRecordToTailBoundary: true,
+    });
+
+    expect(await startupAdoptionAttempts(registry)).toEqual([]);
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+    expect(await startupAdoptionAttempts(registry)).toEqual([]);
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
+
+test.each(["codex", "claude"] as const)(
+  "startup keeps a %s host adoption-eligible when malformed JSON follows a terminal marker",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-corrupt-tail-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "7" : "8"}0000000-0000-4000-8000-000000000000`;
+    addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      activeTurnRef: `active-${engine}`,
+      transcriptRecords: engine === "codex"
+        ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+        : [claudeTerminalRecord()],
+      transcriptSuffix: "\n{corrupt",
+    });
+
+    expect(await startupAdoptionAttempts(registry)).toEqual([`${engine}:${sessionId}`]);
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
+
+test.each(["codex", "claude"] as const)(
+  "startup keeps a %s host adoption-eligible when a truncated record follows a terminal marker",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-truncated-tail-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "9" : "a"}0000000-0000-4000-8000-000000000000`;
+    addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      activeTurnRef: `active-${engine}`,
+      transcriptRecords: engine === "codex"
+        ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+        : [claudeTerminalRecord()],
+      transcriptSuffix: '\n{"next_turn":',
+    });
+
+    expect(await startupAdoptionAttempts(registry)).toEqual([`${engine}:${sessionId}`]);
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
+
+test.each(["codex", "claude"] as const)(
+  "startup keeps a %s host adoption-eligible while its transcript grows during the tail read",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-growing-tail-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "b" : "c"}0000000-0000-4000-8000-000000000000`;
+    const { artifactPath } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      activeTurnRef: `active-${engine}`,
+      transcriptRecords: engine === "codex"
+        ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+        : [claudeTerminalRecord()],
+    });
+    const realOpen = fs.promises.open.bind(fs.promises);
+    const open = spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+      const handle = await realOpen(...args);
+      if (String(args[0]) !== artifactPath) return handle;
+      const realRead = handle.read.bind(handle);
+      let appended = false;
+      handle.read = (async (...readArgs: Parameters<typeof handle.read>) => {
+        const result = await realRead(...readArgs);
+        if (!appended) {
+          appended = true;
+          fs.appendFileSync(artifactPath, '\n{"type":"user"}');
+        }
+        return result;
+      }) as typeof handle.read;
+      return handle;
+    });
+
+    try {
+      expect(await startupAdoptionAttempts(registry)).toEqual([`${engine}:${sessionId}`]);
+    } finally {
+      open.mockRestore();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each([
+  ["codex", "missing"],
+  ["codex", "unreadable"],
+  ["claude", "missing"],
+  ["claude", "unreadable"],
+] as const)(
+  "startup keeps a %s host adoption-eligible when its transcript path is %s",
+  async (engine, condition) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-${condition}-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "d" : "e"}0000000-0000-4000-8000-000000000000`;
+    const { artifactPath } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      activeTurnRef: `active-${engine}`,
+      transcriptRecords: engine === "codex"
+        ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+        : [claudeTerminalRecord()],
+    });
+    if (condition === "missing") fs.rmSync(artifactPath);
+    else fs.chmodSync(artifactPath, 0o000);
+
+    expect(await startupAdoptionAttempts(registry)).toEqual([`${engine}:${sessionId}`]);
+
+    if (condition === "unreadable") fs.chmodSync(artifactPath, 0o600);
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
+
+test("an explicit terminal transcript outranks a stale running runtime projection", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-terminal-runtime-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "60000000-0000-4000-8000-000000000000";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "stale-running-turn",
+    transcriptRecords: [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }],
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "stale-running-turn",
+      provenance: "structured",
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+
+  expect(await startupAdoptionAttempts(registry, runtimeJournalClient(journal))).toEqual([]);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
@@ -732,7 +1090,7 @@ test.each(["text", "ephemeral-images"] as const)(
   },
 );
 
-test("startup adoption boots the terminal host targeted by a queued runtime operation", async () => {
+test("startup adoption boots the terminal host targeted by a queued runtime send", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-queued-operation-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const sessionId = "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb";
@@ -778,6 +1136,61 @@ test("startup adoption boots the terminal host targeted by a queued runtime oper
   journal.close();
   fs.rmSync(directory, { recursive: true, force: true });
 });
+
+test.each(["codex", "claude"] as const)(
+  "startup drains a queued %s terminal kill without adopting its host across repeated restarts",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-terminal-kill-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "4" : "5"}0000000-0000-4000-8000-000000000000`;
+    const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      activeTurnRef: "stale-terminal-turn",
+      transcriptRecords: engine === "codex"
+        ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+        : [claudeTerminalRecord()],
+    });
+    const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+    journal.append({
+      scope: { type: "session", id: conversation.id },
+      kind: "session-status",
+      payload: {
+        conversationId: conversation.id,
+        sessionKey: { engine, sessionId },
+        hostKind: engine === "codex" ? "codex-app-server" : "claude-broker",
+        host: "hosted",
+        turn: "idle",
+        provenance: "structured",
+        artifactPath,
+        capabilities: { steer: engine === "codex", structuredAttention: true },
+      },
+    });
+    journal.executeOperation({
+      kind: "kill",
+      operationId: `terminal-kill-${engine}`,
+      idempotencyKey: `terminal-kill-${engine}`,
+      conversationId: conversation.id,
+      sessionKey: { engine, sessionId },
+    });
+    const client = runtimeJournalClient(journal);
+
+    expect(await startupAdoptionAttempts(registry, client)).toEqual([]);
+    expect(journal.operationResult(`terminal-kill-${engine}`)?.receipt.status).toBe("delivered");
+    expect(registry.snapshot().entries[`${engine}:${sessionId}`]).toMatchObject({
+      status: "dead",
+      structuredHost: null,
+      claimOwner: null,
+    });
+    expect(await startupAdoptionAttempts(registry, client)).toEqual([]);
+
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
 
 test("terminal retained structured metadata stays dead and projects its finished conversation", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-terminal-retained-"));
