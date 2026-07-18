@@ -6,7 +6,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { statePath } from "@/lib/configDir";
-import { applyClaudeSpawnPolicy } from "@/lib/agent/spawnPolicy";
+import { applyClaudeSpawnPolicy, NATIVE_MULTI_AGENT_TOOLS } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
 import { signalDetachedProcessGroup, type ProcessSignal } from "@/lib/processGroup";
@@ -216,6 +216,11 @@ const CHILD_ENV_ALLOWLIST = [
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
+
+/** Durable launch evidence: hosts that launched with the native multi-agent
+    denial advertise the effective denied-tool set so registry snapshots and
+    incident review (#381) can verify the restriction without the argv. */
+export const NATIVE_MULTI_AGENT_DENY_FLAG = `native-multi-agent-deny:${NATIVE_MULTI_AGENT_TOOLS.join(",")}`;
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
 
@@ -475,6 +480,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private terminationStarted = false;
   private readonly reapedPromise: Promise<void>;
   private resolveReaped!: () => void;
+  private readonly launchFlags: readonly string[];
 
   private constructor(
     child: ChildProcessWithoutNullStreams,
@@ -494,6 +500,9 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.cursor = options.initialEventCursor ?? 0;
     this.protocolVersion = auth.version ?? null;
     this.account = { type: auth.authMethod, planType: auth.subscriptionType };
+    this.launchFlags = options.allowSubagents
+      ? [STRUCTURED_IMAGE_CAPABILITY]
+      : [STRUCTURED_IMAGE_CAPABILITY, NATIVE_MULTI_AGENT_DENY_FLAG];
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
     child.stdout.on("data", (chunk: Buffer | string) => {
       this.acceptStdout(typeof chunk === "string" ? chunk : this.stdoutDecoder.write(chunk));
@@ -547,7 +556,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       "--permission-mode", options.permissionMode ?? "default",
     ];
     const disallowedTools = [
-      ...(!options.allowSubagents ? ["Task", "Agent"] : []),
+      ...(!options.allowSubagents ? NATIVE_MULTI_AGENT_TOOLS : []),
       ...(options.readOnly ? ["Edit", "Write", "NotebookEdit"] : []),
     ];
     if (disallowedTools.length > 0) args.push("--disallowedTools", disallowedTools.join(","));
@@ -772,7 +781,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       protocolVersion: this.protocolVersion,
       activeTurnRef: this.activeTurnId,
       pendingAttention: [...this.attentions.keys()],
-      activeFlags: [STRUCTURED_IMAGE_CAPABILITY],
+      activeFlags: [...this.launchFlags],
       account: this.account,
     };
   }

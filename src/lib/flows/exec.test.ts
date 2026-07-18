@@ -285,7 +285,7 @@ test("headless managed Claude reviewer installs the native sub-agent deny profil
   };
 
   expect(settingsIndex).toBeGreaterThanOrEqual(0);
-  expect(settings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(true);
+  expect(settings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage")).toBe(true);
   expect(built.env.LLV_TOKEN).toBeUndefined();
   delete process.env.LLV_TOKEN;
 });

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt, NATIVE_SUBAGENT_DENY_MESSAGE, prepareManagedClaudeSpawnHome, VIEWER_SPAWN_PROMPT_FENCE } from "./spawnPolicy";
+import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt, NATIVE_MULTI_AGENT_HOOK_MATCHER, NATIVE_MULTI_AGENT_TOOLS, NATIVE_SUBAGENT_DENY_MESSAGE, prepareManagedClaudeSpawnHome, VIEWER_SPAWN_PROMPT_FENCE } from "./spawnPolicy";
 
 const homes: string[] = [];
 
@@ -17,7 +17,7 @@ function home(): string {
   return directory;
 }
 
-test("Claude spawn policy installs a Task/Agent hook that denies with Viewer lineage guidance", async () => {
+test("Claude spawn policy installs a multi-agent deny hook with Viewer lineage guidance", async () => {
   const accountHome = home();
 
   const installed = applyClaudeSpawnPolicy(accountHome, { profileId: "denied" });
@@ -26,7 +26,7 @@ test("Claude spawn policy installs a Task/Agent hook that denies with Viewer lin
   };
 
   expect(settings.hooks.PreToolUse).toContainEqual({
-    matcher: "Task|Agent",
+    matcher: "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage",
     hooks: [{ type: "command", command: installed.command }],
   });
   expect((settings as unknown as { disableAllHooks: boolean }).disableAllHooks).toBe(false);
@@ -38,6 +38,38 @@ test("Claude spawn policy installs a Task/Agent hook that denies with Viewer lin
 
   expect(await denied.exited).toBe(2);
   expect(await new Response(denied.stderr).text()).toBe(`${NATIVE_SUBAGENT_DENY_MESSAGE}\n`);
+});
+
+test("Claude spawn policy pins the audited multi-agent set and denies Workflow and team tools (#381)", async () => {
+  expect([...NATIVE_MULTI_AGENT_TOOLS]).toEqual(["Task", "Agent", "Workflow", "TeamCreate", "TeamDelete", "SendMessage"]);
+  expect(NATIVE_MULTI_AGENT_HOOK_MATCHER).toBe("Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage");
+  /* The installed Claude CLI (2.1.214) applies a PreToolUse matcher by splitting
+     it on "|" and testing exact membership of the tool name, so "Task" denies
+     only Task and never TaskOutput. A substring or unanchored-regex model would
+     wrongly swallow the task-list tools, so the assertions below model the exact
+     split-membership semantics. */
+  const deniedByMatcher = (tool: string): boolean => NATIVE_MULTI_AGENT_HOOK_MATCHER.split("|").includes(tool);
+  for (const tool of NATIVE_MULTI_AGENT_TOOLS) expect(deniedByMatcher(tool)).toBe(true);
+  /* Task-list tools, background-shell tools, and full Bash/filesystem access
+     must remain allowed on denied structured hosts. */
+  const allowedTools = [
+    "TaskOutput", "TaskStop", "TaskCreate",
+    "BashOutput", "KillShell",
+    "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "NotebookEdit",
+  ];
+  for (const tool of allowedTools) {
+    expect(deniedByMatcher(tool)).toBe(false);
+    expect(NATIVE_MULTI_AGENT_TOOLS).not.toContain(tool);
+  }
+
+  const installed = applyClaudeSpawnPolicy(home(), { profileId: "audited" });
+  for (const tool of ["Workflow", "TeamCreate", "SendMessage"]) {
+    const denied = Bun.spawn(["sh", "-c", installed.command], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    denied.stdin.write(JSON.stringify({ hook_event_name: "PreToolUse", tool_name: tool, tool_input: {} }));
+    denied.stdin.end();
+    expect(await denied.exited).toBe(2);
+    expect(await new Response(denied.stderr).text()).toBe(`${NATIVE_SUBAGENT_DENY_MESSAGE}\n`);
+  }
 });
 
 test("Claude spawn policy rejects an account restriction that suppresses flag-provided hooks", () => {
@@ -68,7 +100,7 @@ test("Claude spawn policy preserves user settings and re-injects one managed hoo
   };
 
   expect(fs.readFileSync(settingsPath, "utf8")).toBe(userSettings);
-  expect(profile.hooks.PreToolUse.filter((group) => group.matcher === "Task|Agent")).toHaveLength(1);
+  expect(profile.hooks.PreToolUse.filter((group) => group.matcher === "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage")).toHaveLength(1);
 });
 
 test("Claude spawn policy seeds a fresh account from the shared user settings snapshot", () => {
@@ -104,7 +136,7 @@ test("allowSubagents uses an isolated profile while the denied profile stays enf
     hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ type: string; command: string }> }> };
   };
 
-  expect(denied.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(true);
+  expect(denied.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage")).toBe(true);
   expect(allowed.hooks.PreToolUse).toEqual([{ matcher: "Read", hooks: [{ type: "command", command: "user-read-hook" }] }]);
 });
 
