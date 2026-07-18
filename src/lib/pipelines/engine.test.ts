@@ -705,6 +705,28 @@ test("a mid-work message on a recovered idle host never terminalizes the attempt
   expect(current.runs[0]!.attempts[0]!.state).toBe("running");
 });
 
+test("a durable busy turn blocks scanner-message settlement even for a parseable verdict (#337 seam)", async () => {
+  for (const status of ["pass", "fail"] as const) {
+    const h = harness();
+    await runningStructuredStage(h);
+    /* Recovered idle broker over a still-open turn whose trailing scanner
+       message happens to be a syntactically valid fenced verdict. */
+    h.setConversationActive(false);
+    const scanEntry = h.finish("/codex/stage-1.jsonl", status);
+    h.durableTurns.set("/codex/stage-1.jsonl", {
+      turn: "busy",
+      message: h.messages.get("/codex/stage-1.jsonl")!,
+    });
+
+    await tickPipelines([scanEntry], h.ports);
+
+    const current = loadPipelines()[0]!;
+    expect(current.state).toBe("running");
+    expect(current.runs[0]!.attempts[0]!.state).toBe("running");
+    expect(current.runs[0]!.attempts[0]!.verdict).toBeNull();
+  }
+});
+
 test("a genuinely terminal turn without a valid verdict stays parked and retry preserves the attempt receipt", async () => {
   const h = harness();
   const pipeline = await create(h.ports);

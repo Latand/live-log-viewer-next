@@ -553,18 +553,18 @@ async function tickRunStage(
     return;
   }
   if (structuredActive === true) return;
+  /* A recovered idle host over a mid-turn transcript must not terminalize the
+     attempt; completion needs turn evidence, not just a trailing message — even
+     one that parses as a valid fenced verdict. */
+  if (durable?.turn === "busy" && !attempt.paneId) return;
   const message = ports.lastMessage(entry);
   if (!message || message.ts <= unixMs(attempt.startedAt)) {
-    if (durable?.turn === "busy" && !attempt.paneId) return;
     if (structuredActive === false) park(pipeline, "structured stage ended without producing a verdict", attempt);
     else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited without producing a verdict", attempt);
     return;
   }
   const parsed = parseStageVerdict(message.text);
   if (!parsed) {
-    /* A recovered idle host over a mid-turn transcript must not terminalize the
-       attempt; completion needs turn evidence, not just a trailing message. */
-    if (durable?.turn === "busy" && !attempt.paneId) return;
     park(pipeline, "stage completed without a valid final JSON verdict", attempt);
     return;
   }
