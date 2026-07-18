@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import type { FileEntry } from "@/lib/types";
+
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-real-scan-"));
 const previousStateDir = process.env.LLV_STATE_DIR;
 const previousCodexHome = process.env.LLV_CODEX_HOME;
@@ -19,6 +21,7 @@ fs.mkdirSync(sessions, { recursive: true });
 const { listFilesWithProjectCatalog } = await import("@/lib/scanner");
 const { ROOTS } = await import("@/lib/scanner/roots");
 const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
+const { linkEntries } = await import("@/lib/scanner/links");
 const { activityVerdict, transcriptTurnResult } = await import("@/lib/scanner/activity");
 const { entryEffort } = await import("@/lib/scanner/effort");
 const { entryModels } = await import("@/lib/scanner/model");
@@ -183,6 +186,106 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
     fs.rmSync(testStateDir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("a persisted completed generation primes permanent lineage facts", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "durable-lineage-reuse-state");
+  const slug = "-repo-durable-lineage";
+  const sid = "session-durable-lineage";
+  const tid = "task-durable-lineage";
+  const source = path.join(sandbox, "durable-lineage-source.jsonl");
+  const task = path.join(ROOTS["claude-tasks"], slug, sid, "tasks", `${tid}.output`);
+  const predecessor = path.join(sandbox, "durable-lineage-predecessor.jsonl");
+  const successor = path.join(sandbox, "durable-lineage-successor.jsonl");
+  const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+  const makeEntry = (
+    pathname: string,
+    root: FileEntry["root"],
+    name: string,
+    overrides: Partial<FileEntry> = {},
+  ): FileEntry => {
+    const stat = fs.statSync(pathname);
+    return {
+      path: pathname,
+      root,
+      name,
+      project: "repo",
+      title: "Durable lineage",
+      engine: root === "claude-tasks" ? "shell" : "claude",
+      kind: root === "claude-tasks" ? "task" : "session",
+      fmt: root === "claude-tasks" ? "plain" : "claude",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "idle",
+      activityReason: "mtime_old",
+      derivationComplete: true,
+      proc: null,
+      pid: null,
+      model: root === "claude-tasks" ? null : "sonnet-4",
+      pendingQuestion: null,
+      waitingInput: null,
+      ...overrides,
+    };
+  };
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    fs.mkdirSync(path.dirname(task), { recursive: true });
+    fs.writeFileSync(source, "source\n");
+    fs.writeFileSync(task, "complete\n");
+    fs.writeFileSync(predecessor, "predecessor\n");
+    fs.writeFileSync(successor, "successor\n");
+    const sourceEntry = makeEntry(source, "claude-projects", `${slug}/${sid}.jsonl`);
+    const taskEntry = makeEntry(task, "claude-tasks", `${slug}/${sid}/tasks/${tid}.output`, {
+      parent: source,
+      cmd: "bun run durable-worker",
+      cmdDesc: "Run durable worker",
+      title: "Run durable worker",
+    });
+    const predecessorEntry = makeEntry(predecessor, "claude-projects", `${slug}/predecessor.jsonl`, {
+      parent: successor,
+    });
+    const successorEntry = makeEntry(successor, "claude-projects", `${slug}/successor.jsonl`);
+    fs.mkdirSync(testStateDir, { recursive: true });
+    fs.writeFileSync(path.join(testStateDir, "files-scan-snapshot.json"), JSON.stringify({
+      version: 1,
+      snapshot: {
+        complete: true,
+        files: [sourceEntry, taskEntry, predecessorEntry, successorEntry],
+        projectCatalog: [],
+      },
+    }));
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+
+    await cachedFileScan(undefined, undefined, 0);
+
+    expect(cacheStore.__llvCaches?.bgcmd?.get(tid)).toEqual({
+      command: "bun run durable-worker",
+      description: "Run durable worker",
+      source,
+    });
+    /* A snapshot parent between two mains may be the unproven nearest-older
+       fallback, so it must not prime the proven compact-chain store. */
+    expect(cacheStore.__llvCaches?.["compact-links-v1"]?.get(successor)).toBeUndefined();
+    taskEntry.parent = null;
+    taskEntry.cmd = "";
+    taskEntry.cmdDesc = "";
+    await linkEntries([sourceEntry, taskEntry, predecessorEntry, successorEntry], { persist: false });
+    expect(taskEntry).toMatchObject({
+      parent: source,
+      cmd: "bun run durable-worker",
+      cmdDesc: "Run durable worker",
+      title: "Run durable worker",
+    });
+  } finally {
+    for (const pathname of [source, task, predecessor, successor]) fs.rmSync(pathname, { force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+  }
+});
 
 test("persisted Claude question state hydrates without transcript reads and stays retryable", async () => {
   const previousTestStateDir = process.env.LLV_STATE_DIR;
