@@ -14,6 +14,7 @@ Agent Log Viewer (`~/.agents/tools/live-log-viewer-next`) is the user's dashboar
 - **Port 8898 only.** 8899 is a dev/scratch build (`bun dev` default): the user never watches it, and sends to it fail silently the moment it stops. Real spawns, messages, flows, and task actions go to 8898 even when 8899 appears to work.
 - **Spawn fresh + empty.** Hand every helper its whole job as the first prompt. Fork (context-inheriting) agents only when the user explicitly asks for a fork this turn — forked agents carry your context and skip the actual task.
 - Prompts to agents: English. Codex effort is set at boot (`-c model_reasoning_effort=...`), never mid-conversation.
+- **Pipeline boundary.** A session running as a pipeline stage never starts another pipeline or helper. It returns `needs_decision` with the required follow-up. The owning orchestrator materializes that work through the Pipeline API.
 - **Prompt = role + scope, nothing else.** Never name the model or reasoning level in the prompt text ("Act as Sol xhigh reviewer" is wrong twice: effort is a launch parameter that words cannot enable, and the model already knows what it is). Write the role — "You are a fresh-context Reviewer. …" — and pass model/effort only as spawn parameters.
 - Review fan-out is budget-bound: Fable runs at most 1–2 independent review passes; swarms of 5+ reviewers are Sol-only and must run as visible pipeline stages.
 - **Reviewer isolation (#393).** Reviewer and verifier roles perform every assigned check inside their own single session and have zero child-launch capability: they never launch helpers, workflows, teams, swarms, native subagents, Viewer children, or MCP children. Multiple review perspectives are always explicit visible pipeline stages, never fan-out from inside a review session.
@@ -35,7 +36,7 @@ Templates map 1:1 to `agent:*` labels on GitHub issues (`Latand/live-log-viewer-
 
 Assignment defaults: all LLV UX/UI and Viewer bug investigation, implementation, and review go to Fable by default. Sol is reserved for visible review swarms of five or more reviewers and for explicit operator exceptions. Research goes to Sonnet, and Terra stays parked until the operator explicitly assigns a task to it. Fable runs at most one or two independent review passes on any change.
 
-**Review-pass policy (#381).** Fable performs at most **one or two independent review passes** on any change. A review swarm of **five or more reviewers is Sol-only** and runs as visible Viewer pipeline stages (explicit `/api/spawn` workers or flows the operator sees on the board). Structured Fable hosts deny the native Claude multi-agent tools (`Task`, `Agent`, `Workflow`, `TeamCreate`, `TeamDelete`, `SendMessage`); spawn every helper through the Viewer API so it appears on the board with correct lineage.
+**Review-pass policy (#381).** Fable performs at most **one or two independent review passes** on any change. A review swarm of **five or more reviewers is Sol-only** and runs as declared Pipeline API stages the operator sees on the board. Structured Fable hosts deny the native Claude multi-agent tools (`Task`, `Agent`, `Workflow`, `TeamCreate`, `TeamDelete`, `SendMessage`); the owning orchestrator materializes each pipeline helper through the Pipeline API with durable lineage.
 
 **Reviewer isolation and bounded delegation (#393).** An agent spawned as a **reviewer or verifier** does all of its assigned checks itself, inside that one visible session — it must never launch helpers, workflows, teams, swarms, native subagents, Viewer children, or MCP children. If a review needs more coverage or another perspective, the reviewer reports that in its verdict and the orchestrator adds an explicit pipeline stage the operator can see. Roles that are allowed to delegate (builder, architect, orchestrator) record lineage on every spawn and obey the configured maximum delegation depth, **initially two** (e.g. orchestrator → builder → helper; nothing deeper). Product enforcement of these limits is tracked in #393.
 
@@ -43,7 +44,24 @@ Assignment defaults: all LLV UX/UI and Viewer bug investigation, implementation,
 
 `POST http://127.0.0.1:8898/api/spawn` with `{"engine":"codex|claude","model":"<model>","cwd":"<abs dir>","prompt":"<first message>","src":"<your own transcript path>"}` (same-origin: call from localhost without an Origin header).
 
-`src` records lineage in `~/.config/agent-log-viewer/state/handoff-lineage.json` so the board draws the child under its parent — a spawn without `src` appears as an unrelated root, which the user treats as a bug. Done when: the response is ok AND the new conversation is visible in the viewer under its parent.
+For generic callers, `src` stays optional. An explicit `src` wins; omission triggers silent caller inference; an unmatched external caller may create a root card. Orchestrators always supply `src` so the intended parent is deterministic and auditable. `src` records lineage in `~/.config/agent-log-viewer/state/handoff-lineage.json`.
+
+### Mandatory pipeline spawn contract
+
+Every implementer, recovery worker, helper, verifier, and reviewer associated with pipeline work runs as a Pipeline API stage. The owning orchestrator creates the pipeline through `POST /api/pipelines`, retries a parked clean stage through `PATCH /api/pipelines/<id>` with `{"action":"retry-stage"}`, or creates an explicit successor pipeline from a committed head when the prior container is terminal. Direct generic `/api/spawn` calls serve work with no pipeline identity.
+
+`retry-stage` resets the worktree to `lastPassedCommit` and cleans untracked files. Require a clean worktree or explicit operator authorization for that rollback. A dead host that leaves a dirty worktree stays `needs_decision`; preserve the diff and use the recovery-stage adoption path tracked in #387 when available.
+
+When creating a pipeline, the orchestrator passes its transcript as `src`. The pipeline controller then reserves a stable `pipeline_<id>_<stage>_<attempt>` identity and writes the parent edge plus pipeline membership before launching the structured host.
+
+A pipeline stage spawn is accepted only after all of these checks pass:
+
+1. `/api/pipelines` exposes the attempt with its `launchId`, `conversationId`, and `agentPath`.
+2. `/api/files` exposes that same path with `durableLineage.parentConversationId` equal to the intended parent.
+3. The same `/api/files` row carries the expected pipeline `containerId`, `stageId`, `slot`, role, and round membership.
+4. `viewer.snapshot` for the operator active project includes the conversation path in the rendered view. Keep the snapshot response together with the matched `/api/files` lineage row as the grouping evidence.
+
+If the operator view is absent, points at another project, or omits the card, the spawn remains unverified. Open the pipeline project and repeat `viewer.snapshot` before reporting the stage as done. Issue #387 tracks structural parent/container fields in the snapshot response itself.
 
 ## Messaging an existing agent
 
@@ -72,7 +90,7 @@ curl -sS -X POST "http://127.0.0.1:8898/api/tmux?k=$TOK" \
 
 ## Implement→review flows
 
-The viewer runs implement→review cycles itself (spec: `docs/review-loop-ui.md`): long-lived implementer pane + fresh headless reviewer per round, `REVIEW_READY:` marker protocol, verdicts under `~/.config/agent-log-viewer/state/flows/`. API: `GET/POST /api/flows`, `PATCH /api/flows/<id>` (`pause|resume|advance|retry-round|extend|another-round|close`). Start a flow instead of hand-rolling the loop whenever the task is implement→review.
+The viewer runs implement→review cycles itself (spec: `docs/review-loop-ui.md`): long-lived implementer pane + fresh headless reviewer per round, `REVIEW_READY:` marker protocol, verdicts under `~/.config/agent-log-viewer/state/flows/`. API: `GET/POST /api/flows`, `PATCH /api/flows/<id>` (`pause|resume|advance|retry-round|extend|another-round|close`). Pipeline work declares a `review-loop` stage so the controller creates the flow with pipeline membership. Standalone implement→review work may start a flow directly.
 
 ## Data roots the viewer watches
 
