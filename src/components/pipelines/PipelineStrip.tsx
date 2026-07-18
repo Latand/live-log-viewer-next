@@ -145,6 +145,7 @@ function StageChip({
   flows,
   renderableFlows,
   renderablePaths,
+  mobile,
   open,
   configurationOpen,
   onToggleVerdict,
@@ -163,6 +164,7 @@ function StageChip({
   renderableFlows: ReadonlySet<string>;
   /** Transcript paths still in the scan; gates run-stage actions. */
   renderablePaths?: ReadonlySet<string>;
+  mobile: boolean;
   open: boolean;
   configurationOpen: boolean;
   onToggleVerdict: () => void;
@@ -221,9 +223,8 @@ function StageChip({
     if (configurationWasOpen.current && !configurationOpen) stageButtonRef.current?.focus();
     configurationWasOpen.current = configurationOpen;
   }, [configurationOpen]);
-  /* The verdict popover also carries verdict-less evidence (a spawn/tick error,
-     or parked Retry/Skip), but a plain running attempt has none — the shared
-     predicate keeps the trigger from opening a misleading "no findings" sheet. */
+  /* Keep the popover available for visible evidence and openable retry or
+     review-round history. */
   const evidence = stageHasEvidence(pipeline, stage, attempt)
     || stageHasNavigableHistory(pipeline, stage, attempt, flows, renderablePaths);
   const terminalEvidence = Boolean(attempt && ["passed", "failed", "needs_decision", "skipped"].includes(attempt.state));
@@ -311,7 +312,7 @@ function StageChip({
             onClick={onToggleVerdict}
             aria-expanded={open}
             aria-label={t("pipelineStrip.openVerdict", { label, state: chipState })}
-            className="inline-flex h-6 items-center rounded-r-full border-l border-card/60 px-1 text-label font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className={`inline-flex h-6 items-center rounded-r-full border-l border-card/60 px-1 text-label font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${mobile ? "min-h-11 min-w-11 justify-center" : ""}`}
             style={{ backgroundColor: tone.soft, color: tone.color }}
           >
             <span aria-hidden>{attempt!.verdict ? (attempt!.verdict.status === "pass" ? "✓" : attempt!.verdict.status === "fail" ? "✕" : "●") : "!"}</span>
@@ -338,7 +339,7 @@ function StageChip({
       </span>
       {open && attempt ? (
         <AnchoredVerdict anchorRef={chipRef}>
-          <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} flows={flows} availablePaths={renderablePaths} canOpenFlow={canOpenFlow} canOpenPath={canOpenPath} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
+          <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} flows={flows} availablePaths={renderablePaths} mobile={mobile} canOpenFlow={canOpenFlow} canOpenPath={canOpenPath} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
         </AnchoredVerdict>
       ) : null}
       {configurationOpen ? (
@@ -347,7 +348,7 @@ function StageChip({
             role="dialog"
             aria-modal="false"
             aria-label={t("pipelineStrip.configAria", { label })}
-            className="relative h-[min(620px,calc(100vh-24px))] w-[min(600px,calc(100vw-24px))] rounded-surface bg-card shadow-3"
+            className={`relative h-[min(620px,calc(100vh-24px))] w-[min(600px,calc(100vw-24px))] rounded-surface bg-card shadow-3 ${mobile ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""}`}
             onKeyDown={(event) => {
               if (event.key !== "Escape") return;
               event.stopPropagation();
@@ -377,6 +378,7 @@ export function PipelineStrip({
   renderablePaths,
   renderableFlows = EMPTY_PATHS,
   compact = false,
+  mobile = false,
   linkedTasks = [],
   onOpenPath,
   onOpenFlow,
@@ -393,6 +395,7 @@ export function PipelineStrip({
   /** Board variant (§2.2): trimmed to node width — drops the "PIPELINE" kicker
       and tightens padding so the chips + controls fit over a single node. */
   compact?: boolean;
+  mobile?: boolean;
   linkedTasks?: BoardTask[];
   onOpenPath?: (path: string) => void;
   onOpenFlow?: (flowId: string) => void;
@@ -450,7 +453,7 @@ export function PipelineStrip({
       data-scheme-ui
       role="group"
       aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
-      className={`pointer-events-auto flex min-h-9 w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-surface border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-3"} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-border"}`}
+      className={`pointer-events-auto flex min-h-9 w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-surface border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-3"} ${mobile ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-border"}`}
     >
       <span className="flex min-w-0 max-w-full shrink-0 items-center gap-2 sm:max-w-[46%]">
         <span
@@ -488,6 +491,7 @@ export function PipelineStrip({
             flows={flows}
             renderableFlows={renderableFlows}
             renderablePaths={renderablePaths}
+            mobile={mobile}
             open={openVerdict === stage.id}
             configurationOpen={openConfiguration === stage.id}
             onToggleVerdict={() => {

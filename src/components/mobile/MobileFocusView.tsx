@@ -24,7 +24,7 @@ import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 
-import { STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, pipelineLinkedTasks, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence } from "@/components/pipelines/pipelineModel";
+import { STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, pipelineLinkedTasks, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { deckKey } from "@/components/scheme/agentLinks";
@@ -572,9 +572,10 @@ function PipelineFocusRow({ pipeline, index, flows, renderableFlows, renderableP
   const prevState = prev ? t(`pipelineChipState.${stageChipState(pipeline, prev)}`) : "";
   const nextLabel = next ? stageChipLabel(t, next) : "";
   const nextState = next ? t(`pipelineChipState.${stageChipState(pipeline, next)}`) : "";
-  /* Match the desktop evidence predicate: a running attempt has no verdict sheet
-     to open, so the button stays disabled and never shows an empty "no findings". */
-  const canOpenVerdict = stageHasEvidence(pipeline, stage, attempt);
+  /* Match the shared strip: visible evidence and openable retry or review-round
+     history both keep the mobile sheet available. */
+  const canOpenVerdict = stageHasEvidence(pipeline, stage, attempt)
+    || stageHasNavigableHistory(pipeline, stage, attempt, flows, renderablePaths);
   const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
   const canOpenPath = Boolean(attempt?.agentPath && renderablePaths.has(attempt.agentPath));
   return (
@@ -635,6 +636,7 @@ function PipelineFocusRow({ pipeline, index, flows, renderableFlows, renderableP
               attempt={attempt}
               flows={flows}
               availablePaths={renderablePaths}
+              mobile
               canOpenFlow={canOpenFlow}
               canOpenPath={canOpenPath}
               onClose={() => setSheetOpen(false)}
@@ -679,6 +681,7 @@ export function MobilePipelineDock({
         flows={flows}
         renderablePaths={renderablePaths}
         renderableFlows={renderableFlows}
+        mobile
         linkedTasks={linkedTasks}
         onOpenPath={onOpenPath}
         onOpenFlow={onOpenFlow}

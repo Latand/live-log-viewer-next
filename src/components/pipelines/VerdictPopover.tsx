@@ -25,6 +25,7 @@ export function VerdictPopover({
   attempt,
   flows = [],
   availablePaths,
+  mobile = false,
   canOpenFlow = true,
   canOpenPath = true,
   onClose,
@@ -36,6 +37,7 @@ export function VerdictPopover({
   attempt: PipelineStageAttempt;
   flows?: Flow[];
   availablePaths?: ReadonlySet<string>;
+  mobile?: boolean;
   /** Whether the embedded flow still has a board deck; a closed/missing flow
       hides "Open review" so it never routes to an absent entry (default true). */
   canOpenFlow?: boolean;
@@ -80,6 +82,7 @@ export function VerdictPopover({
       return [{ n: round.n, path }];
     });
   const pathAvailable = (path: string) => !availablePaths || availablePaths.has(path);
+  const mobileTarget = mobile ? "min-h-11 min-w-11" : "";
   const findings = verdict?.findings ?? [];
   const shown = expanded ? findings : findings.slice(0, MAX_COLLAPSED_FINDINGS);
   const tone = verdict ? VERDICT_TONES[verdict.status] : null;
@@ -142,7 +145,7 @@ export function VerdictPopover({
             ))}
           </ul>
           {!expanded && findings.length > MAX_COLLAPSED_FINDINGS ? (
-            <button type="button" className="self-start text-[10px] font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => setExpanded(true)}>
+            <button type="button" className={`self-start text-[10px] font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${mobileTarget}`} onClick={() => setExpanded(true)}>
               {t("pipelineVerdict.more", { count: findings.length - MAX_COLLAPSED_FINDINGS })}
             </button>
           ) : null}
@@ -159,7 +162,7 @@ export function VerdictPopover({
             {priorAttempts.map((prior) => {
               const line = t("pipelineVerdict.attemptLine", { n: prior.n, status: prior.verdict ? verdictStatusLabel(t, prior.verdict.status) : attemptStateLabel(t, prior.state) });
               return prior.agentPath && onOpenPath && pathAvailable(prior.agentPath) ? (
-                <button key={prior.n} type="button" aria-label={t("pipelineVerdict.openAttemptTranscript", { n: prior.n })} onClick={() => onOpenPath(prior.agentPath!)} className="rounded-control px-1 text-left font-mono text-[9.5px] text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
+                <button key={prior.n} type="button" aria-label={t("pipelineVerdict.openAttemptTranscript", { n: prior.n })} onClick={() => onOpenPath(prior.agentPath!)} className={`rounded-control px-1 text-left font-mono text-[9.5px] text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${mobileTarget}`}>
                   {line}
                 </button>
               ) : (
@@ -175,7 +178,7 @@ export function VerdictPopover({
           <span className="text-label font-semibold text-secondary">{t("pipelineVerdict.reviewTranscripts")}</span>
           <div className="flex max-h-24 flex-col gap-0.5 overflow-y-auto">
             {reviewTranscripts.map((transcript) => (
-              <button key={transcript.path} type="button" disabled={!onOpenPath || !pathAvailable(transcript.path)} aria-label={t("pipelineVerdict.openReviewTranscript", { n: transcript.n })} onClick={() => onOpenPath?.(transcript.path)} className="rounded-control px-1 text-left font-mono text-[9.5px] text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40">
+              <button key={transcript.path} type="button" disabled={!onOpenPath || !pathAvailable(transcript.path)} aria-label={t("pipelineVerdict.openReviewTranscript", { n: transcript.n })} onClick={() => onOpenPath?.(transcript.path)} className={`rounded-control px-1 text-left font-mono text-[9.5px] text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40 ${mobileTarget}`}>
                 {t("pipelineVerdict.openReviewTranscript", { n: transcript.n })}
               </button>
             ))}
@@ -189,21 +192,21 @@ export function VerdictPopover({
         {/* Every current attempt keeps direct transcript navigation. Review-loop
             attempts also retain the flow route whenever its deck is present. */}
         {attempt.agentPath && onOpenPath && canOpenPath && pathAvailable(attempt.agentPath) ? (
-          <button type="button" aria-label={t("pipelineVerdict.openAttemptTranscript", { n: attempt.n })} className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenPath(attempt.agentPath!)}>
+          <button type="button" aria-label={t("pipelineVerdict.openAttemptTranscript", { n: attempt.n })} className={`rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${mobileTarget}`} onClick={() => onOpenPath(attempt.agentPath!)}>
             {t("pipelineVerdict.openTranscript")}
           </button>
         ) : null}
         {attempt.flowId && onOpenFlow && canOpenFlow ? (
-          <button type="button" className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenFlow(attempt.flowId!)}>
+          <button type="button" className={`rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${mobileTarget}`} onClick={() => onOpenFlow(attempt.flowId!)}>
             {t("pipelineVerdict.openFlow")}
           </button>
         ) : null}
         {parked ? (
           <>
-            <button type="button" className="ml-auto rounded-full border border-accent bg-accent px-2.5 py-1 text-[10px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40" disabled={busy} onClick={() => void act("retry-stage")}>
+            <button type="button" className={`ml-auto rounded-full border border-accent bg-accent px-2.5 py-1 text-[10px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 ${mobileTarget}`} disabled={busy} onClick={() => void act("retry-stage")}>
               {t("pipelineVerdict.retry")}
             </button>
-            <button type="button" className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void act("skip-stage")}>
+            <button type="button" className={`rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40 ${mobileTarget}`} disabled={busy} onClick={() => void act("skip-stage")}>
               {t("pipelineVerdict.skip")}
             </button>
           </>

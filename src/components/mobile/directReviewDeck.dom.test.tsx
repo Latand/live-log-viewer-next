@@ -174,13 +174,17 @@ test("a direct review group rides the phone strip as a round deck with accessibl
   expect(banner).toBeDefined();
 });
 
-test("a pipeline-owned review stays in the compact mobile rail without a deck (#353)", async () => {
+test("an active pipeline-owned review keeps prior rounds in the compact mobile rail (#353)", async () => {
   const builder = entry({ path: "/pipeline-builder", title: "Pipeline builder", conversationId: "conversation-builder", activity: "live", mtime: 9_000 });
-  const reviewer = entry({ path: "/pipeline-reviewer", parent: builder.path, conversationId: "conversation-reviewer", activity: "live", mtime: 10_000 });
+  const priorReviewer = entry({ path: "/pipeline-reviewer-1", parent: builder.path, conversationId: "conversation-reviewer-1", mtime: 9_500 });
+  const reviewer = entry({ path: "/pipeline-reviewer-2", parent: builder.path, conversationId: "conversation-reviewer-2", activity: "live", mtime: 10_000 });
   const flow = {
     id: "pipeline-flow",
     implementerPath: builder.path,
-    rounds: [{ n: 1, reviewerPath: reviewer.path, reviewerConversationId: reviewer.conversationId }],
+    rounds: [
+      { n: 1, reviewerPath: priorReviewer.path, reviewerConversationId: priorReviewer.conversationId },
+      { n: 2, reviewerPath: reviewer.path, reviewerConversationId: reviewer.conversationId },
+    ],
     state: "reviewing",
   } as unknown as Flow;
   const pipeline = {
@@ -196,12 +200,13 @@ test("a pipeline-owned review stays in the compact mobile rail without a deck (#
     cursor: { stageId: "review", state: "reviewing" }, state: "reviewing", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2026-07-18T00:00:00Z", closedAt: null,
   } as unknown as Pipeline;
   const group: BranchGroup = { key: builder.path, columns: [{ file: builder, tasks: [] }], returnable: [], finished: [], smt: builder.mtime, orphanTask: false };
+  const selected: { path: string | null } = { path: null };
 
   roots.push(mount(
     <MobileFocusView
-      project="demo" groups={[group]} manual={[]} files={[builder, reviewer]} flows={[flow]} pipelines={[pipeline]}
+      project="demo" groups={[group]} manual={[]} files={[builder, priorReviewer, reviewer]} flows={[flow]} pipelines={[pipeline]}
       surfacePipelines={[pipeline]} workerStacks={[]} tasks={[]} drafts={[]} loaded focus={null}
-      onSelect={() => {}} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
+      onSelect={(file) => { selected.path = file.path; }} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
     />,
   ));
   await settle();
@@ -215,4 +220,58 @@ test("a pipeline-owned review stays in the compact mobile rail without a deck (#
   expect(focusLabels.some((label) => /^Next stage .+, state .+$/.test(label ?? ""))).toBe(true);
   const deckChip = [...dom.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "R Flow");
   expect(deckChip).toBeUndefined();
+
+  const dock = dom.document.querySelector('[data-testid="mobile-pipeline-dock"]');
+  const history = ([...dock!.querySelectorAll("button")] as unknown as HTMLButtonElement[])
+    .filter((button) => button.getAttribute("aria-label")?.startsWith("Open verdict for stage"))
+    .at(-1);
+  expect(history).toBeDefined();
+  expect(history!.className).toContain("min-w-11");
+  flushSync(() => (history as HTMLButtonElement).click());
+  await settle();
+
+  const priorTranscript = dom.document.querySelector('button[aria-label="Open review transcript 1"]') as unknown as HTMLButtonElement | null;
+  expect(priorTranscript).not.toBeNull();
+  expect(priorTranscript!.className).toContain("min-h-11");
+  expect(priorTranscript!.className).toContain("min-w-11");
+  flushSync(() => priorTranscript!.click());
+  expect(selected.path).toBe(priorReviewer.path);
+});
+
+test("an active retry opens prior transcript history from the mobile focus row (#353)", async () => {
+  const prior = entry({ path: "/pipeline-retry-1", title: "Pipeline retry 1", mtime: 9_000 });
+  const current = entry({ path: "/pipeline-retry-2", title: "Pipeline retry 2", activity: "live", mtime: 10_000 });
+  const pipeline = {
+    id: "pipeline-retry", task: "Retry on mobile", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
+    stages: [{ id: "build", kind: "run", prompt: "", next: null }],
+    runs: [{ stageId: "build", attempts: [
+      { n: 1, state: "failed", agentPath: prior.path, error: "failed", effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } },
+      { n: 2, state: "running", agentPath: current.path, error: null, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } },
+    ] }],
+    cursor: { stageId: "build", state: "running" }, state: "running", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2026-07-18T00:00:00Z", closedAt: null,
+  } as unknown as Pipeline;
+  const group: BranchGroup = { key: current.path, columns: [{ file: current, tasks: [] }], returnable: [], finished: [], smt: current.mtime, orphanTask: false };
+  const selected: { path: string | null } = { path: null };
+
+  roots.push(mount(
+    <MobileFocusView
+      project="demo" groups={[group]} manual={[]} files={[prior, current]} flows={[]} pipelines={[pipeline]}
+      surfacePipelines={[pipeline]} workerStacks={[]} tasks={[]} drafts={[]} loaded focus={null}
+      onSelect={(file) => { selected.path = file.path; }} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
+    />,
+  ));
+  await settle();
+
+  const focusRow = dom.document.querySelector('[data-testid="mobile-pipeline-focus-row"]');
+  const history = focusRow?.querySelector('button[aria-haspopup="dialog"]') as unknown as HTMLButtonElement | null;
+  expect(history?.disabled).toBe(false);
+  flushSync(() => history!.click());
+  await settle();
+
+  const priorTranscript = dom.document.querySelector('button[aria-label="Open transcript for attempt 1"]') as unknown as HTMLButtonElement | null;
+  expect(priorTranscript).not.toBeNull();
+  expect(priorTranscript!.className).toContain("min-h-11");
+  expect(priorTranscript!.className).toContain("min-w-11");
+  flushSync(() => priorTranscript!.click());
+  expect(selected.path).toBe(prior.path);
 });
