@@ -1,13 +1,11 @@
 import crypto from "node:crypto";
 import path from "node:path";
 
-import { isManagedClaudeHome } from "@/lib/accounts/claude";
 import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type DurableMembershipInput } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
-import { prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage } from "@/lib/flows/findings";
@@ -114,9 +112,6 @@ async function spawnPipelineAgent(
 ): Promise<PipelineStageSpawn> {
   const account = accountManager.resolveSpawn(input.role.engine);
   const parent = parentIdentity(input.parentPath);
-  if (input.role.engine === "claude" && isManagedClaudeHome(account.home)) {
-    prepareManagedClaudeSpawnHome(account.home, input.cwd);
-  }
   const specBase = freshSpecFor(input.role.engine, input.cwd, {
     model: input.role.model,
     effort: input.role.effort,

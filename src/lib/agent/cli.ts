@@ -67,6 +67,10 @@ export interface ResumeSpec {
   /** Transcript path the session will write, when knowable at spawn time —
       a fresh claude session launched with a pre-chosen --session-id. */
   transcript?: string;
+  /** Non-interactive `claude -p` command that can never present a permission
+      acceptance gate; the only Claude shape a tmux window may still host
+      under structured transport (the migration successor fork). */
+  printMode?: true;
   launchProfile?: LaunchProfile;
 }
 
@@ -239,6 +243,7 @@ export function claudeSuccessorSpecFor(input: {
     windowName: "claude-migration-successor",
     engine: "claude",
     transcript: claudeTranscriptPath(input.profile.cwd || resumeCwd(input.sourcePath), input.candidateId, input.targetProjectsDir),
+    printMode: true,
     launchProfile: { ...input.profile, model },
   };
 }

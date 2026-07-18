@@ -1736,3 +1736,78 @@ describe("ClaudeStreamBrokerHost", () => {
     }
   });
 });
+
+/* Issue #367 live reproduction: a Viewer-only restart during active Fable
+   stages must recover broker sessions as idle with the interrupted turn closed
+   in the ledger, and a kill must settle even when the dead leader's escaped
+   descendant keeps the stdio pipes open. */
+describe("restart and kill fail-safe lifecycle", () => {
+  test("adoption after a Viewer restart closes the interrupted turn and never retains an active ledger turn", async () => {
+    const sessionId = crypto.randomUUID();
+    const eventStore = new MemoryEventStore();
+    /* The pre-restart Viewer persisted a started turn and then died before
+       the stage could finish — the exact five-active-stages restart shape. */
+    eventStore.append(sessionId, { kind: "turn-started", turnId: "stage-turn", seq: 1 } as RuntimeEvent);
+
+    const child = new FakeClaude(new RecordingDeliveryLedger());
+    const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
+      cwd: "/repo",
+      eventStore,
+      deliveryLedger: new RecordingDeliveryLedger(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    try {
+      expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null, pendingAttention: [] });
+      const replay = host.attach(0)[Symbol.asyncIterator]();
+      expect(await nextEvent(replay)).toMatchObject({ kind: "turn-started", turnId: "stage-turn", seq: 1 });
+      /* The recovered ledger must close the orphaned turn as an error — an
+         idle session with an eternally active turn misreads as "stage
+         completed" and parked #287-style attempts in production. */
+      expect(await nextEvent(replay)).toMatchObject({ kind: "turn-ended", turnId: "stage-turn", status: "error", seq: 2 });
+      expect(await nextEvent(replay)).toMatchObject({ kind: "session-status", status: "idle", seq: 3 });
+    } finally {
+      await host.release();
+    }
+  });
+
+  test("release force-reaps a dead leader whose escaped descendant holds the stdio pipes open", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger, true, true);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      shutdownGraceMs: 2,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    const states: HostState[] = [];
+    host.onStateChange((state) => states.push(state));
+    const content = structuredContent("finish the stage", []);
+    /* The turn starts immediately; the delivery confirmation stays pending —
+       release rejects it, which is the expected shape of a mid-turn kill. */
+    const pendingSend = host.send({ id: "turn-stale", ...content }).catch(() => null);
+    await Bun.sleep(0);
+    expect((await host.health()).activeTurnRef).toBe("turn-stale");
+
+    /* The kernel reaped the leader (exit evidence is recorded on the child)
+       while a grandchild keeps stdout open, so "close" never fires. Kill must
+       settle instead of failing forever with "could not be reaped". */
+    (child as unknown as { exitCode: number | null }).exitCode = 137;
+    (child as unknown as { signalCode: NodeJS.Signals | null }).signalCode = "SIGKILL";
+
+    await expect(host.release()).resolves.toBeUndefined();
+    expect(await host.health()).toMatchObject({
+      status: "unhosted",
+      pid: null,
+      endpoint: "stdio:released",
+      activeTurnRef: null,
+    });
+    expect(states.at(-1)).toMatchObject({ status: "unhosted", pid: null });
+    await expect(host.release()).resolves.toBeUndefined();
+    await pendingSend;
+  });
+});

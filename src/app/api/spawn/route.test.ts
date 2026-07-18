@@ -878,7 +878,7 @@ test("operator callers may grant native sub-agent permission", async () => {
   expect(await response.json()).toEqual({ error: "working directory is required" });
 });
 
-test("operator structured Claude retries retain bypass and agent reuse conflicts", async () => {
+test("operator and agent structured Claude role launches both retain bypass permissions", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "operator-permission-"));
   const store = agentRegistry();
   const callerSessionId = crypto.randomUUID();
@@ -927,16 +927,19 @@ test("operator structured Claude retries retain bypass and agent reuse conflicts
     expect(replay.status).toBe(202);
     expect(await replay.json()).toMatchObject({ state: "starting", effectivePermissionMode: "bypassPermissions" });
 
-    const conflict = await POST.withDependencies(request(agentCapability), structuredRouteDependencies(cwd));
-    expect(conflict.status).toBe(409);
-    expect(await conflict.json()).toEqual({ error: "spawn attempt conflicts with its original request" });
+    /* The agent capability lane resolves the same role request to the same
+       permission contract, so reusing the operator attempt id is an idempotent
+       replay instead of a permission-mode conflict. */
+    const crossLaneReplay = await POST.withDependencies(request(agentCapability), structuredRouteDependencies(cwd));
+    expect(crossLaneReplay.status).toBe(202);
+    expect(await crossLaneReplay.json()).toMatchObject({ state: "starting", effectivePermissionMode: "bypassPermissions" });
 
     const agentAttemptId = `attempt_${crypto.randomUUID()}`;
     const agentLaunch = await POST.withDependencies(request(agentCapability, agentAttemptId), structuredRouteDependencies(cwd));
-    expect(await agentLaunch.json()).toMatchObject({ effectivePermissionMode: "default" });
+    expect(await agentLaunch.json()).toMatchObject({ effectivePermissionMode: "bypassPermissions" });
     const agentReplay = await POST.withDependencies(request(agentCapability, agentAttemptId), structuredRouteDependencies(cwd));
     expect(agentReplay.status).toBe(202);
-    expect(await agentReplay.json()).toMatchObject({ state: "starting", effectivePermissionMode: "default" });
+    expect(await agentReplay.json()).toMatchObject({ state: "starting", effectivePermissionMode: "bypassPermissions" });
   } finally {
     if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previousTransport;

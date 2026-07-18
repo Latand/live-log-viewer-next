@@ -1181,3 +1181,88 @@ test("relayFixOrPark treats a 0 limit as unlimited", () => {
   relayFixOrPark(clone);
   expect(clone.state).toBe("fixing");
 });
+
+test("a pane-mode Claude review launch under structured transport parks without a tmux pane and fails its receipt", async () => {
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousClaudeHome = process.env.LLV_CLAUDE_HOME;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_CLAUDE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-no-tmux-home-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-no-tmux-repo-"));
+  try {
+    expect(spawnSync("git", ["init", "-b", "main"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "flow@example.test"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd }).status).toBe(0);
+    fs.writeFileSync(path.join(cwd, "work.txt"), "committed\n");
+    expect(spawnSync("git", ["add", "work.txt"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "reviewed"], { cwd }).status).toBe(0);
+    const implementer = writeCodexEntry("no-tmux-pane-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f130", cwd }, Date.now() / 1_000);
+    const startedAt = new Date().toISOString();
+    const flow: Flow = {
+      id: "flow-no-tmux-pane",
+      template: "implement-review-loop",
+      project: "repo",
+      cwd,
+      implementerPath: implementer.path,
+      roles: {
+        implementer: { engine: "codex", model: null, effort: "high" },
+        reviewer: { engine: "claude", model: "fable", effort: "high" },
+      },
+      reviewerFallback: null,
+      baseRef: "base",
+      baseMode: "head",
+      mode: "auto",
+      reviewerMode: "pane",
+      roundLimit: 5,
+      state: "spawning",
+      pausedState: null,
+      stateDetail: null,
+      rounds: [{
+        n: 1,
+        reviewerPath: null,
+        reviewerRole: null,
+        accountId: null,
+        attemptedAccounts: [],
+        autoRetryCount: 0,
+        sessionId: null,
+        reviewerPid: null,
+        reviewerIdentity: null,
+        reviewerPane: null,
+        findingsPath: null,
+        triggeredBy: "marker",
+        readyNote: null,
+        reviewHeadSha: null,
+        verdict: null,
+        findingsCount: null,
+        startedAt,
+        spawnStartedAt: null,
+        relayStartedAt: null,
+        relayDelivery: null,
+        reviewedAt: null,
+        terminalAt: null,
+        relayedAt: null,
+        error: null,
+      }],
+      createdAt: startedAt,
+      closedAt: null,
+    };
+    saveFlows([flow]);
+
+    await tickFlows([implementer]);
+
+    const parked = loadFlows()[0]!;
+    expect(parked.state).toBe("needs_decision");
+    expect(parked.stateDetail).toMatch(/structured transport prohibits legacy tmux Claude launches/);
+    expect(parked.rounds[0]).toMatchObject({ reviewerPane: null, reviewerPid: null });
+    const launchId = parked.rounds[0]!.launchId;
+    expect(launchId).toBeTruthy();
+    const receipt = (await import("@/lib/agent/registry")).agentRegistry().snapshot().receipts[launchId!];
+    expect(receipt).toMatchObject({ state: "failed", pane: null });
+    expect(receipt!.error).toMatch(/structured transport prohibits legacy tmux Claude launches/);
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousClaudeHome === undefined) delete process.env.LLV_CLAUDE_HOME;
+    else process.env.LLV_CLAUDE_HOME = previousClaudeHome;
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});

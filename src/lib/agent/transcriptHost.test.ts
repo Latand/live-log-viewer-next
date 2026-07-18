@@ -696,3 +696,57 @@ describe("transcript host resolver", () => {
     expect(state.spawnCalls).toBe(0);
   });
 });
+
+test("the structured-transport resume ladder refuses to open a legacy tmux Claude window", async () => {
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  try {
+    const claudePath = "/home/user/.claude/projects/-repo/0f0e9d8c-0000-4000-8000-000000000001.jsonl";
+    const claudeEntry = entry({
+      path: claudePath,
+      name: claudePath,
+      root: "claude-projects",
+      engine: "claude",
+      fmt: "claude",
+      pid: null,
+      proc: "done",
+      activity: "idle",
+    });
+    const { spawnAgentWithPrompt } = await import("@/lib/tmux");
+    const resolver = createTranscriptHostResolver({
+      listFiles: async () => [claudeEntry],
+      panes: async () => ({ kind: "no-server" as const }),
+      ppidMap: () => new Map(),
+      agents: () => [],
+      serverPid: async () => null,
+      resumeRecords: async () => null,
+      panePid: async () => null,
+      alive: () => false,
+      argv: () => [],
+      parentPid: () => null,
+      identity: () => null,
+      /* The production resume ladder — a spawn here would create the exact
+         stale interactive pane observed as %23 in session 50c0f4cf. */
+      spawn: (resumeSpec, text, receipt) => spawnAgentWithPrompt(resumeSpec, text, receipt),
+      remember: async () => { throw new Error("a refused resume must never be remembered as a pane"); },
+      deliver: async () => { throw new Error("a refused resume must never deliver into a pane"); },
+    });
+
+    const outcome = await resolver.deliverToTranscriptHost({
+      entry: claudeEntry,
+      spec: {
+        command: "claude --dangerously-skip-permissions --resume 0f0e9d8c-0000-4000-8000-000000000001",
+        cwd: "/repo",
+        windowName: "claude-resume",
+        engine: "claude",
+      },
+      payload: "hello",
+    });
+
+    expect(outcome.ok).toBeFalse();
+    if (!outcome.ok) expect(outcome.error).toMatch(/structured transport prohibits legacy tmux Claude launches/);
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+  }
+});

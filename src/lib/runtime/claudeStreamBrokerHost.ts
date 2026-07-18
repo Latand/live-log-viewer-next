@@ -986,7 +986,26 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.startTermination();
     if (!await this.waitForReap(this.shutdownGraceMs * 2)) {
       signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
-      if (!await this.waitForReap(this.shutdownGraceMs)) throw new Error("Claude child could not be reaped");
+      if (!await this.waitForReap(this.shutdownGraceMs)) {
+        /* "close" waits on the stdio pipes, which an escaped descendant can
+           hold open long after the leader died — a kill that keeps failing
+           with an unreapable child wedges the session's terminal receipt
+           forever. The recorded exit evidence is authoritative: when the
+           leader is gone, destroy our pipe ends and settle the reap. */
+        const leaderExited = this.child.pid === undefined
+          || (this.child.exitCode ?? null) !== null
+          || (this.child.signalCode ?? null) !== null;
+        if (!leaderExited) throw new Error("Claude child could not be reaped");
+        for (const stream of [this.child.stdin, this.child.stdout, this.child.stderr]) {
+          try { stream?.destroy(); } catch { /* pipe already closed */ }
+        }
+        this.reaped = true;
+        if (this.terminationTimer) {
+          clearTimeout(this.terminationTimer);
+          this.terminationTimer = null;
+        }
+        this.resolveReaped();
+      }
     }
     this.finishRelease();
   }

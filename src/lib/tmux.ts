@@ -20,6 +20,7 @@ import { normalizeResumePanesFile, type ResumePaneRecord, type ResumePanesFile }
 import { procBackend } from "@/lib/proc";
 import { admitRuntimeImagePayload, type RuntimeImageAdmissionResult } from "@/lib/runtime/runtimeImageAdmission";
 import type { RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
+import { spawnTransport, type SpawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { agentProcesses, isHelperArgv, pidAlive, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
 import {
@@ -1349,11 +1350,27 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
   };
 }
 
+/** Structured transport owns every Viewer-managed Claude launch through the
+    pane-less claude-broker. A legacy tmux pane would boot interactive Claude
+    that can stall on the bypass-permissions acceptance gate, so pane creation
+    is refused before any window exists. Only the account-migration successor's
+    print-mode fork — which can never present an interactive gate and is
+    adopted into the broker before delivery — may pass. */
+export function legacyClaudeTmuxSpawnRefusal(
+  spec: Pick<ResumeSpec, "engine" | "printMode">,
+  transport: SpawnTransport = spawnTransport(),
+): string | null {
+  if (spec.engine !== "claude" || transport !== "structured" || spec.printMode) return null;
+  return "structured transport prohibits legacy tmux Claude launches; the pane-less claude-broker host owns this spawn — retry once the structured runtime host is available";
+}
+
 /** Every visible legacy launch receives a durable receipt before tmux creates
     its window. Callers may later attach the engine-native transcript identity. */
 export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string, existingReceipt?: SpawnReceipt): Promise<SpawnedPane> {
   const receipt = existingReceipt ?? agentRegistry().beginSpawn(spec.engine, spec.cwd, spec.launchProfile);
   try {
+    const refusal = legacyClaudeTmuxSpawnRefusal(spec);
+    if (refusal) throw new Error(refusal);
     const capability = agentRegistry().rotateSpawnCapabilityForReceipt(receipt.launchId);
     return { ...(await spawnAgentWithPromptUnchecked(withSpawnCapability(spec, capability), text, receipt)), receipt };
   } catch (error) {

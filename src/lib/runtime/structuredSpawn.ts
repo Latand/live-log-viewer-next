@@ -7,6 +7,7 @@ import type { AgentEngine, ResumeSpec } from "@/lib/agent/cli";
 import type { AgentRegistry, AgentRegistryEntry, SpawnReceipt, StructuredHostColumns } from "@/lib/agent/registry";
 import { sessionKey, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import type { SpawnResponse } from "@/lib/agent/spawnResponse";
+import { prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
 import { hasUserAuthoredMessage } from "@/lib/session/reader";
@@ -549,13 +550,17 @@ export interface StructuredClaudePermissionContext {
   roleSpawn: boolean;
 }
 
+/** Viewer-managed role launches run autonomously behind prompt and tool
+    fences, so a role spawn keeps the full-permission mode regardless of which
+    capability lane admitted it; only a role-less agent-initiated spawn loses
+    the bypass. */
 export function structuredClaudePermissionMode(
   mode: string | null | undefined,
   context: StructuredClaudePermissionContext,
 ): string {
   if (!mode) return "default";
   if (mode !== "bypassPermissions") return mode;
-  return !context.agentInitiated || context.operatorAuthenticated ? mode : "default";
+  return !context.agentInitiated || context.operatorAuthenticated || context.roleSpawn ? mode : "default";
 }
 
 export function structuredClaudeSpawnPolicyBaseSettingsPath(
@@ -685,6 +690,12 @@ export async function spawnStructuredConversation(
   let adoptionClaimTransferred = false;
   let adoptionClaimContended = false;
   try {
+    /* Bypass acceptance and project trust are staged in the managed home
+       before runtime admission: no structured launch may ever wait at an
+       interactive acceptance gate, whichever caller reached this point. */
+    if (input.engine === "claude" && input.account.kind === "managed") {
+      prepareManagedClaudeSpawnHome(input.account.home, input.spec.cwd);
+    }
     const imageRefs = input.imageRefs ?? [];
     const content = input.prompt.trim() || imageRefs.length
       ? structuredContent(input.prompt, imageRefs)

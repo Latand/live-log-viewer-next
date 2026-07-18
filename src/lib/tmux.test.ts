@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
+import { freshSpecFor } from "@/lib/agent/cli";
+import { agentRegistry } from "@/lib/agent/registry";
 import {
   cdCommandForCwd,
   classifyTmuxAttachSnapshot,
@@ -9,6 +12,8 @@ import {
   createSpawnWindow,
   createTmuxEndpointDescriptor,
   killTmuxHostIfMatches,
+  legacyClaudeTmuxSpawnRefusal,
+  spawnAgentWithPrompt,
   renameTmuxWindowForPid,
   resolveTmuxAttach,
   resolveTmuxEndpointContract,
@@ -482,5 +487,42 @@ describe("killTmuxHostIfMatches", () => {
       })).toBe(false);
       expect(killCommands).toBe(0);
     }
+  });
+});
+
+describe("structured transport prohibits legacy tmux Claude launches", () => {
+  const withStructuredTransport = async (run: () => Promise<void>) => {
+    const previous = process.env.LLV_SPAWN_TRANSPORT;
+    process.env.LLV_SPAWN_TRANSPORT = "structured";
+    try {
+      await run();
+    } finally {
+      if (previous === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+      else process.env.LLV_SPAWN_TRANSPORT = previous;
+    }
+  };
+
+  test("refuses interactive Claude specs and settles a terminal retryable receipt", async () => {
+    await withStructuredTransport(async () => {
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-no-tmux-claude-"));
+      const spec = freshSpecFor("claude", cwd);
+      await expect(spawnAgentWithPrompt(spec, "hello")).rejects.toThrow(
+        /structured transport prohibits legacy tmux Claude launches/,
+      );
+      const receipts = Object.values(agentRegistry().snapshot().receipts)
+        .filter((receipt) => receipt.engine === "claude" && receipt.cwd === cwd);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]!.state).toBe("failed");
+      expect(receipts[0]!.error).toMatch(/structured transport prohibits legacy tmux Claude launches/);
+      fs.rmSync(cwd, { recursive: true, force: true });
+    });
+  });
+
+  test("refusal covers interactive resume specs and spares the migration print-mode fork and tmux transport", () => {
+    const interactive = { command: "claude --dangerously-skip-permissions", cwd: "/tmp", windowName: "claude-resume", engine: "claude" as const };
+    expect(legacyClaudeTmuxSpawnRefusal(interactive, "structured")).toMatch(/structured transport prohibits/);
+    expect(legacyClaudeTmuxSpawnRefusal(interactive, "tmux")).toBeNull();
+    expect(legacyClaudeTmuxSpawnRefusal({ ...interactive, engine: "codex" as const }, "structured")).toBeNull();
+    expect(legacyClaudeTmuxSpawnRefusal({ engine: "claude" as const, printMode: true }, "structured")).toBeNull();
   });
 });

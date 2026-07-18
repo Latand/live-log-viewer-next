@@ -45,6 +45,11 @@ test("structured Claude permission mapping distinguishes trusted autonomous spaw
     agentInitiated: true,
     operatorAuthenticated: false,
     roleSpawn: true,
+  })).toBe("bypassPermissions");
+  expect(structuredClaudePermissionMode("bypassPermissions", {
+    agentInitiated: true,
+    operatorAuthenticated: false,
+    roleSpawn: false,
   })).toBe("default");
   expect(structuredClaudePermissionMode("bypassPermissions", {
     agentInitiated: false,
@@ -3285,7 +3290,17 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
     });
 
     expect(response).toMatchObject({ launched: true, target: null, path: artifactPath, state: "settled" });
-    if (engine === "claude") expect(response).toMatchObject({ effectivePermissionMode: "default" });
+    if (engine === "claude") {
+      expect(response).toMatchObject({ effectivePermissionMode: "default" });
+      /* Bypass acceptance readiness lands in the managed home before runtime
+         admission, so no launch can wait at an interactive acceptance gate. */
+      const homeState = JSON.parse(fs.readFileSync(path.join(account.home, ".claude.json"), "utf8")) as {
+        bypassPermissionsModeAccepted?: boolean;
+        projects?: Record<string, { hasTrustDialogAccepted?: boolean }>;
+      };
+      expect(homeState.bypassPermissionsModeAccepted).toBeTrue();
+      expect(homeState.projects?.[cwd]?.hasTrustDialogAccepted).toBeTrue();
+    }
     expect(registry.snapshot().receipts[begun.receipt.launchId]?.pane).toBeNull();
     const registryBeforeAttach = registry.snapshot();
     let terminalCommand = "";
