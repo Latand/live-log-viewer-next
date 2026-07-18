@@ -3,7 +3,7 @@ import { useMemo, useSyncExternalStore } from "react";
 import { getLocale, type Locale, type MessageKey, type TFunction, translate } from "@/lib/i18n";
 import type { Flow, FlowAction, FlowRoleKey, FlowState, ReviewVerdict, RoleConfig, Round } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
-import { currentConversationFile, withoutArchivedPredecessors } from "@/lib/accounts/identity";
+import { currentConversationFile, currentMemberPath, withoutArchivedPredecessors } from "@/lib/accounts/identity";
 
 import { isConversation } from "@/components/projectModel";
 import { formatRateLimitTime } from "@/components/rateLimit";
@@ -57,6 +57,35 @@ export function useEffectiveFlows(flows: Flow[]): Flow[] {
         : flow,
     );
   }, [flows, closed]);
+}
+
+/**
+ * Canonicalizes a flow's member paths — the implementer anchor and each round's
+ * raw reviewer path — to the transcripts currently hosting those conversations
+ * (issues #325/#353). The deck, halo, folding, links and worker-stack grammars
+ * all key off these raw paths; after an account migration rotates a member onto
+ * a new transcript they stop matching, the deck never places, and reviewers
+ * resurface as detached standalone cards. Identity-stable: untouched flows (the
+ * common case) return the same references.
+ */
+export function resolveFlowMemberPaths(flows: Flow[], files: readonly FileEntry[]): Flow[] {
+  let changedAny = false;
+  const out = flows.map((flow) => {
+    const implementerPath = currentMemberPath(flow.implementerPath, flow.implementerConversationId, files) ?? flow.implementerPath;
+    let roundsChanged = false;
+    const rounds = flow.rounds.map((round) => {
+      /* Only rewrite a recorded path — a round whose reviewer hasn't attached
+         yet keeps its null (the "once known" contract). */
+      const reviewerPath = round.reviewerPath ? currentMemberPath(round.reviewerPath, round.reviewerConversationId, files) : round.reviewerPath;
+      if (reviewerPath === round.reviewerPath) return round;
+      roundsChanged = true;
+      return { ...round, reviewerPath };
+    });
+    if (implementerPath === flow.implementerPath && !roundsChanged) return flow;
+    changedAny = true;
+    return { ...flow, implementerPath, ...(roundsChanged ? { rounds } : {}) };
+  });
+  return changedAny ? out : flows;
 }
 
 /** Flows that still occupy their implementer's node on the scheme. */

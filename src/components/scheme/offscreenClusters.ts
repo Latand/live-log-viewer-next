@@ -35,6 +35,18 @@ export interface ClusterChipPartition {
 const intersects = (a: SchemeRect, b: SchemeRect): boolean =>
   a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
+/* The rendered pill's outer bounds (max-w-[240px], min-h-11) resolved from the
+   per-edge CSS transform in EdgeChips, in screen space. Conservative: a shorter
+   label yields a narrower pill inside this box. */
+const CHIP_W = 240;
+const CHIP_H = 44;
+function chipBox(chip: Omit<ClusterChip, "cluster">): SchemeRect {
+  if (chip.edge === "left") return { x: chip.x, y: chip.y - CHIP_H / 2, w: CHIP_W, h: CHIP_H };
+  if (chip.edge === "right") return { x: chip.x - CHIP_W, y: chip.y - CHIP_H / 2, w: CHIP_W, h: CHIP_H };
+  if (chip.edge === "top") return { x: chip.x - CHIP_W / 2, y: chip.y, w: CHIP_W, h: CHIP_H };
+  return { x: chip.x - CHIP_W / 2, y: chip.y - CHIP_H, w: CHIP_W, h: CHIP_H };
+}
+
 function chipAnchor(rect: SchemeRect, cam: Camera, vp: { w: number; h: number }): Omit<ClusterChip, "cluster"> {
   const cx = (rect.x + rect.w / 2) * cam.z + cam.x;
   const cy = (rect.y + rect.h / 2) * cam.z + cam.y;
@@ -53,12 +65,17 @@ function chipAnchor(rect: SchemeRect, cam: Camera, vp: { w: number; h: number })
   return { edge, x: Math.max(pad, Math.min(vp.w - pad, vx + dx * ty)), y: edge === "bottom" ? vp.h - pad : pad };
 }
 
-/** Pure off-screen filtering, ray/edge placement, priority, and per-edge cap. */
+/** Pure off-screen filtering, ray/edge placement, priority, and per-edge cap.
+ * `obstacles` are screen-space boxes of rendered conversation surfaces (panes,
+ * decks): a chip whose pill would paint over one folds into that edge's compact
+ * «+N» disclosure instead — relation/navigation chips must never overlay chat
+ * content (issue #292 production rejection). */
 export function offscreenClusterChips(
   clusters: readonly BoardCluster[],
   cam: Camera,
   vp: { w: number; h: number },
   perEdgeCap = 4,
+  obstacles: readonly SchemeRect[] = [],
 ): ClusterChipPartition {
   const viewport: SchemeRect = { x: -cam.x / cam.z, y: -cam.y / cam.z, w: vp.w / cam.z, h: vp.h / cam.z };
   const sorted = clusters
@@ -70,7 +87,8 @@ export function offscreenClusterChips(
   for (const cluster of sorted) {
     const chip = { cluster, ...chipAnchor(cluster.rect, cam, vp) };
     const count = counts.get(chip.edge) ?? 0;
-    if (count < perEdgeCap) {
+    const box = chipBox(chip);
+    if (count < perEdgeCap && !obstacles.some((obstacle) => intersects(box, obstacle))) {
       visible.push(chip);
       counts.set(chip.edge, count + 1);
     } else {

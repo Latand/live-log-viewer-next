@@ -33,7 +33,10 @@ test("mobile dock surfaces the full plan + 44px controls for a memberless pipeli
   expect(html).toContain("aria-label=\"Close pipeline\"");
   const controlRows = html.match(/h-11/g) ?? [];
   expect(controlRows.length).toBeGreaterThanOrEqual(2);
-  expect(html).toContain("Configure stage plan, state pending");
+  /* Evidence-less stages compact to glyph chips on mobile (#156) but a
+     configurable stage keeps its tap → configuration disclosure. */
+  expect(html).toContain('data-stage-compact="true"');
+  expect(html).toContain('aria-label="plan, pending"');
   expect(html).toContain('data-pipeline-stage="plan"');
 });
 
@@ -51,6 +54,34 @@ test("pipelinesToDock docks every active pipeline group — memberful ones too (
 
   /* Both pipelines dock, in group order; the flow group contributes nothing. */
   expect(docked.map((p) => p.id)).toEqual(["p1", "p2"]);
+});
+
+test("a collapsed dock is one warning-aware summary row; expanded reveals the full rail (#156)", () => {
+  const collapsed = renderToStaticMarkup(<MobilePipelineDock pipeline={provisioning} defaultExpanded={false} />);
+  /* Only the 44px disclosure row: title, status badge, stage counter, chevron. */
+  expect(collapsed).toContain('data-testid="mobile-pipeline-dock-summary"');
+  expect(collapsed).toContain('aria-label="Expand pipeline Refactor the board"');
+  expect(collapsed).toContain('aria-expanded="false"');
+  expect(collapsed).toContain("Refactor the board");
+  expect(collapsed).toContain("stage 3/3");
+  expect(collapsed).not.toContain('aria-label="Pipeline stages"');
+  expect(collapsed).not.toContain("Pause pipeline");
+
+  /* Expanded keeps the disclosure row and mounts the full mobile rail below. */
+  const expanded = renderToStaticMarkup(<MobilePipelineDock pipeline={provisioning} defaultExpanded />);
+  expect(expanded).toContain('aria-label="Collapse pipeline Refactor the board"');
+  expect(expanded).toContain('aria-label="Pipeline stages"');
+
+  /* A parked or draft pipeline stays visible without expanding: the collapsed
+     summary row carries the warning-toned state badge. */
+  const parked = renderToStaticMarkup(
+    <MobilePipelineDock pipeline={{ ...provisioning, state: "needs_decision" } as Pipeline} defaultExpanded={false} />,
+  );
+  expect(parked).toContain("bg-warning-soft");
+  const draft = renderToStaticMarkup(
+    <MobilePipelineDock pipeline={{ ...provisioning, state: "draft" } as Pipeline} defaultExpanded={false} />,
+  );
+  expect(draft).toContain("bg-warning-soft");
 });
 
 test("a paused pipeline shows Resume; a completed one keeps Close but drops pause/resume", () => {

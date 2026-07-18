@@ -123,6 +123,35 @@ export function resolveConversationTarget(files: FileEntry[], hash: Conversation
 }
 
 /**
+ * The transcript path that CURRENTLY hosts a durable member record (a pipeline
+ * stage attempt, a flow implementer, a review round). Durable records freeze the
+ * path known at launch; an account migration rotates the conversation onto a new
+ * transcript, and every board adapter that keeps matching the frozen path stops
+ * claiming the live generation — it resurfaces as a detached standalone card
+ * (issues #325/#353). Resolution: the stored conversation id's current
+ * generation wins; a recorded path that became an archived predecessor redirects
+ * through its own conversation id; otherwise the recorded path stands (also when
+ * the current generation has left the scan — the caller's renderable gates
+ * handle absence).
+ */
+export function currentMemberPath(
+  path: string | null,
+  conversationId: string | null | undefined,
+  files: readonly FileEntry[],
+): string | null {
+  if (conversationId) {
+    const current = currentConversationFile(files, conversationId);
+    if (current) return current.path;
+  }
+  if (!path) return path;
+  const recorded = files.find((file) => file.path === path);
+  if (recorded && isArchivedPredecessor(recorded) && recorded.conversationId) {
+    return currentConversationFile(files, recorded.conversationId)?.path ?? path;
+  }
+  return path;
+}
+
+/**
  * Filters archived predecessors out of a board/switchboard/attention list so a
  * migrated conversation shows as exactly one card (its current generation).
  * A no-op on pre-migration payloads.

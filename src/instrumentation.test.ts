@@ -11,7 +11,7 @@ import {
   runStructuredHostStartup,
   scheduleAccountMigrationController,
   viewerReleaseOwnsTraffic,
-} from "./instrumentation";
+} from "@/lib/viewerInstrumentation";
 import { operatorSpawnCapabilityPath } from "@/lib/agent/operatorCapability";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
@@ -245,4 +245,18 @@ test("unsupported structured runtime aborts server startup", async () => {
   } finally {
     markStructuredHostStartupReady();
   }
+});
+
+test("the instrumentation shim keeps node: imports out of its static graph (dev /api/files 500 regression)", () => {
+  /* Next's dev fallback compiler builds src/instrumentation.ts without
+     node:-scheme support: ANY node: builtin reachable from the entry — a
+     top-level import, a re-export, or a dynamic import outside the statically
+     pruned NEXT_RUNTIME === "nodejs" branch — fails the compile and 500s every
+     request. The node-side runtime lives in @/lib/viewerInstrumentation and may
+     only be reached through the guarded dynamic import. */
+  const source = fs.readFileSync(new URL("./instrumentation.ts", import.meta.url), "utf8");
+  expect(source).not.toMatch(/from\s+["']node:/);
+  expect(source).not.toMatch(/^\s*import\s[^(]*viewerInstrumentation/m);
+  expect(source).not.toMatch(/^\s*export\s.*\sfrom\s/m);
+  expect(source).toMatch(/NEXT_RUNTIME === "nodejs"/);
 });
