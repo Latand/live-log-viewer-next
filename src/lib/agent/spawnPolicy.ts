@@ -10,6 +10,17 @@ const MANAGED_HOOK_PREFIX = "LLV_MANAGED_NATIVE_SUBAGENT_DENY=1 ";
 const MANAGED_DIR = ".llv";
 const MANAGED_HOOK = "deny-native-subagents.sh";
 
+/** Every native multi-agent entry point in the installed Claude CLI (#381 audit,
+    CLI 2.1.214): subagent spawns (Task, Agent), Workflow orchestration scripts,
+    and the agent-team surface (TeamCreate, TeamDelete, SendMessage). Swarm
+    views are UI wrappers that launch through these same tools. Background
+    shells and task-list tools (TaskOutput, TaskStop, TaskCreate…) never create
+    child agents and stay allowed alongside full Bash/filesystem access. */
+export const NATIVE_MULTI_AGENT_TOOLS: readonly string[] = Object.freeze([
+  "Task", "Agent", "Workflow", "TeamCreate", "TeamDelete", "SendMessage",
+]);
+export const NATIVE_MULTI_AGENT_HOOK_MATCHER = NATIVE_MULTI_AGENT_TOOLS.join("|");
+
 export const VIEWER_SPAWN_ENDPOINT = "http://127.0.0.1:8898/api/spawn";
 export const VIEWER_SPAWN_CAPABILITY_ENV = "LLV_SPAWN_CAPABILITY";
 export const VIEWER_SPAWN_CAPABILITY_HEADER = "x-llv-spawn-capability";
@@ -154,7 +165,7 @@ export function applyClaudeSpawnPolicy(
     const script = `#!/bin/sh\nprintf '%s\\n' ${shellQuote(NATIVE_SUBAGENT_DENY_MESSAGE)} >&2\nexit 2\n`;
     atomicWrite(result.hookPath, script, 0o700);
     preToolUse.push({
-      matcher: "Task|Agent",
+      matcher: NATIVE_MULTI_AGENT_HOOK_MATCHER,
       hooks: [{ type: "command", command: result.command }],
     });
   }

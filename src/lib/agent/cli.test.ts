@@ -161,7 +161,7 @@ test("managed Claude fresh and resume commands pin the transcript owner and scru
   const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
     hooks: { PreToolUse: Array<{ matcher: string }> };
   };
-  expect(settings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(true);
+  expect(settings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage")).toBe(true);
   const resumed = resumeSpecFor("claude-projects", transcript)?.command ?? "";
   expect(resumed).toContain(`CLAUDE_CONFIG_DIR='${account.home}'`);
   expect(resumed).toContain("--resume");

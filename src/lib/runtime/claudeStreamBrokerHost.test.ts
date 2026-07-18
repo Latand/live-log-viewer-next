@@ -15,6 +15,7 @@ import {
   claudeCliAuthStatus,
   ClaudeStreamBrokerHost,
   FileClaudeDeliveryLedger,
+  NATIVE_MULTI_AGENT_DENY_FLAG,
   type ClaudeDeliveryLedger,
   type ClaudeDeliveryState,
 } from "./claudeStreamBrokerHost";
@@ -280,7 +281,7 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(captured.args).toContain("--output-format");
     expect(captured.args).toContain("--safe-mode");
     expect(captured.args).toContain("--disallowedTools");
-    expect(captured.args).toContain("Task,Agent");
+    expect(captured.args).toContain("Task,Agent,Workflow,TeamCreate,TeamDelete,SendMessage");
     expect(captured.args).toContain("--replay-user-messages");
     expect(captured.args).toContain("--permission-prompt-tool");
     expect(captured.args?.at(captured.args.indexOf("--permission-prompt-tool") + 1)).toBe("stdio");
@@ -333,7 +334,7 @@ describe("ClaudeStreamBrokerHost", () => {
 
     const index = captured.args!.indexOf("--disallowedTools");
     expect(index).toBeGreaterThanOrEqual(0);
-    expect(captured.args![index + 1]).toBe("Task,Agent,Edit,Write,NotebookEdit");
+    expect(captured.args![index + 1]).toBe("Task,Agent,Workflow,TeamCreate,TeamDelete,SendMessage,Edit,Write,NotebookEdit");
     await host.release();
   });
 
@@ -558,8 +559,9 @@ describe("ClaudeStreamBrokerHost", () => {
       hooks: { PreToolUse: Array<{ matcher: string }> };
     };
     expect(deniedSettingsIndex).toBeGreaterThanOrEqual(0);
-    expect(deniedCapture.args).toContain("Task,Agent");
-    expect(deniedSettings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(true);
+    expect(deniedCapture.args).toContain("Task,Agent,Workflow,TeamCreate,TeamDelete,SendMessage");
+    expect(deniedSettings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage")).toBe(true);
+    expect((await denied.health()).activeFlags).toContain(NATIVE_MULTI_AGENT_DENY_FLAG);
     await denied.release();
 
     const allowedLedger = new RecordingDeliveryLedger();
@@ -580,8 +582,9 @@ describe("ClaudeStreamBrokerHost", () => {
       hooks: { PreToolUse: Array<{ matcher: string }> };
     };
     expect(allowedSettingsIndex).toBeGreaterThanOrEqual(0);
-    expect(allowedCapture.args).not.toContain("Task,Agent");
-    expect(allowedSettings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(false);
+    expect(allowedCapture.args).not.toContain("--disallowedTools");
+    expect(allowedSettings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage")).toBe(false);
+    expect((await allowed.health()).activeFlags).not.toContain(NATIVE_MULTI_AGENT_DENY_FLAG);
     await allowed.release();
   });
 
@@ -628,7 +631,7 @@ describe("ClaudeStreamBrokerHost", () => {
     const adoptedSettings = JSON.parse(fs.readFileSync(adoptedSettingsPath, "utf8"));
     expect(freshSettings.theme).toBe("shared-dark");
     expect(freshSettings.env).toEqual({ SHARED_SETTING: "kept" });
-    expect(freshSettings.hooks.PreToolUse.map((group) => group.matcher)).toEqual(["Read", "Task|Agent"]);
+    expect(freshSettings.hooks.PreToolUse.map((group) => group.matcher)).toEqual(["Read", "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage"]);
     expect(adoptedSettings).toEqual(freshSettings);
     await adopted.release();
 
@@ -651,7 +654,7 @@ describe("ClaudeStreamBrokerHost", () => {
     const legacyProfile = JSON.parse(fs.readFileSync(legacyProfilePath, "utf8")) as {
       hooks: { PreToolUse: Array<{ matcher: string }> };
     };
-    expect(legacyProfile.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(true);
+    expect(legacyProfile.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage")).toBe(true);
     expect(fs.readFileSync(legacySettingsPath, "utf8")).toBe(legacySettings);
     await legacy.release();
   });
