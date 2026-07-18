@@ -165,6 +165,22 @@ test("a stage that already ran is frozen: pickers disabled, no PATCH from a chan
   host.remove();
 });
 
+test("placeholder runtime controls stay usable at 390px: the row wraps and every control carries a 44px target (#405)", () => {
+  const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
+  /* No pixel browser in CI — acceptance is structural: the classes that carry
+     the 390px contract (wrap + max-md 44px inflation, design rule 8) must be
+     on the real controls. */
+  const controls = host.querySelector('select[aria-label="Running agent model"]')!.parentElement as HTMLElement;
+  expect(controls.className).toContain("flex-wrap");
+  const selects = [...controls.querySelectorAll("select")] as HTMLSelectElement[];
+  expect(selects).toHaveLength(2);
+  for (const select of selects) expect(select.className).toContain("max-md:min-h-11");
+  const apply = controls.querySelector('button[aria-label="Apply"]') as HTMLButtonElement;
+  expect(apply.className).toContain("max-md:min-h-11");
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
 test("the lite (map) variant renders a static runtime summary instead of pickers", () => {
   const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive={false} />);
   expect(host.querySelectorAll("select").length).toBe(0);

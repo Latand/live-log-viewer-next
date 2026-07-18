@@ -61,3 +61,18 @@ shot resume-codex-en-light      1440 900 "view=resume&lang=en&theme=light"
 shot sheet-codex-390-en-light    390 844 "view=sheet&lang=en&theme=light"
 shot sheet-codex-390-uk-dark     390 844 "view=sheet&lang=uk&theme=dark"
 shot rest-codex-390-en-light     390 844 "view=rest&lang=en&theme=light"
+# 7. Live-tmux applying (spinner replaces the chevron) and error (danger face
+#    after a failed reconfigure) — desktop and 390 (#405).
+shot applying-codex-en-light        1440 900 "view=applying&lang=en&theme=light"
+shot applying-codex-390-en-light     390 844 "view=applying&lang=en&theme=light"
+shot apply-error-codex-en-light     1440 900 "view=apply-error&lang=en&theme=light"
+shot apply-error-codex-390-en-light  390 844 "view=apply-error&lang=en&theme=light"
+# 8. Before/after pair: the retired badge+selects+Apply strip vs the new quiet
+#    row (the review-facing "clutter is gone" shot) — desktop and 390 (#405).
+shot before-strip-uk-light          1440 900 "view=before&lang=uk&theme=light"
+shot before-strip-390-uk-light       390 844 "view=before&lang=uk&theme=light"
+shot after-strip-uk-light           1440 900 "view=rest&lang=uk&theme=light"
+shot after-strip-390-uk-light        390 844 "view=rest&lang=uk&theme=light"
+# Stage placeholder runtime row: usable at 390 with 44px targets (#405).
+shot stage-controls-en-light        1440 900 "view=stage&lang=en&theme=light"
+shot stage-controls-390-en-light     390 844 "view=stage&lang=en&theme=light"

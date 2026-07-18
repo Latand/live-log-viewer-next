@@ -504,6 +504,9 @@ interface Row {
   key: string;
   kind: "tier" | "submenu" | "back" | "model" | "speed";
   label: string;
+  /** Accessible name when it must differ from the visible label (the back row:
+      "Back — Model", so it never collides with the submenu row's name). */
+  ariaLabel?: string;
   detail?: string;
   checked: boolean;
   enabled: boolean;
@@ -522,6 +525,9 @@ function buildRows({
 }): Row[] {
   const back = (label: string): Row => ({
     key: "back", kind: "back", label, checked: false, enabled: true, role: "menuitem",
+    // "Back — Model" / «Назад — Модель»: the visible row shows the panel name
+    // (‹ Model), the accessible name says what activating it does (§9).
+    ariaLabel: `${t("composer.backTo")} — ${label}`,
     activate: () => onOpenPanel("root"),
   });
   if (panel === "model") {
@@ -590,6 +596,7 @@ function MenuRow({
         type="button"
         role="menuitem"
         tabIndex={active ? 0 : -1}
+        aria-label={row.ariaLabel}
         onClick={row.activate}
         data-runtime-row="back"
         className="flex w-full items-center gap-1 rounded-control px-2 py-1.5 text-left text-ui font-semibold text-secondary hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"

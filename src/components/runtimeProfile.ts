@@ -196,11 +196,13 @@ export function sendRuntimeFrom(file: FileEntry): RuntimeProfile | undefined {
 /** Move the `:profile` record across a conversation identity rotation, mirroring
     the composer draft's `adoptComposerState`: a provisional→canonical id swap
     (or a migration path flap) must carry the selection along, or a poll that
-    fills in the canonical id would silently drop the user's chosen runtime. */
+    fills in the canonical id would silently drop the user's chosen runtime.
+    `:phase` rides too — a live-tmux reconfigure that is pending/confirming when
+    the identity rotates must keep converging under the canonical id. */
 export function adoptRuntimeProfile(fromIdentity: string, toIdentity: string): void {
   if (!fromIdentity || fromIdentity === toIdentity) return;
   try {
-    for (const suffix of [":profile", ":resume", ""]) {
+    for (const suffix of [":profile", ":resume", ":phase", ""]) {
       const legacy = localStorage.getItem(`llvAgentRuntime:${fromIdentity}${suffix}`);
       if (legacy === null) continue;
       if (localStorage.getItem(`llvAgentRuntime:${toIdentity}${suffix}`) === null) {
