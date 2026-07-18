@@ -62,10 +62,28 @@ const structuredView: RuntimeSessionView = {
 } as unknown as RuntimeSessionView;
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
+/* Capture the real implementations BEFORE mock.module rewires the registry:
+   the namespace's members are live bindings, so reading them after the mock
+   would resolve to the mock itself (infinite recursion). */
+const realUseRuntimeSession = actualRuntimeHooks.useRuntimeSession;
+const realUseRuntimeReceiptsForArtifact = actualRuntimeHooks.useRuntimeReceiptsForArtifact;
+/* bun's mock.module registry is global and the afterAll restore does NOT reach
+   test files loaded later, so an unconditional stub would leak this structured
+   view into every downstream pane test (it flipped 6 BranchPane surfaces to
+   "structured"). The mock therefore delegates to the REAL hooks for every
+   conversation except this file's own `conv-snapshot` — loaded after this
+   file, other suites observe real behavior. The real hook always runs first
+   so the hook order never varies across the branch. */
 mock.module("@/hooks/useRuntime", () => ({
   ...actualRuntimeHooks,
-  useRuntimeSession: () => structuredView,
-  useRuntimeReceiptsForArtifact: () => [],
+  useRuntimeSession: (conversationId: string | null) => {
+    const real = realUseRuntimeSession(conversationId);
+    return conversationId === "conv-snapshot" ? structuredView : real;
+  },
+  useRuntimeReceiptsForArtifact: (path: string | null, conversationId?: string | null) => {
+    const real = realUseRuntimeReceiptsForArtifact(path, conversationId);
+    return path === "/codex-snapshot.jsonl" || conversationId === "conv-snapshot" ? [] : real;
+  },
 }));
 afterAll(() => {
   mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
@@ -196,6 +214,31 @@ test("a same-key retry re-sends the ORIGINAL runtime snapshot even after the sel
   expect(sends[2]!.idempotencyKey).not.toBe(sends[0]!.idempotencyKey);
   expect(sends[2]!.runtime).toEqual({ effort: "low" });
 
+  await act(async () => root.unmount());
+});
+
+test("the delegating mock leaks nothing: another conversation resolves the REAL session and takes the legacy send path", async () => {
+  /* Regression for the bun mock.module leak: an unconditional structured stub
+     here flipped every later-loaded pane test (e.g. BranchPane.render) to the
+     "structured" surface. With the delegate in place, any conversation other
+     than conv-snapshot must observe the real hook — a null session — and send
+     via /api/tmux, never /api/runtime/send. */
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    urls.push(String(input));
+    return { ok: true, status: 200, json: async () => ({ ok: true, targets: {} }) } as Response;
+  }) as typeof fetch;
+  const other: FileEntry = {
+    ...file, path: "/codex-other.jsonl", name: "codex-other.jsonl", conversationId: "conv-other",
+  } as FileEntry;
+
+  const { host, root } = await renderInto(<TmuxComposer file={other} />);
+  const { type, submit } = composerControls(host);
+  await settle(() => type("legacy route"));
+  await settle(() => submit());
+
+  expect(urls).toContain("/api/tmux");
+  expect(urls).not.toContain("/api/runtime/send");
   await act(async () => root.unmount());
 });
 
