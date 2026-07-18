@@ -13,6 +13,23 @@ export class RuntimeHostUnavailableError extends Error {
   }
 }
 
+const TRANSPORT_FAILURE_MESSAGES = new Set([
+  "runtime host request timed out",
+  "runtime host is unavailable",
+  "runtime host response exceeds limit",
+  "runtime host returned invalid JSON",
+  "runtime host response id mismatch",
+]);
+
+/** True only for socket-level failures the client itself produced, where the
+    request may or may not have reached the journal. Idempotent commands are
+    safe to replay against these; deterministic server rejections are not. */
+export function isRuntimeHostTransportFailure(error: unknown): boolean {
+  return error instanceof RuntimeHostUnavailableError
+    && error.code === undefined
+    && TRANSPORT_FAILURE_MESSAGES.has(error.message);
+}
+
 export interface RuntimeHostClient {
   snapshot(): Promise<RuntimeSnapshot>;
   events(after: number): Promise<RuntimeReplay>;

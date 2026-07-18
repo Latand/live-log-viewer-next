@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -295,13 +295,39 @@ function subscriptionEnv(source: NodeJS.ProcessEnv, claudeConfigDir?: string): N
   return env;
 }
 
-function defaultAuthStatus(binary: string, env: NodeJS.ProcessEnv, cwd: string): ClaudeAuthStatus {
-  const result = spawnSync(binary, ["auth", "status"], { cwd, env, encoding: "utf8" });
+const MAX_AUTH_PROBE_STDOUT_BYTES = 1024 * 1024;
+
+/* The auth probe runs on the Viewer request loop while other structured
+   launches, runtime-socket calls, and broker stdout pumps share it. It must
+   never block the event loop: production #367 saw four simultaneous Claude
+   launches starve each other's 3s runtime-host calls into "runtime host
+   request timed out" behind synchronous CLI probes. */
+function claudeCliProbe(
+  binary: string,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ status: number | null; stdout: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      if (stdout.length < MAX_AUTH_PROBE_STDOUT_BYTES) stdout += chunk;
+    });
+    child.stderr.on("data", () => { /* Provider diagnostics may contain credentials. */ });
+    child.on("error", (error) => reject(new Error(`Claude subscription authentication probe failed: ${safeError(error)}`)));
+    child.on("close", (code) => resolve({ status: code, stdout }));
+  });
+}
+
+export async function claudeCliAuthStatus(binary: string, env: NodeJS.ProcessEnv, cwd: string): Promise<ClaudeAuthStatus> {
+  const result = await claudeCliProbe(binary, ["auth", "status"], cwd, env);
   if (result.status !== 0) throw new Error("Claude subscription authentication check failed");
   let value: JsonObject | null = null;
   try { value = record(JSON.parse(result.stdout)); } catch { /* handled below */ }
   if (!value) throw new Error("Claude subscription authentication status was invalid");
-  const versionResult = spawnSync(binary, ["--version"], { cwd, env, encoding: "utf8" });
+  const versionResult = await claudeCliProbe(binary, ["--version"], cwd, env);
   const version = versionResult.status === 0 ? versionResult.stdout.match(/\b\d+\.\d+\.\d+\b/)?.[0] ?? null : null;
   return {
     loggedIn: value.loggedIn === true,
@@ -510,7 +536,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   ): Promise<ClaudeStreamBrokerHost> {
     const binary = options.binary ?? process.env.LLV_CLAUDE_BINARY ?? "claude";
     const env = subscriptionEnv(options.env ?? process.env, options.claudeConfigDir);
-    const auth = await (options.readAuthStatus?.() ?? defaultAuthStatus(binary, env, options.cwd));
+    const auth = await (options.readAuthStatus?.() ?? claudeCliAuthStatus(binary, env, options.cwd));
     if (!auth.loggedIn || auth.authMethod !== "claude.ai" || !auth.subscriptionType) {
       throw new Error("Claude stream hosting requires a claude.ai subscription login");
     }

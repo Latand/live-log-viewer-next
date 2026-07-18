@@ -843,7 +843,35 @@ export class RuntimeJournal {
       const epoch = Number(this.meta("host_epoch")) + 1;
       this.metaSet("host_epoch", String(epoch));
       this.metaSet("health", "ready");
+      /* A fresh spawn placeholder (identity still the conversation id, no
+         transcript ever published) cannot outlive the host epoch that admitted
+         it: materialization always re-projects hosted state from the launcher.
+         Rows still registering at a new epoch are orphans of interrupted or
+         failed launches — production #367 kept them registering/unknown across
+         restarts while health claimed ready. Resume admissions keep their
+         prior identity and settle through Viewer startup recovery. */
+      for (const session of this.entityValues<RuntimeSession>("session")) {
+        if (session.host !== "registering") continue;
+        if (session.artifactPath !== null || session.sessionKey.sessionId !== session.conversationId) continue;
+        this.appendInTransaction(normalizeRuntimeEventInput({
+          scope: { type: "session", id: session.conversationId },
+          kind: "session-status",
+          producer: {
+            kind: "runtime-host",
+            hostEpoch: epoch,
+            eventKey: `host-epoch:${epoch}:registering-reconciled:${session.conversationId}`,
+          },
+          payload: {
+            conversationId: session.conversationId,
+            host: "dead",
+            turn: "idle",
+            activeTurnId: null,
+            attentionIds: [],
+          },
+        }));
+      }
       this.db.exec("COMMIT");
+      this.notifyWaiters();
       return epoch;
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
@@ -1257,6 +1285,63 @@ export class RuntimeJournal {
 
   private appendCompletionConsequences(command: RuntimeOperationCommand, receipt: RuntimeOperationReceipt, operationId: string): void {
     const producer = { kind: "runtime-effect", hostEpoch: Number(this.meta("host_epoch")) };
+    if (command.kind === "spawn"
+      && !command.sessionId
+      && (receipt.status === "failed" || receipt.status === "rejected" || receipt.status === "uncertain")) {
+      /* A fresh spawn placeholder session only ever leaves "registering"
+         through the launcher's own hosted projection. When the launch fails
+         first, the terminal receipt is the durable truth and must retire the
+         placeholder in the same transaction — production #367 left failed
+         launches parked as registering/unknown across runtime-host restarts.
+         Resume admissions (sessionId present) keep their prior writer's
+         projection and settle through the Viewer recovery ladder instead. */
+      const session = this.entity<RuntimeSession>("session", command.conversationId);
+      if (session && session.host === "registering") {
+        this.appendInTransaction(normalizeRuntimeEventInput({
+          scope: { type: "session", id: command.conversationId },
+          kind: "session-status",
+          operationId,
+          producer: { ...producer, eventKey: `operation:${operationId}:spawn-${receipt.status}-session-dead` },
+          payload: {
+            conversationId: command.conversationId,
+            host: "dead",
+            turn: "idle",
+            activeTurnId: null,
+            attentionIds: [],
+          },
+        }));
+      }
+      return;
+    }
+    if (command.kind === "kill" && receipt.status === "delivered") {
+      /* The delivered kill receipt asserts the OS processes are gone. Viewer
+         projections ride best-effort publish chains, so the journal converges
+         host/turn itself — production #367 kept killed conversations at
+         hosted/running after their child PIDs disappeared. A kill aimed at a
+         predecessor generation must not touch a live successor's projection,
+         so the session must still belong to the killed generation. */
+      const session = this.entity<RuntimeSession>("session", command.conversationId);
+      const killedGeneration = session
+        && session.sessionKey.engine === command.sessionKey.engine
+        && session.sessionKey.sessionId === command.sessionKey.sessionId;
+      if (session && killedGeneration
+        && (session.host !== "dead" || session.turn !== "idle" || session.activeTurnId !== null)) {
+        this.appendInTransaction(normalizeRuntimeEventInput({
+          scope: { type: "session", id: command.conversationId },
+          kind: "session-status",
+          operationId,
+          producer: { ...producer, eventKey: `operation:${operationId}:kill-delivered-session-dead` },
+          payload: {
+            conversationId: command.conversationId,
+            host: "dead",
+            turn: "idle",
+            activeTurnId: null,
+            attentionIds: [],
+          },
+        }));
+      }
+      return;
+    }
     if (command.kind === "answer" && receipt.status === "answered") {
       this.appendInTransaction(normalizeRuntimeEventInput({
         scope: { type: "session", id: command.conversationId },

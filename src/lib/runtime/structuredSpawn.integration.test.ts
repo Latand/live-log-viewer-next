@@ -12,14 +12,14 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
-import type { RuntimeHostClient } from "./client";
+import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppServerHost";
 import { StructuredHostAdoptionCleanupError, type DeliveryReceipt, type HostState, type QueueEntry, type RuntimeEvent } from "./engineHost";
 import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./structuredDeliveryController";
 import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
-import { INITIAL_MESSAGE_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, type SpawnedStructuredHost } from "./structuredSpawn";
+import { INITIAL_MESSAGE_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
 
 type UnsequencedEvent = RuntimeEvent extends infer Event
@@ -3039,9 +3039,11 @@ test("a delivering kill terminalizes a stale structured wrapper owned by the liv
     claimOwner: null,
     pendingAction: null,
   });
+  /* The delivered kill receipt now converges the projection in the journal
+     transaction itself (#367): a dead host reads idle, never unknown. */
   expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
     host: "dead",
-    turn: "unknown",
+    turn: "idle",
     activeTurnId: null,
   });
   expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
@@ -3468,4 +3470,264 @@ test("structured spawn fails loudly when Codex omits the transcript-path capabil
 
   expect(registry.snapshot().receipts[begun.receipt.launchId]?.state).toBe("failed");
   expect(journal.operationResult(begun.receipt.launchId)?.receipt).toMatchObject({ status: "failed", reason: expect.stringContaining("transcript path") });
+});
+
+test("issue 367: four simultaneous structured Claude launches admit past transient runtime socket timeouts", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `concurrent-admission-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  /* Production: launches 6799487f/90d9d097/feee9a74/875ef8e1 all became
+     terminal retry-safe failures on their first "runtime host request timed
+     out". The admission command is idempotent by launch id, so a transport
+     timeout must be retried instead of minting a failed receipt. */
+  const timedOutOnce = new Set<string>();
+  const flakyClient = {
+    ...client,
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => {
+      if (command.kind === "spawn" && command.operationId && !timedOutOnce.has(command.operationId)) {
+        timedOutOnce.add(command.operationId);
+        throw new RuntimeHostUnavailableError("runtime host request timed out");
+      }
+      return client.command(command);
+    },
+  } as RuntimeHostClient;
+
+  const launchProfile = emptyLaunchProfile({ cwd, permissionMode: "bypassPermissions" });
+  const launches = Array.from({ length: 4 }, (_, index) => {
+    const begun = registry.beginSpawnRequest({
+      engine: "claude",
+      cwd,
+      transport: "structured",
+      accountId: `claude-account-${index}`,
+      launchProfile,
+    });
+    if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+    const sessionId = crypto.randomUUID();
+    const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+    return { receipt: begun.receipt, host: new RoundTripHost("claude", artifactPath, sessionId), artifactPath };
+  });
+
+  const responses = await Promise.all(launches.map(({ receipt, host, artifactPath }) =>
+    spawnStructuredConversation({
+      engine: "claude",
+      receipt,
+      spec: { command: "claude", cwd, windowName: "fable", engine: "claude", transcript: artifactPath, launchProfile },
+      account: { engine: "claude", accountId: receipt.accountId ?? "default", kind: "legacy", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+      prompt: "",
+      registry,
+      client: flakyClient,
+    }, {
+      startHost: async () => host,
+      bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+        const state = await runningHost.health();
+        targetRegistry.setStructuredHostClaimed(key, {
+          kind: "claude-broker",
+          endpoint: state.endpoint,
+          process: { pid: process.pid, startIdentity: "test-process" },
+          eventCursor: state.eventCursor,
+          protocolVersion: state.protocolVersion,
+          writerClaimEpoch: claimEpoch,
+          activeTurnRef: state.activeTurnRef,
+          pendingAttention: state.pendingAttention,
+          activeFlags: state.activeFlags,
+        }, "idle", claimOwner, claimEpoch);
+        return () => {};
+      },
+      publishHost: async () => async () => {},
+      processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+    })));
+
+  expect(timedOutOnce.size).toBe(4);
+  for (const [index, response] of responses.entries()) {
+    expect(response).toMatchObject({ launched: true, state: "settled", initialMessage: "delivered" });
+    const receipt = registry.snapshot().receipts[launches[index]!.receipt.launchId];
+    expect(receipt?.state).toBe("completed");
+    const operation = journal.operationResult(launches[index]!.receipt.launchId);
+    expect(operation?.receipt.status).toBe("delivered");
+  }
+  journal.close();
+});
+
+test("issue 367: admission retry replays only transport failures", async () => {
+  const attempts: number[] = [];
+  let calls = 0;
+  await expect(withRuntimeAdmissionRetry(async () => {
+    calls += 1;
+    if (calls < 3) throw new RuntimeHostUnavailableError("runtime host request timed out");
+    return "admitted";
+  }, { sleep: async (ms) => { attempts.push(ms); } })).resolves.toBe("admitted");
+  expect(calls).toBe(3);
+  expect(attempts).toEqual([250, 500]);
+
+  await expect(withRuntimeAdmissionRetry(async () => {
+    throw new RuntimeHostUnavailableError("runtime host request timed out");
+  }, { sleep: async () => {} })).rejects.toThrow("runtime host request timed out");
+
+  let deterministicCalls = 0;
+  await expect(withRuntimeAdmissionRetry(async () => {
+    deterministicCalls += 1;
+    throw new RuntimeHostUnavailableError("idempotency key already belongs to another request", "conflict");
+  }, { sleep: async () => {} })).rejects.toThrow("idempotency key already belongs to another request");
+  expect(deterministicCalls).toBe(1);
+});
+
+test("issue 367: a launch failing before identity staging retires its registering placeholder", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `placeholder-retire-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd });
+  const begun = registry.beginSpawnRequest({ engine: "claude", cwd, transport: "structured", launchProfile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+
+  await expect(spawnStructuredConversation({
+    engine: "claude",
+    receipt: begun.receipt,
+    spec: { command: "claude", cwd, windowName: "fable", engine: "claude", launchProfile },
+    account: { engine: "claude", accountId: "default", kind: "legacy", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "Implement",
+    registry,
+    client,
+  }, {
+    startHost: async () => { throw new Error("Claude stream hosting requires a claude.ai subscription login"); },
+    processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+  })).rejects.toThrow("Claude stream hosting requires a claude.ai subscription login");
+
+  const session = journal.snapshot().sessions.find((candidate) => candidate.conversationId === begun.receipt.conversationId);
+  expect(session).toMatchObject({ host: "dead", turn: "idle", activeTurnId: null });
+  expect(journal.operationResult(begun.receipt.launchId)?.receipt.status).toBe("failed");
+  expect(registry.snapshot().receipts[begun.receipt.launchId]?.state).toBe("failed");
+  journal.close();
+});
+
+test("issue 367: startup recovery closes a queued runtime spawn whose durable receipt already failed", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `startup-registering-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd });
+  const begun = registry.beginSpawnRequest({ engine: "claude", cwd, transport: "structured", launchProfile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+
+  /* Production shape: the admission command landed in the journal, the Viewer
+     then failed the durable receipt, and its terminal transition to the
+     runtime host timed out. The row sat registering/unknown through the
+     hostEpoch 43 restart. */
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "claude",
+    cwd,
+    prompt: "Implement",
+  });
+  registry.failSpawn(begun.receipt.launchId, "runtime host request timed out");
+  expect(journal.snapshot().sessions[0]).toMatchObject({ host: "registering", turn: "unknown" });
+
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(journal.operationResult(begun.receipt.launchId)?.receipt.status).toBe("failed");
+  expect(journal.snapshot().sessions[0]).toMatchObject({ host: "dead", turn: "idle", activeTurnId: null });
+
+  /* The pass is idempotent across repeated startups. */
+  await recoverPendingStructuredSpawns(registry, client);
+  expect(journal.snapshot().sessions[0]).toMatchObject({ host: "dead", turn: "idle" });
+  journal.close();
+});
+
+test("issue 367: a post-kill relaunch that exhausts admission never leaves a live queued placeholder", async () => {
+  const killedId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `post-kill-relaunch-${killedId}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const killedPath = path.join(cwd, `${killedId}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+
+  /* Production 2026-07-18: completed structured Fable #156 was killed through
+     /api/tmux and its OS PID exited; the delivered kill must leave a dead/idle
+     projection behind. */
+  const killedConversation = registry.ensureConversation("claude", killedPath, "default");
+  await client.append({
+    scope: { type: "session", id: killedConversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: killedConversation.id,
+      sessionKey: { engine: "claude", sessionId: killedId },
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "turn-156",
+      provenance: "structured",
+      artifactPath: killedPath,
+      capabilities: { steer: false, structuredAttention: true },
+    },
+  });
+  await client.command({
+    kind: "kill",
+    operationId: `kill_${killedId}`,
+    idempotencyKey: `kill_${killedId}`,
+    conversationId: killedConversation.id,
+    sessionKey: { engine: "claude", sessionId: killedId },
+  });
+  await client.transitionOperation(`kill_${killedId}`, "delivering");
+  await client.transitionOperation(`kill_${killedId}`, "delivered");
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === killedConversation.id))
+    .toMatchObject({ host: "dead", turn: "idle", activeTurnId: null });
+
+  /* The next pipeline launch (78a584be shape) hit "runtime host request timed
+     out" on every admission attempt. The durable receipt must converge to a
+     terminal retry-safe failure — /api/files kept reporting it as live
+     structured_spawn_queued with no PID, no session, and no transcript. */
+  const launchProfile = emptyLaunchProfile({ cwd, permissionMode: "bypassPermissions" });
+  const begun = registry.beginSpawnRequest({ engine: "claude", cwd, transport: "structured", launchProfile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  let admissionAttempts = 0;
+  const deadClient = {
+    ...client,
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => {
+      if (command.kind === "kill") return client.command(command);
+      admissionAttempts += 1;
+      throw new RuntimeHostUnavailableError("runtime host request timed out");
+    },
+    transitionOperation: async (...args: Parameters<RuntimeHostClient["transitionOperation"]>) => {
+      if (args[1] === "failed") throw new RuntimeHostUnavailableError("runtime host request timed out");
+      return client.transitionOperation(...args);
+    },
+  } as RuntimeHostClient;
+
+  await expect(spawnStructuredConversation({
+    engine: "claude",
+    receipt: begun.receipt,
+    spec: { command: "claude", cwd, windowName: "fable", engine: "claude", launchProfile },
+    account: { engine: "claude", accountId: "default", kind: "legacy", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "Implement the stage",
+    registry,
+    client: deadClient,
+  }, {
+    startHost: async () => { throw new Error("admission never reached host start"); },
+    processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+  })).rejects.toThrow("runtime host request timed out");
+
+  expect(admissionAttempts).toBe(3);
+  const failed = registry.snapshot().receipts[begun.receipt.launchId];
+  expect(failed).toMatchObject({ state: "failed", key: null, artifactPath: null });
+  expect(failed?.error).toContain("runtime host request timed out");
+  /* No placeholder session may survive for the failed launch: the admission
+     command never landed, so the runtime snapshot must not show the
+     conversation at all — and the replay reconciler reports the failure. */
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId))
+    .toBeUndefined();
+  const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client);
+  expect(reconciled.initialMessage).toBe("failed");
+  expect(reconciled.state).toBe("failed");
+  journal.close();
 });

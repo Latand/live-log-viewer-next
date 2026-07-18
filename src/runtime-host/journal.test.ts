@@ -1828,3 +1828,189 @@ test("runtime host fencing reclaims a stale process identity", () => {
   fence.release();
   expect(fs.existsSync(filename)).toBe(false);
 });
+
+test("issue 367: a failed structured spawn retires its registering placeholder with the terminal receipt", () => {
+  const dir = sandbox("spawn-failed-placeholder");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100, structuredHosts: true });
+  journal.executeOperation({
+    kind: "spawn",
+    conversationId: "conversation_fable_one",
+    operationId: "launch-6799487f",
+    idempotencyKey: "launch-6799487f",
+    engine: "claude",
+    cwd: "/repo",
+    prompt: "Implement the follow-up",
+    accountId: "botfatherdev-2",
+  });
+  expect(journal.snapshot().sessions[0]).toMatchObject({
+    conversationId: "conversation_fable_one",
+    hostKind: "claude-broker",
+    host: "registering",
+    turn: "unknown",
+  });
+
+  const failed = journal.transitionOperation("launch-6799487f", "failed", { reason: "runtime host request timed out" });
+  expect(failed.receipt.status).toBe("failed");
+  const snapshot = journal.snapshot();
+  expect(snapshot.sessions).toHaveLength(1);
+  expect(snapshot.sessions[0]).toMatchObject({
+    conversationId: "conversation_fable_one",
+    host: "dead",
+    turn: "idle",
+    activeTurnId: null,
+    attentionIds: [],
+  });
+  expect(snapshot.runtime.health).toBe("ready");
+
+  const replayed = journal.transitionOperation("launch-6799487f", "failed", { reason: "runtime host request timed out" });
+  expect(replayed.replayed).toBe(true);
+  journal.close();
+});
+
+test("issue 367: a delivered spawn keeps its placeholder for the launcher's hosted projection", () => {
+  const dir = sandbox("spawn-delivered-placeholder");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100, structuredHosts: true });
+  journal.executeOperation({
+    kind: "spawn",
+    conversationId: "conversation_fable_live",
+    operationId: "launch-live",
+    idempotencyKey: "launch-live",
+    engine: "claude",
+    cwd: "/repo",
+    prompt: "Implement",
+  });
+  journal.transitionOperation("launch-live", "delivered");
+  expect(journal.snapshot().sessions[0]).toMatchObject({
+    conversationId: "conversation_fable_live",
+    host: "registering",
+  });
+  journal.close();
+});
+
+test("issue 367: a new host epoch retires registering placeholders abandoned by prior-epoch launches", () => {
+  const dir = sandbox("epoch-registering-sweep");
+  const filename = path.join(dir, "events.sqlite");
+  const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100, structuredHosts: true });
+  for (const conversation of ["conversation_stale_a", "conversation_stale_b"]) {
+    journal.executeOperation({
+      kind: "spawn",
+      conversationId: conversation,
+      operationId: `launch-${conversation}`,
+      idempotencyKey: `launch-${conversation}`,
+      engine: "claude",
+      cwd: "/repo",
+      prompt: "Implement",
+    });
+  }
+  journal.append({
+    scope: runtimeScope("session", "conversation_hosted"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation_hosted",
+      sessionKey: { engine: "claude", sessionId: "session-hosted" },
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "turn-live",
+      provenance: "structured",
+      capabilities: { steer: false, structuredAttention: true },
+    },
+  });
+  journal.close();
+
+  const restarted = new RuntimeJournal(filename, { maxEvents: 100, now: () => 200, structuredHosts: true });
+  const epoch = restarted.claimHostEpoch();
+  expect(epoch).toBe(2);
+  const sessions = new Map(restarted.snapshot().sessions.map((session) => [session.conversationId, session]));
+  expect(sessions.get("conversation_stale_a")).toMatchObject({ host: "dead", turn: "idle", activeTurnId: null });
+  expect(sessions.get("conversation_stale_b")).toMatchObject({ host: "dead", turn: "idle", activeTurnId: null });
+  expect(sessions.get("conversation_hosted")).toMatchObject({ host: "hosted", turn: "running", activeTurnId: "turn-live" });
+
+  const again = restarted.claimHostEpoch();
+  expect(again).toBe(3);
+  expect(restarted.snapshot().sessions.filter((session) => session.host === "registering")).toEqual([]);
+  restarted.close();
+});
+
+test("issue 367: a delivered structured kill converges host and turn projection with its receipt", () => {
+  const dir = sandbox("kill-terminal-projection");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100, structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conversation_limit"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation_limit",
+      sessionKey: { engine: "claude", sessionId: "session-limit" },
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "turn-spend-limit",
+      attentionIds: ["attention-open"],
+      provenance: "structured",
+      artifactPath: "/sessions/limit.jsonl",
+      capabilities: { steer: false, structuredAttention: true },
+    },
+  });
+
+  const queued = journal.executeOperation({
+    kind: "kill",
+    conversationId: "conversation_limit",
+    operationId: "op-kill-limit",
+    idempotencyKey: "op-kill-limit",
+    sessionKey: { engine: "claude", sessionId: "session-limit" },
+  });
+  expect(queued.receipt.status).toBe("queued");
+  expect(journal.snapshot().sessions[0]).toMatchObject({ host: "hosted", turn: "running" });
+
+  journal.transitionOperation("op-kill-limit", "delivering");
+  expect(journal.snapshot().sessions[0]).toMatchObject({ host: "hosted", turn: "running" });
+
+  const delivered = journal.transitionOperation("op-kill-limit", "delivered");
+  expect(delivered.receipt.status).toBe("delivered");
+  const session = journal.snapshot().sessions[0];
+  expect(session).toMatchObject({
+    conversationId: "conversation_limit",
+    host: "dead",
+    turn: "idle",
+    activeTurnId: null,
+    attentionIds: [],
+  });
+
+  const replayed = journal.transitionOperation("op-kill-limit", "delivered");
+  expect(replayed.replayed).toBe(true);
+  expect(journal.snapshot().sessions[0]).toMatchObject({ host: "dead", turn: "idle" });
+  journal.close();
+});
+
+test("issue 367: a failed structured kill leaves the live projection untouched", () => {
+  const dir = sandbox("kill-failed-projection");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100, structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conversation_alive"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation_alive",
+      sessionKey: { engine: "claude", sessionId: "session-alive" },
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "turn-live",
+      provenance: "structured",
+      capabilities: { steer: false, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "kill",
+    conversationId: "conversation_alive",
+    operationId: "op-kill-alive",
+    idempotencyKey: "op-kill-alive",
+    sessionKey: { engine: "claude", sessionId: "session-alive" },
+  });
+  journal.transitionOperation("op-kill-alive", "failed", { reason: "structured host termination is unavailable" });
+  expect(journal.snapshot().sessions[0]).toMatchObject({
+    host: "hosted",
+    turn: "running",
+    activeTurnId: "turn-live",
+  });
+  journal.close();
+});

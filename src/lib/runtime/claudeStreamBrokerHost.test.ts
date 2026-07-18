@@ -12,6 +12,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
 
 import {
+  claudeCliAuthStatus,
   ClaudeStreamBrokerHost,
   FileClaudeDeliveryLedger,
   type ClaudeDeliveryLedger,
@@ -1809,5 +1810,57 @@ describe("restart and kill fail-safe lifecycle", () => {
     expect(states.at(-1)).toMatchObject({ status: "unhosted", pid: null });
     await expect(host.release()).resolves.toBeUndefined();
     await pendingSend;
+  });
+});
+
+describe("issue 367 concurrent launch admission", () => {
+  test("the default auth probe keeps the event loop free for simultaneous structured launches", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-auth-probe-"));
+    const binary = path.join(dir, "claude");
+    fs.writeFileSync(binary, [
+      "#!/bin/sh",
+      'if [ "$1" = "auth" ]; then',
+      "  sleep 0.25",
+      '  printf \'{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"pro"}\\n\'',
+      'elif [ "$1" = "--version" ]; then',
+      "  printf '2.1.17 (Claude Code)\\n'",
+      "fi",
+    ].join("\n"), { mode: 0o755 });
+    try {
+      /* Production #367: four simultaneous Fable launches starved each other's
+         3s runtime-host socket calls into "runtime host request timed out"
+         behind synchronous CLI probes. The probe must leave the loop running:
+         a spawnSync probe would freeze this interval for the whole batch. */
+      let ticks = 0;
+      const timer = setInterval(() => { ticks += 1; }, 10);
+      const statuses = await Promise.all(Array.from({ length: 4 }, () =>
+        claudeCliAuthStatus(binary, { NODE_ENV: "test", PATH: process.env.PATH }, dir)));
+      clearInterval(timer);
+      for (const status of statuses) {
+        expect(status).toEqual({
+          loggedIn: true,
+          authMethod: "claude.ai",
+          subscriptionType: "pro",
+          version: "2.1.17",
+        });
+      }
+      expect(ticks).toBeGreaterThanOrEqual(8);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a failing auth probe binary rejects without leaking provider diagnostics", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-auth-fail-"));
+    const binary = path.join(dir, "claude");
+    fs.writeFileSync(binary, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    try {
+      await expect(claudeCliAuthStatus(binary, { NODE_ENV: "test", PATH: process.env.PATH }, dir))
+        .rejects.toThrow("Claude subscription authentication check failed");
+      await expect(claudeCliAuthStatus(path.join(dir, "missing"), { NODE_ENV: "test", PATH: process.env.PATH }, dir))
+        .rejects.toThrow("Claude subscription authentication probe failed");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

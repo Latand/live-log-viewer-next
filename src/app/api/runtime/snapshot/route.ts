@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
+import { structuredStartupAxis } from "@/lib/runtime/startupStatus";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,6 +15,7 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json({
       ...await client.snapshot(),
       structuredHostsEnabled: process.env.LLV_STRUCTURED_HOSTS === "1",
+      structuredStartup: structuredStartupAxis(),
     }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "runtime host is unavailable" }, { status: 503 });

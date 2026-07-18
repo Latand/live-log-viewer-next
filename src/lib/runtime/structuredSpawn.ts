@@ -15,7 +15,7 @@ import { hardenedRedact } from "@/lib/view/compactText";
 
 import { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import { CodexAppServerHost } from "./codexAppServerHost";
-import type { RuntimeHostClient } from "./client";
+import { isRuntimeHostTransportFailure, type RuntimeHostClient } from "./client";
 import { StructuredHostAdoptionCleanupError, type EngineHost, type HostState } from "./engineHost";
 import type { RuntimeOperationResult, RuntimeSession } from "./contracts";
 import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
@@ -31,6 +31,31 @@ export type SpawnedStructuredHost = EngineHost & {
 
 export const INITIAL_MESSAGE_TIMEOUT_MS = 30_000;
 const INITIAL_MESSAGE_POLL_MS = 250;
+export const ADMISSION_RETRY_ATTEMPTS = 3;
+const ADMISSION_RETRY_BACKOFF_MS = 250;
+
+/** Runtime admission calls carry the durable launch id as their idempotency
+    key, so a replay lands on the original receipt. Production #367 saw
+    simultaneous launches turn transient socket timeouts into terminal failed
+    receipts; transport-level failures are retried before giving up. */
+export async function withRuntimeAdmissionRetry<T>(
+  request: () => Promise<T>,
+  options: { attempts?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<T> {
+  const attempts = options.attempts ?? ADMISSION_RETRY_ATTEMPTS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await request();
+    } catch (error) {
+      if (!isRuntimeHostTransportFailure(error)) throw error;
+      lastError = error;
+      if (attempt < attempts) await sleep(ADMISSION_RETRY_BACKOFF_MS * attempt);
+    }
+  }
+  throw lastError;
+}
 const INITIAL_MESSAGE_DELIVERED = new Set(["delivered", "turn-started", "steered"]);
 const INITIAL_MESSAGE_FAILED = new Set(["failed", "rejected", "uncertain", "interrupted"]);
 
@@ -349,9 +374,37 @@ export async function recoverPendingStructuredSpawns(
     afterEventSeq = next;
   }
 
+  let registeringConversationIds: Set<string> | null = null;
+  const registeringSessions = async (): Promise<Set<string>> => {
+    if (!registeringConversationIds) {
+      const runtime = await client.snapshot().catch(() => null);
+      registeringConversationIds = new Set((runtime?.sessions ?? [])
+        .filter((session) => session.host === "registering")
+        .map((session) => session.conversationId));
+    }
+    return registeringConversationIds;
+  };
+
   const snapshot = registry.snapshot();
   for (const receipt of Object.values(snapshot.receipts)) {
     const effect = spawnEffects.get(receipt.launchId);
+    if (receipt.state === "failed" && receipt.transport !== "tmux") {
+      /* The durable launch receipt failed, but its runtime spawn operation can
+         survive as queued when the terminal transition itself timed out. The
+         placeholder session then sits registering/unknown until someone closes
+         the operation; the journal retires the placeholder on that transition. */
+      if (!(await registeringSessions()).has(receipt.conversationId)) continue;
+      const operation = await client.operationStatus(receipt.launchId);
+      const status = operation?.receipt.status;
+      if (operation
+        && operation.receipt.conversationId === receipt.conversationId
+        && (status === "pending" || status === "queued" || status === "delivering")) {
+        await client.transitionOperation(receipt.launchId, "failed", {
+          reason: (receipt.error ?? "structured spawn failed before runtime acknowledgement").slice(0, 240),
+        });
+      }
+      continue;
+    }
     if (receipt.state === "starting" && !receipt.key && receipt.transport !== "tmux") {
       const operation = await client.operationStatus(receipt.launchId);
       if (receipt.transport !== "structured" && !effect && !operation) continue;
@@ -700,7 +753,7 @@ export async function spawnStructuredConversation(
     const content = input.prompt.trim() || imageRefs.length
       ? structuredContent(input.prompt, imageRefs)
       : null;
-    await input.client.command({
+    await withRuntimeAdmissionRetry(() => input.client.command({
       kind: "spawn",
       operationId,
       idempotencyKey: operationId,
@@ -713,7 +766,7 @@ export async function spawnStructuredConversation(
       accountId: input.account.accountId,
       parentConversationId: input.receipt.parentConversationId,
       ...(input.receipt.purpose === "resume-successor" ? { sessionId: structuredResumeSessionId(input) } : {}),
-    });
+    }));
     const capability = input.registry.rotateSpawnCapabilityForReceipt(input.receipt.launchId);
     const resumeEntry = resumeKey ? input.registry.snapshot().entries[sessionKeyId(resumeKey)] : null;
     if (resumeEntry?.structuredHost) {
@@ -773,7 +826,7 @@ export async function spawnStructuredConversation(
         state: "path-pending",
       };
     }
-    await input.client.transitionOperation(operationId, "delivered");
+    await withRuntimeAdmissionRetry(() => input.client.transitionOperation(operationId, "delivered"));
     const settled = input.registry.finalizeStructuredSpawn(input.receipt.launchId);
     if (settled.kind === "conflict") throw new Error(`structured spawn registry conflict: ${settled.code}`);
     return {
