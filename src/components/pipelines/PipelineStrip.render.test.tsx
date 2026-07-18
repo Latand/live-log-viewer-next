@@ -77,3 +77,61 @@ test("the status dot follows the tone matrix (accent busy, amber attention, ok d
   /* Red is reserved for chip/verdict failures — the dot never uses it. */
   expect(render(pipeline({ state: "needs_decision" }))).not.toContain("rounded-full bg-danger");
 });
+
+test("compact history exposes evidence, configuration, and ordered lineage controls (#353)", () => {
+  const stages = [stage("plan"), stage("build"), stage("verify")];
+  const passed = attempt({
+    state: "passed",
+    agentPath: "/build.jsonl",
+    startedAt: "2026-07-18T10:00:00.000Z",
+    completedAt: "2026-07-18T10:01:30.000Z",
+    effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-5.6-sol", effort: "high", access: "read-write", promptScaffold: null },
+    verdict: { status: "pass", findings: [], confidence: 0.95 },
+  });
+  const html = renderToStaticMarkup(
+    <PipelineStrip
+      pipeline={pipeline({
+        stages,
+        state: "draft",
+        cursor: { stageId: "verify", state: "pending" },
+        runs: [{ stageId: "build", attempts: [passed] }],
+      })}
+      renderablePaths={new Set(["/build.jsonl"])}
+      onOpenPath={() => undefined}
+      linkedTasks={[{
+        id: "task-1", project: "proj", status: "assigned", text: "Verify compact board\nDetails", placement: "unplaced", assignments: [],
+        createdAt: "2026-07-18T00:00:00Z", updatedAt: "2026-07-18T00:00:00Z",
+      }]}
+      onOpenTask={() => undefined}
+    />,
+  );
+
+  expect(html).toContain("<ol");
+  expect(html).toContain('data-stage-evidence="passed"');
+  expect(html).toContain("1:30");
+  expect(html).toContain("gpt-5.6-sol");
+  expect(html).toContain("Configure stage verify, state pending");
+  expect(html).toContain("Open transcript for stage build, state passed");
+  expect(html).toContain("Stage lineage from plan to build");
+  expect(html).toContain("Open previous stage plan, state pending");
+  expect(html).toContain("Open next stage build, state passed");
+  expect(html).toContain("Open verdict for stage build, state passed");
+  expect(html).toContain("Open linked task Verify compact board");
+  const previousAt = html.indexOf("Open previous stage plan, state pending");
+  const previousButton = html.slice(html.lastIndexOf("<button", previousAt), html.indexOf(">", previousAt));
+  expect(previousButton).not.toContain('disabled=""');
+});
+
+test("every linked task keeps a direct control inside the bounded rail (#353)", () => {
+  const linkedTasks = Array.from({ length: 5 }, (_, index) => ({
+    id: `task-${index + 1}`, project: "proj", status: "assigned" as const, text: `Linked ${index + 1}`,
+    placement: "unplaced" as const, assignments: [], createdAt: "2026-07-18T00:00:00Z", updatedAt: "2026-07-18T00:00:00Z",
+  }));
+  const html = renderToStaticMarkup(
+    <PipelineStrip pipeline={pipeline({ state: "draft" })} linkedTasks={linkedTasks} onOpenTask={() => undefined} />,
+  );
+
+  for (let index = 1; index <= 5; index += 1) expect(html).toContain(`Open linked task Linked ${index}`);
+  expect(html).toContain("overflow-x-auto");
+  expect(html).not.toContain("+2");
+});

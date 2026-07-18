@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
+import type { Flow } from "@/lib/flows/types";
 
 import { VerdictPopover } from "./VerdictPopover";
 
@@ -88,15 +89,13 @@ test("an oversized retry history bounds the popover and scrolls the audit", () =
   expect(html).toContain("Attempt 24:");
 });
 
-test("a review-loop verdict offers Open flow and hides the folded-transcript action", () => {
+test("a review-loop verdict keeps direct transcript and flow navigation", () => {
   const reviewStage: PipelineStage = { ...stage, id: "review", kind: "review-loop" };
-  /* agentPath is the reviewer transcript the board folds into the deck, so
-     "Open transcript" must be withheld; only the flow route is offered. */
   const only = attempt(1, { agentPath: "/reviewer.jsonl", flowId: "f1", verdict: { status: "fail", findings: [] } });
   const html = renderToStaticMarkup(
     <VerdictPopover pipeline={pipeline([only])} stage={reviewStage} attempt={only} onClose={() => {}} onOpenPath={() => {}} onOpenFlow={() => {}} />,
   );
-  expect(html).not.toContain("Open transcript");
+  expect(html).toContain("Open transcript");
   expect(html).toContain("Open review");
 });
 
@@ -110,7 +109,7 @@ test("Open transcript is withheld when the run transcript left the scan", () => 
   expect(html).not.toContain("Open transcript");
 });
 
-test("Open review is withheld when the flow no longer has a board deck", () => {
+test("a compacted review keeps transcript navigation when its deck leaves the board", () => {
   const reviewStage: PipelineStage = { ...stage, id: "review", kind: "review-loop" };
   /* A closed/missing flow (canOpenFlow=false) has no deck to reveal, so the
      action is not offered — it would route to an absent board entry. */
@@ -119,5 +118,36 @@ test("Open review is withheld when the flow no longer has a board deck", () => {
     <VerdictPopover pipeline={pipeline([only])} stage={reviewStage} attempt={only} canOpenFlow={false} onClose={() => {}} onOpenPath={() => {}} onOpenFlow={() => {}} />,
   );
   expect(html).not.toContain("Open review");
-  expect(html).not.toContain("Open transcript");
+  expect(html).toContain("Open transcript");
+});
+
+test("bounded history keeps direct transcript actions for every retry and review round (#353)", () => {
+  const reviewStage: PipelineStage = { ...stage, id: "review", kind: "review-loop" };
+  const prior = attempt(1, { agentPath: "/review-attempt-1.jsonl", flowId: "f0" });
+  const current = attempt(2, { agentPath: "/review-attempt-2.jsonl", flowId: "f1", verdict: { status: "pass", findings: [] } });
+  const flows = [{
+    id: "f1", implementerPath: "/builder.jsonl", rounds: [
+      { n: 1, reviewerPath: "/round-1.jsonl" },
+      { n: 2, reviewerPath: "/review-attempt-2.jsonl" },
+    ],
+  }] as unknown as Flow[];
+  const reviewPipeline = pipeline([prior, current]);
+  reviewPipeline.stages = [reviewStage];
+  reviewPipeline.runs = [{ stageId: reviewStage.id, attempts: [prior, current] }];
+  const html = renderToStaticMarkup(
+    <VerdictPopover
+      pipeline={reviewPipeline}
+      stage={reviewStage}
+      attempt={current}
+      flows={flows}
+      availablePaths={new Set([prior.agentPath!, current.agentPath!, "/round-1.jsonl"])}
+      onClose={() => {}}
+      onOpenPath={() => {}}
+    />,
+  );
+
+  expect(html).toContain("Open transcript for attempt 1");
+  expect(html).toContain("Open transcript for attempt 2");
+  expect(html).toContain("Open review transcript 1");
+  expect(html).toContain("max-h-24");
 });

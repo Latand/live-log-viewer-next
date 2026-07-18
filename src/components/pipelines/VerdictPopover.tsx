@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { useLocale } from "@/lib/i18n";
+import type { Flow } from "@/lib/flows/types";
 import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 
 import { VERDICT_TONES, attemptStateLabel, patchPipeline, stageAttempts, stageChipLabel, verdictStatusLabel } from "./pipelineModel";
@@ -22,6 +23,8 @@ export function VerdictPopover({
   pipeline,
   stage,
   attempt,
+  flows = [],
+  availablePaths,
   canOpenFlow = true,
   canOpenPath = true,
   onClose,
@@ -31,6 +34,8 @@ export function VerdictPopover({
   pipeline: Pipeline;
   stage: PipelineStage;
   attempt: PipelineStageAttempt;
+  flows?: Flow[];
+  availablePaths?: ReadonlySet<string>;
   /** Whether the embedded flow still has a board deck; a closed/missing flow
       hides "Open review" so it never routes to an absent entry (default true). */
   canOpenFlow?: boolean;
@@ -62,6 +67,19 @@ export function VerdictPopover({
   /* Only attempts before the one in the header — the current attempt is already
      represented above, so listing it here would duplicate its status (AC5). */
   const priorAttempts = stageAttempts(pipeline, stage.id).filter((prior) => prior.n < attempt.n);
+  const stageFlowIds = new Set(stageAttempts(pipeline, stage.id).flatMap((item) => item.flowId ? [item.flowId] : []));
+  const attemptPaths = new Set(stageAttempts(pipeline, stage.id).flatMap((item) => item.agentPath ? [item.agentPath] : []));
+  const seenReviewPaths = new Set<string>();
+  const reviewTranscripts = flows
+    .filter((flow) => stageFlowIds.has(flow.id))
+    .flatMap((flow) => flow.rounds)
+    .flatMap((round) => {
+      const path = round.reviewerPath;
+      if (!path || attemptPaths.has(path) || seenReviewPaths.has(path)) return [];
+      seenReviewPaths.add(path);
+      return [{ n: round.n, path }];
+    });
+  const pathAvailable = (path: string) => !availablePaths || availablePaths.has(path);
   const findings = verdict?.findings ?? [];
   const shown = expanded ? findings : findings.slice(0, MAX_COLLAPSED_FINDINGS);
   const tone = verdict ? VERDICT_TONES[verdict.status] : null;
@@ -138,10 +156,28 @@ export function VerdictPopover({
               fixed height — otherwise a long history grows the popover past the
               viewport and pushes the Retry/Skip footer off-screen. */}
           <div className="flex max-h-24 flex-col gap-0.5 overflow-y-auto">
-            {priorAttempts.map((prior) => (
-              <span key={prior.n} className="font-mono text-[9.5px] text-muted">
-                {t("pipelineVerdict.attemptLine", { n: prior.n, status: prior.verdict ? verdictStatusLabel(t, prior.verdict.status) : attemptStateLabel(t, prior.state) })}
-              </span>
+            {priorAttempts.map((prior) => {
+              const line = t("pipelineVerdict.attemptLine", { n: prior.n, status: prior.verdict ? verdictStatusLabel(t, prior.verdict.status) : attemptStateLabel(t, prior.state) });
+              return prior.agentPath && onOpenPath && pathAvailable(prior.agentPath) ? (
+                <button key={prior.n} type="button" aria-label={t("pipelineVerdict.openAttemptTranscript", { n: prior.n })} onClick={() => onOpenPath(prior.agentPath!)} className="rounded-control px-1 text-left font-mono text-[9.5px] text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
+                  {line}
+                </button>
+              ) : (
+                <span key={prior.n} className="font-mono text-[9.5px] text-muted">{line}</span>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
+      {reviewTranscripts.length ? (
+        <div className="flex shrink-0 flex-col gap-0.5 border-t border-border pt-1.5">
+          <span className="text-label font-semibold text-secondary">{t("pipelineVerdict.reviewTranscripts")}</span>
+          <div className="flex max-h-24 flex-col gap-0.5 overflow-y-auto">
+            {reviewTranscripts.map((transcript) => (
+              <button key={transcript.path} type="button" disabled={!onOpenPath || !pathAvailable(transcript.path)} aria-label={t("pipelineVerdict.openReviewTranscript", { n: transcript.n })} onClick={() => onOpenPath?.(transcript.path)} className="rounded-control px-1 text-left font-mono text-[9.5px] text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40">
+                {t("pipelineVerdict.openReviewTranscript", { n: transcript.n })}
+              </button>
             ))}
           </div>
         </div>
@@ -150,11 +186,10 @@ export function VerdictPopover({
       {error ? <span className="truncate text-[10px] font-semibold text-danger" title={error}>{error}</span> : null}
 
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border pt-2">
-        {/* A review-loop's agentPath is the reviewer transcript the board folds
-            into the round deck — opening it reveals nothing, so offer only the
-            flow route below. A run stage opens its own node here (#93 §2.2). */}
-        {stage.kind !== "review-loop" && attempt.agentPath && onOpenPath && canOpenPath ? (
-          <button type="button" className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenPath(attempt.agentPath!)}>
+        {/* Every current attempt keeps direct transcript navigation. Review-loop
+            attempts also retain the flow route whenever its deck is present. */}
+        {attempt.agentPath && onOpenPath && canOpenPath && pathAvailable(attempt.agentPath) ? (
+          <button type="button" aria-label={t("pipelineVerdict.openAttemptTranscript", { n: attempt.n })} className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenPath(attempt.agentPath!)}>
             {t("pipelineVerdict.openTranscript")}
           </button>
         ) : null}

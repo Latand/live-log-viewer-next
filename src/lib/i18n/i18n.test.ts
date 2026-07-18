@@ -19,6 +19,50 @@ describe("translation parity between en and uk", () => {
   });
 });
 
+describe("compact pipeline lineage copy (#353)", () => {
+  const keys = [
+    "pipelineStrip.configureStage",
+    "pipelineStrip.lineageAria",
+    "pipelineStrip.previousStage",
+    "pipelineStrip.nextStage",
+    "pipelineStrip.evidenceAria",
+    "pipelineStrip.linkedTasks",
+    "pipelineStrip.openTask",
+  ] as const;
+
+  test("English and Ukrainian define every compact-stage accessibility label", () => {
+    for (const key of keys) {
+      expect(en[key]).toBeTruthy();
+      expect(uk[key]).toBeTruthy();
+    }
+  });
+
+  test("Ukrainian lineage and evidence labels interpolate every spoken value", () => {
+    const lineage = translate("uk", "pipelineStrip.lineageAria", { from: "Архітектор", to: "Розробник" });
+    const evidence = translate("uk", "pipelineStrip.evidenceAria", { label: "Розробник", verdict: "пройдено", duration: "1:30", model: "GPT-5.6" });
+    expect(lineage).toContain("Архітектор");
+    expect(lineage).toContain("Розробник");
+    expect(evidence).toContain("пройдено");
+    expect(evidence).toContain("1:30");
+    expect(evidence).toContain("GPT-5.6");
+  });
+
+  test("template guidance describes compact groups and on-demand configuration in both locales", () => {
+    expect(en["pipelineTemplates.subtitle"]).toContain("compact group");
+    expect(en["pipelineTemplates.subtitle"]).toContain("on demand");
+    expect(uk["pipelineTemplates.subtitle"]).toContain("компакт");
+    expect(uk["pipelineTemplates.subtitle"]).toContain("за запитом");
+  });
+
+  test("every connector and verdict action names its stage and state", () => {
+    expect(translate("en", "pipelineStrip.previousStage", { label: "Build", state: "passed" })).toContain("passed");
+    expect(translate("en", "pipelineStrip.nextStage", { label: "Review", state: "pending" })).toContain("pending");
+    expect(translate("uk", "pipelineStrip.openVerdict", { label: "Збірка", state: "пройдено" })).toContain("пройдено");
+    expect(translate("en", "pipelineMobile.prevStage", { label: "Build", state: "passed" })).toContain("Build");
+    expect(translate("uk", "pipelineMobile.nextStage", { label: "Рев’ю", state: "очікує" })).toContain("очікує");
+  });
+});
+
 describe("new dictation-cap copy is present and interpolates", () => {
   const keys = ["mic.dictateHint", "mic.timeLeft", "mic.capStopped", "dictation.capWarn", "dictation.capStopped"] as const;
 

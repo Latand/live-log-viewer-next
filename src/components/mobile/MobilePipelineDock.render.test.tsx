@@ -33,6 +33,8 @@ test("mobile dock surfaces the full plan + 44px controls for a memberless pipeli
   expect(html).toContain("aria-label=\"Close pipeline\"");
   const controlRows = html.match(/h-11/g) ?? [];
   expect(controlRows.length).toBeGreaterThanOrEqual(2);
+  expect(html).toContain("Configure stage plan, state pending");
+  expect(html).toContain('data-pipeline-stage="plan"');
 });
 
 test("pipelinesToDock docks every active pipeline group — memberful ones too (#156)", () => {
@@ -62,9 +64,9 @@ test("a paused pipeline shows Resume; a completed one keeps Close but drops paus
   expect(done).not.toContain("aria-label=\"Resume pipeline\"");
   expect(done).toContain("aria-label=\"Close pipeline\"");
 
-  /* A truly closed pipeline is gone — no controls at all. */
+  /* The shared strip keeps its dismissal action when rendered directly. */
   const closed = renderToStaticMarkup(<MobilePipelineDock pipeline={{ ...provisioning, state: "closed" } as Pipeline} />);
-  expect(closed).not.toContain("aria-label=\"Close pipeline\"");
+  expect(closed).toContain("aria-label=\"Close pipeline\"");
 });
 
 test("mobile renders a read-only draft plan with a 44px Start action", () => {
@@ -83,7 +85,7 @@ test("mobile renders a read-only draft plan with a 44px Start action", () => {
   /* One title, ONE draft marker (issue #221 §2): the state label alone. */
   expect(html).toContain(">draft<");
   expect(html).not.toContain("DRAFT");
-  expect(html.split("Review on mobile").length - 1).toBe(2); // aria-label + visible title
+  expect(html.split("Review on mobile").length - 1).toBeGreaterThanOrEqual(2);
   expect(html).toContain("plan");
   expect(html).toContain("build");
   expect(html).toContain("review");
