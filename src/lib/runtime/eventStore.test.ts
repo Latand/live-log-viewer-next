@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 
 import type { RuntimeEvent } from "./engineHost";
 import { FileRuntimeEventStore, reconcileRuntimeEventCursor } from "./eventStore";
@@ -65,6 +65,48 @@ test("runtime event store fails closed on gaps, duplicates, and malformed middle
 
   fs.writeFileSync(filename, `${JSON.stringify({ kind: "session-status", status: "idle", seq: 1 })}\n{broken}\n`);
   expect(() => store.load("gap-thread")).toThrow("malformed JSON");
+});
+
+test("runtime event store appends without re-reading the owned ledger (#367 live-turn starvation)", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-hot-"));
+  const store = new FileRuntimeEventStore(directory);
+  store.append("hot-thread", { kind: "session-status", status: "idle", seq: 1 });
+
+  const reads = spyOn(fs, "readFileSync");
+  try {
+    for (let seq = 2; seq <= 200; seq += 1) {
+      store.append("hot-thread", { kind: "delta", turnId: "turn-1", text: "streamed structured output", seq });
+    }
+    expect(reads.mock.calls.length).toBe(0);
+  } finally {
+    reads.mockRestore();
+  }
+  const events = store.load("hot-thread");
+  expect(events).toHaveLength(200);
+  expect(events.at(-1)).toEqual({ kind: "delta", turnId: "turn-1", text: "streamed structured output", seq: 200 });
+});
+
+test("runtime event store derives its durable tail once and re-reconciles only on external divergence", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-tail-"));
+  const filename = path.join(directory, "owned-thread.jsonl");
+  fs.writeFileSync(filename, [
+    JSON.stringify({ kind: "session-status", status: "idle", seq: 1 }),
+    JSON.stringify({ kind: "turn-started", turnId: "turn-1", seq: 2 }),
+    "",
+  ].join("\n"), { mode: 0o600 });
+
+  const store = new FileRuntimeEventStore(directory);
+  expect(() => store.append("owned-thread", { kind: "turn-ended", turnId: "turn-1", status: "completed", seq: 4 }))
+    .toThrow("sequence gap after 2");
+  store.append("owned-thread", { kind: "turn-ended", turnId: "turn-1", status: "completed", seq: 3 });
+
+  fs.writeFileSync(filename, `${JSON.stringify({ kind: "session-status", status: "idle", seq: 1 })}\n`, { mode: 0o600 });
+  store.append("owned-thread", { kind: "turn-started", turnId: "turn-2", seq: 2 });
+
+  expect(store.load("owned-thread")).toEqual([
+    { kind: "session-status", status: "idle", seq: 1 },
+    { kind: "turn-started", turnId: "turn-2", seq: 2 },
+  ]);
 });
 
 test("runtime event store rejects a non-contiguous append", () => {

@@ -106,6 +106,13 @@ function validEvent(value: unknown): value is RuntimeEvent {
 }
 
 export class FileRuntimeEventStore implements RuntimeEventStore {
+  /* The structured host claim makes this store the single writer of its
+     ledger, so the durable tail (last sequence and byte length) is owned in
+     memory. Production #367: deriving the tail by replaying the whole file on
+     every append made each streamed delta O(ledger) on the shared event loop,
+     starving snapshot and concurrent admission for the length of a turn. */
+  private readonly tails = new Map<string, { lastSeq: number; bytes: number }>();
+
   constructor(private readonly directory = statePath("structured-host-events")) {}
 
   load(threadId: string): RuntimeEvent[] {
@@ -144,30 +151,47 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
     if (!validEvent(event)) throw new Error("runtime event ledger append event is invalid");
     fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     const filename = this.filename(threadId);
-    const previous = this.load(threadId).at(-1);
-    if (previous && event.seq !== previous.seq + 1) {
-      throw new Error(`runtime event ledger sequence gap after ${previous.seq}`);
-    }
     const fd = fs.openSync(filename, "a+", 0o600);
     try {
       fs.fchmodSync(fd, 0o600);
-      const size = fs.fstatSync(fd).size;
-      if (size > 0) {
-        const contents = fs.readFileSync(filename, "utf8");
-        if (!contents.endsWith("\n")) {
-          const boundary = contents.lastIndexOf("\n") + 1;
-          const tail = contents.slice(boundary);
-          let parsed: unknown;
-          try { parsed = JSON.parse(tail); } catch { parsed = null; }
-          if (validEvent(parsed)) fs.writeSync(fd, "\n");
-          else fs.ftruncateSync(fd, Buffer.byteLength(contents.slice(0, boundary)));
-        }
+      let tail = this.tails.get(threadId);
+      if (!tail || fs.fstatSync(fd).size !== tail.bytes) {
+        tail = this.reconcileTail(threadId, filename, fd);
       }
-      fs.writeSync(fd, `${JSON.stringify(event)}\n`);
+      if (tail.lastSeq > 0 && event.seq !== tail.lastSeq + 1) {
+        throw new Error(`runtime event ledger sequence gap after ${tail.lastSeq}`);
+      }
+      const line = `${JSON.stringify(event)}\n`;
+      fs.writeSync(fd, line);
       fs.fsyncSync(fd);
+      this.tails.set(threadId, { lastSeq: event.seq, bytes: tail.bytes + Buffer.byteLength(line) });
     } finally {
       fs.closeSync(fd);
     }
+  }
+
+  /* First touch of a ledger, or any on-disk divergence from the owned tail
+     (a torn crash tail, external truncation), replays the file once to
+     re-establish the durable tail and repair an unterminated final record. */
+  private reconcileTail(threadId: string, filename: string, fd: number): { lastSeq: number; bytes: number } {
+    if (fs.fstatSync(fd).size === 0) {
+      const empty = { lastSeq: 0, bytes: 0 };
+      this.tails.set(threadId, empty);
+      return empty;
+    }
+    const events = this.load(threadId);
+    const contents = fs.readFileSync(filename, "utf8");
+    if (!contents.endsWith("\n")) {
+      const boundary = contents.lastIndexOf("\n") + 1;
+      const tailRecord = contents.slice(boundary);
+      let parsed: unknown;
+      try { parsed = JSON.parse(tailRecord); } catch { parsed = null; }
+      if (validEvent(parsed)) fs.writeSync(fd, "\n");
+      else fs.ftruncateSync(fd, Buffer.byteLength(contents.slice(0, boundary)));
+    }
+    const tail = { lastSeq: events.at(-1)?.seq ?? 0, bytes: fs.fstatSync(fd).size };
+    this.tails.set(threadId, tail);
+    return tail;
   }
 
   private filename(threadId: string): string {
