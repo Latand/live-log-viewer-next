@@ -6,7 +6,7 @@ import { recordValue, recordsValue, stringValue } from "./json";
 
 type RecordLike = Record<string, unknown>;
 
-const turnBoundaryCache = globalCache<[number, number, TurnBoundary | null]>("last-turn-v2");
+const turnBoundaryCache = globalCache<[number, number, TurnBoundary | null]>("last-turn-v3");
 
 function parseMillis(value: unknown): number | null {
   if (typeof value !== "string") return null;
@@ -41,18 +41,43 @@ function isTurnStart(record: RecordLike, codex: boolean): boolean {
   );
 }
 
+/** True when a record closes the active run for start-detection purposes: the
+    next prompt after it INITIATES a new turn instead of steering the current
+    one. Claude: the turn's final assistant message (`end_turn`/`stop_sequence`)
+    or a headless `result` record. Codex: task/turn lifecycle completion. */
+function isTurnClose(record: RecordLike, codex: boolean): boolean {
+  if (codex) {
+    const type = stringValue((recordValue(record.payload) ?? {}).type);
+    return type === "task_complete" || type === "turn_complete" || type === "turn_completed" || type === "turn_aborted";
+  }
+  if (record.type === "result") return true;
+  if (record.type !== "assistant") return false;
+  const stop = stringValue((recordValue(record.message) ?? {}).stop_reason);
+  return stop === "end_turn" || stop === "stop_sequence";
+}
+
 /** Turn boundaries for the most-recent turn from a chronological record slice.
-    The turn opens at the LAST prompt in the slice (multi-turn transcripts show
-    only the current turn) and closes at the terminal assistant/tool output —
-    but only once the turn is complete. While the agent is still working
-    `endedAt` stays null so the UI can tick live elapsed. Returns null when no
-    opening prompt survives in the tail window. Pure for testability. */
+    The turn opens at the prompt that INITIATED the work — the first prompt
+    after the previous turn closed, whoever sent it (operator or a relaying
+    agent). Prompts landing while the run is still open (steering, relayed
+    follow-ups) must NOT reset the boundary: the reported span is «initiating
+    prompt → last activity», never a single action's own duration (issue #268).
+    The turn closes at the terminal assistant/tool output — but only once the
+    turn is complete. While the agent is still working `endedAt` stays null so
+    the UI can tick live elapsed. Returns null when no opening prompt survives
+    in the tail window. Pure for testability. */
 export function lastTurnFromRecords(records: RecordLike[], codex: boolean): TurnBoundary | null {
   let startedAt: number | null = null;
-  for (let index = records.length - 1; index >= 0; index -= 1) {
-    if (!isTurnStart(records[index]!, codex)) continue;
-    startedAt = parseMillis(records[index]!.timestamp);
-    break;
+  let open = false;
+  for (const record of records) {
+    if (isTurnStart(record, codex)) {
+      // A later steering prompt only fills in for an initiating prompt whose
+      // own timestamp failed to parse — it never moves a valid boundary.
+      if (!open || startedAt === null) startedAt = parseMillis(record.timestamp);
+      open = true;
+      continue;
+    }
+    if (isTurnClose(record, codex)) open = false;
   }
   if (startedAt === null) return null;
 

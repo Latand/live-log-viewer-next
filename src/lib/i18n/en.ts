@@ -51,6 +51,7 @@ export const en = {
   "turn.worked": "Worked for {d}",
   "turn.running": "working {d}",
   "turn.lastRun": "last run: {d}",
+  "turn.timer": "elapsed work time",
 
   // Conversation kind labels (display of file.kind discriminant)
   "kind.session": "session",

@@ -111,6 +111,37 @@ describe("lastTurnFromRecords — Claude", () => {
   test("no prompt in the window → null", () => {
     expect(lastTurnFromRecords([claudeAssistantEnd("2026-07-14T10:00:40.000Z")], false)).toBeNull();
   });
+
+  test("steering prompt mid-run keeps the initiating prompt as the start", () => {
+    // Operator (or a relaying agent) drops a follow-up while the agent is
+    // still working: the total must span initiating prompt → last activity,
+    // never just the last message's own slice (issue #268 operator comment).
+    const boundary = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "start the work"),
+        claudeAssistantOpen("2026-07-14T10:00:05.000Z"),
+        claudeUser("2026-07-14T10:29:41.000Z", "also check the tests"),
+        claudeAssistantEnd("2026-07-14T10:30:00.000Z"),
+      ],
+      false,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:30:00.000Z"),
+    });
+  });
+
+  test("steering prompt on a still-running turn keeps the start and stays open", () => {
+    const boundary = lastTurnFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "start"),
+        claudeAssistantOpen("2026-07-14T10:00:05.000Z"),
+        claudeUser("2026-07-14T10:20:00.000Z", "steer"),
+      ],
+      false,
+    );
+    expect(boundary).toEqual({ startedAt: ms("2026-07-14T10:00:00.000Z"), endedAt: null });
+  });
 });
 
 describe("lastTurnFromRecords — Codex", () => {
@@ -162,5 +193,23 @@ describe("lastTurnFromRecords — Codex", () => {
 
   test("no user message in the window → null", () => {
     expect(lastTurnFromRecords([codexTaskComplete("2026-07-14T10:00:00.000Z")], true)).toBeNull();
+  });
+
+  test("relayed user_message mid-run keeps the initiating prompt as the start", () => {
+    const boundary = lastTurnFromRecords(
+      [
+        codexUser("2026-07-14T10:00:00.000Z", "start the work"),
+        codexTaskStarted("2026-07-14T10:00:01.000Z"),
+        codexToolCall("2026-07-14T10:00:05.000Z", "c1"),
+        codexUser("2026-07-14T10:44:00.000Z", "relayed follow-up"),
+        codexToolOutput("2026-07-14T10:44:30.000Z", "c1"),
+        codexTaskComplete("2026-07-14T10:45:00.000Z"),
+      ],
+      true,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:45:00.000Z"),
+    });
   });
 });
