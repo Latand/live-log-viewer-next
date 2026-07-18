@@ -17,6 +17,15 @@ export function assignmentAgentState(
   return "unhosted";
 }
 
+/**
+ * Whether the open-agent control navigates. Any state classified against a
+ * resolved transcript that is still on the board — live, killed, unhosted
+ * (stalled/idle/done hosts included) — has a pane to center on, so navigation
+ * stays available (issue #292 fresh review: a stalled assigned agent is still
+ * reachable board content). Unreachable states stay unavailable: gone (no
+ * transcript resolves), spawning (nothing exists to open yet), failed, and
+ * migrating (the pane is mid-move between accounts).
+ */
 export function assignmentOpenable(state: AssignmentAgentState): boolean {
-  return state === "live";
+  return state === "live" || state === "killed" || state === "unhosted";
 }

@@ -238,20 +238,44 @@ test("failed and unavailable assignments show truthful controls and remain detac
   const { host, calls } = render(item, { files: [killed] });
   expect(host.querySelectorAll(".animate-spin")).toHaveLength(1);
   const openControls = [...host.querySelectorAll("[data-task-open-agent]")] as HTMLButtonElement[];
-  /* Unavailable controls stay keyboard-reachable, announce their reason, and
-     remain inert on activation (issue #292 fresh review). */
-  expect(openControls.every((control) => !control.disabled)).toBe(true);
-  expect(openControls.every((control) => control.getAttribute("aria-disabled") === "true")).toBe(true);
-  expect(openControls.some((control) => control.title.includes("killed"))).toBe(true);
-  expect(
-    openControls.some((control) => control.getAttribute("aria-label")?.includes("unavailable: the agent process was killed")),
-  ).toBe(true);
-  for (const control of openControls) control.click();
+  expect(openControls).toHaveLength(2);
+  const [failedOpen, killedOpen] = openControls as [HTMLButtonElement, HTMLButtonElement];
+  /* Unresolvable (failed) controls stay keyboard-reachable, announce their
+     reason, and remain inert on activation (issue #292 fresh review). */
+  expect(failedOpen.getAttribute("aria-disabled")).toBe("true");
+  expect(failedOpen.getAttribute("aria-label")).toContain("unavailable");
+  failedOpen.click();
   expect(calls.opened).toEqual([]);
+  /* A killed host still resolves a transcript on the board — navigation stays
+     available (fresh-review Finding 1) while the chip keeps its truthful
+     killed presentation. */
+  expect(killedOpen.getAttribute("aria-disabled")).toBeNull();
+  killedOpen.click();
+  expect(calls.opened.map((entry) => entry.path)).toEqual(["/killed.jsonl"]);
   const detach = [...host.querySelectorAll('button[title="detach"]')] as HTMLButtonElement[];
   expect(detach).toHaveLength(3);
   detach[0]!.click();
   expect(calls.detached[0]).toEqual({ launchId: null, path: null, conversationId: "failed-conversation", panePid: 77 });
+});
+
+test("stalled and idle assigned agents keep an enabled navigation control (fresh-review Finding 1)", () => {
+  const stalled = file("/stalled.jsonl", "Stalled agent", { proc: null, activity: "stalled" });
+  const idle = file("/idle.jsonl", "Idle agent", { proc: null, activity: "idle" });
+  const item = boardTask({
+    id: "task",
+    assignments: [
+      { path: stalled.path, conversationId: "stalled-conversation", panePid: 11, state: "delivered", error: null, at: "now" },
+      { path: idle.path, conversationId: "idle-conversation", panePid: 12, state: "delivered", error: null, at: "now" },
+    ],
+  });
+  const { host, calls } = render(item, { files: [stalled, idle] });
+  const openControls = [...host.querySelectorAll("[data-task-open-agent]")] as HTMLButtonElement[];
+  expect(openControls).toHaveLength(2);
+  for (const control of openControls) {
+    expect(control.getAttribute("aria-disabled")).toBeNull();
+    control.click();
+  }
+  expect(calls.opened.map((entry) => entry.path)).toEqual(["/stalled.jsonl", "/idle.jsonl"]);
 });
 
 test("a pathless spawning assignment keeps a stable launch handle for detach", () => {
@@ -265,6 +289,33 @@ test("a pathless spawning assignment keeps a stable launch handle for detach", (
   const detach = host.querySelector('button[title="detach"]') as HTMLButtonElement;
   detach.click();
   expect(calls.detached[0]).toEqual({ launchId: "launch-9", path: null, conversationId: null, panePid: null });
+});
+
+test("a handle-less legacy spawning assignment hides detach instead of offering a doomed 400 (fresh-review Finding 2)", () => {
+  /* Pre-launch-id stores can hold a spawning assignment whose launchId, path,
+     conversationId, and panePid are all null. The DELETE route rejects that
+     empty ref, so a rendered detach control could only ever fail — the visible
+     control must always succeed or be absent. */
+  const item = boardTask({
+    id: "task",
+    assignments: [{ path: null, conversationId: null, panePid: null, state: "spawning", error: null, at: "now" }],
+  });
+  const { host, calls } = render(item);
+  expect(host.querySelectorAll(".animate-spin")).toHaveLength(1);
+  expect(host.querySelector('button[title="detach"]')).toBeNull();
+  expect(calls.detached).toEqual([]);
+
+  /* Any single usable handle restores the control, and the ref it carries is
+     one the route accepts. */
+  const withPane = boardTask({
+    id: "task-2",
+    assignments: [{ path: null, conversationId: null, panePid: 41, state: "spawning", error: null, at: "now" }],
+  });
+  const restored = render(withPane);
+  const detach = restored.host.querySelector('button[title="detach"]') as HTMLButtonElement;
+  expect(detach).toBeTruthy();
+  detach.click();
+  expect(restored.calls.detached[0]).toEqual({ launchId: null, path: null, conversationId: null, panePid: 41 });
 });
 
 /* Emulate a real layout engine on top of happy-dom (which reports zero heights,

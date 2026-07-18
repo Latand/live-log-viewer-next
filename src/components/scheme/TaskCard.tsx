@@ -128,18 +128,30 @@ function AssignmentChip({
     conversationId: assignment.conversationId ?? null,
     panePid: assignment.panePid,
   };
+  /* A visible detach control must always succeed: the DELETE route rejects a
+     ref with no usable handle (400), and a legacy pre-launch-id spawning
+     assignment can carry none at all. Mirror the server's emptiness test
+     (assignmentRefFromBody) and hide the control for that handle-less shape
+     rather than offering an action that can only fail. */
+  const detachable =
+    Boolean(detachRef.launchId?.trim()) ||
+    Boolean(detachRef.path?.trim()) ||
+    Boolean(detachRef.conversationId?.trim()) ||
+    (detachRef.panePid != null && Number.isInteger(detachRef.panePid) && detachRef.panePid > 0);
   if (state === "spawning") {
     return (
       <span className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[7px] border border-border bg-card/80 px-2 text-[10.5px] font-semibold text-muted">
         <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden />
         <span className="min-w-0 flex-1 truncate">{t("tasks.spawning")}</span>
-        <ChipAction
-          icon={<X className="h-3 w-3" aria-hidden />}
-          ariaLabel={t("tasks.detachAria", { title: t("tasks.spawning") })}
-          title={t("tasks.detach")}
-          hoverClass="hover:bg-black/5 hover:text-danger"
-          onClick={() => onDetach(task, detachRef)}
-        />
+        {detachable ? (
+          <ChipAction
+            icon={<X className="h-3 w-3" aria-hidden />}
+            ariaLabel={t("tasks.detachAria", { title: t("tasks.spawning") })}
+            title={t("tasks.detach")}
+            hoverClass="hover:bg-black/5 hover:text-danger"
+            onClick={() => onDetach(task, detachRef)}
+          />
+        ) : null}
       </span>
     );
   }
@@ -202,13 +214,15 @@ function AssignmentChip({
         }}
         dataAttr="data-task-open-agent"
       />
-      <ChipAction
-        icon={<X className="h-3 w-3" aria-hidden />}
-        ariaLabel={t("tasks.detachAria", { title })}
-        title={t("tasks.detach")}
-        hoverClass="hover:bg-black/5 hover:text-danger"
-        onClick={() => onDetach(task, detachRef)}
-      />
+      {detachable ? (
+        <ChipAction
+          icon={<X className="h-3 w-3" aria-hidden />}
+          ariaLabel={t("tasks.detachAria", { title })}
+          title={t("tasks.detach")}
+          hoverClass="hover:bg-black/5 hover:text-danger"
+          onClick={() => onDetach(task, detachRef)}
+        />
+      ) : null}
     </span>
   );
 }

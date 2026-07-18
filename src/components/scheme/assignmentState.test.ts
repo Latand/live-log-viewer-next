@@ -49,22 +49,30 @@ describe("assignmentAgentState", () => {
   test("running and recently active agents are live", () => {
     expect(assignmentAgentState(assignment(), file({ proc: "running", activity: "idle" }))).toBe("live");
     expect(assignmentAgentState(assignment(), file({ proc: null, activity: "recent" }))).toBe("live");
+    expect(assignmentAgentState(assignment(), file({ proc: "running", activity: "stalled" }))).toBe("live");
   });
 
-  test("migration, killed, and unhosted states disable open", () => {
+  test("migration, killed, and unhosted classifications stay truthful", () => {
     const migration = { intentId: "i", trigger: "manual", phase: "preparing", targetAccountId: "account", failure: null } as FileEntry["migration"];
-    const states = [
-      assignmentAgentState(assignment(), file({ migration })),
-      assignmentAgentState(assignment(), file({ proc: "killed", activity: "idle" })),
-      assignmentAgentState(assignment(), file({ proc: null, activity: "idle" })),
-    ];
-    expect(states).toEqual(["migrating", "killed", "unhosted"]);
-    for (const state of states) expect(assignmentOpenable(state)).toBe(false);
+    expect(assignmentAgentState(assignment(), file({ migration }))).toBe("migrating");
+    expect(assignmentAgentState(assignment(), file({ proc: "killed", activity: "idle" }))).toBe("killed");
+    expect(assignmentAgentState(assignment(), file({ proc: null, activity: "idle" }))).toBe("unhosted");
+    expect(assignmentAgentState(assignment(), file({ proc: null, activity: "stalled" }))).toBe("unhosted");
+    expect(assignmentAgentState(assignment(), file({ proc: "done", activity: "idle" }))).toBe("unhosted");
   });
 
-  test("open is enabled for live agents only", () => {
-    expect(assignmentOpenable("live")).toBe(true);
-    for (const state of ["spawning", "failed", "gone", "migrating", "killed", "unhosted"] as const) {
+  test("every present transcript state is openable — including stalled and idle hosts (fresh-review Finding 1)", () => {
+    /* A resolved transcript is board content with a pane to center on, whatever
+       its host process is doing. */
+    for (const state of ["live", "killed", "unhosted"] as const) {
+      expect(assignmentOpenable(state)).toBe(true);
+    }
+    expect(assignmentOpenable(assignmentAgentState(assignment(), file({ proc: null, activity: "stalled" })))).toBe(true);
+    expect(assignmentOpenable(assignmentAgentState(assignment(), file({ proc: null, activity: "idle" })))).toBe(true);
+  });
+
+  test("open stays unavailable without a resolvable pane: spawning, failed, gone, migrating", () => {
+    for (const state of ["spawning", "failed", "gone", "migrating"] as const) {
       expect(assignmentOpenable(state)).toBe(false);
     }
   });
