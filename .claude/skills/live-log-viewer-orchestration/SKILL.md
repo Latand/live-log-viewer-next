@@ -14,6 +14,8 @@ Agent Log Viewer (`~/.agents/tools/live-log-viewer-next`) is the user's dashboar
 - **Port 8898 only.** 8899 is a dev/scratch build (`bun dev` default): the user never watches it, and sends to it fail silently the moment it stops. Real spawns, messages, flows, and task actions go to 8898 even when 8899 appears to work.
 - **Spawn fresh + empty.** Hand every helper its whole job as the first prompt. Fork (context-inheriting) agents only when the user explicitly asks for a fork this turn — forked agents carry your context and skip the actual task.
 - Prompts to agents: English. Codex effort is set at boot (`-c model_reasoning_effort=...`), never mid-conversation.
+- **Prompt = role + scope, nothing else.** Never name the model or reasoning level in the prompt text ("Act as Sol xhigh reviewer" is wrong twice: effort is a launch parameter that words cannot enable, and the model already knows what it is). Write the role — "You are a fresh-context Reviewer. …" — and pass model/effort only as spawn parameters.
+- Review fan-out is budget-bound: Fable runs at most 1–2 independent review passes; swarms of 5+ reviewers are Sol-only and must run as visible pipeline stages.
 - After a worker finishes, keep its session/window: the user inspects and kills it from the UI.
 - One orchestrator per file set: while a worker runs, monitor it and review its diff afterwards instead of editing the same files yourself.
 
