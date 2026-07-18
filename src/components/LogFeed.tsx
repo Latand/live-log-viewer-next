@@ -19,7 +19,7 @@ import { ConversationAttention } from "./runtime/ConversationAttention";
 import { speakableAnswer } from "./feed/speakableAnswer";
 import { isSubagent } from "./projectModel";
 import { TaskHeader } from "./TaskHeader";
-import { workedCaption } from "./turnDuration";
+import { TurnStatusBar } from "./TurnStatusBar";
 
 /** Items rendered initially and added per «show earlier» step. */
 const RENDER_STEP = 1500;
@@ -84,36 +84,6 @@ function viewportAnchor(scroller: HTMLElement, path: string): ViewportAnchor | n
 
 function rowForAnchor(scroller: HTMLElement, key: string): HTMLElement | null {
   return feedRows(scroller).find((row) => row.dataset.feedKey === key) ?? null;
-}
-
-/** Animated presence row: the agent of a live transcript is mid-turn right now. */
-function WorkingRow({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
-  return (
-    <div className="mt-2 flex items-center gap-2 text-[12px] font-semibold text-success">
-      <span className="flex items-center gap-0.5" aria-hidden>
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-success" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-success [animation-delay:150ms]" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-success [animation-delay:300ms]" />
-      </span>
-      <Icon className="h-3.5 w-3.5" aria-hidden />
-      {label}
-    </div>
-  );
-}
-
-/** Muted caption after the final message once the turn is complete, mirroring
-    the codex TUI's "Worked for …" line (issue #231). Renders nothing while the
-    turn is still running — `workedCaption` returns null until `endedAt` is set. */
-function WorkedSeparator({ file }: { file: FileEntry }) {
-  const caption = workedCaption(file);
-  if (!caption) return null;
-  return (
-    <div className="mt-3 flex items-center gap-2 text-[11px] font-semibold text-muted" role="note">
-      <span className="h-px flex-1 bg-border" aria-hidden />
-      <span className="tabular-nums">{caption}</span>
-      <span className="h-px flex-1 bg-border" aria-hidden />
-    </div>
-  );
 }
 
 interface Props {
@@ -391,17 +361,24 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     setMagnet(true, true);
   };
 
-  /* Compact panes center the floating pill: on the phone a right-anchored
-     pill would sit over the tool rows' status column. */
-  const pillPos = compact ? "left-1/2 -translate-x-1/2" : "right-3";
+  /* The floating pill is centered on every surface — the same axis as the
+     pinned TurnStatusBar below, per the issue #268 operator note: the two
+     bottom elements share one axis and separate slots, so they can never
+     collide at any pane width. (A right-anchored pill also sat over the tool
+     rows' status column on the phone.) */
+  const pillPos = "left-1/2 -translate-x-1/2";
 
   return (
     <RawLineProvider value={getRawLine}>
+    <div className="flex min-h-0 flex-1 flex-col">
+    {/* The pill anchors to the scroller wrapper — NOT the pane column — so the
+        pinned status bar below is structurally outside its overlay area. */}
     <div className="relative flex min-h-0 flex-1 flex-col">
       {file && feed.items.length ? (
         magnet ? (
           file.activity === "live" ? (
             <div
+              data-live-tail-pill
               className={`pointer-events-none absolute bottom-2 ${pillPos} z-10 inline-flex items-center gap-1 rounded-full bg-success px-2 py-0.5 text-[10px] font-bold text-white shadow-1 transition-transform duration-200 ${
                 pulse ? "scale-125" : "scale-100"
               }`}
@@ -501,7 +478,6 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                 {!file.pendingQuestion && !file.waitingInput && endedQuestion ? (
                   <div className="my-4 rounded-[8px] border border-border bg-sunken px-4 py-3 text-[13px] font-semibold text-muted">{endedQuestion}</div>
                 ) : null}
-                {file.activity === "live" ? <WorkingRow icon={working.icon} label={working.label} /> : null}
                 {file.activity === "recent" && isAwaitingUser(file) ? (
                   <div className="mt-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-warning">
                     <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" aria-hidden /> {t("feed.finishedTurn")}
@@ -511,7 +487,6 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                     <CornerDownRight className="h-3.5 w-3.5" aria-hidden /> {t("feed.returnedResult")}
                   </div>
                 ) : null}
-                <WorkedSeparator file={file} />
               </>
             ) : (
               <div className="mt-[14vh] text-center text-muted">
@@ -539,6 +514,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
         )}
         </div>
       </div>
+    </div>
+    {/* Bottom working-status slot (issue #268): live «працює · 4:32» ticking
+        from the initiating prompt, or the frozen «Працював N» total after the
+        turn ends. Pinned below the scroller in every pane variant. */}
+    {file ? (
+      <TurnStatusBar file={file} workingLabel={working.label} workingIcon={working.icon} compact={compact} />
+    ) : null}
     </div>
     </RawLineProvider>
   );

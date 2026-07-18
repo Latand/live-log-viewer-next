@@ -25,6 +25,18 @@ export function humanizeDuration(seconds: number, locale: Locale = getLocale()):
   return seg.join(units.sep);
 }
 
+/** Ticking-clock rendering for the live bottom timer: «4:32», «1:04:09».
+    Locale-neutral digits, so the same string serves en and uk next to their
+    own «працює…»/"working…" labels. Negative inputs clamp to «0:00». */
+export function clockDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
 /** Seconds spanned by a completed turn, or null when it is still running or the
     boundary is unavailable. */
 export function turnDurationSeconds(file: Pick<FileEntry, "lastTurn">): number | null {
