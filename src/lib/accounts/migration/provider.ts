@@ -736,6 +736,10 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
           cancelClaude: this.dependencies.cancelClaude ?? defaultDependencies.cancelClaude!,
         });
       }
+      if (input.ownsOperation && !await input.ownsOperation()) {
+        await cleanup();
+        return;
+      }
       this.publishedHosts.set(receipt.operationId, {
         nativeId: receipt.nativeId,
         path: receipt.path,

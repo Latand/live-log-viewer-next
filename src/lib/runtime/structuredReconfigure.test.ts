@@ -668,6 +668,60 @@ test("an account-switch release failure durably restores a sparse profile", asyn
   expect(liveSuccessorProfile).toMatchObject({ model: null, effort: null, fast: null });
 });
 
+test("a same-account reconfigure restarts the committed successor with the newest profile", async () => {
+  const target = fixture({ model: null, effort: null, fast: null });
+  const predecessorId = target.registry.conversation(target.conversationId)!.generations.at(-1)!.id;
+  const successorPath = path.join(path.dirname(target.transcript), "successor-same-account-profile.jsonl");
+  fs.writeFileSync(successorPath, "{}\n");
+  let migration = target.registry.requestConversationReseat(target.conversationId, "target").migration!;
+  if (migration.phase === "waiting-turn") {
+    migration = target.registry.transitionConversationMigration(target.conversationId, migration.revision, ["waiting-turn"], { phase: "requested" }).migration!;
+  }
+  migration = target.registry.transitionConversationMigration(target.conversationId, migration.revision, ["requested"], { phase: "preparing" }).migration!;
+  migration = target.registry.transitionConversationMigration(target.conversationId, migration.revision, ["preparing"], { phase: "successor-starting" }).migration!;
+  const receipt = {
+    operationId: migration.operationId,
+    nativeId: "thread-successor-same-account-profile",
+    path: successorPath,
+    continuityPaths: [successorPath],
+    historyHash: "successor-same-account-profile-history",
+    host: { kind: "codex-app-server" as const, identity: "successor-same-account-profile-host", epoch: 1, verifiedAt: "2026-07-20T12:00:00.000Z" },
+  };
+  target.registry.persistMigrationProviderReceipt(target.conversationId, migration.revision, migration.operationId, receipt);
+  target.registry.commitSuccessor(target.conversationId, {
+    id: receipt.nativeId,
+    path: receipt.path,
+    accountId: "target",
+    historyHash: receipt.historyHash,
+    host: receipt.host,
+  }, migration.revision);
+  const released: string[] = [];
+  const recoveredProfiles: unknown[] = [];
+
+  const outcome = await applyStructuredReconfigure(effect({
+    operationId: "same-account-successor-profile",
+    conversationId: target.conversationId,
+    accountId: "target",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+    previousProfile: { model: null, effort: null, fast: null },
+    eventSeq: 34,
+  }), {
+    registry: target.registry,
+    releaseHost: async (key) => { released.push(key.sessionId); return true; },
+    recover: async () => {
+      recoveredProfiles.push(target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile);
+      return { target: null, path: successorPath, conversationId: target.conversationId, spawned: true };
+    },
+  });
+
+  expect(outcome).toBe("applied");
+  expect(released).toEqual([predecessorId, receipt.nativeId]);
+  expect(recoveredProfiles).toHaveLength(1);
+  expect(recoveredProfiles[0]).toMatchObject({ model: "gpt-5.6-terra", effort: "xhigh", fast: true });
+});
+
 test("a committed account-switch replay restores the live successor profile after predecessor cleanup fails", async () => {
   const target = fixture({ model: null, effort: null, fast: null });
   const predecessorId = target.registry.conversation(target.conversationId)!.generations.at(-1)!.id;

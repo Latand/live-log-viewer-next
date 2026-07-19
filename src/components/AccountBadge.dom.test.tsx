@@ -136,6 +136,50 @@ test("a legacy account switch settles when scanner ownership reaches the target 
   await act(async () => root.unmount());
 });
 
+test("a failed legacy account switch clears its pending badge and re-enables choices", async () => {
+  responseBody = { ok: true, outcome: "pending" };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<AccountBadge engine="codex" accountId="source" file={file} />); });
+
+  await act(async () => {
+    host.querySelector<HTMLElement>("[data-conversation-account-chip]")!
+      .dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+  });
+  const rows = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+  await act(async () => {
+    rows[1]!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(host.textContent).toContain("Account switch pending");
+
+  const failedFile: FileEntry = {
+    ...file,
+    migration: {
+      intentId: "legacy-account-switch",
+      trigger: "manual",
+      phase: "failed-recoverable",
+      targetAccountId: "target",
+      failure: "successor authentication expired",
+      revision: 2,
+    },
+  };
+  await act(async () => {
+    root.render(<AccountBadge engine="codex" accountId="source" file={failedFile} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(host.textContent).not.toContain("Account switch pending");
+  await act(async () => {
+    host.querySelector<HTMLElement>("[data-conversation-account-chip]")!
+      .dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+  });
+  const reopenedRows = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+  expect(reopenedRows[1]!.disabled).toBeFalse();
+  await act(async () => root.unmount());
+});
+
 test("an account switch carries the latest conversation runtime profile", async () => {
   localStorage.setItem("llvAgentRuntime:conversation_account_switch:profile", JSON.stringify({
     model: "gpt-5.6-terra",

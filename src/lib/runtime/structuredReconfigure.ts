@@ -148,6 +148,14 @@ export async function applyStructuredReconfigure(
         await release(predecessorKey);
         registry.terminateStructuredHost(predecessorKey);
       }
+      if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
+      await release(key);
+      if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
+      registry.terminateStructuredHost(key);
+      if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
+      const recovered = await recover({ path: generation.path, conversationId }, { registry });
+      if (!recovered) throw new Error("structured successor profile application is unavailable");
+      if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
       await settle("applied");
       return "applied";
     } catch (error) {

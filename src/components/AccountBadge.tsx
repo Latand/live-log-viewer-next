@@ -51,6 +51,17 @@ function healthOf(account: { authHealth?: AccountAuthHealth; authPresent?: boole
   return account.authHealth ?? (account.authPresent ? "unknown" : "signed_out");
 }
 
+function migrationProjectionKey(migration: FileEntry["migration"]): string | null {
+  if (!migration) return null;
+  return [
+    migration.intentId,
+    migration.revision ?? "",
+    migration.phase,
+    migration.targetAccountId,
+    migration.failure ?? "",
+  ].join("\u0000");
+}
+
 /**
  * Account badge — the third meta-chip on an agent window header, after the ctx
  * and branch chips (issue #229). Shows `@ <accountId>` with a deterministic hue
@@ -80,6 +91,7 @@ export function AccountBadge({
   const [pending, setPending] = useState(false);
   const operationRef = useRef<string | null>(null);
   const targetAccountRef = useRef<string | null>(null);
+  const migrationBaselineRef = useRef<string | null>(null);
   const tint = accountTint(accountId);
   const health = healthOf(accounts.accounts.find((account) => account.id === accountId));
   const label = hintLabel(t, accountId, engine, health);
@@ -94,11 +106,13 @@ export function AccountBadge({
     if (receipt.status === "applied") {
       operationRef.current = null;
       targetAccountRef.current = null;
+      migrationBaselineRef.current = null;
       setPending(false);
       pushTaskToast("ok", t("accounts.conversationApplied"));
     } else if (receipt.status === "failed" || receipt.status === "rejected") {
       operationRef.current = null;
       targetAccountRef.current = null;
+      migrationBaselineRef.current = null;
       setPending(false);
       pushTaskToast("err", receipt.reason ?? t("accounts.switchFailed"));
     }
@@ -108,15 +122,31 @@ export function AccountBadge({
     if (!pending || targetAccountRef.current !== accountId) return;
     targetAccountRef.current = null;
     operationRef.current = null;
+    migrationBaselineRef.current = null;
     setPending(false);
     pushTaskToast("ok", t("accounts.conversationApplied"));
   }, [accountId, pending, t]);
+
+  useEffect(() => {
+    const migration = file?.migration;
+    const targetAccountId = targetAccountRef.current;
+    if (!pending
+      || operationRef.current
+      || !migration?.failure
+      || migration.targetAccountId !== targetAccountId
+      || migrationProjectionKey(migration) === migrationBaselineRef.current) return;
+    targetAccountRef.current = null;
+    migrationBaselineRef.current = null;
+    setPending(false);
+    pushTaskToast("err", migration.failure);
+  }, [file?.migration, pending]);
 
   const switchConversation = async (targetId: string) => {
     if (!file || targetId === accountId || pending) return;
     setPending(true);
     setOpen(false);
     targetAccountRef.current = targetId;
+    migrationBaselineRef.current = migrationProjectionKey(file.migration);
     try {
       const profile = effectiveProfile(file);
       const response = await fetch("/api/tmux", {
@@ -139,9 +169,12 @@ export function AccountBadge({
         error?: string;
       };
       if (!response.ok || !body.ok) throw new Error(body.error ?? t("accounts.switchFailed"));
-      operationRef.current = body.operationId ?? body.receipt?.operationId ?? null;
+      if (targetAccountRef.current === targetId) {
+        operationRef.current = body.operationId ?? body.receipt?.operationId ?? null;
+      }
     } catch (error) {
       targetAccountRef.current = null;
+      migrationBaselineRef.current = null;
       setPending(false);
       pushTaskToast("err", error instanceof Error ? error.message : t("accounts.switchFailed"));
     }

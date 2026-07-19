@@ -173,6 +173,57 @@ test("Claude successor cleanup releases its published broker owner", async () =>
   expect(legacyCancellations).toBe(0);
 });
 
+test("a fenced Claude publication keeps receipt cleanup available", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-fenced-claude-publication-"));
+  roots.push(base);
+  const source = accountRoot("claude", base, "source");
+  const target = accountRoot("claude", base, "target");
+  let ownershipChecks = 0;
+  const cancelled: string[] = [];
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    cancelClaude: async (host) => { cancelled.push(host.paneId); return true; },
+    publishClaudeHost: async (input) => {
+      if (input.ownsOperation && !await input.ownsOperation()) return async () => {};
+      throw new Error("stale publication unexpectedly retained ownership");
+    },
+    now: () => "2026-07-20T12:00:00.000Z",
+  });
+  const tmux = claudeHost("%46", 4646);
+  const receipt: ProviderReceipt = {
+    operationId: "fenced-claude-publication",
+    nativeId: "46464646-4646-4646-8646-464646464646",
+    path: path.join(target.transcriptRoot, "46464646-4646-4646-8646-464646464646.jsonl"),
+    continuityPaths: [],
+    historyHash: "history",
+    host: {
+      kind: "claude-stream",
+      identity: "%46:4646",
+      epoch: 1,
+      verifiedAt: "2026-07-20T12:00:00.000Z",
+      tmuxHost: tmux,
+    },
+  };
+
+  await provider.publishHost(receipt, {
+    engine: "claude",
+    conversationId: "conversation_fenced_claude_publication",
+    targetAccountId: "target",
+    launchProfile: emptyLaunchProfile({ cwd: base }),
+    ownsOperation: async () => {
+      ownershipChecks += 1;
+      return ownershipChecks === 1;
+    },
+  });
+  await provider.cleanup(receipt);
+
+  expect(ownershipChecks).toBeGreaterThanOrEqual(2);
+  expect(cancelled).toEqual(["%46"]);
+});
+
 test("Claude successor provider uses registered homes and shared model normalization", async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-"));
   roots.push(base);
