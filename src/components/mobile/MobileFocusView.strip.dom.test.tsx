@@ -11,7 +11,10 @@ import { emptyStore } from "@/components/runtime/runtimeModel";
  * Finding 6 (issue #241): the REAL mobile focus wrapper (`MobileFocusView` →
  * `BranchPane`) must mount the control strip for the focused conversation,
  * classify a scanner-shaped subagent as `live-subagent`, and expose 44px mobile
- * control targets. Regressions in the phone layout fail here independently.
+ * control targets. Chat-first (issue #419): the detailed runtime controls fold
+ * behind the conversation-details disclosure by default, so the strip is one tap
+ * away — this opens it before asserting the strip contract. Regressions in the
+ * phone layout fail here independently.
  */
 
 const dom = new HappyWindow();
@@ -97,6 +100,11 @@ test("the mobile focus view mounts the strip and classifies a scanner-shaped sub
       onDraftSpawned={() => undefined}
     />,
   ));
+
+  /* Chat-first default folds the detailed runtime controls; reveal them. */
+  const details = (host as unknown as HTMLElement).querySelector('[data-testid="mobile-details-toggle"]') as HTMLButtonElement;
+  expect(details).not.toBeNull();
+  flushSync(() => details.click());
 
   const strip = (host as unknown as HTMLElement).querySelector("[data-agent-control-strip]");
   expect(strip).not.toBeNull();

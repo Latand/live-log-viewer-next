@@ -1,7 +1,7 @@
 "use client";
 
 import { CornerDownRight, GitBranch, Maximize2, Minimize2, Unlink2 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { ChevronRight, X } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -152,6 +152,15 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      never reaches the header swipe handler (issue #177 item 1 review). */
   const metaScrollRef = useRef<HTMLDivElement | null>(null);
   const [metaClipped, setMetaClipped] = useState(false);
+  /* Chat-first mobile shell (issue #419): on the phone the conversation shows
+     ONE compact header row by default. The metadata chips (memory/goal/model/
+     ctx/account) and the detailed runtime controls fold behind this single
+     conversation-details disclosure, reserving zero height while collapsed so
+     the transcript keeps its ≥60% viewport budget (see mobile/chatBudget.ts).
+     Desktop always renders both inline, so the flag only gates the phone. */
+  const detailsId = useId();
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const showSecondary = !isMobile || detailsOpen;
   const syncMetaClip = useCallback(() => {
     const el = metaScrollRef.current;
     if (!el) return;
@@ -269,6 +278,20 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               </span>
             )}
             <ProcessStatusControls file={file} compact hideChip={isMobile} />
+            {isMobile ? (
+              <button
+                type="button"
+                data-testid="mobile-details-toggle"
+                aria-expanded={detailsOpen}
+                aria-controls={detailsId}
+                aria-label={detailsOpen ? t("branch.detailsHide") : t("branch.detailsShow")}
+                title={detailsOpen ? t("branch.detailsHide") : t("branch.detailsShow")}
+                onClick={() => setDetailsOpen((open) => !open)}
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <ChevronRight className={`h-4 w-4 transition-transform ${detailsOpen ? "rotate-90" : ""}`} aria-hidden />
+              </button>
+            ) : null}
             {showFavorite ? <FavoriteCrown id={cardId} cardRef={paneRef} touch={isMobile} /> : null}
             {onToggleExpand ? (
               <button
@@ -296,7 +319,10 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               </button>
             ) : null}
           </div>
+          {showSecondary ? (
           <div
+            id={detailsId}
+            data-testid="mobile-conv-meta"
             className="relative flex min-w-0 items-center gap-x-1.5"
             /* The metadata row owns its own touch gestures on the phone so a
                horizontal scroll to reveal clipped chips stays here and never
@@ -412,6 +438,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               )}
             </div>
           </div>
+          ) : null}
         </header>
         {/* Account-migration status ribbon (issue #40): sits in the same slot
             family as the flow banner. Renders only while this conversation is
@@ -469,7 +496,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                 no control applies. Dormant far-zoom board nodes suppress it entirely
                 (the dormant-node contract): the strip returns on activation, and
                 active review panes keep it regardless of `noComposer`. */}
-            {dormant ? null : <AgentControlStrip file={file} />}
+            {dormant || !showSecondary ? null : <AgentControlStrip file={file} />}
             {noComposer || superseded ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} sendBlockedReason={sendBlockedReason} />}
           </>
         )}

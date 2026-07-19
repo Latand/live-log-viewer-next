@@ -288,6 +288,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.placeholderSpawn": "промпт — агент запуститься в tmux…",
   "composer.placeholderSend": "написати агенту…",
   "composer.textAria": "Текст для агента",
+  "composer.optionsShow": "Показати параметри повідомлення",
+  "composer.optionsHide": "Сховати параметри повідомлення",
   "composer.titleRelay": "передасться через кореневу сесію гілки",
   "composer.titleSpawnResumed": "нове tmux-вікно з відновленим агентом",
   "composer.root": "корінь",
@@ -1385,6 +1387,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "branch.expand": "Розгорнути",
   "branch.expandFull": "Розгорнути розмову {title} на все вікно",
   "branch.collapseFull": "Повернутися до полотна (Esc)",
+  // Chat-first mobile disclosure (issue #419)
+  "branch.detailsShow": "Показати деталі розмови",
+  "branch.detailsHide": "Сховати деталі розмови",
   // Crown favorites (issue #185)
   "branch.favorite": "Додати в обране",
   "branch.unfavorite": "Прибрати з обраного",

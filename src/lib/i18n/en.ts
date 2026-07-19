@@ -297,6 +297,11 @@ export const en = {
   "composer.placeholderSpawn": "prompt — the agent will start in tmux…",
   "composer.placeholderSend": "message the agent…",
   "composer.textAria": "Text for the agent",
+  /* Chat-first mobile composer (issue #419 reopened): the model/reasoning +
+     attachment second row folds behind this compact primary-row action so the
+     collapsed composer reserves a single input row. */
+  "composer.optionsShow": "Show message options",
+  "composer.optionsHide": "Hide message options",
   "composer.titleRelay": "relayed through the branch's root session",
   "composer.titleSpawnResumed": "new tmux window with the resumed agent",
   "composer.root": "root",
@@ -1420,6 +1425,10 @@ export const en = {
   "branch.expand": "Expand",
   "branch.expandFull": "Expand conversation {title} to the full window",
   "branch.collapseFull": "Back to the canvas (Esc)",
+  // Chat-first mobile disclosure (issue #419): the phone folds the metadata
+  // chips and the detailed runtime controls behind one compact toggle.
+  "branch.detailsShow": "Show conversation details",
+  "branch.detailsHide": "Hide conversation details",
   // Crown favorites (issue #185)
   "branch.favorite": "Mark as favorite",
   "branch.unfavorite": "Remove from favorites",

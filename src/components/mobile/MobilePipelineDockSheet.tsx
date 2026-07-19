@@ -61,6 +61,37 @@ export function MobilePipelineSummaryRow({ pipelines, onOpen }: { pipelines: Pip
   );
 }
 
+/** The compact focus-strip pipelines trigger (issue #419 reopened): with a
+    conversation focused, the docked pipelines reserve ZERO height below the
+    transcript — this icon + count rides the top strip beside map/tasks and opens
+    the same bottom sheet. The full count summary lives in its aria-label so a
+    screen reader still hears "N pipelines · K active · …". */
+export function MobilePipelineSummaryButton({ pipelines, onOpen }: { pipelines: Pipeline[]; onOpen: () => void }) {
+  const { t } = useLocale();
+  if (!pipelines.length) return null;
+  const counts = summarizePipelines(pipelines);
+  const parts: string[] = [];
+  if (counts.active) parts.push(t("pipelineMobile.summaryActive", { n: counts.active }));
+  if (counts.attention) parts.push(t("pipelineMobile.summaryAttention", { n: counts.attention }));
+  if (counts.completed) parts.push(t("pipelineMobile.summaryCompleted", { n: counts.completed }));
+  const label = [t("pipelineMobile.summaryCount", { n: counts.total }), ...parts].join(" · ");
+  const badge = counts.attention || counts.active || counts.total;
+  const badgeTone = counts.attention ? "bg-warning/10 text-warning" : counts.active ? "bg-accent/10 text-accent" : "bg-sunken text-muted";
+  return (
+    <button
+      type="button"
+      data-testid="mobile-pipeline-summary"
+      onClick={onOpen}
+      aria-haspopup="dialog"
+      aria-label={label}
+      className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+    >
+      <ListTree className="h-4 w-4 shrink-0" aria-hidden />
+      <span className={`rounded-full px-1 text-[10px] font-bold ${badgeTone}`}>{badge}</span>
+    </button>
+  );
+}
+
 /** Bottom sheet listing every docked pipeline as a compact rail (issue #419):
     ongoing pipelines first, completed ones folded behind one reversible
     disclosure so a finished run never crowds the active chain. */
