@@ -16,10 +16,23 @@ import { readSession } from "@/lib/session/reader";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
 import { mutateTasks, mutateTasksFile } from "@/lib/tasks/store";
+import type { BoardTask } from "@/lib/tasks/types";
 
 import type { McpToolArgs, McpToolBindings, McpToolPayload } from "./server";
 
 const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
+
+interface LinkTaskToPipelineDependencies {
+  getPipelines(): ReturnType<typeof getPipelines>;
+  mutateTasks<R>(mutator: (tasks: BoardTask[]) => { tasks?: BoardTask[]; result: R }): R;
+  isoNow(): string;
+}
+
+const productionLinkTaskDependencies: LinkTaskToPipelineDependencies = {
+  getPipelines,
+  mutateTasks,
+  isoNow,
+};
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -151,18 +164,18 @@ async function pipelineAction(args: McpToolArgs): Promise<McpToolPayload> {
   return { pipelineId, pipeline: result.pipeline };
 }
 
-async function linkTaskToPipeline(args: McpToolArgs): Promise<McpToolPayload> {
+async function linkTaskToPipeline(args: McpToolArgs, dependencies: LinkTaskToPipelineDependencies): Promise<McpToolPayload> {
   const taskId = required(args, "taskId");
   const pipelineId = required(args, "pipelineId");
-  const pipeline = getPipelines().pipelines.find((candidate) => candidate.id === pipelineId);
+  const pipeline = dependencies.getPipelines().pipelines.find((candidate) => candidate.id === pipelineId);
   if (!pipeline) throw new Error("pipeline not found");
-  const attempts = pipeline.runs.flatMap((run) => run.attempts).slice().reverse();
-  const member = attempts.find((attempt) => attempt.conversationId || attempt.agentPath);
+  const attempts = pipeline.runs.flatMap((run) => run.attempts);
+  const member = attempts.findLast((attempt) => !attempt.historical && Boolean(attempt.conversationId || attempt.agentPath));
   const transcriptPath = member?.agentPath ?? pipeline.srcPath;
   const conversationId = member?.conversationId ?? pipeline.srcConversationId;
   if (!transcriptPath && !conversationId) throw new Error("pipeline has no conversation to link");
-  const at = isoNow();
-  const result = mutateTasks((tasks) => {
+  const at = dependencies.isoNow();
+  const result = dependencies.mutateTasks((tasks) => {
     const outcome = applyAssignmentPatches(tasks, taskId, [{
       path: transcriptPath,
       conversationId,
@@ -244,7 +257,7 @@ async function getPipeline(args: McpToolArgs): Promise<McpToolPayload> {
   return { pipelineId, pipeline };
 }
 
-export function viewerMcpBindings(): McpToolBindings {
+export function viewerMcpBindings(linkTaskDependencies: LinkTaskToPipelineDependencies = productionLinkTaskDependencies): McpToolBindings {
   return {
     spawn_agent: spawnAgent,
     send_message: sendMessage,
@@ -252,7 +265,7 @@ export function viewerMcpBindings(): McpToolBindings {
     update_task: updateBoardTask,
     create_pipeline: createPipeline,
     pipeline_action: pipelineAction,
-    link_task_to_pipeline: linkTaskToPipeline,
+    link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
     list_conversations: listConversations,
     get_conversation: getConversation,
     deploy_exact_sha: deployExactSha,
