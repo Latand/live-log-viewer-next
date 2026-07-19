@@ -99,6 +99,9 @@ export interface DraftNode extends SchemeRect {
 
 export interface SchemeEdge {
   to: string;
+  /** Stable lineage identities used by the optional subagent badge anchor. */
+  sourceConversationId?: string;
+  targetConversationId?: string;
   x1: number;
   y1: number;
   x2: number;
@@ -382,6 +385,8 @@ export function buildSchemeLayout(
         const child = children[i]!;
         edges.push({
           to: child.file.path,
+          sourceConversationId: conversationIdentity(col.file),
+          targetConversationId: conversationIdentity(child.file),
           x1: x + 40,
           y1: y + h,
           x2: cx + NODE_W / 2,
