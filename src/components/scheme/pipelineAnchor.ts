@@ -8,6 +8,8 @@ import { TASK_W } from "./taskGeometry";
 export const PIPELINE_GROUP_GAP = 32;
 export const PIPELINE_GROUP_W = 360;
 export const PIPELINE_GROUP_COLLAPSED_H = 76;
+/** Expanded groups reserve a bounded world-space surface; their body scrolls within it. */
+export const PIPELINE_GROUP_EXPANDED_H = 520;
 export const PIPELINE_GROUP_STACK_GAP = 24;
 
 const FREE_GRID_COLUMNS = 4;
@@ -108,18 +110,21 @@ export function layoutPipelineGroups(
   tasks: readonly BoardTask[],
   panes: readonly PipelinePane[],
   obstacles: readonly SchemeRect[],
+  groupHeights: ReadonlyMap<string, number> = new Map(),
 ): Map<string, SchemeRect> {
   const byAge = [...pipelines].sort((a, b) =>
     a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id.localeCompare(b.id),
   );
   const result = new Map<string, SchemeRect>();
   const occupied: SchemeRect[] = [...obstacles];
-  const stackDepth = new Map<string, number>();
+  const stackOffset = new Map<string, number>();
+
+  const heightFor = (pipeline: Pipeline) => groupHeights.get(pipeline.id) ?? PIPELINE_GROUP_COLLAPSED_H;
 
   for (const pipeline of byAge) {
     const pinned = (pipeline as PositionedPipeline).pos;
     if (!pinned) continue;
-    const rect = { ...pinned, w: PIPELINE_GROUP_W, h: PIPELINE_GROUP_COLLAPSED_H };
+    const rect = { ...pinned, w: PIPELINE_GROUP_W, h: heightFor(pipeline) };
     result.set(pipeline.id, rect);
     occupied.push(rect);
   }
@@ -127,11 +132,12 @@ export function layoutPipelineGroups(
     if ((pipeline as PositionedPipeline).pos) continue;
     const anchor = anchorFor(pipeline, tasks, panes);
     const key = `${anchor.x}:${anchor.y}`;
-    const depth = stackDepth.get(key) ?? 0;
-    stackDepth.set(key, depth + 1);
-    const stackedAnchor = { x: anchor.x, y: anchor.y + depth * (PIPELINE_GROUP_COLLAPSED_H + PIPELINE_GROUP_STACK_GAP) };
-    const spot = findFreeSlot(stackedAnchor, { w: PIPELINE_GROUP_W, h: PIPELINE_GROUP_COLLAPSED_H }, occupied);
-    const rect = { ...spot, w: PIPELINE_GROUP_W, h: PIPELINE_GROUP_COLLAPSED_H };
+    const height = heightFor(pipeline);
+    const offset = stackOffset.get(key) ?? 0;
+    stackOffset.set(key, offset + height + PIPELINE_GROUP_STACK_GAP);
+    const stackedAnchor = { x: anchor.x, y: anchor.y + offset };
+    const spot = findFreeSlot(stackedAnchor, { w: PIPELINE_GROUP_W, h: height }, occupied);
+    const rect = { ...spot, w: PIPELINE_GROUP_W, h: height };
     result.set(pipeline.id, rect);
     occupied.push(rect);
   }

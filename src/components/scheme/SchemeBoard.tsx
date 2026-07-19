@@ -23,7 +23,7 @@ import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
-import { compactPipelineLayoutFlows, latestAttempt, patchPipeline, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
+import { compactPipelineLayoutFlows, compactPipelineOpenTarget, patchPipeline, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
 import { PipelineEditor } from "@/components/pipelines/PipelineEditor";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { BulkActionBar } from "./BulkActionBar";
@@ -55,7 +55,7 @@ import {
 } from "./taskGeometry";
 import { resolveTaskPlacements } from "./taskPlacement";
 import { PipelineGroup } from "./PipelineGroup";
-import { layoutPipelineGroups, type PipelinePane } from "./pipelineAnchor";
+import { PIPELINE_GROUP_EXPANDED_H, layoutPipelineGroups, type PipelinePane } from "./pipelineAnchor";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
 import { useSpatialNav } from "./useSpatialNav";
@@ -216,7 +216,17 @@ export function SchemeBoard({
   const mapMode = Boolean(onNodePick);
   const [selected, setSelected] = useState<string | null>(null);
   const [localBuilderPipelineId, setLocalBuilderPipelineId] = useState<string | null>(null);
+  const [expandedPipelineIds, setExpandedPipelineIds] = useState<ReadonlySet<string>>(EMPTY_PATHS);
   const activeBuilderPipelineId = builderPipelineId ?? localBuilderPipelineId;
+  const setPipelineExpanded = useCallback((id: string, expanded: boolean) => {
+    setExpandedPipelineIds((previous) => {
+      if (previous.has(id) === expanded) return previous;
+      const next = new Set(previous);
+      if (expanded) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
   const handleBuilderOpened = useCallback(() => {
     setLocalBuilderPipelineId(null);
     onBuilderOpened?.();
@@ -460,6 +470,7 @@ export function SchemeBoard({
     const byTask = new Map<string, Pipeline[]>();
     for (const pipeline of pipelines) {
       if (pipeline.state !== "completed" && pipeline.state !== "closed") continue;
+      if (!compactPipelineOpenTarget(pipeline, flows, renderableGroupFlows, renderablePipelinePaths, files)) continue;
       for (const task of linkedTasksByPipeline.get(pipeline.id) ?? []) {
         const rows = byTask.get(task.id) ?? [];
         rows.push(pipeline);
@@ -467,7 +478,7 @@ export function SchemeBoard({
       }
     }
     return byTask;
-  }, [pipelines, linkedTasksByPipeline]);
+  }, [pipelines, linkedTasksByPipeline, flows, renderableGroupFlows, renderablePipelinePaths, files]);
   const pipelineControls = useMemo<PipelineGroupControls>(
     () => ({ flows, files, renderablePaths: renderablePipelinePaths, renderableFlows: renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, onOpenPath: openPipelinePath, onOpenFlow: openPipelineFlow, onOpenTask: stableOpenTask }),
     [flows, files, renderablePipelinePaths, renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, openPipelinePath, openPipelineFlow, stableOpenTask],
@@ -478,18 +489,10 @@ export function SchemeBoard({
     [],
   );
   const openPipelineHistory = useCallback((pipeline: Pipeline) => {
-    for (const stage of [...pipeline.stages].reverse()) {
-      const attempt = latestAttempt(pipeline, stage.id);
-      if (attempt?.agentPath && renderablePipelinePaths.has(attempt.agentPath)) {
-        openPipelinePath(attempt.agentPath);
-        return;
-      }
-      if (attempt?.flowId && renderableGroupFlows.has(attempt.flowId)) {
-        openPipelineFlow(attempt.flowId);
-        return;
-      }
-    }
-  }, [renderablePipelinePaths, renderableGroupFlows, openPipelinePath, openPipelineFlow]);
+    const target = compactPipelineOpenTarget(pipeline, flows, renderableGroupFlows, renderablePipelinePaths, files);
+    if (target?.kind === "path") openPipelinePath(target.path);
+    else if (target?.kind === "flow") openPipelineFlow(target.flowId);
+  }, [flows, renderableGroupFlows, renderablePipelinePaths, files, openPipelinePath, openPipelineFlow]);
   /* One minimap dot per collapsed worker-stack origin (issue #136): orchestration
      origins (flow/pipeline) in accent, spawner/worktree origins in gray. */
   const stackDots = useMemo<StackDot[]>(() => stackDotsFor(workerStacks), [workerStacks]);
@@ -604,8 +607,8 @@ export function SchemeBoard({
     [placedTasks, textExpandedIds],
   );
   const livePipelineGroups = useMemo(
-    () => surfacePipelines.filter((pipeline) => pipeline.state !== "completed" && pipeline.state !== "closed"),
-    [surfacePipelines],
+    () => mapMode ? [] : surfacePipelines.filter((pipeline) => pipeline.state !== "completed" && pipeline.state !== "closed"),
+    [mapMode, surfacePipelines],
   );
   const pipelinePanes = useMemo<PipelinePane[]>(
     () => layout.nodes.map((node) => ({
@@ -618,9 +621,23 @@ export function SchemeBoard({
     })),
     [layout.nodes],
   );
+  const pipelineGroupHeights = useMemo(
+    () => new Map(livePipelineGroups.flatMap((pipeline) =>
+      expandedPipelineIds.has(pipeline.id) || activeBuilderPipelineId === pipeline.id
+        ? [[pipeline.id, PIPELINE_GROUP_EXPANDED_H] as const]
+        : [],
+    )),
+    [livePipelineGroups, expandedPipelineIds, activeBuilderPipelineId],
+  );
   const pipelineGroupRects = useMemo(
-    () => layoutPipelineGroups(livePipelineGroups, pipelineAnchorTasks, pipelinePanes, [...taskObstacles, ...taskRects.values()]),
-    [livePipelineGroups, pipelineAnchorTasks, pipelinePanes, taskObstacles, taskRects],
+    () => layoutPipelineGroups(
+      livePipelineGroups,
+      pipelineAnchorTasks,
+      pipelinePanes,
+      [...taskObstacles, ...taskRects.values()],
+      pipelineGroupHeights,
+    ),
+    [livePipelineGroups, pipelineAnchorTasks, pipelinePanes, taskObstacles, taskRects, pipelineGroupHeights],
   );
   const taskNavLabels = useMemo(
     () => new Map(placedTasks.map((task) => [`task::${task.id}`, taskTitle(task.text) || t("tasks.untitled")] as const)),
@@ -759,6 +776,7 @@ export function SchemeBoard({
         },
     onWorldTap: mapMode ? undefined : onWorldTap,
     taskRects,
+    contentRects: pipelineGroupRects,
     onPlaceTask: mapMode ? undefined : onPlaceTask,
     onArrowNav: navArrowRef,
     onZoomKey: navZoomRef,
@@ -1175,6 +1193,9 @@ export function SchemeBoard({
               rect={rect}
               camRef={camRef}
               onPin={pinPipeline}
+              interactive={!handLike && !session}
+              expanded={pipelineGroupHeights.has(pipeline.id)}
+              onExpandedChange={setPipelineExpanded}
               autoOpen={activeBuilderPipelineId === pipeline.id}
               onAutoOpen={handleBuilderOpened}
             >

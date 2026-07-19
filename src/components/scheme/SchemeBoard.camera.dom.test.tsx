@@ -3,6 +3,7 @@ import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import { SchemeBoard } from "./SchemeBoard";
@@ -59,6 +60,202 @@ const settle = async () => {
   for (let index = 0; index < 3; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
   flushSync(() => undefined);
 };
+
+function pipeline(index: number): Pipeline {
+  return {
+    id: `camera-pipeline-${index}`,
+    task: `Camera pipeline ${index}`,
+    project: "pipeline-camera",
+    repoDir: "/repo",
+    worktreeDir: `/repo-pipeline-${index}`,
+    branch: `pipeline/${index}`,
+    baseBranch: "main",
+    baseRef: "abc",
+    lastPassedCommit: "abc",
+    stages: [{
+      id: "build",
+      kind: "run",
+      prompt: "",
+      next: null,
+      effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null },
+    }],
+    runs: [],
+    cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+    state: "running",
+    pausedState: null,
+    stateDetail: null,
+    srcPath: null,
+    srcConversationId: null,
+    createdAt: `2026-07-19T00:00:${String(index).padStart(2, "0")}.000Z`,
+    closedAt: null,
+  };
+}
+
+test("a pipeline-only board frames 16 groups and preserves a manual camera across polling", async () => {
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800, toJSON() {} }),
+  });
+  try {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    roots.add(root);
+    const pipelines = Array.from({ length: 16 }, (_, index) => pipeline(index));
+    const render = (next: Pipeline[]) => flushSync(() => {
+      root.render(
+        <SchemeBoard
+          project="pipeline-camera"
+          groups={[]}
+          manual={[]}
+          files={[]}
+          flows={[]}
+          pipelines={next}
+          surfacePipelines={next}
+          tasks={[]}
+          drafts={[]}
+          focus={null}
+          onSelect={() => {}}
+          onClose={() => {}}
+          onDraftClose={() => {}}
+          onDraftSpawned={() => {}}
+        />,
+      );
+    });
+    render(pipelines);
+    await settle();
+
+    const viewport = host.querySelector('[aria-label^="Agent board"]') as HTMLDivElement;
+    const world = Array.from(viewport.children).find((child) =>
+      (child as HTMLElement).style.transform.includes("scale("),
+    ) as HTMLElement;
+    expect(host.querySelectorAll("[data-pipeline-group]")).toHaveLength(16);
+    expect(world.style.transform).not.toBe("translate(0px, 0px) scale(0.5)");
+
+    flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "1", bubbles: true }) as unknown as Event));
+    await settle();
+    const manual = world.style.transform;
+    expect(manual).toContain("scale(1)");
+
+    render(pipelines.map((item) => ({ ...item })));
+    await settle();
+    expect(world.style.transform).toBe(manual);
+
+    flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "0", shiftKey: true, bubbles: true }) as unknown as Event));
+    await settle();
+    expect(world.style.transform).not.toBe(manual);
+    expect(host.textContent).toContain("Framed all content — 16 items");
+
+    flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "1", bubbles: true }) as unknown as Event));
+    await settle();
+    flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "0", bubbles: true }) as unknown as Event));
+    await settle();
+    expect(world.style.transform).not.toContain("scale(1)");
+    expect(host.textContent).toContain("Framed current work — 16 items");
+  } finally {
+    Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", { configurable: true, value: originalRect });
+  }
+});
+
+test("hand, Space-pan, and lasso own pipeline header gestures without position PATCHes", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  const requests: string[] = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    requests.push(String(input));
+    return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const values = Array.from({ length: 16 }, (_, index) => pipeline(index));
+    flushSync(() => root.render(
+      <SchemeBoard
+        project="pipeline-interaction"
+        groups={[]}
+        manual={[]}
+        files={[]}
+        flows={[]}
+        pipelines={values}
+        surfacePipelines={values}
+        tasks={[]}
+        drafts={[]}
+        focus={null}
+        onSelect={() => {}}
+        onClose={() => {}}
+        onDraftClose={() => {}}
+        onDraftSpawned={() => {}}
+      />,
+    ));
+    await settle();
+
+    const viewport = host.querySelector('[aria-label^="Agent board"]') as HTMLDivElement;
+    const world = Array.from(viewport.children).find((child) =>
+      (child as HTMLElement).style.transform.includes("scale("),
+    ) as HTMLElement;
+    const hand = Array.from(host.querySelectorAll("button")).find((button) => button.title.startsWith("Hand")) as HTMLButtonElement;
+    flushSync(() => hand.click());
+    await settle();
+    const before = world.style.transform;
+    const header = host.querySelector("[data-pipeline-group-drag]") as HTMLElement;
+    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerdown", {
+      bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 500, clientY: 300,
+    }) as unknown as Event));
+    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointermove", {
+      bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 420, clientY: 300,
+    }) as unknown as Event));
+    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerup", {
+      bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 420, clientY: 300,
+    }) as unknown as Event));
+    await settle();
+
+    expect(world.style.transform).not.toBe(before);
+    expect(requests).toEqual([]);
+
+    const select = Array.from(host.querySelectorAll("button")).find((button) => button.title.startsWith("Select")) as HTMLButtonElement;
+    flushSync(() => select.click());
+    flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "1", bubbles: true }) as unknown as Event));
+    await settle();
+    flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: " ", bubbles: true }) as unknown as Event));
+    await settle();
+    const beforeSpacePan = world.style.transform;
+    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerdown", {
+      bubbles: true, isPrimary: true, pointerId: 42, pointerType: "mouse", button: 0, clientX: 420, clientY: 300,
+    }) as unknown as Event));
+    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointermove", {
+      bubbles: true, isPrimary: true, pointerId: 42, pointerType: "mouse", button: 0, clientX: 500, clientY: 300,
+    }) as unknown as Event));
+    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerup", {
+      bubbles: true, isPrimary: true, pointerId: 42, pointerType: "mouse", button: 0, clientX: 500, clientY: 300,
+    }) as unknown as Event));
+    flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keyup", { key: " ", bubbles: true }) as unknown as Event));
+    await settle();
+    expect(world.style.transform).not.toBe(beforeSpacePan);
+    expect(requests).toEqual([]);
+
+    const lasso = Array.from(host.querySelectorAll("button")).find((button) => button.title.startsWith("Multi-select")) as HTMLButtonElement;
+    flushSync(() => lasso.click());
+    await settle();
+    const group = host.querySelector('[data-pipeline-group="camera-pipeline-0"]') as HTMLElement;
+    const beforeLasso = group.style.transform;
+    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerdown", {
+      bubbles: true, isPrimary: true, pointerId: 43, pointerType: "mouse", button: 0, clientX: 500, clientY: 300,
+    }) as unknown as Event));
+    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointermove", {
+      bubbles: true, isPrimary: true, pointerId: 43, pointerType: "mouse", button: 0, clientX: 560, clientY: 340,
+    }) as unknown as Event));
+    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerup", {
+      bubbles: true, isPrimary: true, pointerId: 43, pointerType: "mouse", button: 0, clientX: 560, clientY: 340,
+    }) as unknown as Event));
+    await settle();
+    expect(group.style.transform).toBe(beforeLasso);
+    expect(requests).toEqual([]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
 
 test("the scheme viewport keeps its minimap and camera gestures after descendant focus scrolling", async () => {
   const host = document.createElement("div");

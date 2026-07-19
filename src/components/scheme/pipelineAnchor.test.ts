@@ -4,7 +4,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { TASK_W } from "./taskGeometry";
-import { PIPELINE_GROUP_COLLAPSED_H, PIPELINE_GROUP_GAP, PIPELINE_GROUP_W, anchorFor, layoutPipelineGroups } from "./pipelineAnchor";
+import { PIPELINE_GROUP_COLLAPSED_H, PIPELINE_GROUP_EXPANDED_H, PIPELINE_GROUP_GAP, PIPELINE_GROUP_STACK_GAP, PIPELINE_GROUP_W, anchorFor, layoutPipelineGroups } from "./pipelineAnchor";
 
 function pipeline(overrides: Record<string, unknown> = {}): Pipeline {
   return {
@@ -142,5 +142,25 @@ describe("layoutPipelineGroups", () => {
 
     expect(first).toMatchObject({ x: 1337, y: 512 });
     expect(crowded).toMatchObject({ x: 1337, y: 512 });
+  });
+
+  test("an expanded group reserves its full height before the next linked group", () => {
+    const linked = task("task-expanded", { x: 420, y: 180 });
+    const rows = [
+      pipeline({ id: "expanded", taskIds: [linked.id] }),
+      pipeline({ id: "next", taskIds: [linked.id], createdAt: "2026-07-19T00:01:00.000Z" }),
+    ];
+    const layout = layoutPipelineGroups(
+      rows,
+      [linked],
+      [],
+      [{ x: linked.pos!.x, y: linked.pos!.y, w: TASK_W, h: 180 }],
+      new Map([["expanded", PIPELINE_GROUP_EXPANDED_H]]),
+    );
+    const expanded = layout.get("expanded")!;
+    const next = layout.get("next")!;
+
+    expect(expanded.h).toBe(PIPELINE_GROUP_EXPANDED_H);
+    expect(next.y).toBeGreaterThanOrEqual(expanded.y + expanded.h + PIPELINE_GROUP_STACK_GAP);
   });
 });

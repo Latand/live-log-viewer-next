@@ -48,6 +48,9 @@ interface CameraOptions {
   /** Task-card rects keyed `task::<id>`: focus glides and map taps resolve
       through them exactly like layout.byPath entries. */
   taskRects?: ReadonlyMap<string, SchemeRect>;
+  /** Additional world-space surfaces owned outside SchemeLayout. Desktop
+      PipelineGroup containers use this contract for init and explicit fits. */
+  contentRects?: ReadonlyMap<string, SchemeRect>;
   /** One-shot «task» tool sink: the next canvas click lands here in world
       coordinates, then the tool reverts to select. Absent in map mode. */
   onPlaceTask?: (wx: number, wy: number) => void;
@@ -110,14 +113,16 @@ export interface SchemeCamera {
  * persists per project in sessionStorage. Selection lives in the caller; this
  * hook drives it through `setSelected` from the pointer and keyboard handlers.
  */
-/** Whether the board has anything to frame: nodes, drafts, or task cards. Task
-    cards count (issue #17) — a project with only cards must still init and fit
-    the camera, so both the fit guard and the one-time init effect read this. */
+/** Whether the board has anything to frame. Scheme layout surfaces, task cards,
+    and externally owned world-space containers all participate in initialization
+    and explicit fits. */
 export function hasBoardContent(
   layout: Pick<SchemeLayout, "nodes" | "drafts"> & Partial<Pick<SchemeLayout, "groups">>,
   taskRects?: ReadonlyMap<string, SchemeRect>,
+  contentRects?: ReadonlyMap<string, SchemeRect>,
 ): boolean {
-  return layout.nodes.length > 0 || layout.drafts.length > 0 || (layout.groups?.length ?? 0) > 0 || (taskRects?.size ?? 0) > 0;
+  return layout.nodes.length > 0 || layout.drafts.length > 0 || (layout.groups?.length ?? 0) > 0 ||
+    (taskRects?.size ?? 0) > 0 || (contentRects?.size ?? 0) > 0;
 }
 
 /** Pure camera framing shared by Fit All, Fit Current, tests, and map toggles. */
@@ -143,6 +148,7 @@ export function useSchemeCamera({
   onBackgroundDown,
   onWorldTap,
   taskRects,
+  contentRects,
   onPlaceTask,
   onArrowNav,
   onZoomKey,
@@ -298,13 +304,12 @@ export function useSchemeCamera({
 
   const fitCam = useCallback((): Camera | null => {
     const rect = viewportRef.current?.getBoundingClientRect();
-    /* Task cards are board content too (issue #17): a project with only task
-       cards and no nodes/drafts must still fit, or Fit sits inert and a
-       relocated card can stay off-screen. `world` already spans the cards. */
-    if (!rect || !hasBoardContent(layout, taskRects)) return null;
+    /* World-space content outside SchemeLayout still activates Fit. `world`
+       already spans task cards and external containers. */
+    if (!rect || !hasBoardContent(layout, taskRects, contentRects)) return null;
     return fitCameraToRect(world, { w: rect.width, h: rect.height });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- hasBoardContent reads only layout.nodes/drafts, whose lengths are already deps; subscribing to all of `layout` would re-fit on every unrelated relayout
-  }, [layout.nodes.length, layout.drafts.length, layout.groups.length, taskRects, world]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only content-bearing layout counts belong here; subscribing to all of `layout` would re-fit on every unrelated relayout
+  }, [layout.nodes.length, layout.drafts.length, layout.groups.length, taskRects, contentRects, world]);
 
   const glideTo = useCallback((next: Camera | ((c: Camera) => Camera)) => {
     /* Reduced motion: skip the CSS transition — the move lands instantly. */
@@ -330,9 +335,9 @@ export function useSchemeCamera({
 
   const currentFitCam = useCallback((): Camera | null => {
     const rect = viewportRef.current?.getBoundingClientRect();
-    if (!rect || !hasBoardContent(layout, taskRects)) return null;
+    if (!rect || !hasBoardContent(layout, taskRects, contentRects)) return null;
     return fitCameraToRect(currentWork ?? world, { w: rect.width, h: rect.height });
-  }, [currentWork, world, layout, taskRects]);
+  }, [currentWork, world, layout, taskRects, contentRects]);
 
   const fitCurrent = useCallback(() => {
     const c = currentFitCam();
@@ -411,7 +416,7 @@ export function useSchemeCamera({
   /* First layout of a project: restore the saved camera or fit everything.
      The map always opens fitted — its job is the whole picture. */
   useEffect(() => {
-    if (initedFor.current === project || !hasBoardContent(layout, taskRects)) return;
+    if (initedFor.current === project || !hasBoardContent(layout, taskRects, contentRects)) return;
     initedFor.current = project;
     if (!mapMode) {
       try {
@@ -432,7 +437,7 @@ export function useSchemeCamera({
     if (c) {
       setCam(c);
     }
-  }, [project, layout, taskRects, fitCam, currentFitCam, mapMode]);
+  }, [project, layout, taskRects, contentRects, fitCam, currentFitCam, mapMode]);
 
   /* Debounced: a pan produces hundreds of camera frames, storage needs only
      the resting position. The map never writes — the desktop camera survives. */
