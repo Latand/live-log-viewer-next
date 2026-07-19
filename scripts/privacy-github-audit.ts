@@ -251,20 +251,57 @@ function srcsetDestinations(value: string): string[] {
 
 function htmlMediaDestinations(text: string): string[] {
   const destinations: string[] = [];
-  const mediaTags = /<(img|source|video)\b([^>]*)>/gi;
-  for (const tag of text.matchAll(mediaTags)) {
+  const mediaTags = /<(img|source|video)\b/gi;
+  let tag: RegExpExecArray | null;
+  while ((tag = mediaTags.exec(text)) !== null) {
+    let quote: "\"" | "'" | undefined;
+    let awaitingAttributeValue = false;
+    let unquotedAttributeValue = false;
+    let tagEnd = -1;
+    for (let cursor = mediaTags.lastIndex; cursor < text.length; cursor += 1) {
+      const character = text[cursor];
+      if (quote) {
+        if (character === quote) quote = undefined;
+        continue;
+      }
+      if (unquotedAttributeValue) {
+        if (character === ">") {
+          tagEnd = cursor;
+          break;
+        }
+        if (/\s/.test(character)) unquotedAttributeValue = false;
+        continue;
+      }
+      if (awaitingAttributeValue) {
+        if (/\s/.test(character)) continue;
+        awaitingAttributeValue = false;
+        if (character === "\"" || character === "'") quote = character;
+        else if (character === ">") {
+          tagEnd = cursor;
+          break;
+        } else unquotedAttributeValue = true;
+        continue;
+      }
+      if (character === ">") {
+        tagEnd = cursor;
+        break;
+      }
+      if (character === "=") awaitingAttributeValue = true;
+    }
+    if (tagEnd === -1) break;
     const tagName = tag[1].toLowerCase();
-    const attributes = tag[2];
-    const mediaAttributes = /\b(src|srcset|poster)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+    const attributes = text.slice(mediaTags.lastIndex, tagEnd);
+    const mediaAttributes = /(?:^|\s)(src|srcset|poster)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
     for (const attribute of attributes.matchAll(mediaAttributes)) {
       const name = attribute[1].toLowerCase();
-      const value = attribute[2] ?? attribute[3] ?? attribute[4] ?? "";
+      const value = canonicalSensitiveText(attribute[2] ?? attribute[3] ?? attribute[4] ?? "").text;
       if ((tagName === "img" && name !== "poster")
         || (tagName === "source" && name !== "poster")
         || (tagName === "video" && name !== "srcset")) {
         destinations.push(...(name === "srcset" ? srcsetDestinations(value) : [value]));
       }
     }
+    mediaTags.lastIndex = tagEnd + 1;
   }
   return destinations;
 }
@@ -273,7 +310,7 @@ function publishedMediaUrls(text: string, githubBase: URL): URL[] {
   const canonicalText = canonicalSensitiveText(text).text;
   const renderedCandidates = [
     ...markdownImageDestinations(canonicalText),
-    ...htmlMediaDestinations(canonicalText),
+    ...htmlMediaDestinations(text),
   ];
   const candidates: string[] = [];
   for (const match of canonicalText.matchAll(/https?:\/\/[^\s<>"'\]]+/gi)) candidates.push(match[0]);

@@ -1851,6 +1851,59 @@ describe("privacy publication gate", () => {
     }
   });
 
+  test("audits HTML media across quoted and parse-error attribute delimiters", async () => {
+    const originalOcrLanguages = process.env.LLV_PRIVACY_OCR_LANGUAGES;
+    const syntheticHome = ["", "home", "fixture-person", "quoted-attribute-media"].join("/");
+    const media = pngWithCustomMetadata("eXIf", syntheticHome);
+    const mediaPaths = [
+      "/user-attachments/assets/quoted-capture",
+      "/user-attachments/assets/unquoted-capture",
+    ];
+    const resolvedMedia = mediaPaths.map((mediaPath) => `https://github.com${mediaPath}`);
+    const requests: string[] = [];
+    const languageResult = Bun.spawnSync({ cmd: ["tesseract", "--list-langs"], stderr: "pipe", stdout: "pipe" });
+    const ocrLanguage = languageResult.stdout.toString().split(/\r?\n/).find((language) => /^[a-z0-9_]+$/i.test(language) && language !== "osd");
+    process.env.LLV_PRIVACY_OCR_LANGUAGES = ocrLanguage ?? "missing-test-language";
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      requests.push(url.href);
+      if (resolvedMedia.includes(url.href)) {
+        return new Response(Uint8Array.from(media), { headers: { "content-type": "image/png" } });
+      }
+      if (url.pathname.endsWith("/issues/448")) {
+        return Response.json({
+          body: [
+            `<img title=">" src="${mediaPaths[0]}">`,
+            `<img title=unquoted" src="${mediaPaths[1]}">`,
+          ].join("\n"),
+          title: "Synthetic issue",
+        });
+      }
+      if (url.pathname.endsWith("/issues/448/comments")) return Response.json([]);
+      return new Response(null, { status: 404 });
+    };
+
+    try {
+      const findings = await auditGithubPublication({
+        apiUrl: "https://api.github.test/",
+        fetcher,
+        number: 448,
+        repo: "example/repository",
+        requireKnownValues: false,
+        token: "synthetic-github-audit-token",
+      });
+      const output = formatPrivacyReport(findings);
+
+      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 2\nprovenance_missing: 2\n");
+      expect(requests).toHaveLength(4);
+      expect(requests.slice(-2).sort()).toEqual(resolvedMedia.toSorted());
+      expect(output).not.toContain(syntheticHome);
+    } finally {
+      if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
+      else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;
+    }
+  });
+
   test("audits every extensionless source srcset candidate", async () => {
     const originalOcrLanguages = process.env.LLV_PRIVACY_OCR_LANGUAGES;
     const syntheticHome = ["", "home", "fixture-person", "srcset-media"].join("/");
