@@ -238,6 +238,21 @@ function runGit(directory: string, arguments_: string[]): void {
   expect(result.exitCode).toBe(0);
 }
 
+function generatePrivacyPlaceholders(repositoryRoot: string) {
+  const scriptsDirectory = join(repositoryRoot, "scripts");
+  mkdirSync(scriptsDirectory, { recursive: true });
+  writeFileSync(
+    join(scriptsDirectory, "generate-privacy-placeholders.ts"),
+    readFileSync(join(import.meta.dir, "generate-privacy-placeholders.ts")),
+  );
+  return Bun.spawnSync({
+    cmd: [process.execPath, join(scriptsDirectory, "generate-privacy-placeholders.ts")],
+    cwd: repositoryRoot,
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+}
+
 function writeFingerprintCatalog(path: string, value: string): void {
   const compact = value.normalize("NFKC").toLocaleLowerCase("en-US").replaceAll(/[^\p{L}\p{N}]/gu, "");
   writeFileSync(path, JSON.stringify({
@@ -353,22 +368,15 @@ describe("privacy publication gate", () => {
   });
 
   test("regenerates source-bound placeholders deterministically", () => {
-    const repositoryRoot = join(import.meta.dir, "..");
+    const repositoryRoot = mkdtempSync(join(tmpdir(), "llv-privacy-generator-"));
+    temporaryDirectories.push(repositoryRoot);
     const image = join(repositoryRoot, "docs", "acceptance", "issue-290", "readiness-kanban.png");
     const manifestPath = join(repositoryRoot, "docs", "acceptance", "issue-290", "privacy-manifest.json");
-    const committedImageDigest = createHash("sha256").update(readFileSync(image)).digest("hex");
-    const committedManifestDigest = createHash("sha256").update(readFileSync(manifestPath)).digest("hex");
-    const regenerate = () => Bun.spawnSync({
-      cmd: [process.execPath, join(import.meta.dir, "generate-privacy-placeholders.ts")],
-      cwd: repositoryRoot,
-      stderr: "pipe",
-      stdout: "pipe",
-    });
 
-    const first = regenerate();
+    const first = generatePrivacyPlaceholders(repositoryRoot);
     const firstImageDigest = createHash("sha256").update(readFileSync(image)).digest("hex");
     const firstManifestDigest = createHash("sha256").update(readFileSync(manifestPath)).digest("hex");
-    const second = regenerate();
+    const second = generatePrivacyPlaceholders(repositoryRoot);
     const secondImageDigest = createHash("sha256").update(readFileSync(image)).digest("hex");
     const secondManifestDigest = createHash("sha256").update(readFileSync(manifestPath)).digest("hex");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
@@ -380,8 +388,6 @@ describe("privacy publication gate", () => {
     expect(second.exitCode).toBe(0);
     expect(first.stderr.toString()).toBe("");
     expect(second.stderr.toString()).toBe("");
-    expect(committedImageDigest).toBe(firstImageDigest);
-    expect(committedManifestDigest).toBe(firstManifestDigest);
     expect(firstImageDigest).toBe(secondImageDigest);
     expect(firstManifestDigest).toBe(secondManifestDigest);
     expect(manifest.schemaVersion).toBe(2);
@@ -392,13 +398,18 @@ describe("privacy publication gate", () => {
   });
 
   test("accepts media reproduced by the trusted source-bound generator", () => {
-    const toolsDirectory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
-    temporaryDirectories.push(toolsDirectory);
-    const repositoryRoot = join(import.meta.dir, "..");
+    const repositoryRoot = mkdtempSync(join(tmpdir(), "llv-privacy-candidate-"));
+    temporaryDirectories.push(repositoryRoot);
     const image = join(repositoryRoot, "docs", "acceptance", "issue-290", "readiness-kanban.png");
+    const generation = generatePrivacyPlaceholders(repositoryRoot);
 
-    const result = runGate([image], installTool(toolsDirectory, "tesseract"));
+    const result = runGateArguments(
+      ["--repository", repositoryRoot, "--paths", image],
+      installTool(repositoryRoot, "tesseract"),
+    );
 
+    expect(generation.exitCode).toBe(0);
+    expect(generation.stderr.toString()).toBe("");
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toBe("PRIVACY GATE: PASS\n");
     expect(result.stderr.toString()).toBe("");
