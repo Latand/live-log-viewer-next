@@ -10,6 +10,7 @@ import { isClaudeProtocolUser } from "@/lib/claudeProtocolUser";
 import { getLocale, translate } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { decodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
+import { isViewerMcpServer } from "@/lib/mcp/presentation";
 import type { FileEntry } from "@/lib/types";
 import { parseScheduleWakeup, refineWakeupFromResult, type WakeupInfo } from "@/lib/wakeup";
 
@@ -52,6 +53,13 @@ export type Orchestration = { source: string; sourceTruncated: boolean; calls: N
     never supersedes the previous valid one (issue #161 review). */
 export type WakeupEventInfo = WakeupInfo & { superseded: boolean; failed: boolean };
 
+export type ViewerMcpCall = {
+  serverName: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+};
+
 /**
  * One normalized, bounded, source-agnostic tool event shared by Claude, Codex,
  * and future engines. Every string field is redacted and capped inside the
@@ -84,6 +92,8 @@ export type ToolEvent = {
   orchestration?: Orchestration;
   /** Present on a `ScheduleWakeup` call: drives the dedicated wakeup card. */
   wakeup?: WakeupEventInfo;
+  /** Structured Viewer MCP attribution recovered from engine-owned metadata. */
+  mcp?: ViewerMcpCall;
 };
 export type CitationEntry = {
   target: string;
@@ -263,6 +273,44 @@ function arr(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.filter((x): x is Record<string, unknown> => x && typeof x === "object" && !Array.isArray(x)) : [];
 }
 
+function jsonRecord(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function viewerMcpInvocation(value: unknown): ViewerMcpCall | null {
+  const invocation = rec(value);
+  const serverName = textPart(invocation.server);
+  const toolName = textPart(invocation.tool);
+  if (!serverName || !toolName || !isViewerMcpServer(serverName)) return null;
+  return { serverName, toolName, args: rec(invocation.arguments), result: null };
+}
+
+function viewerMcpToolUse(name: string): Pick<ViewerMcpCall, "serverName" | "toolName"> | null {
+  if (!name.startsWith("mcp__")) return null;
+  const identity = name.slice("mcp__".length);
+  const separator = identity.indexOf("__");
+  if (separator <= 0 || separator === identity.length - 2) return null;
+  const serverName = identity.slice(0, separator);
+  const toolName = identity.slice(separator + 2);
+  if (!isViewerMcpServer(serverName)) return null;
+  return { serverName, toolName };
+}
+
+function codexMcpResult(value: unknown): { output: string; result: Record<string, unknown> | null; error: boolean } {
+  const envelope = rec(value);
+  const ok = rec(envelope.Ok);
+  const error = envelope.Err !== undefined || ok.isError === true;
+  const content = arr(ok.content);
+  const output = content.map((block) => textPart(block.text)).filter(Boolean).join("\n")
+    || (envelope.Err === undefined ? "" : JSON.stringify(envelope.Err));
+  return { output, result: jsonRecord(output), error };
+}
+
 function hasNonEmptyValue(value: unknown): boolean {
   if (typeof value === "string") return value.trim().length > 0;
   if (typeof value === "number" || typeof value === "boolean") return true;
@@ -401,6 +449,33 @@ function transcriptRecordBody(value: unknown): { body: string; truncated: boolea
   return { body: bounded.raw, truncated: fieldTruncated || bounded.truncated };
 }
 
+function boundedMcpRecord(value: unknown): Record<string, unknown> {
+  let remaining = 24_000;
+  const visit = (item: unknown, key: string, depth: number): unknown => {
+    if (SENSITIVE_RECORD_KEY.test(key)) return "[redacted]";
+    if (depth > 8) return "[depth limit]";
+    if (typeof item === "string") {
+      if (/^data:image\//i.test(item)) return `[image data · ${item.length} chars]`;
+      const safe = redactTranscriptText(item);
+      const limit = Math.max(0, Math.min(RECORD_FIELD_MAX, remaining));
+      remaining -= Math.min(safe.length, limit);
+      return safe.length > limit ? safe.slice(0, limit) + "…" : safe;
+    }
+    if (item === null || typeof item === "number" || typeof item === "boolean") return item;
+    if (Array.isArray(item)) {
+      const values = item.slice(0, 40).map((child) => visit(child, "", depth + 1));
+      if (item.length > values.length) values.push(`[${item.length - values.length} more items]`);
+      return values;
+    }
+    if (!item || typeof item !== "object") return String(item ?? "");
+    const entries = Object.entries(item as Record<string, unknown>).slice(0, 80);
+    const output = Object.fromEntries(entries.map(([childKey, child]) => [childKey, visit(child, childKey, depth + 1)]));
+    if (Object.keys(item as Record<string, unknown>).length > entries.length) output.__truncated__ = "additional fields hidden";
+    return output;
+  };
+  return rec(visit(value, "", 0));
+}
+
 function parseMemCitation(matchText: string, entriesText: string, idsText: string): MemCitationItem {
   const entries = entriesText
     .split("\n")
@@ -455,7 +530,7 @@ function toolBucket(event: ToolEvent): string {
    is the exception: its countdown/reason card carries live state a folded
    header would hide, so it always stays a standalone card (issue #161). */
 function foldableTool(item: Item): item is ToolEvent {
-  return item.kind === "tool" && !item.wakeup;
+  return item.kind === "tool" && !item.wakeup && !item.mcp;
 }
 
 /* Maps a `tools.<method>` orchestration call to a canonical tool name so the
@@ -1056,6 +1131,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     lang?: string | null;
     summary?: string;
     wakeup?: WakeupEventInfo;
+    mcp?: ViewerMcpCall;
   }): ToolEvent => {
     const args = opts.args ?? {};
     const family = familyOf(opts.tool);
@@ -1086,6 +1162,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
          change is visible without a click (issue #90). */
       open: Boolean(body),
       ...(opts.wakeup ? { wakeup: opts.wakeup } : {}),
+      ...(opts.mcp ? { mcp: {
+        ...opts.mcp,
+        args: boundedMcpRecord(opts.mcp.args),
+        result: opts.mcp.result ? boundedMcpRecord(opts.mcp.result) : null,
+      } } : {}),
     };
   };
   const registerCall = (event: ToolEvent): CallRec => {
@@ -1212,6 +1293,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
        the call is rejected — mark it failed so it never counts down and never
        keeps the previous valid wakeup superseded (issue #161 review). */
     let wakeup = prev.wakeup;
+    const mcpResult = jsonRecord(body);
+    const mcp = prev.mcp
+      ? { ...prev.mcp, result: mcpResult ? boundedMcpRecord(mcpResult) : prev.mcp.result }
+      : undefined;
     if (wakeup) {
       if (isErr) {
         wakeup = { ...wakeup, failed: true };
@@ -1234,6 +1319,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       outputPreview,
       outputTruncated,
       ...(wakeup ? { wakeup } : {}),
+      ...(mcp ? { mcp } : {}),
     };
     callRec.event = event;
     const idx = entryIndex(callRec.seq);
@@ -1437,7 +1523,30 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         if (codexCompacted) return void (codexCompacted = null);
         return addCompact(ts);
       }
-      if (["mcp_tool_call_end", "patch_apply_end", "sub_agent_activity", "thread_settings_applied", "token_count", "turn_aborted", "web_search_end"].includes(textPart(p.type))) {
+      if (p.type === "mcp_tool_call_begin") {
+        const mcp = viewerMcpInvocation(p.invocation);
+        if (!mcp) return addSvc("mcp_tool_call_begin");
+        const id = textPart(p.call_id) || "plain-" + pushSeq + "-" + String(ts ?? "");
+        return void registerCall(newToolEvent({ ts, id, tool: `mcp__${mcp.serverName}__${mcp.toolName}`, args: mcp.args, engine: "codex", mcp }));
+      }
+      if (p.type === "mcp_tool_call_end") {
+        const id = textPart(p.call_id) || "plain-" + pushSeq + "-" + String(ts ?? "");
+        const existing = calls.get(id);
+        const mcp = viewerMcpInvocation(p.invocation) ?? existing?.event.mcp ?? null;
+        if (!mcp) return addSvc("mcp_tool_call_end");
+        const parsed = codexMcpResult(p.result);
+        const call = existing ?? registerCall(newToolEvent({ ts, id, tool: `mcp__${mcp.serverName}__${mcp.toolName}`, args: mcp.args, engine: "codex", mcp }));
+        attach(call, parsed.output, parsed.error);
+        if (call.event.mcp && parsed.result) {
+          const event = { ...call.event, mcp: { ...call.event.mcp, result: boundedMcpRecord(parsed.result) } };
+          call.event = event;
+          const idx = entryIndex(call.seq);
+          if (idx >= 0 && entries[idx]?.item.kind === "tool") entries[idx] = { ...entries[idx], item: event };
+          snapshot = null;
+        }
+        return;
+      }
+      if (["patch_apply_end", "sub_agent_activity", "thread_settings_applied", "token_count", "turn_aborted", "web_search_end"].includes(textPart(p.type))) {
         return addSvc(textPart(p.type));
       }
       return addRecord(ts, textPart(p.type) || "event", p);
@@ -1550,6 +1659,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       return;
     }
     if (obj.type === "assistant" && obj.message) {
+      const attributedServer = textPart(obj.attributionMcpServer);
+      const attributedTool = textPart(obj.attributionMcpTool);
+      const attributedMcp = attributedServer && attributedTool && isViewerMcpServer(attributedServer)
+        ? { serverName: attributedServer, toolName: attributedTool }
+        : null;
       for (const part of arr(rec(obj.message).content)) {
         if (part.type === "text" && textPart(part.text).trim()) addProse(ts, textPart(part.text));
         else if (part.type === "thinking" && textPart(part.thinking).trim()) {
@@ -1588,7 +1702,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           } else {
             const command = familyOf(name) === "shell" ? textPart(input.command) : undefined;
             const lang = familyOf(name) === "read" ? extLang(textPart(input.file_path)) : undefined;
-            registerCall(newToolEvent({ ts, id, tool: name, args: input, engine: "claude", command, lang }));
+            const mcpIdentity = viewerMcpToolUse(name) ?? attributedMcp;
+            const mcp = mcpIdentity
+              ? { ...mcpIdentity, args: input, result: null }
+              : undefined;
+            registerCall(newToolEvent({ ts, id, tool: name, args: input, engine: "claude", command, lang, mcp }));
           }
         }
       }

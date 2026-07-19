@@ -808,6 +808,39 @@ export function ProjectDashboard({
     openTaskOnBoard(task.id);
   };
 
+  useEffect(() => {
+    const navigate = (rawEvent: Event) => {
+      const detail = (rawEvent as CustomEvent<{ kind?: string; id?: string }>).detail;
+      const id = detail?.id?.trim();
+      if (!id) return;
+      if (detail.kind === "task") {
+        const task = tasks.find((candidate) => candidate.id === id);
+        if (task) openTask(task);
+        return;
+      }
+      if (detail.kind !== "pipeline") return;
+      const pipeline = pipelines.find((candidate) => candidate.id === id);
+      if (!pipeline) return;
+      if (pipeline.project !== project) {
+        sessionStorage.setItem("llvPipelineFocus", id);
+        gotoProject(pipeline.project);
+        return;
+      }
+      onUserNavigate?.();
+      setBuilderPipelineId(id);
+    };
+    window.addEventListener("llv:mcp-navigate", navigate);
+    return () => window.removeEventListener("llv:mcp-navigate", navigate);
+  });
+
+  useEffect(() => {
+    const pending = sessionStorage.getItem("llvPipelineFocus");
+    if (!pending || !pipelines.some((pipeline) => pipeline.id === pending && pipeline.project === project)) return;
+    sessionStorage.removeItem("llvPipelineFocus");
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- cross-project MCP link reveal */
+    setBuilderPipelineId(pending);
+  }, [pipelines, project]);
+
   /* Desktop `+ Task`: drop the inline sticky composer in a free slot near the
      button (the board resolves the world anchor + findFreeSlot). Voice, images
      and a deadline all live in that on-board composer. */
