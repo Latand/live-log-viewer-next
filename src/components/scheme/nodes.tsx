@@ -4,6 +4,7 @@ import { Check, Layers } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
+import { conversationIdentity, isArchivedPredecessor } from "@/lib/accounts/identity";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { Activity, FileEntry } from "@/lib/types";
@@ -42,6 +43,8 @@ import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
 import { routeTaskEdge, segHitsRect } from "./taskGeometry";
 import { GroupOverridePanel } from "./GroupOverridePanel";
 import { stableDomOrder, stableNodeDomOrder } from "./domOrder";
+import { SubagentBadges } from "./SubagentBadges";
+import type { SubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
 import {
   LOOP_GAP,
   NODE_W,
@@ -105,12 +108,32 @@ export interface DeckFocus {
 
 /* Geometry animated via CSS (style-level `d`/`cx`/`cy` with transitions), the
    attribute stays as the fallback for engines without SVG geometry props. */
-export const EdgesLayer = memo(function EdgesLayer({ edges, width, height }: { edges: SchemeEdge[]; width: number; height: number }) {
+export const EdgesLayer = memo(function EdgesLayer({
+  edges,
+  badgeAnchors,
+  badgeAnchorRevision = 0,
+  width,
+  height,
+}: {
+  edges: SchemeEdge[];
+  badgeAnchors?: SubagentBadgeAnchorRegistry;
+  badgeAnchorRevision?: number;
+  width: number;
+  height: number;
+}) {
+  void badgeAnchorRevision;
   return (
     <svg width={width} height={height} className="absolute left-0 top-0" aria-hidden>
       {edges.map((edge) => {
-        const lift = Math.max(36, (edge.y2 - edge.y1) * 0.5);
-        const curve = `M ${edge.x1} ${edge.y1} C ${edge.x1} ${edge.y1 + lift}, ${edge.x2} ${edge.y2 - lift}, ${edge.x2} ${edge.y2 - 7}`;
+        /* Hover expansion grows rightward while this anchor stays frozen at the
+           original 30px circle center, keeping the structural arrow steady. */
+        const badgeAnchor = edge.sourceConversationId && edge.targetConversationId
+          ? badgeAnchors?.anchorFor(edge.sourceConversationId, edge.targetConversationId) ?? null
+          : null;
+        const x1 = badgeAnchor?.x ?? edge.x1;
+        const y1 = badgeAnchor?.y ?? edge.y1;
+        const lift = Math.max(36, (edge.y2 - y1) * 0.5);
+        const curve = `M ${x1} ${y1} C ${x1} ${y1 + lift}, ${edge.x2} ${edge.y2 - lift}, ${edge.x2} ${edge.y2 - 7}`;
         const head = `M ${edge.x2 - 5} ${edge.y2 - 9} L ${edge.x2 + 5} ${edge.y2 - 9} L ${edge.x2} ${edge.y2 - 1} Z`;
         return (
           <g key={edge.to} opacity={edge.live ? 0.9 : 0.5}>
@@ -124,14 +147,14 @@ export const EdgesLayer = memo(function EdgesLayer({ edges, width, height }: { e
               strokeDasharray={edge.dashed ? "5 7" : undefined}
             />
             <circle
-              cx={edge.x1}
-              cy={edge.y1}
+              cx={x1}
+              cy={y1}
               r={3.5}
               fill={edge.color}
               style={
                 {
-                  cx: `${edge.x1}px`,
-                  cy: `${edge.y1}px`,
+                  cx: `${x1}px`,
+                  cy: `${y1}px`,
                   transition: `cx ${MOVE_MS}ms ${MOVE_EASE}, cy ${MOVE_MS}ms ${MOVE_EASE}`,
                 } as React.CSSProperties
               }
@@ -809,6 +832,7 @@ function NodeShell({
   onSpawnRetry,
   onExpand,
   onPipelineCreated,
+  badgeAnchors,
 }: {
   node: SchemeNode;
   ringed: boolean;
@@ -853,11 +877,13 @@ function NodeShell({
   /** Header control: open this conversation as the full-window overlay. */
   onExpand: (path: string) => void;
   onPipelineCreated?: (pipeline: Pipeline) => void;
+  badgeAnchors?: SubagentBadgeAnchorRegistry;
 }) {
   const { t } = useLocale();
   const [underOpen, setUnderOpen] = useState(false);
   const [flowOpen, setFlowOpen] = useState(false);
   const [pipelineOpen, setPipelineOpen] = useState(false);
+  const [badgesExpanded, setBadgesExpanded] = useState(false);
   /* The compact board strip sits in FlowStrip's slot; a review-loop current
      stage never reaches here (its node carries the flow, and the strip map
      already excludes it), but gate on !flow so the two can never stack. */
@@ -866,7 +892,7 @@ function NodeShell({
     <div
       data-scheme-node={node.file.path}
       data-lasso-selected={marked ? "true" : undefined}
-      className={`scheme-enter absolute ${underOpen || flowOpen ? "z-20" : ""}${dimClass(dimmed)}`}
+      className={`scheme-enter absolute ${badgesExpanded ? "z-[60]" : underOpen || flowOpen ? "z-20" : ""}${dimClass(dimmed)}`}
       style={{ transform: `translate(${node.x}px, ${node.y}px)`, width: node.w, height: node.h, transition: MOVE_TRANSITION }}
     >
       {marked ? (
@@ -962,6 +988,17 @@ function NodeShell({
           onOpenTask={onOpenTask}
         />
       </div>
+      <SubagentBadges
+        conversationId={conversationIdentity(node.file)}
+        entries={files}
+        cardRect={node}
+        anchorRegistry={badgeAnchors}
+        onExpandedChange={setBadgesExpanded}
+        onNavigate={(conversationId) => {
+          const target = files.find((entry) => conversationIdentity(entry) === conversationId && !isArchivedPredecessor(entry));
+          if (target) onSelect(target);
+        }}
+      />
       {flow ? <RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /> : null}
       <FarLabel file={node.file} />
       {/* The handoff handle pinned outside the card's bottom-left corner —
@@ -1175,6 +1212,7 @@ export const NodesLayer = memo(function NodesLayer({
   linkedTasksByPipeline,
   relatedTasksByPath,
   deckFocus,
+  badgeAnchors,
   onSelect,
   onClose,
   onFocusRound,
@@ -1212,6 +1250,7 @@ export const NodesLayer = memo(function NodesLayer({
   /** Node path → its related board tasks, for the pane relation strip (#292). */
   relatedTasksByPath?: ReadonlyMap<string, readonly TaskRelation[]>;
   deckFocus: DeckFocus | null;
+  badgeAnchors?: SubagentBadgeAnchorRegistry;
   onSelect: (file: FileEntry) => void;
   onClose: (path: string) => void;
   onFocusRound: (flowId: string, round: number) => void;
@@ -1368,6 +1407,7 @@ export const NodesLayer = memo(function NodesLayer({
             onSpawnRetry={onSpawnRetry}
             onExpand={onExpand}
             onPipelineCreated={onPipelineCreated}
+            badgeAnchors={badgeAnchors}
           />
         );
       })}
