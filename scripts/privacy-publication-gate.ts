@@ -268,14 +268,14 @@ function decodeCommonMarkEscapes(text: string): string {
   return text.replaceAll(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, "$1");
 }
 
-function removeZeroWidthSeparators(text: string): string {
-  return text.replaceAll(/[\u200B-\u200D\u2060\uFEFF]/g, "");
+function removeDefaultIgnorables(text: string): string {
+  return text.replaceAll(/\p{Default_Ignorable_Code_Point}/gu, "");
 }
 
 export function canonicalSensitiveText(text: string): { error: boolean; text: string } {
-  let decoded = removeZeroWidthSeparators(text);
+  let decoded = removeDefaultIgnorables(text);
   for (let pass = 0; pass < 16; pass += 1) {
-    const next = removeZeroWidthSeparators(
+    const next = removeDefaultIgnorables(
       decodeCommonMarkEscapes(decodeHtmlEntities(decodePercentEncoding(decoded))),
     );
     if (next === decoded) return { error: false, text: decoded };
@@ -284,10 +284,65 @@ export function canonicalSensitiveText(text: string): { error: boolean; text: st
   return { error: true, text: decoded };
 }
 
+function visibleMarkdownText(text: string): string {
+  let visible = "";
+  let cursor = 0;
+  while (cursor < text.length) {
+    const labelStart = text[cursor] === "["
+      ? cursor
+      : (text[cursor] === "!" && text[cursor + 1] === "[" ? cursor + 1 : -1);
+    if (labelStart === -1) {
+      visible += text[cursor];
+      cursor += 1;
+      continue;
+    }
+    let labelEnd = labelStart + 1;
+    let labelDepth = 0;
+    for (; labelEnd < text.length; labelEnd += 1) {
+      if (text[labelEnd] === "\\" && labelEnd + 1 < text.length) {
+        labelEnd += 1;
+        continue;
+      }
+      if (text[labelEnd] === "[") labelDepth += 1;
+      if (text[labelEnd] !== "]") continue;
+      if (labelDepth === 0) break;
+      labelDepth -= 1;
+    }
+    if (labelEnd >= text.length || text[labelEnd + 1] !== "(") {
+      visible += text[cursor];
+      cursor += 1;
+      continue;
+    }
+    let destinationEnd = labelEnd + 2;
+    let destinationDepth = 0;
+    for (; destinationEnd < text.length; destinationEnd += 1) {
+      if (text[destinationEnd] === "\\" && destinationEnd + 1 < text.length) {
+        destinationEnd += 1;
+        continue;
+      }
+      if (text[destinationEnd] === "(") {
+        destinationDepth += 1;
+        continue;
+      }
+      if (text[destinationEnd] !== ")") continue;
+      if (destinationDepth === 0) break;
+      destinationDepth -= 1;
+    }
+    if (destinationEnd >= text.length) {
+      visible += text[cursor];
+      cursor += 1;
+      continue;
+    }
+    visible += text.slice(labelStart + 1, labelEnd);
+    cursor = destinationEnd + 1;
+  }
+  return visible;
+}
+
 function normalizedSensitiveText(text: string): { compact: string; error: boolean; searchable: string } {
   const canonical = canonicalSensitiveText(text);
   const decoded = canonical.text;
-  const withoutMarkup = decoded.replaceAll(/<[^>]*>/g, "").replaceAll(/[\[\]*_`~]/g, "");
+  const withoutMarkup = visibleMarkdownText(decoded).replaceAll(/<[^>]*>/g, "").replaceAll(/[\[\]*_`~]/g, "");
   return {
     compact: `${compactSensitiveText(decoded)}\0${compactSensitiveText(withoutMarkup)}`,
     error: canonical.error,
