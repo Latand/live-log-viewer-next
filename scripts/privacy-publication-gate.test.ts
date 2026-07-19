@@ -254,6 +254,7 @@ describe("privacy publication gate", () => {
     expect(firstImageDigest).toBe(secondImageDigest);
     expect(firstManifestDigest).toBe(secondManifestDigest);
     expect(manifest.schemaVersion).toBe(2);
+    expect(manifest.assets?.[0]?.generatorRuntime).toBe("bun-1.3.3");
     expect(manifest.assets?.[0]?.generatorVersion).toBe("privacy-placeholders-v2");
     expect(manifest.assets?.[0]?.generatorSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(manifest.assets?.[0]?.sourceDigests).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)]);

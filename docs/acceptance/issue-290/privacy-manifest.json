@@ -7,8 +7,9 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "4bbee6dd05cd6ea991910ccb602e6eebe97160678a987fcbd82906635e9a4ff5"
       ],

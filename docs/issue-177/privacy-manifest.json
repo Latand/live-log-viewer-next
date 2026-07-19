@@ -7,8 +7,9 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "f313695f6f53a836cc1068c6b90564d72f9ea34db5c4179f1a7ec2807f4e3715"
       ],
@@ -20,8 +21,9 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "88c9604843d035d49b8cc2c8473e7c928fc5e54c74426b55587de1aa478a1875"
       ],
@@ -33,8 +35,9 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "c2abd18fa6b8b89ccab35867d3bdb5ab481c318e538a21e717868df49771176b"
       ],
@@ -46,8 +49,9 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "e5c3f858b5e607e70eda2686bf95ebc142e657516252ecdda6b4ed9cdb288e2c"
       ],
@@ -59,8 +63,9 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "2f16aac105f47becc0e281315a901c6ecc9b0a3b980f30a561541c73db9aed31"
       ],
@@ -72,8 +77,9 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "adff93817b822ecb3c399019089085c1facfd36f490aae97e2c288bcb66225ce"
       ],
@@ -85,8 +91,9 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "689d51bc772e2b169ee6e6f7c41abfd749a3d15ca847628557cd64b7b791f05d"
       ],
@@ -98,8 +105,9 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "ac525a2179a3b5ac985f3d5616b1eed75eac90665360c1670bae86d2dcc6183e"
       ],

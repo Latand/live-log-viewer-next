@@ -10,6 +10,7 @@ type Placeholder = {
   width: number;
 };
 
+const PRIVACY_GENERATOR_RUNTIME = "1.3.3";
 const PRIVACY_GENERATOR_VERSION = "privacy-placeholders-v2";
 
 const placeholders: Placeholder[] = [
@@ -168,6 +169,9 @@ function placeholderPng({ height, path, width }: Placeholder, sourceDigest: stri
 }
 
 const manifests = new Map<string, Array<Record<string, unknown>>>();
+if (Bun.version !== PRIVACY_GENERATOR_RUNTIME) {
+  throw new Error("Privacy placeholder generation requires the pinned Bun runtime");
+}
 const generatorSha256 = createHash("sha256").update(readFileSync(generatorPath)).digest("hex");
 for (const placeholder of placeholders) {
   const output = resolve(root, placeholder.path);
@@ -183,6 +187,7 @@ for (const placeholder of placeholders) {
     classification: "redacted-placeholder",
     source: "redacted-live-capture",
     generator: relative(directory, generatorPath),
+    generatorRuntime: `bun-${PRIVACY_GENERATOR_RUNTIME}`,
     generatorVersion: PRIVACY_GENERATOR_VERSION,
     generatorSha256,
     sourceDigests: [sourceDigest],
