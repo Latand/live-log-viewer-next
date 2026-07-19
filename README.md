@@ -123,6 +123,52 @@ select Bun automatically whenever `LLV_AGENT_REGISTRY_SQLITE` or
 `LLV_STRUCTURED_HOSTS` is enabled. Local source checkouts should use the
 explicit `bun --bun` command above during the rollout.
 
+### Connect an orchestrator through MCP
+
+The package includes `agent-log-viewer-mcp`, a local stdio MCP server. It
+invokes Viewer services in-process and shares their durable stores, locks, and
+idempotency rules. Keep the Viewer package and the MCP process under the same
+OS user so they resolve the same state directory.
+
+For an installed package, add this server to the orchestrator's standard MCP
+configuration:
+
+```json
+{
+  "mcpServers": {
+    "viewer": {
+      "command": "agent-log-viewer-mcp"
+    }
+  }
+}
+```
+
+For a local clone, point the client at the launcher:
+
+```json
+{
+  "mcpServers": {
+    "viewer": {
+      "command": "bun",
+      "args": ["/absolute/path/to/live-log-viewer-next/bin/mcp-server.mjs"]
+    }
+  }
+}
+```
+
+The v1 tools are `spawn_agent`, `send_message`, `create_task`, `update_task`,
+`create_pipeline`, `pipeline_action`, `link_task_to_pipeline`,
+`list_conversations`, `get_conversation`, `deploy_exact_sha`, and
+`get_pipeline`. Every call requires a stable `clientRequestId`. Reusing that id
+with the same arguments returns the durable result as a replay. Reusing it with
+different arguments returns an idempotency conflict. `deploy_exact_sha`
+accepts a full 40-character commit SHA and requires `confirm: "deploy"`.
+
+Tool results contain the durable entity identifiers available for that action,
+including conversation ids, transcript paths, pipeline ids, task ids, and
+runtime operation ids. Viewer transcripts render calls attributed to the `viewer` MCP
+server as live cards and turn those identifiers into navigation chips.
+
 **Prerequisites:** Node ≥ 20.9, and bun or npm/pnpm. `tmux` is optional — see
 [Platform support](#platform-support).
 

@@ -20,6 +20,7 @@ import { SysMsgCard } from "./cards/SysMsgCard";
 import { ToolCard } from "./cards/ToolCard";
 import { WakeupCard } from "./cards/WakeupCard";
 import { SpeakButton } from "./SpeakButton";
+import { McpCallCard } from "../runtime/McpCallCard";
 
 /* Memoized: feed items are immutable after buildFeed, so a pane re-render
    (poll tick, camera state, files refresh) skips re-parsing markdown for
@@ -85,6 +86,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
       </div>
     );
   }
+  if (item.kind === "tool" && item.mcp) return <McpCallCard event={item} />;
   if (item.kind === "tool" && item.wakeup) return <WakeupCard event={item} wakeup={item.wakeup} />;
   if (item.kind === "tool") return <ToolCard event={item} />;
   if (item.kind === "cmd-group") return <CmdGroupCard item={item} />;

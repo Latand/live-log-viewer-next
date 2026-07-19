@@ -188,7 +188,9 @@ function markdownImageDestinations(text: string): string[] {
     const labelStart = (definitionStart.index ?? 0) + definitionStart[0].length;
     const labelEnd = labelEndFrom(labelStart);
     if (labelEnd === -1 || labelEnd === labelStart || text[labelEnd + 1] !== ":") continue;
-    const destination = text.slice(labelEnd + 2).match(/^[ \t]*(?:<([^>\r\n]+)>|([^\s\r\n]+))/);
+    const destination = text.slice(labelEnd + 2).match(
+      /^[ \t]*(?:(?:\r\n?|\n)[ \t]*)?(?:<([^>\r\n]+)>|([^\s\r\n]+))/,
+    );
     if (!destination) continue;
     definitions.set(normalizeLabel(text.slice(labelStart, labelEnd)), destination[1] ?? destination[2]);
   }

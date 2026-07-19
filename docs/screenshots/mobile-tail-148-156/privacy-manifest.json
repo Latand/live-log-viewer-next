@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "01-mobile-pipeline-full-plan.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "f439de6c723f5630bc58716d0d738ef201aa0e52f7eb076c8202b637f8d25547"
+      ],
+      "description": "Redacted placeholder for the full mobile pipeline plan evidence.",
+      "sha256": "ff31165b9371dc9744d0be854641f7d31ec1ec3ee8455bd8afb03acafeffa5cf"
+    },
+    {
+      "path": "02-mobile-drawer-header.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "d2ab35caf766754f20ee9697256e0b0827032868df5d79bdecc1e8f63b317474"
+      ],
+      "description": "Redacted placeholder for the mobile drawer-header evidence.",
+      "sha256": "6d3c36a7b83325d4e248cac1255e672eb6840f56acb81deb8e25d358708fefd8"
+    },
+    {
+      "path": "03-mobile-accounts-sheet.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "1c61facd071e6e0ab64edd0fed47e5bf6a00f5e54363f2819636e5dbe4c7a672"
+      ],
+      "description": "Redacted placeholder for the mobile accounts-sheet evidence.",
+      "sha256": "ee16fab181e5be89d0f88fb855aa7a2657a4a49239a74aff3dde103a6bf823d7"
+    },
+    {
+      "path": "04-drawer-header-before.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "3616aceb4f9a5382eeaa285f51723ffb3f1f3291ca634c4f6c6272ff1e39719c"
+      ],
+      "description": "Redacted placeholder for the pre-change drawer-header crop.",
+      "sha256": "df870e75e69c2f67eae404abf53cf56055795e8d8987e0559866934dc644ea48"
+    },
+    {
+      "path": "05-drawer-header-after.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "1e892c87be05892fe44b9711201e8b732290843b96d896c3b0f9d90b70a57a9a"
+      ],
+      "description": "Redacted placeholder for the post-change drawer-header crop.",
+      "sha256": "4bb2d8be718da34a8cb87dee2e550e1286f7e68c60e2cdd28003c23eece64b2b"
+    },
+    {
+      "path": "06-drawer-header-99plus-capped.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "0b73a36e716ad2a9a34ac927bbe16fcedd3caf72b824b0d0f19f60ff4a4ac886"
+      ],
+      "description": "Redacted placeholder for the capped drawer-header count evidence.",
+      "sha256": "1f8930efb75e388432d726c0584dddb83fb49d631a619e8aa7096471c4ffe2ce"
+    }
+  ]
+}

@@ -9,6 +9,7 @@ import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
 import { useEffectiveFlows } from "@/components/flows/flowModel";
 import { useFiles } from "@/hooks/useFiles";
+import { publishConversationAvailability } from "@/lib/mcp/availability";
 import { useBoardState } from "@/hooks/useBoardState";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewPresence } from "@/hooks/useViewPresence";
@@ -110,6 +111,9 @@ export function Viewer() {
      card — every surface below sees only current generations. A no-op (same
      array identity) until something actually migrates. */
   const files = useMemo(() => withoutArchivedPredecessors(allFiles), [allFiles]);
+  useEffect(() => {
+    publishConversationAvailability(new Set(allFiles.flatMap((file) => file.conversationId ? [file.conversationId] : [])));
+  }, [allFiles]);
   /* This tab's optimistic flow closes apply before anything renders: the X
      on a flow strip clears the reviewer side of the scheme instantly. */
   const flows = useEffectiveFlows(polledFlows);

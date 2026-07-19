@@ -6,6 +6,7 @@ import { statePath } from "@/lib/configDir";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
+import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTransaction";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
 import type { EffectivePipelineRole, Pipeline, PipelineEdgeActivation, PipelineStage } from "./types";
@@ -282,7 +283,7 @@ function defaultImplementStage(): PipelineStage {
   return {
     id: "implement",
     kind: "run",
-    prompt: "{{task}}",
+    "prompt": "{{task}}",
     next: null,
     onFail: null,
     effectiveRole: { roleId: null, engine: "claude", model: null, effort: null, access: "read-write", promptScaffold: null },
@@ -377,36 +378,26 @@ export function loadPipelines(): Pipeline[] {
   }));
 }
 
-type PipelineMutationState = { tail: Promise<void> };
-const mutationState = globalThis as typeof globalThis & { __llvPipelineMutationState?: PipelineMutationState };
-mutationState.__llvPipelineMutationState ??= { tail: Promise.resolve() };
-
-/** Serialize every production read-modify-write, including async spawn/flow work. */
-export async function withPipelineMutation<T>(
-  mutate: (pipelines: Pipeline[], persist: () => void) => Promise<T> | T,
-): Promise<T> {
-  const state = mutationState.__llvPipelineMutationState!;
-  const previous = state.tail;
-  let release!: () => void;
-  state.tail = new Promise<void>((resolve) => { release = resolve; });
-  await previous.catch(() => undefined);
-  try {
-    const pipelines = loadPipelines();
-    return await mutate(pipelines, () => savePipelines(pipelines));
-  } finally {
-    release();
-  }
-}
-
-export function savePipelines(pipelines: Pipeline[]): void {
-  /* The loader rejects the whole file on one malformed record, so a writer
-     bug must become a failed mutation here, never a poisoned registry that
-     only a hand edit can recover. */
+function savePipelinesUnlocked(pipelines: Pipeline[]): void {
   for (const pipeline of pipelines) {
     const id = pipeline.id;
     if (!isPipeline(pipeline)) throw new PipelineStoreError(`refusing to persist a malformed pipeline record: ${id}`);
   }
   atomicWriteJson(pipelinesFile(), { schemaVersion: PIPELINES_SCHEMA_VERSION, pipelines });
+}
+
+/** Serialize every production read-modify-write across Viewer and MCP processes. */
+export async function withPipelineMutation<T>(
+  mutate: (pipelines: Pipeline[], persist: () => void) => Promise<T> | T,
+): Promise<T> {
+  return withFileTransaction(pipelinesFile(), "pipeline state is busy", async () => {
+    const pipelines = loadPipelines();
+    return mutate(pipelines, () => savePipelinesUnlocked(pipelines));
+  });
+}
+
+export function savePipelines(pipelines: Pipeline[]): void {
+  withFileTransactionSync(pipelinesFile(), "pipeline state is busy", () => savePipelinesUnlocked(pipelines));
 }
 
 function slugify(value: string): string {

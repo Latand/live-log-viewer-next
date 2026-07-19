@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "edges-desktop.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "386c9349aa6fc59562ae62ad6a57ba4c13c21422cc81a0f7357681937ea72ae2"
+      ],
+      "description": "Redacted placeholder for the desktop pipeline-edge evidence.",
+      "sha256": "e753e70a268c3ea2c304a7db180d123b3ad33669424276455421833dc2c33250"
+    },
+    {
+      "path": "edges-onestage-desktop.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "eed6170341efdbefe837fefa4d284a8680f8c29122a4a8bee49693659df83944"
+      ],
+      "description": "Redacted placeholder for the single-stage desktop edge evidence.",
+      "sha256": "e40d0178fbc8fd5cbc09cb34e2d64514b8e14c262fb3908639d39163460f048c"
+    }
+  ]
+}
