@@ -252,6 +252,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.queueAria": "Черга надісланих повідомлень",
   "composer.removeFromQueue": "Прибрати з черги",
   "composer.deliveryHeld": "Притримано для «{label}» — доставиться після зміни акаунта",
+  "composer.admissionTimedOut": "Час очікування підтвердження вичерпано. Повторіть безпечно — ключ повідомлення збережено.",
   "composer.runtimePill": "Модель і міркування — застосується до наступного повідомлення",
   "composer.reasoningGroup": "Міркування",
   "composer.modelGroup": "Модель",

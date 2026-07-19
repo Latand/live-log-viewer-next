@@ -19,6 +19,7 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
+import { ComposerAdmissionTimeoutError, withComposerAdmissionDeadline } from "./composerAdmissionDeadline";
 import { RuntimePill } from "./RuntimePill";
 import { savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
 import { type PendingImage } from "./imageAttachments";
@@ -1030,10 +1031,10 @@ export function TmuxComposer({
         spawned?: boolean;
         outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "delivering" | "delivered" | "recovering" | "failed";
         receipt?: RuntimeReceipt;
-      } = structuredSession
+      } = await withComposerAdmissionDeadline(Promise.resolve(structuredSession
         ? !reachesWire
           ? { ok: false, structured: true, error: structuredImagesReason }
-          : await sendRuntimeMessage({
+          : sendRuntimeMessage({
               conversationId: structuredSession.session.conversationId,
               text: payloadText.trim(),
               images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
@@ -1046,11 +1047,11 @@ export function TmuxComposer({
               error: result.error,
               status: result.status,
               receipt: result.receipt,
-              outcome: result.receipt?.status === "delivering" || result.receipt?.status === "delivered"
+              outcome: (result.receipt?.status === "delivering" || result.receipt?.status === "delivered"
                 ? result.receipt.status
-                : "queued",
+                : "queued") as "delivering" | "delivered" | "queued",
             }))
-        : await fetch("/api/tmux", {
+        : fetch("/api/tmux", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
@@ -1068,7 +1069,7 @@ export function TmuxComposer({
           }).then(async (response) => {
             const body = await response.json() as typeof json;
             return { ...body, status: response.status, ok: response.ok && body.ok === true };
-          });
+          })));
       if (!json.ok) {
         if (json.structured && json.receipt) {
           /* Keep the payload readable in the compact receipt for retry and
@@ -1172,14 +1173,19 @@ export function TmuxComposer({
               : t("common.sent"),
       });
       inputRef.current?.focus();
-    } catch {
+    } catch (error) {
       /* The request died on the wire AFTER the server may have accepted it.
          The pre-flight record (text AND attachment snapshot) stays armed so a
          late admission receipt still clears exactly what was sent. A stale
          death racing a faster durable admission reports nothing — the receipt
          stack already tells the truth. */
       if (!settledSendKeys.current.has(clientMessageId)) {
-        setStatus({ kind: "err", text: t("common.serverUnavailable") });
+        setStatus({
+          kind: "err",
+          text: error instanceof ComposerAdmissionTimeoutError
+            ? t("composer.admissionTimedOut")
+            : t("common.serverUnavailable"),
+        });
       }
     } finally {
       setBusy(false);
