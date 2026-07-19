@@ -24,7 +24,7 @@ afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
 function journalPort(journal: RuntimeJournal, failDelivered = false): StructuredDeliveryQueuePort {
   return {
-    effects: async () => journal.effectBatch(),
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
     transition: async (operationId, status, details) => {
       if (failDelivered && status === "delivered") throw new Error("runtime stopped before confirmation commit");
       journal.transitionOperation(operationId, status, details);

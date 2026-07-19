@@ -68,6 +68,23 @@ test("dedicated runtime command parsers freeze the Opus request bodies", () => {
     kind: "kill",
     sessionKey: { engine: "codex", sessionId: "thread-one" },
   });
+  expect(parseRuntimeCommand("reconfigure", {
+    conversationId: "conv-reconfigure",
+    operationId: "reconfigure-one",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: true,
+    accountId: "work",
+  })).toEqual({
+    kind: "reconfigure",
+    conversationId: "conv-reconfigure",
+    operationId: "reconfigure-one",
+    idempotencyKey: "reconfigure-one",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: true,
+    accountId: "work",
+  });
 });
 
 test("runtime command parsing rejects malformed and oversized bodies", () => {

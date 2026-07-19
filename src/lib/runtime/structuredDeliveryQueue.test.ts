@@ -69,6 +69,125 @@ test("structured delivery preserves queue order within one conversation", async 
   ]);
 });
 
+test("a busy structured turn keeps reconfigure queued and applies it before later messages", async () => {
+  const actions: string[] = [];
+  const terminal = new Set<string>();
+  let active = true;
+  const currentHost = host(async (entry) => {
+    actions.push(`send:${entry.id}`);
+    return { outcome: "turn-started", turnId: `turn-${entry.id}` };
+  });
+  currentHost.health = async () => ({
+    ...idleState(),
+    status: active ? "active" : "idle",
+    activeTurnRef: active ? "turn-current" : null,
+  });
+  const effects = [
+    {
+      id: "effect:switch-model",
+      kind: "runtime.reconfigure",
+      eventSeq: 1,
+      payload: {
+        operationId: "switch-model", conversationId: "conversation-one",
+        model: "gpt-5.6-sol", effort: "high", fast: false,
+      },
+    },
+    {
+      id: "effect:message-after-switch",
+      kind: "runtime.send",
+      eventSeq: 2,
+      payload: { operationId: "message-after-switch", conversationId: "conversation-one", text: "next", policy: "queue" },
+    },
+  ];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => effects.filter((effect) => !terminal.has(String(effect.payload.operationId))),
+    transition: async (operationId, status) => {
+      actions.push(`${status}:${operationId}`);
+      if (status === "applied" || status === "failed" || status === "delivered") terminal.add(operationId);
+    },
+  }, () => currentHost, undefined, undefined, async (effect) => {
+    actions.push(`reconfigure:${effect.model}:${effect.effort}`);
+  });
+
+  await queue.drain();
+  expect(actions).toEqual([]);
+
+  active = false;
+  await queue.drain();
+  expect(actions).toEqual([
+    "applying:switch-model",
+    "reconfigure:gpt-5.6-sol:high",
+    "applied:switch-model",
+    "delivering:message-after-switch",
+    "send:message-after-switch",
+    "delivered:message-after-switch",
+  ]);
+});
+
+test("queued reconfigures are last-write-wins with one host restart", async () => {
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const applied: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:switch-one", kind: "runtime.reconfigure", eventSeq: 1,
+        payload: { operationId: "switch-one", conversationId: "conversation-one", model: "gpt-5.5", effort: "high", fast: false },
+      },
+      {
+        id: "effect:switch-two", kind: "runtime.reconfigure", eventSeq: 2,
+        payload: { operationId: "switch-two", conversationId: "conversation-one", model: "gpt-5.6-sol", effort: "xhigh", fast: true },
+      },
+    ],
+    transition: async (operationId, status, details) => { transitions.push([operationId, status, details?.reason]); },
+  }, () => host(async () => ({ outcome: "turn-started", turnId: "unused" })), undefined, undefined, async (effect) => {
+    applied.push(effect.operationId);
+  });
+
+  await queue.drain();
+
+  expect(applied).toEqual(["switch-two"]);
+  expect(transitions).toEqual([
+    ["switch-one", "failed", "superseded"],
+    ["switch-two", "applying", undefined],
+    ["switch-two", "applied", undefined],
+  ]);
+});
+
+test("a dead host applies pending reconfigure before queued delivery recovery", async () => {
+  const actions: string[] = [];
+  let recovered = false;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:switch-after-crash", kind: "runtime.reconfigure", eventSeq: 1,
+        payload: { operationId: "switch-after-crash", conversationId: "conversation-one", model: "claude-opus-4-6", effort: "high", fast: null },
+      },
+      {
+        id: "effect:message-after-crash", kind: "runtime.send", eventSeq: 2,
+        payload: { operationId: "message-after-crash", conversationId: "conversation-one", text: "continue", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status) => { actions.push(`${status}:${operationId}`); },
+  }, () => recovered ? host(async (entry) => {
+    actions.push(`send:${entry.id}`);
+    return { outcome: "turn-started", turnId: "turn-recovered" };
+  }) : null, undefined, undefined, async () => {
+    actions.push("recover");
+    recovered = true;
+  });
+
+  await queue.drain();
+
+  expect(actions).toEqual([
+    "applying:switch-after-crash",
+    "recover",
+    "applied:switch-after-crash",
+    "delivering:message-after-crash",
+    "send:message-after-crash",
+    "delivered:message-after-crash",
+  ]);
+});
+
 test("a runtime settings snapshot on the durable effect rides the queue entry to the host (issue #390 §10)", async () => {
   const entries: QueueEntry[] = [];
   const port: StructuredDeliveryQueuePort = {
@@ -139,7 +258,9 @@ test("unrelated outbox effects cannot starve structured message delivery", async
 
   await queue.drain();
 
-  expect(requestedKinds).toEqual([["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill"]]);
+  expect(requestedKinds).toEqual([[
+    "runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill", "runtime.reconfigure",
+  ]]);
   expect(sent).toEqual(["op-after-spawns"]);
 });
 

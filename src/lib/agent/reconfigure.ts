@@ -5,11 +5,12 @@ export interface AgentReconfiguration {
   model: string;
   effort: string;
   fast: boolean | null;
+  accountId?: string;
 }
 
 export function reconfigurationFromBody(
   engine: "claude" | "codex",
-  body: { model?: unknown; effort?: unknown; fast?: unknown },
+  body: { model?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown },
 ): { value?: AgentReconfiguration; error?: string } {
   const model = typeof body.model === "string" ? body.model.trim() : "";
   const validModel = engine === "claude" ? normalizeClaudeLaunchModel(model) : isCodexLaunchModel(model) ? model : null;
@@ -26,5 +27,18 @@ export function reconfigurationFromBody(
   if (engine === "codex" && typeof body.fast !== "boolean") {
     return { error: "speed must be selected for codex" };
   }
-  return { value: { model: validModel, effort, fast: engine === "codex" ? body.fast as boolean : null } };
+  const accountId = body.accountId === undefined || body.accountId === null || body.accountId === ""
+    ? undefined
+    : typeof body.accountId === "string" ? body.accountId.trim() : "";
+  if (accountId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(accountId)) {
+    return { error: "account is invalid" };
+  }
+  return {
+    value: {
+      model: validModel,
+      effort,
+      fast: engine === "codex" ? body.fast as boolean : null,
+      ...(accountId ? { accountId } : {}),
+    },
+  };
 }

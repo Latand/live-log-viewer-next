@@ -53,7 +53,7 @@ function structuredConversation(
   return { registry, path: pathname, conversationId: begun.receipt.conversationId };
 }
 
-test.each(["compact", "dialog-key", "reconfigure", "resume"])(
+test.each(["compact", "dialog-key", "resume"])(
   "structured ownership fences the %s control before legacy routing",
   async (action) => {
     const fixture = structuredConversation();
@@ -66,6 +66,52 @@ test.each(["compact", "dialog-key", "reconfigure", "resume"])(
     expect(result).toEqual({ status: 409, body: { error: `structured host does not support the ${action} control` } });
   },
 );
+
+test("structured reconfigure validates and enters the runtime command channel", async () => {
+  const fixture = structuredConversation();
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "reconfigure-one", receipt: { operationId: "reconfigure-one", status: "queued" }, replayed: false };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: "",
+    action: "reconfigure",
+    reconfiguration: { model: "gpt-5.6-sol", effort: "high", fast: true, accountId: "codex-work" },
+  }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "reconfigure-one",
+    accountExists: () => true,
+    enabled: () => true,
+  });
+
+  expect(result).toMatchObject({ status: 202, body: { operationId: "reconfigure-one", receipt: { status: "queued" } } });
+  expect(commands).toEqual([{
+    kind: "reconfigure",
+    operationId: "reconfigure-one",
+    idempotencyKey: "reconfigure-one",
+    conversationId: fixture.conversationId,
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: true,
+    accountId: "codex-work",
+    previousProfile: { model: null, effort: null, fast: null },
+  }]);
+
+  const invalid = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: "",
+    action: "reconfigure",
+    reconfiguration: { model: "claude-opus-4-6", effort: "unknown", fast: true },
+  }, { registry: fixture.registry, client, enabled: () => true });
+  expect(invalid).toEqual({ status: 400, body: { error: "model is not supported by codex" } });
+  expect(commands).toHaveLength(1);
+});
 
 test("structured ownership resolves from conversation identity", async () => {
   const fixture = structuredConversation();

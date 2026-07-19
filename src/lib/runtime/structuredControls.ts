@@ -1,4 +1,7 @@
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { reconfigurationFromBody, type AgentReconfiguration } from "@/lib/agent/reconfigure";
+import { listClaudeAccounts } from "@/lib/accounts/claude";
+import { listCodexAccounts } from "@/lib/accounts/codex";
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
@@ -8,12 +11,13 @@ import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 export type StructuredControlResult =
   | { status: 200; body: { ok: true; structured: true; target: string; outcome: "delivered" } }
   | { status: 200 | 202; body: { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } } }
-  | { status: 409 | 503; body: { error: string } };
+  | { status: 400 | 409 | 503; body: { error: string } };
 
 export interface StructuredControlRequest {
   path: string;
   conversationId: string;
   action: string;
+  reconfiguration?: Partial<AgentReconfiguration>;
 }
 
 export async function dispatchStructuredControl(
@@ -24,6 +28,7 @@ export async function dispatchStructuredControl(
     operationId?: () => string;
     kick?: () => void;
     enabled?: () => boolean;
+    accountExists?: (engine: "claude" | "codex", accountId: string) => boolean;
   } = {},
 ): Promise<StructuredControlResult | null> {
   if (!request.action) return null;
@@ -46,7 +51,7 @@ export async function dispatchStructuredControl(
   const structuredKill = request.action === "kill" && !entry.host;
   if (!entry.structuredHost && !structuredKill) return null;
 
-  if (request.action !== "interrupt" && request.action !== "kill") {
+  if (request.action !== "interrupt" && request.action !== "kill" && request.action !== "reconfigure") {
     if (request.action === "resume" && (entry.status === "dead" || entry.status === "unhosted")) {
       return null;
     }
@@ -69,6 +74,19 @@ export async function dispatchStructuredControl(
   if (!client) return { status: 503, body: { error: "structured runtime host is unavailable" } };
   const operationId = (dependencies.operationId ?? newOperationId)();
   try {
+    const reconfiguration = request.action === "reconfigure"
+      ? reconfigurationFromBody(conversation.engine, request.reconfiguration ?? {})
+      : null;
+    if (reconfiguration && !reconfiguration.value) {
+      return { status: 400, body: { error: reconfiguration.error ?? "invalid configuration" } };
+    }
+    if (reconfiguration?.value?.accountId) {
+      const accountExists = dependencies.accountExists ?? ((engine: "claude" | "codex", accountId: string) =>
+        (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).some((account) => account.id === accountId));
+      if (!accountExists(conversation.engine, reconfiguration.value.accountId)) {
+        return { status: 400, body: { error: `account is not available for ${conversation.engine}` } };
+      }
+    }
     const result = await client.command(request.action === "kill"
       ? {
           kind: "kill",
@@ -77,7 +95,20 @@ export async function dispatchStructuredControl(
           conversationId: conversation.id,
           sessionKey: { engine: conversation.engine, sessionId: generation.id },
         }
-      : {
+      : request.action === "reconfigure"
+        ? {
+            kind: "reconfigure",
+            operationId,
+            idempotencyKey: operationId,
+            conversationId: conversation.id,
+            ...reconfiguration!.value!,
+            previousProfile: {
+              model: generation.launchProfile.model,
+              effort: generation.launchProfile.effort,
+              fast: generation.launchProfile.fast,
+            },
+          }
+        : {
           kind: "interrupt",
           operationId,
           idempotencyKey: operationId,
@@ -96,10 +127,9 @@ export async function dispatchStructuredControl(
       },
     };
   } catch (error) {
-    if (request.action === "kill" && isRuntimeHostTransportFailure(error)) {
+    if ((request.action === "kill" || request.action === "reconfigure") && isRuntimeHostTransportFailure(error)) {
       /* The socket failed after the command may have reached the journal. The
-         durable receipt, not the transport, decides the outcome of a kill:
-         once admitted or delivered, structured control owns the response. */
+         durable receipt decides whether structured control owns the response. */
       const durable = await client.operationStatus(operationId).catch(() => null);
       if (durable) {
         (dependencies.kick ?? kickStructuredDeliveryQueue)();

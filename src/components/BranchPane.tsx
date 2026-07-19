@@ -171,7 +171,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      recovery and the composer/attention cards stand down; while the runtime
      plane has not yet resolved the host, Send is blocked so a structured/dead
      conversation is never messaged through the legacy /api/tmux path (finding 1). */
-  const { caps } = useAgentCapabilities(file);
+  const { caps, runtime } = useAgentCapabilities(file);
   const deadHost = caps.surface === "dead";
   /* A terminally superseded round (issue #383): the banner replaces recovery
      with navigation to the live successor, and the composer unmounts — the
@@ -392,7 +392,14 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                   the branch chip. Shell tasks carry no account, so they skip it;
                   the id is read from the live transcript path so a migrated
                   conversation reflects its current account. */}
-              {file.engine === "shell" ? null : <AccountBadge engine={file.engine} accountId={file.spawn?.accountId ?? accountIdFromPath(file.path)} />}
+              {file.engine === "shell" ? null : (
+                <AccountBadge
+                  engine={file.engine}
+                  accountId={runtime?.session.accountId ?? file.spawn?.accountId ?? accountIdFromPath(file.path)}
+                  file={file}
+                  runtimeSession={runtime?.session ?? null}
+                />
+              )}
               {file.plan ? <PlanChip plan={file.plan} /> : null}
               {file.goal ? <GoalChip goal={file.goal} /> : null}
               {isRoot || isMobile ? null : (

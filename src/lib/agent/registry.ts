@@ -3996,6 +3996,25 @@ export class AgentRegistry {
     return receipt ? clone(receipt.launchProfile) : null;
   }
 
+  updateConversationLaunchProfile(
+    id: ViewerConversationId,
+    patch: Pick<LaunchProfile, "model" | "effort" | "fast">,
+  ): RegistryConversation {
+    return this.mutate((file) => {
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
+      const generation = conversation?.generations.at(-1);
+      if (!conversation || !generation) throw new Error("viewer conversation is unknown");
+      generation.launchProfile = emptyLaunchProfile({ ...generation.launchProfile, ...patch });
+      const entry = file.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+      if (entry) {
+        entry.launchProfile = emptyLaunchProfile({ ...(entry.launchProfile ?? generation.launchProfile), ...patch });
+        entry.updatedAt = now();
+      }
+      conversation.updatedAt = now();
+      return clone(conversation);
+    });
+  }
+
   canonicalPath(artifactPath: string): string {
     const conversation = this.conversationForPath(artifactPath);
     return conversation?.generations.at(-1)?.path ?? artifactPath;

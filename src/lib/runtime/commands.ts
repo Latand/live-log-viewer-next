@@ -1,6 +1,6 @@
 import { modelFromBody } from "@/lib/agent/models";
 
-import type { RuntimeOperationCommand, RuntimeOperationKind, RuntimeSendSettings } from "./contracts";
+import type { RuntimeOperationCommand, RuntimeOperationKind, RuntimeReconfigureCommand, RuntimeSendSettings } from "./contracts";
 import { parseStructuredImageRefs, structuredContent } from "./structuredContent";
 
 const MAX_OPERATION_BYTES = 256 * 1024;
@@ -120,6 +120,37 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
       idempotencyKey,
       attentionId: requiredId(body.attentionId, "attentionId"),
       resolution: body.resolution,
+    };
+  }
+
+  if (kind === "reconfigure") {
+    const model = typeof body.model === "string" ? body.model.trim() : "";
+    const effort = typeof body.effort === "string" ? body.effort.trim() : "";
+    if (!model || model.length > 128 || /[\r\n\0]/.test(model)) throw new Error("reconfigure model is invalid");
+    if (!effort || effort.length > 32 || !/^[a-z]+$/.test(effort)) throw new Error("reconfigure effort is invalid");
+    if (body.fast !== null && typeof body.fast !== "boolean") throw new Error("reconfigure speed is invalid");
+    const accountId = optionalId(body.accountId, "accountId");
+    const previous = body.previousProfile;
+    if (previous !== undefined && (!previous || typeof previous !== "object" || Array.isArray(previous))) {
+      throw new Error("reconfigure previous profile is invalid");
+    }
+    const previousProfile = previous as Record<string, unknown> | undefined;
+    if (previousProfile
+      && ((previousProfile.model !== null && typeof previousProfile.model !== "string")
+        || (previousProfile.effort !== null && typeof previousProfile.effort !== "string")
+        || (previousProfile.fast !== null && typeof previousProfile.fast !== "boolean"))) {
+      throw new Error("reconfigure previous profile is invalid");
+    }
+    return {
+      kind,
+      conversationId,
+      ...(operationId ? { operationId } : {}),
+      idempotencyKey,
+      model,
+      effort,
+      fast: body.fast,
+      ...(accountId ? { accountId } : {}),
+      ...(previousProfile ? { previousProfile: previousProfile as RuntimeReconfigureCommand["previousProfile"] } : {}),
     };
   }
 

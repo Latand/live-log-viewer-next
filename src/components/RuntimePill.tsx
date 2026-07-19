@@ -12,6 +12,8 @@ import type { RuntimeSettingsCapability } from "@/lib/runtime/contracts";
 import type { FileEntry } from "@/lib/types";
 
 import type { StripSurface } from "./agentCapabilities";
+import type { RuntimeSession } from "./runtime/runtimeModel";
+import { pushTaskToast } from "./tasks/taskToast";
 import {
   adoptRuntimeProfile,
   defaults,
@@ -69,14 +71,16 @@ export function RuntimePill({
   file,
   surface,
   runtimeSettings,
+  runtimeSession,
 }: {
   file: FileEntry;
   /** The strip surface for this conversation; the pill renders on exactly the
       three that keep the runtime control visible. */
   surface: StripSurface;
-  /** The structured host's negotiated per-turn capability — drives honest
-      disabled-with-reason rows where a host can't apply a live change (§7). */
+  /** The structured host's negotiated per-turn capability. Launch-level
+      changes use durable turn-boundary reconfiguration. */
   runtimeSettings?: RuntimeSettingsCapability | null;
+  runtimeSession?: RuntimeSession | null;
 }) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
@@ -87,7 +91,7 @@ export function RuntimePill({
     : surface === "live-root" ? "live-root"
     : null;
 
-  // ---- live-tmux reconfigure lifecycle (only meaningful on live-root) --------
+  // ---- durable reconfigure lifecycle (live tmux and structured hosts) --------
   // The initializer must not synthesize defaults for an engine outside the
   // catalog — the component renders null for those below, after the hooks.
   const [liveDraft, setLiveDraft] = useState<RuntimeDraft>(() =>
@@ -95,6 +99,7 @@ export function RuntimePill({
   const [applyState, setApplyState] = useState<ApplyState>("idle");
   const [error, setError] = useState("");
   const revisionRef = useRef(0);
+  const operationRef = useRef<string | null>(null);
 
   // ---- persisted-profile face (structured / resume) -------------------------
   // Bumped on every commit to re-read the identity-scoped profile so the pill,
@@ -112,24 +117,27 @@ export function RuntimePill({
      draft/phase from localStorage when the conversation identity changes is a
      sync-from-external-store, same pattern as the composer's draft reload. */
   useEffect(() => {
-    if (pillSurface !== "live-root") return;
+    if (!engine) return;
+    if (pillSurface !== "live-root" && pillSurface !== "structured") return;
     const stored = readDraft(file);
     setLiveDraft(stored);
     const phase = localStorage.getItem(phaseKey(file));
     setApplyState(phase === "pending" || phase === "confirming" ? phase : "idle");
     setError("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file.path, pillSurface]);
+  }, [engine, file.path, pillSurface]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
-    if (pillSurface !== "live-root") return;
+    if (!engine) return;
+    if (pillSurface !== "live-root" && pillSurface !== "structured") return;
     localStorage.setItem(storageKey(file), JSON.stringify(liveDraft));
-  }, [liveDraft, file, pillSurface]);
+  }, [engine, liveDraft, file, pillSurface]);
 
   // A poll can adopt a provisional identity to the canonical one while mounted;
   // carry the persisted selection along so it is never silently orphaned.
   const identityRef = useRef(cardId);
+  const runtimeConversationId = runtimeSession?.conversationId;
   useEffect(() => {
     if (identityRef.current !== cardId) {
       adoptRuntimeProfile(identityRef.current, cardId);
@@ -149,14 +157,22 @@ export function RuntimePill({
         body: JSON.stringify({
           action: "reconfigure",
           path: file.path,
+          conversationId: runtimeConversationId,
           ...draft,
           fast: engine === "codex" ? draft.fast : undefined,
         }),
       });
-      const body = (await response.json()) as { ok?: boolean; outcome?: string; error?: string };
+      const body = (await response.json()) as {
+        ok?: boolean;
+        outcome?: string;
+        operationId?: string;
+        receipt?: { operationId: string; status: string };
+        error?: string;
+      };
       if (revision !== revisionRef.current) return;
       if (!response.ok || !body.ok) throw new Error(body.error ?? t("runtimeConfig.failed"));
-      const phase = body.outcome === "pending" ? "pending" : "confirming";
+      operationRef.current = body.operationId ?? body.receipt?.operationId ?? null;
+      const phase = pillSurface === "structured" || body.outcome === "pending" ? "pending" : "confirming";
       localStorage.setItem(phaseKey(file), phase);
       setApplyState(phase);
     } catch (cause) {
@@ -164,7 +180,7 @@ export function RuntimePill({
       setError(cause instanceof Error ? cause.message : t("runtimeConfig.failed"));
       setApplyState("error");
     }
-  }, [engine, file, t]);
+  }, [engine, file, pillSurface, runtimeConversationId, t]);
 
   // Pending re-apply loop and confirm-by-observation, ported from the retired
   // AgentRuntimeControls lifecycle (the trigger is now a selection, not Apply).
@@ -173,6 +189,25 @@ export function RuntimePill({
     const id = window.setInterval(() => void applyReconfigure(liveDraft), 1500);
     return () => window.clearInterval(id);
   }, [pillSurface, applyState, applyReconfigure, liveDraft]);
+
+  useEffect(() => {
+    if (pillSurface !== "structured") return;
+    const operationId = operationRef.current;
+    if (!operationId) return;
+    const receipt = runtimeSession?.recentReceipts.find((candidate) =>
+      candidate.operationId === operationId && candidate.kind === "reconfigure");
+    if (!receipt) return;
+    if (receipt.status === "applied") {
+      operationRef.current = null;
+      setApplyState("applied");
+      pushTaskToast("ok", t("runtimeConfig.applied"));
+    } else if (receipt.status === "failed" || receipt.status === "rejected") {
+      operationRef.current = null;
+      setApplyState("error");
+      setError(receipt.reason ?? t("runtimeConfig.failed"));
+      pushTaskToast("err", receipt.reason ?? t("runtimeConfig.failed"));
+    }
+  }, [pillSurface, runtimeSession, t]);
 
   /* eslint-disable react-hooks/set-state-in-effect -- confirm-by-observation:
      the poll updates `file`, and matching observed runtime settles the phase
@@ -189,14 +224,17 @@ export function RuntimePill({
   }, [applyState, engine, file, liveDraft, pillSurface]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const applying = applyState === "saving" || applyState === "pending" || applyState === "confirming";
+  const applying = applyState === "saving"
+    || applyState === "pending"
+    || applyState === "confirming"
+    || Boolean(pillSurface === "structured" && runtimeSession?.pendingReconfigure);
 
   // ---- the effective face (single source of truth) --------------------------
   const face: RuntimeDraft = useMemo(() => {
     if (!engine) return { model: "", effort: "", fast: false };
     // A failed live reconfigure reverts the face to the observed runtime (§6) —
     // the pill never keeps advertising a draft the pane rejected.
-    if (pillSurface === "live-root") return applyState === "error" ? defaults(file) : liveDraft;
+    if (pillSurface === "live-root" || pillSurface === "structured") return applyState === "error" ? defaults(file) : liveDraft;
     if (pillSurface === "resume") return readResumeDraft(file);
     return effectiveProfile(file);
     // version re-reads the persisted profile after a commit.
@@ -206,13 +244,13 @@ export function RuntimePill({
   const efforts = useMemo(() => (engine ? effortScale(engine, face.model) ?? [] : []), [engine, face.model]);
   const speedShown = engine === "codex";
 
-  // Per-turn honesty on structured: a host that can't change model/effort live
-  // disables those rows with a reason (§7); resume and live-tmux always actuate.
-  // Speed is thread-level in the app-server protocol (serviceTier rides
-  // thread/resume, never turn/start), so on structured it locks like a model.
-  const effortLocked = pillSurface === "structured" && !runtimeSettings?.perTurnEffort;
-  const modelLocked = pillSurface === "structured" && !runtimeSettings?.perTurnModel;
-  const speedLocked = pillSurface === "structured";
+  // Structured reconfigure restarts at an idle boundary, so every launch-level
+  // setting remains available while a turn is running. Per-turn capabilities
+  // still describe message-scoped overrides elsewhere in the composer.
+  void runtimeSettings;
+  const effortLocked = false;
+  const modelLocked = false;
+  const speedLocked = false;
   const lockReason = t("composer.settingsNextResume");
 
   const announceCommit = useCallback((next: RuntimeDraft) => {
@@ -224,7 +262,7 @@ export function RuntimePill({
 
   const commit = useCallback((patch: Partial<RuntimeDraft>) => {
     if (!engine) return;
-    if (pillSurface === "live-root") {
+    if (pillSurface === "live-root" || pillSurface === "structured") {
       revisionRef.current += 1;
       localStorage.removeItem(phaseKey(file));
       setLiveDraft((current) => {
@@ -235,12 +273,13 @@ export function RuntimePill({
           effort: patch.effort ?? (scale.includes(current.effort) ? current.effort : scale[0] ?? current.effort),
         };
         announceCommit(next);
+        if (pillSurface === "structured") writeProfile(file, patch);
         void applyReconfigure(next);
         return next;
       });
       return;
     }
-    // structured / resume: pure client persistence — auto-apply IS the save.
+    // Resume keeps a client-side profile that the next host launch consumes.
     if (pillSurface === "resume") {
       announceCommit(writeResumeProfile(file, patch));
     } else {
@@ -311,6 +350,11 @@ export function RuntimePill({
           <ChevronDown className="h-3 w-3 shrink-0" aria-hidden />
         )}
       </button>
+      {applying ? (
+        <span className="ml-1 self-center text-[10px] font-semibold text-accent" data-runtime-switch-pending>
+          {t("runtimeConfig.pending")}
+        </span>
+      ) : null}
 
       {open && !isMobile ? (
         <RuntimePopover

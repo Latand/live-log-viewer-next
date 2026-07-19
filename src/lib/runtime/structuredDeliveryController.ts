@@ -7,6 +7,7 @@ import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import { runtimeSettingsCapability, type RuntimeEventInput } from "./contracts";
 import type { EngineHost, HostState } from "./engineHost";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
+import { applyStructuredReconfigure } from "./structuredReconfigure";
 import { projectEngineHostEvent } from "./engineHostEvents";
 import { publishFilesRevision } from "./filesRevision";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
@@ -215,6 +216,7 @@ export async function bindStructuredDeliveryQueue(
       return true;
     },
     () => scheduleAutomaticRetry(),
+    (effect) => applyStructuredReconfigure(effect, { registry }),
   );
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;

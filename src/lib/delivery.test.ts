@@ -487,6 +487,103 @@ test("idle reconfiguration survives a transient host miss and resumes after veri
   expect(resumePolicy).toMatchObject({ readOnly: true, permissionMode: "never", allowSubagents: true });
 });
 
+test("legacy account reconfiguration queues a conversation reseat without touching the active pane", async () => {
+  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf744440";
+  const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
+  fs.writeFileSync(pathname, "");
+  const registry = new AgentRegistry(path.join(SANDBOX, "legacy-account-reconfigure-registry.json"));
+  const conversation = registry.ensureConversation("codex", pathname, "source-account");
+  registry.updateConversationLaunchProfile(conversation.id, { model: "gpt-5.6-sol", effort: "high", fast: false });
+  registry.upsert({
+    key: { engine: "codex", sessionId }, artifactPath: pathname, cwd: SANDBOX, accountId: "source-account",
+    launchProfile: emptyLaunchProfile({ cwd: SANDBOX, model: "gpt-5.6-sol", effort: "high" }), status: "live",
+    host: KILL_HOST, claimEpoch: 1, claimOwner: null, pendingAction: null,
+  });
+  const entry: FileEntry = {
+    path: pathname, root: "codex-sessions", name: path.basename(pathname), project: "viewer", title: "worker",
+    engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 0, activity: "live",
+    proc: "running", pid: KILL_HOST.agent.pid, model: "gpt-5.6-sol", effort: "high", fast: false,
+    pendingQuestion: null, waitingInput: null,
+  };
+  let resolved = 0;
+  let migrationTicks = 0;
+  let killed = 0;
+
+  const outcome = await reconfigureConversation(pathname, {
+    model: "gpt-5.6-terra", effort: "medium", fast: true, accountId: "target-account",
+  }, {
+    pathAllowed: () => true,
+    listFiles: async () => [entry],
+    registry,
+    validateAccount: async () => {},
+    resolveAccount: (engine, accountId) => {
+      expect([engine, accountId]).toEqual(["codex", "target-account"]);
+      resolved += 1;
+      return {} as AccountContext;
+    },
+    requestMigrationTick: () => { migrationTicks += 1; },
+    killHost: async () => { killed += 1; return true; },
+  });
+
+  expect(outcome).toMatchObject({ ok: true, outcome: "pending" });
+  expect(resolved).toBe(1);
+  expect(migrationTicks).toBe(1);
+  expect(killed).toBe(0);
+  expect(registry.conversationForPath(pathname)?.migration).toMatchObject({
+    phase: "waiting-turn",
+    targetId: "target-account",
+  });
+  expect(registry.launchProfileForPath(pathname)).toMatchObject({
+    model: "gpt-5.6-terra",
+    effort: "medium",
+    fast: true,
+  });
+});
+
+test("legacy account reconfiguration leaves the conversation untouched when auth preflight fails", async () => {
+  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf744441";
+  const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
+  fs.writeFileSync(pathname, "");
+  const registry = new AgentRegistry(path.join(SANDBOX, "legacy-account-reconfigure-auth-registry.json"));
+  const conversation = registry.ensureConversation("codex", pathname, "source-account");
+  registry.updateConversationLaunchProfile(conversation.id, { model: "gpt-5.6-sol", effort: "high", fast: false });
+  registry.upsert({
+    key: { engine: "codex", sessionId }, artifactPath: pathname, cwd: SANDBOX, accountId: "source-account",
+    launchProfile: emptyLaunchProfile({ cwd: SANDBOX, model: "gpt-5.6-sol", effort: "high" }), status: "idle",
+    host: KILL_HOST, claimEpoch: 1, claimOwner: null, pendingAction: null,
+  });
+  const entry: FileEntry = {
+    path: pathname, root: "codex-sessions", name: path.basename(pathname), project: "viewer", title: "worker",
+    engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 0, activity: "idle",
+    proc: "running", pid: KILL_HOST.agent.pid, model: "gpt-5.6-sol", effort: "high", fast: false,
+    pendingQuestion: null, waitingInput: null,
+  };
+  let migrationTicks = 0;
+  let killed = 0;
+
+  const outcome = await reconfigureConversation(pathname, {
+    model: "gpt-5.6-sol", effort: "high", fast: false, accountId: "signed-out-account",
+  }, {
+    pathAllowed: () => true,
+    listFiles: async () => [entry],
+    registry,
+    validateAccount: async () => { throw new Error("codex account requires authentication"); },
+    resolveAccount: () => ({}) as AccountContext,
+    requestMigrationTick: () => { migrationTicks += 1; },
+    killHost: async () => { killed += 1; return true; },
+  });
+
+  expect(outcome).toMatchObject({ ok: false, error: "codex account requires authentication" });
+  expect(migrationTicks).toBe(0);
+  expect(killed).toBe(0);
+  expect(registry.conversationForPath(pathname)?.migration).toBeNull();
+  expect(registry.launchProfileForPath(pathname)).toMatchObject({
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: false,
+  });
+});
+
 const KILL_HOST: TmuxHostEvidence = {
   kind: "tmux",
   endpoint: "/run/user/1000/agent-log-viewer",

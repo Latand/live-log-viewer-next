@@ -208,6 +208,9 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
         : runtimeImageCapability(key.engine === "claude" ? "claude" : "codex", false),
     },
     activeTurnId: typeof payload.activeTurnId === "string" ? payload.activeTurnId : null,
+    pendingReconfigure: payload.pendingReconfigure && typeof payload.pendingReconfigure === "object"
+      ? payload.pendingReconfigure as RuntimeSession["pendingReconfigure"]
+      : null,
     drift: payload.drift && typeof payload.drift === "object" ? payload.drift as RuntimeSession["drift"] : null,
   };
 }
@@ -444,13 +447,19 @@ export class RuntimeJournal {
         this.db.exec("COMMIT");
         return { operationId, receipt: previous, replayed: true };
       }
-      const queueing = status === "queued"
-        && (previous.status === "delivering" || (this.structuredHosts && previous.status === "pending"));
-      const beginning = (previous.status === "pending" || previous.status === "queued") && status === "delivering";
-      const completing = (previous.status === "pending" || previous.status === "queued" || previous.status === "delivering")
-        && status !== "delivering" && status !== "queued";
-      if (!queueing && !beginning && !completing) throw new Error("runtime operation transition is invalid");
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      const queueing = status === "queued"
+        && (previous.status === "delivering" || previous.status === "applying"
+          || (this.structuredHosts && previous.status === "pending"));
+      const beginning = (previous.status === "pending" || previous.status === "queued")
+        && (status === "delivering" || (command.kind === "reconfigure" && status === "applying"));
+      const completing = (previous.status === "pending" || previous.status === "queued"
+        || previous.status === "delivering" || previous.status === "applying")
+        && status !== "delivering" && status !== "applying" && status !== "queued";
+      if (!queueing && !beginning && !completing) throw new Error("runtime operation transition is invalid");
+      if ((status === "applying" || status === "applied") && command.kind !== "reconfigure") {
+        throw new Error("runtime operation transition is invalid");
+      }
       if (beginning && (command.kind === "send" || command.kind === "steer") && details.turnId !== undefined) {
         const effect = this.db.query<{ payload_json: string }, [string]>("SELECT payload_json FROM outbox WHERE id = ?")
           .get(`effect:${operationId}`);
@@ -1230,6 +1239,25 @@ export class RuntimeJournal {
       }));
       return;
     }
+    if (command.kind === "reconfigure") {
+      this.appendInTransaction(normalizeRuntimeEventInput({
+        scope: { type: "session", id: command.conversationId },
+        kind: "session-status",
+        operationId,
+        producer: { ...producer, eventKey: `operation:${operationId}:reconfigure-queued` },
+        payload: {
+          conversationId: command.conversationId,
+          pendingReconfigure: {
+            operationId,
+            model: command.model,
+            effort: command.effort,
+            fast: command.fast,
+            ...(command.accountId ? { accountId: command.accountId } : {}),
+          },
+        },
+      }));
+      return;
+    }
     if (command.kind === "spawn") {
       const requestedParentConversationId = command.parentConversationId && command.parentConversationId !== command.conversationId
         ? command.parentConversationId
@@ -1285,6 +1313,19 @@ export class RuntimeJournal {
 
   private appendCompletionConsequences(command: RuntimeOperationCommand, receipt: RuntimeOperationReceipt, operationId: string): void {
     const producer = { kind: "runtime-effect", hostEpoch: Number(this.meta("host_epoch")) };
+    if (command.kind === "reconfigure" && (receipt.status === "applied" || receipt.status === "failed")) {
+      const session = this.entity<RuntimeSession>("session", command.conversationId);
+      if (session?.pendingReconfigure?.operationId === operationId) {
+        this.appendInTransaction(normalizeRuntimeEventInput({
+          scope: { type: "session", id: command.conversationId },
+          kind: "session-status",
+          operationId,
+          producer: { ...producer, eventKey: `operation:${operationId}:reconfigure-${receipt.status}` },
+          payload: { conversationId: command.conversationId, pendingReconfigure: null },
+        }));
+      }
+      return;
+    }
     if (command.kind === "spawn"
       && !command.sessionId
       && (receipt.status === "failed" || receipt.status === "rejected" || receipt.status === "uncertain")) {

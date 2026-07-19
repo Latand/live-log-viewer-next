@@ -153,6 +153,7 @@ test("snapshot exposes the canonical projected runtime model", () => {
         }),
       },
       activeTurnId: "turn-one",
+      pendingReconfigure: null,
       drift: null,
     }],
     attentions: [{
@@ -238,6 +239,65 @@ test("send operations converge by idempotency key and persist one receipt and ef
   expect(journal.snapshot().sessions[0]?.recentReceipts).toHaveLength(1);
   expect(() => journal.executeOperation({ ...command, text: "different" })).toThrow("idempotency key already belongs to another request");
   expect(() => journal.executeOperation({ ...command, idempotencyKey: "send-key-two" })).toThrow("operationId already belongs to another request");
+  journal.close();
+});
+
+test("reconfigure admission durably replaces the session pending switch", () => {
+  const dir = sandbox("reconfigure-last-write-wins");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true, now: () => 100 });
+  journal.append({
+    scope: runtimeScope("session", "conv-reconfigure"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-reconfigure",
+      sessionKey: { engine: "codex", sessionId: "thread-one" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      provenance: "structured",
+      accountId: "default",
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: "turn-one",
+    },
+  });
+
+  const first = journal.executeOperation({
+    kind: "reconfigure",
+    operationId: "reconfigure-one",
+    idempotencyKey: "reconfigure-one",
+    conversationId: "conv-reconfigure",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: false,
+  });
+  const second = journal.executeOperation({
+    kind: "reconfigure",
+    operationId: "reconfigure-two",
+    idempotencyKey: "reconfigure-two",
+    conversationId: "conv-reconfigure",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+    accountId: "work",
+  });
+
+  expect(first.receipt.status).toBe("queued");
+  expect(second.receipt.status).toBe("queued");
+  expect(journal.snapshot().sessions[0]?.pendingReconfigure).toEqual({
+    operationId: "reconfigure-two",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+    accountId: "work",
+  });
+  expect(journal.effectBatch(100, ["runtime.reconfigure"])).toHaveLength(2);
+  expect(journal.transitionOperation(first.operationId, "failed", { reason: "superseded" }).receipt.status).toBe("failed");
+  expect(journal.snapshot().sessions[0]?.pendingReconfigure?.operationId).toBe(second.operationId);
+  expect(journal.transitionOperation(second.operationId, "applying").receipt.status).toBe("applying");
+  expect(journal.effectBatch(100, ["runtime.reconfigure"])).toHaveLength(1);
+  expect(journal.transitionOperation(second.operationId, "applied").receipt.status).toBe("applied");
+  expect(journal.snapshot().sessions[0]?.pendingReconfigure).toBeNull();
+  expect(journal.effectBatch(100, ["runtime.reconfigure"])).toHaveLength(0);
   journal.close();
 });
 
