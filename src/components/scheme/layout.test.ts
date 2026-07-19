@@ -326,8 +326,11 @@ describe("buildSchemeLayout byPath", () => {
     const layout = buildSchemeLayout(groups, [], files, [], []);
     const parentNode = layout.nodes.find((node) => node.file.path === "/session")!;
     const childNode = layout.nodes.find((node) => node.file.path === "/session/verify-mvp")!;
+    const childEdge = layout.edges.find((edge) => edge.to === "/session/verify-mvp")!;
     expect(childNode.y).toBeGreaterThan(parentNode.y + parentNode.h);
-    expect(layout.edges.some((edge) => edge.to === "/session/verify-mvp" && !edge.dashed)).toBe(true);
+    expect(childEdge.dashed).toBeFalsy();
+    expect(childEdge.sourceConversationId).toBe("/session");
+    expect(childEdge.targetConversationId).toBe("/session/verify-mvp");
     expect(layout.stacks).toHaveLength(0);
   });
 });

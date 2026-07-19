@@ -31,8 +31,10 @@ import { STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenT
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { MobilePipelineDock } from "./MobilePipelineDock";
 import { MobilePipelineDockSheet, MobilePipelineSummaryButton, MobilePipelineSummaryRow } from "./MobilePipelineDockSheet";
+import { conversationIdentity } from "@/lib/accounts/identity";
 import { deckKey } from "@/components/scheme/agentLinks";
 import { buildSchemeLayout } from "@/components/scheme/layout";
+import { SubagentBadges } from "@/components/scheme/SubagentBadges";
 import { layoutPipelineGroups, type PipelinePane } from "@/components/scheme/pipelineAnchor";
 import { isPlacedTask, taskRect } from "@/components/scheme/taskGeometry";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
@@ -51,6 +53,12 @@ const STATE_SCORE: Record<PaneState, number> = { waiting: 5, stalled: 4, live: 3
 /* Swipe on the pane header: mostly-horizontal and long enough to be deliberate. */
 const SWIPE_MIN_X = 56;
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
+
+/* Height of the phone's bottom-up subagent badge rail — the 12-badge hard cap
+   at 30px + 6px gaps. The rail anchors to the focused pane's left edge and lifts
+   clear of the composer, so a tap expands the title rightward inside the 390px
+   viewport with no horizontal overflow. */
+const SUBAGENT_RAIL_H = 12 * 36;
 
 interface Entry {
   key: string;
@@ -520,6 +528,30 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
             {t("common.loading")}
           </div>
         )}
+        {/* The subagent badge/anchor interaction on the phone (PR #441): the same
+            30x30 bottom-up circles the desktop board carries, anchored to the
+            focused pane's left edge and lifted above the composer. A hover/tap
+            expands the title, a second tap navigates to the child's CURRENT
+            generation. The overlay is pointer-events-none so only the badges
+            themselves take taps; expansion grows rightward within the 390px
+            viewport, so it never adds horizontal overflow. */}
+        {activeNode ? (
+          <div
+            data-testid="mobile-subagent-rail"
+            className="pointer-events-none absolute bottom-20 left-2 z-[20]"
+            style={{ width: 0, height: SUBAGENT_RAIL_H }}
+          >
+            <SubagentBadges
+              conversationId={conversationIdentity(activeNode.file)}
+              entries={files}
+              cardRect={{ x: 0, y: 0, w: 0, h: SUBAGENT_RAIL_H }}
+              onNavigate={(path) => {
+                const target = files.find((entry) => entry.path === path);
+                if (target) onSelect(target);
+              }}
+            />
+          </div>
+        ) : null}
       </div>
 
       {/* Chat owns the viewport (issue #419 reopened): the docked pipelines no
