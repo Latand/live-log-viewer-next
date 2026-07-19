@@ -23,9 +23,14 @@
     "start": "next start",
     "lint": "eslint",
     "prepack": "node scripts/prepack.mjs",
+    "privacy:check": "LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE=scripts/privacy-known-value-fingerprints.json LLV_PRIVACY_OCR_LANGUAGES=eng+ukr bun scripts/privacy-publication-gate.ts --require-known-values --base origin/main",
+    "privacy:fingerprints": "bun scripts/generate-privacy-known-value-fingerprints.ts",
+    "privacy:github-audit": "LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE=scripts/privacy-known-value-fingerprints.json bun scripts/privacy-github-audit.ts",
+    "privacy:placeholders": "bun scripts/generate-privacy-placeholders.ts",
     "test": "bun test"
   },
   "dependencies": {
+    "entities": "^7.0.1",
     "highlight.js": "^11.11.1",
     "lucide-react": "^1.23.0",
     "next": "16.2.10",
