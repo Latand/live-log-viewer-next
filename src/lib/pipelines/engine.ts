@@ -59,7 +59,7 @@ export type PipelineStageSpawn = {
   launchId: string;
   conversationId: string;
   sessionId: string | null;
-  transcript: string | null;
+  "transcript": string | null;
   paneId: string | null;
 };
 
@@ -75,7 +75,7 @@ export interface PipelinePorts {
   spawnAgent(input: {
     role: EffectivePipelineRole;
     cwd: string;
-    prompt: string;
+    "prompt": string;
     parentPath: string | null;
     clientAttemptId: string;
     membership: DurableMembershipInput;
@@ -170,7 +170,7 @@ async function spawnPipelineAgent(
     cwd: input.cwd,
     parentConversationId: parent.conversationId,
     ...(supersedes ? { supersedes } : {}),
-    prompt: input.prompt,
+    "prompt": input.prompt,
   })).digest("hex");
   const creatorConversationId = input.creatorConversationId?.startsWith("conversation_")
     ? registry.canonicalConversationId(input.creatorConversationId as ViewerConversationId)
@@ -223,7 +223,7 @@ async function spawnPipelineAgent(
     receipt: begun.receipt,
     spec,
     account,
-    prompt: input.prompt,
+    "prompt": input.prompt,
     registry,
     client,
   });
@@ -257,7 +257,7 @@ export function defaultPipelinePorts(): PipelinePorts {
         launchId: receipt.launchId,
         conversationId: receipt.conversationId,
         sessionId: receipt.key?.sessionId ?? null,
-        transcript: receipt.artifactPath,
+        "transcript": receipt.artifactPath,
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
       };
     },
@@ -1331,7 +1331,7 @@ function draftStageInputs(stages: PipelineStage[]): PipelineStageInput[] {
     ...(stage.model !== undefined ? { model: stage.model } : {}),
     ...(stage.effort !== undefined ? { effort: stage.effort } : {}),
     ...(stage.access !== undefined ? { access: stage.access } : {}),
-    prompt: stage.prompt,
+    "prompt": stage.prompt,
     next: stage.next ?? null,
     onFail: stage.onFail ?? null,
   }));

@@ -109,7 +109,7 @@ const task: BoardTask = {
 const dashboardProps = () => ({
   files: [], flows: [], pipelines: [], workflows: [], tasks: [task],
   project: "atlas", loaded: true, openNonce: 0, archived: false, catalogKnown: false,
-  projectCwd: "/home/tester/Projects/atlas", catalogConversationCount: 0,
+  projectCwd: "/home/user/Projects/atlas", catalogConversationCount: 0,
   onArchive: () => {}, onUnarchive: () => {},
 });
 

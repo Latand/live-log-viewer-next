@@ -69,7 +69,7 @@ export function ensurePipelineForTask(
       model: spawnParams.model,
       effort: spawnParams.effort,
       access: "read-write",
-      prompt: "{{task}}",
+      "prompt": "{{task}}",
       next: null,
     }],
   };

@@ -17,7 +17,7 @@ test("task attribution failure replays one launched pane into one durable assign
   const sessionId = crypto.randomUUID();
   const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
   let tasks: BoardTask[] = [{
-    id: "08b5e4ec-89c5-4064-9118-51661c4f080b",
+    id: "08b5e4ec-89c5-0064-9118-51661c4f080b",
     project: "live-log-viewer-next",
     status: "inbox",
     text: "Own issue #282",
@@ -78,7 +78,7 @@ test("task attribution failure replays one launched pane into one durable assign
       return { paneId: "%18", display: "agents:18.0", panePid: 3627416, host, receipt };
     },
   } as Parameters<typeof POST.withDependencies>[2];
-  const request = () => new NextRequest("http://127.0.0.1/api/tasks/08b5e4ec-89c5-4064-9118-51661c4f080b/spawn", {
+  const request = () => new NextRequest("http://127.0.0.1/api/tasks/08b5e4ec-89c5-0064-9118-51661c4f080b/spawn", {
     method: "POST",
     headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
     body: JSON.stringify({
@@ -137,7 +137,7 @@ test("pre-pane spawn failure returns an ownerless task to inbox", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-ownerless-failure-"));
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   let tasks: BoardTask[] = [{
-    id: "4f337f38-48dd-44af-bf15-5b544ce3ea13",
+    id: "4f337f38-48dd-04af-bf15-5b544ce3ea13",
     project: "live-log-viewer-next",
     status: "inbox",
     text: "Repair release ownership",
@@ -176,7 +176,7 @@ test("pre-pane spawn failure returns an ownerless task to inbox", async () => {
     },
   } as Parameters<typeof POST.withDependencies>[2];
   const response = await POST.withDependencies(new NextRequest(
-    "http://127.0.0.1/api/tasks/4f337f38-48dd-44af-bf15-5b544ce3ea13/spawn",
+    "http://127.0.0.1/api/tasks/4f337f38-48dd-04af-bf15-5b544ce3ea13/spawn",
     {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
@@ -232,7 +232,7 @@ test("a deliberate retry after pre-pane failure creates one fresh launch", async
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-deliberate-retry-"));
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   let tasks: BoardTask[] = [{
-    id: "4f337f38-48dd-44af-bf15-5b544ce3ea14",
+    id: "4f337f38-48dd-04af-bf15-5b544ce3ea14",
     project: "live-log-viewer-next",
     status: "inbox",
     text: "Retry release ownership",
@@ -268,7 +268,7 @@ test("a deliberate retry after pre-pane failure creates one fresh launch", async
     },
   } as Parameters<typeof POST.withDependencies>[2];
   const request = () => new NextRequest(
-    "http://127.0.0.1/api/tasks/4f337f38-48dd-44af-bf15-5b544ce3ea14/spawn",
+    "http://127.0.0.1/api/tasks/4f337f38-48dd-04af-bf15-5b544ce3ea14/spawn",
     {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
@@ -296,7 +296,7 @@ test("concurrent and lost-response replays actuate each deliberate gesture once"
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-gesture-replay-"));
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   let tasks: BoardTask[] = [{
-    id: "4f337f38-48dd-44af-bf15-5b544ce3ea15",
+    id: "4f337f38-48dd-04af-bf15-5b544ce3ea15",
     project: "live-log-viewer-next",
     status: "inbox",
     text: "Replay one launch gesture",
@@ -337,7 +337,7 @@ test("concurrent and lost-response replays actuate each deliberate gesture once"
   } as Parameters<typeof POST.withDependencies>[2];
   const context = { params: Promise.resolve({ id: tasks[0]!.id }) };
   const request = (clientAttemptId: string) => new NextRequest(
-    "http://127.0.0.1/api/tasks/4f337f38-48dd-44af-bf15-5b544ce3ea15/spawn",
+    "http://127.0.0.1/api/tasks/4f337f38-48dd-04af-bf15-5b544ce3ea15/spawn",
     {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
@@ -386,7 +386,7 @@ test("retryOfLaunchId relaunches a pathless failed assignment with a fresh attem
   const sessionId = crypto.randomUUID();
   const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
   let tasks: BoardTask[] = [{
-    id: "b7f1c2d3-89c5-4064-9118-51661c4f0334",
+    id: "b7f1c2d3-89c5-0064-9118-51661c4f0334",
     project: "live-log-viewer-next",
     status: "inbox",
     text: "Own issue #334",
@@ -501,7 +501,7 @@ test("process stop after pane settlement replays one launch into one task pipeli
   const sessionId = crypto.randomUUID();
   const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
   let tasks: BoardTask[] = [{
-    id: "f4370000-89c5-4064-9118-51661c4f0437",
+    id: "f4370000-89c5-0064-9118-51661c4f0437",
     project: "live-log-viewer-next",
     status: "inbox",
     text: "Recover one durable task pipeline",

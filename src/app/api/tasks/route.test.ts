@@ -40,7 +40,7 @@ test("GET derives pipelineIds including closed history and filters stale task id
     stages: [{
       id: "run",
       kind: "run",
-      prompt: "run",
+      "prompt": "run",
       next: null,
       effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null },
     }],

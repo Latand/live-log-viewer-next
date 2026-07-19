@@ -57,7 +57,7 @@ test("an unlinked task produces a minimal builder pipeline request", () => {
       model: "gpt-5.6-sol",
       effort: "high",
       access: "read-write",
-      prompt: "{{task}}",
+      "prompt": "{{task}}",
       next: null,
     }],
   });

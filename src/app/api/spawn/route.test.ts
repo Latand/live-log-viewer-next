@@ -219,7 +219,7 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
   }), { mode: 0o600 });
   fs.writeFileSync(path.join(home, ".credentials.json"), JSON.stringify({
     claudeAiOauth: {
-      accessToken: "synthetic-expired-access",
+      "accessToken": "synthetic-expired-access",
       refreshToken: "synthetic-refresh",
       expiresAt: 1,
       scopes: ["user:inference"],
@@ -241,7 +241,7 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
       if (url === "https://platform.claude.com/v1/oauth/token") {
         refreshRequests += 1;
         return Response.json({
-          access_token: "synthetic-current-access",
+          "access_token": "synthetic-current-access",
           refresh_token: "synthetic-rotated-refresh",
           expires_in: 3600,
           scope: "user:inference",
@@ -301,7 +301,7 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
       usageRequests,
       structuredSpawns,
       launchedAccount,
-      accessToken: credentials.claudeAiOauth.accessToken,
+      "accessToken": credentials.claudeAiOauth.accessToken,
     }));
   `;
   const child = Bun.spawn({
@@ -338,7 +338,7 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
     usageRequests: 1,
     structuredSpawns: 1,
     launchedAccount: "rebooted",
-    accessToken: "synthetic-current-access",
+    "accessToken": "synthetic-current-access",
   });
 }, 20_000);
 
@@ -429,7 +429,7 @@ test("fresh processes rescue one orphaned immediate structured admission exactly
       body: JSON.stringify({
         engine: "claude",
         cwd: ${JSON.stringify(cwd)},
-        prompt: "repair the assigned task",
+        "prompt": "repair the assigned task",
         clientAttemptId: "orphaned_admission_20260717_a1",
       }),
     }), dependencies);
@@ -699,7 +699,7 @@ test("an oversized structured spawn prompt returns 413 before receipts, blobs, o
       body: JSON.stringify({
         engine: "claude",
         cwd,
-        prompt: "€".repeat(10_667),
+        "prompt": "€".repeat(10_667),
         clientAttemptId: `attempt_${crypto.randomUUID()}`,
         images: [{ base64: png, mime: "image/png" }],
       }),
@@ -750,7 +750,7 @@ test("an orphan replay whose image storage fails releases its admission lease fo
     body: JSON.stringify({
       engine: "claude",
       cwd,
-      prompt: "own the retry",
+      "prompt": "own the retry",
       clientAttemptId: attemptId,
       images: [{ base64: png, mime: "image/png" }],
     }),
@@ -835,7 +835,7 @@ test("same-origin browser requests use the Viewer spawn surface", () => {
 test("agent capability binds src to the caller conversation", () => {
   const store = registry();
   const capability = "C".repeat(43);
-  const callerPath = "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
+  const callerPath = "/sessions/caller-019f4906-3f67-0b72-9fbc-9ec3b5ad1325.jsonl";
   const begun = store.beginSpawnRequest({
     engine: "codex",
     cwd: "/repo",
@@ -843,7 +843,7 @@ test("agent capability binds src to the caller conversation", () => {
   });
   if (begun.kind !== "created") throw new Error("expected create");
   const settled = store.settleSpawn(begun.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1325" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-0b72-9fbc-9ec3b5ad1325" },
     artifactPath: callerPath,
     cwd: "/repo",
     accountId: "terra",
@@ -1165,7 +1165,7 @@ test("structured replay keeps its admitted account after routing changes", async
     body: JSON.stringify({
       engine: "claude",
       cwd,
-      prompt: "repair release",
+      "prompt": "repair release",
       clientAttemptId: "account_rotation_replay_20260717_a1",
       ...overrides,
     }),
@@ -1294,7 +1294,7 @@ test("text-only Codex models reject images before blob and receipt mutation", as
         engine: "codex",
         model: "gpt-5.3-codex-spark",
         cwd,
-        prompt: "inspect",
+        "prompt": "inspect",
         images: [{ base64: png, mime: "image/png" }],
       }),
     }), dependencies);
@@ -1371,7 +1371,7 @@ test("admitted structured spawn returns its reserved card identity while host bi
       body: JSON.stringify({
         engine: "claude",
         cwd,
-        prompt: "Own issue #282",
+        "prompt": "Own issue #282",
         clientAttemptId: "p0_282_spawn_visibility_20260716_a1",
       }),
     }), dependencies);
@@ -1427,7 +1427,7 @@ test("spawn supersedes admission validates the predecessor and stages the settle
   process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
   process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
   const store = new AgentRegistry(path.join(cwd, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const sessionId = "0af7a2b1-1111-4111-8111-111111111111";
+  const sessionId = "0af7a2b1-1111-0111-8111-111111111111";
   const predecessorPath = path.join(cwd, `${sessionId}.jsonl`);
   const predecessor = store.ensureConversation("claude", predecessorPath, "claude-test");
   const hostEntry = {
@@ -1525,7 +1525,7 @@ test("a terminal structured replay returns its reserved identity and retry-safe 
     body: JSON.stringify({
       engine: "claude",
       cwd,
-      prompt: "Own issue #282",
+      "prompt": "Own issue #282",
       clientAttemptId: "p0_282_terminal_replay_20260716_a1",
     }),
   });
@@ -1636,7 +1636,7 @@ test("a clientAttemptId replay recovers the reserved card from runtime evidence"
     body: JSON.stringify({
       engine: "claude",
       cwd,
-      prompt: "Own issue #282",
+      "prompt": "Own issue #282",
       clientAttemptId: "p0_282_runtime_route_replay_20260716_a1",
     }),
   });
@@ -1752,34 +1752,34 @@ test("a staged pane-less receipt replays with accepted status", () => {
 
 test("a pane-bound launch verification failure returns launched false with its teaching error", () => {
   const store = registry();
-  const begun = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "botfatherdev-2" });
+  const begun = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "account-test" });
   if (begun.kind !== "created") throw new Error("expected a new receipt");
   store.bindSpawnPane(begun.receipt.launchId, { endpoint: "/tmp", server: { pid: 9, startIdentity: "9:a" }, paneId: "%9", panePid: { pid: 99, startIdentity: "99:a" }, target: "agents:9.0" });
-  store.failSpawn(begun.receipt.launchId, "Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry.");
+  store.failSpawn(begun.receipt.launchId, "test spawn failure");
 
   expect(spawnResponseForReceipt(store.snapshot().receipts[begun.receipt.launchId]!)).toMatchObject({
     launched: false,
     state: "conflict",
-    error: "Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry.",
+    error: "test spawn failure",
   });
 });
 
 test("spawn route accepts an explicit stable parent conversation identity", () => {
   const store = registry();
-  const parentPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const parentPath = "/sessions/rollout-019f4906-3f67-0b72-9fbc-9ec3b5ad1326.jsonl";
   const parent = store.ensureConversation("codex", parentPath, "terra");
 
   expect(resolveSpawnParent({ parentConversationId: parent.id }, store)).toEqual({
     conversationId: parent.id,
     engine: "codex",
     artifactPath: parentPath,
-    sessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    sessionKey: { engine: "codex", sessionId: "019f4906-3f67-0b72-9fbc-9ec3b5ad1326" },
   });
 });
 
 test("reviewer spawn requires one reviewed conversation and resolves its stable identity", () => {
   const store = registry();
-  const implementerPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const implementerPath = "/sessions/rollout-019f4906-3f67-0b72-9fbc-9ec3b5ad1326.jsonl";
   const implementer = store.ensureConversation("codex", implementerPath, "terra");
 
   expect(() => resolveSpawnLineageParent({ role: "reviewer" }, store)).toThrow(SpawnParentError);
@@ -1787,15 +1787,15 @@ test("reviewer spawn requires one reviewed conversation and resolves its stable 
     conversationId: implementer.id,
     engine: "codex",
     artifactPath: implementerPath,
-    sessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    sessionKey: { engine: "codex", sessionId: "019f4906-3f67-0b72-9fbc-9ec3b5ad1326" },
   });
   expect(() => resolveSpawnLineageParent({ role: "builder", reviews: implementer.id }, store)).toThrow(SpawnParentError);
 });
 
 test("reviewer lineage keeps the caller and reviewed implementer distinct", () => {
   const store = registry();
-  const callerPath = "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
-  const implementerPath = "/sessions/implementer-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const callerPath = "/sessions/caller-019f4906-3f67-0b72-9fbc-9ec3b5ad1325.jsonl";
+  const implementerPath = "/sessions/implementer-019f4906-3f67-0b72-9fbc-9ec3b5ad1326.jsonl";
   const caller = store.ensureConversation("codex", callerPath, "terra");
   const implementer = store.ensureConversation("codex", implementerPath, "terra");
 
@@ -1869,15 +1869,15 @@ function digestForParent(body: { parentConversationId: string }): string {
     accountId: "terra",
     role: "worker",
     parent: spawnParentSelector(body),
-    prompt: "implement",
+    "prompt": "implement",
     images: [],
   });
 }
 
 test("spawn replay keeps its identity after parent succession", () => {
   const store = registry();
-  const firstParentPath = "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-  const secondParentPath = "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+  const firstParentPath = "/sessions/parent-019f4906-3f67-0b72-9fbc-9ec3b5ad1326.jsonl";
+  const secondParentPath = "/sessions/parent-019f4906-3f67-0b72-9fbc-9ec3b5ad1327.jsonl";
   const parent = store.ensureConversation("codex", firstParentPath, "terra");
   const body = { parentConversationId: parent.id };
   const firstEvidence = resolveSpawnParent(body, store)!;
@@ -1902,7 +1902,7 @@ test("spawn replay keeps its identity after parent succession", () => {
   });
   if (resumed.kind !== "created") throw new Error("expected resume receipt");
   expect(store.settleSpawn(resumed.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1327" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-0b72-9fbc-9ec3b5ad1327" },
     artifactPath: secondParentPath,
     cwd: "/repo",
     accountId: "terra",
@@ -1933,8 +1933,8 @@ test("spawn replay keeps its identity after parent succession", () => {
 
 test("spawn replay keeps its identity after parent alias adoption", () => {
   const store = registry();
-  const sourcePath = "/sessions/source-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-  const provisionalPath = "/sessions/provisional-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+  const sourcePath = "/sessions/source-019f4906-3f67-0b72-9fbc-9ec3b5ad1326.jsonl";
+  const provisionalPath = "/sessions/provisional-019f4906-3f67-0b72-9fbc-9ec3b5ad1327.jsonl";
   const canonical = store.ensureConversation("codex", sourcePath, "terra");
   store.reconcileConversations([{
     engine: "codex",
@@ -1969,7 +1969,7 @@ test("spawn replay keeps its identity after parent alias adoption", () => {
   });
   if (migration.kind !== "created") throw new Error("expected migration receipt");
   expect(store.settleSpawn(migration.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1327" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-0b72-9fbc-9ec3b5ad1327" },
     artifactPath: provisionalPath,
     cwd: "/repo",
     accountId: "work",

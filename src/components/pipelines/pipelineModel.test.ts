@@ -59,7 +59,7 @@ function stage(id: string, kind: PipelineStage["kind"] = "run", roleId?: string)
     id,
     kind,
     ...(roleId ? { role: { roleId: roleId as PipelineStage["role"] extends undefined ? never : NonNullable<PipelineStage["role"]>["roleId"] } } : {}),
-    prompt: "",
+    "prompt": "",
     next: null,
     effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: kind === "review-loop" ? "read-only" : "read-write", promptScaffold: null },
   } as PipelineStage;
@@ -613,7 +613,7 @@ describe("draftStagesToInput", () => {
     model: "",
     effort: "",
     access: "read-write",
-    prompt: "do it",
+    "prompt": "do it",
     roleParams: {},
     ...over,
   });
@@ -1048,7 +1048,7 @@ describe("stageOverrideBody sends only changed fields (issue #118 Finding 4)", (
       id: "build",
       kind: "run",
       role: { roleId: "builder" },
-      prompt: "Build it",
+      "prompt": "Build it",
       next: null,
       effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", promptScaffold: null },
     } as PipelineStage;
@@ -1062,7 +1062,7 @@ describe("stageOverrideBody sends only changed fields (issue #118 Finding 4)", (
   test("an edited prompt travels; an unchanged one is omitted (issue #221 §5)", () => {
     expect(stageOverrideBody(editable(), { ...base, prompt: "{{task}}\n\nBuild it well" })).toEqual({
       stageId: "build",
-      prompt: "{{task}}\n\nBuild it well",
+      "prompt": "{{task}}\n\nBuild it well",
     });
   });
 

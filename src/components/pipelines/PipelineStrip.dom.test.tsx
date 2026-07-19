@@ -50,7 +50,7 @@ function draftPipeline(): Pipeline {
       id: "build",
       kind: "run",
       role: { roleId: "builder" },
-      prompt: "{{task}}",
+      "prompt": "{{task}}",
       next: null,
       effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-5.6-sol", effort: "high", access: "read-write", promptScaffold: null },
     }],
@@ -92,7 +92,7 @@ test("desktop history opens both durable bindings from one logical review round 
   const stage = {
     id: "review",
     kind: "review-loop",
-    prompt: "",
+    "prompt": "",
     next: null,
     effectiveRole: { roleId: "reviewer", engine: "codex", model: "gpt-5.6-sol", effort: "xhigh", access: "read-only", promptScaffold: null },
   } as const;

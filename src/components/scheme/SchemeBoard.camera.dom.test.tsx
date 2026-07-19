@@ -76,7 +76,7 @@ function pipeline(index: number): Pipeline {
     stages: [{
       id: "build",
       kind: "run",
-      prompt: "",
+      "prompt": "",
       next: null,
       effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null },
     }],

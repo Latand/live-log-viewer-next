@@ -494,7 +494,7 @@ test("a fresh task launch replaces one failed pending creation intent", async ()
     launchId,
     conversationId: "conversation_stage_1",
     sessionId: null,
-    transcript: null,
+    "transcript": null,
     paneId: null,
   } : null;
 
@@ -1142,7 +1142,7 @@ test("restart after a bare spawn reservation parks instead of waiting forever", 
     launchId: "launch-reserved",
     conversationId: "conversation_reserved",
     sessionId: null,
-    transcript: null,
+    "transcript": null,
     paneId: null,
   });
   savePipelines([pipeline]);
@@ -1658,7 +1658,7 @@ test("pipeline 8fa12bb4 creates review flow from a terminal builder's durable id
       launchId: "launch-1",
       conversationId: "conversation_stage_1",
       sessionId: "session-1",
-      transcript: "/codex/stage-1.jsonl",
+      "transcript": "/codex/stage-1.jsonl",
       paneId: null,
     };
   };
@@ -2128,7 +2128,7 @@ test("override-stage edits every stage while a pipeline is a draft", async () =>
     const updated = await patchPipeline(created.pipeline!.id, {
       action: "override-stage",
       stageId: stage.id,
-      prompt: `Edited ${stage.id}`,
+      "prompt": `Edited ${stage.id}`,
     }, ports);
     expect(updated.error).toBeUndefined();
   }
@@ -2436,7 +2436,7 @@ test("a completed stage's output is persisted once and relayed exactly once (#35
   expect(current.cursor).toEqual({ stageId: "build", state: "pending", input: "plan output", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
 
   /* Sibling-record evolution after the advance must not change the delivered
-     prompt: the persisted input is authoritative, not a positional re-scan. */
+     The persisted prompt input remains authoritative across cursor movement. */
   current.runs[0]!.attempts[0]!.output = "mutated later";
   savePipelines([current]);
   await tickPipelines([], h.ports);

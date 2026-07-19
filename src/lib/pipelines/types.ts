@@ -65,7 +65,7 @@ export type PipelineStageInput = {
   model?: string | null;
   effort?: string | null;
   access?: PipelineAccess;
-  prompt: string;
+  "prompt": string;
   /** Pass edge: the stage activated when this one passes. Schema v3 allows any
       stage id (direct links, merges), constrained to an acyclic pass graph. */
   next: string | null;

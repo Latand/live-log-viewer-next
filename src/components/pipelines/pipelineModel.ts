@@ -656,7 +656,7 @@ export type DraftStage = {
   model: string;
   effort: string;
   access: PipelineAccess;
-  prompt: string;
+  "prompt": string;
   roleParams: Record<string, string | number>;
   /** The operator edited engine/model/effort by hand, so role/param autofill must
       no longer clobber the runtime. Selecting a role preserves the pin (design
@@ -836,7 +836,7 @@ export function draftStagesToInput(drafts: DraftStage[]): PipelineStageInput[] {
           }
         : {}),
       ...(draft.kind === "review-loop" ? {} : { access: draft.access }),
-      prompt: draft.prompt,
+      "prompt": draft.prompt,
       next: ids[index + 1] ?? null,
     };
   });
@@ -915,7 +915,7 @@ export function templateStageInputs(template: PipelineTemplate): PipelineStageIn
       model: "",
       effort: "",
       access: stage.access,
-      prompt: stage.prompt,
+      "prompt": stage.prompt,
       roleParams: {},
     })),
   );
