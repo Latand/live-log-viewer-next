@@ -2,7 +2,8 @@
   "name": "agent-log-viewer",
   "version": "0.11.7",
   "bin": {
-    "agent-log-viewer": "bin/cli.mjs"
+    "agent-log-viewer": "bin/cli.mjs",
+    "agent-log-viewer-mcp": "bin/mcp-server.mjs"
   },
   "files": [
     "bin",
@@ -17,7 +18,8 @@
   ],
   "scripts": {
     "dev": "NODE_ENV=development next dev --webpack --hostname 127.0.0.1",
-    "build": "next build --webpack",
+    "build": "next build --webpack && bun run build:mcp",
+    "build:mcp": "bun scripts/build-mcp.ts",
     "demo:capture": "bun scripts/demo-capture.ts",
     "demo:motion": "bun scripts/demo-motion.ts",
     "start": "next start",
@@ -30,6 +32,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
     "entities": "^7.0.1",
     "highlight.js": "^11.11.1",
     "lucide-react": "^1.23.0",
@@ -37,7 +40,8 @@
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
 import { isTaskAttachment } from "./attachments";
 import type { RecentCreate } from "./commands";
@@ -160,35 +161,39 @@ export function loadTasksFile(filePath = TASKS_FILE): TasksFileState {
 }
 
 export function saveTasks(tasks: BoardTask[], filePath = TASKS_FILE): void {
-  /* Preserve the idempotency receipts a tasks-only save (patch/delete/send)
-     doesn't touch, so a create replay still resolves after them. */
-  const { recentCreates } = loadTasksFile(filePath);
-  saveTasksFile({ tasks, recentCreates }, filePath);
+  withFileTransactionSync(filePath, "task state is busy", () => {
+    /* Preserve the idempotency receipts a tasks-only save (patch/delete/send)
+       doesn't touch, so a create replay still resolves after them. */
+    const { recentCreates } = loadTasksFile(filePath);
+    atomicWriteJson(filePath, recentCreates.length ? { tasks, recentCreates } : { tasks });
+  });
 }
 
 export function saveTasksFile(state: TasksFileState, filePath = TASKS_FILE): void {
-  atomicWriteJson(filePath, state.recentCreates.length ? { tasks: state.tasks, recentCreates: state.recentCreates } : { tasks: state.tasks });
+  withFileTransactionSync(filePath, "task state is busy", () => {
+    atomicWriteJson(filePath, state.recentCreates.length ? { tasks: state.tasks, recentCreates: state.recentCreates } : { tasks: state.tasks });
+  });
 }
 
 /**
- * Serialized read-modify-write over the tasks file — the only sanctioned way
- * to persist a mutation. The whole load→transform→save runs in one
- * synchronous block, and Node yields to other request handlers only at await
- * points, so a handler can never save a snapshot that predates another
- * handler's write. Whole-file saves built on separate `loadTasks()` calls
- * could: files-route reconciliation racing a PATCH would resurrect the old
- * task list. The callback must stay synchronous — do the slow async work
- * (message delivery, agent spawn, fs scans) first, then fold its outcome
- * into the fresh snapshot here. Return `tasks: undefined` to skip the write
- * (validation failures, clean reconciles).
+ * Process-shared read-modify-write over the tasks file. The callback must stay
+ * synchronous: complete slow async work first, then fold its result into the
+ * fresh snapshot here. Return `tasks: undefined` to skip the write.
  */
 export function mutateTasks<R>(
   mutate: (tasks: BoardTask[]) => { tasks: BoardTask[] | undefined; result: R },
   filePath = TASKS_FILE,
 ): R {
-  const outcome = mutate(loadTasks(filePath));
-  if (outcome.tasks) saveTasks(outcome.tasks, filePath);
-  return outcome.result;
+  return withFileTransactionSync(filePath, "task state is busy", () => {
+    const current = loadTasksFile(filePath);
+    const outcome = mutate(current.tasks);
+    if (outcome.tasks) {
+      atomicWriteJson(filePath, current.recentCreates.length
+        ? { tasks: outcome.tasks, recentCreates: current.recentCreates }
+        : { tasks: outcome.tasks });
+    }
+    return outcome.result;
+  });
 }
 
 /**
@@ -201,7 +206,13 @@ export function mutateTasksFile<R>(
   mutate: (state: TasksFileState) => { state: TasksFileState | undefined; result: R },
   filePath = TASKS_FILE,
 ): R {
-  const outcome = mutate(loadTasksFile(filePath));
-  if (outcome.state) saveTasksFile(outcome.state, filePath);
-  return outcome.result;
+  return withFileTransactionSync(filePath, "task state is busy", () => {
+    const outcome = mutate(loadTasksFile(filePath));
+    if (outcome.state) {
+      atomicWriteJson(filePath, outcome.state.recentCreates.length
+        ? { tasks: outcome.state.tasks, recentCreates: outcome.state.recentCreates }
+        : { tasks: outcome.state.tasks });
+    }
+    return outcome.result;
+  });
 }
