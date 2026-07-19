@@ -219,7 +219,7 @@ const delivered = (body: SendBody) => ({
   },
 });
 
-test("unhosted structured composer sends through durable recovery admission", async () => {
+test("text-only unhosted structured composer sends through durable recovery admission", async () => {
   structuredView.session.host = "unhosted";
   const sends: SendBody[] = [];
   mockWire(sends, [delivered]);
@@ -237,7 +237,7 @@ test("unhosted structured composer sends through durable recovery admission", as
   await act(async () => root.unmount());
 });
 
-test("dead structured image-only submission keeps every selected image off the unsafe recovery path", async () => {
+test("dead structured image-only input stays removable and avoids failing recovery", async () => {
   const sends: SendBody[] = [];
   mockWire(sends, [() => ({ status: 503, json: { error: "recovery failed before image admission" } })]);
 
@@ -255,16 +255,25 @@ test("dead structured image-only submission keeps every selected image off the u
   const send = host.querySelector('button[type="submit"]') as HTMLButtonElement;
   expect(imagePicker.disabled).toBe(true);
   expect(send.disabled).toBe(true);
+  expect(host.textContent).toContain(translate("en", "composer.imagesBlockedDuringRecovery"));
 
   await settle(() => composerControls(host).submit());
   expect(sends).toHaveLength(0);
   expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(2);
+
+  const remove = host.querySelector(`[aria-label="${translate("en", "img.removeAria", { n: 1 })}"]`) as HTMLButtonElement;
+  expect(remove).toBeTruthy();
+  await settle(() => remove.click());
+  expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(1);
+  expect(sends).toHaveLength(0);
   await act(async () => root.unmount());
 });
 
-test("dead structured text-plus-image submission preserves the complete draft with image-specific recovery guidance", async () => {
+test("dead structured text plus images stays local and retries after hosting returns", async () => {
   const sends: SendBody[] = [];
-  mockWire(sends, [() => ({ status: 503, json: { error: "recovery failed before image admission" } })]);
+  mockWire(sends, [(body) => structuredView.session.host === "unhosted"
+    ? { status: 503, json: { error: "recovery failed before image admission" } }
+    : delivered(body)]);
 
   const { host, root } = await renderInto(<TmuxComposer file={file} />);
   const { type } = composerControls(host);
@@ -283,6 +292,23 @@ test("dead structured text-plus-image submission preserves the complete draft wi
     .toBe("keep this text with both screenshots");
   expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(2);
   expect(host.textContent).toContain(translate("en", "composer.imagesBlockedDuringRecovery"));
+
+  structuredView.session.host = "hosted";
+  await act(async () => {
+    root.render(<TmuxComposer file={file} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const recoveredSend = host.querySelector('button[type="submit"]') as HTMLButtonElement;
+  expect(recoveredSend.disabled).toBe(false);
+  await settle(() => composerControls(host).submit());
+
+  expect(sends).toHaveLength(1);
+  expect(sends[0]).toMatchObject({
+    text: "keep this text with both screenshots",
+    images: [{ mime: "image/png" }, { mime: "image/png" }],
+  });
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+  expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(0);
   await act(async () => root.unmount());
 });
 
