@@ -59,6 +59,80 @@
       ],
       "createdAt": "2100-01-02T11:19:00.000Z",
       "updatedAt": "2100-01-02T11:20:30.000Z"
+    },
+    {
+      "id": "task-kanban-now",
+      "project": "kanban",
+      "status": "assigned",
+      "text": "Wire the readiness strip #290\nHook the five sections into the dashboard footer.",
+      "placement": "pinned",
+      "pos": { "x": 760, "y": 120 },
+      "assignments": [
+        {
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-kanban/99999999-9999-4999-8999-999999999999.jsonl",
+          "panePid": null,
+          "state": "delivered",
+          "error": null,
+          "at": "2100-01-02T11:31:00.000Z",
+          "accountId": "default",
+          "engine": "claude"
+        }
+      ],
+      "createdAt": "2100-01-02T11:30:00.000Z",
+      "updatedAt": "2100-01-02T11:31:00.000Z"
+    },
+    {
+      "id": "task-kanban-review",
+      "project": "kanban",
+      "status": "assigned",
+      "text": "Ship the review evidence #290\nKeep the APPROVE verdict linked to the deck.",
+      "placement": "pinned",
+      "pos": { "x": 760, "y": 340 },
+      "assignments": [
+        {
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-kanban/88888888-8888-4888-8888-888888888888.jsonl",
+          "panePid": null,
+          "state": "delivered",
+          "error": null,
+          "at": "2100-01-02T11:30:30.000Z",
+          "accountId": "default",
+          "engine": "claude"
+        }
+      ],
+      "createdAt": "2100-01-02T11:29:00.000Z",
+      "updatedAt": "2100-01-02T11:30:30.000Z"
+    },
+    {
+      "id": "task-kanban-blocked",
+      "project": "kanban",
+      "status": "blocked",
+      "text": "Decide the legend copy #291\nOperator call on the section wording.",
+      "placement": "pinned",
+      "pos": { "x": 1000, "y": 120 },
+      "assignments": [],
+      "createdAt": "2100-01-02T11:28:00.000Z",
+      "updatedAt": "2100-01-02T11:28:30.000Z"
+    },
+    {
+      "id": "task-kanban-planned",
+      "project": "kanban",
+      "status": "inbox",
+      "text": "Draft the rollout checklist #292\nBacklog card without a board position.",
+      "placement": "unplaced",
+      "assignments": [],
+      "createdAt": "2100-01-02T11:27:00.000Z",
+      "updatedAt": "2100-01-02T11:27:30.000Z"
+    },
+    {
+      "id": "task-kanban-done",
+      "project": "kanban",
+      "status": "done",
+      "text": "Land the tokens refresh\nShipped before the readiness work started.",
+      "placement": "pinned",
+      "pos": { "x": 1000, "y": 340 },
+      "assignments": [],
+      "createdAt": "2100-01-02T11:26:00.000Z",
+      "updatedAt": "2100-01-02T11:26:30.000Z"
     }
   ]
 }

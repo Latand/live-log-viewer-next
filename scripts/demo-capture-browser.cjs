@@ -148,9 +148,9 @@ async function assertPngFrame(png, shot) {
   return metrics;
 }
 
-async function installDeterministicPage(page, fixedIso) {
+async function installDeterministicPage(page, fixedIso, locale) {
   const fixedMs = Date.parse(fixedIso);
-  await page.evaluateOnNewDocument((captureTime) => {
+  await page.evaluateOnNewDocument((captureTime, captureLocale) => {
     const NativeDate = Date;
     class CaptureDate extends NativeDate {
       constructor(...args) {
@@ -163,9 +163,9 @@ async function installDeterministicPage(page, fixedIso) {
     Object.defineProperty(globalThis, "IntersectionObserver", { configurable: true, value: undefined });
     localStorage.clear();
     sessionStorage.clear();
-    localStorage.setItem("llv_lang", "en");
+    localStorage.setItem("llv_lang", captureLocale);
     localStorage.setItem("llvSound", "0");
-  }, fixedMs);
+  }, fixedMs, locale);
 }
 
 function shotHash(shot) {
@@ -185,7 +185,7 @@ async function render(browser, config, shot, capturePng) {
   });
   await page.setViewport({ ...shot.viewport, deviceScaleFactor: 1 });
   await page.emulateTimezone("UTC");
-  await installDeterministicPage(page, config.fixedIso);
+  await installDeterministicPage(page, config.fixedIso, shot.locale || "en");
   await page.goto(`${config.baseUrl}/`, { waitUntil: "networkidle2", timeout: 60_000 });
   await page.addStyleTag({ content: `
     *, *::before, *::after {
@@ -250,6 +250,37 @@ async function render(browser, config, shot, capturePng) {
     });
     await page.waitForSelector("[data-review-deck-collapsed]", { timeout: 30_000 });
   }
+  if (shot.id === "readiness-kanban" || shot.id === "readiness-kanban-mobile") {
+    // The strip boots collapsed (the phone additionally folds it behind the
+    // bottom shelf); expand the shelf, the strip, then the two sections whose
+    // chips carry the link evidence — deterministic clicks on stable testids.
+    if (shot.id === "readiness-kanban-mobile") {
+      await page.waitForSelector('[data-testid="mobile-bottom-shelf"] button[aria-expanded]', { timeout: 30_000 });
+      await page.evaluate(() => {
+        const shelf = document.querySelector('[data-testid="mobile-bottom-shelf"] button[aria-expanded]');
+        if (!(shelf instanceof HTMLElement)) throw new Error("missing mobile shelf disclosure");
+        shelf.click();
+      });
+    }
+    await page.waitForSelector('[data-testid="task-readiness"] button[aria-expanded]', { timeout: 30_000 });
+    await page.evaluate(() => {
+      const header = document.querySelector('[data-testid="task-readiness"] button[aria-expanded]');
+      if (!(header instanceof HTMLElement)) throw new Error("missing readiness strip header");
+      header.click();
+    });
+    await page.waitForSelector('[data-readiness-section="now"] > button', { timeout: 30_000 });
+    // The 390px strip scrolls internally at ~384px; opening both evidence
+    // sections would push the lower rows out of the gated frame, so the
+    // phone shot opens only the «Зараз» chips.
+    const sections = shot.id === "readiness-kanban-mobile" ? ["now"] : ["now", "review"];
+    await page.evaluate((keys) => {
+      for (const key of keys) {
+        const row = document.querySelector(`[data-readiness-section="${key}"] > button`);
+        if (!(row instanceof HTMLElement)) throw new Error(`missing readiness row ${key}`);
+        row.click();
+      }
+    }, sections);
+  }
   if (shot.id === "chat-feed") {
     // The compact scheme card renders the same transcript in miniature, so the
     // command group must be toggled inside the expanded dialog specifically.
@@ -275,7 +306,7 @@ async function render(browser, config, shot, capturePng) {
   }
   if (shot.id !== "overview-board") {
     await page.evaluate(() => {
-      const close = document.querySelector('button[aria-label="Close the notification"]');
+      const close = document.querySelector('button[aria-label="Close the notification"], button[aria-label="Закрити сповіщення"]');
       if (close instanceof HTMLElement) close.click();
     });
   }

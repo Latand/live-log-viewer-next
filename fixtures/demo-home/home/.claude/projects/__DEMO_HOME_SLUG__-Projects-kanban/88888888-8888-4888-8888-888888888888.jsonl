@@ -1,0 +1,2 @@
+{"type":"user","uuid":"d1000000-0000-4000-8000-000000000001","timestamp":"2100-01-02T11:30:00.000Z","cwd":"/demo/Projects/kanban","message":{"role":"user","content":"Ship the review evidence for the readiness board and keep the verdict linked."}}
+{"type":"assistant","uuid":"d1000000-0000-4000-8000-000000000002","timestamp":"2100-01-02T11:30:20.000Z","cwd":"/demo/Projects/kanban","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Builder evidence is in place; the review round returned an APPROVE verdict."}]}}

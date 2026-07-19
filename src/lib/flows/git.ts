@@ -41,6 +41,33 @@ export function githubRepositoryFromRemote(remote: string): string | null {
   }
 }
 
+/* ── Project-root → GitHub repository (issue #290 readiness issue links) ── */
+
+const REPOSITORY_CACHE_TTL_MS = 10 * 60_000;
+const repositoryCache = new Map<string, { repository: string | null; at: number }>();
+
+/** GitHub `owner/repo` of a project root's origin remote. Cached per root and
+    bounded by a 2 s git timeout, so a slow or missing repository degrades to
+    `null` (plain-text issue chips) without ever blocking the files response. */
+export function repositoryForProjectRoot(root: string, nowMs = Date.now()): string | null {
+  const cached = repositoryCache.get(root);
+  if (cached && nowMs - cached.at < REPOSITORY_CACHE_TTL_MS) return cached.repository;
+  let repository: string | null = null;
+  try {
+    const remote = spawnSync("git", ["remote", "get-url", "origin"], { cwd: root, encoding: "utf8", timeout: 2_000 });
+    if (remote.status === 0) repository = githubRepositoryFromRemote(remote.stdout);
+  } catch {
+    repository = null;
+  }
+  repositoryCache.set(root, { repository, at: nowMs });
+  return repository;
+}
+
+/** Test seam: drop the per-root repository cache. */
+export function resetRepositoryCache(): void {
+  repositoryCache.clear();
+}
+
 export function resolveFlowMergeIdentity(cwd: string): { repository: string; headRef: string; headSha: string } | null {
   const remote = spawnSync("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8" });
   const branch = spawnSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" });

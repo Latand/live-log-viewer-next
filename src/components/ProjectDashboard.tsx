@@ -35,7 +35,7 @@ import { launchHistoryFor } from "./launchHistoryModel";
 import { LaunchHistory } from "./LaunchHistory";
 import { isPlacedTask } from "./scheme/taskGeometry";
 import { loadExpandedTasks, partitionTaskStacks, persistExpandedTasks } from "./scheme/taskStacks";
-import { TaskStacksStrip } from "./TaskStacksStrip";
+import { TaskReadinessStrip } from "./TaskReadinessStrip";
 import { WorkerStacks } from "./WorkerStacks";
 import { MobileBottomShelf } from "./MobileBottomShelf";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
@@ -1538,12 +1538,23 @@ export function ProjectDashboard({
           beside a single disclosure that folds both strips. Desktop renders the
           two strips directly, side by side. */}
       {boardReady && (() => {
-        const stackedTaskTotal = taskPartition.stacks.reduce((sum, stack) => sum + stack.items.length, 0);
-        const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0) + launchHistory.length + stackedTaskTotal;
+        /* Readiness strip totals cover EVERY project task (issue #290) — not
+           just the canvas-folded subset — so the shelf badge stays truthful. */
+        const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0) + launchHistory.length + projectTasks.length;
         const quietTotal = !hasArchiveNodes ? residual.length : 0;
         const strips = (
           <>
-            <TaskStacksStrip stacks={taskPartition.stacks} onOpen={(task) => openTaskOnBoard(task.id)} />
+            <TaskReadinessStrip
+              tasks={projectTasks}
+              files={files}
+              pipelines={pipelines}
+              flows={deckFlows}
+              conversationAliases={conversationAliases}
+              repository={projectCatalogEntries.find((entry) => entry.project === project)?.repository ?? null}
+              onOpenTask={openTask}
+              onPlaceOnMap={isMobile ? undefined : placeOnMap}
+              onOpenFile={openSwitchboardFile}
+            />
             <LaunchHistory items={launchHistory} onRetry={retryLaunch} />
             <WorkerStacks stacks={workerStacks} files={files} flows={deckFlows} pipelines={pipelines} onSelect={openSwitchboardFile} onExpandGroup={expandReviewGroup} />
             {!hasArchiveNodes && residual.length ? (

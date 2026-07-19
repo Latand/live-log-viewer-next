@@ -9,6 +9,7 @@ import { agentRegistry, conversationLookupFromSnapshot, supersedenceChainTail } 
 import { preallocatedStructuredSpawnCards } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
+import { repositoryForProjectRoot } from "@/lib/flows/git";
 import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles } from "@/lib/displayNames";
@@ -502,6 +503,11 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
   markTiming("files-project-rate-limits");
   const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
+  /* GitHub repository identity for readiness issue links (issue #290): cached
+     per project root with a bounded git probe, nullable on any failure. */
+  for (const entry of effectiveProjectCatalog) {
+    entry.repository = entry.projectRoot ? repositoryForProjectRoot(entry.projectRoot) : null;
+  }
   markTiming("files-project-catalog");
   const projectCwds = projectDirectoryFallbacks([
     ...projected.files.map((file) => file.project),
