@@ -59,6 +59,7 @@ import { PIPELINE_GROUP_EXPANDED_H, layoutPipelineGroups, type PipelinePane } fr
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
 import { useSpatialNav } from "./useSpatialNav";
+import { createSubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
 
 /* Below this zoom the big node labels fade in over the unreadable panes. */
 const LABEL_Z = 0.45;
@@ -215,6 +216,11 @@ export function SchemeBoard({
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
   const [selected, setSelected] = useState<string | null>(null);
+  const [badgeAnchorRevision, setBadgeAnchorRevision] = useState(0);
+  const badgeAnchors = useMemo(
+    () => createSubagentBadgeAnchorRegistry(() => setBadgeAnchorRevision((revision) => revision + 1)),
+    [],
+  );
   const [localBuilderPipelineId, setLocalBuilderPipelineId] = useState<string | null>(null);
   const [expandedPipelineIds, setExpandedPipelineIds] = useState<ReadonlySet<string>>(EMPTY_PATHS);
   const activeBuilderPipelineId = builderPipelineId ?? localBuilderPipelineId;
@@ -1133,7 +1139,7 @@ export function SchemeBoard({
         {/* Group halos sit behind every edge and card so a running flow/pipeline
             reads as one framed region; the label chip stays live off the map. */}
         <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} pipelineControls={mapMode ? undefined : pipelineControls} autoOpenGroupId={activeBuilderPipelineId} onAutoOpen={handleBuilderOpened} />
-        <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
+        <EdgesLayer edges={layout.edges} badgeAnchors={badgeAnchors} badgeAnchorRevision={badgeAnchorRevision} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
             tap target there — the mobile lite map reaches pipeline controls only
@@ -1157,6 +1163,7 @@ export function SchemeBoard({
           linkedTasksByPipeline={linkedTasksByPipeline}
           relatedTasksByPath={relatedTasksByPath}
           deckFocus={deckFocus}
+          badgeAnchors={badgeAnchors}
           onSelect={stableSelect}
           onClose={stableClose}
           onFocusRound={focusRound}

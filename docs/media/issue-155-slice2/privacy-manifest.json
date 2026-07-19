@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "before-1440.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "a43428d86f66669bd0ef35565c43ff997d41db83b4f684add04bdea542ca2af1"
+      ],
+      "description": "Redacted placeholder retaining the desktop pre-change viewport.",
+      "sha256": "f896a479077d37e5441005d3829f12869a4435e5026b1a458a910a7c7b451ab0"
+    }
+  ]
+}
