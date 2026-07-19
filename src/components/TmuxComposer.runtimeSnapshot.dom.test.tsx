@@ -21,6 +21,19 @@ import { setLocale, translate } from "@/lib/i18n";
 
 const dom = new Window();
 installActEnv();
+class ImmediateFileReader {
+  result: string | null = null;
+  error: null = null;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+
+  readAsDataURL(file: File): void {
+    const mime = file.type || "image/png";
+    this.result = `data:${mime};base64,${Buffer.from(file.name).toString("base64")}`;
+    queueMicrotask(() => this.onload?.());
+  }
+}
 Object.assign(globalThis, {
   window: dom,
   document: dom.document,
@@ -32,7 +45,7 @@ Object.assign(globalThis, {
   CustomEvent: dom.CustomEvent,
   MouseEvent: dom.MouseEvent,
   File: dom.File,
-  FileReader: dom.FileReader,
+  FileReader: ImmediateFileReader,
   requestAnimationFrame: dom.requestAnimationFrame.bind(dom),
   cancelAnimationFrame: dom.cancelAnimationFrame.bind(dom),
   localStorage: dom.localStorage,
@@ -113,6 +126,7 @@ const file: FileEntry = {
 interface SendBody {
   idempotencyKey: string;
   text: string;
+  images?: Array<{ base64: string; mime: string }>;
   runtime?: { model?: string; effort?: string; fast?: boolean };
 }
 
@@ -124,7 +138,7 @@ function mockWire(sends: SendBody[], respond: Array<(body: SendBody) => { status
   globalThis.fetch = (async (input: string | URL | Request, init?: { body?: string }) => {
     const url = String(input);
     if (url === "/api/tmux/targets") return { ok: true, status: 200, json: async () => ({ targets: {} }) } as Response;
-    if (url !== "/api/runtime/send") return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response;
+    if (url !== "/api/runtime/send") throw new Error(`unexpected request: ${url}`);
     const body = JSON.parse(init?.body ?? "{}") as SendBody;
     sends.push(body);
     const script = respond[Math.min(call++, respond.length - 1)]!(body);
@@ -163,6 +177,31 @@ function composerControls(host: HTMLElement) {
   return { type, submit };
 }
 
+async function pasteImages(host: HTMLElement, names: string[]): Promise<void> {
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, {
+    onPaste(event: unknown): void;
+  }>)[propsKey]!;
+  const files = names.map((name) => new dom.File([name], name, { type: "image/png" }) as unknown as File);
+  await act(async () => {
+    props.onPaste({
+      clipboardData: {
+        items: files.map((image) => ({ type: image.type, getAsFile: () => image })),
+      },
+      preventDefault() {},
+    });
+    await Promise.resolve();
+  });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    if (host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]').length === names.length) return;
+  }
+  throw new Error("image attachments did not finish reading");
+}
+
 const delivered = (body: SendBody) => ({
   status: 200,
   json: {
@@ -195,6 +234,55 @@ test("unhosted structured composer sends through durable recovery admission", as
     text: "continue while the host recovers",
     idempotencyKey: expect.any(String),
   });
+  await act(async () => root.unmount());
+});
+
+test("dead structured image-only submission keeps every selected image off the unsafe recovery path", async () => {
+  const sends: SendBody[] = [];
+  mockWire(sends, [() => ({ status: 503, json: { error: "recovery failed before image admission" } })]);
+
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
+  await pasteImages(host, ["first.png", "second.png"]);
+  expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(2);
+
+  structuredView.session.host = "unhosted";
+  await act(async () => {
+    root.render(<TmuxComposer file={file} deadHost />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  const imagePicker = host.querySelector(`button[aria-label="${translate("en", "composer.addImages")}"]`) as HTMLButtonElement;
+  const send = host.querySelector('button[type="submit"]') as HTMLButtonElement;
+  expect(imagePicker.disabled).toBe(true);
+  expect(send.disabled).toBe(true);
+
+  await settle(() => composerControls(host).submit());
+  expect(sends).toHaveLength(0);
+  expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(2);
+  await act(async () => root.unmount());
+});
+
+test("dead structured text-plus-image submission preserves the complete draft with image-specific recovery guidance", async () => {
+  const sends: SendBody[] = [];
+  mockWire(sends, [() => ({ status: 503, json: { error: "recovery failed before image admission" } })]);
+
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
+  const { type } = composerControls(host);
+  await settle(() => type("keep this text with both screenshots"));
+  await pasteImages(host, ["context.png", "result.png"]);
+
+  structuredView.session.host = "unhosted";
+  await act(async () => {
+    root.render(<TmuxComposer file={file} deadHost />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await settle(() => composerControls(host).submit());
+
+  expect(sends).toHaveLength(0);
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).value)
+    .toBe("keep this text with both screenshots");
+  expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(2);
+  expect(host.textContent).toContain(translate("en", "composer.imagesBlockedDuringRecovery"));
   await act(async () => root.unmount());
 });
 
