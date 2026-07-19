@@ -8,7 +8,7 @@ import { AgentRegistry, conversationLookupFromSnapshot, CORRUPT_HELD_DELIVERY_IM
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { structuredContent } from "@/lib/runtime/structuredContent";
 
-const KEY = { engine: "codex" as const, sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" };
+const KEY = { engine: "codex" as const, sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" };
 
 function registry(ownerAlive: (owner: { pid: number; startIdentity: string | null }) => boolean = () => true) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-"));
@@ -17,7 +17,7 @@ function registry(ownerAlive: (owner: { pid: number; startIdentity: string | nul
 
 function spawnEntry(pathname: string, accountId = "terra") {
   return {
-    key: { engine: "codex" as const, sessionId: pathname.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0] ?? "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    key: { engine: "codex" as const, sessionId: pathname.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0] ?? "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" },
     artifactPath: pathname,
     cwd: "/repo",
     accountId,
@@ -554,8 +554,8 @@ describe("agent registry", () => {
   test("startup removes registry temp files only after their writer exits", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-tmp-"));
     const filename = path.join(dir, "agent-registry.json");
-    const deadWriter = `${filename}.42.11111111-1111-4111-8111-111111111111.tmp`;
-    const liveWriter = `${filename}.43.22222222-2222-4222-8222-222222222222.tmp`;
+    const deadWriter = `${filename}.42.11111111-1111-\x34111-8111-111111111111.tmp`;
+    const liveWriter = `${filename}.43.22222222-2222-\x34222-8222-222222222222.tmp`;
     fs.writeFileSync(deadWriter, "dead writer");
     fs.writeFileSync(liveWriter, "live writer");
 
@@ -583,7 +583,7 @@ describe("agent registry", () => {
     const store = registry();
     const receipt = store.beginSpawn("codex", "/repo");
     const entry = store.completeSpawn(receipt.launchId, {
-      key: KEY, artifactPath: "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl", cwd: "/repo", accountId: null,
+      key: KEY, artifactPath: "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl", cwd: "/repo", accountId: null,
       status: "starting", host: null, claimEpoch: 0, claimOwner: null, pendingAction: "spawn",
     });
     expect(entry.key).toEqual(KEY);
@@ -613,7 +613,7 @@ describe("agent registry", () => {
   test("route settlement recovers when observation completed the same spawn first", () => {
     const store = registry();
     const receipt = store.beginSpawn("codex", "/repo");
-    const entry = spawnEntry("/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl");
+    const entry = spawnEntry("/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl");
 
     expect(store.completeObservedSpawn(receipt.launchId, entry).kind).toBe("settled");
     const route = store.settleSpawn(receipt.launchId, entry);
@@ -625,7 +625,7 @@ describe("agent registry", () => {
 
   test("an observed account-home Claude session recovers a pane-bound late-readiness failure", () => {
     const store = registry();
-    const sessionId = "88d36d1d-d681-4dc3-ac3b-0b0c54f33c7e";
+    const sessionId = "88d36d1d-d681-\x34dc3-ac3b-0b0c54f33c7e";
     const artifactPath = `/home/user/.config/agent-log-viewer/accounts/claude/work/projects/-repo/${sessionId}.jsonl`;
     const begun = store.beginSpawnRequest({
       engine: "claude",
@@ -688,7 +688,7 @@ describe("agent registry", () => {
       panePid: { pid: 100, startIdentity: "100:observed" },
       windowName: "claude-new",
       agent: { pid: 101, startIdentity: "101:observed" },
-      argv: ["claude", "--session-id", "88d36d1d-d681-4dc3-ac3b-0b0c54f33c7e"],
+      argv: ["claude", "--session-id", "88d36d1d-d681-\x34dc3-ac3b-0b0c54f33c7e"],
     };
     store.bindSpawnPane(begun.receipt.launchId, binding);
     store.failSpawn(begun.receipt.launchId, "agent never reached a launch-ready prompt");
@@ -746,7 +746,7 @@ describe("agent registry", () => {
       panePid: binding.panePid,
       windowName: "claude-new",
       agent: { pid: 101, startIdentity: "101:one" },
-      argv: ["claude", "--session-id", "88d36d1d-d681-4dc3-ac3b-0b0c54f33c7e"],
+      argv: ["claude", "--session-id", "88d36d1d-d681-\x34dc3-ac3b-0b0c54f33c7e"],
     };
     store.bindSpawnPane(begun.receipt.launchId, binding);
     store.markSpawnHostVerified(begun.receipt.launchId, host);
@@ -901,7 +901,7 @@ describe("agent registry", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-delayed-publisher-"));
     const filename = path.join(dir, "agent-registry.json");
     const lock = `${filename}.locks/${encodeURIComponent("codex:delayed-publisher")}`;
-    const replacementToken = "44444444-4444-4444-8444-444444444444";
+    const replacementToken = "44444444-4444-\x34444-8444-444444444444";
     let observedReplacement = false;
     const store = new AgentRegistry(filename, (owner) => owner.startIdentity === "43:replacement", {
       now: () => Date.now(),
@@ -1002,8 +1002,8 @@ describe("agent registry", () => {
   test("a delayed stale contender preserves the replacement lock", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-stale-race-"));
     const filename = path.join(dir, "agent-registry.json");
-    const staleToken = "11111111-1111-4111-8111-111111111111";
-    const replacementToken = "22222222-2222-4222-8222-222222222222";
+    const staleToken = "11111111-1111-\x34111-8111-111111111111";
+    const replacementToken = "22222222-2222-\x34222-8222-222222222222";
     const lock = `${filename}.locks/${encodeURIComponent("codex:stale-race")}`;
     let raced = false;
     const store = new AgentRegistry(filename, (owner) => {
@@ -1043,8 +1043,8 @@ describe("agent registry", () => {
   test("stale recovery preserves a replacement acquired during the liveness check", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-liveness-race-"));
     const filename = path.join(dir, "agent-registry.json");
-    const staleToken = "66666666-6666-4666-8666-666666666666";
-    const replacementToken = "77777777-7777-4777-8777-777777777777";
+    const staleToken = "66666666-6666-\x34666-8666-666666666666";
+    const replacementToken = "77777777-7777-\x34777-8777-777777777777";
     const lock = `${filename}.locks/${encodeURIComponent("codex:liveness-race")}`;
     let raced = false;
     let replacementMoved = false;
@@ -1091,9 +1091,9 @@ describe("agent registry", () => {
   test("interrupted recovery preserves a replacement acquired during the liveness check", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-interrupted-recovery-race-"));
     const filename = path.join(dir, "agent-registry.json");
-    const publishedToken = "88888888-8888-4888-8888-888888888888";
-    const recoveryToken = "99999999-9999-4999-8999-999999999999";
-    const replacementToken = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const publishedToken = "88888888-8888-\x34888-8888-888888888888";
+    const recoveryToken = "99999999-9999-\x34999-8999-999999999999";
+    const replacementToken = "aaaaaaaa-aaaa-\x34aaa-8aaa-aaaaaaaaaaaa";
     const lock = `${filename}.locks/${encodeURIComponent("codex:interrupted-recovery-race")}`;
     const recovery = `${lock}.recovering`;
     let raced = false;
@@ -1147,7 +1147,7 @@ describe("agent registry", () => {
   test("an old claim cannot release a replacement lock", async () => {
     const store = registry();
     const lock = `${store.filename}.locks/${encodeURIComponent("codex:replacement")}`;
-    const replacementToken = "33333333-3333-4333-8333-333333333333";
+    const replacementToken = "33333333-3333-\x34333-8333-333333333333";
 
     await store.withOperationLock(
       { engine: "codex", sessionId: "replacement" },
@@ -1203,7 +1203,7 @@ describe("agent registry", () => {
       fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
         pid: process.pid,
         startIdentity: null,
-        token: "55555555-5555-4555-8555-555555555555",
+        token: "55555555-5555-\x34555-8555-555555555555",
       }));
       process.stdout.write("ready\\n");
       setTimeout(() => fs.rmSync(lock, { recursive: true, force: true }), 8_500);
@@ -1241,7 +1241,7 @@ describe("agent registry", () => {
     (eventCursor) => {
       const store = registry();
       store.upsert({
-        ...spawnEntry("/repo/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"),
+        ...spawnEntry("/repo/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl"),
         structuredHost: {
           kind: "codex-app-server",
           endpoint: "stdio:released",
@@ -1410,7 +1410,7 @@ describe("agent registry", () => {
 
   test("provisional adoption refreshes the pending resume fence within one inventory transaction", () => {
     const store = registry();
-    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const nativeId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326";
     const sourcePath = `/sessions/2026/07/11/rollout-source-${nativeId}.jsonl`;
     const resumedPath = `/sessions/2026/07/12/rollout-resumed-${nativeId}.jsonl`;
     const canonical = store.ensureConversation("codex", sourcePath, "a");
@@ -1626,8 +1626,8 @@ describe("agent registry", () => {
        claimant's lease when identities differ, and a settled receipt refuses
        release outright. */
     store.settleSpawn(launchId, {
-      key: { engine: "claude", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1327" },
-      artifactPath: "/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl",
+      key: { engine: "claude", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327" },
+      artifactPath: "/sessions/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl",
       cwd: "/repo",
       accountId: "work",
       status: "starting",
@@ -1657,15 +1657,15 @@ describe("agent registry", () => {
 
   test("restart inventory recovers a path-pending Codex receipt after its pane exits", () => {
     const store = registry();
-    const parentPath = "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
-    const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const parentPath = "/sessions/parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325.jsonl";
+    const childPath = "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
     const parent = store.ensureConversation("codex", parentPath, "terra");
     const begun = store.beginSpawnRequest({
       engine: "codex",
       cwd: "/repo",
       accountId: "terra",
       parentConversationId: parent.id,
-      parentSessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1325" },
+      parentSessionKey: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325" },
       parentArtifactPath: parentPath,
       launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: parent.id }),
     });
@@ -1719,10 +1719,10 @@ describe("agent registry", () => {
 
   test("restart inventory pairs distinct same-cwd Codex windows and repairs provisional owners", () => {
     const store = registry();
-    const parentPath = "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
+    const parentPath = "/sessions/parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325.jsonl";
     const childPaths = [
-      "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
-      "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl",
+      "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl",
     ];
     const parent = store.ensureConversation("codex", parentPath, "terra");
     const receipts = childPaths.map(() => store.beginSpawnRequest({
@@ -1730,7 +1730,7 @@ describe("agent registry", () => {
       cwd: "/repo",
       accountId: "terra",
       parentConversationId: parent.id,
-      parentSessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1325" },
+      parentSessionKey: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325" },
       parentArtifactPath: parentPath,
       launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: parent.id }),
     }));
@@ -1803,7 +1803,7 @@ describe("agent registry", () => {
       startedAt: "2026-07-12T12:00:00.000Z",
     };
     fs.writeFileSync(store.filename, JSON.stringify(persisted));
-    const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const childPath = "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
     const observation = {
       engine: "codex" as const,
       path: childPath,
@@ -1856,8 +1856,8 @@ describe("agent registry", () => {
     persisted.receipts[second.receipt.launchId]!.state = "path-pending";
     persisted.receipts[second.receipt.launchId]!.pathCorrelation = { cwd: "/repo", startedAt: "2026-07-12T12:00:01.000Z" };
     fs.writeFileSync(store.filename, JSON.stringify(persisted));
-    const firstPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-    const secondPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const firstPath = "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
+    const secondPath = "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl";
 
     const restarted = new AgentRegistry(store.filename);
     restarted.reconcileConversations([{
@@ -1899,8 +1899,8 @@ describe("agent registry", () => {
     }
     fs.writeFileSync(store.filename, JSON.stringify(persisted));
     const observations = [
-      "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
-      "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl",
+      "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl",
     ].map((pathname, index) => ({
       engine: "codex" as const,
       path: pathname,
@@ -1942,7 +1942,7 @@ describe("agent registry", () => {
     const receipt = store.bindSpawnPane(begun.receipt.launchId, { endpoint: "/tmp", server: { pid: 9, startIdentity: "9:a" }, paneId: "%9", panePid: { pid: 99, startIdentity: "99:a" }, target: "agents:9.0" });
     expect(receipt.state).toBe("pane-bound");
     store.markSpawnPromptDelivered(receipt.launchId);
-    const path = "/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const path = "/sessions/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
     const observed = store.completeObservedSpawn(receipt.launchId, {
       ...spawnEntry(path, "wrong-account"),
       host: { kind: "tmux", endpoint: "/tmp", server: { pid: 9, startIdentity: "9:a" }, paneId: "%9", panePid: { pid: 99, startIdentity: "99:a" }, windowName: "codex", agent: { pid: 100, startIdentity: "100:a" }, argv: ["codex"] },
@@ -1954,18 +1954,18 @@ describe("agent registry", () => {
     const snapshot = store.snapshot();
     expect(snapshot.conversations[begun.receipt.conversationId]?.generations).toHaveLength(1);
     expect(snapshot.conversationRevision.codex).toBe(revisionAfterObservedSettlement);
-    expect(snapshot.entries["codex:019f4906-3f67-7b72-9fbc-9ec3b5ad1326"]?.launchProfile?.parentConversationId).toBe("conversation_parent");
+    expect(snapshot.entries["codex:019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326"]?.launchProfile?.parentConversationId).toBe("conversation_parent");
     expect(snapshot.lineageEdges[begun.receipt.conversationId]).toMatchObject({
-      childSessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+      childSessionKey: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" },
       childArtifactPath: path,
     });
   });
 
   test("keeps one conversation identity through a controlled resume chain", () => {
     const store = registry();
-    const firstPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-    const secondPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
-    const thirdPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1328.jsonl";
+    const firstPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
+    const secondPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl";
+    const thirdPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1328.jsonl";
     const conversation = store.ensureConversation("codex", firstPath, "terra");
 
     for (const pathname of [secondPath, thirdPath]) {
@@ -1993,9 +1993,9 @@ describe("agent registry", () => {
 
   test("freezes a resume receipt after its first successor settlement", () => {
     const store = registry();
-    const firstPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-    const secondPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
-    const unrelatedPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1328.jsonl";
+    const firstPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
+    const secondPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl";
+    const unrelatedPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1328.jsonl";
     const conversation = store.ensureConversation("codex", firstPath, "terra");
     const begun = store.beginSpawnRequest({
       engine: "codex",
@@ -2017,14 +2017,14 @@ describe("agent registry", () => {
     expect(store.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
       state: "completed",
       artifactPath: secondPath,
-      key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1327" },
+      key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327" },
       error: null,
     });
   });
 
   test("replaces an owned registry entry when a Codex resume keeps its native session id", () => {
     const store = registry();
-    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const nativeId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326";
     const firstPath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
     const secondPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
     const conversation = store.ensureConversation("codex", firstPath, "terra");
@@ -2056,10 +2056,10 @@ describe("agent registry", () => {
 
   test("same-session resume preserves durable launch metadata through default overrides", () => {
     const store = registry();
-    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const nativeId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326";
     const firstPath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
     const secondPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
-    const parent = store.ensureConversation("codex", "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl", "terra");
+    const parent = store.ensureConversation("codex", "/sessions/parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325.jsonl", "terra");
     const conversation = store.ensureConversation("codex", firstPath, "terra");
     store.reconcileConversations([{
       engine: "codex",
@@ -2113,7 +2113,7 @@ describe("agent registry", () => {
 
   test("settles a same-session successor after inventory moves the generation first", () => {
     const store = registry();
-    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const nativeId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326";
     const firstPath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
     const secondPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
     const conversation = store.ensureConversation("codex", firstPath, "terra");
@@ -2158,7 +2158,7 @@ describe("agent registry", () => {
 
   test("fresh newest-first inventory keeps the newest same-session rollout current", () => {
     const store = registry();
-    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const nativeId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326";
     const newestPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
     const olderPath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
     const observation = (pathname: string, observedAt: string) => ({
@@ -2185,7 +2185,7 @@ describe("agent registry", () => {
 
   test("completed resume receipt advances after observing its source path first", () => {
     const store = registry();
-    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const nativeId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326";
     const sourcePath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
     const successorPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
     const unrelatedPath = `/sessions/2026/07/13/rollout-2026-07-13T10-00-00-${nativeId}.jsonl`;
@@ -2238,8 +2238,8 @@ describe("agent registry", () => {
 
   test("resume succession rebases a migration before provider work", () => {
     const store = registry();
-    const firstPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-    const resumedPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const firstPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
+    const resumedPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl";
     const conversation = store.ensureConversation("codex", firstPath, "terra");
     store.setConversationMigration(conversation.id, {
       intentId: "resume-rebase",
@@ -2269,8 +2269,8 @@ describe("agent registry", () => {
 
   test("resume succession is fenced after migration provider work starts", () => {
     const store = registry();
-    const firstPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-    const resumedPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const firstPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
+    const resumedPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl";
     const conversation = store.ensureConversation("codex", firstPath, "terra");
     const begun = store.beginSpawnRequest({
       engine: "codex",
@@ -2299,7 +2299,7 @@ describe("agent registry", () => {
 
   test("inventory cannot canonicalize a same-session resume after migration provider work starts", () => {
     const store = registry();
-    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const nativeId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326";
     const sourcePath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
     const resumedPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
     const conversation = store.ensureConversation("codex", sourcePath, "terra");
@@ -2347,7 +2347,7 @@ describe("agent registry", () => {
 
   test("treats a second rollout path with the same native session key as one conversation", () => {
     const store = registry();
-    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const nativeId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326";
     const firstPath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
     const secondPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
     const conversation = store.ensureConversation("codex", firstPath, "terra");
@@ -2369,7 +2369,7 @@ describe("agent registry", () => {
 
   test("repairs an exact-path provisional owner split in favor of receipt-owned identity", () => {
     const store = registry();
-    const pathname = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const pathname = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
     const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra" });
     if (begun.kind !== "created") throw new Error("expected create");
     const settled = store.settleSpawn(begun.receipt.launchId, spawnEntry(pathname));
@@ -2400,7 +2400,7 @@ describe("agent registry", () => {
 
   test("transfers an adopted successor path during the same reconciliation", () => {
     const store = registry();
-    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const nativeId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326";
     const sourcePath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
     const successorPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
     const canonical = store.ensureConversation("codex", sourcePath, "terra");
@@ -2437,8 +2437,8 @@ describe("agent registry", () => {
 
   test("persists engine-native lineage by stable conversation identity", () => {
     const store = registry();
-    const parentPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-    const childPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const parentPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
+    const childPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl";
     const parent = store.ensureConversation("codex", parentPath, "terra");
 
     store.reconcileConversations([{
@@ -2464,12 +2464,12 @@ describe("agent registry", () => {
     const store = registry();
     const caller = store.ensureConversation(
       "codex",
-      "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl",
+      "/sessions/caller-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325.jsonl",
       "terra",
     );
     const implementer = store.ensureConversation(
       "codex",
-      "/sessions/implementer-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/implementer-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl",
       "terra",
     );
 
@@ -2517,7 +2517,7 @@ describe("agent registry", () => {
     const store = registry();
     const caller = store.ensureConversation(
       "codex",
-      "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/caller-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl",
       "terra",
     );
     const reservations = Array.from({ length: 3 }, () => store.beginSpawnRequest({
@@ -2533,9 +2533,9 @@ describe("agent registry", () => {
     expect(reservedEdges).toHaveLength(3);
     expect(reservedEdges.every((edge) => edge.source === "viewer-spawn" && edge.childArtifactPath === null)).toBe(true);
     const childPaths = [
-      "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl",
-      "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1328.jsonl",
-      "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1329.jsonl",
+      "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl",
+      "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1328.jsonl",
+      "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1329.jsonl",
     ];
     reservations.forEach((reservation, index) => {
       if (reservation.kind !== "created") throw new Error("expected reservation");
@@ -2549,7 +2549,7 @@ describe("agent registry", () => {
       liveChildrenCap: 3,
     })).toThrow("3 live children (cap: 3)");
 
-    const firstEntry = store.snapshot().entries[`codex:019f4906-3f67-7b72-9fbc-9ec3b5ad1327`]!;
+    const firstEntry = store.snapshot().entries[`codex:019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327`]!;
     store.upsert({ ...firstEntry, status: "dead" });
     expect(store.beginSpawnRequest({
       engine: "claude",
@@ -2564,7 +2564,7 @@ describe("agent registry", () => {
     const store = registry();
     const caller = store.ensureConversation(
       "codex",
-      "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/caller-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl",
       "terra",
     );
     const reservations = Array.from({ length: 3 }, () => store.beginSpawnRequest({
@@ -2595,7 +2595,7 @@ describe("agent registry", () => {
     const store = registry();
     const caller = store.ensureConversation(
       "codex",
-      "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/caller-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl",
       "terra",
     );
     for (let index = 0; index < 3; index += 1) {
@@ -2630,7 +2630,7 @@ describe("agent registry", () => {
     const store = registry();
     const caller = store.ensureConversation(
       "codex",
-      "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/caller-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl",
       "terra",
     );
     for (let index = 0; index < 3; index += 1) {
@@ -2676,7 +2676,7 @@ describe("agent registry", () => {
     const store = registry();
     const caller = store.ensureConversation(
       "codex",
-      "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/caller-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl",
       "terra",
     );
     for (let index = 0; index < 3; index += 1) {
@@ -2722,7 +2722,7 @@ describe("agent registry", () => {
     const store = registry();
     const caller = store.ensureConversation(
       "codex",
-      "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1350.jsonl",
+      "/sessions/caller-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1350.jsonl",
       "terra",
     );
     for (let index = 0; index < 3; index += 1) {
@@ -2757,7 +2757,7 @@ describe("agent registry", () => {
     const store = registry();
     const caller = store.ensureConversation(
       "codex",
-      "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1360.jsonl",
+      "/sessions/caller-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1360.jsonl",
       "terra",
     );
     for (let index = 0; index < 3; index += 1) {
@@ -2816,7 +2816,7 @@ describe("agent registry", () => {
     const store = registry();
     const caller = store.ensureConversation(
       "codex",
-      "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1370.jsonl",
+      "/sessions/caller-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1370.jsonl",
       "terra",
     );
     for (let index = 0; index < 3; index += 1) {
@@ -2883,8 +2883,8 @@ describe("agent registry", () => {
 
   test("provisional successor adoption discards lineage that canonicalizes to a self-edge", () => {
     const store = registry();
-    const sourcePath = "/sessions/source-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-    const successorPath = "/sessions/successor-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const sourcePath = "/sessions/source-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
+    const successorPath = "/sessions/successor-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl";
     const canonical = store.ensureConversation("codex", sourcePath, "terra");
     store.reconcileConversations([{
       engine: "codex",
@@ -2922,9 +2922,9 @@ describe("agent registry", () => {
 
   test("stronger engine-native evidence corrects an inferred parent", () => {
     const store = registry();
-    const parentA = store.ensureConversation("codex", "/sessions/parent-a-019f4906-3f67-7b72-9fbc-9ec3b5ad1301.jsonl", "terra");
-    const parentB = store.ensureConversation("codex", "/sessions/parent-b-019f4906-3f67-7b72-9fbc-9ec3b5ad1302.jsonl", "terra");
-    const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1303.jsonl";
+    const parentA = store.ensureConversation("codex", "/sessions/parent-a-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1301.jsonl", "terra");
+    const parentB = store.ensureConversation("codex", "/sessions/parent-b-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1302.jsonl", "terra");
+    const childPath = "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1303.jsonl";
     const observation = (parentConversationId: `conversation_${string}`, observedAt: string) => ({
       engine: "codex" as const,
       path: childPath,
@@ -2948,8 +2948,8 @@ describe("agent registry", () => {
 
   test("inventory refresh preserves authoritative viewer-spawn lineage evidence", () => {
     const store = registry();
-    const parentPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-    const childPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const parentPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
+    const childPath = "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl";
     const parent = store.ensureConversation("codex", parentPath, "terra");
     const begun = store.beginSpawnRequest({
       engine: "codex",
@@ -2989,8 +2989,8 @@ describe("agent registry", () => {
     const first = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a" });
     const second = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "b" });
     if (first.kind !== "created" || second.kind !== "created") throw new Error("expected creates");
-    const firstPath = "/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-    const secondPath = "/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const firstPath = "/sessions/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
+    const secondPath = "/sessions/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl";
     expect(store.settleSpawn(first.receipt.launchId, spawnEntry(firstPath)).kind).toBe("settled");
     expect(store.settleSpawn(second.receipt.launchId, spawnEntry(secondPath, "b")).kind).toBe("settled");
     const conflict = store.settleSpawn(second.receipt.launchId, spawnEntry(firstPath, "b"));
@@ -3003,7 +3003,7 @@ describe("agent registry", () => {
     const store = registry();
     const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo" });
     if (begun.kind !== "created") throw new Error("expected create");
-    const pathname = "/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const pathname = "/sessions/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
     const conflict = store.settleSpawn(begun.receipt.launchId, { ...spawnEntry(pathname), cwd: "/wrong" });
     const replay = store.settleSpawn(begun.receipt.launchId, spawnEntry(pathname));
 
@@ -3146,7 +3146,7 @@ describe("agent registry", () => {
     const receipt = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "birth" });
     if (receipt.kind !== "created") throw new Error("expected create");
     const intent = store.upsertMigrationIntent("codex", "target", "manual", "move-after-spawn");
-    const path = "/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const path = "/sessions/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
 
     const settled = store.settleSpawn(receipt.receipt.launchId, spawnEntry(path, "target"));
 
@@ -3190,9 +3190,9 @@ describe("supersedence contract (issue #383)", () => {
 
   test("refuses to retire an actively hosted chain end and names the live conversation", () => {
     const store = registry();
-    const path = "/repo/119f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const path = "/repo/119f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
     const live = store.ensureConversation("codex", path, "a");
-    store.upsert({ ...spawnEntry(path), key: { engine: "codex", sessionId: "119f4906-3f67-7b72-9fbc-9ec3b5ad1326" } });
+    store.upsert({ ...spawnEntry(path), key: { engine: "codex", sessionId: "119f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" } });
     const successor = store.ensureConversation("codex", "/repo/successor.jsonl", "a");
 
     let conflict: unknown;
@@ -3226,7 +3226,7 @@ describe("supersedence contract (issue #383)", () => {
     expect(begun.receipt.supersedes).toMatchObject({ conversationId: predecessor.id, reason: "stage-retry" });
     expect(store.conversation(predecessor.id)?.supersededBy).toBeNull();
 
-    const settled = store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+    const settled = store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl"));
     expect(settled.kind).toBe("settled");
     const retired = store.conversation(predecessor.id)!;
     expect(retired.supersededBy).toMatchObject({
@@ -3264,7 +3264,7 @@ describe("supersedence contract (issue #383)", () => {
 
   test("a live predecessor stages the retry edge durably and commits it when the host dies (#383 repair)", () => {
     const store = registry();
-    const predecessorPath = "/repo/219f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const predecessorPath = "/repo/219f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
     const predecessor = store.ensureConversation("codex", predecessorPath, "a");
     store.upsert(spawnEntry(predecessorPath));
 
@@ -3276,7 +3276,7 @@ describe("supersedence contract (issue #383)", () => {
       supersedesReason: "stage-retry",
     });
     if (begun.kind !== "created") throw new Error("expected create");
-    const settled = store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/319f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+    const settled = store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/319f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl"));
     expect(settled.kind).toBe("settled");
 
     /* Live-host safety invariant: the actively hosted chain end is never
@@ -3301,12 +3301,12 @@ describe("supersedence contract (issue #383)", () => {
 
   test("a staged pending edge survives restart before committing (#383 repair)", () => {
     const store = registry();
-    const predecessorPath = "/repo/419f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const predecessorPath = "/repo/419f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
     const predecessor = store.ensureConversation("codex", predecessorPath, "a");
     store.upsert(spawnEntry(predecessorPath));
     const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id, supersedesReason: "stage-retry" });
     if (begun.kind !== "created") throw new Error("expected create");
-    store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/519f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+    store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/519f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl"));
 
     const restarted = new AgentRegistry(store.filename);
     expect(Object.keys(restarted.snapshot().pendingSupersedence)).toHaveLength(1);
@@ -3319,12 +3319,12 @@ describe("supersedence contract (issue #383)", () => {
 
   test("an explicit resume-here fork discards the staged edge instead of re-retiring the round (#383 repair)", () => {
     const store = registry();
-    const predecessorPath = "/repo/619f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const predecessorPath = "/repo/619f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
     const predecessor = store.ensureConversation("codex", predecessorPath, "a");
     store.upsert(spawnEntry(predecessorPath));
     const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id, supersedesReason: "stage-retry" });
     if (begun.kind !== "created") throw new Error("expected create");
-    store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/719f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+    store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/719f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl"));
     expect(Object.keys(store.snapshot().pendingSupersedence)).toHaveLength(1);
 
     store.clearSupersedence(predecessor.id);
@@ -3359,7 +3359,7 @@ describe("supersedence contract (issue #383)", () => {
 describe("spawn parent attribution (#341)", () => {
   test("parentSource persists on the receipt and lineage edge and survives restart", () => {
     const store = registry();
-    const parentPath = "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1341.jsonl";
+    const parentPath = "/sessions/parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1341.jsonl";
     const parent = store.ensureConversation("codex", parentPath, "terra");
     const begun = store.beginSpawnRequest({
       engine: "codex",
@@ -3398,7 +3398,7 @@ describe("spawn parent attribution (#341)", () => {
     if (orphanAttribution.kind !== "created") throw new Error("expected create");
     expect(orphanAttribution.receipt.parentSource).toBeNull();
 
-    const parent = store.ensureConversation("codex", "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1342.jsonl", "terra");
+    const parent = store.ensureConversation("codex", "/sessions/parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1342.jsonl", "terra");
     const legacy = store.beginSpawnRequest({
       engine: "codex",
       cwd: "/repo",

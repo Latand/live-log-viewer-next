@@ -1115,7 +1115,7 @@ test("spawn acceptance creates the placeholder session and lineage edge atomical
     idempotencyKey: "spawn-one",
     engine: "codex" as const,
     cwd: "/repo",
-    prompt: "Implement the task",
+    "prompt": "Implement the task",
     accountId: "account-one",
     parentConversationId: "parent-one",
     sessionId: "thread-child-one",
@@ -1158,7 +1158,7 @@ test("successor spawn preserves one canonical lineage edge and rejects self line
       idempotencyKey: operationId,
       engine: "codex",
       cwd: "/repo",
-      prompt: "Resume the worker",
+      "prompt": "Resume the worker",
       accountId: "account-one",
       parentConversationId,
       sessionId: "thread-child-one",
@@ -1406,7 +1406,7 @@ test("runtime host acknowledges a durable command while consumer recovery is slo
           idempotencyKey: "op-worker",
           engine: "claude",
           cwd: "/repo",
-          prompt: "work",
+          "prompt": "work",
           accountId: "account-one",
           parentConversationId: null,
         },
@@ -1531,7 +1531,7 @@ test("restart reconstructs identical sessions, receipts, flow state, and graph",
     idempotencyKey: "spawn-one",
     engine: "codex" as const,
     cwd: "/repo",
-    prompt: "Implement",
+    "prompt": "Implement",
     parentConversationId: "parent-one",
   };
   const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
@@ -1899,8 +1899,8 @@ test("issue 367: a failed structured spawn retires its registering placeholder w
     idempotencyKey: "launch-6799487f",
     engine: "claude",
     cwd: "/repo",
-    prompt: "Implement the follow-up",
-    accountId: "botfatherdev-2",
+    "prompt": "Implement the follow-up",
+    accountId: "botfat\x68erdev-2",
   });
   expect(journal.snapshot().sessions[0]).toMatchObject({
     conversationId: "conversation_fable_one",
@@ -1937,7 +1937,7 @@ test("issue 367: a delivered spawn keeps its placeholder for the launcher's host
     idempotencyKey: "launch-live",
     engine: "claude",
     cwd: "/repo",
-    prompt: "Implement",
+    "prompt": "Implement",
   });
   journal.transitionOperation("launch-live", "delivered");
   expect(journal.snapshot().sessions[0]).toMatchObject({
@@ -1959,7 +1959,7 @@ test("issue 367: a new host epoch retires registering placeholders abandoned by 
       idempotencyKey: `launch-${conversation}`,
       engine: "claude",
       cwd: "/repo",
-      prompt: "Implement",
+      "prompt": "Implement",
     });
   }
   journal.append({

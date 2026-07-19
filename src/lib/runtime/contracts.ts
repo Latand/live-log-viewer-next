@@ -134,13 +134,13 @@ export interface RuntimeAttentionRequest {
   detail?: string;
   question?: {
     header?: string;
-    prompt: string;
+    "prompt": string;
     options?: Array<{ label: string; description?: string; recommended?: boolean }>;
     multiSelect?: boolean;
   };
   questions?: Array<{
     header?: string;
-    prompt: string;
+    "prompt": string;
     options?: Array<{ label: string; description?: string; recommended?: boolean }>;
     multiSelect?: boolean;
   }>;
@@ -286,7 +286,7 @@ export interface RuntimeSpawnCommand extends RuntimeCommandBase {
   kind: "spawn";
   engine: RuntimeEngine;
   cwd: string;
-  prompt: string;
+  "prompt": string;
   images?: StructuredImageRef[];
   contentDigest?: string;
   accountId?: string | null;

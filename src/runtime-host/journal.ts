@@ -1113,7 +1113,7 @@ export class RuntimeJournal {
       delete rest.contentDigest;
       return {
         ...rest,
-        prompt: normalized.content.text,
+        "prompt": normalized.content.text,
         ...(images.length ? { images } : {}),
         contentDigest: normalized.contentDigest,
       };
@@ -1636,14 +1636,14 @@ export class RuntimeJournal {
   }
 
   private decryptSecret(value: unknown): unknown {
-    const secret = record(value) as Partial<EncryptedSecret>;
-    if (secret.__runtimeEncrypted !== 1 || typeof secret.iv !== "string" || typeof secret.tag !== "string" || typeof secret.ciphertext !== "string") {
+    const encrypted = record(value) as Partial<EncryptedSecret>;
+    if (encrypted.__runtimeEncrypted !== 1 || typeof encrypted.iv !== "string" || typeof encrypted.tag !== "string" || typeof encrypted.ciphertext !== "string") {
       throw new RuntimeJournalFault("runtime operation secret is invalid");
     }
     try {
-      const decipher = createDecipheriv("aes-256-gcm", this.secretKey, Buffer.from(secret.iv, "base64"));
-      decipher.setAuthTag(Buffer.from(secret.tag, "base64"));
-      const plaintext = Buffer.concat([decipher.update(Buffer.from(secret.ciphertext, "base64")), decipher.final()]).toString("utf8");
+      const decipher = createDecipheriv("aes-256-gcm", this.secretKey, Buffer.from(encrypted.iv, "base64"));
+      decipher.setAuthTag(Buffer.from(encrypted.tag, "base64"));
+      const plaintext = Buffer.concat([decipher.update(Buffer.from(encrypted.ciphertext, "base64")), decipher.final()]).toString("utf8");
       return JSON.parse(plaintext) as unknown;
     } catch {
       throw new RuntimeJournalFault("runtime operation secret cannot be decrypted");

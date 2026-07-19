@@ -131,7 +131,7 @@ test("a new spawn during a conversation reseat is never adopted into the drain",
     pendingAction: null,
   });
   const spawn = store.beginSpawn("codex", "/repo/checkout");
-  const settled = store.settleSpawn(spawn.launchId, spawnEntry("019f4906-3f67-7b72-9fbc-9ec3b5ad1326", "/sessions/unrelated-spawn.jsonl"));
+  const settled = store.settleSpawn(spawn.launchId, spawnEntry("019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326", "/sessions/unrelated-spawn.jsonl"));
   expect(settled.kind).toBe("settled");
   expect(store.conversationForPath("/sessions/unrelated-spawn.jsonl")!.migration).toBeNull();
 
@@ -145,7 +145,7 @@ test("a new spawn during a conversation reseat is never adopted into the drain",
     expectedRevision: store.engineRouting("codex").revision,
   });
   const second = store.beginSpawn("codex", "/repo/checkout");
-  expect(store.settleSpawn(second.launchId, spawnEntry("019f4906-3f67-7b72-9fbc-9ec3b5ad1327", "/sessions/adopted-spawn.jsonl")).kind).toBe("settled");
+  expect(store.settleSpawn(second.launchId, spawnEntry("019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327", "/sessions/adopted-spawn.jsonl")).kind).toBe("settled");
   expect(store.conversationForPath("/sessions/adopted-spawn.jsonl")!.migration).toMatchObject({ targetId: "engine-target" });
 });
 

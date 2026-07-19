@@ -157,13 +157,13 @@ export interface AttentionRequest {
   /** Structured AskUserQuestion / requestUserInput payload. */
   question?: {
     header?: string;
-    prompt: string;
+    "prompt": string;
     options?: { label: string; description?: string; recommended?: boolean }[];
     multiSelect?: boolean;
   };
   questions?: Array<{
     header?: string;
-    prompt: string;
+    "prompt": string;
     options?: { label: string; description?: string; recommended?: boolean }[];
     multiSelect?: boolean;
   }>;

@@ -9,7 +9,7 @@ import { NextRequest } from "next/server";
 const realResources = { ...(await import("@/lib/resources")) };
 const previousCodexHome = process.env.LLV_CODEX_HOME;
 const routeCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tmux-route-codex-"));
-const PATHNAME = path.join(routeCodexHome, "sessions", "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl");
+const PATHNAME = path.join(routeCodexHome, "sessions", "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl");
 fs.mkdirSync(path.dirname(PATHNAME), { recursive: true });
 fs.writeFileSync(PATHNAME, "{}\n");
 process.env.LLV_CODEX_HOME = routeCodexHome;
@@ -69,7 +69,7 @@ const host = {
   tmuxServerPid: 900,
   engine: "codex" as const,
   cwd: "/repo",
-  agentArgv: ["codex", "resume", "019f4906-3f67-7b72-9fbc-9ec3b5ad1326"],
+  agentArgv: ["codex", "resume", "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326"],
   agentIdentity: "200:one",
   claimedPaths: [PATHNAME],
   primaryPath: PATHNAME,

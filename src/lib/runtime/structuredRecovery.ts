@@ -118,7 +118,7 @@ function candidateFor(
       cwd: profile.cwd,
       windowName: "structured-resume",
       engine: conversation.engine,
-      transcript: generation.path,
+      "transcript": generation.path,
       launchProfile: profile,
     },
     publishReady,
@@ -186,7 +186,7 @@ async function recoverCandidate(
       receipt: begun.receipt,
       spec: current.spec,
       account,
-      prompt: "",
+      "prompt": "",
       registry,
       client,
     });

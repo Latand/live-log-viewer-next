@@ -58,7 +58,7 @@ test("dedicated runtime command parsers freeze the Opus request bodies", () => {
     operationId: "spawn-empty",
     engine: "codex",
     cwd: "/repo",
-    prompt: "",
+    "prompt": "",
   })).toMatchObject({ kind: "spawn", cwd: "/repo", prompt: "" });
   expect(parseRuntimeCommand("kill", {
     conversationId: "conv-kill",

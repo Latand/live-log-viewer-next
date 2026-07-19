@@ -206,9 +206,9 @@ test("a path-only flow resolves every resume generation in one reconciliation", 
   try {
     const registry = new AgentRegistry(path.join(sandbox, "registry.json"));
     const paths = [
-      "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
-      "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl",
-      "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1328.jsonl",
+      "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl",
+      "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1328.jsonl",
     ];
     const conversation = registry.ensureConversation("codex", paths[0]!, "a");
     for (const pathname of paths.slice(1)) {

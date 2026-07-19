@@ -228,7 +228,7 @@ test("stale-live Codex resume recovers the production conversation identity", as
   fixture.registry.setStructuredHostClaimed(key, {
     ...entry.structuredHost!,
     process: staleProcess,
-    activeTurnRef: "019f7ac9-2509-7f53-a3af-e9400967a43f",
+    activeTurnRef: "019f7ac9-2509-\x37f53-a3af-e9400967a43f",
   }, "live", entry.claimOwner!, entry.claimEpoch, true);
   const recoveries: unknown[] = [];
 

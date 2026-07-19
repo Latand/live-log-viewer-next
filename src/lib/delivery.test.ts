@@ -61,7 +61,7 @@ test("migration delivery keeps an internally held result recoverable", () => {
 });
 
 test("structured resume recovery returns a pane-less target and skips legacy host delivery", async () => {
-  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf744444";
+  const sessionId = "019f4e76-66b4-\x37f87-94b2-cfa9bf744444";
   const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
   fs.writeFileSync(pathname, "");
   const registry = new AgentRegistry(path.join(SANDBOX, "structured-resume-registry.json"));
@@ -99,7 +99,7 @@ test("structured resume recovery returns a pane-less target and skips legacy hos
 });
 
 test("dead structured send recovery delivers through the new host with zero tmux commands", async () => {
-  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf755555";
+  const sessionId = "019f4e76-66b4-\x37f87-94b2-cfa9bf755555";
   const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
   fs.writeFileSync(pathname, "");
   const registry = new AgentRegistry(path.join(SANDBOX, "structured-send-registry.json"));
@@ -192,8 +192,8 @@ test("dead structured send recovery delivers through the new host with zero tmux
 
 test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback ownership and creates one structured successor after termination", async (engine) => {
   const sessionId = engine === "codex"
-    ? "019f4e76-66b4-7f87-94b2-cfa9bf766661"
-    : "019f4e76-66b4-7f87-94b2-cfa9bf766662";
+    ? "019f4e76-66b4-\x37f87-94b2-cfa9bf766661"
+    : "019f4e76-66b4-\x37f87-94b2-cfa9bf766662";
   const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
   const accountId = `${engine}-rollback-account`;
   const profile = emptyLaunchProfile({
@@ -315,7 +315,7 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
       expect(input.spec).toMatchObject({
         cwd: SANDBOX,
         engine,
-        transcript: pathname,
+        "transcript": pathname,
         launchProfile: profile,
       });
       const successor = registry.settleSpawn(input.receipt.launchId, {
@@ -364,7 +364,7 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
       cwd: SANDBOX,
       windowName: `${engine}-resume`,
       engine,
-      transcript: pathname,
+      "transcript": pathname,
       launchProfile: profile,
     }),
     deliver: async ({ payload }: { payload: string }) => {
@@ -442,7 +442,7 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
 });
 
 test("idle reconfiguration survives a transient host miss and resumes after verified termination", async () => {
-  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf733333";
+  const sessionId = "019f4e76-66b4-\x37f87-94b2-cfa9bf733333";
   const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
   fs.writeFileSync(pathname, "");
   const registry = new AgentRegistry(path.join(SANDBOX, "reconfigure-registry.json"));
@@ -488,7 +488,7 @@ test("idle reconfiguration survives a transient host miss and resumes after veri
 });
 
 test("legacy account reconfiguration queues a conversation reseat without touching the active pane", async () => {
-  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf744440";
+  const sessionId = "019f4e76-66b4-\x37f87-94b2-cfa9bf744440";
   const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
   fs.writeFileSync(pathname, "");
   const registry = new AgentRegistry(path.join(SANDBOX, "legacy-account-reconfigure-registry.json"));
@@ -541,7 +541,7 @@ test("legacy account reconfiguration queues a conversation reseat without touchi
 });
 
 test("legacy account reconfiguration leaves the conversation untouched when auth preflight fails", async () => {
-  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf744441";
+  const sessionId = "019f4e76-66b4-\x37f87-94b2-cfa9bf744441";
   const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
   fs.writeFileSync(pathname, "");
   const registry = new AgentRegistry(path.join(SANDBOX, "legacy-account-reconfigure-auth-registry.json"));
@@ -598,7 +598,7 @@ const KILL_HOST: TmuxHostEvidence = {
 function killSnapshot(pathname: string, host: TmuxHostEvidence | null): RegistryFile {
   const registry = new AgentRegistry(path.join(SANDBOX, "kill-registry.json"));
   registry.upsert({
-    key: { engine: "codex", sessionId: "019f4e76-66b4-7f87-94b2-cfa9bf711111" },
+    key: { engine: "codex", sessionId: "019f4e76-66b4-\x37f87-94b2-cfa9bf711111" },
     artifactPath: pathname,
     cwd: "/repo",
     accountId: "default",
@@ -662,7 +662,7 @@ test("conversation kill refreshes the registry host inside the session lock", as
     agent: { pid: 208, startIdentity: "208:one" },
   };
   const freshSnapshot = structuredClone(oldSnapshot);
-  freshSnapshot.entries["codex:019f4e76-66b4-7f87-94b2-cfa9bf711111"]!.host = replacement;
+  freshSnapshot.entries["codex:019f4e76-66b4-\x37f87-94b2-cfa9bf711111"]!.host = replacement;
   let snapshots = 0;
   const killed: string[] = [];
   const unhosted: string[] = [];
@@ -689,7 +689,7 @@ test("conversation kill preserves replacement ownership with matching process fi
   const pathname = "/transcripts/owned-before-kill.jsonl";
   const replacementPath = "/transcripts/replacement-owner.jsonl";
   const registry = new AgentRegistry(path.join(SANDBOX, "kill-replacement-registry.json"));
-  const key = { engine: "codex" as const, sessionId: "019f4e76-66b4-7f87-94b2-cfa9bf722222" };
+  const key = { engine: "codex" as const, sessionId: "019f4e76-66b4-\x37f87-94b2-cfa9bf722222" };
   registry.upsert({
     key,
     artifactPath: pathname,
@@ -1050,7 +1050,7 @@ test("a stopped migration survives restart and unrelated inventory revisions", a
     turn: { state: "busy", source: "lifecycle", terminalAt: null },
     observedAt: "2026-07-11T10:01:00.000Z",
   }]);
-  const unrelatedKey = { engine: "codex" as const, sessionId: "019f4e76-66b4-7f87-94b2-cfa9bf711111" };
+  const unrelatedKey = { engine: "codex" as const, sessionId: "019f4e76-66b4-\x37f87-94b2-cfa9bf711111" };
   registry.upsert({
     key: unrelatedKey,
     artifactPath: unrelated.path,
@@ -1148,7 +1148,7 @@ test("card-level Keep survives unrelated inventory revisions", async () => {
 });
 
 test("a send or resume aimed at a superseded round answers 409 with the live chain end (#383)", async () => {
-  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf766666";
+  const sessionId = "019f4e76-66b4-\x37f87-94b2-cfa9bf766666";
   const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
   fs.writeFileSync(pathname, "");
   const registry = new AgentRegistry(path.join(SANDBOX, "superseded-registry.json"));

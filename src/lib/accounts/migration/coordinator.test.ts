@@ -1114,7 +1114,7 @@ describe("durable account migration coordinator", () => {
     const store = registry();
     store.reconcileConversations([observation("/live-idle.jsonl", "managed", "idle")]);
     store.upsert({
-      key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+      key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" },
       artifactPath: "/live-idle.jsonl",
       cwd: "/repo",
       accountId: "managed",
@@ -1132,7 +1132,7 @@ describe("durable account migration coordinator", () => {
 
   test("host readiness changes invalidate migration previews", async () => {
     const store = registry();
-    const key = { engine: "codex" as const, sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1327" };
+    const key = { engine: "codex" as const, sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327" };
     store.reconcileConversations([observation("/readiness-fence.jsonl", "managed", "idle")]);
     const deferredPreview = await previewMigration("codex", "default", store);
 
@@ -1290,8 +1290,8 @@ describe("durable account migration coordinator", () => {
 
   test("resume settlement between migration read and fence migrates the resumed generation", async () => {
     const store = registry();
-    const sourceId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
-    const resumedId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1327";
+    const sourceId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326";
+    const resumedId = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327";
     const sourcePath = `/sessions/rollout-${sourceId}.jsonl`;
     const resumedPath = `/sessions/rollout-${resumedId}.jsonl`;
     store.reconcileConversations([observation(sourcePath, "a", "idle")]);
