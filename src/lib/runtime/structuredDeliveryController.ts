@@ -396,8 +396,18 @@ export async function bindStructuredDeliveryQueue(
     if (current) await unregisterHost(key, current.host);
     const initialState = await item.host.health();
     if (ownsOperation && !await ownsOperation()) return async () => {};
+    const publicationEntry = entryForHost(registry, item);
+    const publicationConversationId = publicationEntry
+      ? conversationIdForEntry(registry, publicationEntry)
+      : null;
     await publishHostState(client, registry, item, initialState);
-    if (ownsOperation && !await ownsOperation()) return async () => {};
+    if (ownsOperation && !await ownsOperation()) {
+      const restoreCurrentProjection = async () => {
+        await refreshCurrentProjection(publicationConversationId);
+      };
+      await restoreCurrentProjection();
+      return restoreCurrentProjection;
+    }
     hosts.set(key, item.host);
     requestDrain();
     const observable = item.host as ObservableEngineHost;

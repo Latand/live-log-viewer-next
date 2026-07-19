@@ -3065,6 +3065,108 @@ test("successor cleanup drains a delayed publication before restoring path-only 
   journal.close();
 });
 
+test("ownership loss inside successor projection republishes the current source host", async () => {
+  const sourceId = "12121212-1212-4212-8212-121212121212";
+  const successorId = "34343434-3434-4434-8434-343434343434";
+  const sourcePath = path.join(sandbox, `${sourceId}.jsonl`);
+  const successorPath = path.join(sandbox, `${successorId}.jsonl`);
+  const registry = new AgentRegistry(path.join(sandbox, "publication-ownership-projection-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: sandbox });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: sourcePath,
+    accountId: "source",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-19T12:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(sourcePath)!;
+  const structuredHost = (endpoint: string) => ({
+    kind: "codex-app-server" as const,
+    endpoint,
+    process: null,
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    writerClaimEpoch: 0,
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+  });
+  const upsertHost = (sessionId: string, artifactPath: string, accountId: string, endpoint: string) => registry.upsert({
+    key: { engine: "codex" as const, sessionId },
+    artifactPath,
+    cwd: sandbox,
+    accountId,
+    launchProfile: profile,
+    status: "idle" as const,
+    host: null,
+    structuredHost: structuredHost(endpoint),
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  upsertHost(sourceId, sourcePath, "source", "fake:publication-source");
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "publication-ownership-loss",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  registry.recordConversationContinuityPath(conversation.id, successorPath);
+  upsertHost(successorId, successorPath, "target", "fake:publication-successor");
+
+  const journal = new RuntimeJournal(path.join(sandbox, "publication-ownership-projection-runtime.sqlite"), { structuredHosts: true });
+  const journalClient = runtimeJournalClient(journal);
+  let ownsPublication = true;
+  let successorProjections = 0;
+  let releaseSuccessorAppend = () => {};
+  const successorAppendGate = new Promise<void>((resolve) => { releaseSuccessorAppend = resolve; });
+  let markSuccessorProjected = () => {};
+  const successorProjected = new Promise<void>((resolve) => { markSuccessorProjected = resolve; });
+  const client = {
+    ...journalClient,
+    append: async (event: Parameters<RuntimeHostClient["append"]>[0]) => {
+      const result = await journalClient.append(event);
+      if (event.kind === "session-status" && event.payload.artifactPath === successorPath) {
+        successorProjections += 1;
+        ownsPublication = false;
+        markSuccessorProjected();
+        await successorAppendGate;
+      }
+      return result;
+    },
+  } as RuntimeHostClient;
+
+  await bindStructuredDeliveryQueue([{
+    key: { engine: "codex", sessionId: sourceId },
+    host: observableFakeHost(new FakeEngineHost()),
+  }], { registry, client });
+  try {
+    const publication = publishStructuredDeliveryHost({
+      key: { engine: "codex", sessionId: successorId },
+      host: observableFakeHost(new FakeEngineHost()),
+    }, async () => ownsPublication);
+    await successorProjected;
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.artifactPath)
+      .toBe(successorPath);
+    releaseSuccessorAppend();
+    const cleanup = await publication;
+    await cleanup();
+
+    expect(successorProjections).toBe(1);
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+      sessionKey: { engine: "codex", sessionId: sourceId },
+      accountId: "source",
+      artifactPath: sourcePath,
+    });
+  } finally {
+    releaseSuccessorAppend();
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
 test("structured successor cleanup restores a rolled-back tmux source projection", async () => {
   const sourceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const successorId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";

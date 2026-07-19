@@ -221,6 +221,44 @@ test("a stale failed apply cannot roll its profile back over a newer reconfigure
   });
 });
 
+test("a failed LWW reconfigure restores the last stable profile across an applying predecessor", () => {
+  const target = fixture({ model: "gpt-5.5", effort: "medium", fast: false });
+  const first = target.registry.claimConversationReconfigure(target.conversationId, {
+    operationId: "optimistic-a",
+    revision: 10,
+    profile: { model: "gpt-5.6-sol", effort: "high", fast: false },
+  });
+  expect(first.kind).toBe("claimed");
+  expect(target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile).toMatchObject({
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: false,
+  });
+
+  const second = target.registry.claimConversationReconfigure(target.conversationId, {
+    operationId: "optimistic-b",
+    revision: 11,
+    profile: { model: "gpt-5.6-terra", effort: "xhigh", fast: true },
+  });
+  expect(second.kind).toBe("claimed");
+  if (!second.state) throw new Error("second reconfigure claim did not persist ownership");
+  expect(second.state.previousProfile).toEqual({ model: "gpt-5.5", effort: "medium", fast: false });
+
+  target.registry.settleConversationReconfigure(
+    target.conversationId,
+    "optimistic-b",
+    11,
+    "failed",
+    "replacement failed",
+  );
+  const reopened = new AgentRegistry(target.registry.filename, undefined, undefined, { sqliteMode: "off" });
+  expect(reopened.conversation(target.conversationId)?.generations.at(-1)?.launchProfile).toMatchObject({
+    model: "gpt-5.5",
+    effort: "medium",
+    fast: false,
+  });
+});
+
 test("a newer account reconfigure supersedes an in-flight conversation migration", async () => {
   const target = fixture();
   let releaseMigrationB!: () => void;

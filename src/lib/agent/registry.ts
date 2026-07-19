@@ -4106,11 +4106,13 @@ export class AgentRegistry {
         }
         return { kind: "replayed" as const, state: clone(current), conversation: clone(conversation) };
       }
-      const previousProfile = claim.previousProfile ?? {
-        model: generation.launchProfile.model,
-        effort: generation.launchProfile.effort,
-        fast: generation.launchProfile.fast,
-      };
+      const previousProfile = current?.status === "applying"
+        ? current.previousProfile
+        : claim.previousProfile ?? {
+          model: generation.launchProfile.model,
+          effort: generation.launchProfile.effort,
+          fast: generation.launchProfile.fast,
+        };
       const state: ConversationReconfigureState = {
         operationId: claim.operationId,
         revision: claim.revision,
