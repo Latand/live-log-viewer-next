@@ -1031,7 +1031,10 @@ export function stageFailEdgeRoundsUsed(pipeline: Pipeline, stage: PipelineStage
   if (!stage.onFail) return 0;
   const target = pipeline.runs.find((run) => run.stageId === stage.onFail!.to);
   if (!target) return 0;
-  return target.attempts.filter((attempt) => attempt.activatedBy?.edge === "fail" && attempt.activatedBy.stageId === stage.id).length;
+  return target.attempts.filter((attempt) =>
+    !attempt.historical
+    && attempt.activatedBy?.edge === "fail"
+    && attempt.activatedBy.stageId === stage.id).length;
 }
 
 /**

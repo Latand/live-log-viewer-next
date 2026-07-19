@@ -26,6 +26,7 @@ import {
   pipelineAnnouncement,
   pipelineStagePosition,
   stageFailEdgeFrozen,
+  stageFailEdgeRoundsUsed,
   pipelineBoardStripPath,
   pipelineCursorActive,
   pipelineNeedsAttention,
@@ -501,6 +502,24 @@ describe("stageFailEdgeFrozen (#353)", () => {
         { stageId: "verify", attempts: [{ n: 1, state: "failed" } as never] },
       ],
     });
+    expect(stageFailEdgeFrozen(p, verify)).toBe(true);
+  });
+
+  test("a historical child keeps fail-edge usage on the running operational round", () => {
+    const verify = { ...stage("verify"), onFail: { to: "build", maxRounds: 3 } };
+    const activation = { stageId: "verify", attempt: 1, edge: "fail" as const };
+    const p = pipeline({
+      stages: [stage("build"), verify],
+      runs: [
+        { stageId: "build", attempts: [
+          { n: 2, state: "running", activatedBy: activation } as never,
+          { n: 3, state: "passed", historical: true, activatedBy: activation } as never,
+        ] },
+        { stageId: "verify", attempts: [{ n: 1, state: "failed" } as never] },
+      ],
+    });
+
+    expect(stageFailEdgeRoundsUsed(p, verify)).toBe(1);
     expect(stageFailEdgeFrozen(p, verify)).toBe(true);
   });
 
