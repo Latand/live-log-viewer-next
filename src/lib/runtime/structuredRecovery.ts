@@ -42,6 +42,12 @@ interface RecoveryCandidate {
   publishReady: boolean;
 }
 
+function processIdentityAlive(identity: { pid: number; startIdentity: string | null } | null): boolean {
+  if (!identity || !Number.isInteger(identity.pid) || identity.pid <= 0) return false;
+  if (!procBackend.pidAlive(identity.pid)) return false;
+  return identity.startIdentity === null || procBackend.processIdentity(identity.pid) === identity.startIdentity;
+}
+
 const recoveryStore = globalThis as typeof globalThis & {
   __llvStructuredRecovery?: Map<string, Promise<StructuredRecoveryResult | null>>;
 };
@@ -66,7 +72,7 @@ function candidateFor(
       && registry.canonicalConversationId(receipt.conversationId) === conversation.id);
   if (!entry.structuredHost && !structuredReceipt) return null;
   const terminal = entry.status === "dead" || entry.status === "unhosted";
-  const publishReady = Boolean(entry.structuredHost?.process
+  const publishReady = Boolean(processIdentityAlive(entry.structuredHost?.process ?? null)
     && entry.claimOwner
     && entry.pendingAction === null
     && !terminal);
