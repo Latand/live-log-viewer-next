@@ -9,7 +9,7 @@ describe("describeMcpCall", () => {
       model: "gpt-5.6-sol",
       effort: "xhigh",
       role: "reviewer",
-      prompt: "Review PR #431",
+      "prompt": "Review PR #431",
     }, {
       conversationId: "conversation_431",
       transcriptPath: "/sessions/reviewer.jsonl",

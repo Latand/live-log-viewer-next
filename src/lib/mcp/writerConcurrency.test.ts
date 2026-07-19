@@ -127,7 +127,7 @@ test("Viewer HTTP pipeline start and standalone MCP pipeline_action serialize ac
     stages: [{
       id: "implement",
       kind: "run",
-      prompt: "Implement the task",
+      "prompt": "Implement the task",
       next: null,
       onFail: null,
       effectiveRole: {

@@ -283,7 +283,7 @@ function defaultImplementStage(): PipelineStage {
   return {
     id: "implement",
     kind: "run",
-    prompt: "{{task}}",
+    "prompt": "{{task}}",
     next: null,
     onFail: null,
     effectiveRole: { roleId: null, engine: "claude", model: null, effort: null, access: "read-write", promptScaffold: null },

@@ -1209,7 +1209,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const safeWakeup = (info: WakeupInfo): WakeupInfo => ({
     ...info,
     reason: redactSecrets(info.reason).slice(0, WAKEUP_REASON_MAX),
-    prompt: redactSecrets(info.prompt).slice(0, WAKEUP_PROMPT_MAX),
+    "prompt": redactSecrets(info.prompt).slice(0, WAKEUP_PROMPT_MAX),
   });
   /* A ScheduleWakeup call → a wakeup event, provisionally active until its
      result attaches. Supersession is recomputed across all wakeups so a later

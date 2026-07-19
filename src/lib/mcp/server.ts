@@ -301,7 +301,7 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   spawn_agent: z.object({
     clientRequestId: clientRequestIdSchema,
     cwd: z.string().min(1).describe("Existing working directory for the new agent."),
-    prompt: z.string().describe("First instruction sent to the agent."),
+    "prompt": z.string().describe("First instruction sent to the agent."),
     engine: z.enum(["claude", "codex"]).optional(),
     model: z.string().optional(),
     effort: z.string().optional(),

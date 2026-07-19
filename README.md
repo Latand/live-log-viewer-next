@@ -169,8 +169,6 @@ including conversation ids, transcript paths, pipeline ids, task ids, and
 runtime operation ids. Viewer transcripts render calls attributed to the `viewer` MCP
 server as live cards and turn those identifiers into navigation chips.
 
-![Pending, successful replay, and retryable MCP transcript cards](docs/media/mcp-call-cards.png)
-
 **Prerequisites:** Node ≥ 20.9, and bun or npm/pnpm. `tmux` is optional — see
 [Platform support](#platform-support).
 
