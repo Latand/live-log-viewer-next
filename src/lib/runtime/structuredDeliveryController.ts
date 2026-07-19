@@ -216,7 +216,10 @@ export async function bindStructuredDeliveryQueue(
       return true;
     },
     () => scheduleAutomaticRetry(),
-    (effect) => applyStructuredReconfigure(effect, { registry }),
+    (effect, ownership) => applyStructuredReconfigure(effect, {
+      registry,
+      ownsOperation: ownership.isCurrent,
+    }),
   );
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;

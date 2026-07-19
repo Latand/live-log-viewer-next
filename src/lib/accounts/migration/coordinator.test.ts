@@ -2796,6 +2796,92 @@ describe("durable account migration coordinator", () => {
     expect(store.conversationForPath("/stale-b.jsonl")?.id).toBe(conversation.id);
   });
 
+  test("a superseded account migration cannot publish its stale successor", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source-a.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source-a.jsonl")!;
+    store.requestConversationReseat(conversation.id, "b");
+    let releaseVerification!: () => void;
+    let verificationStarted!: () => void;
+    const verified = new Promise<void>((resolve) => { verificationStarted = resolve; });
+    const verificationGate = new Promise<void>((resolve) => { releaseVerification = resolve; });
+    const published: string[] = [];
+    const cleaned: string[] = [];
+    const staleProvider: SuccessorProviderPort = {
+      virtualSource: true,
+      async create(input) {
+        return {
+          operationId: input.operationId,
+          nativeId: "successor-b",
+          path: "/successor-b.jsonl",
+          continuityPaths: [],
+          historyHash: "successor-b",
+          host: { kind: "codex-app-server", identity: "successor-b", epoch: 1, verifiedAt: "2026-07-19T12:00:00.000Z" },
+        };
+      },
+      async verify() {
+        verificationStarted();
+        await verificationGate;
+      },
+      async publishHost(receipt) { published.push(receipt.nativeId); },
+      async cleanup(receipt) { cleaned.push(receipt.nativeId); },
+    };
+
+    const staleAdvance = advanceConversationMigration(conversation.id, store, staleProvider);
+    await verified;
+    const migrationB = store.conversation(conversation.id)!.migration!;
+    store.setConversationMigration(conversation.id, {
+      ...migrationB,
+      targetId: "c",
+      revision: migrationB.revision + 1,
+      operationId: "reconfigure-c",
+      phase: "requested",
+      providerReceipt: null,
+    });
+    releaseVerification();
+    const latest = await staleAdvance;
+
+    expect(published).toEqual([]);
+    expect(cleaned).toEqual(["successor-b"]);
+    expect(latest.migration).toMatchObject({ targetId: "c", operationId: "reconfigure-c" });
+    expect(latest.generations).toHaveLength(1);
+  });
+
+  test("a newer durable reconfigure effect fences publication before registry retarget", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source-effect-fence.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source-effect-fence.jsonl")!;
+    store.requestConversationReseat(conversation.id, "b");
+    let current = true;
+    const published: string[] = [];
+    const cleaned: string[] = [];
+    const provider: SuccessorProviderPort = {
+      virtualSource: true,
+      async create(input) {
+        return {
+          operationId: input.operationId,
+          nativeId: "effect-fenced-b",
+          path: "/effect-fenced-b.jsonl",
+          continuityPaths: [],
+          historyHash: "effect-fenced-b",
+          host: { kind: "codex-app-server", identity: "effect-fenced-b", epoch: 1, verifiedAt: "2026-07-19T12:00:00.000Z" },
+        };
+      },
+      async verify() { current = false; },
+      async publishHost(receipt) { published.push(receipt.nativeId); },
+      async cleanup(receipt) { cleaned.push(receipt.nativeId); },
+    };
+
+    const latest = await advanceConversationMigration(conversation.id, store, provider, {
+      ownsOperation: async () => current,
+    });
+
+    expect(published).toEqual([]);
+    expect(cleaned).toEqual(["effect-fenced-b"]);
+    expect(latest.generations).toHaveLength(1);
+    expect(latest.migration).toMatchObject({ targetId: "b", phase: "verifying" });
+  });
+
   test("stopping during successor startup fences the stale completion and cleans the discarded successor", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);

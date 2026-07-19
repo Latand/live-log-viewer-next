@@ -723,6 +723,70 @@ test("a delivering entry resumes after restart through the host ledger without a
   reopenedJournal.close();
 });
 
+test("an applying reconfigure recovers before its queued message after journal restart", async () => {
+  const filename = path.join(sandbox, "reconfigure-restart.sqlite");
+  const firstJournal = new RuntimeJournal(filename, { structuredHosts: true });
+  firstJournal.append({
+    scope: { type: "session", id: "conversation-reconfigure-restart" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-reconfigure-restart",
+      sessionKey: { engine: "codex", sessionId: "session-reconfigure-restart" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/reconfigure-restart.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  firstJournal.executeOperation({
+    kind: "reconfigure",
+    operationId: "reconfigure-before-crash",
+    idempotencyKey: "reconfigure-before-crash",
+    conversationId: "conversation-reconfigure-restart",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: true,
+    previousProfile: { model: null, effort: null, fast: null },
+  });
+  firstJournal.executeOperation({
+    kind: "send",
+    operationId: "message-after-reconfigure-crash",
+    idempotencyKey: "message-after-reconfigure-crash",
+    conversationId: "conversation-reconfigure-restart",
+    text: "continue after recovery",
+    policy: "queue",
+  });
+  firstJournal.transitionOperation("reconfigure-before-crash", "applying");
+  firstJournal.close();
+
+  const reopenedJournal = new RuntimeJournal(filename, { structuredHosts: true });
+  const ledger = createFakeDeliveryLedger();
+  const recoveredHost = new FakeEngineHost(ledger);
+  let recovered = false;
+  const actions: string[] = [];
+  const queue = new StructuredDeliveryQueue(
+    journalPort(reopenedJournal),
+    () => recovered ? recoveredHost : null,
+    undefined,
+    undefined,
+    async (effect, ownership) => {
+      expect(await ownership.isCurrent()).toBeTrue();
+      actions.push(`reconfigure:${effect.operationId}`);
+      recovered = true;
+    },
+  );
+  await queue.drain();
+
+  expect(actions).toEqual(["reconfigure:reconfigure-before-crash"]);
+  expect(ledger.writes.map((entry) => entry.id)).toEqual(["message-after-reconfigure-crash"]);
+  expect(reopenedJournal.operationResult("reconfigure-before-crash")?.receipt.status).toBe("applied");
+  expect(reopenedJournal.operationResult("message-after-reconfigure-crash")?.receipt.status).toBe("delivered");
+  expect(reopenedJournal.snapshot().sessions[0]?.pendingReconfigure).toBeNull();
+  reopenedJournal.close();
+});
+
 test("repeated terminal retry clicks produce one replacement engine write", async () => {
   const filename = path.join(sandbox, "terminal-retry-clicks.sqlite");
   const sessionId = "12121212-1212-4212-8212-121212121212";

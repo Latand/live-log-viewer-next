@@ -87,7 +87,14 @@ export interface StructuredReconfigureEffect {
   eventSeq: number;
 }
 
-export type StructuredReconfigureHandler = (effect: StructuredReconfigureEffect) => Promise<void | "applied" | "pending">;
+export interface StructuredReconfigureOwnership {
+  isCurrent(): Promise<boolean>;
+}
+
+export type StructuredReconfigureHandler = (
+  effect: StructuredReconfigureEffect,
+  ownership: StructuredReconfigureOwnership,
+) => Promise<void | "applied" | "pending">;
 
 type DeliveryEffect = SendEffect | ControlEffect | StructuredReconfigureEffect;
 
@@ -427,7 +434,9 @@ export class StructuredDeliveryQueue {
     }
     await this.port.transition(effect.operationId, "applying");
     try {
-      const outcome = await this.reconfigure(effect);
+      const outcome = await this.reconfigure(effect, {
+        isCurrent: () => this.isCurrentReconfigure(effect),
+      });
       if (outcome === "pending") {
         await this.port.transition(effect.operationId, "queued", { reason: "turn-boundary" });
         this.retrySoon();
@@ -438,6 +447,27 @@ export class StructuredDeliveryQueue {
       await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
     }
     return false;
+  }
+
+  private async isCurrentReconfigure(effect: StructuredReconfigureEffect): Promise<boolean> {
+    let latest = effect;
+    let afterEventSeq = 0;
+    while (true) {
+      const page = await this.port.effects(["runtime.reconfigure"], afterEventSeq);
+      for (const raw of page) {
+        const candidate = reconfigureEffect(raw);
+        if (candidate?.conversationId === effect.conversationId && candidate.eventSeq > latest.eventSeq) {
+          latest = candidate;
+        }
+      }
+      if (page.length < STRUCTURED_DELIVERY_BATCH_SIZE) break;
+      const nextCursor = Math.max(...page.map((item) => item.eventSeq));
+      if (!Number.isSafeInteger(nextCursor) || nextCursor <= afterEventSeq) {
+        throw new Error("structured reconfigure ownership page did not advance");
+      }
+      afterEventSeq = nextCursor;
+    }
+    return latest.operationId === effect.operationId && latest.eventSeq === effect.eventSeq;
   }
 
   private async drainControl(effect: ControlEffect): Promise<boolean> {

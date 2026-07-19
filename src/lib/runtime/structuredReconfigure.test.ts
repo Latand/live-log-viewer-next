@@ -14,7 +14,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-function fixture() {
+function fixture(profile: Partial<{ model: string | null; effort: string | null; fast: boolean | null }> = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-reconfigure-"));
   roots.push(root);
   const registry = new AgentRegistry(path.join(root, "registry.json"), undefined, undefined, { sqliteMode: "off" });
@@ -25,7 +25,7 @@ function fixture() {
     cwd: root,
     accountId: "source",
     transport: "structured",
-    launchProfile: { model: "gpt-5.5", effort: "medium", fast: false },
+    launchProfile: { model: "gpt-5.5", effort: "medium", fast: false, ...profile },
   });
   if (begun.kind !== "created") throw new Error("fixture spawn was unavailable");
   const settled = registry.settleSpawn(begun.receipt.launchId, {
@@ -166,4 +166,223 @@ test("account reconfigure restores the admitted profile after a pending attempt 
     effort: "medium",
     fast: false,
   });
+});
+
+test("a stale failed apply cannot roll its profile back over a newer reconfigure", async () => {
+  const target = fixture();
+  let releaseOldRecovery!: () => void;
+  let oldRecoveryStarted!: () => void;
+  const oldRecoveryGate = new Promise<void>((resolve) => { releaseOldRecovery = resolve; });
+  const oldRecoveryEntered = new Promise<void>((resolve) => { oldRecoveryStarted = resolve; });
+  let oldRecoveryAttempts = 0;
+  const oldApply = applyStructuredReconfigure(effect({
+    operationId: "switch-old",
+    conversationId: target.conversationId,
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: false,
+    previousProfile: { model: "gpt-5.5", effort: "medium", fast: false },
+    eventSeq: 10,
+  }), {
+    registry: target.registry,
+    releaseHost: async () => true,
+    recover: async () => {
+      oldRecoveryAttempts += 1;
+      if (oldRecoveryAttempts === 1) {
+        oldRecoveryStarted();
+        await oldRecoveryGate;
+        throw new Error("old target failed to start");
+      }
+      return { target: null, path: target.transcript, conversationId: target.conversationId, spawned: true };
+    },
+  });
+  await oldRecoveryEntered;
+
+  await applyStructuredReconfigure(effect({
+    operationId: "switch-new",
+    conversationId: target.conversationId,
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+    previousProfile: { model: "gpt-5.6-sol", effort: "high", fast: false },
+    eventSeq: 11,
+  }), {
+    registry: target.registry,
+    releaseHost: async () => true,
+    recover: async () => ({ target: null, path: target.transcript, conversationId: target.conversationId, spawned: true }),
+  });
+  releaseOldRecovery();
+  await expect(oldApply).rejects.toThrow();
+
+  expect(target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile).toMatchObject({
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+  });
+});
+
+test("a newer account reconfigure supersedes an in-flight conversation migration", async () => {
+  const target = fixture();
+  let releaseMigrationB!: () => void;
+  let migrationBStarted!: () => void;
+  const migrationBGate = new Promise<void>((resolve) => { releaseMigrationB = resolve; });
+  const migrationBEntered = new Promise<void>((resolve) => { migrationBStarted = resolve; });
+  const common = {
+    registry: target.registry,
+    validateAccount: async () => {},
+    resolveAccount: () => ({}) as never,
+    releaseHost: async () => true,
+  };
+  const switchToB = applyStructuredReconfigure(effect({
+    operationId: "switch-account-b",
+    conversationId: target.conversationId,
+    accountId: "b",
+    eventSeq: 20,
+  }), {
+    ...common,
+    migrate: async (conversationId, accountId, registry) => {
+      registry.requestConversationReseat(conversationId, accountId);
+      migrationBStarted();
+      await migrationBGate;
+      return registry.conversation(conversationId)!;
+    },
+  });
+  await migrationBEntered;
+
+  const switchToC = await applyStructuredReconfigure(effect({
+    operationId: "switch-account-c",
+    conversationId: target.conversationId,
+    accountId: "c",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    eventSeq: 21,
+  }), {
+    ...common,
+    migrate: async (conversationId, accountId, registry) => {
+      registry.requestConversationReseat(conversationId, accountId);
+      return registry.conversation(conversationId)!;
+    },
+  });
+  releaseMigrationB();
+  await expect(switchToB).rejects.toThrow("superseded");
+
+  expect(switchToC).toBe("pending");
+  expect(target.registry.conversation(target.conversationId)?.migration).toMatchObject({ targetId: "c" });
+  expect(Object.values(target.registry.snapshot().conversations)).toHaveLength(1);
+});
+
+test("a failed apply durably restores a sparse profile with its operation fence", async () => {
+  const target = fixture({ model: null, effort: null, fast: null });
+  const request = effect({
+    operationId: "sparse-profile-failure",
+    conversationId: target.conversationId,
+    previousProfile: { model: null, effort: null, fast: null },
+    eventSeq: 30,
+  });
+
+  await expect(applyStructuredReconfigure(request, {
+    registry: target.registry,
+    releaseHost: async () => true,
+    recover: async () => { throw new Error("replacement host failed"); },
+  })).rejects.toThrow("replacement host failed");
+
+  const reopened = new AgentRegistry(target.registry.filename, undefined, undefined, { sqliteMode: "off" });
+  const persisted = reopened.conversation(target.conversationId)!;
+  expect(persisted.generations.at(-1)?.launchProfile).toMatchObject({ model: null, effort: null, fast: null });
+  expect(persisted.reconfigure).toMatchObject({
+    operationId: "sparse-profile-failure",
+    revision: 30,
+    status: "failed",
+    previousProfile: { model: null, effort: null, fast: null },
+    error: "replacement host failed",
+  });
+});
+
+test("an applying reconfigure resumes from its durable operation after registry recovery", async () => {
+  const target = fixture({ model: null, effort: null, fast: null });
+  const request = effect({
+    operationId: "recover-applying-profile",
+    conversationId: target.conversationId,
+    previousProfile: { model: null, effort: null, fast: null },
+    eventSeq: 31,
+  });
+  target.registry.claimConversationReconfigure(target.conversationId, {
+    operationId: request.operationId,
+    revision: request.eventSeq,
+    profile: { model: request.model, effort: request.effort, fast: request.fast },
+    previousProfile: request.previousProfile,
+  });
+
+  const recoveredRegistry = new AgentRegistry(target.registry.filename, undefined, undefined, { sqliteMode: "off" });
+  const recoveredProfiles: unknown[] = [];
+  const outcome = await applyStructuredReconfigure(request, {
+    registry: recoveredRegistry,
+    releaseHost: async () => true,
+    recover: async () => {
+      recoveredProfiles.push(recoveredRegistry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile);
+      return { target: null, path: target.transcript, conversationId: target.conversationId, spawned: true };
+    },
+  });
+
+  expect(outcome).toBe("applied");
+  expect(recoveredProfiles).toEqual([expect.objectContaining({ model: request.model, effort: request.effort, fast: request.fast })]);
+  expect(recoveredRegistry.conversation(target.conversationId)?.reconfigure).toMatchObject({
+    operationId: request.operationId,
+    revision: request.eventSeq,
+    status: "applied",
+  });
+});
+
+test("account migration preserves conversation continuity without a duplicate card", async () => {
+  const target = fixture();
+  const successorPath = path.join(path.dirname(target.transcript), "successor-c.jsonl");
+  fs.writeFileSync(successorPath, "{}\n");
+
+  const outcome = await applyStructuredReconfigure(effect({
+    operationId: "switch-with-continuity",
+    conversationId: target.conversationId,
+    accountId: "c",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    eventSeq: 40,
+  }), {
+    registry: target.registry,
+    validateAccount: async () => {},
+    resolveAccount: () => ({}) as never,
+    releaseHost: async () => true,
+    migrate: async (conversationId, accountId, registry) => {
+      let migration = registry.conversation(conversationId)!.migration!;
+      if (migration.phase === "waiting-turn") {
+        migration = registry.transitionConversationMigration(conversationId, migration.revision, ["waiting-turn"], { phase: "requested" }).migration!;
+      }
+      migration = registry.transitionConversationMigration(conversationId, migration.revision, ["requested"], { phase: "preparing" }).migration!;
+      migration = registry.transitionConversationMigration(conversationId, migration.revision, ["preparing"], { phase: "successor-starting" }).migration!;
+      const receipt = {
+        operationId: migration.operationId,
+        nativeId: "thread-successor-c",
+        path: successorPath,
+        continuityPaths: [successorPath],
+        historyHash: "successor-c-history",
+        host: { kind: "codex-app-server" as const, identity: "successor-c-host", epoch: 1, verifiedAt: "2026-07-19T12:00:00.000Z" },
+      };
+      registry.recordConversationContinuityPath(conversationId, successorPath);
+      registry.persistMigrationProviderReceipt(conversationId, migration.revision, migration.operationId, receipt);
+      return registry.commitSuccessor(conversationId, {
+        id: receipt.nativeId,
+        path: receipt.path,
+        accountId,
+        historyHash: receipt.historyHash,
+        host: receipt.host,
+      }, migration.revision);
+    },
+  });
+
+  const settled = target.registry.conversation(target.conversationId)!;
+  expect(outcome).toBe("applied");
+  expect(settled.generations).toHaveLength(2);
+  expect(settled.generations.at(-1)).toMatchObject({ id: "thread-successor-c", accountId: "c", path: successorPath });
+  expect(target.registry.conversationForPath(target.transcript)?.id).toBe(target.conversationId);
+  expect(target.registry.conversationForPath(successorPath)?.id).toBe(target.conversationId);
+  expect(target.registry.canonicalPath(target.transcript)).toBe(successorPath);
+  expect(Object.values(target.registry.snapshot().conversations)).toHaveLength(1);
 });

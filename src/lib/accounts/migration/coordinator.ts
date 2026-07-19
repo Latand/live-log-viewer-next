@@ -265,6 +265,7 @@ export interface MigrationCoordinatorOptions {
   remapBoardPaths?: typeof remapDurableBoardPaths;
   transferBoardPathPlacements?: typeof transferDurableBoardPathPlacements;
   deferBoardRepair?: boolean;
+  ownsOperation?: () => Promise<boolean>;
 }
 
 interface BoardRepairPlan {
@@ -475,6 +476,26 @@ export async function advanceConversationMigration(
     if (!source) throw new Error("conversation has no source generation");
     if (!receipt || receipt.operationId !== migration.operationId) throw new Error("persisted successor receipt operation does not match");
     await successorProvider.verify(receipt, { engine: conversation.engine, targetAccountId: migration.targetId, launchProfile: source.launchProfile });
+    const publishOwner = registry.conversation(conversation.id);
+    const publishMigration = publishOwner?.migration;
+    const ownsPublication = (options.ownsOperation ? await options.ownsOperation() : true)
+      && publishMigration?.phase === "verifying"
+      && publishMigration.revision === migration.revision
+      && publishMigration.operationId === migration.operationId
+      && publishMigration.providerReceipt !== null
+      && sameProviderReceiptOutcome(publishMigration.providerReceipt, receipt);
+    if (!publishOwner || !ownsPublication) {
+      if (publishOwner) {
+        await cleanupDiscardedSuccessor(successorProvider, receipt, publishOwner, registry);
+        if (!options.deferBoardRepair) await repairCommittedBoardSuccessions(
+          [publishOwner],
+          registry,
+          options.remapBoardPaths ?? remapDurableBoardPaths,
+          options.transferBoardPathPlacements ?? transferDurableBoardPathPlacements,
+        );
+      }
+      return registry.conversation(conversation.id) ?? publishOwner ?? conversation;
+    }
     await successorProvider.publishHost?.(receipt, {
       engine: conversation.engine,
       conversationId: conversation.id,

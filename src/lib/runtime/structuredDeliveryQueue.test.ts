@@ -153,6 +153,56 @@ test("queued reconfigures are last-write-wins with one host restart", async () =
   ]);
 });
 
+test("a reconfigure admitted during an active apply supersedes it before publication", async () => {
+  const effects = [{
+    id: "effect:switch-b",
+    kind: "runtime.reconfigure",
+    eventSeq: 10,
+    payload: { operationId: "switch-b", conversationId: "conversation-one", model: "gpt-5.6-sol", effort: "high", fast: false, accountId: "b" },
+  }];
+  const terminal = new Set<string>();
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const applied: string[] = [];
+  let releaseB!: () => void;
+  let enteredB!: () => void;
+  const bGate = new Promise<void>((resolve) => { releaseB = resolve; });
+  const bEntered = new Promise<void>((resolve) => { enteredB = resolve; });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => effects.filter((item) => !terminal.has(String(item.payload.operationId))),
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+      if (status === "applied" || status === "failed") terminal.add(operationId);
+    },
+  }, () => null, undefined, undefined, async (effect, ownership) => {
+    if (effect.operationId === "switch-b") {
+      enteredB();
+      await bGate;
+    }
+    if (!await ownership.isCurrent()) throw new Error("superseded");
+    applied.push(effect.operationId);
+  });
+
+  const firstDrain = queue.drain();
+  await bEntered;
+  effects.push({
+    id: "effect:switch-c",
+    kind: "runtime.reconfigure",
+    eventSeq: 11,
+    payload: { operationId: "switch-c", conversationId: "conversation-one", model: "gpt-5.6-terra", effort: "xhigh", fast: true, accountId: "c" },
+  });
+  const rerun = queue.drain();
+  releaseB();
+  await Promise.all([firstDrain, rerun]);
+
+  expect(applied).toEqual(["switch-c"]);
+  expect(transitions).toEqual([
+    ["switch-b", "applying", undefined],
+    ["switch-b", "failed", "superseded"],
+    ["switch-c", "applying", undefined],
+    ["switch-c", "applied", undefined],
+  ]);
+});
+
 test("a dead host applies pending reconfigure before queued delivery recovery", async () => {
   const actions: string[] = [];
   let recovered = false;
