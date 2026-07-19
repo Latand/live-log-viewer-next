@@ -166,11 +166,31 @@ async function fetchPages(
 
 function markdownImageDestinations(text: string): string[] {
   const destinations: string[] = [];
-  const normalizeLabel = (label: string): string => label.trim().replaceAll(/\s+/g, " ").toLocaleLowerCase("en-US");
+  const normalizeLabel = (label: string): string => label
+    .replaceAll(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, "$1")
+    .trim()
+    .replaceAll(/\s+/g, " ")
+    .toLocaleLowerCase("en-US");
+  const labelEndFrom = (start: number): number => {
+    for (let cursor = start; cursor < text.length; cursor += 1) {
+      if (text[cursor] === "\\" && cursor + 1 < text.length) {
+        cursor += 1;
+        continue;
+      }
+      if (text[cursor] === "\r" || text[cursor] === "\n") return -1;
+      if (text[cursor] === "]") return cursor;
+    }
+    return -1;
+  };
   const definitions = new Map<string, string>();
-  const definitionPattern = /^[ \t]{0,3}\[([^\]\r\n]+)\]:[ \t]*(?:<([^>\r\n]+)>|([^\s\r\n]+))/gm;
-  for (const definition of text.matchAll(definitionPattern)) {
-    definitions.set(normalizeLabel(definition[1]), definition[2] ?? definition[3]);
+  const definitionStartPattern = /^[ \t]{0,3}\[/gm;
+  for (const definitionStart of text.matchAll(definitionStartPattern)) {
+    const labelStart = (definitionStart.index ?? 0) + definitionStart[0].length;
+    const labelEnd = labelEndFrom(labelStart);
+    if (labelEnd === -1 || labelEnd === labelStart || text[labelEnd + 1] !== ":") continue;
+    const destination = text.slice(labelEnd + 2).match(/^[ \t]*(?:<([^>\r\n]+)>|([^\s\r\n]+))/);
+    if (!destination) continue;
+    definitions.set(normalizeLabel(text.slice(labelStart, labelEnd)), destination[1] ?? destination[2]);
   }
   let searchFrom = 0;
   while (searchFrom < text.length) {
@@ -194,7 +214,7 @@ function markdownImageDestinations(text: string): string[] {
       let referenceLabel = label;
       let nextSearchFrom = labelEnd + 1;
       if (text[labelEnd + 1] === "[") {
-        const referenceEnd = text.indexOf("]", labelEnd + 2);
+        const referenceEnd = labelEndFrom(labelEnd + 2);
         if (referenceEnd !== -1) {
           referenceLabel = text.slice(labelEnd + 2, referenceEnd) || label;
           nextSearchFrom = referenceEnd + 1;
