@@ -26,6 +26,7 @@ export interface StructuredDeliveryQueuePort {
 }
 
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
+export type StructuredHostRecovery = (conversationId: string) => Promise<boolean>;
 
 const STRUCTURED_DELIVERY_BATCH_SIZE = 100;
 const THREAD_READ_ATTEMPTS = 2;
@@ -179,6 +180,7 @@ export class StructuredDeliveryQueue {
       sessionKey: { engine: "codex" | "claude"; sessionId: string },
     ) => Promise<boolean> = async () => false,
     private readonly retrySoon: () => void = () => {},
+    private readonly recoverHost: StructuredHostRecovery = async () => false,
   ) {}
 
   drain(): Promise<void> {
@@ -257,6 +259,12 @@ export class StructuredDeliveryQueue {
       const health = await host.health();
       if (health.status === "dead" || health.status === "unhosted") {
         await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+        try {
+          if (await this.recoverHost(effect.conversationId)) this.rerun = true;
+        } catch (error) {
+          const reason = `structured host recovery failed: ${failureReason(error)}`.slice(0, 240);
+          await this.port.transition(effect.operationId, "failed", { reason });
+        }
         return true;
       }
       const maySteer = health.status === "active"
