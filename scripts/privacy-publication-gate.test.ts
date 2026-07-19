@@ -2203,6 +2203,53 @@ describe("privacy publication gate", () => {
     }
   });
 
+  test("audits escaped reference labels in Markdown images", async () => {
+    const originalOcrLanguages = process.env.LLV_PRIVACY_OCR_LANGUAGES;
+    const syntheticHome = ["", "home", "fixture-person", "escaped-reference-media"].join("/");
+    const media = pngWithCustomMetadata("eXIf", syntheticHome);
+    const mediaPath = "/user-attachments/assets/escaped-reference-capture";
+    const resolvedMedia = `https://github.com${mediaPath}`;
+    const requests: string[] = [];
+    const languageResult = Bun.spawnSync({ cmd: ["tesseract", "--list-langs"], stderr: "pipe", stdout: "pipe" });
+    const ocrLanguage = languageResult.stdout.toString().split(/\r?\n/).find((language) => /^[a-z0-9_]+$/i.test(language) && language !== "osd");
+    process.env.LLV_PRIVACY_OCR_LANGUAGES = ocrLanguage ?? "missing-test-language";
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      requests.push(url.href);
+      if (url.href === resolvedMedia) {
+        return new Response(Uint8Array.from(media), { headers: { "content-type": "image/png" } });
+      }
+      if (url.pathname.endsWith("/issues/448")) {
+        return Response.json({
+          body: `![alt][a\\]b]\n\n[a\\]b]: ${mediaPath}`,
+          title: "Synthetic issue",
+        });
+      }
+      if (url.pathname.endsWith("/issues/448/comments")) return Response.json([]);
+      return new Response(null, { status: 404 });
+    };
+
+    try {
+      const findings = await auditGithubPublication({
+        apiUrl: "https://api.github.test/",
+        fetcher,
+        number: 448,
+        repo: "example/repository",
+        requireKnownValues: false,
+        token: "synthetic-github-audit-token",
+      });
+      const output = formatPrivacyReport(findings);
+
+      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_missing: 1\n");
+      expect(requests).toHaveLength(3);
+      expect(requests.at(-1)).toBe(resolvedMedia);
+      expect(output).not.toContain(syntheticHome);
+    } finally {
+      if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
+      else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;
+    }
+  });
+
   test("fetches entity-encoded GitHub media references for inspection", async () => {
     const originalOcrLanguages = process.env.LLV_PRIVACY_OCR_LANGUAGES;
     const syntheticHome = ["", "home", "fixture-person", "encoded-media"].join("/");
