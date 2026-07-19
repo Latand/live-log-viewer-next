@@ -438,13 +438,14 @@ export function SchemeBoard({
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
   const stableExpand = useCallback((path: string) => setExpanded(path), []);
 
-  /* Controls for a pipeline group's on-halo stage strip (issue #136): opening a
-     run stage routes through the board's normal select; a review-loop stage
-     glides to the flow's latest round. Stable identities keep GroupsLayer from
-     thrashing across polls. renderablePaths/renderableFlows gate actions to what
-     the board can actually reveal, matching NodesLayer's own strips. */
+  /* Compact node strips keep their path/flow navigation below. The group graph
+     resolves every materialized stage by conversation id through stableSelect. */
   const openPipelinePath = useCallback((path: string) => {
     const file = files.find((entry) => entry.path === path);
+    if (file) stableSelect(file);
+  }, [files, stableSelect]);
+  const openPipelineConversation = useCallback((conversationId: string) => {
+    const file = files.find((entry) => entry.conversationId === conversationId);
     if (file) stableSelect(file);
   }, [files, stableSelect]);
   const openPipelineFlow = useCallback((flowId: string) => {
@@ -454,14 +455,6 @@ export function SchemeBoard({
   const renderablePipelinePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   const placedNodePaths = useMemo(() => new Set(layout.nodes.map((node) => node.file.path)), [layout]);
   const renderableGroupFlows = useMemo(() => renderableFlowIds(layoutFlows, placedNodePaths), [layoutFlows, placedNodePaths]);
-  /* Pipelines whose per-node compact strip is actually mounted: its board-strip
-     node must be PLACED on the layout, not merely resolvable. A pipeline missing
-     here has no on-board plan surface, so its group halo renders one (finding 1). */
-  const nodeStripPipelineIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const [path, pipeline] of pipelineStrips) if (placedNodePaths.has(path)) ids.add(pipeline.id);
-    return ids;
-  }, [pipelineStrips, placedNodePaths]);
   const linkedTasksByPipeline = useMemo(
     () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, allTasks, flows, files)] as const)),
     [pipelines, allTasks, flows, files],
@@ -480,8 +473,8 @@ export function SchemeBoard({
     return byTask;
   }, [pipelines, linkedTasksByPipeline, flows, renderableGroupFlows, renderablePipelinePaths, files]);
   const pipelineControls = useMemo<PipelineGroupControls>(
-    () => ({ flows, files, renderablePaths: renderablePipelinePaths, renderableFlows: renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, onOpenPath: openPipelinePath, onOpenFlow: openPipelineFlow, onOpenTask: stableOpenTask }),
-    [flows, files, renderablePipelinePaths, renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, openPipelinePath, openPipelineFlow, stableOpenTask],
+    () => ({ flows, onOpenConversation: openPipelineConversation }),
+    [flows, openPipelineConversation],
   );
   const pinPipeline = useCallback(
     (pipeline: Pipeline, pos: { x: number; y: number }) =>
