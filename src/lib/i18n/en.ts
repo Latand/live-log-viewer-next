@@ -1038,6 +1038,8 @@ export const en = {
   "pipelineStrip.openTask": "Open linked task {label}",
   "pipelineStrip.roundShort": "R{n}",
   "pipelineStrip.attemptSuffix": "×{n}",
+  "stageGraph.roundProgress": "round {round}/{total}",
+  "stageGraph.startedNotice": "This stage started while settings were open. Its saved server configuration is now locked.",
   "pipelineStrip.chipAria": "Stage {label}: {state}",
   "pipelineStrip.compactChipAria": "{label}, {state}",
   "pipelineStrip.stageOf": "stage {k}/{n}",

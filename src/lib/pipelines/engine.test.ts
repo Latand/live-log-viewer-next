@@ -62,6 +62,7 @@ function entry(pathname: string): FileEntry {
 
 function harness() {
   const calls: string[] = [];
+  const spawnRoles: Array<Parameters<PipelinePorts["spawnAgent"]>[0]["role"]> = [];
   const messages = new Map<string, { text: string; ts: number }>();
   const durableTurns = new Map<string, StageTurnEvidence>();
   const flows = new Map<string, Flow>();
@@ -93,8 +94,9 @@ function harness() {
       return null;
     },
     spawnReceipt: () => null,
-    spawnAgent: async ({ parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
+    spawnAgent: async ({ role, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
       spawn += 1;
+      spawnRoles.push(structuredClone(role));
       calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}:supersedes=${supersedes ?? "none"}`);
       calls.push(`membership:${membership.kind}:${membership.containerId}:${membership.slot}:${membership.role}:${membership.stageOrder}:round=${membership.round}`);
       onReserved({ launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}` });
@@ -134,6 +136,7 @@ function harness() {
     messages,
     durableTurns,
     flows,
+    spawnRoles,
     finish,
     setBuilderEffort: (effort: string) => { builderEffort = effort; },
     setPaneAlive: (alive: boolean) => { paneAlive = alive; },
@@ -1401,6 +1404,34 @@ test("override-stage re-configures an unstarted stage and rejects a started one 
   });
   savePipelines([started]);
   expect((await patchPipeline(started.id, { action: "override-stage", stageId: "build", prompt: "x" }, ports)).status).toBe(409);
+});
+
+test("a stage spawn uses the model and effort saved by override-stage", async () => {
+  const h = harness();
+  const created = await create(h.ports);
+  const updated = await patchPipeline(created.id, {
+    action: "override-stage",
+    stageId: "build",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+  }, h.ports);
+  expect(updated.error).toBeUndefined();
+
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "planned")], h.ports);
+  await tickPipelines([], h.ports);
+
+  expect(h.spawnRoles.at(-1)).toMatchObject({
+    roleId: "builder",
+    engine: "codex",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+  });
+  expect(loadPipelines()[0]!.runs.find((run) => run.stageId === "build")?.attempts[0]?.effectiveRole).toMatchObject({
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+  });
 });
 
 test("override-stage edits every stage while a pipeline is a draft", async () => {
