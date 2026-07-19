@@ -21,7 +21,7 @@ import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
-import { PipelineStageGraph } from "@/components/scheme/PipelineStageGraph";
+import { PipelineStageGraph, PipelineStageGraphFlowsProvider } from "@/components/scheme/PipelineStageGraph";
 import { STAGE_TONES, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
@@ -359,6 +359,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
  */
 /** Navigation seam for the stage graph mounted in an interactive pipeline group. */
 export interface PipelineGroupControls {
+  flows: readonly Flow[];
   onOpenConversation: (conversationId: string) => void;
 }
 
@@ -443,10 +444,12 @@ export const GroupsLayer = memo(function GroupsLayer({
                 data-scheme-group-strip
                 className={`absolute left-4 right-4 top-3 z-[7] ${interactive ? "pointer-events-auto" : "pointer-events-none"}`}
               >
-                <PipelineStageGraph
-                  pipeline={group.pipeline}
-                  onOpenConversation={pipelineControls.onOpenConversation}
-                />
+                <PipelineStageGraphFlowsProvider flows={pipelineControls.flows}>
+                  <PipelineStageGraph
+                    pipeline={group.pipeline}
+                    onOpenConversation={pipelineControls.onOpenConversation}
+                  />
+                </PipelineStageGraphFlowsProvider>
               </div>
             ) : null}
             <button

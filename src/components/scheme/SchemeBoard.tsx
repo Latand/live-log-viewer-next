@@ -452,8 +452,8 @@ export function SchemeBoard({
     [pipelines, allTasks, flows, files],
   );
   const pipelineControls = useMemo<PipelineGroupControls>(
-    () => ({ onOpenConversation: openPipelineConversation }),
-    [openPipelineConversation],
+    () => ({ flows, onOpenConversation: openPipelineConversation }),
+    [flows, openPipelineConversation],
   );
   /* One minimap dot per collapsed worker-stack origin (issue #136): orchestration
      origins (flow/pipeline) in accent, spawner/worktree origins in gray. */

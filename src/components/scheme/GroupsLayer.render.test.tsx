@@ -19,6 +19,7 @@ const planPipeline = {
 } as unknown as Pipeline;
 
 const controls: PipelineGroupControls = {
+  flows: [],
   onOpenConversation: () => {},
 };
 

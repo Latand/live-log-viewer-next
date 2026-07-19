@@ -4,9 +4,10 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { useState } from "react";
 
+import type { Flow } from "@/lib/flows/types";
 import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 
-import { PipelineStageGraph } from "./PipelineStageGraph";
+import { PipelineStageGraph, PipelineStageGraphFlowsProvider } from "./PipelineStageGraph";
 
 const dom = new HappyWindow();
 const roots = new Set<Root>();
@@ -78,12 +79,20 @@ function pipeline(stages: PipelineStage[], attemptsByStage: Record<string, Pipel
   };
 }
 
-function mount(value: Pipeline, onOpenConversation: (conversationId: string) => void = () => {}): HTMLElement {
+function mount(
+  value: Pipeline,
+  onOpenConversation: (conversationId: string) => void = () => {},
+  flows: readonly Flow[] = [],
+): HTMLElement {
   const host = dom.document.createElement("div");
   dom.document.body.append(host);
   const root = createRoot(host as unknown as HTMLElement);
   roots.add(root);
-  flushSync(() => root.render(<PipelineStageGraph pipeline={value} onOpenConversation={onOpenConversation} />));
+  flushSync(() => root.render(
+    <PipelineStageGraphFlowsProvider flows={flows}>
+      <PipelineStageGraph pipeline={value} onOpenConversation={onOpenConversation} />
+    </PipelineStageGraphFlowsProvider>,
+  ));
   return host as unknown as HTMLElement;
 }
 
@@ -102,6 +111,27 @@ function mountMutable(value: Pipeline, onOpenConversation: (conversationId: stri
   return { host: host as unknown as HTMLElement, update: (next: Pipeline) => flushSync(() => update(next)) };
 }
 
+function expandReview(host: HTMLElement, ownerId = "build"): HTMLElement {
+  flushSync(() => (host.querySelector(`[data-review-group-collapsed="${ownerId}"]`) as HTMLButtonElement).click());
+  return host.querySelector(`[data-review-cycle="${ownerId}"]`) as HTMLElement;
+}
+
+function openReviewSettings(host: HTMLElement, ownerId = "build"): HTMLElement {
+  const cycle = expandReview(host, ownerId);
+  flushSync(() => (cycle.querySelector('button[data-cycle-role="reviewer"]') as HTMLButtonElement).click());
+  return cycle;
+}
+
+function reviewFlow(id: string, roundCount: number, state: Flow["state"]): Flow {
+  return {
+    id,
+    state,
+    roundLimit: 3,
+    roles: { implementer: builderRole, reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "high" } },
+    rounds: Array.from({ length: roundCount }, (_, index) => ({ n: index + 1 })),
+  } as unknown as Flow;
+}
+
 test("a fresh two-stage pipeline renders its running node and clickable review settings ghost", () => {
   const stages = [runStage("build", "review"), reviewStage("review", null)];
   const opened: string[] = [];
@@ -114,10 +144,10 @@ test("a fresh two-stage pipeline renders its running node and clickable review s
   expect(host.querySelectorAll("[data-stage-graph-edge]")).toHaveLength(1);
   const ghost = host.querySelector('[data-stage-graph-node="review"]') as HTMLElement;
   expect(ghost.getAttribute("data-ghost")).toBe("true");
-  const trigger = ghost.querySelector("button[data-open-stage]") as HTMLButtonElement;
+  const trigger = host.querySelector('[data-review-group-collapsed="build"]') as HTMLButtonElement;
   expect(trigger.disabled).toBe(false);
-  flushSync(() => trigger.click());
-  expect(ghost.querySelector('[data-stage-settings="review"]')).not.toBeNull();
+  const cycle = openReviewSettings(host);
+  expect(cycle.querySelector('[data-stage-settings="review"]')).not.toBeNull();
   expect(opened).toEqual([]);
   expect(host.querySelector('[data-stage-group-owner="build"]')?.contains(ghost)).toBe(true);
 });
@@ -142,6 +172,78 @@ test("review rounds stay grouped under their implementer and show bounded progre
   expect(owner.contains(reviewNode)).toBe(true);
   expect(reviewNode.getAttribute("data-review-round")).toBe("2/3");
   expect(reviewNode.textContent).toContain("round 2/3");
+});
+
+test("collapsed reviewers form a compact group directly below their implementer", () => {
+  const build = runStage("build", "review");
+  const review = reviewStage("review", null);
+  const host = mount(pipeline([build, review], {
+    build: [attempt(1, "passed", "conversation-build")],
+    review: [attempt(1, "reviewing", "conversation-review", { stageId: "build", attempt: 1, edge: "pass" })],
+  }));
+
+  const owner = host.querySelector('[data-stage-group-owner="build"]')!;
+  const implementer = owner.querySelector('[data-stage-graph-node="build"]') as HTMLElement;
+  const reviewers = owner.querySelector('[data-review-group-collapsed="build"]') as HTMLElement;
+
+  expect(reviewers).not.toBeNull();
+  expect(owner.contains(reviewers)).toBe(true);
+  expect(Number.parseFloat(reviewers.style.top)).toBeGreaterThan(
+    Number.parseFloat(implementer.style.top) + Number.parseFloat(implementer.style.height),
+  );
+  expect(reviewers.querySelector('[data-review-group-stage="review"]')).not.toBeNull();
+});
+
+test("expanding a reviewer group reveals a two-arrow cycle with round progress", () => {
+  const build = runStage("build", "review");
+  const review = reviewStage("review", null);
+  review.onFail = { to: "build", maxRounds: 3 };
+  const reviewAttempt = attempt(1, "reviewing", "conversation-review-2", { stageId: "build", attempt: 1, edge: "pass" });
+  reviewAttempt.flowId = "flow-review";
+  const host = mount(pipeline([build, review], {
+    build: [attempt(1, "passed", "conversation-build")],
+    review: [reviewAttempt],
+  }), () => {}, [reviewFlow("flow-review", 2, "reviewing")]);
+
+  flushSync(() => (host.querySelector('[data-review-group-collapsed="build"]') as HTMLButtonElement).click());
+
+  const cycle = host.querySelector('[data-review-cycle="build"][data-review-cycle-state="expanded"]')!;
+  expect(cycle).not.toBeNull();
+  expect(cycle.querySelectorAll("[data-review-cycle-arrow]")).toHaveLength(2);
+  expect(cycle.querySelector('[data-cycle-role="implementer"]')?.textContent).toContain("build");
+  expect(cycle.querySelector('[data-cycle-role="reviewer"]')?.textContent).toContain("review");
+  expect(cycle.getAttribute("data-review-round")).toBe("2/3");
+  expect(cycle.textContent).toContain("round 2/3");
+});
+
+test("the expanded cycle triggers another round through its embedded review flow", async () => {
+  const build = runStage("build", "review");
+  const review = reviewStage("review", null);
+  review.onFail = { to: "build", maxRounds: 3 };
+  const reviewAttempt = attempt(1, "needs_decision", "conversation-review", { stageId: "build", attempt: 1, edge: "pass" });
+  reviewAttempt.flowId = "flow-review";
+  const value = pipeline([build, review], {
+    build: [attempt(1, "passed", "conversation-build")],
+    review: [reviewAttempt],
+  });
+  value.state = "needs_decision";
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const host = mount(value, () => {}, [reviewFlow("flow-review", 1, "done_comment")]);
+    flushSync(() => (host.querySelector('[data-review-group-collapsed="build"]') as HTMLButtonElement).click());
+    (host.querySelector("button[data-trigger-review-round]") as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toEqual([{ url: "/api/flows/flow-review", body: { action: "another-round" } }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("clicking a materialized node opens its conversation while failed transcripts remain linkable", () => {
@@ -225,7 +327,7 @@ test("saving ghost settings issues override-stage and the spawned node shows the
 
   try {
     const host = mount(value);
-    flushSync(() => (host.querySelector('[data-stage-graph-node="review"] button[data-open-stage]') as HTMLButtonElement).click());
+    openReviewSettings(host);
     const set = (name: string, selected: string) => {
       const input = host.querySelector(`[data-stage-setting="${name}"]`) as HTMLSelectElement;
       input.value = selected;
@@ -267,7 +369,7 @@ test("an editor closes with a notice when its stage starts and the node opens th
   const initial = pipeline(stages, { build: [attempt(1, "running", "conversation-build")] });
   const opened: string[] = [];
   const view = mountMutable(initial, (conversationId) => opened.push(conversationId));
-  flushSync(() => (view.host.querySelector('[data-stage-graph-node="review"] button[data-open-stage]') as HTMLButtonElement).click());
+  openReviewSettings(view.host);
   expect(view.host.querySelector('[data-stage-settings="review"]')).not.toBeNull();
 
   const started = structuredClone(initial);
@@ -276,8 +378,8 @@ test("an editor closes with a notice when its stage starts and the node opens th
   view.update(started);
 
   expect(view.host.querySelector('[data-stage-settings="review"]')).toBeNull();
-  expect(view.host.querySelector('[data-stage-graph-node="review"] [role="status"]')?.textContent).toContain("started");
-  (view.host.querySelector('[data-stage-graph-node="review"] button[data-open-stage]') as HTMLButtonElement).click();
+  expect(view.host.querySelector('[data-review-cycle="build"] [role="status"]')?.textContent).toContain("started");
+  (view.host.querySelector('[data-review-cycle="build"] button[data-open-stage]') as HTMLButtonElement).click();
   expect(opened).toEqual(["conversation-review"]);
 });
 
@@ -290,10 +392,10 @@ test("an override-stage rejection is surfaced inside the open node", async () =>
   })) as unknown as typeof fetch;
   try {
     const host = mount(pipeline(stages, { build: [attempt(1, "running", "conversation-build")] }));
-    flushSync(() => (host.querySelector('[data-stage-graph-node="review"] button[data-open-stage]') as HTMLButtonElement).click());
+    openReviewSettings(host);
     (host.querySelector("button[data-save-stage-settings]") as HTMLButtonElement).click();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(host.querySelector('[data-stage-settings="review"] [role="alert"]')?.textContent).toBe("stage already started");
+    expect(host.querySelector('[data-review-cycle="build"] [role="alert"]')?.textContent).toBe("stage already started");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -307,21 +409,21 @@ test("a late override rejection replaces the started notice after the editor clo
   globalThis.fetch = (() => new Promise<Response>((resolve) => { settle = resolve; })) as unknown as typeof fetch;
   try {
     const view = mountMutable(initial);
-    flushSync(() => (view.host.querySelector('[data-stage-graph-node="review"] button[data-open-stage]') as HTMLButtonElement).click());
+    openReviewSettings(view.host);
     (view.host.querySelector("button[data-save-stage-settings]") as HTMLButtonElement).click();
 
     const started = structuredClone(initial);
     started.runs[1]!.attempts = [attempt(1, "reviewing", "conversation-review", { stageId: "build", attempt: 1, edge: "pass" })];
     started.cursor = { stageId: "review", state: "reviewing", input: null, activatedBy: { stageId: "build", attempt: 1, edge: "pass" } };
     view.update(started);
-    expect(view.host.querySelector('[data-stage-graph-node="review"] [role="status"]')?.textContent).toContain("started");
+    expect(view.host.querySelector('[data-review-cycle="build"] [role="status"]')?.textContent).toContain("started");
 
     settle(new Response(JSON.stringify({ error: "server rejected started-stage override" }), {
       status: 409,
       headers: { "content-type": "application/json" },
     }));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(view.host.querySelector('[data-stage-graph-node="review"] [role="status"]')?.textContent).toContain("server rejected started-stage override");
+    expect(view.host.querySelector('[data-review-cycle="build"] [role="status"]')?.textContent).toContain("server rejected started-stage override");
   } finally {
     globalThis.fetch = originalFetch;
   }

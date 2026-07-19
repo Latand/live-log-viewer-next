@@ -1106,6 +1106,32 @@ test("retrying a parked review-loop appends a fresh attempt and flow", async () 
   expect(reviewRun.attempts[1]!.flowId).toBe("flow-2");
 });
 
+test("reopening an embedded review flow resumes its parked pipeline attempt", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.flows.get("flow-1")!.state = "done_comment";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+
+  h.flows.get("flow-1")!.state = "waiting_ready";
+  h.flows.get("flow-1")!.stateDetail = null;
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const resumed = loadPipelines()[0]!;
+  const reviewRun = resumed.runs[1]!;
+  expect(resumed.state).toBe("running");
+  expect(reviewRun.attempts).toHaveLength(1);
+  expect(reviewRun.attempts[0]).toMatchObject({ flowId: "flow-1", state: "reviewing", error: null });
+});
+
 test("review-loop startup parks when advance fails", async () => {
   const h = harness();
   const stages = [
