@@ -497,6 +497,24 @@ describe("privacy publication gate", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
+  test("detects resource identifiers split across visible Markdown link text", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const text = join(directory, "publication.md");
+    const identifier = ["12345678", "1234", "4abc", "8def", "123456789abc"].join("-");
+    const publication = `${identifier.slice(0, 4)}[${identifier.slice(4, 8)}](https://example.invalid)${identifier.slice(8)}`;
+    writeFileSync(text, `${publication}\n`);
+
+    const result = runGate([text]);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\nresource_identifier: 1\n");
+    expect(output).not.toContain(publication);
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("keeps the all-zero UUID placeholder exempt", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
@@ -655,6 +673,36 @@ describe("privacy publication gate", () => {
         const encodedSeparator = encodeURIComponent(String.fromCodePoint(0x200b));
         return ["", `ho${encodedSeparator}me`, "fixture-person", "records"].join("/");
       },
+    },
+    {
+      expected: "resource_identifier",
+      name: "U+2063 default-ignorable separators",
+      publication: () => `1234${String.fromCodePoint(0x2063)}5678-1234-4abc-8def-123456789abc`,
+    },
+    {
+      expected: "resource_identifier",
+      name: "U+2061 function-application separators",
+      publication: () => `1234${String.fromCodePoint(0x2061)}5678-1234-4abc-8def-123456789abc`,
+    },
+    {
+      expected: "resource_identifier",
+      name: "U+2062 invisible-times separators",
+      publication: () => `1234${String.fromCodePoint(0x2062)}5678-1234-4abc-8def-123456789abc`,
+    },
+    {
+      expected: "resource_identifier",
+      name: "U+2064 invisible-plus separators",
+      publication: () => `1234${String.fromCodePoint(0x2064)}5678-1234-4abc-8def-123456789abc`,
+    },
+    {
+      expected: "resource_identifier",
+      name: "soft-hyphen default-ignorables",
+      publication: () => `1234${String.fromCodePoint(0x00ad)}5678-1234-4abc-8def-123456789abc`,
+    },
+    {
+      expected: "resource_identifier",
+      name: "supplementary tag default-ignorables",
+      publication: () => `1234${String.fromCodePoint(0xe007f)}5678-1234-4abc-8def-123456789abc`,
     },
     {
       expected: "home_path",
@@ -2222,6 +2270,53 @@ describe("privacy publication gate", () => {
       if (url.pathname.endsWith("/issues/448")) {
         return Response.json({
           body: `![alt][a\\]b]\n\n[a\\]b]: ${mediaPath}`,
+          title: "Synthetic issue",
+        });
+      }
+      if (url.pathname.endsWith("/issues/448/comments")) return Response.json([]);
+      return new Response(null, { status: 404 });
+    };
+
+    try {
+      const findings = await auditGithubPublication({
+        apiUrl: "https://api.github.test/",
+        fetcher,
+        number: 448,
+        repo: "example/repository",
+        requireKnownValues: false,
+        token: "synthetic-github-audit-token",
+      });
+      const output = formatPrivacyReport(findings);
+
+      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_missing: 1\n");
+      expect(requests).toHaveLength(3);
+      expect(requests.at(-1)).toBe(resolvedMedia);
+      expect(output).not.toContain(syntheticHome);
+    } finally {
+      if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
+      else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;
+    }
+  });
+
+  test("audits multiline reference destinations in Markdown images", async () => {
+    const originalOcrLanguages = process.env.LLV_PRIVACY_OCR_LANGUAGES;
+    const syntheticHome = ["", "home", "fixture-person", "multiline-reference-media"].join("/");
+    const media = pngWithCustomMetadata("eXIf", syntheticHome);
+    const mediaPath = "/user-attachments/assets/multiline-reference-capture";
+    const resolvedMedia = `https://github.com${mediaPath}`;
+    const requests: string[] = [];
+    const languageResult = Bun.spawnSync({ cmd: ["tesseract", "--list-langs"], stderr: "pipe", stdout: "pipe" });
+    const ocrLanguage = languageResult.stdout.toString().split(/\r?\n/).find((language) => /^[a-z0-9_]+$/i.test(language) && language !== "osd");
+    process.env.LLV_PRIVACY_OCR_LANGUAGES = ocrLanguage ?? "missing-test-language";
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      requests.push(url.href);
+      if (url.href === resolvedMedia) {
+        return new Response(Uint8Array.from(media), { headers: { "content-type": "image/png" } });
+      }
+      if (url.pathname.endsWith("/issues/448")) {
+        return Response.json({
+          body: `![evidence][capture]\n\n[capture]:\n ${mediaPath}`,
           title: "Synthetic issue",
         });
       }
