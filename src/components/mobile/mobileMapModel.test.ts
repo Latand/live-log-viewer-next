@@ -163,4 +163,5 @@ test("a memberless pipeline contributes a mobile outline plus All and Current bo
   expect(model.world.x + model.world.w).toBeGreaterThanOrEqual(outline.rect.x + outline.rect.w);
   expect(model.world.y + model.world.h).toBeGreaterThanOrEqual(outline.rect.y + outline.rect.h);
   expect(model.current).toEqual(outline.rect);
+  expect(model.currentCount).toBe(1);
 });

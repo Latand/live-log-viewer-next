@@ -254,7 +254,7 @@ test("current framing fits separated pipeline-only outlines", async () => {
       workerStacks={[]}
       pipelineOutlines={[
         { id: "left", title: "Left pipeline", rect: { x: 100, y: 100, w: 360, h: 76 } },
-        { id: "right", title: "Right pipeline", rect: { x: 2_200, y: 500, w: 360, h: 76 } },
+        { id: "right", title: "Right pipeline", rect: { x: 100_000, y: 500, w: 360, h: 76 } },
       ]}
       frame="current"
       ringKey={null}
@@ -376,6 +376,8 @@ test("pipeline-only All and Current framing preserve a manual camera across equi
   await settle();
   expect(Number.parseFloat(marker().style.left) + Number.parseFloat(marker().style.width) / 2).toBeCloseTo(195, 5);
   expect(Number.parseFloat(marker().style.top) + Number.parseFloat(marker().style.height) / 2).toBeCloseTo(310, 5);
+  expect(Number.parseFloat(marker().style.width)).toBe(outline.rect.w);
+  expect(Number.parseFloat(marker().style.height)).toBe(outline.rect.h);
 
   render(root, "all", true);
   await settle();

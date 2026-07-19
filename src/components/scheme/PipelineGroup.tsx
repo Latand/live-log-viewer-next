@@ -70,6 +70,7 @@ export const PipelineGroup = memo(function PipelineGroup({
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
   const pinSeqRef = useRef(0);
   const pendingPinRef = useRef<PendingPin | null>(null);
+  const pinSaveTailRef = useRef<Promise<void> | null>(null);
   const pos = drag ?? localPos ?? rect.header;
   const worldRect = useMemo(() => {
     const dx = pos.x - rect.header.x;
@@ -132,7 +133,16 @@ export const PipelineGroup = memo(function PipelineGroup({
     const seq = ++pinSeqRef.current;
     pendingPinRef.current = { seq, pos: dropped, settled: false };
     setLocalPos(dropped);
-    void onPin(pipeline, dropped).then((error) => {
+    const previousSave = pinSaveTailRef.current;
+    const save = previousSave
+      ? previousSave.then(() => onPin(pipeline, dropped))
+      : onPin(pipeline, dropped);
+    const saveTail = save.then(() => undefined, () => undefined);
+    pinSaveTailRef.current = saveTail;
+    void saveTail.then(() => {
+      if (pinSaveTailRef.current === saveTail) pinSaveTailRef.current = null;
+    });
+    const settle = (error: string | null) => {
       const pending = pendingPinRef.current;
       if (!pending || pending.seq !== seq) return;
       if (error) {
@@ -142,7 +152,8 @@ export const PipelineGroup = memo(function PipelineGroup({
       }
       pending.settled = true;
       setSettledPinSeq(seq);
-    });
+    };
+    void save.then(settle, () => settle("pipeline position save failed"));
   };
 
   return (

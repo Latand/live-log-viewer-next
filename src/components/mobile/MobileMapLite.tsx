@@ -35,9 +35,14 @@ function frameRect(rect: { x: number; y: number; w: number; h: number }, viewpor
 }
 
 /** Fit one semantic frame with a 1x ceiling so Current never hides its edges. */
-function fitCurrent(rect: MapRect, viewport: { w: number; h: number }): Camera {
-  const availableW = Math.max(viewport.w - FIT_PAD * 2, 1);
-  const availableH = Math.max(viewport.h - FIT_PAD * 2, 1);
+function fitCurrent(rect: MapRect, viewport: { w: number; h: number }, surfaceCount: number): Camera {
+  if (surfaceCount === 1) {
+    const z = Math.min(viewport.w / Math.max(rect.w, 1), viewport.h / Math.max(rect.h, 1), 1);
+    return frameRect(rect, viewport, z);
+  }
+  const markerPad = Math.max(FIT_PAD, MARKER_MIN_SIZE);
+  const availableW = Math.max(viewport.w - markerPad * 2, 1);
+  const availableH = Math.max(viewport.h - markerPad * 2, 1);
   const z = Math.min(availableW / Math.max(rect.w, 1), availableH / Math.max(rect.h, 1), 1);
   return frameRect(rect, viewport, z);
 }
@@ -112,8 +117,8 @@ export function MobileMapLite({
   const currentCamera = useMemo(
     () => currentX === null || currentY === null || currentW === null || currentH === null
       ? null
-      : fitCurrent({ x: currentX, y: currentY, w: currentW, h: currentH }, { w: viewportW, h: viewportH }),
-    [currentX, currentY, currentW, currentH, viewportW, viewportH],
+      : fitCurrent({ x: currentX, y: currentY, w: currentW, h: currentH }, { w: viewportW, h: viewportH }, model.currentCount),
+    [currentX, currentY, currentW, currentH, viewportW, viewportH, model.currentCount],
   );
   const targetCamera = currentCamera ?? allCamera;
   const gestureMinZoom = Math.min(Z_MIN, targetCamera.z);

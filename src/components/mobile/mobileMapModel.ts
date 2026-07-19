@@ -73,6 +73,8 @@ export interface MobileMapModel {
   world: MapRect;
   /** Active/focused surfaces used by the Current frame. */
   current: MapRect | null;
+  /** Number of semantic surfaces represented by the Current frame. */
+  currentCount: number;
   /** Marker candidates before the cap — diagnostics and tests. */
   total: number;
 }
@@ -252,6 +254,7 @@ export function buildMobileMapModel(
     clusters,
     world: { x: left, y: top, w: Math.max(right - left, 1), h: Math.max(bottom - top, 1) },
     current,
+    currentCount: currentRects.length,
     total: candidates.length,
   };
 }
