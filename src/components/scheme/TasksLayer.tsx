@@ -3,6 +3,7 @@
 import { memo } from "react";
 
 import { useLocale } from "@/lib/i18n";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -59,6 +60,8 @@ export const TasksLayer = memo(function TasksLayer({
   pending,
   onStickyCreated,
   onCreateCancel,
+  completedPipelinesByTask,
+  onOpenPipelineHistory,
 }: {
   tasks: PlacedTask[];
   files: FileEntry[];
@@ -77,6 +80,8 @@ export const TasksLayer = memo(function TasksLayer({
   pending: { x: number; y: number } | null;
   onStickyCreated: (task: BoardTask) => void;
   onCreateCancel: () => void;
+  completedPipelinesByTask?: ReadonlyMap<string, readonly Pipeline[]>;
+  onOpenPipelineHistory?: (pipeline: Pipeline) => void;
 }) {
   return (
     <div className={interactive ? undefined : "pointer-events-none select-none"}>
@@ -90,6 +95,8 @@ export const TasksLayer = memo(function TasksLayer({
             files={files}
             camRef={camRef}
             handlers={handlers}
+            completedPipelines={completedPipelinesByTask?.get(task.id)}
+            onOpenPipelineHistory={onOpenPipelineHistory}
             selected={selectedTaskId === task.id}
             expanded={textExpandedIds.has(task.id)}
           />

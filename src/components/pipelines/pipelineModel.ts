@@ -319,6 +319,14 @@ export function pipelineLinkedTasks(
   flows: readonly Flow[] = [],
   files: readonly FileEntry[] = [],
 ): BoardTask[] {
+  const taskIds = (pipeline as Pipeline & { taskIds?: readonly string[] }).taskIds;
+  if (taskIds?.length) {
+    const byId = new Map(tasks.map((task) => [task.id, task] as const));
+    return taskIds.flatMap((id) => {
+      const task = byId.get(id);
+      return task ? [task] : [];
+    });
+  }
   const { paths, conversationIds } = pipelineLineage(pipeline, flows, files);
   if (!paths.size && !conversationIds.size) return [];
   return tasks.filter((task) =>
@@ -467,6 +475,28 @@ export function compactStageOpenTarget(
     if (reviewerPath) return { kind: "path", path: reviewerPath };
   }
   if (!renderablePaths || renderablePaths.has(flow.implementerPath)) return { kind: "path", path: flow.implementerPath };
+  return null;
+}
+
+/** First navigable artifact for a compact pipeline, newest stage first. */
+export function compactPipelineOpenTarget(
+  pipeline: Pipeline,
+  flows: readonly Flow[],
+  renderableFlows?: ReadonlySet<string>,
+  renderablePaths?: ReadonlySet<string>,
+  files: readonly FileEntry[] = [],
+): { kind: "flow"; flowId: string } | { kind: "path"; path: string } | null {
+  for (const stage of [...pipeline.stages].reverse()) {
+    const target = compactStageOpenTarget(
+      stage,
+      latestAttempt(pipeline, stage.id),
+      flows,
+      renderableFlows,
+      renderablePaths,
+      files,
+    );
+    if (target) return target;
+  }
   return null;
 }
 

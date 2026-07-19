@@ -5,7 +5,6 @@ import { flushSync } from "react-dom";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
 import type { Pipeline } from "@/lib/pipelines/types";
-import type { WorkerStack } from "@/components/scheme/workerCollapse";
 
 /* Finding-1 regression (#156): opening the mobile map must keep the full pipeline
    plan reachable. The map overlay covers the focus-surface dock, and SchemeBoard
@@ -84,8 +83,6 @@ const pipeline = {
   runs: [], cursor: null, state: "paused", pausedState: "running", stateDetail: null,
   srcPath: null, srcConversationId: null, createdAt: new Date(0).toISOString(), closedAt: null,
 } as unknown as Pipeline;
-// One worker stack makes the map reachable with no placed nodes required.
-const stack: WorkerStack = { key: "stack::pipe:p1", kind: "pipeline", id: "p1", items: [] };
 
 let roots: Root[] = [];
 beforeEach(() => { dom.document.body.replaceChildren(); roots = []; });
@@ -110,7 +107,7 @@ test("opening the mobile map keeps every active pipeline's full plan on a dock i
         flows={[]}
         pipelines={[pipeline]}
         surfacePipelines={[pipeline]}
-        workerStacks={[stack]}
+        workerStacks={[]}
         tasks={[]}
         drafts={[]}
         loaded
@@ -123,11 +120,17 @@ test("opening the mobile map keeps every active pipeline's full plan on a dock i
     ),
   );
 
-  // The map is reachable (a worker stack), so the open-map control is present.
+  // The active pipeline makes this empty project map reachable.
   const openBtn = dom.document.querySelector('button[aria-label="Open the project map"]') as HTMLButtonElement | null;
   expect(openBtn).not.toBeNull();
 
   flushSync(() => openBtn!.click());
+
+  const outlineFound = await waitFor(() => Boolean(dom.document.querySelector('[data-map-kind="pipeline"]')));
+  expect(outlineFound).toBe(true);
+  const outline = dom.document.querySelector('[data-map-kind="pipeline"]') as unknown as HTMLButtonElement;
+  expect(outline.disabled).toBe(true);
+  expect(outline.textContent).toContain("Ship the mobile map");
 
   /* The map overlay carries the one-row pipeline summary (#419) instead of a
      stack of dock rows; scoping to the overlay makes the assertion fail if the

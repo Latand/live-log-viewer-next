@@ -30,7 +30,13 @@ export interface MapRect {
   h: number;
 }
 
-export type MapMarkerKind = "node" | "deck" | "draft" | "stack" | "worker" | "task";
+export type MapMarkerKind = "node" | "deck" | "draft" | "stack" | "worker" | "task" | "pipeline";
+
+export interface MobilePipelineOutline {
+  id: string;
+  title: string;
+  rect: MapRect;
+}
 
 export interface MapMarker {
   key: string;
@@ -65,6 +71,8 @@ export interface MobileMapModel {
   edges: MapEdge[];
   clusters: MapCluster[];
   world: MapRect;
+  /** Active/focused surfaces used by the Current frame. */
+  current: MapRect | null;
   /** Marker candidates before the cap — diagnostics and tests. */
   total: number;
 }
@@ -92,6 +100,7 @@ export function buildMobileMapModel(
       past the cap, so the ring and the "current" frame never lose their rect to
       a cluster chip (PR #431). */
   focusKey: string | null = null,
+  pipelineOutlines: readonly MobilePipelineOutline[] = [],
 ): MobileMapModel {
   const candidates: MapMarker[] = [];
 
@@ -137,6 +146,16 @@ export function buildMobileMapModel(
       pickKey: top ? top.path : null,
       isRoot: false,
       count: stack.items.length,
+    });
+  }
+  for (const pipeline of pipelineOutlines) {
+    candidates.push({
+      key: "pipeline::" + pipeline.id,
+      kind: "pipeline",
+      rect: pipeline.rect,
+      title: pipeline.title,
+      pickKey: null,
+      isRoot: true,
     });
   }
 
@@ -223,14 +242,26 @@ export function buildMobileMapModel(
   const top = Math.min(...contentRects.map((rect) => rect.y));
   const right = Math.max(...contentRects.map((rect) => rect.x + rect.w));
   const bottom = Math.max(...contentRects.map((rect) => rect.y + rect.h));
+  const focusedRect = focusKey ? candidates.find((marker) => marker.key === focusKey)?.rect ?? null : null;
+  const currentRects = [...pipelineOutlines.map((pipeline) => pipeline.rect), ...(focusedRect ? [focusedRect] : [])];
+  const current = currentRects.length ? unionRects(currentRects) : null;
 
   return {
     markers,
     edges,
     clusters,
     world: { x: left, y: top, w: Math.max(right - left, 1), h: Math.max(bottom - top, 1) },
+    current,
     total: candidates.length,
   };
+}
+
+function unionRects(rects: readonly MapRect[]): MapRect {
+  const left = Math.min(...rects.map((rect) => rect.x));
+  const top = Math.min(...rects.map((rect) => rect.y));
+  const right = Math.max(...rects.map((rect) => rect.x + rect.w));
+  const bottom = Math.max(...rects.map((rect) => rect.y + rect.h));
+  return { x: left, y: top, w: right - left, h: bottom - top };
 }
 
 function pointInRect(rect: MapRect, x: number, y: number): boolean {

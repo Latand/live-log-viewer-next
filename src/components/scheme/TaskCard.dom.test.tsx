@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { AssignmentRef, BoardTask } from "@/lib/tasks/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import type { Camera } from "./Minimap";
@@ -105,7 +106,7 @@ function handlers(calls: Calls): TaskCardHandlers {
 const camRef = { current: { x: 0, y: 0, z: 1 } as Camera };
 const LONG_TEXT = "A long task title\n" + Array.from({ length: 20 }, (_, index) => `durable body line ${index}`).join("\n");
 
-function render(task: PlacedTask, options: { expanded?: boolean; files?: FileEntry[] } = {}) {
+function render(task: PlacedTask, options: { expanded?: boolean; files?: FileEntry[]; completedPipelines?: Pipeline[]; onOpenPipelineHistory?: (pipeline: Pipeline) => void } = {}) {
   const calls: Calls = { toggled: [], opened: [], detached: [], folded: [], patched: [] };
   const host = dom.document.createElement("div") as unknown as HTMLElement;
   dom.document.body.appendChild(host as never);
@@ -119,6 +120,8 @@ function render(task: PlacedTask, options: { expanded?: boolean; files?: FileEnt
       expanded={options.expanded ?? false}
       camRef={camRef}
       handlers={handlers(calls)}
+      completedPipelines={options.completedPipelines}
+      onOpenPipelineHistory={options.onOpenPipelineHistory}
     />,
   ));
   return { host, calls };
@@ -143,6 +146,28 @@ test("compact and expanded cards avoid nested scrolling", () => {
   expect(fullBody.querySelector(".line-clamp-3")).toBeNull();
   expect(fullBody.textContent).toContain("durable body line 19");
   expect(full.host.querySelector("[data-task-disclosure]")?.getAttribute("aria-expanded")).toBe("true");
+});
+
+test("a completed linked pipeline collapses to one task-card history chip", () => {
+  const opened: string[] = [];
+  const completed = {
+    id: "pipeline-done",
+    task: "Completed pipeline",
+    state: "completed",
+    stages: [],
+    runs: [],
+    cursor: null,
+  } as unknown as Pipeline;
+  const { host } = render(boardTask({ id: "task" }), {
+    completedPipelines: [completed],
+    onOpenPipelineHistory: (pipeline) => opened.push(pipeline.id),
+  });
+
+  const chip = host.querySelector('[data-task-pipeline-history="pipeline-done"]') as HTMLButtonElement;
+  expect(chip).toBeTruthy();
+  expect(chip.textContent).toContain("✓ pipeline");
+  chip.click();
+  expect(opened).toEqual(["pipeline-done"]);
 });
 
 test("a clipped compact preview fades out and the expanded body drops the fade", () => {

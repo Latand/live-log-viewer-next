@@ -222,8 +222,8 @@ export function buildSchemeLayout(
   flows: Flow[] = [],
   draftIds: string[] = [],
   pipelines: Pipeline[] = [],
-  /** Active project pipelines are accepted for call-site compatibility. Their
-      memberless presentation lives in the screen-space pipeline shelf. */
+  /** Active project pipelines are accepted for call-site compatibility. The
+      caller owns their board projection outside this conversation layout. */
   surfacePipelines: Pipeline[] = [],
   /** Durable identities (`conversationIdentity`) the user has crowned (issue
       #224). A group/manual root whose identity is favorited is lifted into a

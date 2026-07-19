@@ -1023,6 +1023,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineShelf.aria": "Полиця пайплайнів",
   "pipelineShelf.title": "Пайплайни",
   "pipelineShelf.edit": "Редагувати пайплайн {task}",
+  "pipelineGroup.toggle": "Розгорнути або згорнути пайплайн {task}",
+  "pipelineGroup.openHistory": "Відкрити історію пайплайна {task}",
 
   // плейсхолдери етапів пайплайна + вибір шаблону (#196)
   "pipelineSlot.paneAria": "Запланований етап {role}",
@@ -1055,7 +1057,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineSlot.passEdgeFrozen": "Цей етап уже виконувався — його ребро проходження заморожене як свідчення.",
   "pipelineSlot.failEdgeFrozen": "Це ребро невдачі вже пройдене — воно заморожене як свідчення.",
   "pipelineTemplates.title": "Новий пайплайн",
-  "pipelineTemplates.subtitle": "Обери шаблон. Повний план залишається на полиці пайплайнів, доки етап не відкриється на дошці. Налаштування етапів доступні за запитом.",
+  "pipelineTemplates.subtitle": "Обери шаблон. Група пайплайна з’явиться на дошці біля пов’язаного завдання. Налаштування етапів доступні за запитом.",
   "pipelineTemplates.blank": "Порожнє полотно",
   "pipelineTemplates.blankHint": "Почни з нуля і збери етапи вручну.",
   "pipelineTemplates.noRole": "без ролі",
@@ -1462,6 +1464,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile.marker.stack": "історія",
   "mobile.marker.worker": "воркери",
   "mobile.marker.task": "задача",
+  "mobile.marker.pipeline": "пайплайн",
 
   "tasks.failed": "не вдалося ({status})",
   "tasks.tool": "Задача — наступний клік кладе картку на полотно (T)",
