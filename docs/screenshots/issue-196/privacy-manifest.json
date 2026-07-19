@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "template-draft-desktop-1440.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the desktop template-draft evidence.",
+      "sha256": "066fe5d878728eb692e8e1e2177b97ab83463f11f918b1d059d3ccc789fda051"
+    },
+    {
+      "path": "template-draft-mobile-390.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the mobile template-draft evidence.",
+      "sha256": "168d7c3b8cbba86431b274bfaea43f5e3c1c1d944f26b96cb8a8425066f8cb6f"
+    }
+  ]
+}

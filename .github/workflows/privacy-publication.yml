@@ -1,0 +1,31 @@
+name: Privacy publication gate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  privacy-publication:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install media inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg tesseract-ocr tesseract-ocr-eng
+
+      - name: Verify privacy gate behavior
+        run: bun test scripts/privacy-publication-gate.test.ts
+
+      - name: Scan changed publication surfaces
+        env:
+          LLV_PRIVACY_KNOWN_VALUES: ${{ secrets.LLV_PRIVACY_KNOWN_VALUES }}
+          PRIVACY_BASE_REF: origin/${{ github.base_ref }}
+        run: bun scripts/privacy-publication-gate.ts --base "$PRIVACY_BASE_REF"

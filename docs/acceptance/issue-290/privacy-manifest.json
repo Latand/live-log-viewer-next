@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "readiness-kanban.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder retaining the readiness Kanban acceptance viewport.",
+      "sha256": "b7fdcb994b0551afb20f7ab0175b88bca84fe6c13834251dcdcbd33158cb1136"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "before-1440.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder retaining the desktop pre-change viewport.",
+      "sha256": "6fce0a4dccc0ec2ba4d5118ddce2cff1460a94f350e0c98990073e7838340e00"
+    }
+  ]
+}

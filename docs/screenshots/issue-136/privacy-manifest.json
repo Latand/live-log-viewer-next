@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "builder-desktop-1440.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the desktop builder evidence.",
+      "sha256": "45eeb6cb98bcb5562fe860405653e0b3c8a271985bbf88a426cf42e7c143c1b5"
+    },
+    {
+      "path": "builder-mobile-390.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the mobile builder evidence.",
+      "sha256": "93445ee37a814f2d6624cbfeb658aae77e0304caeb2dcfab64f68f1c7dd35548"
+    }
+  ]
+}

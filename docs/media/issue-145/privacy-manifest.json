@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "after-create-menu.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the post-change mobile create-menu evidence.",
+      "sha256": "ffa62ea871c334b9ffa1024af15fe80ef30a8a26269bb0502964f763cdd05263"
+    },
+    {
+      "path": "after-desktop-unchanged.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the unchanged desktop comparison evidence.",
+      "sha256": "bef46aba1e606ddffb6baed63f32720efa441ace56aeff9f32525b74d9bf24c7"
+    },
+    {
+      "path": "after-drawer.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the post-change mobile drawer evidence.",
+      "sha256": "c51563f14654af2b4c34df6f464d62ab6e332744a4b4e7769f92045d7be130de"
+    },
+    {
+      "path": "after-more-menu.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the post-change mobile overflow-menu evidence.",
+      "sha256": "ffa62ea871c334b9ffa1024af15fe80ef30a8a26269bb0502964f763cdd05263"
+    },
+    {
+      "path": "after-scheme.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the post-change mobile scheme evidence.",
+      "sha256": "31ff3557cf6f48340e996a79462e9c36394f4228340053a3f9e6ac31dcce96f7"
+    },
+    {
+      "path": "before-scheme.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the pre-change mobile scheme evidence.",
+      "sha256": "c51563f14654af2b4c34df6f464d62ab6e332744a4b4e7769f92045d7be130de"
+    }
+  ]
+}

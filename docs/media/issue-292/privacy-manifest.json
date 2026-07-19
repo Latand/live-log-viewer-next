@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "relation-navigate-desktop.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the desktop relation-navigation evidence.",
+      "sha256": "9dff2745554ddde154f04ae8fa8433a1b3792491d5fb323dbe5ed637fe99694f"
+    },
+    {
+      "path": "relation-strip-desktop-uk.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the Ukrainian desktop relation-strip evidence.",
+      "sha256": "34564edbb9a5944033f52a29d16f6e428a006a8d25184ade511938107592379c"
+    },
+    {
+      "path": "relation-strip-desktop.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the desktop relation-strip evidence.",
+      "sha256": "6fce0a4dccc0ec2ba4d5118ddce2cff1460a94f350e0c98990073e7838340e00"
+    },
+    {
+      "path": "task-card-expanded-desktop.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the expanded desktop task-card evidence.",
+      "sha256": "6c02f6df71c6e96a52f2b5252ee751a9ab236da801c221edf9922e6e05d3a8bd"
+    }
+  ]
+}

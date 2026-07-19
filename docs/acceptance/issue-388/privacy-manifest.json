@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "desktop-en.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder retaining the desktop English acceptance viewport.",
+      "sha256": "b045679cc454f1aa916257df3918407c9e6e65e85060a356a4f92de87da174f5"
+    },
+    {
+      "path": "desktop-uk-preflight.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder retaining the desktop Ukrainian preflight acceptance viewport.",
+      "sha256": "6ef1d70897db8b73ee2c878e79208ebfca294caf14c79477da09a87d14b04eb2"
+    },
+    {
+      "path": "desktop-uk.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder retaining the desktop Ukrainian acceptance viewport.",
+      "sha256": "68cd10dbcceef55fe2ea248dd511cec7e91a48dd7e1473ff29eb3f2dda6f9fff"
+    },
+    {
+      "path": "mobile-390-en.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder retaining the 390-pixel English acceptance viewport.",
+      "sha256": "8d71f608dc6736194b09c1c31c47521b8d6f16ec688f298d2801e2f515fa165b"
+    },
+    {
+      "path": "mobile-390-uk.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder retaining the 390-pixel Ukrainian acceptance viewport.",
+      "sha256": "826ec70ecfda4ff75f43b69f8f2522797a46ef48a75f9b57529af69cdd52b941"
+    }
+  ]
+}

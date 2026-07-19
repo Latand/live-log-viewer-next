@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "edges-desktop.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the desktop pipeline-edge evidence.",
+      "sha256": "c9c6ac0e4ccdbae99bb0aeb33e98e96d6f73d8ac0b534280542590214a925f70"
+    },
+    {
+      "path": "edges-onestage-desktop.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "description": "Redacted placeholder for the single-stage desktop edge evidence.",
+      "sha256": "86f9338ed5804150c766a504afa35b120537daf01704759fda572653ceddb589"
+    }
+  ]
+}
