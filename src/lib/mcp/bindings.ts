@@ -3,7 +3,9 @@ import crypto from "node:crypto";
 import { NextRequest } from "next/server";
 
 import { agentRegistry } from "@/lib/agent/registry";
+import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { executeSpawnRequest, productionSpawnCommandDependencies } from "@/lib/agent/spawnCommand";
+import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
@@ -53,7 +55,13 @@ async function spawnAgent(args: McpToolArgs): Promise<McpToolPayload> {
   const body = withoutKeys(args, ["clientRequestId"]);
   const request = new NextRequest("http://127.0.0.1/api/spawn", {
     method: "POST",
-    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    headers: {
+      host: "127.0.0.1",
+      origin: "http://127.0.0.1",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
+    },
     body: JSON.stringify({ ...body, clientAttemptId }),
   });
   const response = await executeSpawnRequest(request, {

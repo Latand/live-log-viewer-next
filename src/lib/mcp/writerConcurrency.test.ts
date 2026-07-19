@@ -17,7 +17,13 @@ async function waitFor(pathname: string, timeoutMs = 5_000): Promise<void> {
   }
 }
 
-async function runConcurrentWriters(kind: "task" | "pipeline", initialState: string): Promise<Record<string, unknown>> {
+type WriterOperation = "create" | "update" | "transition";
+
+async function runConcurrentWriters(
+  kind: "task" | "pipeline",
+  initialState: string,
+  operation: WriterOperation = "create",
+): Promise<{ enteredBeforeRelease: boolean; persisted: Record<string, unknown> }> {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), `llv-${kind}-writers-`));
   sandboxes.push(sandbox);
   const stateFile = path.join(sandbox, `${kind}s.json`);
@@ -34,6 +40,7 @@ async function runConcurrentWriters(kind: "task" | "pipeline", initialState: str
         LLV_STATE_DIR: sandbox,
         LLV_WRITER_KIND: kind,
         LLV_WRITER_INTERFACE: writer,
+        LLV_WRITER_OPERATION: operation,
         LLV_WRITER_READY: ready,
         LLV_WRITER_RELEASE: release,
       },
@@ -53,6 +60,7 @@ async function runConcurrentWriters(kind: "task" | "pipeline", initialState: str
   const first = writers.find(({ ready }) => fs.existsSync(ready))!;
   const second = writers.find((candidate) => candidate !== first)!;
   await Bun.sleep(750);
+  const enteredBeforeRelease = fs.existsSync(second.ready);
   fs.writeFileSync(first.release, "release\n", "utf8");
   await waitFor(second.ready);
   fs.writeFileSync(second.release, "release\n", "utf8");
@@ -62,18 +70,94 @@ async function runConcurrentWriters(kind: "task" | "pipeline", initialState: str
     const errors = await Promise.all(writers.map(({ child }) => new Response(child.stderr).text()));
     throw new Error(errors.filter(Boolean).join("\n"));
   }
-  return JSON.parse(fs.readFileSync(stateFile, "utf8")) as Record<string, unknown>;
+  return {
+    enteredBeforeRelease,
+    persisted: JSON.parse(fs.readFileSync(stateFile, "utf8")) as Record<string, unknown>,
+  };
 }
 
 test("Viewer HTTP and standalone MCP task creates preserve both writes across processes", async () => {
-  const persisted = await runConcurrentWriters("task", "{\"tasks\":[]}\n") as { tasks: unknown[]; recentCreates: unknown[] };
+  const result = await runConcurrentWriters("task", "{\"tasks\":[]}\n");
+  const persisted = result.persisted as { tasks: unknown[]; recentCreates: unknown[] };
+  expect(result.enteredBeforeRelease).toBe(false);
   expect(persisted.tasks).toHaveLength(2);
   expect(persisted.recentCreates).toHaveLength(2);
 }, 15_000);
 
 test("Viewer HTTP and standalone MCP pipeline creates preserve both writes across processes", async () => {
-  const persisted = await runConcurrentWriters("pipeline", "{\"schemaVersion\":3,\"pipelines\":[]}\n") as { pipelines: unknown[] };
+  const result = await runConcurrentWriters("pipeline", "{\"schemaVersion\":3,\"pipelines\":[]}\n");
+  const persisted = result.persisted as { pipelines: unknown[] };
+  expect(result.enteredBeforeRelease).toBe(false);
   expect(persisted.pipelines).toHaveLength(2);
+}, 15_000);
+
+test("Viewer HTTP PATCH and standalone MCP update_task serialize across processes", async () => {
+  const now = "2026-07-20T10:00:00.000Z";
+  const task = (id: string) => ({
+    id,
+    project: "viewer",
+    status: "inbox",
+    text: `${id} original`,
+    placement: "unplaced",
+    assignments: [],
+    createdAt: now,
+    updatedAt: now,
+  });
+  const result = await runConcurrentWriters("task", JSON.stringify({
+    tasks: [task("task-http"), task("task-mcp")],
+  }), "update");
+  const persisted = result.persisted as { tasks: Array<{ id: string; text: string }> };
+  expect(result.enteredBeforeRelease).toBe(false);
+  expect(persisted.tasks.find(({ id }) => id === "task-http")?.text).toBe("http updated task");
+  expect(persisted.tasks.find(({ id }) => id === "task-mcp")?.text).toBe("mcp updated task");
+}, 15_000);
+
+test("Viewer HTTP pipeline start and standalone MCP pipeline_action serialize across processes", async () => {
+  const baseRef = "0".repeat(40);
+  const pipeline = (id: string) => ({
+    id,
+    task: `${id} task`,
+    project: "live-log-viewer-next",
+    repoDir: process.cwd(),
+    worktreeDir: path.join(path.dirname(process.cwd()), `${path.basename(process.cwd())}-pipeline-${id}`),
+    branch: `pipeline/${id}-task-${id}`,
+    baseBranch: "main",
+    baseRef,
+    lastPassedCommit: baseRef,
+    stages: [{
+      id: "implement",
+      kind: "run",
+      prompt: "Implement the task",
+      next: null,
+      onFail: null,
+      effectiveRole: {
+        roleId: null,
+        engine: "claude",
+        model: null,
+        effort: null,
+        access: "read-write",
+        promptScaffold: null,
+      },
+    }],
+    runs: [{ stageId: "implement", attempts: [] }],
+    cursor: { stageId: "implement", state: "pending", input: null, activatedBy: null },
+    state: "draft",
+    pausedState: null,
+    stateDetail: null,
+    srcPath: null,
+    srcConversationId: null,
+    createdAt: "2026-07-20T10:00:00.000Z",
+    closedAt: null,
+    hiddenAt: null,
+  });
+  const result = await runConcurrentWriters("pipeline", JSON.stringify({
+    schemaVersion: 3,
+    pipelines: [pipeline("pipeline-http"), pipeline("pipeline-mcp")],
+  }), "transition");
+  const persisted = result.persisted as { pipelines: Array<{ id: string; state: string }> };
+  expect(result.enteredBeforeRelease).toBe(false);
+  expect(persisted.pipelines.find(({ id }) => id === "pipeline-http")?.state).toBe("provisioning");
+  expect(persisted.pipelines.find(({ id }) => id === "pipeline-mcp")?.state).toBe("provisioning");
 }, 15_000);
 
 test("an aged live writer without process identity retains the transaction until release", async () => {

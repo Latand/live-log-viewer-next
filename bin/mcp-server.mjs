@@ -13,19 +13,21 @@ const source = join(packageRoot, "src", "lib", "mcp", "entry.ts");
 
 async function runChild(runtime, entry) {
   const child = spawn(runtime, [entry], { cwd: packageRoot, env: process.env, stdio: "inherit" });
+  let childExited = false;
   const forwardInterrupt = () => {
-    if (!child.killed) child.kill("SIGINT");
+    if (!childExited) child.kill("SIGINT");
   };
   const forwardTermination = () => {
-    if (!child.killed) child.kill("SIGTERM");
+    if (!childExited) child.kill("SIGTERM");
   };
-  process.once("SIGINT", forwardInterrupt);
-  process.once("SIGTERM", forwardTermination);
+  process.on("SIGINT", forwardInterrupt);
+  process.on("SIGTERM", forwardTermination);
   await new Promise((resolve) => {
     let settled = false;
     const finish = (exitCode) => {
       if (settled) return;
       settled = true;
+      childExited = true;
       process.removeListener("SIGINT", forwardInterrupt);
       process.removeListener("SIGTERM", forwardTermination);
       process.exitCode = exitCode;

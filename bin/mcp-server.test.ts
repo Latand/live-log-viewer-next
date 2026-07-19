@@ -98,3 +98,51 @@ test("the installed MCP launcher forwards termination to its Bun child", async (
   await child.exited;
   expect(fs.readFileSync(signalPath, "utf8")).toBe("SIGTERM\n");
 }, 15_000);
+
+test("the installed MCP launcher forwards escalating signals until its Bun child exits", async () => {
+  const readyPath = path.join(os.tmpdir(), `llv-mcp-ready-${crypto.randomUUID()}`);
+  const signalPath = path.join(os.tmpdir(), `llv-mcp-signals-${crypto.randomUUID()}`);
+  sandboxes.push(readyPath, signalPath);
+  const { root, launcher } = installedPackage(`
+    const fs = await import("node:fs");
+    fs.writeFileSync(process.env.LLV_TEST_READY, "ready\\n", "utf8");
+    process.on("SIGINT", () => fs.appendFileSync(process.env.LLV_TEST_SIGNAL, "SIGINT\\n", "utf8"));
+    process.on("SIGTERM", () => {
+      fs.appendFileSync(process.env.LLV_TEST_SIGNAL, "SIGTERM\\n", "utf8");
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(7), 1_500);
+    setInterval(() => {}, 1_000);
+  `);
+  const node = Bun.which("node");
+  const bun = Bun.which("bun");
+  if (!node || !bun) throw new Error("Node and Bun are required for the launcher test");
+  const child = Bun.spawn({
+    cmd: [node, launcher],
+    cwd: root,
+    env: {
+      ...process.env,
+      LLV_STRUCTURED_HOSTS: "1",
+      LLV_BUN_EXECUTABLE: bun,
+      LLV_TEST_READY: readyPath,
+      LLV_TEST_SIGNAL: signalPath,
+    },
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const deadline = Date.now() + 5_000;
+  while (!fs.existsSync(readyPath)) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for the Bun MCP child");
+    await Bun.sleep(5);
+  }
+  child.kill("SIGINT");
+  while (!fs.existsSync(signalPath) || !fs.readFileSync(signalPath, "utf8").includes("SIGINT\n")) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for SIGINT forwarding");
+    await Bun.sleep(5);
+  }
+  child.kill("SIGTERM");
+  const exitCode = await child.exited;
+  const stderr = await new Response(child.stderr).text();
+  expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+  expect(fs.readFileSync(signalPath, "utf8")).toBe("SIGINT\nSIGTERM\n");
+}, 15_000);
