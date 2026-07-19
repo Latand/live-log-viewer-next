@@ -322,8 +322,10 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
           runtime: HIDDEN,
           kill: HIDDEN,
           terminal: ENABLED, // the dead-host escape hatch (§5/§6)
-          images: HIDDEN,
-          send: disabled("deadHost.sendBlocked"),
+          // Text has a durable pre-recovery hold. Images remain in the local
+          // draft until a live host can reserve their runtime-store bytes.
+          images: disabled("composer.imagesBlockedDuringRecovery"),
+          send: ENABLED,
         },
       };
     case "superseded":

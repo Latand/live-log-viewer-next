@@ -1,4 +1,4 @@
-import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type ProcessIdentity } from "@/lib/agent/registry";
 import { reconfigurationFromBody, type AgentReconfiguration } from "@/lib/agent/reconfigure";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
@@ -7,9 +7,11 @@ import { sessionKeyId } from "@/lib/agent/sessionKey";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { newOperationId } from "./contracts";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
+import { recoverDeadStructuredConversation, structuredHostProcessAlive } from "./structuredRecovery";
 
 export type StructuredControlResult =
   | { status: 200; body: { ok: true; structured: true; target: string; outcome: "delivered" } }
+  | { status: 200; body: { ok: true; structured: true; target: string; outcome: "resumed"; spawned: boolean } }
   | { status: 200 | 202; body: { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } } }
   | { status: 400 | 409 | 503; body: { error: string } };
 
@@ -29,6 +31,8 @@ export async function dispatchStructuredControl(
     kick?: () => void;
     enabled?: () => boolean;
     accountExists?: (engine: "claude" | "codex", accountId: string) => boolean;
+    recover?: typeof recoverDeadStructuredConversation;
+    hostProcessAlive?: (identity: ProcessIdentity | null) => boolean;
   } = {},
 ): Promise<StructuredControlResult | null> {
   if (!request.action) return null;
@@ -54,6 +58,30 @@ export async function dispatchStructuredControl(
   if (request.action !== "interrupt" && request.action !== "kill" && request.action !== "reconfigure") {
     if (request.action === "resume" && (entry.status === "dead" || entry.status === "unhosted")) {
       return null;
+    }
+    if (request.action === "resume"
+      && !(dependencies.hostProcessAlive ?? structuredHostProcessAlive)(entry.structuredHost?.process ?? null)) {
+      try {
+        const recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({
+          path: request.path || generation.path,
+          conversationId: conversation.id,
+        }, { registry });
+        if (!recovered) {
+          return { status: 503, body: { error: "structured recovery ownership is unavailable" } };
+        }
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            structured: true,
+            target: conversation.id,
+            outcome: "resumed",
+            spawned: recovered.spawned,
+          },
+        };
+      } catch (error) {
+        return { status: 503, body: { error: error instanceof Error ? error.message : String(error) } };
+      }
     }
     const label = ["compact", "dialog-key", "kill", "reconfigure", "resume"].includes(request.action)
       ? request.action

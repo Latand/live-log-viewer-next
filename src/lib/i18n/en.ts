@@ -280,6 +280,7 @@ export const en = {
   "composer.structuredImagesUnavailable": "Image delivery is unavailable for structured conversations",
   "composer.codexImagesTextOnly": "The selected Codex model accepts text input only.",
   "composer.structuredImagesProtocol": "This structured host has no negotiated image capability.",
+  "composer.imagesBlockedDuringRecovery": "Images stay selected until the structured host is recovered.",
   "composer.imageCapabilityLoading": "Image capability is loading.",
   "composer.imageCapabilityError": "Image capability could not be loaded.",
   "composer.imageCapabilityRetry": "Retry image check",
@@ -1056,6 +1057,8 @@ export const en = {
   "pipelineShelf.aria": "Pipeline shelf",
   "pipelineShelf.title": "Pipelines",
   "pipelineShelf.edit": "Edit pipeline {task}",
+  "pipelineGroup.toggle": "Expand or collapse pipeline {task}",
+  "pipelineGroup.openHistory": "Open pipeline history for {task}",
 
   // pipeline stage placeholders + template picker (#196)
   "pipelineSlot.paneAria": "Planned stage {role}",
@@ -1088,7 +1091,7 @@ export const en = {
   "pipelineSlot.passEdgeFrozen": "This stage already ran — its pass edge is frozen evidence.",
   "pipelineSlot.failEdgeFrozen": "This fail edge was already traversed — it is frozen evidence.",
   "pipelineTemplates.title": "New pipeline",
-  "pipelineTemplates.subtitle": "Pick a template. The full plan stays in the pipeline shelf until a stage opens on the board. Stage configuration remains available on demand.",
+  "pipelineTemplates.subtitle": "Pick a template. Its pipeline group lands on the board beside the linked task. Stage configuration remains available on demand.",
   "pipelineTemplates.blank": "Blank canvas",
   "pipelineTemplates.blankHint": "Start empty and assemble the stages by hand.",
   "pipelineTemplates.noRole": "no role",
@@ -1510,6 +1513,7 @@ export const en = {
   "mobile.marker.stack": "history",
   "mobile.marker.worker": "workers",
   "mobile.marker.task": "task",
+  "mobile.marker.pipeline": "pipeline",
 
   // Board tasks
   "tasks.failed": "failed ({status})",

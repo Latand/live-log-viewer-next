@@ -4,6 +4,7 @@ import { ChevronDown, ChevronUp, Crosshair, FoldVertical, Link2, Loader2, Rotate
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { AssignmentRef, BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -309,6 +310,8 @@ export const TaskCard = memo(function TaskCard({
   files,
   camRef,
   handlers,
+  completedPipelines = [],
+  onOpenPipelineHistory,
   selected = false,
   expanded = false,
 }: {
@@ -316,6 +319,8 @@ export const TaskCard = memo(function TaskCard({
   files: FileEntry[];
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
+  completedPipelines?: readonly Pipeline[];
+  onOpenPipelineHistory?: (pipeline: Pipeline) => void;
   selected?: boolean;
   expanded?: boolean;
 }) {
@@ -521,7 +526,7 @@ export const TaskCard = memo(function TaskCard({
       onPointerUp={onPointerUp}
     >
       <div
-        className={`flex flex-col overflow-hidden rounded-[10px] border border-border shadow-1 transition-shadow ${
+        className={`relative flex flex-col overflow-hidden rounded-[10px] border border-border shadow-1 transition-shadow ${
           task.status === "done" ? "opacity-60 saturate-50" : ""
         } ${lifted ? "shadow-2" : "group-hover:shadow-2"} ${
           editing ? "ring-2 ring-accent/50" : selected ? "ring-2 ring-accent ring-offset-1 ring-offset-canvas" : ""
@@ -529,6 +534,23 @@ export const TaskCard = memo(function TaskCard({
         style={{ backgroundColor: tone.soft }}
       >
         <div aria-hidden className="h-1.5 w-full shrink-0" style={{ backgroundColor: tone.color }} />
+        {!editing && completedPipelines.length ? (
+          <div className="absolute right-2 top-2 z-[2] flex max-w-[92px] flex-col items-end gap-1">
+            {completedPipelines.map((pipeline) => (
+              <button
+                key={pipeline.id}
+                type="button"
+                data-task-pipeline-history={pipeline.id}
+                className="max-w-full truncate rounded-[5px] bg-card/90 px-1.5 py-1 text-[9.5px] font-semibold text-success shadow-1 hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                aria-label={t("pipelineGroup.openHistory", { task: pipeline.task })}
+                title={pipeline.task}
+                onClick={() => onOpenPipelineHistory?.(pipeline)}
+              >
+                ✓ pipeline
+              </button>
+            ))}
+          </div>
+        ) : null}
         {editing ? (
           <textarea
             ref={editRef}
@@ -550,7 +572,7 @@ export const TaskCard = memo(function TaskCard({
           <div
             data-task-body
             {...(clipped ? { "data-task-clipped": "" } : {})}
-            className="cursor-text px-3 py-2"
+            className={`cursor-text py-2 pl-3 ${completedPipelines.length ? "pr-[104px]" : "pr-3"}`}
             style={clipped ? { maskImage: PREVIEW_FADE_MASK, WebkitMaskImage: PREVIEW_FADE_MASK } : undefined}
           >
             <div

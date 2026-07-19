@@ -162,6 +162,8 @@ export type Pipeline = {
   hiddenAt?: string | null;
   /** Read-model marker set when a hidden container is projected for a pinned member. */
   restored?: boolean;
+  /** Durable user pin for the desktop board's world-space pipeline group. */
+  pos?: { x: number; y: number };
 };
 
 export type CreatePipelineRequest = {
@@ -180,6 +182,7 @@ export type CreatePipelineRequest = {
 export type PipelineAction =
   | "start"
   | "update-draft"
+  | "set-position"
   | "add-stage"
   | "remove-stage"
   | "reorder-stage"
@@ -210,6 +213,8 @@ export type PatchPipelineRequest = {
   task?: string;
   spec?: string;
   repoDir?: string;
+  /** for set-position: exact world coordinates selected by a user drag. */
+  pos?: { x: number; y: number };
   stage?: PipelineStageInput;
   index?: number;
   stageIds?: string[];

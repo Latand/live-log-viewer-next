@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
+import { procBackend } from "@/lib/proc";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import { dispatchStructuredControl } from "./structuredControls";
@@ -14,30 +15,35 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-controls-"
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
 function structuredConversation(
-  options: { parentConversationId?: `conversation_${string}`; registry?: AgentRegistry } = {},
+  options: {
+    engine?: "claude" | "codex";
+    parentConversationId?: `conversation_${string}`;
+    registry?: AgentRegistry;
+  } = {},
 ): { registry: AgentRegistry; path: string; conversationId: string } {
+  const engine = options.engine ?? "codex";
   const id = crypto.randomUUID();
   const pathname = path.join(sandbox, `${id}.jsonl`);
   const registry = options.registry
     ?? new AgentRegistry(path.join(sandbox, `${id}.registry.json`), undefined, undefined, { sqliteMode: "off" });
   const begun = registry.beginSpawnRequest({
-    engine: "codex",
+    engine,
     cwd: sandbox,
-    accountId: "codex-subscription",
+    accountId: `${engine}-subscription`,
     ...(options.parentConversationId ? { parentConversationId: options.parentConversationId } : {}),
   });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const settled = registry.settleSpawn(begun.receipt.launchId, {
-    key: { engine: "codex", sessionId: id },
+    key: { engine, sessionId: id },
     artifactPath: pathname,
     cwd: sandbox,
-    accountId: "codex-subscription",
+    accountId: `${engine}-subscription`,
     status: "live",
     host: null,
     structuredHost: {
-      kind: "codex-app-server",
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
       endpoint: "fake:stdio",
-      process: { pid: process.pid, startIdentity: "test-process" },
+      process: { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) },
       eventCursor: 1,
       protocolVersion: "fake-v1",
       writerClaimEpoch: 1,
@@ -122,6 +128,104 @@ test("structured ownership resolves from conversation identity", async () => {
   });
 
   expect(result).toEqual({ status: 409, body: { error: "structured host does not support the resume control" } });
+});
+
+test("stale-live Codex resume recovers the production conversation identity", async () => {
+  const fixture = structuredConversation();
+  const conversation = fixture.registry.conversation(fixture.conversationId as `conversation_${string}`)!;
+  const generation = conversation.generations.at(-1)!;
+  const key = { engine: conversation.engine, sessionId: generation.id } as const;
+  const entry = fixture.registry.snapshot().entries[`${key.engine}:${key.sessionId}`]!;
+  const staleProcess = { pid: 1_275_500, startIdentity: "production-start-identity" };
+  fixture.registry.setStructuredHostClaimed(key, {
+    ...entry.structuredHost!,
+    process: staleProcess,
+    activeTurnRef: "019f7ac9-2509-7f53-a3af-e9400967a43f",
+  }, "live", entry.claimOwner!, entry.claimEpoch, true);
+  const recoveries: unknown[] = [];
+
+  const result = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: fixture.conversationId,
+    action: "resume",
+  }, {
+    registry: fixture.registry,
+    enabled: () => true,
+    hostProcessAlive: (identity) => {
+      expect(identity).toEqual(staleProcess);
+      return false;
+    },
+    recover: async (request) => {
+      recoveries.push(request);
+      return {
+        target: null,
+        path: fixture.path,
+        conversationId: fixture.conversationId as `conversation_${string}`,
+        spawned: true,
+      };
+    },
+  });
+
+  expect(recoveries).toEqual([{
+    path: fixture.path,
+    conversationId: fixture.conversationId,
+  }]);
+  expect(result).toEqual({
+    status: 200,
+    body: {
+      ok: true,
+      structured: true,
+      target: fixture.conversationId,
+      outcome: "resumed",
+      spawned: true,
+    },
+  });
+});
+
+test("stale-live Claude resume recovers after a PID start-identity mismatch", async () => {
+  const fixture = structuredConversation({ engine: "claude" });
+  const conversation = fixture.registry.conversation(fixture.conversationId as `conversation_${string}`)!;
+  const generation = conversation.generations.at(-1)!;
+  const key = { engine: conversation.engine, sessionId: generation.id } as const;
+  const entry = fixture.registry.snapshot().entries[`${key.engine}:${key.sessionId}`]!;
+  fixture.registry.setStructuredHostClaimed(key, {
+    ...entry.structuredHost!,
+    process: { pid: process.pid, startIdentity: "reused-pid-start-identity" },
+    activeTurnRef: "stale-claude-turn",
+  }, "live", entry.claimOwner!, entry.claimEpoch, true);
+  const recoveries: unknown[] = [];
+
+  const result = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: fixture.conversationId,
+    action: "resume",
+  }, {
+    registry: fixture.registry,
+    enabled: () => true,
+    recover: async (request) => {
+      recoveries.push(request);
+      return {
+        target: null,
+        path: fixture.path,
+        conversationId: fixture.conversationId as `conversation_${string}`,
+        spawned: true,
+      };
+    },
+  });
+
+  expect(recoveries).toEqual([{
+    path: fixture.path,
+    conversationId: fixture.conversationId,
+  }]);
+  expect(result).toMatchObject({
+    status: 200,
+    body: {
+      ok: true,
+      target: fixture.conversationId,
+      outcome: "resumed",
+      spawned: true,
+    },
+  });
 });
 
 test("dead structured resume falls through to canonical recovery", async () => {
