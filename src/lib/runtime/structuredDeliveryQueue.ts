@@ -180,7 +180,7 @@ export class StructuredDeliveryQueue {
       sessionKey: { engine: "codex" | "claude"; sessionId: string },
     ) => Promise<boolean> = async () => false,
     private readonly retrySoon: () => void = () => {},
-    private readonly recoverHost: StructuredHostRecovery = async () => false,
+    private readonly recoverHost: StructuredHostRecovery | null = null,
   ) {}
 
   drain(): Promise<void> {
@@ -255,16 +255,15 @@ export class StructuredDeliveryQueue {
         continue;
       }
       const host = this.resolveHost(effect.conversationId);
-      if (!host) return true;
+      if (!host) {
+        await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+        await this.recoverUnavailableHost(effect);
+        return true;
+      }
       const health = await host.health();
       if (health.status === "dead" || health.status === "unhosted") {
         await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
-        try {
-          if (await this.recoverHost(effect.conversationId)) this.rerun = true;
-        } catch (error) {
-          const reason = `structured host recovery failed: ${failureReason(error)}`.slice(0, 240);
-          await this.port.transition(effect.operationId, "failed", { reason });
-        }
+        await this.recoverUnavailableHost(effect);
         return true;
       }
       const maySteer = health.status === "active"
@@ -359,6 +358,22 @@ export class StructuredDeliveryQueue {
       await this.port.transition(effect.operationId, "delivered", { turnId: receipt.turnId });
     }
     return false;
+  }
+
+  private async recoverUnavailableHost(effect: SendEffect): Promise<void> {
+    if (!this.recoverHost) return;
+    try {
+      if (await this.recoverHost(effect.conversationId)) {
+        this.rerun = true;
+        return;
+      }
+      await this.port.transition(effect.operationId, "failed", {
+        reason: "structured host recovery did not start; retry the operation",
+      });
+    } catch (error) {
+      const reason = `structured host recovery failed: ${failureReason(error)}`.slice(0, 240);
+      await this.port.transition(effect.operationId, "failed", { reason });
+    }
   }
 
   private async drainControl(effect: ControlEffect): Promise<boolean> {
