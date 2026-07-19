@@ -1,8 +1,9 @@
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import type { ResumeSpec } from "@/lib/agent/cli";
-import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type ProcessIdentity } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 
@@ -29,6 +30,7 @@ export interface StructuredRecoveryDependencies {
   resolveAccount?: (engine: "claude" | "codex", accountId: string | null) => AccountContext;
   spawn?: typeof spawnStructuredConversation;
   processIdentity?: () => { pid: number; startIdentity: string | null };
+  requestDeliveryDrain?: () => void;
 }
 
 interface RecoveryCandidate {
@@ -42,7 +44,7 @@ interface RecoveryCandidate {
   publishReady: boolean;
 }
 
-function processIdentityAlive(identity: { pid: number; startIdentity: string | null } | null): boolean {
+export function structuredHostProcessAlive(identity: ProcessIdentity | null): boolean {
   if (!identity || !Number.isInteger(identity.pid) || identity.pid <= 0) return false;
   if (!procBackend.pidAlive(identity.pid)) return false;
   return identity.startIdentity === null || procBackend.processIdentity(identity.pid) === identity.startIdentity;
@@ -72,7 +74,7 @@ function candidateFor(
       && registry.canonicalConversationId(receipt.conversationId) === conversation.id);
   if (!entry.structuredHost && !structuredReceipt) return null;
   const terminal = entry.status === "dead" || entry.status === "unhosted";
-  const publishReady = Boolean(processIdentityAlive(entry.structuredHost?.process ?? null)
+  const publishReady = Boolean(structuredHostProcessAlive(entry.structuredHost?.process ?? null)
     && entry.claimOwner
     && entry.pendingAction === null
     && !terminal);
@@ -152,6 +154,7 @@ async function recoverCandidate(
       client,
     });
     if (!response.ok || !response.path) throw new Error("structured recovery host did not publish its transcript");
+    (dependencies.requestDeliveryDrain ?? requestAccountMigrationTick)();
     return {
       target: null,
       path: response.path,

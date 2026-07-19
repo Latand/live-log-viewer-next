@@ -274,6 +274,7 @@ export const en = {
   "composer.structuredImagesUnavailable": "Image delivery is unavailable for structured conversations",
   "composer.codexImagesTextOnly": "The selected Codex model accepts text input only.",
   "composer.structuredImagesProtocol": "This structured host has no negotiated image capability.",
+  "composer.imagesBlockedDuringRecovery": "Images stay selected until the structured host is recovered.",
   "composer.imageCapabilityLoading": "Image capability is loading.",
   "composer.imageCapabilityError": "Image capability could not be loaded.",
   "composer.imageCapabilityRetry": "Retry image check",
