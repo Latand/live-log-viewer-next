@@ -1,9 +1,12 @@
 # Privacy-safe publication
 
-Every pull request runs `privacy-publication` across committed, staged,
-unstaged, and untracked changes relative to its base branch. Diagnostics expose
-finding classes and counts. Matched values, OCR text, metadata values, and file
-paths remain suppressed.
+Every pull request runs `privacy-publication` from the default branch through
+`pull_request_target`. The job checks out trusted scanner, test, workflow, and
+fingerprint files separately, then handles the pull-request checkout as opaque
+inspection input. Candidate code is never executed. The scan covers committed,
+staged, unstaged, and untracked changes relative to the exact base SHA.
+Diagnostics expose finding classes and counts. Matched values, OCR text,
+metadata values, and file paths remain suppressed.
 
 Run the same check locally:
 
@@ -17,17 +20,20 @@ Ukrainian OCR data and configures `eng+ukr`; operators can set
 tools, missing language data, failed inspection, and malformed configuration
 fail closed.
 
-Text inspection decodes nested percent encoding and HTML entities, removes
-zero-width separators, and inspects Markdown destinations, HTML attributes,
-credential-bearing forms, URI authentication, authorization headers, and split
-token shapes. Publication inputs that are symlinks are rejected before their
-targets are read.
+Text inspection applies bounded fixed-point decoding to nested percent and HTML
+entity encoding, normalizes CommonMark escapes and zero-width separators, and
+inspects Markdown destinations, HTML attributes, credential-bearing forms, URI
+authentication, authorization headers, and split token shapes. Text-like files
+remain inspectable with NUL bytes or UTF-16 encoding. Unsupported binary inputs
+fail closed. Publication inputs and supporting files with symlinks in any path
+component are rejected before their targets are read.
 
 Raster inspection covers pixels and metadata. PNG inspection validates chunk
 CRCs and scans `tEXt`, compressed `zTXt` and `iTXt`, `eXIf`, UTF-oriented
 metadata strings, and bytes after `IEND`. Animation and video inspection scans
 container metadata plus five representative frames. Frame-count sampling keeps
-that coverage when duration metadata is unavailable.
+that coverage when duration metadata is unavailable. Missing duration and frame
+count produce `inspection_error`.
 
 ## Known-value fingerprints
 
@@ -56,9 +62,10 @@ and the generated catalog.
 ## Authenticated GitHub publication audit
 
 The `privacy-tracker-audit` workflow audits the event's issue or pull request
-through GitHub's authenticated API. Coverage includes issue bodies, issue
-comments, pull-request bodies, inline review comments, review bodies, Markdown
-media links, HTML media attributes, and raw GitHub media URLs.
+through GitHub's authenticated API. Coverage includes issue and pull-request
+titles and bodies, issue comments, inline review comments, review bodies,
+Markdown media links, HTML media attributes, and raw GitHub media URLs. Media
+references use the same bounded canonical representation as text scanning.
 
 `pull_request_target` events check out the default branch, so the token-bearing
 audit always executes trusted code. The checkout excludes persisted Git
@@ -86,9 +93,10 @@ Every changed raster, GIF, or video needs a co-located
 - the exact SHA-256 digest of the generator bytes; and
 - a useful evidence description.
 
-The gate verifies regular files for manifests and generators, validates every
-digest, confirms the declared generator version exists in the bound generator,
-and requires source digests to differ from the published output digest.
+The gate verifies canonical regular-file paths for manifests and generators,
+validates every digest, confirms the declared generator version and exact
+supported runtime exist in the bound generator, and requires source digests to
+differ from the published output digest.
 
 The normal classifications are `synthetic` and `redacted-placeholder`.
 `adversarial-synthetic` is reserved for documented fixture directories. Its

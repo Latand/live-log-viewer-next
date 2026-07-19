@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -114,8 +114,33 @@ function pngWithTrailingPayload(value: string): Buffer {
   return Buffer.concat([redactedPlaceholderPng(), Buffer.from(value, "utf8")]);
 }
 
+function oddAlignedUtf16(value: string, byteOrder: "be" | "le"): Buffer {
+  const encoded = Buffer.from(value, "utf16le");
+  if (byteOrder === "be") encoded.swap16();
+  return Buffer.concat([Buffer.from([0x7f]), encoded]);
+}
+
+function pngWithExifBytes(data: Buffer): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8;
+  header[9] = 2;
+  return Buffer.concat([
+    Buffer.from("89504e470d0a1a0a", "hex"),
+    pngChunk("IHDR", header),
+    pngChunk("eXIf", data),
+    pngChunk("IDAT", deflateSync(Buffer.from([0, 245, 247, 250]))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
 function writeValidProvenance(directory: string, name: string, contents: Buffer): void {
-  const generator = Buffer.from('export const PRIVACY_GENERATOR_VERSION = "fixture-generator-v2";\n');
+  const generator = Buffer.from([
+    'export const PRIVACY_GENERATOR_RUNTIME = "1.3.3";',
+    'export const PRIVACY_GENERATOR_VERSION = "fixture-generator-v2";',
+    "",
+  ].join("\n"));
   writeFileSync(join(directory, "generate-placeholder.mjs"), generator);
   writeFileSync(join(directory, "privacy-manifest.json"), JSON.stringify({
     schemaVersion: 2,
@@ -124,6 +149,7 @@ function writeValidProvenance(directory: string, name: string, contents: Buffer)
       classification: "redacted-placeholder",
       source: "redacted-live-capture",
       generator: "generate-placeholder.mjs",
+      generatorRuntime: "bun-1.3.3",
       generatorVersion: "fixture-generator-v2",
       generatorSha256: createHash("sha256").update(generator).digest("hex"),
       sourceDigests: [createHash("sha256").update(`fixture-source:${name}`).digest("hex")],
@@ -157,6 +183,18 @@ function runGate(paths: string[], environment: Record<string, string> = {}) {
 function runGit(directory: string, arguments_: string[]): void {
   const result = Bun.spawnSync({ cmd: ["git", ...arguments_], cwd: directory, stderr: "pipe", stdout: "pipe" });
   expect(result.exitCode).toBe(0);
+}
+
+function writeFingerprintCatalog(path: string, value: string): void {
+  const compact = value.normalize("NFKC").toLocaleLowerCase("en-US").replaceAll(/[^\p{L}\p{N}]/gu, "");
+  writeFileSync(path, JSON.stringify({
+    schemaVersion: 1,
+    normalization: "nfkc-lower-alnum-v1",
+    fingerprints: [{
+      length: compact.length,
+      sha256: createHash("sha256").update(compact).digest("hex"),
+    }],
+  }));
 }
 
 describe("privacy publication gate", () => {
@@ -375,6 +413,64 @@ describe("privacy publication gate", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
+  const canonicalizationFixtures = [
+    {
+      expected: "home_path",
+      name: "mixed entity and percent encoding",
+      publication: () => `${"&#37;26&#37;23x2f&#37;3B"}home&#37;26&#37;23x2f&#37;3Bfixture-person&#37;26&#37;23x2f&#37;3Brecords`,
+    },
+    {
+      expected: "home_path",
+      name: "four-layer percent encoding",
+      publication: () => {
+        let encoded = ["", "home", "fixture-person", "records"].join("/");
+        for (let pass = 0; pass < 4; pass += 1) encoded = encodeURIComponent(encoded);
+        return encoded;
+      },
+    },
+    {
+      expected: "home_path",
+      name: "CommonMark escaped slashes",
+      publication: () => ["", "home", "fixture-person", "records"].join("\\/"),
+    },
+    {
+      expected: "known_value",
+      name: "newline-split known values",
+      publication: () => ["fixture", process.pid, "newline", "known", "label"].join("\n"),
+      value: () => ["fixture", process.pid, "newline", "known", "label"].join("-"),
+    },
+    {
+      expected: "home_path",
+      name: "lowercase Windows home paths",
+      publication: () => ["c:", "users", "fixture-person", "records"].join("\\"),
+    },
+  ];
+
+  for (const fixture of canonicalizationFixtures) {
+    test(`canonicalizes ${fixture.name} with class-only diagnostics`, () => {
+      const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+      temporaryDirectories.push(directory);
+      const publication = fixture.publication();
+      const text = join(directory, "publication.md");
+      writeFileSync(text, `${publication}\n`);
+      const environment: Record<string, string> = {};
+      if (fixture.value) {
+        const fingerprints = join(directory, "known-values.json");
+        writeFingerprintCatalog(fingerprints, fixture.value());
+        environment.LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE = fingerprints;
+      }
+
+      const result = runGate([text], environment);
+      const output = result.stdout.toString();
+
+      expect(result.exitCode).toBe(1);
+      expect(output).toBe(`PRIVACY GATE: FAIL\n${fixture.expected}: 1\n`);
+      expect(output).not.toContain(publication);
+      expect(output).not.toContain(directory);
+      expect(result.stderr.toString()).toBe("");
+    });
+  }
+
   test("matches fingerprinted labels inside HTML attributes", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
@@ -417,6 +513,66 @@ describe("privacy publication gate", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
+  const encodedTextFixtures = [
+    {
+      expected: "home_path",
+      name: "NUL-prefixed text",
+      value: () => Buffer.concat([
+        Buffer.from([0]),
+        Buffer.from(["", "home", "fixture-person", "records"].join("/")),
+      ]),
+    },
+    {
+      expected: "home_path",
+      name: "embedded-NUL text",
+      value: () => Buffer.concat([
+        Buffer.from("Synthetic prefix"),
+        Buffer.from([0]),
+        Buffer.from(["", "home", "fixture-person", "records"].join("/")),
+      ]),
+    },
+    {
+      expected: "home_path",
+      name: "UTF-16 text",
+      value: () => Buffer.concat([
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from(["", "home", "fixture-person", "records"].join("/"), "utf16le"),
+      ]),
+    },
+  ];
+
+  for (const fixture of encodedTextFixtures) {
+    test(`inspects ${fixture.name} with class-only diagnostics`, () => {
+      const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+      temporaryDirectories.push(directory);
+      const text = join(directory, "publication.md");
+      const contents = fixture.value();
+      writeFileSync(text, contents);
+
+      const result = runGate([text]);
+      const output = result.stdout.toString();
+
+      expect(result.exitCode).toBe(1);
+      expect(output).toBe(`PRIVACY GATE: FAIL\n${fixture.expected}: 1\n`);
+      expect(output).not.toContain(directory);
+      expect(result.stderr.toString()).toBe("");
+    });
+  }
+
+  test("fails closed for unsupported binary publication input", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const binary = join(directory, "publication.bin");
+    writeFileSync(binary, Buffer.from([0x00, 0xff, 0x00, 0xfe, 0x01, 0x02]));
+
+    const result = runGate([binary]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\n");
+    expect(result.stdout.toString()).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("generates a value-free fingerprint catalog from an operator file", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
@@ -446,6 +602,30 @@ describe("privacy publication gate", () => {
     expect(catalog).toContain(createHash("sha256").update(knownLabel.replaceAll("-", "")).digest("hex"));
   });
 
+  test("rejects fingerprint catalogs reached through symlinked ancestors", () => {
+    const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(root);
+    const realDirectory = join(root, "real-catalog");
+    mkdirSync(realDirectory);
+    const catalog = join(realDirectory, "known-values.json");
+    writeFingerprintCatalog(catalog, `fixture-${process.pid}-catalog-value`);
+    const linkedDirectory = join(root, "linked-catalog");
+    symlinkSync(realDirectory, linkedDirectory);
+    const publication = join(root, "publication.md");
+    writeFileSync(publication, "Synthetic publication.\n");
+
+    const result = runGateArguments(["--require-known-values", "--paths", publication], {
+      LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE: join(linkedDirectory, "known-values.json"),
+      LLV_PRIVACY_KNOWN_VALUES: "",
+      LLV_PRIVACY_KNOWN_VALUES_FILE: "",
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\nconfiguration_error: 1\n");
+    expect(result.stdout.toString()).not.toContain(root);
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("rejects symlink publication inputs without reading their targets", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
@@ -461,6 +641,48 @@ describe("privacy publication gate", () => {
     expect(result.exitCode).toBe(1);
     expect(output).toBe("PRIVACY GATE: FAIL\nunsafe_path: 1\n");
     expect(output).not.toContain(syntheticHome);
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("discovers committed regular-file to symlink type changes", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    runGit(directory, ["init", "--quiet"]);
+    runGit(directory, ["config", "user.name", "Synthetic Fixture"]);
+    runGit(directory, ["config", "user.email", "fixture@example.invalid"]);
+    const publication = join(directory, "publication.md");
+    writeFileSync(publication, "Synthetic baseline.\n");
+    runGit(directory, ["add", "publication.md"]);
+    runGit(directory, ["commit", "--quiet", "-m", "fixture baseline"]);
+    const baseResult = Bun.spawnSync({ cmd: ["git", "rev-parse", "HEAD"], cwd: directory, stdout: "pipe" });
+    const base = baseResult.stdout.toString().trim();
+    rmSync(publication);
+    symlinkSync(["", "home", "fixture-person", "dangling-target"].join("/"), publication);
+    runGit(directory, ["add", "publication.md"]);
+    runGit(directory, ["commit", "--quiet", "-m", "fixture type change"]);
+
+    const result = runGateArguments(["--base", base], {}, directory);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\nunsafe_path: 1\n");
+    expect(result.stdout.toString()).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("rejects dangling symlinks without resolving their target strings", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const publication = join(directory, "publication.md");
+    const target = ["", "home", "fixture-person", "missing-target"].join("/");
+    symlinkSync(target, publication);
+
+    const result = runGate([publication]);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\nunsafe_path: 1\n");
+    expect(output).not.toContain(target);
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
   });
@@ -498,7 +720,7 @@ describe("privacy publication gate", () => {
     writeValidProvenance(directory, "capture.mp4", contents);
     const counter = join(directory, "sample-count");
     const syntheticHome = ["", "Users", "fixture-person", "records"].join("/");
-    installTool(directory, "ffprobe", `printf '%s' '{"format":{"duration":"N/A","tags":{}},"streams":[{"nb_read_frames":"240"}]}'`);
+    installTool(directory, "ffprobe", `printf '%s' '{"format":{"duration":"N/A","tags":{}},"streams":[{"nb_read_frames":"N/A","nb_frames":"240"}]}'`);
     installTool(directory, "ffmpeg", `printf x >> "$FRAME_COUNTER"\nprintf '%s' 'synthetic-frame'`);
     const environment = installTool(directory, "tesseract", `printf '%s\n' '${syntheticHome}'`);
 
@@ -513,7 +735,28 @@ describe("privacy publication gate", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
-  test("passes configured multilingual OCR languages to raster inspection", () => {
+  test("fails closed when protected late video frames cannot be bounded", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const animation = join(directory, "capture.mp4");
+    const contents = Buffer.from("deterministic synthetic unbounded long-video fixture");
+    writeFileSync(animation, contents);
+    writeValidProvenance(directory, "capture.mp4", contents);
+    const sampleLog = join(directory, "sample-log");
+    installTool(directory, "ffprobe", `printf '%s' '{"format":{"duration":"N/A"},"streams":[{"nb_read_frames":"N/A","nb_frames":"N/A"}]}'`);
+    installTool(directory, "ffmpeg", `printf '%s\n' "$*" >> "$SAMPLE_LOG"\nprintf '%s' 'synthetic-frame'`);
+    const environment = installTool(directory, "tesseract", "printf '%s' 'synthetic-safe-ocr'");
+
+    const result = runGate([animation], { ...environment, SAMPLE_LOG: sampleLog });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\n");
+    expect(existsSync(sampleLog)).toBe(false);
+    expect(result.stdout.toString()).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("matches a Ukrainian OCR value with configured multilingual language data", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
     const image = join(directory, "capture.png");
@@ -521,21 +764,45 @@ describe("privacy publication gate", () => {
     writeFileSync(image, contents);
     writeValidProvenance(directory, "capture.png", contents);
     const argumentsFile = join(directory, "ocr-arguments");
-    const syntheticHome = ["", "home", "fixture-person", "records"].join("/");
-    const environment = installTool(directory, "tesseract", `printf '%s' "$*" > "$OCR_ARGUMENTS"\nprintf '%s\n' '${syntheticHome}'`);
+    const fingerprints = join(directory, "known-values.json");
+    const ukrainianValue = ["приватна", "назва", "проєкту"].join("-");
+    writeFingerprintCatalog(fingerprints, ukrainianValue);
+    const environment = installTool(directory, "tesseract", `printf '%s' "$*" > "$OCR_ARGUMENTS"\nprintf '%s\n' "$OCR_TEXT"`);
 
     const result = runGate([image], {
       ...environment,
+      LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE: fingerprints,
       LLV_PRIVACY_OCR_LANGUAGES: "eng+ukr",
       OCR_ARGUMENTS: argumentsFile,
+      OCR_TEXT: ukrainianValue,
     });
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\nknown_value: 1\n");
     expect(readFileSync(argumentsFile, "utf8")).toContain("-l eng+ukr");
-    expect(output).not.toContain(syntheticHome);
+    expect(output).not.toContain(ukrainianValue);
     expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("fails closed when configured OCR language data is unavailable", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const image = join(directory, "capture.png");
+    const contents = redactedPlaceholderPng();
+    writeFileSync(image, contents);
+    writeValidProvenance(directory, "capture.png", contents);
+    const environment = installTool(directory, "tesseract", "exit 1");
+
+    const result = runGate([image], {
+      ...environment,
+      LLV_PRIVACY_OCR_LANGUAGES: "eng+ukr",
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\n");
+    expect(result.stdout.toString()).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
   });
 
@@ -581,6 +848,48 @@ describe("privacy publication gate", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
+  test("uses trusted scanner and fingerprints when every candidate gate surface is tampered", () => {
+    const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(root);
+    const candidate = join(root, "candidate");
+    mkdirSync(candidate);
+    runGit(candidate, ["init", "--quiet"]);
+    runGit(candidate, ["config", "user.name", "Synthetic Fixture"]);
+    runGit(candidate, ["config", "user.email", "fixture@example.invalid"]);
+    const tamperedPaths = [
+      ".github/workflows/privacy-publication.yml",
+      "scripts/privacy-known-value-fingerprints.json",
+      "scripts/privacy-publication-gate.test.ts",
+      "scripts/privacy-publication-gate.ts",
+    ];
+    for (const path of [...tamperedPaths, "docs/publication.md"]) {
+      const absolute = join(candidate, path);
+      mkdirSync(join(absolute, ".."), { recursive: true });
+      writeFileSync(absolute, "Synthetic baseline.\n");
+    }
+    runGit(candidate, ["add", "."]);
+    runGit(candidate, ["commit", "--quiet", "-m", "fixture baseline"]);
+
+    for (const path of tamperedPaths) writeFileSync(join(candidate, path), "tampered candidate gate surface\n");
+    const knownValue = `fixture-${process.pid}-trusted-tampering-label`;
+    writeFileSync(join(candidate, "docs/publication.md"), `${knownValue}\n`);
+    const trustedCatalog = join(root, "trusted-fingerprints.json");
+    writeFingerprintCatalog(trustedCatalog, knownValue);
+
+    const result = runGateArguments(["--repository", candidate, "--base", "HEAD", "--require-known-values"], {
+      LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE: trustedCatalog,
+      LLV_PRIVACY_KNOWN_VALUES: "",
+      LLV_PRIVACY_KNOWN_VALUES_FILE: "",
+    });
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\nknown_value: 1\n");
+    expect(output).not.toContain(knownValue);
+    expect(output).not.toContain(candidate);
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("allows checksum-bound adversarial synthetic fixtures with declared classes", () => {
     const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(root);
@@ -589,7 +898,7 @@ describe("privacy publication gate", () => {
     const image = join(directory, "synthetic-path.png");
     const contents = redactedPlaceholderPng();
     writeFileSync(image, contents);
-    const generator = Buffer.from('export const PRIVACY_GENERATOR_VERSION = "fixture-generator-v2";\n');
+    const generator = Buffer.from('export const PRIVACY_GENERATOR_RUNTIME = "1.3.3";\nexport const PRIVACY_GENERATOR_VERSION = "fixture-generator-v2";\n');
     writeFileSync(join(directory, "generate-fixture.mjs"), generator);
     writeFileSync(join(directory, "privacy-manifest.json"), JSON.stringify({
       schemaVersion: 2,
@@ -598,6 +907,7 @@ describe("privacy publication gate", () => {
         classification: "adversarial-synthetic",
         source: "deterministic-generator",
         generator: "generate-fixture.mjs",
+        generatorRuntime: "bun-1.3.3",
         generatorVersion: "fixture-generator-v2",
         generatorSha256: createHash("sha256").update(generator).digest("hex"),
         sourceDigests: [createHash("sha256").update("adversarial-fixture-source").digest("hex")],
@@ -627,7 +937,7 @@ describe("privacy publication gate", () => {
     mkdirSync(manifestLinkDirectory);
     const manifestLinkImage = join(manifestLinkDirectory, "capture.png");
     writeFileSync(manifestLinkImage, contents);
-    const generator = Buffer.from('export const PRIVACY_GENERATOR_VERSION = "fixture-generator-v2";\n');
+    const generator = Buffer.from('export const PRIVACY_GENERATOR_RUNTIME = "1.3.3";\nexport const PRIVACY_GENERATOR_VERSION = "fixture-generator-v2";\n');
     writeFileSync(join(manifestLinkDirectory, "generate-placeholder.mjs"), generator);
     writeFileSync(externalManifest, JSON.stringify({
       schemaVersion: 2,
@@ -636,6 +946,7 @@ describe("privacy publication gate", () => {
         classification: "redacted-placeholder",
         source: "redacted-live-capture",
         generator: "generate-placeholder.mjs",
+        generatorRuntime: "bun-1.3.3",
         generatorVersion: "fixture-generator-v2",
         generatorSha256: createHash("sha256").update(generator).digest("hex"),
         sourceDigests: [createHash("sha256").update("fixture-source").digest("hex")],
@@ -666,6 +977,65 @@ describe("privacy publication gate", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
+  test("rejects asset and manifest paths reached through symlinked ancestors", () => {
+    const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(root);
+    const realDirectory = join(root, "real-publication");
+    mkdirSync(realDirectory);
+    const contents = redactedPlaceholderPng();
+    writeFileSync(join(realDirectory, "capture.png"), contents);
+    writeValidProvenance(realDirectory, "capture.png", contents);
+    const linkedDirectory = join(root, "linked-publication");
+    symlinkSync(realDirectory, linkedDirectory);
+
+    const result = runGate(
+      [join(linkedDirectory, "capture.png")],
+      installTool(root, "tesseract"),
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\nunsafe_path: 1\n");
+    expect(result.stdout.toString()).not.toContain(root);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("rejects provenance generators reached through symlinked ancestors", () => {
+    const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(root);
+    const publicationDirectory = join(root, "published");
+    const externalDirectory = join(root, "external-generator");
+    mkdirSync(publicationDirectory);
+    mkdirSync(externalDirectory);
+    const image = join(publicationDirectory, "capture.png");
+    const contents = redactedPlaceholderPng();
+    writeFileSync(image, contents);
+    const generator = Buffer.from('export const PRIVACY_GENERATOR_RUNTIME = "1.3.3";\nexport const PRIVACY_GENERATOR_VERSION = "fixture-generator-v2";\n');
+    writeFileSync(join(externalDirectory, "generate-placeholder.mjs"), generator);
+    symlinkSync(externalDirectory, join(publicationDirectory, "linked-generator"));
+    writeFileSync(join(publicationDirectory, "privacy-manifest.json"), JSON.stringify({
+      schemaVersion: 2,
+      assets: [{
+        path: "capture.png",
+        classification: "redacted-placeholder",
+        source: "redacted-live-capture",
+        generator: "linked-generator/generate-placeholder.mjs",
+        generatorRuntime: "bun-1.3.3",
+        generatorVersion: "fixture-generator-v2",
+        generatorSha256: createHash("sha256").update(generator).digest("hex"),
+        sourceDigests: [createHash("sha256").update("fixture-source").digest("hex")],
+        description: "Synthetic provenance fixture with an ancestor-linked generator.",
+        sha256: createHash("sha256").update(contents).digest("hex"),
+      }],
+    }));
+
+    const result = runGate([image], installTool(root, "tesseract"));
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\nprovenance_invalid: 1\n");
+    expect(result.stdout.toString()).not.toContain(root);
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("rejects provenance generators outside the asset boundary", () => {
     const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(root);
@@ -674,7 +1044,7 @@ describe("privacy publication gate", () => {
     const image = join(directory, "capture.png");
     const contents = redactedPlaceholderPng();
     writeFileSync(image, contents);
-    const generator = Buffer.from('export const PRIVACY_GENERATOR_VERSION = "fixture-generator-v2";\n');
+    const generator = Buffer.from('export const PRIVACY_GENERATOR_RUNTIME = "1.3.3";\nexport const PRIVACY_GENERATOR_VERSION = "fixture-generator-v2";\n');
     const externalGenerator = join(root, "external-generator.mjs");
     writeFileSync(externalGenerator, generator);
     writeFileSync(join(directory, "privacy-manifest.json"), JSON.stringify({
@@ -684,6 +1054,7 @@ describe("privacy publication gate", () => {
         classification: "redacted-placeholder",
         source: "redacted-live-capture",
         generator: "../external-generator.mjs",
+        generatorRuntime: "bun-1.3.3",
         generatorVersion: "fixture-generator-v2",
         generatorSha256: createHash("sha256").update(generator).digest("hex"),
         sourceDigests: [createHash("sha256").update("fixture-source").digest("hex")],
@@ -705,7 +1076,7 @@ describe("privacy publication gate", () => {
     const image = join(directory, "capture.png");
     const contents = redactedPlaceholderPng();
     writeFileSync(image, contents);
-    const generator = Buffer.from('export const packageMetadata = { version: "fixture-generator-v2" };\n');
+    const generator = Buffer.from('export const PRIVACY_GENERATOR_RUNTIME = "1.3.3";\nexport const packageMetadata = { version: "fixture-generator-v2" };\n');
     writeFileSync(join(directory, "generate-placeholder.mjs"), generator);
     writeFileSync(join(directory, "privacy-manifest.json"), JSON.stringify({
       schemaVersion: 2,
@@ -714,6 +1085,7 @@ describe("privacy publication gate", () => {
         classification: "redacted-placeholder",
         source: "redacted-live-capture",
         generator: "generate-placeholder.mjs",
+        generatorRuntime: "bun-1.3.3",
         generatorVersion: "fixture-generator-v2",
         generatorSha256: createHash("sha256").update(generator).digest("hex"),
         sourceDigests: [createHash("sha256").update("fixture-source").digest("hex")],
@@ -728,6 +1100,35 @@ describe("privacy publication gate", () => {
     expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\nprovenance_invalid: 1\n");
     expect(result.stderr.toString()).toBe("");
   });
+
+  for (const runtimeFixture of [
+    { name: "missing", value: undefined },
+    { name: "malformed", value: "bun latest!" },
+    { name: "mismatched", value: "bun-1.3.14" },
+  ]) {
+    test(`rejects ${runtimeFixture.name} provenance generator runtime declarations`, () => {
+      const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+      temporaryDirectories.push(directory);
+      const image = join(directory, "capture.png");
+      const contents = redactedPlaceholderPng();
+      writeFileSync(image, contents);
+      writeValidProvenance(directory, "capture.png", contents);
+      const manifestPath = join(directory, "privacy-manifest.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        assets: Array<Record<string, unknown>>;
+      };
+      if (runtimeFixture.value === undefined) delete manifest.assets[0].generatorRuntime;
+      else manifest.assets[0].generatorRuntime = runtimeFixture.value;
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+
+      const result = runGate([image], installTool(directory, "tesseract"));
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\nprovenance_invalid: 1\n");
+      expect(result.stdout.toString()).not.toContain(directory);
+      expect(result.stderr.toString()).toBe("");
+    });
+  }
 
   test("classifies private network, resource, and transcript-shaped media text", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
@@ -809,6 +1210,35 @@ describe("privacy publication gate", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
+  for (const fixture of [
+    { byteOrder: "le" as const, location: "eXIf" as const },
+    { byteOrder: "be" as const, location: "eXIf" as const },
+    { byteOrder: "le" as const, location: "trailing payload" as const },
+    { byteOrder: "be" as const, location: "trailing payload" as const },
+  ]) {
+    test(`scans odd-aligned ${fixture.byteOrder.toUpperCase()} UTF-16 in ${fixture.location}`, () => {
+      const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+      temporaryDirectories.push(directory);
+      const syntheticHome = ["", "home", "fixture-person", `${fixture.byteOrder}-metadata`].join("/");
+      const payload = oddAlignedUtf16(syntheticHome, fixture.byteOrder);
+      const contents = fixture.location === "eXIf"
+        ? pngWithExifBytes(payload)
+        : Buffer.concat([redactedPlaceholderPng(), payload]);
+      const image = join(directory, "capture.png");
+      writeFileSync(image, contents);
+      writeValidProvenance(directory, "capture.png", contents);
+
+      const result = runGate([image], installTool(directory, "tesseract"));
+      const output = result.stdout.toString();
+
+      expect(result.exitCode).toBe(1);
+      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+      expect(output).not.toContain(syntheticHome);
+      expect(output).not.toContain(directory);
+      expect(result.stderr.toString()).toBe("");
+    });
+  }
+
   test("audits authenticated GitHub issue, PR, comment, review, and media surfaces", async () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
@@ -884,6 +1314,99 @@ describe("privacy publication gate", () => {
       expect(output).not.toContain(syntheticIdentifier);
       expect(output).not.toContain(token);
       expect(output).not.toContain(directory);
+    } finally {
+      if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
+      else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;
+    }
+  });
+
+  test("audits issue titles with class-only diagnostics", async () => {
+    const syntheticHome = ["", "home", "fixture-person", "issue-title"].join("/");
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      if (url.pathname.endsWith("/issues/448")) return Response.json({ body: "", title: syntheticHome });
+      if (url.pathname.endsWith("/issues/448/comments")) return Response.json([]);
+      return new Response(null, { status: 404 });
+    };
+
+    const findings = await auditGithubPublication({
+      apiUrl: "https://api.github.test/",
+      fetcher,
+      number: 448,
+      repo: "example/repository",
+      requireKnownValues: false,
+      token: "synthetic-github-audit-token",
+    });
+    const output = formatPrivacyReport(findings);
+
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+    expect(output).not.toContain(syntheticHome);
+  });
+
+  test("audits pull-request titles with class-only diagnostics", async () => {
+    const syntheticIdentifier = ["12345678", "1234", "4abc", "8def", "123456789abc"].join("-");
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      if (url.pathname.endsWith("/issues/456")) return Response.json({ body: "", pull_request: {}, title: "" });
+      if (url.pathname.endsWith("/issues/456/comments")) return Response.json([]);
+      if (url.pathname.endsWith("/pulls/456")) return Response.json({ body: "", title: syntheticIdentifier });
+      if (url.pathname.endsWith("/pulls/456/comments")) return Response.json([]);
+      if (url.pathname.endsWith("/pulls/456/reviews")) return Response.json([]);
+      return new Response(null, { status: 404 });
+    };
+
+    const findings = await auditGithubPublication({
+      apiUrl: "https://api.github.test/",
+      fetcher,
+      number: 456,
+      repo: "example/repository",
+      requireKnownValues: false,
+      token: "synthetic-github-audit-token",
+    });
+    const output = formatPrivacyReport(findings);
+
+    expect(output).toBe("PRIVACY GATE: FAIL\nresource_identifier: 1\n");
+    expect(output).not.toContain(syntheticIdentifier);
+  });
+
+  test("fetches entity-encoded GitHub media references for inspection", async () => {
+    const originalOcrLanguages = process.env.LLV_PRIVACY_OCR_LANGUAGES;
+    const syntheticHome = ["", "home", "fixture-person", "encoded-media"].join("/");
+    const media = pngWithCustomMetadata("eXIf", syntheticHome);
+    const requests: string[] = [];
+    const encodedMedia = "&#104;&amp;#116;&#116;&#112;&#115;&amp;colon;&sol;&sol;github.com/example/repository/assets/encoded.png";
+    const languageResult = Bun.spawnSync({ cmd: ["tesseract", "--list-langs"], stderr: "pipe", stdout: "pipe" });
+    const ocrLanguage = languageResult.stdout.toString().split(/\r?\n/).find((language) => /^[a-z0-9_]+$/i.test(language) && language !== "osd");
+    process.env.LLV_PRIVACY_OCR_LANGUAGES = ocrLanguage ?? "missing-test-language";
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      requests.push(url.href);
+      if (url.hostname === "github.com") {
+        return new Response(Uint8Array.from(media), { headers: { "content-type": "image/png" } });
+      }
+      if (url.pathname.endsWith("/issues/448")) {
+        return Response.json({ body: `<img src="${encodedMedia}">`, title: "Synthetic issue" });
+      }
+      if (url.pathname.endsWith("/issues/448/comments")) return Response.json([]);
+      return new Response(null, { status: 404 });
+    };
+
+    try {
+      const findings = await auditGithubPublication({
+        apiUrl: "https://api.github.test/",
+        fetcher,
+        number: 448,
+        repo: "example/repository",
+        requireKnownValues: false,
+        token: "synthetic-github-audit-token",
+      });
+      const output = formatPrivacyReport(findings);
+
+      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_missing: 1\n");
+      expect(requests).toHaveLength(3);
+      expect(requests.at(-1)).toBe("https://github.com/example/repository/assets/encoded.png");
+      expect(output).not.toContain(syntheticHome);
+      expect(output).not.toContain(encodedMedia);
     } finally {
       if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
       else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;

@@ -1,6 +1,6 @@
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { inflateSync } from "node:zlib";
 
 export type FindingClass =
@@ -24,6 +24,7 @@ type ProvenanceAsset = {
   description?: unknown;
   expectedFindingClasses?: unknown;
   generator?: unknown;
+  generatorRuntime?: unknown;
   generatorSha256?: unknown;
   generatorVersion?: unknown;
   path?: unknown;
@@ -47,7 +48,14 @@ const adversarialFindingClasses = new Set<FindingClass>([
 ]);
 const rasterExtensions = new Set([".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
 const animatedExtensions = new Set([".avi", ".gif", ".m4v", ".mkv", ".mov", ".mp4", ".webm"]);
+const textExtensions = new Set([
+  ".cjs", ".conf", ".css", ".csv", ".env", ".graphql", ".htm", ".html", ".ini", ".js", ".json",
+  ".jsx", ".lock", ".md", ".mdx", ".mjs", ".properties", ".sh", ".svg", ".toml", ".ts", ".tsx",
+  ".txt", ".xml", ".yaml", ".yml", ".zsh",
+]);
+const textBasenames = new Set(["CODEOWNERS", "Dockerfile", "LICENSE", "Makefile", "README"]);
 const maxPublicationBytes = 32 * 1024 * 1024;
+const supportedGeneratorRuntime = "bun-1.3.3";
 const credentialInputPattern = new RegExp([
   String.raw`<in`,
   String.raw`put\b(?=[^>]*(?:type\s*=\s*["']?password|name\s*=\s*["']?(?:api[_-]?key|password|secret|token)))`,
@@ -59,6 +67,41 @@ type KnownValueFingerprint = {
   sha256: string;
 };
 
+type SafePathResult = {
+  metadata?: ReturnType<typeof lstatSync>;
+  status: "missing" | "safe" | "symlink";
+};
+
+function safePath(path: string): SafePathResult {
+  const absolute = resolve(path);
+  const root = parse(absolute).root;
+  let current = root;
+  let metadata: ReturnType<typeof lstatSync>;
+  try {
+    metadata = lstatSync(root);
+  } catch {
+    return { status: "missing" };
+  }
+  if (metadata.isSymbolicLink()) return { status: "symlink" };
+  const segments = relative(root, absolute).split(sep).filter(Boolean);
+  for (const segment of segments) {
+    current = join(current, segment);
+    try {
+      metadata = lstatSync(current);
+    } catch {
+      return { status: "missing" };
+    }
+    if (metadata.isSymbolicLink()) return { status: "symlink" };
+  }
+  return { metadata, status: "safe" };
+}
+
+function readSafeRegularFile(path: string): Buffer {
+  const result = safePath(path);
+  if (result.status !== "safe" || !result.metadata?.isFile()) throw new Error("unsafe file path");
+  return readFileSync(resolve(path));
+}
+
 function compactSensitiveText(text: string): string {
   return text.normalize("NFKC").toLocaleLowerCase("en-US").replaceAll(/[^\p{L}\p{N}]/gu, "");
 }
@@ -68,7 +111,7 @@ function loadKnownValues(): { error: boolean; fingerprints: KnownValueFingerprin
   const file = process.env.LLV_PRIVACY_KNOWN_VALUES_FILE;
   if (file) {
     try {
-      values.push(...readFileSync(file, "utf8").split(/\r?\n/));
+      values.push(...readSafeRegularFile(file).toString("utf8").split(/\r?\n/));
     } catch {
       return { error: true, fingerprints: [], values: [] };
     }
@@ -84,7 +127,7 @@ function loadKnownValues(): { error: boolean; fingerprints: KnownValueFingerprin
   const fingerprintFile = process.env.LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE;
   if (fingerprintFile) {
     try {
-      const catalog = JSON.parse(readFileSync(fingerprintFile, "utf8")) as {
+      const catalog = JSON.parse(readSafeRegularFile(fingerprintFile).toString("utf8")) as {
         fingerprints?: unknown;
         normalization?: unknown;
         schemaVersion?: unknown;
@@ -132,8 +175,15 @@ function requestedPaths(arguments_: string[]): string[] | undefined {
   return separator === -1 ? undefined : arguments_.slice(separator + 1);
 }
 
-function gitPaths(arguments_: string[]): { error: boolean; paths: string[] } {
-  const result = Bun.spawnSync({ cmd: ["git", ...arguments_], stderr: "pipe", stdout: "pipe" });
+function argumentValue(arguments_: string[], flag: string): string | undefined {
+  const index = arguments_.indexOf(flag);
+  if (index === -1) return undefined;
+  const value = arguments_[index + 1];
+  return value && !value.startsWith("--") ? value : undefined;
+}
+
+function gitPaths(repository: string, arguments_: string[]): { error: boolean; paths: string[] } {
+  const result = Bun.spawnSync({ cmd: ["git", "-C", repository, ...arguments_], stderr: "pipe", stdout: "pipe" });
   if (result.exitCode !== 0) return { error: true, paths: [] };
   return {
     error: false,
@@ -141,21 +191,21 @@ function gitPaths(arguments_: string[]): { error: boolean; paths: string[] } {
   };
 }
 
-function changedPaths(arguments_: string[]): { error: boolean; paths: string[] } {
+function changedPaths(arguments_: string[], repository: string): { error: boolean; paths: string[] } {
   const baseIndex = arguments_.indexOf("--base");
   const base = baseIndex === -1 ? "origin/main" : arguments_[baseIndex + 1];
   if (!base || base.startsWith("--")) return { error: true, paths: [] };
   const commands = [
-    ["diff", "--name-only", "--diff-filter=ACMR", "-z", `${base}...HEAD`],
-    ["diff", "--name-only", "--diff-filter=ACMR", "-z"],
-    ["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"],
+    ["diff", "--name-only", "--diff-filter=ACMRT", "-z", `${base}...HEAD`],
+    ["diff", "--name-only", "--diff-filter=ACMRT", "-z"],
+    ["diff", "--cached", "--name-only", "--diff-filter=ACMRT", "-z"],
     ["ls-files", "--others", "--exclude-standard", "-z"],
   ];
   const paths = new Set<string>();
   for (const command of commands) {
-    const result = gitPaths(command);
+    const result = gitPaths(repository, command);
     if (result.error) return { error: true, paths: [] };
-    for (const path of result.paths) paths.add(resolve(path));
+    for (const path of result.paths) paths.add(resolve(repository, path));
   }
   return { error: false, paths: [...paths] };
 }
@@ -165,19 +215,13 @@ function addFinding(findings: Map<FindingClass, number>, finding: FindingClass):
 }
 
 function decodePercentEncoding(text: string): string {
-  let decoded = text;
-  for (let pass = 0; pass < 3; pass += 1) {
-    const next = decoded.replace(/(?:%[0-9a-f]{2})+/gi, (encoded) => {
-      try {
-        return decodeURIComponent(encoded);
-      } catch {
-        return encoded;
-      }
-    });
-    if (next === decoded) break;
-    decoded = next;
-  }
-  return decoded;
+  return text.replace(/(?:%[0-9a-f]{2})+/gi, (encoded) => {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded;
+    }
+  });
 }
 
 function decodeHtmlEntities(text: string): string {
@@ -187,6 +231,7 @@ function decodeHtmlEntities(text: string): string {
     colon: ":",
     gt: ">",
     lt: "<",
+    percnt: "%",
     quot: "\"",
     sol: "/",
   };
@@ -203,12 +248,27 @@ function decodeHtmlEntities(text: string): string {
   });
 }
 
-function normalizedSensitiveText(text: string): { compact: string; searchable: string } {
-  const decoded = decodeHtmlEntities(decodePercentEncoding(text.replaceAll(/[\u200B-\u200D\u2060\uFEFF]/g, "")));
+function decodeCommonMarkEscapes(text: string): string {
+  return text.replaceAll(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, "$1");
+}
+
+export function canonicalSensitiveText(text: string): { error: boolean; text: string } {
+  let decoded = text.replaceAll(/[\u200B-\u200D\u2060\uFEFF]/g, "");
+  for (let pass = 0; pass < 16; pass += 1) {
+    const next = decodeCommonMarkEscapes(decodeHtmlEntities(decodePercentEncoding(decoded)));
+    if (next === decoded) return { error: false, text: decoded };
+    decoded = next;
+  }
+  return { error: true, text: decoded };
+}
+
+function normalizedSensitiveText(text: string): { compact: string; error: boolean; searchable: string } {
+  const canonical = canonicalSensitiveText(text);
+  const decoded = canonical.text;
   const withoutMarkup = decoded.replaceAll(/<[^>]*>/g, "").replaceAll(/[\[\]*`~]/g, "");
-  const fingerprintViews = `${decoded}\n${withoutMarkup}`;
   return {
-    compact: fingerprintViews.split(/\r?\n/).map((line) => compactSensitiveText(line)).join("\n"),
+    compact: `${compactSensitiveText(decoded)}\0${compactSensitiveText(withoutMarkup)}`,
+    error: canonical.error,
     searchable: `${decoded}\n${withoutMarkup}`.replaceAll("\0", "\n"),
   };
 }
@@ -252,13 +312,14 @@ function metadataStrings(bytes: Buffer): string[] {
   const strings: string[] = [...(bytes.toString("latin1").match(/[\x20-\x7e]{4,}/g) ?? [])];
   const utf8 = bytes.toString("utf8");
   if (!utf8.includes("\ufffd")) strings.push(utf8);
-  if (bytes.length >= 8 && bytes.length % 2 === 0) {
-    const littleEndian = bytes.toString("utf16le");
-    strings.push(...(littleEndian.match(/[\p{L}\p{N}][\p{L}\p{N}\p{P}\p{Zs}\\/:@._-]{3,}/gu) ?? []));
-    const swapped = Buffer.from(bytes);
+  for (const alignment of [0, 1]) {
+    const end = bytes.length - ((bytes.length - alignment) % 2);
+    if (end - alignment < 8) continue;
+    const aligned = bytes.subarray(alignment, end);
+    strings.push(aligned.toString("utf16le"));
+    const swapped = Buffer.from(aligned);
     swapped.swap16();
-    const bigEndian = swapped.toString("utf16le");
-    strings.push(...(bigEndian.match(/[\p{L}\p{N}][\p{L}\p{N}\p{P}\p{Zs}\\/:@._-]{3,}/gu) ?? []));
+    strings.push(swapped.toString("utf16le"));
   }
   return strings;
 }
@@ -379,7 +440,8 @@ function inspectRasterMetadata(path: string): Set<FindingClass> {
 
 export function sensitiveClasses(text: string): Set<FindingClass> {
   const findings = new Set<FindingClass>();
-  const { compact, searchable: searchableText } = normalizedSensitiveText(text);
+  const { compact, error, searchable: searchableText } = normalizedSensitiveText(text);
+  if (error) findings.add("inspection_error");
   const normalizedText = searchableText.toLocaleLowerCase("en-US");
   if (knownValues.values.some((value) => normalizedText.includes(value.toLocaleLowerCase("en-US"))) || matchesKnownFingerprint(compact)) {
     findings.add("known_value");
@@ -390,7 +452,7 @@ export function sensitiveClasses(text: string): Set<FindingClass> {
     findings.add("home_path");
     break;
   }
-  const windowsHomePattern = /(?:^|[\s"'(])[A-Za-z]:\\Users\\([A-Za-z0-9._-]+)(?:\\|$)/gm;
+  const windowsHomePattern = /(?:^|[\s"'(])[A-Za-z]:\\Users\\([A-Za-z0-9._-]+)(?:\\|$)/gim;
   for (const match of searchableText.matchAll(windowsHomePattern)) {
     if (match[1].toLowerCase() === "user") continue;
     findings.add("home_path");
@@ -443,9 +505,47 @@ export function sensitiveClasses(text: string): Set<FindingClass> {
 
 function inspectText(path: string): Set<FindingClass> {
   if (isMedia(path)) return new Set();
-  const contents = readFileSync(path);
-  if (contents.includes(0)) return new Set();
-  return sensitiveClasses(contents.toString("utf8"));
+  try {
+    const contents = readFileSync(path);
+    const utf8 = contents.toString("utf8");
+    const views = [utf8];
+    const startsLittleEndian = contents.length >= 2 && contents[0] === 0xff && contents[1] === 0xfe;
+    const startsBigEndian = contents.length >= 2 && contents[0] === 0xfe && contents[1] === 0xff;
+    if (startsLittleEndian) views.push(contents.subarray(2, contents.length - (contents.length % 2)).toString("utf16le"));
+    if (startsBigEndian) {
+      const bigEndian = Buffer.from(contents.subarray(2, contents.length - (contents.length % 2)));
+      bigEndian.swap16();
+      views.push(bigEndian.toString("utf16le"));
+    }
+    if (contents.includes(0) && !startsLittleEndian && !startsBigEndian) {
+      for (const alignment of [0, 1]) {
+        const end = contents.length - ((contents.length - alignment) % 2);
+        if (end - alignment < 4) continue;
+        const aligned = contents.subarray(alignment, end);
+        views.push(aligned.toString("utf16le"));
+        const swapped = Buffer.from(aligned);
+        swapped.swap16();
+        views.push(swapped.toString("utf16le"));
+      }
+    }
+    const findings = sensitiveClasses(views.join("\n"));
+    const extension = extname(path).toLowerCase();
+    const textLike = textExtensions.has(extension) || textBasenames.has(basename(path));
+    const controlBytes = contents.reduce((count, byte) => {
+      const allowedWhitespace = byte === 0x09 || byte === 0x0a || byte === 0x0d;
+      return count + (byte < 0x20 && !allowedWhitespace ? 1 : 0);
+    }, 0);
+    const unsupportedBinary = !textLike && (utf8.includes("\ufffd") || controlBytes > 0);
+    const invalidTextEncoding = textLike
+      && utf8.includes("\ufffd")
+      && !startsLittleEndian
+      && !startsBigEndian
+      && !contents.includes(0);
+    if (unsupportedBinary || invalidTextEncoding) findings.add("inspection_error");
+    return findings;
+  } catch {
+    return new Set(["inspection_error"]);
+  }
 }
 
 function inspectRaster(path: string): Set<FindingClass> {
@@ -497,17 +597,25 @@ function inspectAnimated(path: string): Set<FindingClass> {
     };
     duration = Number(metadata.format?.duration ?? metadata.streams?.[0]?.duration);
     if (!Number.isFinite(duration) || duration < 0) duration = 0;
-    frameCount = Number(metadata.streams?.[0]?.nb_read_frames ?? metadata.streams?.[0]?.nb_frames);
-    if (!Number.isSafeInteger(frameCount) || frameCount < 1) frameCount = 0;
+    for (const candidate of [metadata.streams?.[0]?.nb_read_frames, metadata.streams?.[0]?.nb_frames]) {
+      const count = Number(candidate);
+      if (!Number.isSafeInteger(count) || count < 1) continue;
+      frameCount = count;
+      break;
+    }
   } catch {
     return new Set([...findings, "inspection_error"]);
+  }
+  if (duration === 0 && frameCount === 0) {
+    findings.add("inspection_error");
+    return findings;
   }
   const fractions = [0, 0.25, 0.5, 0.75, 0.95];
   const samples = duration > 0
     ? fractions.map((fraction) => ({ kind: "time" as const, value: (duration * fraction).toFixed(3) }))
     : fractions.map((fraction) => ({
       kind: "frame" as const,
-      value: Math.floor((frameCount > 0 ? frameCount - 1 : 1_800) * fraction).toString(),
+      value: Math.floor((frameCount - 1) * fraction).toString(),
     }));
   const uniqueSamples = new Map(samples.map((sample) => [`${sample.kind}:${sample.value}`, sample]));
   for (const sample of uniqueSamples.values()) {
@@ -560,6 +668,11 @@ function pathIsWithin(root: string, candidate: string): boolean {
   return relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
 }
 
+function canonicalPathIsWithin(root: string, candidate: string): boolean {
+  if (safePath(root).status !== "safe" || safePath(candidate).status !== "safe") return false;
+  return pathIsWithin(realpathSync(root), realpathSync(candidate));
+}
+
 function currentRepositoryRoot(): string | undefined {
   const result = Bun.spawnSync({ cmd: ["git", "rev-parse", "--show-toplevel"], stderr: "pipe", stdout: "pipe" });
   if (result.exitCode !== 0) return undefined;
@@ -569,13 +682,13 @@ function currentRepositoryRoot(): string | undefined {
 
 const repositoryRoot = currentRepositoryRoot();
 
-function provenanceFor(path: string): ProvenanceResult {
+function provenanceFor(path: string, inspectionRoot = repositoryRoot): ProvenanceResult {
   const manifestPath = join(dirname(path), "privacy-manifest.json");
   const invalid: ProvenanceResult = { expectedFindingClasses: new Set(), status: "invalid" };
-  if (!existsSync(manifestPath)) return { expectedFindingClasses: new Set(), status: "missing" };
+  const manifestPathResult = safePath(manifestPath);
+  if (manifestPathResult.status === "missing") return { expectedFindingClasses: new Set(), status: "missing" };
+  if (manifestPathResult.status !== "safe" || !manifestPathResult.metadata?.isFile()) return invalid;
   try {
-    const manifestMetadata = lstatSync(manifestPath);
-    if (manifestMetadata.isSymbolicLink() || !manifestMetadata.isFile()) return invalid;
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
       assets?: unknown;
       schemaVersion?: unknown;
@@ -590,12 +703,16 @@ function provenanceFor(path: string): ProvenanceResult {
     if (typeof asset.description !== "string" || asset.description.trim().length < 12) return invalid;
     if (typeof asset.generator !== "string" || asset.generator.length === 0 || isAbsolute(asset.generator)) return invalid;
     const generatorPath = resolve(dirname(manifestPath), asset.generator);
-    if (!existsSync(generatorPath)) return invalid;
-    const provenanceRoot = repositoryRoot && pathIsWithin(repositoryRoot, path) ? repositoryRoot : dirname(manifestPath);
-    if (!pathIsWithin(provenanceRoot, generatorPath)) return invalid;
-    const generatorMetadata = lstatSync(generatorPath);
-    if (generatorMetadata.isSymbolicLink() || !generatorMetadata.isFile()) return invalid;
+    const provenanceRoot = inspectionRoot && canonicalPathIsWithin(inspectionRoot, path) ? inspectionRoot : dirname(manifestPath);
+    if (!canonicalPathIsWithin(provenanceRoot, generatorPath)) return invalid;
+    const generatorMetadata = safePath(generatorPath);
+    if (generatorMetadata.status !== "safe" || !generatorMetadata.metadata?.isFile()) return invalid;
     const generatorBytes = readFileSync(generatorPath);
+    if (asset.generatorRuntime !== supportedGeneratorRuntime) return invalid;
+    const runtimeVersion = supportedGeneratorRuntime.slice("bun-".length);
+    const escapedRuntimeVersion = runtimeVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const runtimeDeclaration = new RegExp(`\\bPRIVACY_GENERATOR_RUNTIME\\s*=\\s*["']${escapedRuntimeVersion}["']`);
+    if (!runtimeDeclaration.test(generatorBytes.toString("utf8"))) return invalid;
     if (typeof asset.generatorVersion !== "string" || !/^[a-z0-9][a-z0-9._-]{2,63}$/i.test(asset.generatorVersion)) return invalid;
     const escapedVersion = asset.generatorVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const versionDeclaration = new RegExp(`\\bPRIVACY_GENERATOR_VERSION\\s*=\\s*["']${escapedVersion}["']`);
@@ -633,24 +750,27 @@ function provenanceFor(path: string): ProvenanceResult {
   }
 }
 
-export function inspectPaths(paths: string[], configurationError = false, requireKnownValues = false): Map<FindingClass, number> {
+export function inspectPaths(
+  paths: string[],
+  configurationError = false,
+  requireKnownValues = false,
+  inspectionRoot = repositoryRoot,
+): Map<FindingClass, number> {
   const findings = new Map<FindingClass, number>();
   if (knownValues.error || configurationError || (requireKnownValues && knownValues.fingerprints.length === 0)) {
     addFinding(findings, "configuration_error");
   }
   for (const path of paths) {
-    if (!existsSync(path)) continue;
-    try {
-      const metadata = lstatSync(path);
-      if (metadata.isSymbolicLink() || !metadata.isFile()) {
-        addFinding(findings, "unsafe_path");
-        continue;
-      }
-      if (metadata.size > maxPublicationBytes) {
-        addFinding(findings, "inspection_error");
-        continue;
-      }
-    } catch {
+    const pathResult = safePath(path);
+    if (pathResult.status === "symlink" || (pathResult.status === "safe" && !pathResult.metadata?.isFile())) {
+      addFinding(findings, "unsafe_path");
+      continue;
+    }
+    if (pathResult.status === "missing" || !pathResult.metadata) {
+      addFinding(findings, "inspection_error");
+      continue;
+    }
+    if (pathResult.metadata.size > maxPublicationBytes) {
       addFinding(findings, "inspection_error");
       continue;
     }
@@ -661,7 +781,7 @@ export function inspectPaths(paths: string[], configurationError = false, requir
     for (const finding of inspectAnimated(path)) pathFindings.add(finding);
     for (const finding of inspectText(path)) pathFindings.add(finding);
     if (isMedia(path)) {
-      const provenance = provenanceFor(path);
+      const provenance = provenanceFor(path, inspectionRoot);
       if (provenance.status === "missing") pathFindings.add("provenance_missing");
       if (provenance.status === "invalid") pathFindings.add("provenance_invalid");
       if (provenance.status === "valid" && provenance.expectedFindingClasses.size > 0) {
@@ -699,9 +819,21 @@ export function reportPrivacyFindings(findings: Map<FindingClass, number>): void
 
 if (import.meta.main) {
   const arguments_ = process.argv.slice(2);
+  const repositoryArgument = argumentValue(arguments_, "--repository");
+  const inspectionRoot = repositoryArgument ? resolve(repositoryArgument) : (repositoryRoot ?? resolve("."));
+  const repositoryPath = safePath(inspectionRoot);
+  const repositoryError = repositoryPath.status !== "safe" || !repositoryPath.metadata?.isDirectory();
   const explicitPaths = requestedPaths(arguments_);
   const selection = explicitPaths === undefined
-    ? changedPaths(arguments_)
-    : { error: explicitPaths.length === 0, paths: explicitPaths };
-  reportPrivacyFindings(inspectPaths(selection.paths, selection.error, arguments_.includes("--require-known-values")));
+    ? changedPaths(arguments_, inspectionRoot)
+    : {
+      error: explicitPaths.length === 0,
+      paths: explicitPaths.map((path) => isAbsolute(path) ? path : resolve(inspectionRoot, path)),
+    };
+  reportPrivacyFindings(inspectPaths(
+    selection.paths,
+    selection.error || repositoryError,
+    arguments_.includes("--require-known-values"),
+    inspectionRoot,
+  ));
 }

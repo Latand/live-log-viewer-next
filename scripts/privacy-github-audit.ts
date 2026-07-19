@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 
 import {
+  canonicalSensitiveText,
   type FindingClass,
   inspectPaths,
   reportPrivacyFindings,
@@ -23,10 +24,12 @@ export type GithubAuditOptions = {
 type GithubIssue = {
   body?: unknown;
   pull_request?: unknown;
+  title?: unknown;
 };
 
 type GithubSurface = {
   body?: unknown;
+  title?: unknown;
 };
 
 const trustedMediaHosts = new Set([
@@ -205,13 +208,14 @@ function markdownDestinations(text: string): string[] {
 }
 
 function publishedMediaUrls(text: string): URL[] {
-  const candidates = markdownDestinations(text);
+  const canonicalText = canonicalSensitiveText(text).text;
+  const candidates = markdownDestinations(canonicalText);
   const patterns = [
     /<(?:a|img|source|video)\b[^>]*(?:href|src)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>/gi,
     /https?:\/\/[^\s<>"'\]]+/gi,
   ];
   for (const pattern of patterns) {
-    for (const match of text.matchAll(pattern)) candidates.push(match[1] ?? match[2] ?? match[3] ?? match[0]);
+    for (const match of canonicalText.matchAll(pattern)) candidates.push(match[1] ?? match[2] ?? match[3] ?? match[0]);
   }
   const urls = new Map<string, URL>();
   for (const candidate of candidates) {
@@ -237,8 +241,9 @@ function publishedMediaUrls(text: string): URL[] {
   return [...urls.values()];
 }
 
-function surfaceBodies(surfaces: GithubSurface[]): string[] {
-  return surfaces.flatMap((surface) => typeof surface.body === "string" && surface.body.length > 0 ? [surface.body] : []);
+function surfaceTexts(surfaces: GithubSurface[]): string[] {
+  return surfaces.flatMap((surface) => [surface.title, surface.body]
+    .filter((value): value is string => typeof value === "string" && value.length > 0));
 }
 
 export async function auditGithubPublication(options: GithubAuditOptions): Promise<Map<FindingClass, number>> {
@@ -280,7 +285,7 @@ export async function auditGithubPublication(options: GithubAuditOptions): Promi
     addFinding(findings, "inspection_error");
     return findings;
   }
-  const bodies = surfaceBodies(comments);
+  const texts = new Set(surfaceTexts([issue, ...comments]));
   if (issue.pull_request) {
     const [pullResult, reviewComments, reviews] = await Promise.all([
       fetchJson(new URL(`${root}/pulls/${options.number}`, apiBase), options.token, apiBase.origin, fetcher),
@@ -291,17 +296,14 @@ export async function auditGithubPublication(options: GithubAuditOptions): Promi
       addFinding(findings, "inspection_error");
       return findings;
     }
-    bodies.unshift(...surfaceBodies([pullResult as GithubSurface]));
-    bodies.push(...surfaceBodies(reviewComments), ...surfaceBodies(reviews));
-  } else {
-    bodies.unshift(...surfaceBodies([issue]));
+    for (const text of surfaceTexts([pullResult as GithubSurface, ...reviewComments, ...reviews])) texts.add(text);
   }
 
-  for (const body of bodies) mergeFindings(findings, sensitiveClasses(body));
+  for (const text of texts) mergeFindings(findings, sensitiveClasses(text));
 
   const mediaUrls = new Map<string, URL>();
-  for (const body of bodies) {
-    for (const url of publishedMediaUrls(body)) mediaUrls.set(url.href, url);
+  for (const text of texts) {
+    for (const url of publishedMediaUrls(text)) mediaUrls.set(url.href, url);
   }
   if (mediaUrls.size === 0) return findings;
 
