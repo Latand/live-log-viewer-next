@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "relation-navigate-desktop.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "c61162c12b20e4080cabe341b59048a2427337c3215b56ceab6cd8a907cea238"
+      ],
+      "description": "Redacted placeholder for the desktop relation-navigation evidence.",
+      "sha256": "6c02f6df71c6e96a52f2b5252ee751a9ab236da801c221edf9922e6e05d3a8bd"
+    },
+    {
+      "path": "relation-strip-desktop-uk.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "284f9627ccbda4e32734d64bf01a8c67814dbad0153d964fba7cc8ca8c0d3122"
+      ],
+      "description": "Redacted placeholder for the Ukrainian desktop relation-strip evidence.",
+      "sha256": "13ab5b5e97886fbdfaf6594b776f2a0a8b504931385190e10f0155234701b4b0"
+    },
+    {
+      "path": "relation-strip-desktop.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "4113df0ba59d4f2a077b9a598b265b5d06faebeabbbca5d34d36d7bb5ebe8c39"
+      ],
+      "description": "Redacted placeholder for the desktop relation-strip evidence.",
+      "sha256": "f07f5cc7e2b1487a9170cac5595a2dc1490d4d3366535a56a908945c93ec4ac5"
+    },
+    {
+      "path": "task-card-expanded-desktop.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "7bed3aeebfd4ece12c12774aee3dda4c4089b77aff4b618ddc92445c570ac478"
+      ],
+      "description": "Redacted placeholder for the expanded desktop task-card evidence.",
+      "sha256": "4d8d8293d1d50b655f225e2ac48ff7756cc5401273a4958bb4bbf39ac14df859"
+    }
+  ]
+}
