@@ -851,8 +851,8 @@ export function ProjectDashboard({
   };
 
   /* `+ Пайплайн` (#136, #196, #388): the picker admits a repository before it
-     creates a DRAFT. The draft opens in the screen-space shelf, where the full
-     role chain and shared editor remain available before the first run. */
+     creates a DRAFT. Its world-space PipelineGroup opens with the full role
+     chain and shared editor before the first run. */
   const addPipelineDraft = async (template: PipelineTemplate | null, repoDir: string) => {
     onUserNavigate?.();
     return createDraftPipeline(project, repoDir, template ?? undefined);
@@ -1137,9 +1137,8 @@ export function ProjectDashboard({
      canvas instead of hanging as lone stub nodes in the middle of it. */
   const dockedTasks = visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
   const schemeGroups = visibleGroups.filter((group) => !group.orphanTask);
-  /* Active pipelines for this project keep the scheme available before the
-     first stage transcript lands. Memberless drafts use the screen-space shelf;
-     materialized pipelines retain their world-space group halo. */
+  /* Active pipelines keep the scheme available before the first transcript;
+     SchemeBoard anchors their world-space PipelineGroups beside linked tasks. */
   const activePipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
   const visibleDrafts = drafts.filter((id) => !pendingRestoredHandoffs.has(id));
   const hasNodes =

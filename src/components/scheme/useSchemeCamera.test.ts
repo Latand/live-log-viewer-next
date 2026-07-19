@@ -22,6 +22,11 @@ describe("hasBoardContent — task cards are board content (issue #17)", () => {
     expect(hasBoardContent({ nodes: [], drafts: [], groups: [rect as never] })).toBe(true);
   });
 
+  test("a board whose only content is a PipelineGroup still initializes and fits", () => {
+    const pipelineRects = new Map<string, SchemeRect>([["pipeline-a", rect]]);
+    expect(hasBoardContent(empty, new Map(), pipelineRects)).toBe(true);
+  });
+
   test("a truly empty board has no content", () => {
     expect(hasBoardContent(empty)).toBe(false);
     expect(hasBoardContent(empty, new Map())).toBe(false);

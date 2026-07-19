@@ -20,6 +20,7 @@ import {
   resolvePipelineMemberPaths,
   stageDockCompact,
   compactStageOpenTarget,
+  compactPipelineOpenTarget,
   excludeCompactPipelineArtifacts,
   pipelineAnnouncement,
   pipelineStagePosition,
@@ -176,6 +177,22 @@ test("pipelineLinkedTasks keeps assignment and source lineage directly navigable
   expect(pipelineLinkedTasks(p, tasks, flows, files).map((item) => item.id)).toEqual([
     "assigned", "sourced", "origin", "conversation", "source-conversation", "round", "round-conversation", "prior-round", "prior-round-conversation",
   ]);
+});
+
+test("pipelineLinkedTasks prefers explicit taskIds when Stream A data is present", () => {
+  const task = (id: string): BoardTask => ({
+    id,
+    project: "proj",
+    status: "assigned",
+    text: id,
+    placement: "unplaced",
+    assignments: [],
+    createdAt: "2026-07-18T00:00:00Z",
+    updatedAt: "2026-07-18T00:00:00Z",
+  });
+  const p = pipeline({ taskIds: ["task-b", "task-a"] } as Partial<Pipeline>);
+
+  expect(pipelineLinkedTasks(p, [task("task-a"), task("task-b"), task("task-c")]).map((item) => item.id)).toEqual(["task-b", "task-a"]);
 });
 
 test("opening compact history replaces the prior inspected pane from the same pipeline", () => {
@@ -725,6 +742,27 @@ describe("compactStageOpenTarget", () => {
 
     expect(compactStageOpenTarget(reviewStage, reviewAttempt, [resumedFlow], new Set(), new Set(["/reviewer-resumed"]), files))
       .toEqual({ kind: "path", path: "/reviewer-resumed" });
+  });
+
+  test("a completed pipeline resolves history through the current reviewer binding", () => {
+    const buildStage = { ...stage("build"), next: reviewStage.id };
+    const completed = pipeline({
+      state: "completed",
+      stages: [buildStage, reviewStage],
+      runs: [
+        { stageId: buildStage.id, attempts: [{ n: 1, state: "passed", agentPath: "/builder" } as never] },
+        { stageId: reviewStage.id, attempts: [reviewAttempt] },
+      ],
+    });
+    const reboundFlow = {
+      ...flow,
+      rounds: [{ n: 1, reviewerPath: "/reviewer-current" }],
+    } as unknown as Flow;
+
+    expect(compactPipelineOpenTarget(completed, [reboundFlow], new Set(), new Set(["/reviewer-current"])))
+      .toEqual({ kind: "path", path: "/reviewer-current" });
+    expect(compactPipelineOpenTarget(completed, [reboundFlow], new Set(), new Set()))
+      .toBeNull();
   });
 });
 

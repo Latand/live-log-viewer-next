@@ -133,3 +133,34 @@ test("all-frame bounds span negative and distant markers plus overflow clusters"
   expect(model.clusters.some((cluster) => cluster.rect.x > layout.width)).toBe(true);
   expect(model.world).toEqual({ x: left, y: top, w: right - left, h: bottom - top });
 });
+
+test("a memberless pipeline contributes a mobile outline plus All and Current bounds", () => {
+  const source = buildMobileMapFixture(8);
+  const layout = {
+    ...source.layout,
+    nodes: [],
+    edges: [],
+    groups: [],
+    stacks: [],
+    decks: [],
+    drafts: [],
+    slots: [],
+    links: [],
+    loops: [],
+    byPath: new Map(),
+    width: 1,
+    height: 1,
+  };
+  const outline = {
+    id: "pipeline-only",
+    title: "Synthetic pipeline",
+    rect: { x: 720, y: 240, w: 360, h: 76 },
+  };
+  const model = buildMobileMapModel(layout, [], [], null, [outline]);
+  const marker = model.markers.find((candidate) => candidate.key === "pipeline::pipeline-only");
+
+  expect(marker).toMatchObject({ kind: "pipeline", rect: outline.rect, pickKey: null });
+  expect(model.world.x + model.world.w).toBeGreaterThanOrEqual(outline.rect.x + outline.rect.w);
+  expect(model.world.y + model.world.h).toBeGreaterThanOrEqual(outline.rect.y + outline.rect.h);
+  expect(model.current).toEqual(outline.rect);
+});

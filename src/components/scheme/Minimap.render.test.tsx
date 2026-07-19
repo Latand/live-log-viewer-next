@@ -85,6 +85,18 @@ test("the minimap draws one compact outline per pipeline group (#353)", () => {
   expect(html).toContain("<title>Pipeline</title>");
 });
 
+test("the minimap keeps every desktop pipeline group visible past 14", () => {
+  const pipelineGroups = Array.from({ length: 15 }, (_, index) => ({
+    pipeline: { id: `pipeline-${index}`, task: `Pipeline ${index}`, state: index === 0 ? "draft" : "running" } as never,
+    rect: { x: 100 + index * 20, y: 120 + index * 16, w: 360, h: 76 },
+  }));
+  const html = renderToStaticMarkup(
+    <Minimap layout={emptyLayout} world={world} pipelineGroups={pipelineGroups} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  expect((html.match(/data-minimap-pipeline=/g) ?? []).length).toBe(15);
+  expect(html).toContain("stroke-dasharray=");
+});
+
 test("the minimap draws the current-work frame separately from the viewport", () => {
   const currentWork = { x: 100, y: 120, w: 600, h: 780 };
   const html = renderToStaticMarkup(

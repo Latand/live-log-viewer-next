@@ -48,6 +48,9 @@ interface CameraOptions {
   /** Task-card rects keyed `task::<id>`: focus glides and map taps resolve
       through them exactly like layout.byPath entries. */
   taskRects?: ReadonlyMap<string, SchemeRect>;
+  /** PipelineGroup rects participate in content gating even when the board has
+      no conversation nodes, drafts, flow groups, or task cards. */
+  pipelineRects?: ReadonlyMap<string, SchemeRect>;
   /** One-shot «task» tool sink: the next canvas click lands here in world
       coordinates, then the tool reverts to select. Absent in map mode. */
   onPlaceTask?: (wx: number, wy: number) => void;
@@ -116,8 +119,13 @@ export interface SchemeCamera {
 export function hasBoardContent(
   layout: Pick<SchemeLayout, "nodes" | "drafts"> & Partial<Pick<SchemeLayout, "groups">>,
   taskRects?: ReadonlyMap<string, SchemeRect>,
+  pipelineRects?: ReadonlyMap<string, SchemeRect>,
 ): boolean {
-  return layout.nodes.length > 0 || layout.drafts.length > 0 || (layout.groups?.length ?? 0) > 0 || (taskRects?.size ?? 0) > 0;
+  return layout.nodes.length > 0
+    || layout.drafts.length > 0
+    || (layout.groups?.length ?? 0) > 0
+    || (taskRects?.size ?? 0) > 0
+    || (pipelineRects?.size ?? 0) > 0;
 }
 
 /** Pure camera framing shared by Fit All, Fit Current, tests, and map toggles. */
@@ -143,6 +151,7 @@ export function useSchemeCamera({
   onBackgroundDown,
   onWorldTap,
   taskRects,
+  pipelineRects,
   onPlaceTask,
   onArrowNav,
   onZoomKey,
@@ -301,10 +310,10 @@ export function useSchemeCamera({
     /* Task cards are board content too (issue #17): a project with only task
        cards and no nodes/drafts must still fit, or Fit sits inert and a
        relocated card can stay off-screen. `world` already spans the cards. */
-    if (!rect || !hasBoardContent(layout, taskRects)) return null;
+    if (!rect || !hasBoardContent(layout, taskRects, pipelineRects)) return null;
     return fitCameraToRect(world, { w: rect.width, h: rect.height });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- hasBoardContent reads only layout.nodes/drafts, whose lengths are already deps; subscribing to all of `layout` would re-fit on every unrelated relayout
-  }, [layout.nodes.length, layout.drafts.length, layout.groups.length, taskRects, world]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hasBoardContent reads the listed layout lengths and rect maps; subscribing to all of `layout` would re-fit on every unrelated relayout
+  }, [layout.nodes.length, layout.drafts.length, layout.groups.length, taskRects, pipelineRects, world]);
 
   const glideTo = useCallback((next: Camera | ((c: Camera) => Camera)) => {
     /* Reduced motion: skip the CSS transition — the move lands instantly. */
@@ -330,9 +339,9 @@ export function useSchemeCamera({
 
   const currentFitCam = useCallback((): Camera | null => {
     const rect = viewportRef.current?.getBoundingClientRect();
-    if (!rect || !hasBoardContent(layout, taskRects)) return null;
+    if (!rect || !hasBoardContent(layout, taskRects, pipelineRects)) return null;
     return fitCameraToRect(currentWork ?? world, { w: rect.width, h: rect.height });
-  }, [currentWork, world, layout, taskRects]);
+  }, [currentWork, world, layout, taskRects, pipelineRects]);
 
   const fitCurrent = useCallback(() => {
     const c = currentFitCam();
@@ -411,7 +420,7 @@ export function useSchemeCamera({
   /* First layout of a project: restore the saved camera or fit everything.
      The map always opens fitted — its job is the whole picture. */
   useEffect(() => {
-    if (initedFor.current === project || !hasBoardContent(layout, taskRects)) return;
+    if (initedFor.current === project || !hasBoardContent(layout, taskRects, pipelineRects)) return;
     initedFor.current = project;
     if (!mapMode) {
       try {
@@ -432,7 +441,7 @@ export function useSchemeCamera({
     if (c) {
       setCam(c);
     }
-  }, [project, layout, taskRects, fitCam, currentFitCam, mapMode]);
+  }, [project, layout, taskRects, pipelineRects, fitCam, currentFitCam, mapMode]);
 
   /* Debounced: a pan produces hundreds of camera frames, storage needs only
      the resting position. The map never writes — the desktop camera survives. */
