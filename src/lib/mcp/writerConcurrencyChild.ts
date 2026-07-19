@@ -11,6 +11,11 @@ const releasePath = process.env.LLV_WRITER_RELEASE;
 
 if (!stateDir || !writer || !readyPath || !releasePath) throw new Error("writer concurrency fixture is incomplete");
 
+if (process.env.LLV_WRITER_NO_PROCESS_IDENTITY === "1") {
+  const { procBackend } = await import("@/lib/proc");
+  procBackend.processIdentity = () => null;
+}
+
 const stateFile = path.join(stateDir, `${kind}s.json`);
 const originalReadFileSync = fs.readFileSync.bind(fs);
 let gated = false;

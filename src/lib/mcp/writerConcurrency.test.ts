@@ -75,3 +75,56 @@ test("Viewer HTTP and standalone MCP pipeline creates preserve both writes acros
   const persisted = await runConcurrentWriters("pipeline", "{\"schemaVersion\":3,\"pipelines\":[]}\n") as { pipelines: unknown[] };
   expect(persisted.pipelines).toHaveLength(2);
 }, 15_000);
+
+test("an aged live writer without process identity retains the transaction until release", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-live-owner-writers-"));
+  sandboxes.push(sandbox);
+  const stateFile = path.join(sandbox, "tasks.json");
+  const queuePath = `${stateFile}.write-locks`;
+  const lockPath = `${stateFile}.write-lock`;
+  const fixture = path.join(import.meta.dir, "writerConcurrencyChild.ts");
+  fs.writeFileSync(stateFile, "{\"tasks\":[]}\n", "utf8");
+
+  const spawnWriter = (writer: "http" | "mcp") => {
+    const ready = path.join(sandbox, `${writer}.ready`);
+    const release = path.join(sandbox, `${writer}.release`);
+    const child = Bun.spawn({
+      cmd: [process.execPath, fixture],
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        LLV_STATE_DIR: sandbox,
+        LLV_WRITER_KIND: "task",
+        LLV_WRITER_INTERFACE: writer,
+        LLV_WRITER_READY: ready,
+        LLV_WRITER_RELEASE: release,
+        LLV_WRITER_NO_PROCESS_IDENTITY: "1",
+      },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    return { child, ready, release };
+  };
+
+  const first = spawnWriter("http");
+  await waitFor(first.ready);
+  const aged = new Date(Date.now() - 60_000);
+  fs.utimesSync(lockPath, aged, aged);
+  for (const ticket of fs.readdirSync(queuePath)) fs.utimesSync(path.join(queuePath, ticket), aged, aged);
+
+  const second = spawnWriter("mcp");
+  await Bun.sleep(300);
+  const enteredBeforeRelease = fs.existsSync(second.ready);
+  fs.writeFileSync(first.release, "release\n", "utf8");
+  if (!enteredBeforeRelease) await waitFor(second.ready);
+  fs.writeFileSync(second.release, "release\n", "utf8");
+
+  const exitCodes = await Promise.all([first.child.exited, second.child.exited]);
+  if (exitCodes.some((code) => code !== 0)) {
+    const errors = await Promise.all([new Response(first.child.stderr).text(), new Response(second.child.stderr).text()]);
+    throw new Error(errors.filter(Boolean).join("\n"));
+  }
+  expect(enteredBeforeRelease).toBe(false);
+  const persisted = JSON.parse(fs.readFileSync(stateFile, "utf8")) as { tasks: unknown[] };
+  expect(persisted.tasks).toHaveLength(2);
+}, 15_000);

@@ -39,6 +39,7 @@ function ownerIsStale(ownerPath: string): boolean {
         const currentIdentity = procBackend.processIdentity(previous.pid);
         return currentIdentity !== null && currentIdentity !== identity;
       }
+      return false;
     }
     return Date.now() - fs.statSync(ownerPath).mtimeMs > LOCK_STALE_MS;
   } catch {
