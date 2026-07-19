@@ -124,6 +124,57 @@ test("dragging the header persists one zoom-corrected world position", () => {
   expect(pins).toEqual([{ x: 440, y: 210 }]);
 });
 
+test("successful drag yields to the authoritative echo and ignores an older save response", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  const pending: Array<(error: string | null) => void> = [];
+  const base = placement(false);
+  const at = (x: number, y: number): PipelineGroupPlacement => ({
+    ...base,
+    x,
+    y,
+    header: { ...base.header, x, y },
+    bounds: { ...base.bounds, x, y },
+  });
+  const render = (rect: PipelineGroupPlacement) => flushSync(() => root.render(
+    <PipelineGroup
+      pipeline={pipeline({ state: "running" })}
+      rect={rect}
+      camRef={{ current: { x: 0, y: 0, z: 1 } }}
+      onPin={async () => new Promise<string | null>((resolve) => pending.push(resolve))}
+      interactive
+      expanded={false}
+      onExpandedChange={() => {}}
+    />,
+  ));
+  render(base);
+  const handle = host.querySelector("[data-pipeline-group-drag]") as HTMLElement;
+  const dragTo = (pointerId: number, dx: number, dy: number) => {
+    flushSync(() => {
+      handle.dispatchEvent(new dom.PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId, clientX: 100, clientY: 100 }) as unknown as Event);
+      handle.dispatchEvent(new dom.PointerEvent("pointermove", { bubbles: true, pointerId, clientX: 100 + dx, clientY: 100 + dy }) as unknown as Event);
+      handle.dispatchEvent(new dom.PointerEvent("pointerup", { bubbles: true, pointerId, clientX: 100 + dx, clientY: 100 + dy }) as unknown as Event);
+    });
+  };
+
+  dragTo(1, 20, 30);
+  dragTo(2, 40, 50);
+  expect((host.querySelector('[data-pipeline-group="pipeline-a"]') as HTMLElement).style.transform).toBe("translate(480px, 260px)");
+
+  pending[0]!("stale failure");
+  await Promise.resolve();
+  expect((host.querySelector('[data-pipeline-group="pipeline-a"]') as HTMLElement).style.transform).toBe("translate(480px, 260px)");
+
+  pending[1]!(null);
+  await Promise.resolve();
+  render(at(480, 260));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  render(at(540, 300));
+  expect((host.querySelector('[data-pipeline-group="pipeline-a"]') as HTMLElement).style.transform).toBe("translate(540px, 300px)");
+});
+
 test("expanded body exposes children with the pipeline id and world rect", () => {
   const host = renderGroup();
   flushSync(() => (host.querySelector("button[aria-expanded]") as HTMLButtonElement).click());

@@ -16,6 +16,12 @@ export interface PipelineGroupContextValue {
   worldRect: SchemeRect;
 }
 
+type PendingPin = {
+  seq: number;
+  pos: { x: number; y: number };
+  settled: boolean;
+};
+
 const PipelineGroupContext = createContext<PipelineGroupContextValue | null>(null);
 
 export function usePipelineGroupContext(): PipelineGroupContextValue {
@@ -60,7 +66,10 @@ export const PipelineGroup = memo(function PipelineGroup({
   const { t } = useLocale();
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
   const [localPos, setLocalPos] = useState<{ x: number; y: number } | null>(null);
+  const [settledPinSeq, setSettledPinSeq] = useState(0);
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
+  const pinSeqRef = useRef(0);
+  const pendingPinRef = useRef<PendingPin | null>(null);
   const pos = drag ?? localPos ?? rect.header;
   const worldRect = useMemo(() => {
     const dx = pos.x - rect.header.x;
@@ -77,6 +86,13 @@ export const PipelineGroup = memo(function PipelineGroup({
     onExpandedChange(pipeline.id, true);
     onAutoOpen?.();
   }, [autoOpen, onAutoOpen, onExpandedChange, pipeline.id]);
+
+  useEffect(() => {
+    const pending = pendingPinRef.current;
+    if (!pending?.settled || pending.pos.x !== rect.header.x || pending.pos.y !== rect.header.y) return;
+    pendingPinRef.current = null;
+    setLocalPos(null);
+  }, [rect.header.x, rect.header.y, settledPinSeq]);
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!interactive || event.button !== 0 || (event.target as HTMLElement).closest("button, a, input, textarea, select")) return;
@@ -113,9 +129,19 @@ export const PipelineGroup = memo(function PipelineGroup({
       y: Math.round(start.oy + (event.clientY - start.sy) / z),
     };
     setDrag(null);
+    const seq = ++pinSeqRef.current;
+    pendingPinRef.current = { seq, pos: dropped, settled: false };
     setLocalPos(dropped);
     void onPin(pipeline, dropped).then((error) => {
-      if (error) setLocalPos(null);
+      const pending = pendingPinRef.current;
+      if (!pending || pending.seq !== seq) return;
+      if (error) {
+        pendingPinRef.current = null;
+        setLocalPos(null);
+        return;
+      }
+      pending.settled = true;
+      setSettledPinSeq(seq);
     });
   };
 

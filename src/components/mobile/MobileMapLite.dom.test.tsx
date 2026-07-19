@@ -185,6 +185,98 @@ test("current framing centers the retained focus marker at interactive scale", a
   expect({ width, height }).toEqual({ width: focused.w, height: focused.h });
 });
 
+test("current framing fits a focused conversation and a distant active pipeline", async () => {
+  const source = buildMobileMapFixture(8);
+  const focused = { ...source.layout.nodes[0]!, x: 100, y: 100, w: 300, h: 220 };
+  const layout = {
+    ...source.layout,
+    nodes: [focused],
+    edges: [],
+    groups: [],
+    stacks: [],
+    decks: [],
+    drafts: [],
+    slots: [],
+    links: [],
+    loops: [],
+    byPath: new Map([[focused.file.path, focused]]),
+    width: 500,
+    height: 420,
+  };
+  mount(
+    <MobileMapLite
+      layout={layout}
+      tasks={[]}
+      workerStacks={[]}
+      pipelineOutlines={[{ id: "far", title: "Synthetic pipeline", rect: { x: 2_200, y: 100, w: 360, h: 76 } }]}
+      frame="current"
+      ringKey={focused.file.path}
+      onPick={() => {}}
+    />,
+  );
+  await settle();
+
+  const focusedMarker = dom.document.querySelector(`[data-map-key="${focused.file.path}"]`) as unknown as HTMLElement;
+  const pipelineMarker = dom.document.querySelector('[data-map-kind="pipeline"]') as unknown as HTMLElement;
+  for (const marker of [focusedMarker, pipelineMarker]) {
+    const left = Number.parseFloat(marker.style.left);
+    const top = Number.parseFloat(marker.style.top);
+    const width = Number.parseFloat(marker.style.width);
+    const height = Number.parseFloat(marker.style.height);
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect(top).toBeGreaterThanOrEqual(0);
+    expect(left + width).toBeLessThanOrEqual(390);
+    expect(top + height).toBeLessThanOrEqual(620);
+  }
+});
+
+test("current framing fits separated pipeline-only outlines", async () => {
+  const source = buildMobileMapFixture(8);
+  const emptyLayout = {
+    ...source.layout,
+    nodes: [],
+    edges: [],
+    groups: [],
+    stacks: [],
+    decks: [],
+    drafts: [],
+    slots: [],
+    links: [],
+    loops: [],
+    byPath: new Map(),
+    width: 1,
+    height: 1,
+  };
+  mount(
+    <MobileMapLite
+      layout={emptyLayout}
+      tasks={[]}
+      workerStacks={[]}
+      pipelineOutlines={[
+        { id: "left", title: "Left pipeline", rect: { x: 100, y: 100, w: 360, h: 76 } },
+        { id: "right", title: "Right pipeline", rect: { x: 2_200, y: 500, w: 360, h: 76 } },
+      ]}
+      frame="current"
+      ringKey={null}
+      onPick={() => {}}
+    />,
+  );
+  await settle();
+
+  const markers = [...dom.document.querySelectorAll('[data-map-kind="pipeline"]')] as unknown as HTMLElement[];
+  expect(markers).toHaveLength(2);
+  for (const marker of markers) {
+    const left = Number.parseFloat(marker.style.left);
+    const top = Number.parseFloat(marker.style.top);
+    const width = Number.parseFloat(marker.style.width);
+    const height = Number.parseFloat(marker.style.height);
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect(top).toBeGreaterThanOrEqual(0);
+    expect(left + width).toBeLessThanOrEqual(390);
+    expect(top + height).toBeLessThanOrEqual(620);
+  }
+});
+
 test("current framing without a ring keeps the fitted fallback gesture floor", async () => {
   const source = buildMobileMapFixture(8);
   const leftNode = { ...source.layout.nodes[0]!, x: -5_000 };
