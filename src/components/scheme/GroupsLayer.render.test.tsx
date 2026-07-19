@@ -20,7 +20,7 @@ const planPipeline = {
 
 const controls: PipelineGroupControls = {
   flows: [],
-  onOpenConversation: () => {},
+  onOpenAttempt: () => {},
 };
 
 const flowGroup: SchemeGroup = {

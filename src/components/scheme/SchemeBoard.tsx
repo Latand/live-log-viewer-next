@@ -23,7 +23,7 @@ import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
-import { compactPipelineLayoutFlows, compactPipelineOpenTarget, patchPipeline, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
+import { compactPipelineLayoutFlows, compactPipelineOpenTarget, patchPipeline, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds, resolveStageNavFile, type StageNavTarget } from "@/components/pipelines/pipelineModel";
 import { PipelineEditor } from "@/components/pipelines/PipelineEditor";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { BulkActionBar } from "./BulkActionBar";
@@ -444,8 +444,13 @@ export function SchemeBoard({
     const file = files.find((entry) => entry.path === path);
     if (file) stableSelect(file);
   }, [files, stableSelect]);
-  const openPipelineConversation = useCallback((conversationId: string) => {
-    const file = files.find((entry) => entry.conversationId === conversationId);
+  /* A stage-graph node hands back the attempt's conversation id AND its recorded
+     transcript path. Resolution opens the CURRENT non-archived generation for the
+     conversation id first, then falls back to the path — so a path-only attempt
+     (no adopted id yet) still navigates and a migrated attempt never opens the
+     folded predecessor. */
+  const openPipelineAttempt = useCallback((target: StageNavTarget) => {
+    const file = resolveStageNavFile(target, files);
     if (file) stableSelect(file);
   }, [files, stableSelect]);
   const openPipelineFlow = useCallback((flowId: string) => {
@@ -473,8 +478,8 @@ export function SchemeBoard({
     return byTask;
   }, [pipelines, linkedTasksByPipeline, flows, renderableGroupFlows, renderablePipelinePaths, files]);
   const pipelineControls = useMemo<PipelineGroupControls>(
-    () => ({ flows, onOpenConversation: openPipelineConversation }),
-    [flows, openPipelineConversation],
+    () => ({ flows, onOpenAttempt: openPipelineAttempt }),
+    [flows, openPipelineAttempt],
   );
   const pinPipeline = useCallback(
     (pipeline: Pipeline, pos: { x: number; y: number }) =>

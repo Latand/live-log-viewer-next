@@ -10,11 +10,13 @@ import {
   PIPELINE_ROLE_OPTIONS,
   STAGE_GLYPH,
   STAGE_TONES,
+  attemptNavTarget,
   patchPipeline,
   pipelineCursorActive,
   pipelineStagePosition,
   stageChipState,
   stageOverrideBody,
+  type StageNavTarget,
 } from "@/components/pipelines/pipelineModel";
 import { Select } from "@/components/ui/Select";
 import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
@@ -88,18 +90,18 @@ function StageNode({
   pipeline,
   node,
   resting,
-  onOpenConversation,
+  onOpenAttempt,
 }: {
   pipeline: Pipeline;
   node: StageGraphNode;
   resting: boolean;
-  onOpenConversation: (conversationId: string) => void;
+  onOpenAttempt: (target: StageNavTarget) => void;
 }) {
   const { t } = useLocale();
   const attempt = node.attempts.at(-1) ?? null;
   const state = stageChipState(pipeline, node.stage);
   const tone = STAGE_TONES[state];
-  const conversationId = attempt?.conversationId ?? null;
+  const navTarget = attemptNavTarget(attempt);
   const ghost = node.attempts.length === 0;
   const current = pipeline.cursor?.stageId === node.id && pipelineCursorActive(pipeline) && pipeline.state !== "paused";
   const dimmed = state === "failed" || state === "skipped";
@@ -143,12 +145,12 @@ function StageNode({
       <button
         type="button"
         data-open-stage
-        disabled={!editable && !conversationId}
+        disabled={!editable && !navTarget}
         onClick={() => {
           if (editable) {
             setNotice(null);
             setSettingsOpen(true);
-          } else if (conversationId) onOpenConversation(conversationId);
+          } else if (navTarget) onOpenAttempt(navTarget);
         }}
         className={`flex w-full flex-col gap-2 overflow-hidden rounded-control px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/45 disabled:cursor-default ${settingsOpen ? "h-[76px] border-b border-border" : "h-full"} ${node.attempts.length > 1 ? "pb-8" : ""}`}
         aria-label={`${node.stage.id}: ${t(`pipelineChipState.${state}`)}`}
@@ -186,18 +188,22 @@ function StageNode({
             {t("pipelineHub.attempt", { n: attempt?.n ?? node.attempts.length })}
           </summary>
           <div className="absolute left-0 top-full mt-1 flex min-w-full flex-col gap-1 rounded-control border border-border bg-card p-1.5 shadow-2">
-            {node.attempts.map((candidate) => (
-              <button
-                key={candidate.n}
-                type="button"
-                data-attempt-conversation={candidate.conversationId ?? undefined}
-                disabled={!candidate.conversationId}
-                onClick={() => candidate.conversationId && onOpenConversation(candidate.conversationId)}
-                className="whitespace-nowrap rounded-control px-2 py-1 text-left font-semibold text-primary hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:text-muted"
-              >
-                {t("pipelineVerdict.attemptLine", { n: candidate.n, status: t(`pipelineChipState.${candidate.state}`) })}
-              </button>
-            ))}
+            {node.attempts.map((candidate) => {
+              const candidateTarget = attemptNavTarget(candidate);
+              return (
+                <button
+                  key={candidate.n}
+                  type="button"
+                  data-attempt-conversation={candidate.conversationId ?? undefined}
+                  data-attempt-path={!candidate.conversationId && candidate.agentPath ? candidate.agentPath : undefined}
+                  disabled={!candidateTarget}
+                  onClick={() => candidateTarget && onOpenAttempt(candidateTarget)}
+                  className="whitespace-nowrap rounded-control px-2 py-1 text-left font-semibold text-primary hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:text-muted"
+                >
+                  {t("pipelineVerdict.attemptLine", { n: candidate.n, status: t(`pipelineChipState.${candidate.state}`) })}
+                </button>
+              );
+            })}
           </div>
         </details>
       ) : null}
@@ -349,7 +355,7 @@ function ReviewCycle({
   expanded,
   restingStageId,
   onCollapse,
-  onOpenConversation,
+  onOpenAttempt,
 }: {
   pipeline: Pipeline;
   owner: StageGraphNode;
@@ -357,7 +363,7 @@ function ReviewCycle({
   expanded: boolean;
   restingStageId: string | null;
   onCollapse: () => void;
-  onOpenConversation: (conversationId: string) => void;
+  onOpenAttempt: (target: StageNavTarget) => void;
 }) {
   const { locale, t } = useLocale();
   const flows = useContext(PipelineStageGraphFlowsContext);
@@ -366,6 +372,8 @@ function ReviewCycle({
     ?? reviewers[0]!;
   const implementerAttempt = owner.attempts.at(-1) ?? null;
   const reviewerAttempt = reviewer.attempts.at(-1) ?? null;
+  const implementerTarget = attemptNavTarget(implementerAttempt);
+  const reviewerTarget = attemptNavTarget(reviewerAttempt);
   const flowId = reviewerAttempt?.flowId ?? null;
   const flow = flowId ? flows.find((candidate) => candidate.id === flowId) ?? null : null;
   const round = flow?.rounds.at(-1)?.n ?? reviewerAttempt?.n ?? reviewer.attempts.length;
@@ -451,8 +459,8 @@ function ReviewCycle({
         type="button"
         data-cycle-role="implementer"
         tabIndex={expanded ? 0 : -1}
-        disabled={!implementerAttempt?.conversationId}
-        onClick={() => implementerAttempt?.conversationId && onOpenConversation(implementerAttempt.conversationId)}
+        disabled={!implementerTarget}
+        onClick={() => implementerTarget && onOpenAttempt(implementerTarget)}
         className="absolute left-5 top-[76px] flex h-[76px] w-[154px] flex-col justify-center gap-1 rounded-control border border-border bg-card px-3 text-left shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
       >
         <span className="flex items-center gap-2 text-ui font-bold text-primary"><Hammer className="h-4 w-4 text-accent" aria-hidden />{owner.id}</span>
@@ -467,12 +475,12 @@ function ReviewCycle({
         data-attempt-model={reviewerAttempt?.effectiveRole.model ?? undefined}
         data-resting={reviewer.id === restingStageId ? "true" : undefined}
         tabIndex={expanded ? 0 : -1}
-        disabled={!editable && !reviewerAttempt?.conversationId}
+        disabled={!editable && !reviewerTarget}
         onClick={() => {
           if (editable) {
             setNotice(null);
             setSettingsOpen(true);
-          } else if (reviewerAttempt?.conversationId) onOpenConversation(reviewerAttempt.conversationId);
+          } else if (reviewerTarget) onOpenAttempt(reviewerTarget);
         }}
         className="absolute right-5 top-[76px] flex h-[76px] w-[154px] flex-col justify-center gap-1 rounded-control border border-border bg-card px-3 text-left shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
       >
@@ -548,18 +556,18 @@ function ReviewCluster({
   owner,
   reviewers,
   restingStageId,
-  onOpenConversation,
+  onOpenAttempt,
 }: {
   pipeline: Pipeline;
   owner: StageGraphNode;
   reviewers: StageGraphNode[];
   restingStageId: string | null;
-  onOpenConversation: (conversationId: string) => void;
+  onOpenAttempt: (target: StageNavTarget) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <>
-      <StageNode pipeline={pipeline} node={owner} resting={owner.id === restingStageId} onOpenConversation={onOpenConversation} />
+      <StageNode pipeline={pipeline} node={owner} resting={owner.id === restingStageId} onOpenAttempt={onOpenAttempt} />
       <CollapsedReviewGroup pipeline={pipeline} owner={owner} reviewers={reviewers} expanded={expanded} onExpand={() => setExpanded(true)} />
       <ReviewCycle
         pipeline={pipeline}
@@ -568,7 +576,7 @@ function ReviewCluster({
         expanded={expanded}
         restingStageId={restingStageId}
         onCollapse={() => setExpanded(false)}
-        onOpenConversation={onOpenConversation}
+        onOpenAttempt={onOpenAttempt}
       />
     </>
   );
@@ -576,10 +584,10 @@ function ReviewCluster({
 
 export function PipelineStageGraph({
   pipeline,
-  onOpenConversation,
+  onOpenAttempt,
 }: {
   pipeline: Pipeline;
-  onOpenConversation: (conversationId: string) => void;
+  onOpenAttempt: (target: StageNavTarget) => void;
 }) {
   const graph = layoutStageGraph(pipeline.stages, pipeline.runs);
   const nodes = new Map(graph.nodes.map((node) => [node.id, node] as const));
@@ -626,9 +634,9 @@ export function PipelineStageGraph({
                 />
               ) : null}
               {children.length ? (
-                <ReviewCluster pipeline={pipeline} owner={root} reviewers={children} restingStageId={restingStageId} onOpenConversation={onOpenConversation} />
+                <ReviewCluster pipeline={pipeline} owner={root} reviewers={children} restingStageId={restingStageId} onOpenAttempt={onOpenAttempt} />
               ) : (
-                <StageNode pipeline={pipeline} node={root} resting={root.id === restingStageId} onOpenConversation={onOpenConversation} />
+                <StageNode pipeline={pipeline} node={root} resting={root.id === restingStageId} onOpenAttempt={onOpenAttempt} />
               )}
             </div>
           );

@@ -36,6 +36,8 @@ import {
   stageHasEvidence,
   stageHasNavigableHistory,
   stageOpenTarget,
+  attemptNavTarget,
+  resolveStageNavFile,
   partitionPipelineSurfaces,
   pipelineStagePresentation,
   stageOverrideBody,
@@ -1181,5 +1183,47 @@ describe("pipelineStagePresentation", () => {
     });
     expect(pipelineStagePresentation(review, stages[2]!, new Set(), new Set(["flow-1"]))).toBe("materialized");
     expect(pipelineStagePresentation(pipeline({ state: "draft", stages }), stages[0]!, new Set(), new Set())).toBe("waiting");
+  });
+});
+
+describe("stage-graph attempt navigation (path-only + current generation — PR #439)", () => {
+  const fileAt = (path: string, over: Partial<FileEntry> = {}): FileEntry => ({ path, ...over }) as FileEntry;
+  const makeAttempt = (over: Record<string, unknown>) =>
+    ({ n: 1, state: "passed", conversationId: null, agentPath: null, flowId: null, verdict: null, error: null, ...over }) as unknown as PipelineStageAttempt;
+
+  test("attemptNavTarget returns null only when neither a conversation id nor a path exists", () => {
+    expect(attemptNavTarget(null)).toBeNull();
+    expect(attemptNavTarget(makeAttempt({ conversationId: null, agentPath: null }))).toBeNull();
+    expect(attemptNavTarget(makeAttempt({ conversationId: "c1", agentPath: "/a.jsonl" }))).toEqual({ conversationId: "c1", agentPath: "/a.jsonl" });
+    expect(attemptNavTarget(makeAttempt({ conversationId: null, agentPath: "/only-path.jsonl" }))).toEqual({ conversationId: null, agentPath: "/only-path.jsonl" });
+  });
+
+  test("resolveStageNavFile opens the current non-archived generation, never the folded predecessor", () => {
+    const files = [
+      fileAt("/old.jsonl", { conversationId: "c1", migratedTo: "/new.jsonl" }),
+      fileAt("/new.jsonl", { conversationId: "c1", predecessorPath: "/old.jsonl" }),
+    ];
+    const resolved = resolveStageNavFile({ conversationId: "c1", agentPath: "/old.jsonl" }, files);
+    expect(resolved?.path).toBe("/new.jsonl");
+  });
+
+  test("resolveStageNavFile falls back to agentPath for a path-only attempt", () => {
+    const files = [fileAt("/only-path.jsonl", { conversationId: "cx" })];
+    const resolved = resolveStageNavFile({ conversationId: null, agentPath: "/only-path.jsonl" }, files);
+    expect(resolved?.path).toBe("/only-path.jsonl");
+  });
+
+  test("resolveStageNavFile redirects a path that itself became an archived predecessor", () => {
+    const files = [
+      fileAt("/old.jsonl", { conversationId: "c1", migratedTo: "/new.jsonl" }),
+      fileAt("/new.jsonl", { conversationId: "c1", predecessorPath: "/old.jsonl" }),
+    ];
+    const resolved = resolveStageNavFile({ conversationId: null, agentPath: "/old.jsonl" }, files);
+    expect(resolved?.path).toBe("/new.jsonl");
+  });
+
+  test("resolveStageNavFile is a no-op when nothing in the scan matches", () => {
+    expect(resolveStageNavFile(null, [fileAt("/a.jsonl", { conversationId: "c1" })])).toBeNull();
+    expect(resolveStageNavFile({ conversationId: "gone", agentPath: "/gone.jsonl" }, [fileAt("/a.jsonl", { conversationId: "c1" })])).toBeNull();
   });
 });

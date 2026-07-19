@@ -22,7 +22,7 @@ import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
 import { PipelineStageGraph, PipelineStageGraphFlowsProvider } from "@/components/scheme/PipelineStageGraph";
-import { STAGE_TONES, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState } from "@/components/pipelines/pipelineModel";
+import { STAGE_TONES, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState, type StageNavTarget } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -360,7 +360,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
 /** Navigation seam for the stage graph mounted in an interactive pipeline group. */
 export interface PipelineGroupControls {
   flows: readonly Flow[];
-  onOpenConversation: (conversationId: string) => void;
+  onOpenAttempt: (target: StageNavTarget) => void;
 }
 
 export const GroupsLayer = memo(function GroupsLayer({
@@ -447,7 +447,7 @@ export const GroupsLayer = memo(function GroupsLayer({
                 <PipelineStageGraphFlowsProvider flows={pipelineControls.flows}>
                   <PipelineStageGraph
                     pipeline={group.pipeline}
-                    onOpenConversation={pipelineControls.onOpenConversation}
+                    onOpenAttempt={pipelineControls.onOpenAttempt}
                   />
                 </PipelineStageGraphFlowsProvider>
               </div>

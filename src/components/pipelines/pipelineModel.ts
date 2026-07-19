@@ -454,6 +454,35 @@ export function stageOpenTarget(
   return { kind: "path", path: attempt.agentPath };
 }
 
+/** What a stage-graph attempt points at for navigation: its stable conversation
+    id (when the launch adopted one) alongside the transcript path recorded at
+    launch. Either alone is enough to open the attempt — a path-only attempt (no
+    adopted id yet) still resolves through `agentPath`. */
+export type StageNavTarget = { conversationId: string | null; agentPath: string | null };
+
+/** The navigation target for a stage attempt, or null when the attempt carries
+    neither a conversation id nor a transcript path (a pending ghost with nothing
+    to open). Both a materialized run and a path-only launch are navigable. */
+export function attemptNavTarget(attempt: PipelineStageAttempt | null): StageNavTarget | null {
+  if (!attempt) return null;
+  if (!attempt.conversationId && !attempt.agentPath) return null;
+  return { conversationId: attempt.conversationId, agentPath: attempt.agentPath };
+}
+
+/** Resolve a stage-graph navigation target to the file its card should open.
+    The stored conversation id's CURRENT (non-archived) generation wins so a
+    migrated attempt never opens the folded predecessor; a path-only attempt (or
+    one whose id has no live generation) falls back to `agentPath`, redirecting a
+    recorded path that itself became an archived predecessor. Returns null when
+    nothing in the scanned file set matches yet — the caller leaves the click a
+    no-op rather than opening a stale transcript. */
+export function resolveStageNavFile(target: StageNavTarget | null, files: readonly FileEntry[]): FileEntry | null {
+  if (!target) return null;
+  const path = currentMemberPath(target.agentPath, target.conversationId, files);
+  if (!path) return null;
+  return files.find((entry) => entry.path === path) ?? null;
+}
+
 /** Resolve compact history after pipeline review decks leave the board. */
 export function compactStageOpenTarget(
   stage: PipelineStage,

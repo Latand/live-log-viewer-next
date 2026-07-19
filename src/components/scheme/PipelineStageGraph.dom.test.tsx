@@ -6,8 +6,13 @@ import { useState } from "react";
 
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
+import type { StageNavTarget } from "@/components/pipelines/pipelineModel";
 
 import { PipelineStageGraph, PipelineStageGraphFlowsProvider } from "./PipelineStageGraph";
+
+/** The navigation seam hands back a target; the tests key on whichever id the
+    surface actually resolved (conversation id first, else the path-only fallback). */
+const navKey = (target: StageNavTarget): string => target.conversationId ?? target.agentPath ?? "";
 
 const dom = new HappyWindow();
 const roots = new Set<Root>();
@@ -68,6 +73,17 @@ function attempt(
   };
 }
 
+/** A launch that recorded a transcript path but never adopted a stable
+    conversation id — the path-only attempts PR #439 must keep navigable. */
+function pathAttempt(
+  n: number,
+  state: PipelineStageAttempt["state"],
+  agentPath: string,
+  activatedBy: PipelineStageAttempt["activatedBy"] = null,
+): PipelineStageAttempt {
+  return { ...attempt(n, state, null, activatedBy), agentPath };
+}
+
 function pipeline(stages: PipelineStage[], attemptsByStage: Record<string, PipelineStageAttempt[]>): Pipeline {
   return {
     id: "p1", task: "Stage graph", project: "project", repoDir: "/repo", worktreeDir: "/worktree",
@@ -81,7 +97,7 @@ function pipeline(stages: PipelineStage[], attemptsByStage: Record<string, Pipel
 
 function mount(
   value: Pipeline,
-  onOpenConversation: (conversationId: string) => void = () => {},
+  onOpenAttempt: (target: StageNavTarget) => void = () => {},
   flows: readonly Flow[] = [],
 ): HTMLElement {
   const host = dom.document.createElement("div");
@@ -90,13 +106,13 @@ function mount(
   roots.add(root);
   flushSync(() => root.render(
     <PipelineStageGraphFlowsProvider flows={flows}>
-      <PipelineStageGraph pipeline={value} onOpenConversation={onOpenConversation} />
+      <PipelineStageGraph pipeline={value} onOpenAttempt={onOpenAttempt} />
     </PipelineStageGraphFlowsProvider>,
   ));
   return host as unknown as HTMLElement;
 }
 
-function mountMutable(value: Pipeline, onOpenConversation: (conversationId: string) => void = () => {}) {
+function mountMutable(value: Pipeline, onOpenAttempt: (target: StageNavTarget) => void = () => {}) {
   const host = dom.document.createElement("div");
   dom.document.body.append(host);
   const root = createRoot(host as unknown as HTMLElement);
@@ -105,7 +121,7 @@ function mountMutable(value: Pipeline, onOpenConversation: (conversationId: stri
   function MutableGraph() {
     const [current, setCurrent] = useState(value);
     update = setCurrent;
-    return <PipelineStageGraph pipeline={current} onOpenConversation={onOpenConversation} />;
+    return <PipelineStageGraph pipeline={current} onOpenAttempt={onOpenAttempt} />;
   }
   flushSync(() => root.render(<MutableGraph />));
   return { host: host as unknown as HTMLElement, update: (next: Pipeline) => flushSync(() => update(next)) };
@@ -137,7 +153,7 @@ test("a fresh two-stage pipeline renders its running node and clickable review s
   const opened: string[] = [];
   const host = mount(
     pipeline(stages, { build: [attempt(1, "running", "conversation-build")] }),
-    (conversationId) => opened.push(conversationId),
+    (target) => opened.push(navKey(target)),
   );
 
   expect(host.querySelectorAll("[data-stage-graph-node]")).toHaveLength(2);
@@ -251,7 +267,7 @@ test("clicking a materialized node opens its conversation while failed transcrip
   const opened: string[] = [];
   const host = mount(
     pipeline([build], { build: [attempt(1, "failed", "conversation-dead-host")] }),
-    (conversationId) => opened.push(conversationId),
+    (target) => opened.push(navKey(target)),
   );
   const node = host.querySelector('[data-stage-graph-node="build"]')!;
 
@@ -268,7 +284,7 @@ test("many retries collapse into an expandable attempt stack with transcript lin
     attempt(1, "failed", "conversation-1"),
     attempt(2, "failed", "conversation-2"),
     attempt(3, "running", "conversation-3"),
-  ] }), (conversationId) => opened.push(conversationId));
+  ] }), (target) => opened.push(navKey(target)));
 
   const stack = host.querySelector("details[data-attempt-stack]") as HTMLDetailsElement;
   expect(stack.open).toBe(false);
@@ -368,7 +384,7 @@ test("an editor closes with a notice when its stage starts and the node opens th
   const stages = [runStage("build", "review"), reviewStage("review", null)];
   const initial = pipeline(stages, { build: [attempt(1, "running", "conversation-build")] });
   const opened: string[] = [];
-  const view = mountMutable(initial, (conversationId) => opened.push(conversationId));
+  const view = mountMutable(initial, (target) => opened.push(navKey(target)));
   openReviewSettings(view.host);
   expect(view.host.querySelector('[data-stage-settings="review"]')).not.toBeNull();
 
@@ -437,4 +453,61 @@ test("draft ghost settings retain the editable stage edge controls", () => {
   const host = mount(value);
   flushSync(() => (host.querySelector('[data-stage-graph-node="build"] button[data-open-stage]') as HTMLButtonElement).click());
   expect(host.querySelector('[data-stage-settings="build"] [data-stage-edges]')).not.toBeNull();
+});
+
+test("a path-only primary node stays clickable and opens its transcript by path (PR #439)", () => {
+  const build = runStage("build", null);
+  const opened: string[] = [];
+  const host = mount(
+    pipeline([build], { build: [pathAttempt(1, "failed", "/pipelines/build-only.jsonl")] }),
+    (target) => opened.push(navKey(target)),
+  );
+  const button = host.querySelector('[data-stage-graph-node="build"] button[data-open-stage]') as HTMLButtonElement;
+
+  expect(button.disabled).toBe(false);
+  button.click();
+  expect(opened).toEqual(["/pipelines/build-only.jsonl"]);
+});
+
+test("a path-only prior attempt stays linkable inside the retry stack (PR #439)", () => {
+  const build = runStage("build", null);
+  const opened: string[] = [];
+  const host = mount(pipeline([build], { build: [
+    pathAttempt(1, "failed", "/pipelines/retry-1.jsonl"),
+    attempt(2, "failed", "conversation-2"),
+    attempt(3, "running", "conversation-3"),
+  ] }), (target) => opened.push(navKey(target)));
+
+  const stack = host.querySelector("details[data-attempt-stack]") as HTMLDetailsElement;
+  (stack.querySelector("summary") as HTMLElement).click();
+  const links = stack.querySelectorAll("button[data-attempt-conversation], button[data-attempt-path]");
+  expect(links).toHaveLength(3);
+  const first = links[0] as HTMLButtonElement;
+  expect(first.disabled).toBe(false);
+  first.click();
+  expect(opened).toEqual(["/pipelines/retry-1.jsonl"]);
+});
+
+test("a review cycle opens its path-only implementer and reviewer by path (PR #439)", () => {
+  const build = runStage("build", "review");
+  const review = reviewStage("review", null);
+  review.onFail = { to: "build", maxRounds: 3 };
+  const reviewAttempt = pathAttempt(1, "reviewing", "/pipelines/review-only.jsonl", { stageId: "build", attempt: 1, edge: "pass" });
+  reviewAttempt.flowId = "flow-review";
+  const value = pipeline([build, review], {
+    build: [pathAttempt(1, "passed", "/pipelines/impl-only.jsonl")],
+    review: [reviewAttempt],
+  });
+  value.cursor = { stageId: "review", state: "reviewing", input: null, activatedBy: { stageId: "build", attempt: 1, edge: "pass" } };
+  const opened: string[] = [];
+  const host = mount(value, (target) => opened.push(navKey(target)), [reviewFlow("flow-review", 1, "reviewing")]);
+  const cycle = expandReview(host);
+
+  const implementer = cycle.querySelector('button[data-cycle-role="implementer"]') as HTMLButtonElement;
+  const reviewer = cycle.querySelector('button[data-cycle-role="reviewer"]') as HTMLButtonElement;
+  expect(implementer.disabled).toBe(false);
+  expect(reviewer.disabled).toBe(false);
+  implementer.click();
+  reviewer.click();
+  expect(opened).toEqual(["/pipelines/impl-only.jsonl", "/pipelines/review-only.jsonl"]);
 });
