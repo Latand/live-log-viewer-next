@@ -43,6 +43,18 @@ function runNextBuild() {
   });
 }
 
+function runMcpBuild() {
+  return new Promise((resolve, reject) => {
+    const bun = process.env.LLV_BUN_EXECUTABLE || "bun";
+    const child = spawn(bun, ["run", "build:mcp"], { cwd: root, env: process.env, stdio: "inherit" });
+    child.on("error", (error) => reject(new Error(`Failed to start ${bun}: ${error.message}`)));
+    child.on("exit", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(signal ? `MCP build stopped after signal ${signal}.` : `MCP build failed with exit code ${code}.`));
+    });
+  });
+}
+
 async function findStandaloneServer(dir) {
   const directServer = join(dir, "server.js");
   if (existsSync(directServer)) {
@@ -79,6 +91,7 @@ async function main() {
     await rm(join(distStandaloneDir, ".claude"), { recursive: true, force: true });
   }
   await cp(staticDir, join(distStandaloneDir, ".next", "static"), { recursive: true });
+  await runMcpBuild();
 
   if (!existsSync(join(distStandaloneDir, "server.js"))) {
     throw new Error("Prepack did not produce dist/standalone/server.js.");
