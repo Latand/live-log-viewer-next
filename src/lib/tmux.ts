@@ -1183,12 +1183,11 @@ export async function sendKeys(target: TmuxTarget, keys: string[]): Promise<void
 }
 
 /**
- * Opens a new window in the user's current tmux session, boots the resumed
- * agent there, waits until the CLI is actually accepting input, then pastes
- * the text. The window runs the login shell and the agent command is typed
- * into it, so the pane survives even when the agent CLI exits early — a window
- * created with the agent as its direct command would close on exit and the
- * later paste would fail with "can't find window".
+ * Opens a new window or resumes a process-fenced pane from an interrupted
+ * launch, waits until the CLI is accepting input, then pastes the text. A new
+ * window runs the login shell and receives the agent command as typed input,
+ * so the pane survives an early CLI exit. Recovery verifies the persisted
+ * pane identity and launch marker before continuing in that same window.
  *
  * Readiness is polled instead of a fixed delay: `claude --resume` on a large
  * session first shows a «Resume from summary» picker, which this answers with
@@ -1201,13 +1200,18 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
   const session = await activeTmuxSession(endpoint);
   const server = await tmuxServerReference(endpoint);
   if (!server) throw new Error("tmux server identity is unavailable before spawn");
-  const binding = await createSpawnWindow({
-    session,
-    cwd: spec.cwd,
-    windowName: spec.windowName,
-    endpoint,
-    server,
-  });
+  const existingPane = receipt.state === "pane-bound" ? receipt.pane : null;
+  const recoveringPane = existingPane !== null;
+  const initialCapability = recoveringPane ? null : agentRegistry().rotateSpawnCapabilityForReceipt(receipt.launchId);
+  const binding = existingPane
+    ? existingPane
+    : await createSpawnWindow({
+        session,
+        cwd: spec.cwd,
+        windowName: spec.windowName,
+        endpoint,
+        server,
+      });
   const target = binding.paneId;
   const display = binding.display ?? binding.paneId;
   const panePid = binding.panePid.pid;
@@ -1218,26 +1222,44 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
     return runTmux(args, undefined, endpoint);
   };
 
-  /* The marker and receipt binding precede every command/poll. An observer
-     therefore has one exact launch identity whenever it can see the host. */
-  const marker = await runBoundTmux(["set-option", "-p", "-t", target, "@llv_launch_id", receipt.launchId]);
-  if (marker.code !== 0) throw new Error(marker.stderr.trim() || "could not bind launch marker to pane");
-  const bound = agentRegistry().bindSpawnPane(receipt.launchId, binding);
-  if (bound.state === "conflicted") throw new Error("spawn pane binding conflict");
+  /* The marker and receipt binding precede every command/poll. Recovery
+     verifies that same marker and process-fenced pane identity before it
+     continues, so replay never allocates a second window. */
+  if (recoveringPane) {
+    const marker = await runBoundTmux(["show-options", "-p", "-v", "-t", target, "@llv_launch_id"]);
+    if (marker.code !== 0 || marker.stdout.trim() !== receipt.launchId) {
+      throw new Error("spawn pane launch marker changed before recovery");
+    }
+  } else {
+    const marker = await runBoundTmux(["set-option", "-p", "-t", target, "@llv_launch_id", receipt.launchId]);
+    if (marker.code !== 0) throw new Error(marker.stderr.trim() || "could not bind launch marker to pane");
+    const bound = agentRegistry().bindSpawnPane(receipt.launchId, binding);
+    if (bound.state === "conflicted") throw new Error("spawn pane binding conflict");
+  }
 
-  const cwdTyped = await runBoundTmux(["send-keys", "-t", target, "-l", cdCommandForCwd(spec.cwd)]);
-  if (cwdTyped.code !== 0) throw new Error(cwdTyped.stderr.trim() || "could not type cwd into pane");
-  const cwdEnter = await runBoundTmux(["send-keys", "-t", target, "Enter"]);
-  if (cwdEnter.code !== 0) throw new Error(cwdEnter.stderr.trim() || "could not enter cwd");
+  const observedPane = await verifyTmuxSpawnBinding(binding, endpoint);
+  if (!observedPane) throw new Error("tmux server or created pane changed before spawn actuation");
+  let agentSeen = !isShellCommand(observedPane.command);
+  if (!agentSeen) {
+    if (recoveringPane) {
+      const reset = await runBoundTmux(["send-keys", "-t", target, "C-c"]);
+      if (reset.code !== 0) throw new Error(reset.stderr.trim() || "could not reset pane before spawn recovery");
+    }
+    const capability = initialCapability ?? agentRegistry().rotateSpawnCapabilityForReceipt(receipt.launchId);
+    const bootSpec = withSpawnCapability(spec, capability);
+    const cwdTyped = await runBoundTmux(["send-keys", "-t", target, "-l", cdCommandForCwd(spec.cwd)]);
+    if (cwdTyped.code !== 0) throw new Error(cwdTyped.stderr.trim() || "could not type cwd into pane");
+    const cwdEnter = await runBoundTmux(["send-keys", "-t", target, "Enter"]);
+    if (cwdEnter.code !== 0) throw new Error(cwdEnter.stderr.trim() || "could not enter cwd");
 
-  /* Type the boot command literally into the fresh shell, then run it. */
-  const typed = await runBoundTmux(["send-keys", "-t", target, "-l", spec.command]);
-  if (typed.code !== 0) throw new Error(typed.stderr.trim() || "could not type command into pane");
-  const enter = await runBoundTmux(["send-keys", "-t", target, "Enter"]);
-  if (enter.code !== 0) throw new Error(enter.stderr.trim() || "could not start agent");
+    /* Type the boot command literally into the fenced shell, then run it. */
+    const typed = await runBoundTmux(["send-keys", "-t", target, "-l", bootSpec.command]);
+    if (typed.code !== 0) throw new Error(typed.stderr.trim() || "could not type command into pane");
+    const enter = await runBoundTmux(["send-keys", "-t", target, "Enter"]);
+    if (enter.code !== 0) throw new Error(enter.stderr.trim() || "could not start agent");
+  }
 
   const deadline = Date.now() + SPAWN_READY_TIMEOUT_MS;
-  let agentSeen = false;
   let answeredScreen = "";
   while (Date.now() < deadline) {
     await sleep(SPAWN_POLL_MS);
@@ -1371,8 +1393,7 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string, exist
   try {
     const refusal = legacyClaudeTmuxSpawnRefusal(spec);
     if (refusal) throw new Error(refusal);
-    const capability = agentRegistry().rotateSpawnCapabilityForReceipt(receipt.launchId);
-    return { ...(await spawnAgentWithPromptUnchecked(withSpawnCapability(spec, capability), text, receipt)), receipt };
+    return { ...(await spawnAgentWithPromptUnchecked(spec, text, receipt)), receipt };
   } catch (error) {
     agentRegistry().failSpawn(receipt.launchId, error instanceof Error ? error.message : String(error));
     throw error;

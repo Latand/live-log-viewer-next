@@ -308,7 +308,7 @@ async function postTaskSpawn(
         }), { status: 202 });
       }
     }
-    const claim = registry.claimStartingTmuxSpawn(launchReceipt.launchId);
+    const claim = registry.claimTmuxSpawnActuation(launchReceipt.launchId);
     launchReceipt = claim.receipt;
     if (!claim.claimed) {
       const at = isoNow();

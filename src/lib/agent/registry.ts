@@ -2804,11 +2804,13 @@ export class AgentRegistry {
     }
   }
 
-  private claimStartingSpawn(launchId: string, transport: "tmux" | "structured"): { claimed: boolean; receipt: SpawnReceipt } {
+  private claimSpawnActuation(launchId: string, transport: "tmux" | "structured"): { claimed: boolean; receipt: SpawnReceipt } {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt) throw new Error("unknown spawn receipt");
-      if (receipt.transport !== transport || receipt.state !== "starting" || receipt.key || receipt.pane) {
+      const unbound = receipt.state === "starting" && !receipt.key && !receipt.pane;
+      const recoverablePane = transport === "tmux" && receipt.state === "pane-bound" && !receipt.key && Boolean(receipt.pane);
+      if (receipt.transport !== transport || (!unbound && !recoverablePane)) {
         return { claimed: false, receipt: clone(receipt) };
       }
       if (receipt.admissionOwner && this.ownerAlive(receipt.admissionOwner)) {
@@ -2825,12 +2827,14 @@ export class AgentRegistry {
   /** Atomically adopts a structured receipt whose pre-host owner exited.
       A live owner keeps responsibility for its process-local deferred work. */
   claimStartingStructuredSpawn(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
-    return this.claimStartingSpawn(launchId, "structured");
+    return this.claimSpawnActuation(launchId, "structured");
   }
 
-  /** Atomically adopts an unbound tmux receipt after its actuation owner exits. */
-  claimStartingTmuxSpawn(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
-    return this.claimStartingSpawn(launchId, "tmux");
+  /** Atomically adopts an unbound or pane-bound tmux receipt after its
+      actuation owner exits. A pane-bound claimant must continue inside the
+      persisted pane identity. */
+  claimTmuxSpawnActuation(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
+    return this.claimSpawnActuation(launchId, "tmux");
   }
 
   /** Compare-and-set release of a starting structured admission: only the
