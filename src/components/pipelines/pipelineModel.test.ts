@@ -18,6 +18,7 @@ import {
   compactPipelineArtifactPaths,
   latestAttempt,
   resolvePipelineMemberPaths,
+  stageAttempts,
   stageDockCompact,
   compactStageOpenTarget,
   compactPipelineOpenTarget,
@@ -131,6 +132,22 @@ describe("stageChipState", () => {
     expect(stageChipState(p, stages[1]!)).toBe("running");
     /* A stage the cursor has not reached stays pending even while paused. */
     expect(stageChipState(p, stages[2]!)).toBe("pending");
+  });
+
+  test("a passed historical child stays visible while the running attempt remains operational", () => {
+    const operational = { n: 1, state: "running", historical: false, agentPath: "/operational.jsonl" } as PipelineStageAttempt;
+    const historical = { n: 2, state: "passed", historical: true, agentPath: "/historical.jsonl" } as PipelineStageAttempt;
+    const p = pipeline({
+      stages,
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      runs: [{ stageId: "build", attempts: [operational, historical] }],
+    });
+
+    expect(stageAttempts(p, "build")).toEqual([operational, historical]);
+    expect(latestAttempt(p, "build")).toBe(operational);
+    expect(stageChipState(p, stages[1]!)).toBe("running");
+    expect(pipelineBoardStripPath(p)).toBe("/operational.jsonl");
+    expect(pipelineStagePosition(p)).toEqual({ k: 2, n: 3 });
   });
 });
 

@@ -190,7 +190,7 @@ export const STAGE_GLYPH: Record<StageChipState, string> = {
 };
 
 export function latestAttempt(pipeline: Pipeline, stageId: string): PipelineStageAttempt | null {
-  return pipeline.runs.find((run) => run.stageId === stageId)?.attempts.at(-1) ?? null;
+  return pipeline.runs.find((run) => run.stageId === stageId)?.attempts.findLast((attempt) => !attempt.historical) ?? null;
 }
 
 export function stageAttempts(pipeline: Pipeline, stageId: string): PipelineStageAttempt[] {
