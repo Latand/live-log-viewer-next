@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 
 const ACTIONS = new Set<PipelineAction>([
   "start", "update-draft", "add-stage", "remove-stage", "reorder-stage", "set-edge",
-  "pause", "resume", "retry-stage", "skip-stage", "override-stage", "delete", "close",
+  "pause", "resume", "retry-stage", "skip-stage", "override-stage", "link-task", "unlink-task", "delete", "close",
 ]);
 
 const CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);

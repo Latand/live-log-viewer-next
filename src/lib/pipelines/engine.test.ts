@@ -4,12 +4,14 @@ import os from "node:os";
 import path from "node:path";
 
 import type { Flow } from "@/lib/flows/types";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
-const { createPipelineFromRequest, patchPipeline, pipelineClaudePermissionMode, reviewNote, tickPipelines } = await import("./engine");
+const { adoptAttempt, createPipelineFromRequest, ensureTaskPipelineForAssignment, patchPipeline, pipelineClaudePermissionMode, reviewNote, tickPipelines } = await import("./engine");
 const { registerPipelineTick } = await import("./controllerSignal");
 const { loadPipelines, savePipelines } = await import("./store");
+const { saveTasks } = await import("@/lib/tasks/store");
 type PipelinePorts = import("./engine").PipelinePorts;
 type StageTurnEvidence = import("./durableEvidence").StageTurnEvidence;
 
@@ -147,6 +149,185 @@ async function create(ports: PipelinePorts, stages = RUN_STAGES as never) {
   if (!result.pipeline) throw new Error(result.error);
   return result.pipeline;
 }
+
+function boardTask(id: string, project = "viewer"): BoardTask {
+  return {
+    id,
+    project,
+    status: "inbox",
+    text: `Task ${id}`,
+    placement: "unplaced",
+    assignments: [],
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:00:00.000Z",
+  };
+}
+
+test("link-task is idempotent for an existing task in the pipeline project", async () => {
+  const h = harness();
+  const task = boardTask("task-link-1");
+  saveTasks([task]);
+  const pipeline = await create(h.ports);
+
+  const first = await patchPipeline(pipeline.id, { action: "link-task", taskId: task.id }, h.ports);
+  const duplicate = await patchPipeline(pipeline.id, { action: "link-task", taskId: task.id }, h.ports);
+
+  expect(first.pipeline?.taskIds).toEqual([task.id]);
+  expect(duplicate.pipeline?.taskIds).toEqual([task.id]);
+  expect(loadPipelines()[0]!.taskIds).toEqual([task.id]);
+});
+
+test("task links reject project mismatches without persisting a change", async () => {
+  const h = harness();
+  const foreignTask = boardTask("task-foreign", "other-project");
+  saveTasks([foreignTask]);
+  const pipeline = await create(h.ports);
+
+  const result = await patchPipeline(pipeline.id, { action: "link-task", taskId: foreignTask.id }, h.ports);
+
+  expect(result).toEqual({ error: `task project does not match pipeline project: ${foreignTask.id}`, status: 400 });
+  expect(loadPipelines()[0]!.taskIds).toEqual([]);
+});
+
+test("a linked draft cannot move to a different task project", async () => {
+  const h = harness();
+  const task = boardTask("task-repo-move");
+  saveTasks([task]);
+  savePipelines([]);
+  h.ports.projectForCwd = (cwd) => cwd === "/other" ? "other-project" : "viewer";
+  const created = await createPipelineFromRequest({
+    task: "Linked draft",
+    taskIds: [task.id],
+    repoDir: "/repo",
+    autoStart: false,
+    stages: [{ id: "run", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "run", next: null }],
+  }, h.ports);
+
+  const moved = await patchPipeline(created.pipeline!.id, { action: "update-draft", repoDir: "/other" }, h.ports);
+
+  expect(moved).toEqual({ error: `task project does not match pipeline project: ${task.id}`, status: 400 });
+  expect(loadPipelines()[0]).toMatchObject({ repoDir: "/repo", project: "viewer", taskIds: [task.id] });
+});
+
+test("a deleted task stays linked until unlink-task removes its stale id", async () => {
+  const h = harness();
+  const task = boardTask("task-stale");
+  saveTasks([task]);
+  const pipeline = await create(h.ports);
+  await patchPipeline(pipeline.id, { action: "link-task", taskId: task.id }, h.ports);
+  saveTasks([]);
+
+  expect(loadPipelines()[0]!.taskIds).toEqual([task.id]);
+  const result = await patchPipeline(pipeline.id, { action: "unlink-task", taskId: task.id }, h.ports);
+
+  expect(result.pipeline?.taskIds).toEqual([]);
+  expect(loadPipelines()[0]!.taskIds).toEqual([]);
+});
+
+test("pipeline creation validates and persists explicit taskIds atomically", async () => {
+  const h = harness();
+  const task = boardTask("task-create");
+  saveTasks([task]);
+  savePipelines([]);
+
+  const created = await createPipelineFromRequest({
+    task: "Bound pipeline",
+    taskIds: [task.id, task.id],
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+  }, h.ports);
+
+  expect(created.pipeline?.taskIds).toEqual([task.id]);
+  expect(loadPipelines()[0]!.taskIds).toEqual([task.id]);
+
+  savePipelines([]);
+  const missing = await createPipelineFromRequest({
+    task: "Missing task",
+    taskIds: ["task-missing"],
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+  }, h.ports);
+  expect(missing).toEqual({ error: "task not found: task-missing", status: 400 });
+  expect(loadPipelines()).toEqual([]);
+});
+
+test("auto-create rechecks task links inside the pipeline mutation", async () => {
+  const h = harness();
+  const task = boardTask("task-race");
+  saveTasks([task]);
+  savePipelines([]);
+
+  const [explicit, automatic] = await Promise.all([
+    createPipelineFromRequest({
+      task: "Explicit owner",
+      taskIds: [task.id],
+      repoDir: "/repo",
+      autoStart: false,
+      stages: [{ id: "run", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "run", next: null }],
+    }, h.ports),
+    ensureTaskPipelineForAssignment(task, {
+      repoDir: "/repo",
+      engine: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+    }, h.ports),
+  ]);
+
+  expect(explicit.pipeline).toBeDefined();
+  expect(automatic.pipeline?.id).toBe(explicit.pipeline?.id);
+  expect(loadPipelines()).toHaveLength(1);
+  expect(loadPipelines()[0]!.taskIds).toEqual([task.id]);
+});
+
+test("adoptAttempt appends to the source stage after the cursor moved on", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  const sourceRun = pipeline.runs.find((run) => run.stageId === "plan")!;
+  sourceRun.attempts.push({
+    n: 1,
+    state: "passed",
+    effectiveRole: structuredClone(pipeline.stages[0]!.effectiveRole),
+    launchId: "launch-source",
+    conversationId: "conversation_source",
+    sessionId: "session-source",
+    agentPath: "/codex/source.jsonl",
+    paneId: "%1",
+    flowId: null,
+    startedAt: "t0",
+    completedAt: "t1",
+    input: "original input",
+    activatedBy: null,
+    output: "source output",
+    verdict: { status: "pass" },
+    error: null,
+  });
+  pipeline.cursor = { stageId: "build", state: "running", input: "source output", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } };
+  const cursorBefore = structuredClone(pipeline.cursor);
+
+  const adopted = adoptAttempt(pipeline, "plan", {
+    sourceConversationId: "conversation_source",
+    launchId: "launch-child",
+    conversationId: "conversation_child",
+    sessionId: "session-child",
+    agentPath: "/codex/child.jsonl",
+    paneId: "%2",
+    startedAt: "t2",
+  });
+
+  expect(adopted).toMatchObject({ n: 2, state: "running", conversationId: "conversation_child", input: "original input" });
+  expect(sourceRun.attempts).toHaveLength(2);
+  expect(pipeline.cursor).toEqual(cursorBefore);
+  expect(adoptAttempt(pipeline, "plan", {
+    sourceConversationId: "conversation_source",
+    launchId: "launch-child",
+    conversationId: "conversation_child",
+    sessionId: "session-child",
+    agentPath: "/codex/child.jsonl",
+    paneId: "%2",
+    startedAt: "t2",
+  })).toBe(adopted);
+  expect(sourceRun.attempts).toHaveLength(2);
+});
 
 test("creation validates the 1–8 stage conversation graph and optional roles", async () => {
   const { ports } = harness();

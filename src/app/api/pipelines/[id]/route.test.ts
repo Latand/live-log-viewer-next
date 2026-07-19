@@ -18,10 +18,10 @@ mock.module("@/lib/pipelines/engine", () => ({
 const { DELETE, PATCH } = await import("./route");
 const { registerPipelineTick } = await import("@/lib/pipelines/controllerSignal");
 
-test("pipeline PATCH accepts the control actions including override-stage", async () => {
+test("pipeline PATCH accepts control and task-link actions", async () => {
   let ticks = 0;
   const unregister = registerPipelineTick(async () => { ticks += 1; });
-  for (const action of ["start", "update-draft", "add-stage", "remove-stage", "reorder-stage", "pause", "resume", "retry-stage", "skip-stage", "override-stage", "delete", "close"]) {
+  for (const action of ["start", "update-draft", "add-stage", "remove-stage", "reorder-stage", "set-edge", "pause", "resume", "retry-stage", "skip-stage", "override-stage", "link-task", "unlink-task", "delete", "close"]) {
     const response = await PATCH(
       new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", { method: "PATCH", headers: { host: "127.0.0.1" }, body: JSON.stringify({ action }) }),
       { params: Promise.resolve({ id: "pipeline-1" }) },

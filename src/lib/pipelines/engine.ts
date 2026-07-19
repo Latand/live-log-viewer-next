@@ -15,6 +15,8 @@ import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineag
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
 import { projectForCwd } from "@/lib/scanner/describe";
+import { loadTasks } from "@/lib/tasks/store";
+import type { BoardTask } from "@/lib/tasks/types";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { isShellCommand } from "@/lib/status";
 import { paneInfo } from "@/lib/tmux";
@@ -36,7 +38,8 @@ import {
 import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipelineRepo } from "./preflight";
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
-import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, PipelineStoreError, withPipelineMutation } from "./store";
+import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineMutation } from "./store";
+import { ensurePipelineForTask, type TaskPipelineSpawnParams } from "./taskBinding";
 import type {
   CreatePipelineRequest,
   EffectivePipelineRole,
@@ -463,6 +466,71 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAtte
   };
   run.attempts.push(attempt);
   return attempt;
+}
+
+export type PipelineAttemptConversationRef = {
+  sourceConversationId: string;
+  launchId: string | null;
+  conversationId: string;
+  sessionId: string | null;
+  agentPath: string;
+  paneId: string | null;
+  startedAt: string | null;
+};
+
+/** Adds a lineage child as historical evidence on its source stage. */
+export function adoptAttempt(
+  pipeline: Pipeline,
+  stageId: string,
+  conversationRef: PipelineAttemptConversationRef,
+): PipelineStageAttempt | null {
+  const run = runFor(pipeline, stageId);
+  const stage = pipeline.stages.find((candidate) => candidate.id === stageId) ?? null;
+  if (!run || !stage) return null;
+  const existing = run.attempts.find((attempt) =>
+    attempt.conversationId === conversationRef.conversationId
+    || (conversationRef.launchId !== null && attempt.launchId === conversationRef.launchId));
+  if (existing) return existing;
+  const source = run.attempts.find((attempt) => attempt.conversationId === conversationRef.sourceConversationId) ?? null;
+  if (!source) return null;
+  const attempt: PipelineStageAttempt = {
+    n: run.attempts.length + 1,
+    state: "running",
+    effectiveRole: structuredClone(source.effectiveRole ?? stage.effectiveRole),
+    launchId: conversationRef.launchId,
+    conversationId: conversationRef.conversationId,
+    sessionId: conversationRef.sessionId,
+    agentPath: conversationRef.agentPath,
+    paneId: conversationRef.paneId,
+    flowId: null,
+    startedAt: conversationRef.startedAt,
+    completedAt: null,
+    input: source.input,
+    activatedBy: source.activatedBy ? { ...source.activatedBy } : null,
+    output: null,
+    verdict: null,
+    error: null,
+  };
+  run.attempts.push(attempt);
+  return attempt;
+}
+
+export async function adoptPipelineAttemptFromSource(
+  sourceConversationId: string,
+  conversationRef: Omit<PipelineAttemptConversationRef, "sourceConversationId">,
+): Promise<{ pipeline: Pipeline; stageId: string; attempt: PipelineStageAttempt } | null> {
+  return withPipelineMutation((pipelines, persist) => {
+    for (const pipeline of pipelines) {
+      for (const run of pipeline.runs) {
+        if (!run.attempts.some((attempt) => attempt.conversationId === sourceConversationId)) continue;
+        const attempt = adoptAttempt(pipeline, run.stageId, { ...conversationRef, sourceConversationId });
+        if (!attempt) return null;
+        persist();
+        return { pipeline, stageId: run.stageId, attempt };
+      }
+    }
+    return null;
+  });
 }
 
 /** Advance along the pass edge, persisting the relay record: the completed
@@ -1168,6 +1236,11 @@ type PipelineMutationResult = {
   path?: string;
 };
 
+type CreatePipelineOptions = {
+  ensureTask?: BoardTask;
+  spawnParams?: TaskPipelineSpawnParams;
+};
+
 function preflightFailure(result: Extract<PipelineRepoPreflight, { ok: false }>): PipelineMutationResult {
   return {
     error: pipelineRepoPreflightError(result),
@@ -1181,6 +1254,7 @@ function preflightFailure(result: Extract<PipelineRepoPreflight, { ok: false }>)
 export async function createPipelineFromRequest(
   req: CreatePipelineRequest,
   ports: PipelinePorts = defaultPipelinePorts(),
+  options: CreatePipelineOptions = {},
 ): Promise<PipelineMutationResult> {
   const task = typeof req.task === "string" ? req.task.trim() : "";
   if (!task) return { error: "task is required", status: 400 };
@@ -1191,6 +1265,10 @@ export async function createPipelineFromRequest(
   if (req.autoStart !== undefined && typeof req.autoStart !== "boolean") return { error: "autoStart must be a boolean", status: 400 };
   if (req.baseBranch !== undefined && typeof req.baseBranch !== "string") return { error: "baseBranch must be a string", status: 400 };
   if (req.baseRef !== undefined && typeof req.baseRef !== "string") return { error: "baseRef must be a string", status: 400 };
+  if (req.taskIds !== undefined && (!Array.isArray(req.taskIds) || req.taskIds.some((taskId) => typeof taskId !== "string" || !taskId.trim()))) {
+    return { error: "taskIds must be an array of non-empty strings", status: 400 };
+  }
+  const taskIds = [...new Set((req.taskIds ?? []).map((taskId) => taskId.trim()))];
   const requestedRepoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
   if (!requestedRepoDir) return { error: "repoDir is required", status: 400 };
   const admission = ports.preflightRepo(requestedRepoDir);
@@ -1213,6 +1291,7 @@ export async function createPipelineFromRequest(
   const pipeline = buildPipeline({
     id: crypto.randomUUID().slice(0, 8),
     task,
+    taskIds,
     ...(spec ? { spec } : {}),
     project: ports.projectForCwd(repoDir) ?? path.basename(repoDir),
     repoDir,
@@ -1228,10 +1307,37 @@ export async function createPipelineFromRequest(
     pipeline.lastPassedCommit = base.baseRef;
   }
   return withPipelineMutation((pipelines, persist) => {
+    if (options.ensureTask && options.spawnParams) {
+      const decision = ensurePipelineForTask(options.ensureTask, pipelines, options.spawnParams);
+      if (decision === null) {
+        const existing = pipelines.find((candidate) =>
+          candidate.taskIds.includes(options.ensureTask!.id)
+          && candidate.state !== "closed"
+          && !candidate.hiddenAt);
+        return existing ? { pipeline: existing } : { error: "task pipeline binding changed during creation", status: 409 };
+      }
+    }
+    const taskLinkError = pipelineTaskLinkError(pipeline, taskIds, loadTasks());
+    if (taskLinkError) return { error: taskLinkError, status: 400 };
     pipelines.push(pipeline);
     persist();
     return { pipeline };
   });
+}
+
+export async function ensureTaskPipelineForAssignment(
+  task: BoardTask,
+  spawnParams: TaskPipelineSpawnParams,
+  ports: PipelinePorts = defaultPipelinePorts(),
+): Promise<PipelineMutationResult> {
+  const pipelines = loadPipelines();
+  const request = ensurePipelineForTask(task, pipelines, spawnParams);
+  if (request === null) {
+    const pipeline = pipelines.find((candidate) =>
+      candidate.taskIds.includes(task.id) && candidate.state !== "closed" && !candidate.hiddenAt);
+    return pipeline ? { pipeline } : { error: "task pipeline binding changed during lookup", status: 409 };
+  }
+  return createPipelineFromRequest(request, ports, { ensureTask: task, spawnParams });
 }
 
 /** A park without a verdict (interrupted spawn, vanished transcript) can
@@ -1260,7 +1366,17 @@ export async function patchPipeline(
     const attempt = stage ? currentAttempt(pipeline, stage.id) : null;
     const flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
 
-    if (req.action === "start") {
+    if (req.action === "link-task") {
+      const taskId = typeof req.taskId === "string" ? req.taskId.trim() : "";
+      if (!taskId) return { error: "taskId is required", status: 400 };
+      const taskLinkError = pipelineTaskLinkError(pipeline, [taskId], loadTasks());
+      if (taskLinkError) return { error: taskLinkError, status: 400 };
+      if (!pipeline.taskIds.includes(taskId)) pipeline.taskIds.push(taskId);
+    } else if (req.action === "unlink-task") {
+      const taskId = typeof req.taskId === "string" ? req.taskId.trim() : "";
+      if (!taskId) return { error: "taskId is required", status: 400 };
+      pipeline.taskIds = pipeline.taskIds.filter((candidate) => candidate !== taskId);
+    } else if (req.action === "start") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       /* Start enforces the 1-stage floor (#353): the minimum graph is a single
          implement conversation. The graph rules (acyclic pass edges,
@@ -1269,8 +1385,11 @@ export async function patchPipeline(
       const admission = ports.preflightRepo(pipeline.repoDir);
       if (!admission.ok) return preflightFailure(admission);
       if (admission.repoDir !== pipeline.repoDir) {
+        const project = ports.projectForCwd(admission.repoDir) ?? path.basename(admission.repoDir);
+        const taskLinkError = pipelineTaskLinkError({ project }, pipeline.taskIds, loadTasks(), { allowMissing: true });
+        if (taskLinkError) return { error: taskLinkError, status: 400 };
         pipeline.repoDir = admission.repoDir;
-        pipeline.project = ports.projectForCwd(admission.repoDir) ?? path.basename(admission.repoDir);
+        pipeline.project = project;
         Object.assign(pipeline, pipelineIdentity(pipeline.id, pipeline.task, admission.repoDir));
       }
       if (!pipeline.baseBranch || !pipeline.baseRef || !pipeline.lastPassedCommit) {
@@ -1300,11 +1419,16 @@ export async function patchPipeline(
         repoDir = admission.repoDir;
       }
       const repoChanged = repoDir !== pipeline.repoDir;
+      const project = ports.projectForCwd(repoDir) ?? path.basename(repoDir);
+      if (repoChanged) {
+        const taskLinkError = pipelineTaskLinkError({ project }, pipeline.taskIds, loadTasks(), { allowMissing: true });
+        if (taskLinkError) return { error: taskLinkError, status: 400 };
+      }
       pipeline.task = task;
       if (spec) pipeline.spec = spec;
       else delete pipeline.spec;
       pipeline.repoDir = repoDir;
-      pipeline.project = ports.projectForCwd(repoDir) ?? path.basename(repoDir);
+      pipeline.project = project;
       Object.assign(pipeline, pipelineIdentity(pipeline.id, task, repoDir));
       if (repoChanged) {
         pipeline.baseBranch = "";

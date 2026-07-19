@@ -37,6 +37,7 @@ function oneStagePipeline(): { pipeline: Pipeline; stage: PipelineStage } {
   const pipeline = {
     id: "p1",
     task: "Lone stage",
+    taskIds: [],
     project: "demo",
     repoDir: "/r",
     worktreeDir: "/w",

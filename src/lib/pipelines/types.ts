@@ -136,6 +136,8 @@ export type PipelineState = "draft" | "provisioning" | "running" | "needs_decisi
 export type Pipeline = {
   id: string;
   task: string;
+  /** Durable board-task membership. The legacy `task` field remains the title. */
+  taskIds: string[];
   /** Pinned specification and acceptance criteria, matching Flow.spec from #85. */
   spec?: string;
   project: string;
@@ -166,6 +168,7 @@ export type Pipeline = {
 
 export type CreatePipelineRequest = {
   task: string;
+  taskIds?: string[];
   spec?: string;
   repoDir: string;
   /** Merge target branch; defaults to main when the pipeline starts. */
@@ -189,11 +192,15 @@ export type PipelineAction =
   | "retry-stage"
   | "skip-stage"
   | "override-stage"
+  | "link-task"
+  | "unlink-task"
   | "delete"
   | "close";
 
 export type PatchPipelineRequest = {
   action: PipelineAction;
+  /** Board task used by link-task and unlink-task. */
+  taskId?: string;
   /** for override-stage: the not-yet-started stage to re-configure (issue #118
       on-canvas stage controls). Only fields present are changed; a stage that
       already ran an attempt is rejected so the override always targets the future.

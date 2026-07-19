@@ -17,6 +17,7 @@ import { spawnResponseForReceipt, type SpawnResponse as AgentSpawnResponse } fro
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { projectInfoFromCwd } from "@/lib/scanner/describe";
+import { ensureTaskPipelineForAssignment } from "@/lib/pipelines/engine";
 import { attachmentPath } from "@/lib/tasks/attachments";
 import { applyAssignmentPatches, pinnedAccountId, type AssignmentPatch, type TaskCommandResult } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
@@ -54,6 +55,7 @@ interface TaskSpawnDependencies {
   resolveSpawnAccount(engine: AgentEngine, accountId: string | null): AccountContext;
   spawnAgentWithPrompt: typeof spawnAgentWithPrompt;
   resolveSpawnedTranscriptPath: typeof resolveSpawnedTranscriptPath;
+  ensureTaskPipelineForAssignment?: typeof ensureTaskPipelineForAssignment;
 }
 
 const productionDependencies: TaskSpawnDependencies = {
@@ -63,6 +65,7 @@ const productionDependencies: TaskSpawnDependencies = {
   resolveSpawnAccount: (engine, accountId) => accountManager.resolveSpawn(engine, accountId),
   spawnAgentWithPrompt,
   resolveSpawnedTranscriptPath,
+  ensureTaskPipelineForAssignment,
 };
 
 function cwdFromBody(value: unknown): { cwd?: string; error?: string; status?: number } {
@@ -294,6 +297,19 @@ async function postTaskSpawn(
       return NextResponse.json(taskSpawnResponse(begun.receipt, task, { ...patch, state: "spawning" }, {
         error: error instanceof Error ? error.message : "task assignment write failed",
       }), { status: 202 });
+    }
+  }
+
+  if (dependencies.ensureTaskPipelineForAssignment) {
+    const binding = await dependencies.ensureTaskPipelineForAssignment(task, {
+      repoDir: cwdResult.cwd,
+      engine,
+      model: selectedModel.model,
+      effort: reasoning.effort,
+    });
+    if (!binding.pipeline) {
+      registry.failSpawn(begun.receipt.launchId, binding.error ?? "could not bind task to a pipeline");
+      return NextResponse.json({ error: binding.error ?? "could not bind task to a pipeline" }, { status: binding.status ?? 400 });
     }
   }
 

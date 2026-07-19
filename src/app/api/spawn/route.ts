@@ -34,6 +34,7 @@ import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structured
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
+import { adoptPipelineAttemptFromSource } from "@/lib/pipelines/engine";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
@@ -58,6 +59,7 @@ interface SpawnRouteDependencies {
   assertStructuredRuntime: typeof assertDarwinStructuredRuntime;
   defer(work: () => Promise<void>): void;
   storeImages(images: readonly RuntimeImageUpload[]): StructuredImageRef[];
+  adoptPipelineAttemptFromSource?: typeof adoptPipelineAttemptFromSource;
 }
 
 class RuntimeImageStorageError extends Error {}
@@ -72,6 +74,7 @@ const productionSpawnRouteDependencies: SpawnRouteDependencies = {
   assertStructuredRuntime: assertDarwinStructuredRuntime,
   defer: (work) => after(work),
   storeImages: (images) => runtimeImageStore().putMany(images),
+  adoptPipelineAttemptFromSource,
 };
 
 interface SuggestResponse {
@@ -315,6 +318,9 @@ async function postSpawn(
         || (typeof body.reviews === "string" && Boolean(body.reviews.trim()));
     const parentSource = parent ? (bodyCarriedSelector ? "explicit" as const : "inferred-caller" as const) : null;
     const parentConversationId = parent?.conversationId ?? null;
+    const pipelineSourceConversationId = typeof body.src === "string" && body.src.trim()
+      ? parentConversationId
+      : null;
     const parentSessionKey = parent?.sessionKey ?? null;
     const parentArtifactPath = parent?.artifactPath ?? null;
     const digest = spawnRequestDigest({
@@ -387,6 +393,27 @@ async function postSpawn(
       requestDigest: digest,
     });
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
+    const adoptMaterializedAttempt = async (receipt: typeof begun.receipt, agentPath: string): Promise<void> => {
+      if (!pipelineSourceConversationId || !dependencies.adoptPipelineAttemptFromSource) return;
+      const materialized = registry.snapshot().receipts[receipt.launchId] ?? receipt;
+      try {
+        await dependencies.adoptPipelineAttemptFromSource(pipelineSourceConversationId, {
+          launchId: materialized.launchId,
+          conversationId: materialized.conversationId,
+          sessionId: materialized.key?.sessionId ?? null,
+          agentPath,
+          paneId: materialized.verifiedHost?.paneId ?? materialized.pane?.paneId ?? null,
+          startedAt: materialized.createdAt,
+        });
+      } catch (error) {
+        console.error("[spawn] pipeline attempt adoption failed", {
+          launchId: materialized.launchId,
+          conversationId: materialized.conversationId,
+          sourceConversationId: pipelineSourceConversationId,
+          error,
+        });
+      }
+    };
     const deferStructuredSpawn = (
       receipt: typeof begun.receipt,
       runtimeClient: NonNullable<ReturnType<typeof dependencies.runtimeHostClient>>,
@@ -427,6 +454,7 @@ async function postSpawn(
             });
           }
         }
+        if (response.path) await adoptMaterializedAttempt(receipt, response.path);
         if (response.path && fs.existsSync(response.path)) {
           try {
             await dependencies.publishFilesRevision?.(runtimeClient);
@@ -472,6 +500,7 @@ async function postSpawn(
           deferStructuredSpawn(receipt, runtimeClient, imageRefs);
         }
       }
+      if (receipt.artifactPath) await adoptMaterializedAttempt(receipt, receipt.artifactPath);
       const response = spawnResponseForReceipt(receipt, receipt.artifactPath, { structured, initialMessage });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
@@ -572,6 +601,7 @@ async function postSpawn(
       if (childPath) rememberHandoffChild(childPath, parentArtifactPath);
       persistHandoffLineage();
     }
+    await adoptMaterializedAttempt(settled.receipt, childPath);
     if (!await verifyTmuxHostEvidence(pane.host)) {
       agentRegistry().invalidateSpawnHost(begun.receipt.launchId, "spawn host disappeared before API response");
       const lost = agentRegistry().snapshot().receipts[begun.receipt.launchId]!;

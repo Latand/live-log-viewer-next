@@ -37,6 +37,7 @@ function hiddenPipeline(conversationId: string): Pipeline {
   return {
     id: "pipeline-hidden",
     task: "durable",
+    taskIds: [],
     project: "repo",
     repoDir: "/missing/repo",
     worktreeDir: "/missing/worktree",

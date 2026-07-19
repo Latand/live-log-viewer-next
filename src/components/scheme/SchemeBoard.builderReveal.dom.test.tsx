@@ -46,7 +46,7 @@ afterEach(() => {
 
 /* A fresh empty draft in the screen-space pipeline shelf. */
 const draft: Pipeline = {
-  id: "d1", task: "New pipeline", project: "demo", repoDir: "/r",
+  id: "d1", task: "New pipeline", taskIds: [], project: "demo", repoDir: "/r",
   worktreeDir: "/r-pipeline-d1", branch: "pipeline/new-pipeline-d1",
   baseBranch: "", baseRef: "", lastPassedCommit: "", stages: [], runs: [],
   cursor: null, state: "draft", pausedState: null, stateDetail: null,
