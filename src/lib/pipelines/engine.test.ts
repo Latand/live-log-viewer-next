@@ -1989,3 +1989,38 @@ test("closing a post-advance pending stage records the resting stage with its re
   expect(buildRun.attempts[0]).toMatchObject({ state: "pending", startedAt: null, completedAt: null, input: "planned", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
   expect(reloaded.runs.find((run) => run.stageId === "plan")!.attempts[0]!.state).toBe("passed");
 });
+
+test("closing a fail-edge target with an older terminal attempt records a fresh pending round (#353)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports, [
+    { id: "plan", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "Plan {{task}}", next: "build" },
+    { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "Build {{prev.output}}", next: "verify" },
+    { id: "verify", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "Verify {{prev.output}}", next: null, onFail: { to: "build", maxRounds: 2 } },
+  ] as never);
+  await tickPipelines([], h.ports); // provision
+  await tickPipelines([], h.ports); // spawn plan
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "planned")], h.ports); // plan → build
+  await tickPipelines([], h.ports); // spawn build
+  await tickPipelines([h.finish("/codex/stage-2.jsonl", "pass", "built v1")], h.ports); // build → verify
+  await tickPipelines([], h.ports); // spawn verify
+  h.messages.set("/codex/stage-3.jsonl", { text: "cannot pass\n\n```json\n{\"status\":\"fail\",\"findings\":[\"regression\"]}\n```", ts: Date.now() + 100_000_000 });
+  await tickPipelines([entry("/codex/stage-3.jsonl")], h.ports); // verify fails → routes to build
+
+  const before = loadPipelines()[0]!;
+  expect(before.cursor).toMatchObject({ stageId: "build", state: "pending", activatedBy: { stageId: "verify", attempt: 1, edge: "fail" } });
+  expect(before.runs.find((run) => run.stageId === "build")!.attempts).toHaveLength(1); // build attempt 2 not yet materialized
+
+  await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  const reloaded = loadPipelines()[0]!;
+  expect(reloaded.state).toBe("closed");
+  expect(reloaded.cursor).toBeNull();
+  const buildRun = reloaded.runs.find((run) => run.stageId === "build")!;
+  expect(buildRun.attempts).toHaveLength(2);
+  expect(buildRun.attempts[0]!.state).toBe("passed");
+  /* The fresh round stays pending, carries the fail-edge provenance and input,
+     and has no run timestamps (it never started). */
+  expect(buildRun.attempts[1]).toMatchObject({ n: 2, state: "pending", startedAt: null, completedAt: null, activatedBy: { stageId: "verify", attempt: 1, edge: "fail" } });
+  expect(buildRun.attempts[1]!.input).toContain("regression");
+  expect(reloaded.runs.find((run) => run.stageId === "verify")!.attempts[0]!.state).toBe("failed");
+});

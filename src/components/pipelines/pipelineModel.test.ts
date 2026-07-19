@@ -415,6 +415,25 @@ describe("pipelineStagePosition (#353)", () => {
     test("closed on a skipped stage keeps that stage", () => {
       expect(pipelineStagePosition(closed({ n: 1, state: "skipped", completedAt: "2026-01-01T00:00:02Z" } as never))).toEqual({ k: 2, n: 3 });
     });
+    test("closed on a fail-edge target keeps the target stage", () => {
+      /* verify failed most recently, and the fail edge queued a fresh pending
+         round on build; the live attempt wins, so the header reads 2/3. */
+      const p = pipeline({
+        stages,
+        state: "closed",
+        cursor: null,
+        closedAt: "2026-01-01T00:00:05Z",
+        runs: [
+          { stageId: "plan", attempts: [{ n: 1, state: "passed", completedAt: "2026-01-01T00:00:01Z" } as never] },
+          { stageId: "build", attempts: [
+            { n: 1, state: "passed", completedAt: "2026-01-01T00:00:02Z" } as never,
+            { n: 2, state: "pending", activatedBy: { stageId: "verify", attempt: 1, edge: "fail" } } as never,
+          ] },
+          { stageId: "verify", attempts: [{ n: 1, state: "failed", completedAt: "2026-01-01T00:00:04Z" } as never] },
+        ],
+      });
+      expect(pipelineStagePosition(p)).toEqual({ k: 2, n: 3 });
+    });
   });
 });
 

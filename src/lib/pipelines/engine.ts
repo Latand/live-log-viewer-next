@@ -297,6 +297,9 @@ export function defaultPipelinePorts(): PipelinePorts {
 
 const spawnsThisProcess = new Set<string>();
 const TERMINAL_STATES = new Set<Pipeline["state"]>(["completed", "closed"]);
+/** Attempt states that end a round; a pending cursor over one of these queues a
+    fresh attempt on the next tick (tickRunStage/tickReviewStage). */
+const TERMINAL_ATTEMPT_STATES = new Set<PipelineStageAttempt["state"]>(["passed", "failed", "needs_decision", "skipped"]);
 
 
 function attemptKey(pipeline: Pipeline, stage: PipelineStage, attempt: PipelineStageAttempt): string {
@@ -1556,13 +1559,17 @@ export async function patchPipeline(
         return { pipeline };
       }
       if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
-      /* A cursor can rest at state pending before its attempt materializes — the
-         initial stage right after provisioning, or the next stage in the window
-         after an advance and before the next tick. Record that resting stage as a
-         truthful pending attempt so the cursorless projection keeps the k/n
-         position once the cursor clears. The attempt inherits the cursor's durable
-         relay record and carries no run timestamps (it never started). */
-      if (stage && !attempt) newAttempt(pipeline, stage);
+      /* A cursor can rest at state pending before its round's attempt
+         materializes: the initial stage right after provisioning, the next stage
+         in the window after an advance, or a fail-edge target whose latest attempt
+         is an older terminal round. Record that resting round as a truthful pending
+         attempt so the cursorless projection keeps the k/n position once the cursor
+         clears — matching the attempt the next tick would create. The attempt
+         inherits the cursor's durable relay record (including fail-edge
+         activatedBy) and carries no run timestamps (it never started). */
+      if (stage && (!attempt || (pipeline.cursor?.state === "pending" && TERMINAL_ATTEMPT_STATES.has(attempt.state)))) {
+        newAttempt(pipeline, stage);
+      }
       pipeline.state = "closed";
       pipeline.cursor = null;
       pipeline.pausedState = null;
