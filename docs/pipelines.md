@@ -84,6 +84,7 @@ Pipeline stages cannot create another pipeline. The stage-kind validator and the
 
 `PATCH /api/pipelines/<id>` accepts one action:
 
+- `set-position` — persist `{ x, y }` as the exact desktop board pin for the pipeline group. Automatic anchors remain render-derived; a drag writes this smallest durable override directly on the pipeline record.
 - `pause` — hold coordinator transitions and pause an embedded review flow.
 - `resume` — return to the saved pipeline phase and resume an embedded flow.
 - `retry-stage` — restore the last passed commit and start a fresh attempt.
