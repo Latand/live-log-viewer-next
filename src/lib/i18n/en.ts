@@ -626,6 +626,13 @@ export const en = {
   "img.error": "image error",
   "img.previewAlt": "image preview {n}",
   "img.removeAria": "Remove image {n}",
+  "img.readingAria": "loading image {n}",
+  "img.retry": "Retry",
+  "img.retryAria": "Retry image {n}",
+  "img.clearAll": "Clear all",
+  "img.clearAllAria": "Remove all images",
+  "img.blockedReading": "Waiting for the image to finish loading…",
+  "img.blockedFailed": "Remove or retry the failed image to send",
   "img.deliveryHint": "attached to the message",
 
   // QuestionCard
@@ -1153,6 +1160,14 @@ export const en = {
   "pipelineMobile.openVerdict": "Open verdict for {label}, state {state}",
   "pipelineMobile.expandDock": "Expand pipeline {task}",
   "pipelineMobile.collapseDock": "Collapse pipeline {task}",
+  "pipelineMobile.summaryOpen": "Open pipelines ({n})",
+  "pipelineMobile.summaryCount": { one: "{n} pipeline", other: "{n} pipelines" },
+  "pipelineMobile.summaryActive": "{n} active",
+  "pipelineMobile.summaryAttention": "{n} need you",
+  "pipelineMobile.summaryCompleted": "{n} done",
+  "pipelineMobile.sheetTitle": "Pipelines",
+  "pipelineMobile.closeSheet": "Close pipelines",
+  "pipelineMobile.completedGroup": { one: "{n} completed", other: "{n} completed" },
 
   "wfDraft.paneAria": "Draft of a new workflow",
   "wfDraft.notStarted": "the workflow is not launched yet",
@@ -1481,6 +1496,14 @@ export const en = {
   "mobile.tapNode": "Tap a node — the conversation opens full-screen",
   "mobile.agent": "agent",
   "mobile.openMap": "Open the project map",
+  "mobile.mapLoading": "Loading the map…",
+  "mobile.marker.open": "Open {title}",
+  "mobile.marker.node": "conversation",
+  "mobile.marker.deck": "review",
+  "mobile.marker.draft": "draft agent",
+  "mobile.marker.stack": "history",
+  "mobile.marker.worker": "workers",
+  "mobile.marker.task": "task",
 
   // Board tasks
   "tasks.failed": "failed ({status})",

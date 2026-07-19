@@ -528,15 +528,21 @@ export function settlePendingDeliveries(
   return { settled, remaining };
 }
 
-/** Removes one attachment per delivered snapshot entry (matched by content,
-    not position), so attachments added while the send was in flight survive. */
+/** Removes one attachment per delivered snapshot entry, so attachments added
+    while the send was in flight survive. An id-bearing snapshot matches ONLY
+    its intake id — if that slot is already gone, a late replayed receipt must
+    settle as a no-op, never consume an identical image the user attached for
+    the next message (PR #431). Only snapshots persisted by pre-id sessions
+    (no id at all) settle by `base64+mime` content (issue #419). */
 export function attachmentsAfterDelivery(
   current: readonly PendingImage[],
   delivered: readonly PendingImage[],
 ): PendingImage[] {
   const remaining = [...current];
   for (const sent of delivered) {
-    const index = remaining.findIndex((image) => image.base64 === sent.base64 && image.mime === sent.mime);
+    const index = sent.id
+      ? remaining.findIndex((image) => image.id === sent.id)
+      : remaining.findIndex((image) => image.base64 === sent.base64 && image.mime === sent.mime);
     if (index >= 0) remaining.splice(index, 1);
   }
   return remaining;
@@ -877,17 +883,15 @@ export function TmuxComposer({
     const { settled, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);
     if (!settled.length) return;
     persistPendingDeliveries(remaining);
-    let remainingImages: readonly PendingImage[] = attachments.imagesRef.current;
     for (const settlement of settled) {
       markSettled(settlement.entry.key);
       const next = draftAfterDelivery(textRef.current, settlement.text);
       if (next !== textRef.current) setText(next);
-      remainingImages = attachmentsAfterDelivery(remainingImages, settlement.entry.images);
+      attachments.settleDelivered(settlement.entry.images);
       /* The admitted attempt consumed its key: minting a fresh one keeps the
          next message from being replay-deduped into silence server-side. */
       if (settlement.entry.key === idempotencyKey.current) idempotencyKey.current = mintIdempotencyKey();
     }
-    if (remainingImages.length !== attachments.imagesRef.current.length) attachments.replace([...remainingImages]);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef/attachments are hook-stable
   }, [displayedRuntimeReceipts]);
 
@@ -1017,7 +1021,7 @@ export function TmuxComposer({
       if (settledSendKeys.current.has(clientMessageId)) return;
       markSettled(clientMessageId);
       setText(draftAfterDelivery(textRef.current, clearedText));
-      attachments.replace(attachmentsAfterDelivery(attachments.imagesRef.current, snapshot));
+      attachments.settleDelivered(snapshot);
     };
     try {
       const json: {

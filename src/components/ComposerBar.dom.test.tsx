@@ -327,13 +327,22 @@ test("structured limit feedback is available in English and Ukrainian", () => {
 });
 
 test("attachment preview copy remains accurate for structured and tmux delivery in both locales", () => {
-  const image = { base64: "AA==", mime: "image/png", preview: "data:image/png;base64,AA==" };
+  const attachment = {
+    id: "att-copy",
+    status: "ready" as const,
+    name: "shot.png",
+    mime: "image/png",
+    preview: "data:image/png;base64,AA==",
+    base64: "AA==",
+    file: new dom.File([new Uint8Array([0])], "shot.png", { type: "image/png" }) as unknown as File,
+    ownsPreview: false,
+  };
   for (const [locale, expected] of [["en", "attached to the message"], ["uk", "додано до повідомлення"]] as const) {
     setLocale(locale);
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
-    flushSync(() => root.render(<ImagePreviewStrip images={[image]} onRemove={() => {}} />));
+    flushSync(() => root.render(<ImagePreviewStrip attachments={[attachment]} onRemove={() => {}} onRetry={() => {}} onClearAll={() => {}} />));
     expect(host.textContent).toContain(expected);
     expect(host.textContent).not.toContain("file paths");
     expect(host.textContent).not.toContain("шляхами до файлів");

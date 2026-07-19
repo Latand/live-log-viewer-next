@@ -435,6 +435,40 @@ test("attachmentsAfterDelivery removes exactly the sent snapshot and keeps later
   expect(attachmentsAfterDelivery([later], sent)).toEqual([later]);
 });
 
+test("attachmentsAfterDelivery matches by intake id first, then falls back to content (#419)", () => {
+  /* Two identical images (same base64+mime), distinct ids. A delivery for the
+     FIRST must clear that exact slot and keep the re-attached twin. */
+  const first = { id: "att-1", base64: "AAAA", mime: "image/png", preview: "p1" };
+  const twin = { id: "att-2", base64: "AAAA", mime: "image/png", preview: "p2" };
+  expect(attachmentsAfterDelivery([first, twin], [first])).toEqual([twin]);
+  expect(attachmentsAfterDelivery([twin, first], [first])).toEqual([twin]);
+
+  /* A snapshot persisted by a pre-id session (no id) still settles by content. */
+  const legacy = { base64: "AAAA", mime: "image/png", preview: "legacy" };
+  const current = { id: "att-9", base64: "AAAA", mime: "image/png", preview: "current" };
+  expect(attachmentsAfterDelivery([current], [legacy])).toEqual([]);
+
+  /* An id-bearing snapshot whose slot is gone settles as a no-op — content
+     matching here would consume an unrelated duplicate (see next test). */
+  const gone = { id: "att-removed", base64: "BBBB", mime: "image/png", preview: "gone" };
+  const readded = { id: "att-new", base64: "BBBB", mime: "image/png", preview: "readded" };
+  expect(attachmentsAfterDelivery([readded], [gone])).toEqual([readded]);
+});
+
+test("an id-bearing late receipt never content-matches a new duplicate (PR #431)", () => {
+  /* The user sends an image, removes nothing, the tray clears on admission —
+     then re-attaches the SAME image for the next message. A late replayed
+     receipt for the first send carries the old intake id; that id is gone, and
+     the receipt must NOT fall back to content and eat the new attachment. */
+  const sentSnapshot = { id: "att-old", base64: "CCCC", mime: "image/png", preview: "sent" };
+  const nextTurn = { id: "att-next", base64: "CCCC", mime: "image/png", preview: "next" };
+  expect(attachmentsAfterDelivery([nextTurn], [sentSnapshot])).toEqual([nextTurn]);
+
+  /* Only a pre-id (legacy) snapshot may settle by content. */
+  const legacySnapshot = { base64: "CCCC", mime: "image/png", preview: "legacy" };
+  expect(attachmentsAfterDelivery([nextTurn], [legacySnapshot])).toEqual([]);
+});
+
 test("settlePendingDeliveries is idempotent across repeated admission receipts", () => {
   const pending: PendingDelivery[] = [{ key: "key-a", text: "first ask", images: [] }];
   const first = settlePendingDeliveries(pending, [deliveredReceipt("key-a", "queued")]);

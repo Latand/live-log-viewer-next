@@ -153,8 +153,12 @@ export function useComposer({ initialText, persistText, submit, disabled = false
   const dictationRecording = dictation.phase === "rec";
   const dictationBusy = dictation.phase === "busy";
   const fieldsDisabled = busy || voiceSending || disabled;
+  /* An attachment still decoding, or one that failed to read, blocks Send with a
+     visible reason (issue #419): a send now would silently drop that image, so
+     the composer waits for every slot to settle (or be removed/retried). */
+  const attachmentsBlocked = attachments.hasReading || attachments.hasError;
   const canSend =
-    !fieldsDisabled && !dictationBusy && (dictationRecording || Boolean(text.trim()) || attachments.images.length > 0);
+    !fieldsDisabled && !dictationBusy && !attachmentsBlocked && (dictationRecording || Boolean(text.trim()) || attachments.images.length > 0);
 
   return {
     text,
@@ -179,6 +183,7 @@ export function useComposer({ initialText, persistText, submit, disabled = false
     dictationBusy,
     fieldsDisabled,
     canSend,
+    attachmentsBlocked,
   };
 }
 
