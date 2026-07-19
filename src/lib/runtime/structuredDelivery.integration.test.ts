@@ -24,7 +24,7 @@ afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
 function journalPort(journal: RuntimeJournal, failDelivered = false): StructuredDeliveryQueuePort {
   return {
-    effects: async () => journal.effectBatch(),
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
     transition: async (operationId, status, details) => {
       if (failDelivered && status === "delivered") throw new Error("runtime stopped before confirmation commit");
       journal.transitionOperation(operationId, status, details);
@@ -34,6 +34,31 @@ function journalPort(journal: RuntimeJournal, failDelivered = false): Structured
 
 function observableFakeHost(host: FakeEngineHost): FakeEngineHost & { onStateChange(): () => void } {
   return Object.assign(host, { onStateChange: () => () => {} });
+}
+
+function statefulObservableFakeHost(
+  initialState: HostState,
+  ledger = createFakeDeliveryLedger(),
+): {
+  host: FakeEngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+  setState(next: HostState): void;
+} {
+  let state = structuredClone(initialState);
+  const listeners = new Set<(state: HostState) => void>();
+  const host = Object.assign(new FakeEngineHost(ledger), {
+    health: async () => structuredClone(state),
+    onStateChange(listener: (next: HostState) => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  });
+  return {
+    host,
+    setState(next) {
+      state = structuredClone(next);
+      for (const listener of listeners) listener(structuredClone(state));
+    },
+  };
 }
 
 function burstyObservableHost(): {
@@ -112,6 +137,7 @@ async function waitForCondition(assertion: () => boolean): Promise<void> {
 function runtimeJournalClient(journal: RuntimeJournal): RuntimeHostClient {
   return {
     snapshot: async () => journal.snapshot(),
+    events: async (afterEventSeq) => journal.replay(afterEventSeq),
     append: async (event) => journal.append(event),
     command: async (command) => journal.executeOperation(command),
     operationStatus: async (operationId) => journal.operationResult(operationId),
@@ -286,6 +312,432 @@ test("the controller republishes a live host into a restarted runtime journal", 
   }
 });
 
+test("a queued hosted send survives restart without an adopted host through one successor turn", async () => {
+  const directory = path.join(sandbox, "host-death-queued-send-recovery");
+  let registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "45345345-3453-4453-8453-453453453453";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "host-death-account",
+    launchProfile: profile,
+    turn: { state: "busy", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-19T12:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const key = { engine: "codex" as const, sessionId };
+  const structuredHost = {
+    kind: "codex-app-server" as const,
+    endpoint: "fake:host-before-death",
+    process: null,
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    writerClaimEpoch: 0,
+    activeTurnRef: "turn:blocking",
+    pendingAttention: [],
+    activeFlags: [],
+  };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "host-death-account",
+    launchProfile: profile,
+    status: "live",
+    host: null,
+    structuredHost,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const runtimeFilename = path.join(directory, "runtime.sqlite");
+  let journal = new RuntimeJournal(runtimeFilename, { structuredHosts: true });
+  const projections: string[] = [];
+  const clientFor = (target: RuntimeJournal): RuntimeHostClient => {
+    const base = runtimeJournalClient(target);
+    return {
+      ...base,
+      append: async (event) => {
+        if (event.kind === "session-status" && typeof event.payload.host === "string") {
+          projections.push(event.payload.host);
+        }
+        return await base.append(event);
+      },
+    };
+  };
+  let client = clientFor(journal);
+  const predecessorLedger = createFakeDeliveryLedger();
+  const predecessor = statefulObservableFakeHost({
+    status: "active",
+    sessionKey: sessionId,
+    endpoint: structuredHost.endpoint,
+    pid: 45_300,
+    processStartIdentity: "fake:predecessor",
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    activeTurnRef: "turn:blocking",
+    pendingAttention: [],
+    activeFlags: [],
+    account: null,
+  }, predecessorLedger);
+  const successorLedger = createFakeDeliveryLedger();
+  const successor = statefulObservableFakeHost({
+    status: "idle",
+    sessionKey: sessionId,
+    endpoint: "fake:host-after-death",
+    pid: 45_301,
+    processStartIdentity: "fake:successor",
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+    account: null,
+  }, successorLedger);
+  const request = {
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "host-death-idempotency-key",
+    operationId: "operation-admitted-before-host-death",
+    kind: "send" as const,
+    policy: "queue" as const,
+    turnId: null,
+    text: "deliver this durable queue head once",
+    hasImages: false,
+  };
+  let recoveryCalls = 0;
+  const recover = async (recoveryRequest: { conversationId?: string | null }) => {
+    recoveryCalls += 1;
+    expect(recoveryRequest.conversationId).toBe(conversation.id);
+    expect(projections.at(-1)).toBe("dead");
+    expect(journal.operationResult(request.operationId)?.receipt).toMatchObject({
+      operationId: request.operationId,
+      idempotencyKey: request.clientMessageId,
+      status: "queued",
+    });
+    registry.setStructuredHost(key, {
+      ...structuredHost,
+      endpoint: "fake:host-after-death",
+      activeTurnRef: null,
+    }, "idle");
+    await publishStructuredDeliveryHost({ key, host: successor.host });
+    return {
+      target: null,
+      path: artifactPath,
+      conversationId: conversation.id,
+      spawned: true,
+    } as const;
+  };
+
+  try {
+    await bindStructuredDeliveryQueue([{ key, host: predecessor.host }], { registry, client, recover });
+    const admitted = await enqueueStructuredMessage(request, {
+      enabled: () => true,
+      client: () => client,
+      registry: () => registry,
+      kick: () => {},
+    });
+    expect(admitted).toMatchObject({
+      ok: true,
+      structured: true,
+      outcome: "queued",
+      operationId: request.operationId,
+      receipt: {
+        operationId: request.operationId,
+        idempotencyKey: request.clientMessageId,
+        status: "queued",
+      },
+    });
+    expect(predecessorLedger.writes).toEqual([]);
+
+    registry.setStructuredHost(key, {
+      ...structuredHost,
+      endpoint: "fake:released-predecessor",
+      activeTurnRef: null,
+    }, "dead");
+    await client.append({
+      scope: { type: "session", id: conversation.id },
+      kind: "session-status",
+      payload: {
+        conversationId: conversation.id,
+        sessionKey: key,
+        hostKind: "codex-app-server",
+        host: "dead",
+        turn: "unknown",
+        provenance: "structured",
+        artifactPath,
+        capabilities: { steer: true, structuredAttention: true },
+      },
+    });
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    registry = new AgentRegistry(registry.filename);
+    journal = new RuntimeJournal(runtimeFilename, { structuredHosts: true });
+    client = clientFor(journal);
+
+    await bindStructuredDeliveryQueue([], { registry, client, recover });
+
+    await waitForCondition(() => journal.operationResult(request.operationId)?.receipt.status === "delivered");
+    expect(recoveryCalls).toBe(1);
+    expect(projections[0]).toBe("hosted");
+    expect(projections).toContain("dead");
+    expect(projections.at(-1)).toBe("hosted");
+    expect(predecessorLedger.writes).toEqual([]);
+    expect(successorLedger.writes).toEqual([expect.objectContaining({
+      id: request.operationId,
+      text: request.text,
+      expectedTurnId: request.turnId,
+    })]);
+    expect(journal.operationResult(request.operationId)?.receipt).toMatchObject({
+      operationId: request.operationId,
+      idempotencyKey: request.clientMessageId,
+      status: "delivered",
+      turnId: `turn:${request.operationId}`,
+    });
+    expect(registry.snapshot().deliveryOperationOwners[request.operationId]).toMatchObject({
+      conversationId: conversation.id,
+      terminalState: "delivered",
+    });
+
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    const replayRegistry = new AgentRegistry(registry.filename);
+    journal = new RuntimeJournal(runtimeFilename, { structuredHosts: true });
+    client = clientFor(journal);
+    await bindStructuredDeliveryQueue([{ key, host: successor.host }], {
+      registry: replayRegistry,
+      client,
+      recover,
+    });
+    await kickStructuredDeliveryQueue();
+    expect(await enqueueStructuredMessage(request, {
+      enabled: () => true,
+      client: () => client,
+      registry: () => replayRegistry,
+      kick: () => {},
+    })).toMatchObject({
+      ok: true,
+      structured: true,
+      outcome: "delivered",
+      operationId: request.operationId,
+      receipt: { status: "delivered" },
+    });
+    expect(recoveryCalls).toBe(1);
+    expect(successorLedger.writes).toHaveLength(1);
+    expect(journal.effectBatch()).toEqual([]);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
+test("a declined startup recovery fails the absent-host queue head for explicit retry", async () => {
+  const directory = path.join(sandbox, "declined-startup-recovery");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "45345345-3453-4453-8453-453453453454";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "declined-recovery-account",
+    launchProfile: profile,
+    turn: { state: "busy", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-19T12:01:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "declined-recovery-account",
+    launchProfile: profile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:declined-recovery",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const operationId = "operation-declined-startup-recovery";
+  const idempotencyKey = "declined-startup-recovery-key";
+  const text = "keep the declined recovery retryable";
+  const held = registry.holdDelivery(
+    conversation.id,
+    text,
+    idempotencyKey,
+    "text",
+    [],
+    structuredContentDigest({ text, images: [] }),
+    { operationId, kind: "send", policy: "queue", turnId: null },
+  );
+  registry.beginDeliveryAttempt(held.id, held.generationId!);
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      provenance: "structured",
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId,
+    idempotencyKey,
+    conversationId: conversation.id,
+    text,
+    policy: "queue",
+  });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "dead",
+      turn: "unknown",
+      provenance: "structured",
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  let recoveryCalls = 0;
+
+  try {
+    await bindStructuredDeliveryQueue([], {
+      registry,
+      client: runtimeJournalClient(journal),
+      recover: async (request) => {
+        recoveryCalls += 1;
+        expect(request).toMatchObject({ path: artifactPath, conversationId: conversation.id });
+        return { target: null, path: artifactPath, conversationId: conversation.id, spawned: false };
+      },
+    });
+
+    expect(recoveryCalls).toBe(1);
+    expect(journal.operationResult(operationId)?.receipt).toMatchObject({
+      operationId,
+      idempotencyKey,
+      status: "failed",
+      reason: "structured host recovery did not start; retry the operation",
+    });
+    expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "failed",
+      error: "structured host recovery did not start; retry the operation",
+    });
+    journal.append({
+      scope: { type: "session", id: conversation.id },
+      kind: "session-status",
+      payload: {
+        conversationId: conversation.id,
+        sessionKey: key,
+        hostKind: "codex-app-server",
+        host: "hosted",
+        turn: "idle",
+        provenance: "structured",
+        artifactPath,
+        capabilities: { steer: true, structuredAttention: true },
+      },
+    });
+    const retry = journal.retryOperation(operationId, "declined-startup-recovery-retry-key");
+    expect(retry.receipt).toMatchObject({
+      status: "queued",
+      retryOfOperationId: operationId,
+    });
+    expect(journal.effectBatch()).toHaveLength(1);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
+test("a failed dead-host recovery terminalizes the durable head for explicit retry", async () => {
+  const filename = path.join(sandbox, "failed-dead-host-recovery.sqlite");
+  const journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: "conversation-recovery-failure" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-recovery-failure",
+      sessionKey: { engine: "codex", sessionId: "recovery-failure-session" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/recovery-failure.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "operation-recovery-failure",
+    idempotencyKey: "recovery-failure-key",
+    conversationId: "conversation-recovery-failure",
+    text: "keep this retryable",
+    policy: "queue",
+  });
+  const deadHost = new FakeEngineHost();
+  deadHost.health = async () => ({
+    status: "dead",
+    sessionKey: "recovery-failure-session",
+    endpoint: "fake:dead-host",
+    pid: null,
+    processStartIdentity: null,
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+    account: null,
+  });
+  const queue = new StructuredDeliveryQueue(
+    journalPort(journal),
+    () => deadHost,
+    undefined,
+    undefined,
+    async () => { throw new Error("successor admission unavailable"); },
+  );
+
+  try {
+    await queue.drain();
+    expect(journal.operationResult("operation-recovery-failure")?.receipt).toMatchObject({
+      operationId: "operation-recovery-failure",
+      idempotencyKey: "recovery-failure-key",
+      status: "failed",
+      reason: "structured host recovery failed: successor admission unavailable",
+    });
+    const retry = journal.retryOperation("operation-recovery-failure", "recovery-failure-retry-key");
+    expect(retry.receipt).toMatchObject({
+      status: "queued",
+      retryOfOperationId: "operation-recovery-failure",
+    });
+    expect(journal.effectBatch()).toHaveLength(1);
+  } finally {
+    journal.close();
+  }
+});
+
 test("a failed route kick retries queued controls and messages without a host-state notification", async () => {
   const directory = path.join(sandbox, "controller-route-kick-retry");
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -449,7 +901,7 @@ test("a failed route kick retries queued controls and messages without a host-st
   }
 });
 
-test("a kill cancels an automatic delivery retry without falsifying either receipt", async () => {
+test("a kill cancels an automatic delivery retry and fails the send retryably", async () => {
   const directory = path.join(sandbox, "controller-kill-cancels-auto-retry");
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const sessionId = "e40306b9-a4df-47b3-bf6e-4570c44259c7";
@@ -463,7 +915,7 @@ test("a kill cancels an automatic delivery retry without falsifying either recei
     turn: { state: "busy", source: "assistant", terminalAt: null },
     observedAt: "2026-07-14T12:00:00.000Z",
   }]);
-  const conversationId = Object.keys(registry.snapshot().conversations)[0]!;
+  const conversationId = Object.keys(registry.snapshot().conversations)[0]! as `conversation_${string}`;
   const key = { engine: "codex" as const, sessionId };
   registry.upsert({
     key,
@@ -528,9 +980,29 @@ test("a kill cancels an automatic delivery retry without falsifying either recei
     },
     onStateChange: () => () => {},
   } satisfies EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+  const successorLedger = createFakeDeliveryLedger();
+  const successor = observableFakeHost(new FakeEngineHost(successorLedger));
+  let recoveryCalls = 0;
+  const recover = async (request: { conversationId?: string | null }) => {
+    recoveryCalls += 1;
+    expect(request.conversationId).toBe(conversationId);
+    registry.setStructuredHost(key, {
+      kind: "codex-app-server",
+      endpoint: "fake:revived-after-kill",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    }, "idle");
+    await publishStructuredDeliveryHost({ key, host: successor });
+    return { target: null, path: artifactPath, conversationId, spawned: true } as const;
+  };
 
   try {
-    await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+    await bindStructuredDeliveryQueue([{ key, host }], { registry, client, recover });
     const sendOperationId = "operation-send-before-kill";
     journal.executeOperation({
       kind: "send",
@@ -565,6 +1037,8 @@ test("a kill cancels an automatic delivery retry without falsifying either recei
 
     expect(releaseCount).toBe(1);
     expect(sendCount).toBe(2);
+    expect(recoveryCalls).toBe(0);
+    expect(successorLedger.writes).toEqual([]);
     expect(effectBatchCalls).toBe(effectBatchCallsAfterKill);
     expect(journal.operationResult(killOperationId)?.receipt).toMatchObject({
       kind: "kill",
@@ -573,11 +1047,11 @@ test("a kill cancels an automatic delivery retry without falsifying either recei
     });
     expect(journal.operationResult(sendOperationId)?.receipt).toMatchObject({
       kind: "send",
-      status: "queued",
-      reason: "delivery-auto-retry",
+      status: "failed",
+      reason: "structured host was intentionally terminated; retry the operation",
     });
     expect(journal.effectBatch(100, ["runtime.kill"], 0)).toEqual([]);
-    expect(journal.effectBatch(100, ["runtime.send"], 0)).toHaveLength(1);
+    expect(journal.effectBatch(100, ["runtime.send"], 0)).toEqual([]);
     expect(journal.snapshot().sessions.find((session) => session.conversationId === conversationId)).toMatchObject({
       sessionKey: key,
       host: "dead",
@@ -860,6 +1334,288 @@ test("ledger recovery drains every entry beyond one effect batch", async () => {
   expect(ledger.writes.map((entry) => entry.id)).toEqual(
     Array.from({ length: 101 }, (_, index) => `operation-${index}`),
   );
+  expect(journal.effectBatch()).toEqual([]);
+  journal.close();
+});
+
+test("a successful kill beyond one effect page fences older sends through compaction and repeated restart", async () => {
+  const filename = path.join(sandbox, "durable-kill-boundary.sqlite");
+  const conversationId = "conversation-durable-kill";
+  const sessionKey = { engine: "codex" as const, sessionId: "session-durable-kill" };
+  let journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/durable-kill.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const sendOperationIds = Array.from({ length: 101 }, (_, index) => `operation-stale-${index}`);
+  for (const [index, operationId] of sendOperationIds.entries()) {
+    journal.executeOperation({
+      kind: "send",
+      operationId,
+      idempotencyKey: `message-stale-${index}`,
+      conversationId,
+      text: `stale message ${index}`,
+      policy: "queue",
+    });
+  }
+  for (let index = 0; index < 40; index += 1) {
+    journal.append({
+      scope: { type: "system", id: "durable-kill-history-padding" },
+      kind: "test.padding",
+      producer: { kind: "integration-test", eventKey: `durable-kill-padding:${index}` },
+      payload: { index },
+    });
+  }
+  const killOperationId = "operation-durable-kill";
+  journal.executeOperation({
+    kind: "kill",
+    operationId: killOperationId,
+    idempotencyKey: killOperationId,
+    conversationId,
+    sessionKey,
+  });
+
+  const ledger = createFakeDeliveryLedger();
+  const host = new FakeEngineHost(ledger);
+  let terminated = false;
+  let recoveryCalls = 0;
+  let crashesRemaining = 2;
+  const queue = () => new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transition: async (operationId, status, details) => {
+      journal.transitionOperation(operationId, status, details);
+      if (status === "failed" && operationId.startsWith("operation-stale-") && crashesRemaining > 0) {
+        crashesRemaining -= 1;
+        throw new Error("runtime crashed after kill settlement");
+      }
+    },
+  } as StructuredDeliveryQueuePort, () => terminated ? null : host, async () => {
+    terminated = true;
+    return true;
+  }, () => {}, async () => {
+    recoveryCalls += 1;
+    return false;
+  });
+
+  await expect(queue().drain()).rejects.toThrow("runtime crashed after kill settlement");
+  expect(journal.operationResult(killOperationId)?.receipt.status).toBe("delivered");
+  journal.compact(2);
+  journal.close();
+
+  journal = new RuntimeJournal(filename, { structuredHosts: true });
+  await expect(queue().drain()).rejects.toThrow("runtime crashed after kill settlement");
+  journal.close();
+
+  journal = new RuntimeJournal(filename, { structuredHosts: true });
+  await queue().drain();
+
+  expect(recoveryCalls).toBe(0);
+  expect(ledger.writes).toEqual([]);
+  for (const operationId of sendOperationIds) {
+    expect(journal.operationResult(operationId)?.receipt).toMatchObject({
+      status: "failed",
+      reason: "structured host was intentionally terminated; retry the operation",
+    });
+  }
+  expect(journal.effectBatch()).toEqual([]);
+  journal.close();
+});
+
+test("a retry admitted during kill drain starts one successor turn after compaction and restart", async () => {
+  const filename = path.join(sandbox, "post-kill-retry.sqlite");
+  const conversationId = "conversation-post-kill-retry";
+  const sessionKey = { engine: "codex" as const, sessionId: "session-post-kill-retry" };
+  let journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/post-kill-retry.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const originalOperationId = "operation-before-kill";
+  journal.executeOperation({
+    kind: "send",
+    operationId: originalOperationId,
+    idempotencyKey: "message-before-kill",
+    conversationId,
+    text: "deliver on the successor",
+    policy: "queue",
+  });
+  const killOperationId = "operation-kill-before-retry";
+  journal.executeOperation({
+    kind: "kill",
+    operationId: killOperationId,
+    idempotencyKey: killOperationId,
+    conversationId,
+    sessionKey,
+  });
+
+  const staleLedger = createFakeDeliveryLedger();
+  const successorLedger = createFakeDeliveryLedger();
+  const successorHost = new FakeEngineHost(successorLedger);
+  let currentHost: EngineHost | null = new FakeEngineHost(staleLedger);
+  let recoveryCalls = 0;
+  let crashAfterStaleFence = true;
+  let staleFenceCommitted!: () => void;
+  let releaseCrash!: () => void;
+  const staleFence = new Promise<void>((resolve) => { staleFenceCommitted = resolve; });
+  const crashGate = new Promise<void>((resolve) => { releaseCrash = resolve; });
+  const queue = () => new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transition: async (operationId, status, details) => {
+      journal.transitionOperation(operationId, status, details);
+      if (crashAfterStaleFence && operationId === originalOperationId && status === "failed") {
+        staleFenceCommitted();
+        await crashGate;
+        throw new Error("runtime crashed with a retry kick pending");
+      }
+    },
+  }, () => currentHost, async () => {
+    currentHost = null;
+    return true;
+  }, () => {}, async () => {
+    recoveryCalls += 1;
+    return false;
+  });
+
+  const activeQueue = queue();
+  const drain = activeQueue.drain();
+  await staleFence;
+  currentHost = successorHost;
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/post-kill-retry.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const replacement = journal.retryOperation(originalOperationId, "message-after-kill");
+  const replayed = journal.retryOperation(originalOperationId, "message-after-kill-replay");
+  const kicked = activeQueue.drain();
+  expect(replayed).toMatchObject({ operationId: replacement.operationId, replayed: true });
+  releaseCrash();
+  await expect(drain).rejects.toThrow("runtime crashed with a retry kick pending");
+  await expect(kicked).rejects.toThrow("runtime crashed with a retry kick pending");
+  journal.compact(2);
+  journal.close();
+
+  crashAfterStaleFence = false;
+  journal = new RuntimeJournal(filename, { structuredHosts: true });
+  const restartedQueue = queue();
+  await restartedQueue.drain();
+  await restartedQueue.drain();
+
+  expect(recoveryCalls).toBe(0);
+  expect(staleLedger.writes).toEqual([]);
+  expect(successorLedger.writes).toEqual([
+    expect.objectContaining({ id: replacement.operationId, text: "deliver on the successor" }),
+  ]);
+  expect(journal.operationResult(replacement.operationId)?.receipt).toMatchObject({
+    status: "delivered",
+    turnId: `turn:${replacement.operationId}`,
+    retryOfOperationId: originalOperationId,
+  });
+  expect(journal.effectBatch()).toEqual([]);
+  journal.close();
+});
+
+test("a failed kill creates no durable boundary across compaction and restart", async () => {
+  const filename = path.join(sandbox, "failed-kill-boundary.sqlite");
+  const conversationId = "conversation-failed-kill-boundary";
+  const sessionKey = { engine: "codex" as const, sessionId: "session-failed-kill-boundary" };
+  let journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/failed-kill-boundary.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const sendOperationId = "operation-survives-failed-kill";
+  journal.executeOperation({
+    kind: "send",
+    operationId: sendOperationId,
+    idempotencyKey: sendOperationId,
+    conversationId,
+    text: "deliver after failed kill",
+    policy: "queue",
+  });
+  const killOperationId = "operation-failed-kill-boundary";
+  journal.executeOperation({
+    kind: "kill",
+    operationId: killOperationId,
+    idempotencyKey: killOperationId,
+    conversationId,
+    sessionKey,
+  });
+
+  const ledger = createFakeDeliveryLedger();
+  const host = new FakeEngineHost(ledger);
+  let crashAfterFailedKill = true;
+  let recoveryCalls = 0;
+  const queue = () => new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transition: async (operationId, status, details) => {
+      journal.transitionOperation(operationId, status, details);
+      if (crashAfterFailedKill && operationId === killOperationId && status === "failed") {
+        throw new Error("runtime crashed after failed kill");
+      }
+    },
+  }, () => host, async () => false, () => {}, async () => {
+    recoveryCalls += 1;
+    return false;
+  });
+
+  await expect(queue().drain()).rejects.toThrow();
+  expect(journal.operationResult(killOperationId)?.receipt.status).toBe("failed");
+  expect(journal.operationResult(sendOperationId)?.receipt.status).toBe("queued");
+  journal.compact(2);
+  journal.close();
+
+  crashAfterFailedKill = false;
+  journal = new RuntimeJournal(filename, { structuredHosts: true });
+  await queue().drain();
+
+  expect(recoveryCalls).toBe(0);
+  expect(ledger.writes).toEqual([
+    expect.objectContaining({ id: sendOperationId, text: "deliver after failed kill" }),
+  ]);
+  expect(journal.operationResult(sendOperationId)?.receipt).toMatchObject({
+    status: "delivered",
+    turnId: `turn:${sendOperationId}`,
+  });
   expect(journal.effectBatch()).toEqual([]);
   journal.close();
 });
