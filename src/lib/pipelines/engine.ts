@@ -49,7 +49,7 @@ import type {
   PipelineStageInput,
   PipelineStageAttempt,
 } from "./types";
-import { parseStageVerdict } from "./verdict";
+import { parseStageVerdict, type ParsedStageVerdict } from "./verdict";
 
 export type PipelineStageSpawn = {
   launchId: string;
@@ -501,7 +501,7 @@ function failEdgeRoundsUsed(pipeline: Pipeline, stage: PipelineStage): number {
 /** The `{{prev.output}}` payload a fail edge forwards: the failed attempt's
     narrative output plus its structured findings, so the loop target sees what
     to fix without re-deriving it from transcripts. */
-function failEdgeInput(parsed: NonNullable<ReturnType<typeof parseStageVerdict>>): string | null {
+function failEdgeInput(parsed: ParsedStageVerdict): string | null {
   const findings = parsed.verdict.findings?.length
     ? `Fail verdict findings:\n${parsed.verdict.findings.map((finding) => `- ${finding}`).join("\n")}`
     : "";

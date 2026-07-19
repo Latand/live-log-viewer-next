@@ -985,7 +985,7 @@ test("a contradictory durable pass verdict parks with the parser failure reason"
   const current = loadPipelines()[0]!;
   expect(current.state).toBe("needs_decision");
   expect(current.stateDetail).toBe(reason);
-  expect(current.cursor).toEqual({ stageId: "plan", state: "running" });
+  expect(current.cursor).toEqual({ stageId: "plan", state: "running", input: null, activatedBy: null });
   expect(current.lastPassedCommit).toBe(ORIGIN_MAIN_SHA);
   expect(current.runs[0]!.attempts[0]).toMatchObject({
     state: "needs_decision",
@@ -1267,6 +1267,8 @@ test("retry and skip recover a completed pane-hosted semantic contradiction", as
     expect(recovered.pipeline?.cursor).toEqual({
       stageId: action === "retry-stage" ? "plan" : "build",
       state: "pending",
+      input: action === "retry-stage" ? null : "Skipped by operator.",
+      activatedBy: action === "retry-stage" ? null : { stageId: "plan", attempt: 1, edge: "pass" },
     });
   }
 });
@@ -1672,6 +1674,39 @@ const CYCLE_STAGES = [
   { id: "verify", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Verify {{prev.output}}", next: null, onFail: { to: "build", maxRounds: 1 } },
 ] as const;
 
+test("a rejected structured fail verdict parks before fail-edge traversal (#429)", async () => {
+  const h = harness();
+  await create(h.ports, CYCLE_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "built")], h.ports);
+  await tickPipelines([], h.ports);
+  h.messages.set("/codex/stage-2.jsonl", {
+    text: "VERDICT: APPROVE\n\n```json\n{\"status\":\"fail\",\"findings\":[\"broken test\"]}\n```",
+    ts: Date.now() + 100_000_000,
+  });
+
+  await tickPipelines([entry("/codex/stage-2.jsonl")], h.ports);
+
+  const reason = 'contradictory stage verdict: prose marker "APPROVE" disagrees with JSON status "fail"';
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("needs_decision");
+  expect(current.stateDetail).toBe(reason);
+  expect(current.cursor).toEqual({
+    stageId: "verify",
+    state: "running",
+    input: "built",
+    activatedBy: { stageId: "build", attempt: 1, edge: "pass" },
+  });
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    output: "VERDICT: APPROVE",
+    verdict: null,
+    error: reason,
+  });
+});
+
 test("a completed stage's output is persisted once and relayed exactly once (#353)", async () => {
   const h = harness();
   const prompts: string[] = [];
@@ -1708,7 +1743,7 @@ test("a completed stage's output is persisted once and relayed exactly once (#35
   expect(h.calls.filter((call) => call.startsWith("spawn:")).length).toBe(2);
 });
 
-test("a fail verdict traverses the fail edge, loops once, then parks on budget exhaustion (#353)", async () => {
+test("an accepted fail verdict traverses the fail edge, loops once, then parks on budget exhaustion (#353)", async () => {
   const h = harness();
   const prompts: string[] = [];
   const baseSpawn = h.ports.spawnAgent;
