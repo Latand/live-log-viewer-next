@@ -1992,6 +1992,60 @@ test("issue 367: a new host epoch retires registering placeholders abandoned by 
   restarted.close();
 });
 
+for (const order of ["reconfigure-then-kill", "kill-then-reconfigure"] as const) {
+  test(`a delivered kill durably fences a same-generation reconfigure admitted ${order}`, () => {
+    const dir = sandbox(`kill-reconfigure-${order}`);
+    const filename = path.join(dir, "events.sqlite");
+    const journal = new RuntimeJournal(filename, { structuredHosts: true, now: () => 100 });
+    journal.append({
+      scope: runtimeScope("session", "conv-kill-reconfigure"),
+      kind: "session-status",
+      payload: {
+        conversationId: "conv-kill-reconfigure",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+        hostKind: "codex-app-server",
+        host: "hosted",
+        turn: "idle",
+        provenance: "structured",
+        capabilities: { steer: true, structuredAttention: true },
+      },
+    });
+    const reconfigure = {
+      kind: "reconfigure" as const,
+      operationId: "reconfigure-one",
+      idempotencyKey: "reconfigure-one",
+      conversationId: "conv-kill-reconfigure",
+      sessionKey: { engine: "codex" as const, sessionId: "thread-one" },
+      model: "gpt-5.6-sol",
+      effort: "high",
+      fast: false,
+    };
+    const kill = {
+      kind: "kill" as const,
+      operationId: "kill-one",
+      idempotencyKey: "kill-one",
+      conversationId: "conv-kill-reconfigure",
+      sessionKey: { engine: "codex" as const, sessionId: "thread-one" },
+    };
+    for (const command of order === "reconfigure-then-kill" ? [reconfigure, kill] : [kill, reconfigure]) {
+      journal.executeOperation(command);
+    }
+
+    journal.transitionOperation(kill.operationId, "delivering");
+    journal.transitionOperation(kill.operationId, "delivered");
+    journal.close();
+
+    const reopened = new RuntimeJournal(filename, { structuredHosts: true, now: () => 200 });
+    expect(reopened.operationResult(reconfigure.operationId)?.receipt).toMatchObject({
+      status: "failed",
+      reason: "conversation-killed",
+    });
+    expect(reopened.effectBatch(100, ["runtime.reconfigure"])).toEqual([]);
+    expect(reopened.snapshot().sessions[0]).toMatchObject({ host: "dead", pendingReconfigure: null });
+    reopened.close();
+  });
+}
+
 test("issue 367: a delivered structured kill converges host and turn projection with its receipt", () => {
   const dir = sandbox("kill-terminal-projection");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100, structuredHosts: true });

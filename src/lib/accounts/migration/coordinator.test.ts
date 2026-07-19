@@ -2882,6 +2882,51 @@ describe("durable account migration coordinator", () => {
     expect(latest.migration).toMatchObject({ targetId: "b", phase: "verifying" });
   });
 
+  test("a newer reconfigure admitted during publication fences the stale successor", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source-publication-fence.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source-publication-fence.jsonl")!;
+    store.requestConversationReseat(conversation.id, "b");
+    let current = true;
+    let publicationStarted!: () => void;
+    let releasePublication!: () => void;
+    const publicationGate = new Promise<void>((resolve) => { releasePublication = resolve; });
+    const publishing = new Promise<void>((resolve) => { publicationStarted = resolve; });
+    const cleaned: string[] = [];
+    const provider: SuccessorProviderPort = {
+      virtualSource: true,
+      async create(input) {
+        return {
+          operationId: input.operationId,
+          nativeId: "publication-fenced-b",
+          path: "/publication-fenced-b.jsonl",
+          continuityPaths: [],
+          historyHash: "publication-fenced-b",
+          host: { kind: "codex-app-server", identity: "publication-fenced-b", epoch: 1, verifiedAt: "2026-07-19T12:00:00.000Z" },
+        };
+      },
+      async verify() {},
+      async publishHost() {
+        publicationStarted();
+        await publicationGate;
+      },
+      async cleanup(receipt) { cleaned.push(receipt.nativeId); },
+    };
+
+    const staleAdvance = advanceConversationMigration(conversation.id, store, provider, {
+      ownsOperation: async () => current,
+    });
+    await publishing;
+    current = false;
+    releasePublication();
+    const latest = await staleAdvance;
+
+    expect(latest.generations).toHaveLength(1);
+    expect(latest.generations.at(-1)?.id).not.toBe("publication-fenced-b");
+    expect(latest.migration).toMatchObject({ targetId: "b", phase: "verifying" });
+    expect(cleaned).toEqual(["publication-fenced-b"]);
+  });
+
   test("stopping during successor startup fences the stale completion and cleans the discarded successor", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);

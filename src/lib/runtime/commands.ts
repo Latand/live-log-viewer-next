@@ -48,6 +48,15 @@ function optionalNullableId(value: unknown, name: string): string | null | undef
   return requiredId(value, name);
 }
 
+function runtimeSessionKey(value: unknown): { engine: "codex" | "claude"; sessionId: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("sessionKey is invalid");
+  const candidate = value as Record<string, unknown>;
+  const engine = candidate.engine === "codex" || candidate.engine === "claude" ? candidate.engine : null;
+  const sessionId = typeof candidate.sessionId === "string" ? candidate.sessionId.trim() : "";
+  if (!engine || !sessionId || sessionId.includes(":") || /\s/.test(sessionId)) throw new Error("sessionKey is invalid");
+  return { engine, sessionId };
+}
+
 function idempotency(body: Record<string, unknown>, operationId: string | undefined): string {
   return requiredId(body.idempotencyKey ?? operationId, "idempotencyKey");
 }
@@ -96,18 +105,12 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
   }
 
   if (kind === "kill") {
-    const key = body.sessionKey;
-    if (!key || typeof key !== "object" || Array.isArray(key)) throw new Error("sessionKey is invalid");
-    const candidate = key as Record<string, unknown>;
-    const engine = candidate.engine === "codex" || candidate.engine === "claude" ? candidate.engine : null;
-    const sessionId = typeof candidate.sessionId === "string" ? candidate.sessionId.trim() : "";
-    if (!engine || !sessionId || sessionId.includes(":") || /\s/.test(sessionId)) throw new Error("sessionKey is invalid");
     return {
       kind,
       conversationId,
       ...(operationId ? { operationId } : {}),
       idempotencyKey,
-      sessionKey: { engine, sessionId },
+      sessionKey: runtimeSessionKey(body.sessionKey),
     };
   }
 
@@ -130,6 +133,7 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
     if (!effort || effort.length > 32 || !/^[a-z]+$/.test(effort)) throw new Error("reconfigure effort is invalid");
     if (body.fast !== null && typeof body.fast !== "boolean") throw new Error("reconfigure speed is invalid");
     const accountId = optionalId(body.accountId, "accountId");
+    const sessionKey = body.sessionKey === undefined ? undefined : runtimeSessionKey(body.sessionKey);
     const previous = body.previousProfile;
     if (previous !== undefined && (!previous || typeof previous !== "object" || Array.isArray(previous))) {
       throw new Error("reconfigure previous profile is invalid");
@@ -146,6 +150,7 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
       conversationId,
       ...(operationId ? { operationId } : {}),
       idempotencyKey,
+      ...(sessionKey ? { sessionKey } : {}),
       model,
       effort,
       fast: body.fast,

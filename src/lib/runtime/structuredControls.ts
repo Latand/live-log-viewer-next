@@ -129,6 +129,7 @@ export async function dispatchStructuredControl(
             operationId,
             idempotencyKey: operationId,
             conversationId: conversation.id,
+            sessionKey: { engine: conversation.engine, sessionId: generation.id },
             ...reconfiguration!.value!,
             previousProfile: {
               model: generation.launchProfile.model,

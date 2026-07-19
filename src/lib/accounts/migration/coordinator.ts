@@ -476,17 +476,25 @@ export async function advanceConversationMigration(
     if (!source) throw new Error("conversation has no source generation");
     if (!receipt || receipt.operationId !== migration.operationId) throw new Error("persisted successor receipt operation does not match");
     await successorProvider.verify(receipt, { engine: conversation.engine, targetAccountId: migration.targetId, launchProfile: source.launchProfile });
-    const publishOwner = registry.conversation(conversation.id);
-    const publishMigration = publishOwner?.migration;
-    const ownsPublication = (options.ownsOperation ? await options.ownsOperation() : true)
-      && publishMigration?.phase === "verifying"
-      && publishMigration.revision === migration.revision
-      && publishMigration.operationId === migration.operationId
-      && publishMigration.providerReceipt !== null
-      && sameProviderReceiptOutcome(publishMigration.providerReceipt, receipt);
-    if (!publishOwner || !ownsPublication) {
+    const publicationConversationId = conversation.id;
+    const publicationReceipt = receipt;
+    const publicationRevision = migration.revision;
+    const publicationOperationId = migration.operationId;
+    const ownsPublication = async (): Promise<boolean> => {
+      if (options.ownsOperation && !await options.ownsOperation()) return false;
+      const owner = registry.conversation(publicationConversationId);
+      const ownerMigration = owner?.migration;
+      return Boolean(owner
+        && ownerMigration?.phase === "verifying"
+        && ownerMigration.revision === publicationRevision
+        && ownerMigration.operationId === publicationOperationId
+        && ownerMigration.providerReceipt !== null
+        && sameProviderReceiptOutcome(ownerMigration.providerReceipt, publicationReceipt));
+    };
+    let publishOwner = registry.conversation(publicationConversationId);
+    if (!publishOwner || !await ownsPublication()) {
       if (publishOwner) {
-        await cleanupDiscardedSuccessor(successorProvider, receipt, publishOwner, registry);
+        await cleanupDiscardedSuccessor(successorProvider, publicationReceipt, publishOwner, registry);
         if (!options.deferBoardRepair) await repairCommittedBoardSuccessions(
           [publishOwner],
           registry,
@@ -494,22 +502,36 @@ export async function advanceConversationMigration(
           options.transferBoardPathPlacements ?? transferDurableBoardPathPlacements,
         );
       }
-      return registry.conversation(conversation.id) ?? publishOwner ?? conversation;
+      return registry.conversation(publicationConversationId) ?? publishOwner ?? conversation;
     }
-    await successorProvider.publishHost?.(receipt, {
+    await successorProvider.publishHost?.(publicationReceipt, {
       engine: conversation.engine,
-      conversationId: conversation.id,
+      conversationId: publicationConversationId,
       targetAccountId: migration.targetId,
       launchProfile: source.launchProfile,
+      ownsOperation: ownsPublication,
     });
-    const committed = registry.commitSuccessor(conversation.id, {
-      id: receipt.nativeId,
-      path: receipt.path,
+    publishOwner = registry.conversation(publicationConversationId);
+    if (!publishOwner || !await ownsPublication()) {
+      if (publishOwner) {
+        await cleanupDiscardedSuccessor(successorProvider, publicationReceipt, publishOwner, registry);
+        if (!options.deferBoardRepair) await repairCommittedBoardSuccessions(
+          [publishOwner],
+          registry,
+          options.remapBoardPaths ?? remapDurableBoardPaths,
+          options.transferBoardPathPlacements ?? transferDurableBoardPathPlacements,
+        );
+      }
+      return registry.conversation(publicationConversationId) ?? publishOwner ?? conversation;
+    }
+    const committed = registry.commitSuccessor(publicationConversationId, {
+      id: publicationReceipt.nativeId,
+      path: publicationReceipt.path,
       accountId: migration.targetId,
       launchProfile: source.launchProfile,
-      historyHash: receipt.historyHash,
-      host: receipt.host,
-    }, migration.revision);
+      historyHash: publicationReceipt.historyHash,
+      host: publicationReceipt.host,
+    }, publicationRevision);
     if (!options.deferBoardRepair) await repairCommittedBoardSuccessions(
       [committed],
       registry,

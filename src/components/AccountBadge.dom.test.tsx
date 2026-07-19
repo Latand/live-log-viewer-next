@@ -18,8 +18,13 @@ Object.assign(globalThis, {
   Event: dom.Event,
   localStorage: dom.localStorage,
 });
+(dom as unknown as { matchMedia(query: string): unknown }).matchMedia = (query: string) => ({
+  matches: false,
+  media: query,
+  addEventListener() {},
+  removeEventListener() {},
+});
 
-mock.module("@/hooks/useIsMobile", () => ({ useIsMobile: () => false }));
 mock.module("@/hooks/useEngineAccounts", () => ({
   useEngineAccounts: () => ({
     accounts: [

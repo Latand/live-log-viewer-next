@@ -264,6 +264,7 @@ export interface RuntimeKillCommand extends RuntimeCommandBase {
 
 export interface RuntimeReconfigureCommand extends RuntimeCommandBase {
   kind: "reconfigure";
+  sessionKey?: { engine: RuntimeEngine; sessionId: string };
   model: string;
   effort: string;
   fast: boolean | null;

@@ -99,24 +99,35 @@ export async function applyStructuredReconfigure(
   if (claim.state.status === "applied") return "applied";
   if (claim.state.status === "failed") throw new Error(claim.state.error ?? "structured reconfigure failed");
 
-  if (effect.accountId
-    && effect.accountId === generation.accountId
-    && conversation.migration?.phase === "committed") {
-    const predecessor = conversation.generations.at(-2);
-    if (predecessor) {
-      const predecessorKey = { engine: conversation.engine, sessionId: predecessor.id } as const;
-      await (dependencies.releaseHost ?? releaseStructuredHost)(predecessorKey);
-      registry.terminateStructuredHost(predecessorKey);
-    }
+  const settle = async (status: "applied" | "failed", error: unknown = null): Promise<void> => {
     if (!await ownsOperation()) throw new StructuredReconfigureSupersededError();
     const settled = registry.settleConversationReconfigure(
       conversationId,
       effect.operationId,
       effect.eventSeq,
-      "applied",
+      status,
+      status === "failed" ? failureMessage(error) : null,
     );
     if (settled.kind === "stale") throw new StructuredReconfigureSupersededError();
-    return "applied";
+  };
+
+  if (effect.accountId
+    && effect.accountId === generation.accountId
+    && conversation.migration?.phase === "committed") {
+    try {
+      const predecessor = conversation.generations.at(-2);
+      if (predecessor) {
+        const predecessorKey = { engine: conversation.engine, sessionId: predecessor.id } as const;
+        await (dependencies.releaseHost ?? releaseStructuredHost)(predecessorKey);
+        registry.terminateStructuredHost(predecessorKey);
+      }
+      await settle("applied");
+      return "applied";
+    } catch (error) {
+      if (error instanceof StructuredReconfigureSupersededError) throw error;
+      await settle("failed", error);
+      throw error;
+    }
   }
 
   if (switchingAccount) {
@@ -124,87 +135,48 @@ export async function applyStructuredReconfigure(
       operationId: effect.operationId,
       revision: effect.eventSeq,
     });
-    let migrated: RegistryConversation;
     try {
-      migrated = await (dependencies.migrate ?? migrateConversation)(
+      const migrated: RegistryConversation = await (dependencies.migrate ?? migrateConversation)(
         conversationId,
         targetAccountId!,
         registry,
         ownsOperation,
       );
+      const owner = registry.conversation(conversationId)?.reconfigure;
+      if (!await ownsOperation()
+        || owner?.operationId !== effect.operationId || owner.revision !== effect.eventSeq) {
+        throw new StructuredReconfigureSupersededError();
+      }
+      const current = migrated.generations.at(-1);
+      if (migrated.migration?.phase === "failed-recoverable") {
+        throw new Error(migrated.migration.error ?? "account switch failed");
+      }
+      if (current?.accountId !== targetAccountId || migrated.migration?.phase !== "committed") {
+        return "pending";
+      }
+      await (dependencies.releaseHost ?? releaseStructuredHost)(key);
+      registry.terminateStructuredHost(key);
+      await settle("applied");
+      return "applied";
     } catch (error) {
-      if (!await ownsOperation()) throw new StructuredReconfigureSupersededError();
-      const failed = registry.settleConversationReconfigure(
-        conversationId,
-        effect.operationId,
-        effect.eventSeq,
-        "failed",
-        failureMessage(error),
-      );
-      if (failed.kind === "stale") throw new StructuredReconfigureSupersededError();
+      if (error instanceof StructuredReconfigureSupersededError) throw error;
+      await settle("failed", error);
       throw error;
     }
-    const owner = registry.conversation(conversationId)?.reconfigure;
-    if (!await ownsOperation()
-      || owner?.operationId !== effect.operationId || owner.revision !== effect.eventSeq) {
-      throw new StructuredReconfigureSupersededError();
-    }
-    const current = migrated.generations.at(-1);
-    if (migrated.migration?.phase === "failed-recoverable") {
-      const error = new Error(migrated.migration.error ?? "account switch failed");
-      const failed = registry.settleConversationReconfigure(
-        conversationId,
-        effect.operationId,
-        effect.eventSeq,
-        "failed",
-        error.message,
-      );
-      if (failed.kind === "stale") throw new StructuredReconfigureSupersededError();
-      throw error;
-    }
-    if (current?.accountId !== targetAccountId || migrated.migration?.phase !== "committed") {
-      return "pending";
-    }
-    await (dependencies.releaseHost ?? releaseStructuredHost)(key);
-    registry.terminateStructuredHost(key);
-    if (!await ownsOperation()) throw new StructuredReconfigureSupersededError();
-    const settled = registry.settleConversationReconfigure(
-      conversationId,
-      effect.operationId,
-      effect.eventSeq,
-      "applied",
-    );
-    if (settled.kind === "stale") throw new StructuredReconfigureSupersededError();
-    return "applied";
   }
 
   const release = dependencies.releaseHost ?? releaseStructuredHost;
   const recover = dependencies.recover ?? recoverDeadStructuredConversation;
-  await release(key);
-  registry.terminateStructuredHost(key);
   try {
+    await release(key);
+    registry.terminateStructuredHost(key);
     const recovered = await recover({ path: generation.path, conversationId }, { registry });
     if (!recovered) throw new Error("structured conversation recovery is unavailable");
-    if (!await ownsOperation()) throw new StructuredReconfigureSupersededError();
-    const settled = registry.settleConversationReconfigure(
-      conversationId,
-      effect.operationId,
-      effect.eventSeq,
-      "applied",
-    );
-    if (settled.kind === "stale") throw new StructuredReconfigureSupersededError();
+    await settle("applied");
     return "applied";
   } catch (error) {
     if (error instanceof StructuredReconfigureSupersededError) throw error;
-    if (!await ownsOperation()) throw new StructuredReconfigureSupersededError();
-    const failed = registry.settleConversationReconfigure(
-      conversationId,
-      effect.operationId,
-      effect.eventSeq,
-      "failed",
-      failureMessage(error),
-    );
-    if (failed.kind === "stale") throw new StructuredReconfigureSupersededError();
+    await settle("failed", error);
     await recover({ path: generation.path, conversationId }, { registry }).catch(() => null);
     throw error;
   }

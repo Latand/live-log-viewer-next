@@ -19,6 +19,7 @@ import {
   defaults,
   effectiveProfile,
   phaseKey,
+  phaseOperationKey,
   readDraft,
   readResumeDraft,
   storageKey,
@@ -122,6 +123,7 @@ export function RuntimePill({
     const stored = readDraft(file);
     setLiveDraft(stored);
     const phase = localStorage.getItem(phaseKey(file));
+    operationRef.current = localStorage.getItem(phaseOperationKey(file));
     setApplyState(phase === "pending" || phase === "confirming" ? phase : "idle");
     setError("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -174,6 +176,8 @@ export function RuntimePill({
       operationRef.current = body.operationId ?? body.receipt?.operationId ?? null;
       const phase = pillSurface === "structured" || body.outcome === "pending" ? "pending" : "confirming";
       localStorage.setItem(phaseKey(file), phase);
+      if (operationRef.current) localStorage.setItem(phaseOperationKey(file), operationRef.current);
+      else localStorage.removeItem(phaseOperationKey(file));
       setApplyState(phase);
     } catch (cause) {
       if (revision !== revisionRef.current) return;
@@ -190,24 +194,44 @@ export function RuntimePill({
     return () => window.clearInterval(id);
   }, [pillSurface, applyState, applyReconfigure, liveDraft]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- the runtime journal and
+     identity-scoped storage are external stores whose durable projection owns
+     remount reconciliation. */
   useEffect(() => {
     if (pillSurface !== "structured") return;
-    const operationId = operationRef.current;
-    if (!operationId) return;
+    const pending = runtimeSession?.pendingReconfigure;
+    if (pending) {
+      operationRef.current = pending.operationId;
+      localStorage.setItem(phaseKey(file), "pending");
+      localStorage.setItem(phaseOperationKey(file), pending.operationId);
+      setApplyState("pending");
+      return;
+    }
+    const trackedOperationId = operationRef.current;
+    const storedPhase = localStorage.getItem(phaseKey(file));
+    const recoveringStoredPhase = !trackedOperationId
+      && (storedPhase === "pending" || storedPhase === "confirming");
     const receipt = runtimeSession?.recentReceipts.find((candidate) =>
-      candidate.operationId === operationId && candidate.kind === "reconfigure");
+      candidate.kind === "reconfigure"
+      && (trackedOperationId
+        ? candidate.operationId === trackedOperationId
+        : recoveringStoredPhase && (candidate.status === "applied"
+          || candidate.status === "failed" || candidate.status === "rejected")));
     if (!receipt) return;
+    localStorage.removeItem(phaseKey(file));
+    localStorage.removeItem(phaseOperationKey(file));
     if (receipt.status === "applied") {
       operationRef.current = null;
       setApplyState("applied");
-      pushTaskToast("ok", t("runtimeConfig.applied"));
+      if (trackedOperationId) pushTaskToast("ok", t("runtimeConfig.applied"));
     } else if (receipt.status === "failed" || receipt.status === "rejected") {
       operationRef.current = null;
       setApplyState("error");
       setError(receipt.reason ?? t("runtimeConfig.failed"));
-      pushTaskToast("err", receipt.reason ?? t("runtimeConfig.failed"));
+      if (trackedOperationId) pushTaskToast("err", receipt.reason ?? t("runtimeConfig.failed"));
     }
-  }, [pillSurface, runtimeSession, t]);
+  }, [file, pillSurface, runtimeSession, t]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /* eslint-disable react-hooks/set-state-in-effect -- confirm-by-observation:
      the poll updates `file`, and matching observed runtime settles the phase
@@ -220,6 +244,7 @@ export function RuntimePill({
     const speedMatches = engine === "claude" || file.fast === liveDraft.fast;
     if (!modelMatches || !effortMatches || !speedMatches) return;
     localStorage.removeItem(phaseKey(file));
+    localStorage.removeItem(phaseOperationKey(file));
     setApplyState("applied");
   }, [applyState, engine, file, liveDraft, pillSurface]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -265,6 +290,7 @@ export function RuntimePill({
     if (pillSurface === "live-root" || pillSurface === "structured") {
       revisionRef.current += 1;
       localStorage.removeItem(phaseKey(file));
+      localStorage.removeItem(phaseOperationKey(file));
       setLiveDraft((current) => {
         const scale = patch.model ? effortScale(engine, patch.model) ?? [] : effortScale(engine, current.model) ?? [];
         const next: RuntimeDraft = {

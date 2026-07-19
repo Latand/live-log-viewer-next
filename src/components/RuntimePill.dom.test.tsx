@@ -8,6 +8,7 @@ import type { RuntimeSettingsCapability } from "@/lib/runtime/contracts";
 import type { FileEntry } from "@/lib/types";
 
 import { RuntimePill } from "./RuntimePill";
+import type { RuntimeSession } from "./runtime/runtimeModel";
 
 const dom = new Window();
 installActEnv();
@@ -51,6 +52,42 @@ const key = "llvAgentRuntime:conversation_runtime";
 
 const CODEX_STRUCTURED: RuntimeSettingsCapability = { perTurnEffort: true, perTurnModel: false };
 const CLAUDE_STRUCTURED: RuntimeSettingsCapability = { perTurnEffort: false, perTurnModel: false };
+
+function structuredSession(
+  status: "applied" | "failed",
+  reason: string | null = null,
+): RuntimeSession {
+  return {
+    conversationId: "conversation_runtime",
+    sessionKey: { engine: "codex", sessionId: "thread-runtime" },
+    hostKind: "codex-app-server",
+    host: "hosted",
+    turn: "idle",
+    provenance: "structured",
+    revision: 2,
+    attentionIds: [],
+    recentReceipts: [{
+      operationId: "reconfigure-ui",
+      idempotencyKey: "reconfigure-ui",
+      conversationId: "conversation_runtime",
+      kind: "reconfigure",
+      status,
+      reason,
+      at: "2026-07-19T12:00:00.000Z",
+      revision: 2,
+    }],
+    accountId: "source",
+    parentConversationId: null,
+    flowId: null,
+    workflowId: null,
+    cwd: "/repo",
+    artifactPath: codexFile.path,
+    capabilities: { steer: true, structuredAttention: true, runtimeSettings: CODEX_STRUCTURED },
+    activeTurnId: null,
+    pendingReconfigure: null,
+    drift: null,
+  };
+}
 
 async function renderPill(node: React.ReactElement): Promise<{ host: HTMLElement; root: Root }> {
   const host = document.createElement("div");
@@ -127,6 +164,57 @@ test("selecting a tier persists the sparse profile, announces, and closes (auto-
   expect(status.textContent).toBe("Next message: GPT-5.6-Sol · Ultra");
   expect(host.querySelector("[data-runtime-switch-pending]")?.textContent).toBe("switch pending");
   expect(requests.at(-1)).toMatchObject({ action: "reconfigure", model: "gpt-5.6-sol", effort: "ultra", fast: false });
+  await act(async () => root.unmount());
+});
+
+for (const terminal of ["applied", "failed"] as const) {
+  test(`a remounted pill clears a persisted pending phase after a durable ${terminal} receipt`, async () => {
+    localStorage.setItem(key + ":phase", "pending");
+    localStorage.setItem(key + ":phase:operation", "reconfigure-ui");
+    const { host, root } = await renderPill(
+      <RuntimePill
+        file={codexFile}
+        surface="structured"
+        runtimeSettings={CODEX_STRUCTURED}
+        runtimeSession={structuredSession(terminal, terminal === "failed" ? "replacement host failed" : null)}
+      />,
+    );
+
+    expect(localStorage.getItem(key + ":phase")).toBeNull();
+    expect(localStorage.getItem(key + ":phase:operation")).toBeNull();
+    expect(host.querySelector("[data-runtime-switch-pending]")).toBeNull();
+    if (terminal === "failed") expect(host.textContent).toContain("replacement host failed");
+    await act(async () => root.unmount());
+  });
+}
+
+test("a remounted pill adopts durable pending ownership before its terminal receipt", async () => {
+  const pending = structuredSession("applied");
+  pending.recentReceipts = [];
+  pending.pendingReconfigure = {
+    operationId: "reconfigure-pending",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+  };
+  const { host, root } = await renderPill(
+    <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={pending} />,
+  );
+  expect(localStorage.getItem(key + ":phase:operation")).toBe("reconfigure-pending");
+  expect(host.querySelector("[data-runtime-switch-pending]")).not.toBeNull();
+
+  const failed = structuredSession("failed", "pending replacement failed");
+  failed.recentReceipts[0]!.operationId = "reconfigure-pending";
+  await act(async () => {
+    root.render(
+      <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={failed} />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(localStorage.getItem(key + ":phase:operation")).toBeNull();
+  expect(host.querySelector("[data-runtime-switch-pending]")).toBeNull();
+  expect(host.textContent).toContain("pending replacement failed");
   await act(async () => root.unmount());
 });
 

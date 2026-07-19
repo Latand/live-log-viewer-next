@@ -298,6 +298,100 @@ test("a failed apply durably restores a sparse profile with its operation fence"
   });
 });
 
+test("a host release failure durably restores a sparse profile", async () => {
+  const target = fixture({ model: null, effort: null, fast: null });
+  const request = effect({
+    operationId: "sparse-profile-release-failure",
+    conversationId: target.conversationId,
+    previousProfile: { model: null, effort: null, fast: null },
+    eventSeq: 31,
+  });
+  const recoveredProfiles: unknown[] = [];
+
+  await expect(applyStructuredReconfigure(request, {
+    registry: target.registry,
+    releaseHost: async () => { throw new Error("host release failed"); },
+    recover: async () => {
+      recoveredProfiles.push(target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile);
+      return { target: null, path: target.transcript, conversationId: target.conversationId, spawned: true };
+    },
+  })).rejects.toThrow("host release failed");
+
+  const reopened = new AgentRegistry(target.registry.filename, undefined, undefined, { sqliteMode: "off" });
+  expect(recoveredProfiles).toEqual([expect.objectContaining({ model: null, effort: null, fast: null })]);
+  expect(reopened.conversation(target.conversationId)?.generations.at(-1)?.launchProfile).toMatchObject({
+    model: null,
+    effort: null,
+    fast: null,
+  });
+  expect(reopened.conversation(target.conversationId)?.reconfigure).toMatchObject({
+    operationId: request.operationId,
+    revision: request.eventSeq,
+    status: "failed",
+    previousProfile: { model: null, effort: null, fast: null },
+    error: "host release failed",
+  });
+});
+
+test("an account-switch release failure durably restores a sparse profile", async () => {
+  const target = fixture({ model: null, effort: null, fast: null });
+  const successorPath = path.join(path.dirname(target.transcript), "successor-release-failure.jsonl");
+  fs.writeFileSync(successorPath, "{}\n");
+  const request = effect({
+    operationId: "sparse-account-release-failure",
+    conversationId: target.conversationId,
+    accountId: "target",
+    previousProfile: { model: null, effort: null, fast: null },
+    eventSeq: 32,
+  });
+
+  await expect(applyStructuredReconfigure(request, {
+    registry: target.registry,
+    validateAccount: async () => {},
+    resolveAccount: () => ({}) as never,
+    releaseHost: async () => { throw new Error("source host release failed"); },
+    migrate: async (conversationId, accountId, registry) => {
+      let migration = registry.conversation(conversationId)!.migration!;
+      if (migration.phase === "waiting-turn") {
+        migration = registry.transitionConversationMigration(conversationId, migration.revision, ["waiting-turn"], { phase: "requested" }).migration!;
+      }
+      migration = registry.transitionConversationMigration(conversationId, migration.revision, ["requested"], { phase: "preparing" }).migration!;
+      migration = registry.transitionConversationMigration(conversationId, migration.revision, ["preparing"], { phase: "successor-starting" }).migration!;
+      const receipt = {
+        operationId: migration.operationId,
+        nativeId: "thread-successor-release-failure",
+        path: successorPath,
+        continuityPaths: [successorPath],
+        historyHash: "successor-release-failure-history",
+        host: { kind: "codex-app-server" as const, identity: "successor-release-failure-host", epoch: 1, verifiedAt: "2026-07-19T12:00:00.000Z" },
+      };
+      registry.persistMigrationProviderReceipt(conversationId, migration.revision, migration.operationId, receipt);
+      return registry.commitSuccessor(conversationId, {
+        id: receipt.nativeId,
+        path: receipt.path,
+        accountId,
+        historyHash: receipt.historyHash,
+        host: receipt.host,
+      }, migration.revision);
+    },
+  })).rejects.toThrow("source host release failed");
+
+  const reopened = new AgentRegistry(target.registry.filename, undefined, undefined, { sqliteMode: "off" });
+  const persisted = reopened.conversation(target.conversationId)!;
+  expect(persisted.generations.at(-1)).toMatchObject({
+    id: "thread-successor-release-failure",
+    accountId: "target",
+    launchProfile: { model: null, effort: null, fast: null },
+  });
+  expect(persisted.reconfigure).toMatchObject({
+    operationId: request.operationId,
+    revision: request.eventSeq,
+    status: "failed",
+    previousProfile: { model: null, effort: null, fast: null },
+    error: "source host release failed",
+  });
+});
+
 test("an applying reconfigure resumes from its durable operation after registry recovery", async () => {
   const target = fixture({ model: null, effort: null, fast: null });
   const request = effect({

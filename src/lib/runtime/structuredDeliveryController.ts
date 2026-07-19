@@ -30,7 +30,7 @@ const DELIVERY_DRAIN_MAX_BACKOFF_MS = 1_000;
 interface ControllerState {
   activeQueue: StructuredDeliveryQueue | null;
   activeHosts: Map<string, EngineHost> | null;
-  registerActiveHost: ((item: StructuredDeliveryHost) => Promise<() => Promise<void>>) | null;
+  registerActiveHost: ((item: StructuredDeliveryHost, ownsOperation?: () => Promise<boolean>) => Promise<() => Promise<void>>) | null;
   republishActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   releaseActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   terminateActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
@@ -361,13 +361,19 @@ export async function bindStructuredDeliveryQueue(
     }
     await refreshCurrentProjection(conversationId);
   };
-  const register = async (item: StructuredDeliveryHost): Promise<() => Promise<void>> => {
+  const register = async (
+    item: StructuredDeliveryHost,
+    ownsOperation?: () => Promise<boolean>,
+  ): Promise<() => Promise<void>> => {
+    if (ownsOperation && !await ownsOperation()) return async () => {};
     const key = sessionKeyId(item.key);
     const current = registrations.get(key);
     if (current?.host === item.host) return async () => {};
     if (current) await unregisterHost(key, current.host);
     const initialState = await item.host.health();
+    if (ownsOperation && !await ownsOperation()) return async () => {};
     await publishHostState(client, registry, item, initialState);
+    if (ownsOperation && !await ownsOperation()) return async () => {};
     hosts.set(key, item.host);
     requestDrain();
     const observable = item.host as ObservableEngineHost;
@@ -513,9 +519,12 @@ export function hasStructuredDeliveryHost(key: SessionKey): boolean {
   return state.activeHosts?.has(sessionKeyId(key)) ?? false;
 }
 
-export async function publishStructuredDeliveryHost(item: StructuredDeliveryHost): Promise<() => Promise<void>> {
+export async function publishStructuredDeliveryHost(
+  item: StructuredDeliveryHost,
+  ownsOperation?: () => Promise<boolean>,
+): Promise<() => Promise<void>> {
   if (!state.registerActiveHost) throw new Error("structured delivery controller is unavailable");
-  return state.registerActiveHost(item);
+  return state.registerActiveHost(item, ownsOperation);
 }
 
 export async function republishStructuredDeliveryHost(key: SessionKey): Promise<boolean> {

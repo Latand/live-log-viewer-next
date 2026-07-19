@@ -114,10 +114,13 @@ test("adoptRuntimeProfile moves profile/resume/draft records across an identity 
 test("adoptRuntimeProfile carries the live reconfigure :phase so pending/confirming convergence survives id rotation (#405)", () => {
   localStorage.setItem("llvAgentRuntime:prov-2", JSON.stringify({ model: "gpt-5.6-sol", effort: "medium", fast: false }));
   localStorage.setItem("llvAgentRuntime:prov-2:phase", "confirming");
+  localStorage.setItem("llvAgentRuntime:prov-2:phase:operation", "reconfigure-prov-2");
   adoptRuntimeProfile("prov-2", "canon-2");
   expect(localStorage.getItem("llvAgentRuntime:canon-2:phase")).toBe("confirming");
+  expect(localStorage.getItem("llvAgentRuntime:canon-2:phase:operation")).toBe("reconfigure-prov-2");
   expect(localStorage.getItem("llvAgentRuntime:canon-2")).toContain("medium");
   expect(localStorage.getItem("llvAgentRuntime:prov-2:phase")).toBeNull();
+  expect(localStorage.getItem("llvAgentRuntime:prov-2:phase:operation")).toBeNull();
   // A phase already filed under the canonical id wins — a stale provisional
   // marker never regresses an adopted conversation's convergence state.
   localStorage.setItem("llvAgentRuntime:prov-3:phase", "pending");

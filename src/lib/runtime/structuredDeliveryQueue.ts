@@ -79,6 +79,7 @@ export interface StructuredReconfigureEffect {
   operationId: string;
   conversationId: string;
   kind: "reconfigure";
+  sessionKey?: { engine: "codex" | "claude"; sessionId: string };
   model: string;
   effort: string;
   fast: boolean | null;
@@ -175,6 +176,13 @@ function reconfigureEffect(effect: StructuredDeliveryEffect): StructuredReconfig
   const effort = typeof effect.payload.effort === "string" ? effect.payload.effort : "";
   const fast = typeof effect.payload.fast === "boolean" || effect.payload.fast === null ? effect.payload.fast : undefined;
   const accountId = typeof effect.payload.accountId === "string" ? effect.payload.accountId : undefined;
+  const key = effect.payload.sessionKey;
+  const sessionKey = key && typeof key === "object" && !Array.isArray(key)
+    && ((key as Record<string, unknown>).engine === "codex" || (key as Record<string, unknown>).engine === "claude")
+    && typeof (key as Record<string, unknown>).sessionId === "string"
+    ? key as StructuredReconfigureEffect["sessionKey"]
+    : undefined;
+  if (key !== undefined && !sessionKey) return null;
   const previous = effect.payload.previousProfile;
   const previousProfile = previous && typeof previous === "object" && !Array.isArray(previous)
     ? previous as StructuredReconfigureEffect["previousProfile"]
@@ -184,6 +192,7 @@ function reconfigureEffect(effect: StructuredDeliveryEffect): StructuredReconfig
     operationId,
     conversationId,
     kind: "reconfigure",
+    ...(sessionKey ? { sessionKey } : {}),
     model,
     effort,
     fast,
@@ -303,6 +312,7 @@ export class StructuredDeliveryQueue {
   }
 
   private async drainTarget(effects: DeliveryEffect[]): Promise<boolean> {
+    const killedGenerations = new Set<string>();
     const reconfigures = effects.filter(isReconfigureEffect);
     const currentReconfigure = reconfigures.reduce<StructuredReconfigureEffect | null>(
       (current, effect) => !current || effect.eventSeq > current.eventSeq ? effect : current,
@@ -316,12 +326,18 @@ export class StructuredDeliveryQueue {
     for (const effect of effects) {
       if (isReconfigureEffect(effect)) {
         if (effect !== currentReconfigure) continue;
+        if (effect.sessionKey
+          ? killedGenerations.has(`${effect.sessionKey.engine}:${effect.sessionKey.sessionId}`)
+          : killedGenerations.size > 0) {
+          await this.port.transition(effect.operationId, "failed", { reason: "conversation-killed" });
+          continue;
+        }
         const blocked = await this.drainReconfigure(effect);
         if (blocked) return true;
         continue;
       }
       if (isControlEffect(effect)) {
-        const blocked = await this.drainControl(effect);
+        const blocked = await this.drainControl(effect, killedGenerations);
         if (blocked) return true;
         continue;
       }
@@ -470,7 +486,7 @@ export class StructuredDeliveryQueue {
     return latest.operationId === effect.operationId && latest.eventSeq === effect.eventSeq;
   }
 
-  private async drainControl(effect: ControlEffect): Promise<boolean> {
+  private async drainControl(effect: ControlEffect, killedGenerations: Set<string>): Promise<boolean> {
     const host = this.resolveHost(effect.conversationId);
     if (effect.kind === "kill") {
       if (!effect.sessionKey) {
@@ -482,6 +498,7 @@ export class StructuredDeliveryQueue {
           if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) return true;
           await this.port.transition(effect.operationId, "delivering");
           await this.port.transition(effect.operationId, "delivered");
+          killedGenerations.add(`${effect.sessionKey.engine}:${effect.sessionKey.sessionId}`);
           return false;
         } catch (error) {
           await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
@@ -495,6 +512,7 @@ export class StructuredDeliveryQueue {
           return false;
         }
         await this.port.transition(effect.operationId, "delivered");
+        killedGenerations.add(`${effect.sessionKey.engine}:${effect.sessionKey.sessionId}`);
         return false;
       } catch (error) {
         await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });

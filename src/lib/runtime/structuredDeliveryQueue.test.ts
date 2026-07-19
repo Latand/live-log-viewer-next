@@ -1133,6 +1133,61 @@ test("a structured kill terminates its host and completes its receipt", async ()
   ]);
 });
 
+for (const order of ["reconfigure-then-kill", "kill-then-reconfigure"] as const) {
+  test(`a delivered kill fences a pending same-generation reconfigure admitted ${order}`, async () => {
+    const reconfigure = {
+      id: "reconfigure-one",
+      kind: "runtime.reconfigure",
+      eventSeq: order === "reconfigure-then-kill" ? 1 : 2,
+      payload: {
+        operationId: "reconfigure-one",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+        model: "gpt-5.6-sol",
+        effort: "high",
+        fast: false,
+      },
+    };
+    const kill = {
+      id: "kill-one",
+      kind: "runtime.kill",
+      eventSeq: order === "reconfigure-then-kill" ? 2 : 1,
+      payload: {
+        operationId: "kill-one",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    };
+    const transitions: Array<[string, string, string | null | undefined]> = [];
+    const actions: string[] = [];
+    let hosted = true;
+    const target = host(async () => ({ outcome: "turn-started", turnId: "unexpected" }));
+    const queue = new StructuredDeliveryQueue({
+      effects: async () => [reconfigure, kill],
+      transition: async (operationId, status, details) => {
+        transitions.push([operationId, status, details?.reason]);
+      },
+    }, () => hosted ? target : null, async () => {
+      actions.push("terminate");
+      hosted = false;
+      return true;
+    }, undefined, async () => {
+      actions.push("recover");
+      hosted = true;
+    });
+
+    await queue.drain();
+
+    expect(actions).toEqual(["terminate"]);
+    expect(hosted).toBeFalse();
+    expect(transitions).toEqual([
+      ["kill-one", "delivering", undefined],
+      ["kill-one", "delivered", undefined],
+      ["reconfigure-one", "failed", "conversation-killed"],
+    ]);
+  });
+}
+
 test("concurrent kills finish after the first kill removes the host", async () => {
   const pending = new Set(["kill-one", "kill-two"]);
   const transitions: Array<[string, string]> = [];

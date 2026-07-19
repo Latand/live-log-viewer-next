@@ -22,6 +22,11 @@ export function phaseKey(file: FileEntry): string {
   return storageKey(file) + ":phase";
 }
 
+/** The operation that owns the persisted reconfigure phase across remounts. */
+export function phaseOperationKey(file: FileEntry): string {
+  return phaseKey(file) + ":operation";
+}
+
 /** The "on resume" profile key (issue #241 §4). */
 export function resumeKey(file: FileEntry): string {
   return storageKey(file) + ":resume";
@@ -202,7 +207,7 @@ export function sendRuntimeFrom(file: FileEntry): RuntimeProfile | undefined {
 export function adoptRuntimeProfile(fromIdentity: string, toIdentity: string): void {
   if (!fromIdentity || fromIdentity === toIdentity) return;
   try {
-    for (const suffix of [":profile", ":resume", ":phase", ""]) {
+    for (const suffix of [":profile", ":resume", ":phase", ":phase:operation", ""]) {
       const legacy = localStorage.getItem(`llvAgentRuntime:${fromIdentity}${suffix}`);
       if (legacy === null) continue;
       if (localStorage.getItem(`llvAgentRuntime:${toIdentity}${suffix}`) === null) {
