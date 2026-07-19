@@ -249,6 +249,41 @@ function srcsetDestinations(value: string): string[] {
     .filter((candidate) => candidate.length > 0);
 }
 
+function htmlAttributes(text: string): Array<{ name: string; value: string }> {
+  const attributes: Array<{ name: string; value: string }> = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    while (cursor < text.length && (/\s/.test(text[cursor]) || text[cursor] === "/")) cursor += 1;
+    const nameStart = cursor;
+    while (cursor < text.length && !/[\s/=]/.test(text[cursor])) cursor += 1;
+    if (cursor === nameStart) {
+      cursor += 1;
+      continue;
+    }
+    const name = text.slice(nameStart, cursor).toLowerCase();
+    while (/\s/.test(text[cursor] ?? "")) cursor += 1;
+    let value = "";
+    if (text[cursor] === "=") {
+      cursor += 1;
+      while (/\s/.test(text[cursor] ?? "")) cursor += 1;
+      const quote = text[cursor] === "\"" || text[cursor] === "'" ? text[cursor] : undefined;
+      if (quote) {
+        cursor += 1;
+        const valueStart = cursor;
+        while (cursor < text.length && text[cursor] !== quote) cursor += 1;
+        value = text.slice(valueStart, cursor);
+        if (text[cursor] === quote) cursor += 1;
+      } else {
+        const valueStart = cursor;
+        while (cursor < text.length && !/\s/.test(text[cursor])) cursor += 1;
+        value = text.slice(valueStart, cursor);
+      }
+    }
+    attributes.push({ name, value });
+  }
+  return attributes;
+}
+
 function htmlMediaDestinations(text: string): string[] {
   const destinations: string[] = [];
   const mediaTags = /<(img|source|video)\b/gi;
@@ -291,13 +326,12 @@ function htmlMediaDestinations(text: string): string[] {
     if (tagEnd === -1) break;
     const tagName = tag[1].toLowerCase();
     const attributes = text.slice(mediaTags.lastIndex, tagEnd);
-    const mediaAttributes = /(?:^|\s)(src|srcset|poster)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
-    for (const attribute of attributes.matchAll(mediaAttributes)) {
-      const name = attribute[1].toLowerCase();
-      const value = canonicalSensitiveText(attribute[2] ?? attribute[3] ?? attribute[4] ?? "").text;
-      if ((tagName === "img" && name !== "poster")
-        || (tagName === "source" && name !== "poster")
-        || (tagName === "video" && name !== "srcset")) {
+    for (const attribute of htmlAttributes(attributes)) {
+      const { name } = attribute;
+      const value = canonicalSensitiveText(attribute.value).text;
+      const imageSource = (tagName === "img" || tagName === "source") && (name === "src" || name === "srcset");
+      const videoSource = tagName === "video" && (name === "src" || name === "poster");
+      if (imageSource || videoSource) {
         destinations.push(...(name === "srcset" ? srcsetDestinations(value) : [value]));
       }
     }
@@ -309,7 +343,7 @@ function htmlMediaDestinations(text: string): string[] {
 function publishedMediaUrls(text: string, githubBase: URL): URL[] {
   const canonicalText = canonicalSensitiveText(text).text;
   const renderedCandidates = [
-    ...markdownImageDestinations(canonicalText),
+    ...markdownImageDestinations(text).map((destination) => canonicalSensitiveText(destination).text),
     ...htmlMediaDestinations(text),
   ];
   const candidates: string[] = [];

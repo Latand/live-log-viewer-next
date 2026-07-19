@@ -496,7 +496,8 @@ export function sensitiveClasses(text: string): Set<FindingClass> {
     findings.add("email_address");
     break;
   }
-  if (/(?:api[_-]?(?:key|token)|access[_-]?token|authorization|password|secret)\s*[:=]\s*["']?[A-Za-z0-9_./+:-]{12,}/i.test(searchableText)) {
+  const credentialAssignmentPattern = /(?:api[_-]?(?:key|token)|access[_-]?token|authorization|password|secret)\s*[:=]\s*(?:"[^"\r\n]{12,}"|'[^'\r\n]{12,}'|[^\s"'`]{12,})/i;
+  if (credentialAssignmentPattern.test(searchableText)) {
     findings.add("credential");
   }
   if (/\b(?:github_pat_|gh[pousr]_|sk-|xox[baprs]-)[A-Za-z0-9_-]{12,}\b/.test(searchableText)) {
@@ -546,13 +547,35 @@ function inspectText(path: string, kind: MediaKind | undefined): Set<FindingClas
     const contents = readFileSync(path);
     const utf8 = contents.toString("utf8");
     const views = [utf8];
-    const startsLittleEndian = contents.length >= 2 && contents[0] === 0xff && contents[1] === 0xfe;
-    const startsBigEndian = contents.length >= 2 && contents[0] === 0xfe && contents[1] === 0xff;
-    if (startsLittleEndian) views.push(contents.subarray(2, contents.length - (contents.length % 2)).toString("utf16le"));
-    if (startsBigEndian) {
-      const bigEndian = Buffer.from(contents.subarray(2, contents.length - (contents.length % 2)));
-      bigEndian.swap16();
-      views.push(bigEndian.toString("utf16le"));
+    const startsUtf32LittleEndian = contents.subarray(0, 4).equals(Buffer.from([0xff, 0xfe, 0x00, 0x00]));
+    const startsUtf32BigEndian = contents.subarray(0, 4).equals(Buffer.from([0x00, 0x00, 0xfe, 0xff]));
+    const startsLittleEndian = !startsUtf32LittleEndian
+      && contents.length >= 2
+      && contents[0] === 0xff
+      && contents[1] === 0xfe;
+    const startsBigEndian = !startsUtf32BigEndian
+      && contents.length >= 2
+      && contents[0] === 0xfe
+      && contents[1] === 0xff;
+    let supportedEncoding = false;
+    if (startsLittleEndian || startsBigEndian) {
+      const payload = Buffer.from(contents.subarray(2));
+      if (payload.length % 2 === 0) {
+        if (startsBigEndian) payload.swap16();
+        try {
+          views.push(new TextDecoder("utf-16le", { fatal: true }).decode(payload));
+          supportedEncoding = true;
+        } catch {
+          supportedEncoding = false;
+        }
+      }
+    } else if (!startsUtf32LittleEndian && !startsUtf32BigEndian) {
+      try {
+        views[0] = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+        supportedEncoding = true;
+      } catch {
+        supportedEncoding = false;
+      }
     }
     if (contents.includes(0) && !startsLittleEndian && !startsBigEndian) {
       for (const alignment of [0, 1]) {
@@ -572,12 +595,12 @@ function inspectText(path: string, kind: MediaKind | undefined): Set<FindingClas
       const allowedWhitespace = byte === 0x09 || byte === 0x0a || byte === 0x0d;
       return count + (byte < 0x20 && !allowedWhitespace ? 1 : 0);
     }, 0);
-    const unsupportedBinary = !textLike && (utf8.includes("\ufffd") || controlBytes > 0);
-    const invalidTextEncoding = textLike
-      && utf8.includes("\ufffd")
-      && !startsLittleEndian
+    const excessiveControlBytes = !startsLittleEndian
       && !startsBigEndian
-      && !contents.includes(0);
+      && controlBytes > 0
+      && controlBytes * 8 > contents.length;
+    const unsupportedBinary = !textLike && (!supportedEncoding || controlBytes > 0);
+    const invalidTextEncoding = textLike && (!supportedEncoding || excessiveControlBytes);
     if (unsupportedBinary || invalidTextEncoding) findings.add("inspection_error");
     return findings;
   } catch {
