@@ -10,7 +10,28 @@ const PROSE_VERDICT_STATUSES = {
   COMMENT: "needs_decision",
   "NO FINDINGS": "pass",
 } as const satisfies Record<string, StageVerdict["status"]>;
-const PROSE_VERDICT_RE = /^\s*(?:VERDICT:\s*(APPROVE|REQUEST_CHANGES|COMMENT)|(NO FINDINGS))\s*$/gim;
+const PROSE_VERDICT_LINE_RE = /^\s*(?:VERDICT:\s*(APPROVE|REQUEST_CHANGES|COMMENT)|(NO FINDINGS))\s*$/i;
+
+type ProseVerdictMarker = keyof typeof PROSE_VERDICT_STATUSES;
+
+function proseVerdictMarkers(prose: string): ProseVerdictMarker[] {
+  const markers: ProseVerdictMarker[] = [];
+  let fence: { marker: "`" | "~"; length: number } | null = null;
+  for (const line of prose.split(/\r?\n/)) {
+    const fenceMatch = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fenceMatch) {
+      const token = fenceMatch[1]!;
+      const marker = token[0] as "`" | "~";
+      if (!fence) fence = { marker, length: token.length };
+      else if (fence.marker === marker && token.length >= fence.length && !fenceMatch[2]!.trim()) fence = null;
+      continue;
+    }
+    if (fence || /^\s*>/.test(line)) continue;
+    const match = PROSE_VERDICT_LINE_RE.exec(line);
+    if (match) markers.push((match[1] ?? match[2])!.toUpperCase() as ProseVerdictMarker);
+  }
+  return markers;
+}
 
 export type ParsedStageVerdict = { verdict: StageVerdict; output: string };
 export type RejectedStageVerdict = { failureReason: string; output: string };
@@ -63,8 +84,7 @@ export function parseStageVerdict(text: string): ParsedStageVerdict | RejectedSt
       output,
     };
   }
-  for (const match of prose.matchAll(PROSE_VERDICT_RE)) {
-    const marker = (match[1] ?? match[2])!.toUpperCase() as keyof typeof PROSE_VERDICT_STATUSES;
+  for (const marker of proseVerdictMarkers(prose)) {
     if (PROSE_VERDICT_STATUSES[marker] !== verdict.status) {
       return {
         failureReason: `contradictory stage verdict: prose marker "${marker}" disagrees with JSON status "${verdict.status}"`,

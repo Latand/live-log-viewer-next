@@ -1037,13 +1037,13 @@ export async function createPipelineFromRequest(
 /** A park without a verdict (interrupted spawn, vanished transcript) can
     leave the stage agent mid-turn in its pane; retry/skip would reset the
     worktree under it and the next passed stage would commit its strays. An
-    attempt that produced a verdict finished its turn — an idle interactive
-    CLI in the pane is safe to leave behind. */
+    attempt with a verdict or terminal completion timestamp finished its turn;
+    an idle interactive CLI in the pane is safe to leave behind. */
 async function orphanAgentPane(
   attempt: PipelineStageAttempt | null,
   ports: PipelinePorts,
 ): Promise<{ error: string; status: number } | null> {
-  if (!attempt || attempt.verdict || !attempt.paneId) return null;
+  if (!attempt || attempt.verdict || attempt.completedAt || !attempt.paneId) return null;
   if (!(await ports.paneAgentAlive(attempt.paneId))) return null;
   return { error: `stage agent may still be running in pane ${attempt.paneId}; wait for it to exit or kill the pane first`, status: 409 };
 }

@@ -95,6 +95,35 @@ test("a clean no-findings pass remains valid", () => {
   });
 });
 
+test("fenced and quoted marker examples do not contradict a clean pass", () => {
+  const prose = [
+    "The reviewed prompt includes this failure example:",
+    "",
+    "```text",
+    "VERDICT: REQUEST_CHANGES",
+    "```",
+    "",
+    "~~~text",
+    "~~~json",
+    "VERDICT: REQUEST_CHANGES",
+    "~~~",
+    "",
+    "> VERDICT: REQUEST_CHANGES",
+    "",
+    "NO FINDINGS",
+  ].join("\n");
+  expect(parseStageVerdict([
+    prose,
+    "",
+    "```json",
+    '{"status":"pass","findings":[],"confidence":1}',
+    "```",
+  ].join("\n"))).toEqual({
+    verdict: { status: "pass", findings: [], confidence: 1 },
+    output: prose,
+  });
+});
+
 test("a matching fail verdict preserves every finding", () => {
   expect(parseStageVerdict([
     "VERDICT: REQUEST_CHANGES",

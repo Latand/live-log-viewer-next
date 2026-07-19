@@ -1225,6 +1225,43 @@ test("retry and skip refuse while a verdict-less parked stage still hosts a live
   expect(retried.pipeline?.state).toBe("running");
 });
 
+test("retry and skip recover a completed pane-hosted semantic contradiction", async () => {
+  for (const action of ["retry-stage", "skip-stage"] as const) {
+    const h = harness();
+    const pipeline = await create(h.ports);
+    await tickPipelines([], h.ports);
+    await tickPipelines([], h.ports);
+    h.messages.set("/codex/stage-1.jsonl", {
+      text: [
+        "VERDICT: REQUEST_CHANGES",
+        "",
+        "```json",
+        '{"status":"pass"}',
+        "```",
+      ].join("\n"),
+      ts: 5_000_000,
+    });
+    await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+    const parkedAttempt = loadPipelines()[0]!.runs[0]!.attempts[0]!;
+    expect(parkedAttempt).toMatchObject({
+      state: "needs_decision",
+      paneId: "%1",
+      verdict: null,
+      error: 'contradictory stage verdict: prose marker "REQUEST_CHANGES" disagrees with JSON status "pass"',
+    });
+    expect(parkedAttempt.completedAt).toBeTruthy();
+
+    const recovered = await patchPipeline(pipeline.id, { action }, h.ports);
+    expect(recovered.error).toBeUndefined();
+    expect(recovered.pipeline?.state).toBe("running");
+    expect(recovered.pipeline?.cursor).toEqual({
+      stageId: action === "retry-stage" ? "plan" : "build",
+      state: "pending",
+    });
+  }
+});
+
 test("closing a mid-run or parked pipeline persists a record that loads back", async () => {
   const h = harness();
   const running = await create(h.ports);
