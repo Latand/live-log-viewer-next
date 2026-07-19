@@ -5,14 +5,32 @@ import type { BoardTask } from "@/lib/tasks/types";
 import { MAX_TASK_LENGTH } from "./limits";
 import type { CreatePipelineRequest, Pipeline } from "./types";
 
-export type TaskPipelineSpawnParams = {
+type TaskPipelineRuntimeParams = {
   repoDir: string;
   engine: FlowEngine;
   model: string | null;
   effort: string | null;
-  /** Conversation receiving the first assignment. */
-  srcPath: string;
 };
+
+export type TaskSpawnPipelineParams = TaskPipelineRuntimeParams & {
+  launchId: string;
+  conversationId: string;
+  /** Conversation receiving the first assignment. */
+  srcPath: string | null;
+  /** Failed task launch explicitly replaced by this launch. */
+  retryOfLaunchId?: string | null;
+};
+
+export type TaskPipelineSpawnParams = TaskSpawnPipelineParams | (TaskPipelineRuntimeParams & {
+  srcPath: string;
+  launchId?: never;
+  conversationId?: never;
+  retryOfLaunchId?: never;
+});
+
+export function isTaskSpawnPipelineParams(params: TaskPipelineSpawnParams): params is TaskSpawnPipelineParams {
+  return typeof params.launchId === "string" && typeof params.conversationId === "string";
+}
 
 export type TaskPipelineReadModel = BoardTask & { pipelineIds: string[] };
 
@@ -41,7 +59,7 @@ export function ensurePipelineForTask(
     spec: task.text,
     taskIds: [task.id],
     repoDir: spawnParams.repoDir,
-    src: spawnParams.srcPath,
+    ...(spawnParams.srcPath ? { src: spawnParams.srcPath } : {}),
     autoStart: false,
     stages: [{
       id: "run",

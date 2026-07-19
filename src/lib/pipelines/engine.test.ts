@@ -376,6 +376,8 @@ test("auto-create rechecks task links inside the pipeline mutation", async () =>
       engine: "codex",
       model: "gpt-5.6-sol",
       effort: "high",
+      launchId: "launch-task-race",
+      conversationId: "conversation_creator",
       srcPath: "/codex/creator.jsonl",
     }, h.ports),
   ]);
@@ -384,6 +386,134 @@ test("auto-create rechecks task links inside the pipeline mutation", async () =>
   expect(automatic.pipeline?.id).toBe(explicit.pipeline?.id);
   expect(loadPipelines()).toHaveLength(1);
   expect(loadPipelines()[0]!.taskIds).toEqual([task.id]);
+});
+
+test("task spawn reserves one launch-correlated pipeline and reconciles its creator path", async () => {
+  const h = harness();
+  const task = boardTask("task-intent");
+  saveTasks([task]);
+  savePipelines([]);
+  const pending = {
+    repoDir: "/repo",
+    engine: "codex" as const,
+    model: "gpt-5.6-sol",
+    effort: "high",
+    launchId: "launch-task-intent",
+    conversationId: "conversation_stage_1",
+    srcPath: null,
+  };
+
+  const reserved = await ensureTaskPipelineForAssignment(task, pending, h.ports);
+  expect(reserved.pipeline).toMatchObject({
+    taskIds: [task.id],
+    creationIntent: { kind: "task-spawn", taskId: task.id, launchId: pending.launchId },
+    srcPath: null,
+    srcConversationId: pending.conversationId,
+  });
+
+  const materialized = await ensureTaskPipelineForAssignment(task, {
+    ...pending,
+    srcPath: "/codex/stage-1.jsonl",
+  }, h.ports);
+  const replayed = await ensureTaskPipelineForAssignment(task, {
+    ...pending,
+    srcPath: "/codex/stage-1.jsonl",
+  }, h.ports);
+  expect(materialized.pipeline?.id).toBe(reserved.pipeline?.id);
+  expect(replayed.pipeline?.id).toBe(reserved.pipeline?.id);
+  expect(loadPipelines()).toEqual([expect.objectContaining({
+    id: reserved.pipeline?.id,
+    srcPath: "/codex/stage-1.jsonl",
+  })]);
+});
+
+test("pipeline tick recovers a reserved task creator path from its conversation", async () => {
+  const h = harness();
+  const task = boardTask("task-intent-recovery");
+  saveTasks([task]);
+  savePipelines([]);
+
+  const reserved = await ensureTaskPipelineForAssignment(task, {
+    repoDir: "/repo",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    launchId: "launch-task-recovery",
+    conversationId: "conversation_stage_2",
+    srcPath: null,
+  }, h.ports);
+  expect(reserved.pipeline?.srcPath).toBeNull();
+
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()).toEqual([expect.objectContaining({
+    id: reserved.pipeline?.id,
+    srcPath: "/codex/stage-2.jsonl",
+    srcConversationId: "conversation_stage_2",
+  })]);
+});
+
+test("unlinking a task keeps its launch-correlated creation evidence", async () => {
+  const h = harness();
+  const task = boardTask("task-intent-unlink");
+  saveTasks([task]);
+  savePipelines([]);
+  const reserved = await ensureTaskPipelineForAssignment(task, {
+    repoDir: "/repo",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    launchId: "launch-task-unlink",
+    conversationId: "conversation_stage_1",
+    srcPath: null,
+  }, h.ports);
+
+  const unlinked = await patchPipeline(reserved.pipeline!.id, { action: "unlink-task", taskId: task.id }, h.ports);
+  expect(unlinked.pipeline).toMatchObject({
+    taskIds: [],
+    creationIntent: { kind: "task-spawn", taskId: task.id, launchId: "launch-task-unlink" },
+  });
+  expect(loadPipelines()).toHaveLength(1);
+});
+
+test("a fresh task launch replaces one failed pending creation intent", async () => {
+  const h = harness();
+  const task = boardTask("task-intent-retry");
+  saveTasks([task]);
+  savePipelines([]);
+  const first = await ensureTaskPipelineForAssignment(task, {
+    repoDir: "/repo",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    launchId: "launch-task-failed",
+    conversationId: "conversation_stage_1",
+    srcPath: null,
+  }, h.ports);
+  h.ports.spawnReceipt = (launchId) => launchId === "launch-task-failed" ? {
+    state: "failed",
+    launchId,
+    conversationId: "conversation_stage_1",
+    sessionId: null,
+    transcript: null,
+    paneId: null,
+  } : null;
+
+  const recovered = await ensureTaskPipelineForAssignment(task, {
+    repoDir: "/repo",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    launchId: "launch-task-retry",
+    conversationId: "conversation_stage_2",
+    srcPath: "/codex/stage-2.jsonl",
+  }, h.ports);
+
+  expect(recovered.pipeline?.id).toBe(first.pipeline?.id);
+  expect(loadPipelines()).toEqual([expect.objectContaining({
+    creationIntent: { kind: "task-spawn", taskId: task.id, launchId: "launch-task-retry" },
+    srcConversationId: "conversation_stage_2",
+    srcPath: "/codex/stage-2.jsonl",
+  })]);
 });
 
 test("adoptAttempt appends to the source stage after the cursor moved on", async () => {

@@ -9,7 +9,7 @@ import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
-import type { EffectivePipelineRole, Pipeline, PipelineEdgeActivation, PipelineStage } from "./types";
+import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
 export const PIPELINES_SCHEMA_VERSION = 4;
@@ -121,6 +121,14 @@ function isFailEdge(value: unknown): boolean {
   );
 }
 
+function isCreationIntent(value: unknown): value is PipelineCreationIntent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const intent = value as Partial<PipelineCreationIntent>;
+  return intent.kind === "task-spawn"
+    && typeof intent.taskId === "string" && Boolean(intent.taskId.trim())
+    && typeof intent.launchId === "string" && Boolean(intent.launchId.trim());
+}
+
 function isStage(value: unknown): value is PipelineStage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const stage = value as Partial<PipelineStage>;
@@ -209,6 +217,7 @@ function isPipeline(value: unknown): value is Pipeline {
     Array.isArray(pipeline.taskIds) &&
     pipeline.taskIds.every((taskId) => typeof taskId === "string") &&
     new Set(pipeline.taskIds).size === pipeline.taskIds.length &&
+    (pipeline.creationIntent === undefined || isCreationIntent(pipeline.creationIntent)) &&
     (pipeline.spec === undefined || typeof pipeline.spec === "string") &&
     typeof pipeline.project === "string" &&
     typeof pipeline.repoDir === "string" &&
@@ -350,6 +359,7 @@ export function loadPipelines(): Pipeline[] {
   return records.map((pipeline) => ({
     ...pipeline,
     taskIds: [...pipeline.taskIds],
+    creationIntent: pipeline.creationIntent ? { ...pipeline.creationIntent } : undefined,
     spec: typeof pipeline.spec === "string" ? pipeline.spec : undefined,
     baseBranch: pipeline.baseBranch ?? "",
     baseRef: pipeline.baseRef ?? "",
@@ -456,6 +466,7 @@ export function buildPipeline(input: {
   id: string;
   task: string;
   taskIds?: string[];
+  creationIntent?: PipelineCreationIntent;
   spec?: string;
   project: string;
   repoDir: string;
@@ -470,6 +481,7 @@ export function buildPipeline(input: {
     id: input.id,
     task: input.task,
     taskIds: [...new Set(input.taskIds ?? [])],
+    ...(input.creationIntent ? { creationIntent: { ...input.creationIntent } } : {}),
     ...(input.spec ? { spec: input.spec } : {}),
     project: input.project,
     repoDir: input.repoDir,

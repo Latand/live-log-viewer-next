@@ -284,15 +284,20 @@ async function postTaskSpawn(
     return NextResponse.json({ error: "task spawn attempt conflicts with its original request" }, { status: 409 });
   }
 
+  const pipelineSpawnParams = (srcPath: string | null) => ({
+    repoDir: cwdResult.cwd!,
+    engine,
+    model: selectedModel.model,
+    effort: reasoning.effort,
+    launchId: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    srcPath,
+    retryOfLaunchId: retryOf?.launchId ?? null,
+  });
+
   if (begun.kind === "replay") {
-    if (dependencies.ensureTaskPipelineForAssignment && begun.receipt.artifactPath) {
-      const binding = await dependencies.ensureTaskPipelineForAssignment(task, {
-        repoDir: cwdResult.cwd,
-        engine,
-        model: selectedModel.model,
-        effort: reasoning.effort,
-        srcPath: begun.receipt.artifactPath,
-      });
+    if (dependencies.ensureTaskPipelineForAssignment) {
+      const binding = await dependencies.ensureTaskPipelineForAssignment(task, pipelineSpawnParams(begun.receipt.artifactPath));
       if (!binding.pipeline) {
         const at = isoNow();
         const patch = assignmentPatch(begun.receipt, at, account.accountId, engine);
@@ -332,6 +337,20 @@ async function postTaskSpawn(
     return NextResponse.json(taskSpawnResponse(failed, task, { ...admittedPatch, state: "failed" }, {
       error: error instanceof Error ? error.message : "task admission could not be persisted",
     }), { status: 500 });
+  }
+
+  if (dependencies.ensureTaskPipelineForAssignment) {
+    const binding = await dependencies.ensureTaskPipelineForAssignment(admittedTask, pipelineSpawnParams(null));
+    if (!binding.pipeline) {
+      registry.failSpawn(begun.receipt.launchId, binding.error ?? "could not reserve task pipeline");
+      const failed = registry.snapshot().receipts[begun.receipt.launchId] ?? begun.receipt;
+      const failedAt = isoNow();
+      const failedPatch = assignmentPatch(failed, failedAt, account.accountId, engine);
+      const persisted = persistAssignment(dependencies, id, failedPatch, failedAt);
+      return NextResponse.json(taskSpawnResponse(failed, persisted.ok ? persisted.task : admittedTask, failedPatch, {
+        error: binding.error ?? "could not reserve task pipeline",
+      }), { status: binding.status ?? 500 });
+    }
   }
 
   const attachmentPaths = (task.attachments ?? []).map((attachment) => attachmentPath(attachment));
@@ -404,13 +423,7 @@ async function postTaskSpawn(
   const completedAt = isoNow();
   const completedPatch = assignmentPatch(completed, completedAt, account.accountId, engine);
   if (dependencies.ensureTaskPipelineForAssignment && completed.artifactPath) {
-    const binding = await dependencies.ensureTaskPipelineForAssignment(task, {
-      repoDir: cwdResult.cwd,
-      engine,
-      model: selectedModel.model,
-      effort: reasoning.effort,
-      srcPath: completed.artifactPath,
-    });
+    const binding = await dependencies.ensureTaskPipelineForAssignment(admittedTask, pipelineSpawnParams(completed.artifactPath));
     if (!binding.pipeline) {
       return NextResponse.json(taskSpawnResponse(completed, admittedTask, { ...completedPatch, state: "spawning" }, {
         error: binding.error ?? "could not bind task to a pipeline",

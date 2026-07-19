@@ -30,7 +30,7 @@ test("task attribution failure replays one launched pane into one durable assign
   let writes = 0;
   let spawnCalls = 0;
   let bindingCalls = 0;
-  let bindingParams: unknown = null;
+  const bindingParams: unknown[] = [];
   const dependencies = {
     registry: () => registry,
     loadTasks: () => tasks,
@@ -52,7 +52,7 @@ test("task attribution failure replays one launched pane into one durable assign
     resolveSpawnedTranscriptPath: async () => artifactPath,
     ensureTaskPipelineForAssignment: async (_task: BoardTask, spawnParams: unknown) => {
       bindingCalls += 1;
-      bindingParams = spawnParams;
+      bindingParams.push(spawnParams);
       return { pipeline: { id: "pipeline-test" } as Pipeline };
     },
     spawnAgentWithPrompt: async (_spec: unknown, _prompt: string, receipt: SpawnReceipt) => {
@@ -116,14 +116,13 @@ test("task attribution failure replays one launched pane into one durable assign
     initialMessage: "delivered",
   });
   expect(spawnCalls).toBe(1);
-  expect(bindingCalls).toBe(2);
-  expect(bindingParams).toEqual({
-    repoDir: cwd,
-    engine: "claude",
-    model: "opus",
-    effort: "high",
-    srcPath: artifactPath,
-  });
+  expect(bindingCalls).toBe(3);
+  expect(bindingParams).toEqual([
+    expect.objectContaining({ repoDir: cwd, engine: "claude", model: "opus", effort: "high", srcPath: null }),
+    expect.objectContaining({ repoDir: cwd, engine: "claude", model: "opus", effort: "high", srcPath: artifactPath }),
+    expect.objectContaining({ repoDir: cwd, engine: "claude", model: "opus", effort: "high", srcPath: artifactPath }),
+  ]);
+  expect(new Set(bindingParams.map((item) => (item as { launchId: string }).launchId)).size).toBe(1);
   expect(tasks[0]?.assignments).toEqual([expect.objectContaining({
     launchId: uncertainBody.launchId,
     clientAttemptId: "task_282_post_launch_write_20260715_a1",
@@ -215,7 +214,18 @@ test("pre-pane spawn failure returns an ownerless task to inbox", async () => {
     state: "failed",
     error: "process exited before pane creation",
   });
-  expect(bindingCalls).toEqual([]);
+  expect(bindingCalls).toEqual([{
+    taskId: tasks[0]!.id,
+    spawnParams: expect.objectContaining({
+      repoDir: cwd,
+      engine: "claude",
+      model: null,
+      effort: null,
+      launchId,
+      conversationId: expect.stringMatching(/^conversation_/),
+      srcPath: null,
+    }),
+  }]);
 });
 
 test("a deliberate retry after pre-pane failure creates one fresh launch", async () => {
@@ -483,4 +493,126 @@ test("retryOfLaunchId relaunches a pathless failed assignment with a fresh attem
 
   /* A delivered launch is not retryable: the terminal-only guard holds. */
   expect((await POST.withDependencies(request({ retryOfLaunchId: retriedBody.launchId }), context, dependencies)).status).toBe(409);
+});
+
+test("process stop after pane settlement replays one launch into one task pipeline", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-pipeline-recovery-"));
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const sessionId = crypto.randomUUID();
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  let tasks: BoardTask[] = [{
+    id: "f4370000-89c5-4064-9118-51661c4f0437",
+    project: "live-log-viewer-next",
+    status: "inbox",
+    text: "Recover one durable task pipeline",
+    placement: "pinned",
+    pos: { x: 0, y: 0 },
+    assignments: [],
+    createdAt: "2026-07-20T08:00:00.000Z",
+    updatedAt: "2026-07-20T08:00:00.000Z",
+  }];
+  const pipelineIntents: Array<{
+    id: string;
+    taskId: string;
+    launchId: string;
+    conversationId: string;
+    srcPath: string | null;
+  }> = [];
+  let stopAfterSettlement = true;
+  let spawnCalls = 0;
+  const dependencies = {
+    registry: () => registry,
+    loadTasks: () => tasks,
+    mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
+      const mutation = mutator(tasks);
+      if (mutation.tasks) tasks = mutation.tasks;
+      return mutation.result;
+    },
+    resolveSpawnAccount: () => ({
+      engine: "claude" as const,
+      accountId: "claude-work",
+      kind: "managed" as const,
+      home: cwd,
+      transcriptRoot: cwd,
+      env: { NODE_ENV: "test" },
+    }),
+    resolveSpawnedTranscriptPath: async () => artifactPath,
+    ensureTaskPipelineForAssignment: async (task: BoardTask, spawnParams: {
+      launchId: string;
+      conversationId: string;
+      srcPath: string | null;
+    }) => {
+      let intent = pipelineIntents.find((candidate) => candidate.taskId === task.id) ?? null;
+      if (!intent && spawnParams.srcPath === null) {
+        intent = {
+          id: "pipeline-437",
+          taskId: task.id,
+          launchId: spawnParams.launchId,
+          conversationId: spawnParams.conversationId,
+          srcPath: null,
+        };
+        pipelineIntents.push(intent);
+      }
+      if (spawnParams.srcPath && stopAfterSettlement) {
+        stopAfterSettlement = false;
+        throw new Error("process stopped after receipt settlement");
+      }
+      if (!intent) return { error: "pipeline intent was not persisted before actuation", status: 500 };
+      if (spawnParams.srcPath) intent.srcPath = spawnParams.srcPath;
+      return { pipeline: { id: intent.id } as Pipeline };
+    },
+    spawnAgentWithPrompt: async (_spec: unknown, _prompt: string, receipt: SpawnReceipt) => {
+      spawnCalls += 1;
+      const binding = {
+        endpoint: "/tmp",
+        server: { pid: 92, startIdentity: "92:one" },
+        paneId: "%43",
+        panePid: { pid: 3627437, startIdentity: "3627437:one" },
+        target: "agents:43.0",
+      };
+      registry.bindSpawnPane(receipt.launchId, binding);
+      const host = {
+        kind: "tmux" as const,
+        ...binding,
+        windowName: "claude-builder",
+        agent: { pid: 3627438, startIdentity: "3627438:one" },
+        argv: ["claude"],
+      };
+      registry.markSpawnHostVerified(receipt.launchId, host);
+      registry.markSpawnPromptDelivered(receipt.launchId);
+      fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: { content: tasks[0]!.text } })}\n`);
+      return { paneId: "%43", display: "agents:43.0", panePid: 3627437, host, receipt };
+    },
+  } as Parameters<typeof POST.withDependencies>[2];
+  const request = () => new NextRequest(`http://127.0.0.1/api/tasks/${tasks[0]!.id}/spawn`, {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      clientAttemptId: "task_pipeline_recovery_20260720_a1",
+    }),
+  });
+  const context = { params: Promise.resolve({ id: tasks[0]!.id }) };
+
+  await expect(POST.withDependencies(request(), context, dependencies)).rejects.toThrow("process stopped after receipt settlement");
+  expect(pipelineIntents).toEqual([expect.objectContaining({
+    taskId: tasks[0]!.id,
+    srcPath: null,
+  })]);
+  expect(spawnCalls).toBe(1);
+  expect(Object.values(registry.snapshot().receipts)).toEqual([expect.objectContaining({
+    state: "completed",
+    artifactPath,
+    pane: expect.objectContaining({ paneId: "%43" }),
+  })]);
+
+  const recovered = await POST.withDependencies(request(), context, dependencies);
+  const replayed = await POST.withDependencies(request(), context, dependencies);
+  expect([recovered.status, replayed.status]).toEqual([200, 200]);
+  expect(spawnCalls).toBe(1);
+  expect(pipelineIntents).toEqual([expect.objectContaining({
+    taskId: tasks[0]!.id,
+    srcPath: artifactPath,
+  })]);
 });

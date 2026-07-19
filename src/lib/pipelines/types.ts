@@ -135,11 +135,19 @@ export type PipelineCursorState = "pending" | "spawning" | "running" | "reviewin
 
 export type PipelineState = "draft" | "provisioning" | "running" | "needs_decision" | "paused" | "completed" | "closed";
 
+export type PipelineCreationIntent = {
+  kind: "task-spawn";
+  taskId: string;
+  launchId: string;
+};
+
 export type Pipeline = {
   id: string;
   task: string;
   /** Durable board-task membership. The legacy `task` field remains the title. */
   taskIds: string[];
+  /** Launch-correlated creation evidence reserved before task-spawn actuation. */
+  creationIntent?: PipelineCreationIntent;
   /** Pinned specification and acceptance criteria, matching Flow.spec from #85. */
   spec?: string;
   project: string;

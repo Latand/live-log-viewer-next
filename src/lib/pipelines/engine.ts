@@ -40,7 +40,7 @@ import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipel
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
 import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineMutation } from "./store";
-import { ensurePipelineForTask, type TaskPipelineSpawnParams } from "./taskBinding";
+import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
 import type {
   CreatePipelineRequest,
   EffectivePipelineRole,
@@ -804,6 +804,13 @@ function updateAttemptIdentity(pipeline: Pipeline, attempt: PipelineStageAttempt
 
 function rebindPipelineAttemptPaths(pipeline: Pipeline, ports: PipelinePorts): boolean {
   let changed = false;
+  if (pipeline.srcConversationId) {
+    const currentPath = ports.pathForConversation(pipeline.srcConversationId);
+    if (currentPath && currentPath !== pipeline.srcPath) {
+      pipeline.srcPath = currentPath;
+      changed = true;
+    }
+  }
   for (const run of pipeline.runs) {
     for (const attempt of run.attempts) {
       if (!attempt.conversationId) continue;
@@ -1377,7 +1384,7 @@ type PipelineMutationResult = {
 };
 
 type PipelineCreatorLineage = {
-  srcPath: string;
+  srcPath: string | null;
   srcConversationId: string;
 };
 
@@ -1397,6 +1404,60 @@ type CreatePipelineOptions = {
   ensureTask?: BoardTask;
   spawnParams?: TaskPipelineSpawnParams;
 };
+
+function taskSpawnCreatorLineage(
+  spawnParams: TaskSpawnPipelineParams,
+  ports: Pick<PipelinePorts, "sourcePathAllowed" | "conversationIdForPath">,
+): { lineage?: PipelineCreatorLineage; error?: string; status?: number } {
+  if (!spawnParams.launchId || !spawnParams.conversationId) {
+    return { error: "task pipeline creation requires launch and conversation identity", status: 400 };
+  }
+  if (spawnParams.srcPath === null) {
+    return { lineage: { srcPath: null, srcConversationId: spawnParams.conversationId } };
+  }
+  const resolved = resolvePipelineCreatorLineage(spawnParams.srcPath, ports);
+  if (!resolved.lineage) return resolved;
+  if (resolved.lineage.srcConversationId !== spawnParams.conversationId) {
+    return { error: "task pipeline creator path does not match its launch conversation", status: 409 };
+  }
+  return resolved;
+}
+
+function reconcileTaskPipelineCreation(
+  pipeline: Pipeline,
+  task: BoardTask,
+  spawnParams: TaskSpawnPipelineParams,
+  ports: Pick<PipelinePorts, "sourcePathAllowed" | "conversationIdForPath" | "spawnReceipt">,
+): { changed: boolean; error?: string; status?: number } {
+  const intent = pipeline.creationIntent;
+  if (!intent) return { changed: false };
+  if (intent.kind !== "task-spawn" || intent.taskId !== task.id) {
+    return { changed: false, error: "task pipeline creation intent does not match its task", status: 409 };
+  }
+
+  let changed = false;
+  if (intent.launchId !== spawnParams.launchId) {
+    const priorReceipt = ports.spawnReceipt(intent.launchId);
+    const priorLaunchFailed = priorReceipt?.state === "failed" || priorReceipt?.state === "conflicted";
+    const replacesPendingIntent = pipeline.srcPath === null
+      && (spawnParams.retryOfLaunchId === intent.launchId || priorLaunchFailed);
+    if (!replacesPendingIntent) return { changed: false };
+    pipeline.creationIntent = { ...intent, launchId: spawnParams.launchId };
+    pipeline.srcConversationId = spawnParams.conversationId;
+    changed = true;
+  }
+
+  const activeIntent = pipeline.creationIntent;
+  if (!activeIntent || activeIntent.launchId !== spawnParams.launchId) return { changed };
+  if (pipeline.srcConversationId !== spawnParams.conversationId) {
+    return { changed: false, error: "task pipeline launch conversation changed during reconciliation", status: 409 };
+  }
+  if (spawnParams.srcPath === null || pipeline.srcPath === spawnParams.srcPath) return { changed };
+  const creator = taskSpawnCreatorLineage(spawnParams, ports);
+  if (!creator.lineage) return { changed: false, error: creator.error, status: creator.status };
+  pipeline.srcPath = creator.lineage.srcPath;
+  return { changed: true };
+}
 
 function preflightFailure(result: Extract<PipelineRepoPreflight, { ok: false }>): PipelineMutationResult {
   return {
@@ -1425,7 +1486,12 @@ export async function createPipelineFromRequest(
   if (req.taskIds !== undefined && (!Array.isArray(req.taskIds) || req.taskIds.some((taskId) => typeof taskId !== "string" || !taskId.trim()))) {
     return { error: "taskIds must be an array of non-empty strings", status: 400 };
   }
-  const creator = resolvePipelineCreatorLineage(req.src, ports);
+  const taskSpawn = options.ensureTask && options.spawnParams && isTaskSpawnPipelineParams(options.spawnParams)
+    ? { task: options.ensureTask, params: options.spawnParams }
+    : null;
+  const creator = taskSpawn
+    ? taskSpawnCreatorLineage(taskSpawn.params, ports)
+    : resolvePipelineCreatorLineage(req.src, ports);
   if (!creator.lineage) return { error: creator.error, status: creator.status };
   const taskIds = [...new Set((req.taskIds ?? []).map((taskId) => taskId.trim()))];
   const requestedRepoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
@@ -1450,6 +1516,7 @@ export async function createPipelineFromRequest(
     id: crypto.randomUUID().slice(0, 8),
     task,
     taskIds,
+    ...(taskSpawn ? { creationIntent: { kind: "task-spawn" as const, taskId: taskSpawn.task.id, launchId: taskSpawn.params.launchId } } : {}),
     ...(spec ? { spec } : {}),
     project: ports.projectForCwd(repoDir) ?? path.basename(repoDir),
     repoDir,
@@ -1472,7 +1539,13 @@ export async function createPipelineFromRequest(
           candidate.taskIds.includes(options.ensureTask!.id)
           && candidate.state !== "closed"
           && !candidate.hiddenAt);
-        return existing ? { pipeline: existing } : { error: "task pipeline binding changed during creation", status: 409 };
+        if (!existing) return { error: "task pipeline binding changed during creation", status: 409 };
+        if (isTaskSpawnPipelineParams(options.spawnParams)) {
+          const reconciled = reconcileTaskPipelineCreation(existing, options.ensureTask, options.spawnParams, ports);
+          if (reconciled.error) return { error: reconciled.error, status: reconciled.status };
+          if (reconciled.changed) persist();
+        }
+        return { pipeline: existing };
       }
     }
     const taskLinkError = pipelineTaskLinkError(pipeline, taskIds, loadTasks());
@@ -1491,9 +1564,17 @@ export async function ensureTaskPipelineForAssignment(
   const pipelines = loadPipelines();
   const request = ensurePipelineForTask(task, pipelines, spawnParams);
   if (request === null) {
-    const pipeline = pipelines.find((candidate) =>
-      candidate.taskIds.includes(task.id) && candidate.state !== "closed" && !candidate.hiddenAt);
-    return pipeline ? { pipeline } : { error: "task pipeline binding changed during lookup", status: 409 };
+    return withPipelineMutation((current, persist) => {
+      const pipeline = current.find((candidate) =>
+        candidate.taskIds.includes(task.id) && candidate.state !== "closed" && !candidate.hiddenAt);
+      if (!pipeline) return { error: "task pipeline binding changed during lookup", status: 409 };
+      if (isTaskSpawnPipelineParams(spawnParams)) {
+        const reconciled = reconcileTaskPipelineCreation(pipeline, task, spawnParams, ports);
+        if (reconciled.error) return { error: reconciled.error, status: reconciled.status };
+        if (reconciled.changed) persist();
+      }
+      return { pipeline };
+    });
   }
   return createPipelineFromRequest(request, ports, { ensureTask: task, spawnParams });
 }

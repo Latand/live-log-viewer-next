@@ -14,6 +14,11 @@ const role = {
   promptScaffold: "Build",
 };
 
+const spawnIdentity = {
+  launchId: "launch-task-binding",
+  conversationId: "conversation_task_binding",
+};
+
 function task(): BoardTask {
   return {
     id: "task-binding-1",
@@ -33,6 +38,7 @@ test("an unlinked task produces a minimal builder pipeline request", () => {
     engine: "codex",
     model: "gpt-5.6-sol",
     effort: "high",
+    ...spawnIdentity,
     srcPath: "/sessions/assigned.jsonl",
   });
 
@@ -70,18 +76,18 @@ test("live links suppress auto-create while closed and hidden links remain histo
     now: "now",
   });
 
-  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null, srcPath: "/sessions/assigned.jsonl" })).toBeNull();
+  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null, ...spawnIdentity, srcPath: "/sessions/assigned.jsonl" })).toBeNull();
 
   linked.state = "closed";
   linked.cursor = null;
   linked.closedAt = "later";
-  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null, srcPath: "/sessions/assigned.jsonl" })).not.toBeNull();
+  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null, ...spawnIdentity, srcPath: "/sessions/assigned.jsonl" })).not.toBeNull();
 
   linked.state = "provisioning";
   linked.cursor = { stageId: "run", state: "pending", input: null, activatedBy: null };
   linked.closedAt = null;
   linked.hiddenAt = "later";
-  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null, srcPath: "/sessions/assigned.jsonl" })).not.toBeNull();
+  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null, ...spawnIdentity, srcPath: "/sessions/assigned.jsonl" })).not.toBeNull();
 });
 
 test("auto-create bounds a valid long board-task title to the pipeline limit", () => {
@@ -93,6 +99,7 @@ test("auto-create bounds a valid long board-task title to the pipeline limit", (
     engine: "codex",
     model: null,
     effort: null,
+    ...spawnIdentity,
     srcPath: "/sessions/assigned.jsonl",
   });
 
