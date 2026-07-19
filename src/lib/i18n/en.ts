@@ -260,6 +260,7 @@ export const en = {
   "composer.queueAria": "Queue of sent messages",
   "composer.removeFromQueue": "Remove from queue",
   "composer.deliveryHeld": "Held for «{label}» — delivers after the account switch",
+  "composer.admissionTimedOut": "Delivery confirmation timed out. Retry safely; the same message key will be reused.",
   "composer.runtimePill": "Model and reasoning — applies to your next message",
   "composer.reasoningGroup": "Reasoning",
   "composer.modelGroup": "Model",
