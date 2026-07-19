@@ -117,6 +117,126 @@ test("unauthenticated account reconfigure leaves profile and host ownership unto
   expect(releases).toBe(0);
 });
 
+test("failed account preflight supersedes an applying predecessor and restores its stable host", async () => {
+  const target = fixture({ model: null, effort: null, fast: null });
+  const generation = target.registry.conversation(target.conversationId)!.generations.at(-1)!;
+  const root = path.dirname(target.transcript);
+  target.registry.claimConversationReconfigure(target.conversationId, {
+    operationId: "preflight-predecessor",
+    revision: 10,
+    profile: { model: "gpt-5.6-sol", effort: "high", fast: false },
+    accountId: "pending-target",
+  });
+  target.registry.requestConversationReseat(target.conversationId, "pending-target", {
+    operationId: "preflight-predecessor",
+    revision: 10,
+  });
+  target.registry.terminateStructuredHost({ engine: "codex", sessionId: generation.id });
+  const publishedProfiles: unknown[] = [];
+  let accountResolutions = 0;
+  const recover: typeof recoverDeadStructuredConversation = (request, dependencies) =>
+    recoverDeadStructuredConversation(request, {
+      ...dependencies,
+      client: {} as never,
+      transport: () => "structured",
+      resolveAccount: () => ({
+        engine: "codex",
+        accountId: "source",
+        kind: "managed",
+        home: path.join(root, "account"),
+        transcriptRoot: root,
+        env: { NODE_ENV: "test" },
+      }),
+      spawn: async (input) => {
+        const launchProfile = input.spec.launchProfile;
+        if (!launchProfile) throw new Error("recovery spawn profile is unavailable");
+        publishedProfiles.push(launchProfile);
+        const settled = target.registry.settleSpawn(input.receipt.launchId, {
+          key: { engine: "codex", sessionId: generation.id },
+          artifactPath: target.transcript,
+          cwd: root,
+          accountId: "source",
+          status: "idle",
+          host: null,
+          structuredHost: {
+            kind: "codex-app-server",
+            endpoint: "test:failed-account-preflight",
+            process: { pid: process.pid, startIdentity: null },
+            eventCursor: 1,
+            protocolVersion: "test",
+            writerClaimEpoch: 1,
+            activeTurnRef: null,
+            pendingAttention: [],
+            activeFlags: [],
+          },
+          claimEpoch: 1,
+          claimOwner: `structured-host:${input.receipt.launchId}`,
+          pendingAction: null,
+          launchProfile,
+        });
+        if (settled.kind !== "settled") throw new Error("recovery spawn did not publish");
+        return {
+          ok: true,
+          target: null,
+          path: target.transcript,
+          launchId: input.receipt.launchId,
+          conversationId: target.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered" as const,
+          state: "settled" as const,
+        };
+      },
+    });
+
+  await expect(applyStructuredReconfigure(effect({
+    operationId: "expired-account-preflight",
+    conversationId: target.conversationId,
+    accountId: "expired",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+    previousProfile: { model: "gpt-5.6-sol", effort: "high", fast: false },
+    eventSeq: 11,
+  }), {
+    registry: target.registry,
+    validateAccount: async () => {
+      expect(target.registry.conversation(target.conversationId)?.migration?.phase).toBe("rolled-back");
+      throw new Error("target account session expired");
+    },
+    resolveAccount: () => { accountResolutions += 1; return {} as never; },
+    releaseHost: async () => true,
+    recover,
+  })).rejects.toThrow("target account session expired");
+
+  const reopened = new AgentRegistry(target.registry.filename, undefined, undefined, { sqliteMode: "off" });
+  expect(reopened.conversation(target.conversationId)?.reconfigure).toMatchObject({
+    operationId: "expired-account-preflight",
+    revision: 11,
+    status: "failed",
+    previousProfile: { model: null, effort: null, fast: null },
+    error: "target account session expired",
+  });
+  expect(reopened.conversation(target.conversationId)?.generations.at(-1)?.launchProfile).toMatchObject({
+    model: null,
+    effort: null,
+    fast: null,
+  });
+  expect(reopened.conversation(target.conversationId)?.migration).toMatchObject({
+    targetId: "pending-target",
+    phase: "rolled-back",
+  });
+  expect(reopened.snapshot().entries[`codex:${generation.id}`]).toMatchObject({
+    status: "idle",
+    launchProfile: { model: null, effort: null, fast: null },
+    structuredHost: { process: { pid: process.pid } },
+  });
+  expect(publishedProfiles).toEqual([
+    expect.objectContaining({ model: null, effort: null, fast: null }),
+  ]);
+  expect(accountResolutions).toBe(0);
+});
+
 test("account reconfigure stays pending until the durable successor commits", async () => {
   const target = fixture();
   let releases = 0;

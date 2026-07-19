@@ -84,11 +84,8 @@ export async function applyStructuredReconfigure(
   const ownsOperation = dependencies.ownsOperation ?? (async () => true);
   const release = dependencies.releaseHost ?? releaseStructuredHost;
   const recover = dependencies.recover ?? recoverDeadStructuredConversation;
+  const inheritedApplyingOperation = conversation.reconfigure?.status === "applying";
 
-  if (switchingAccount) {
-    await (dependencies.validateAccount ?? validateAccountAuthentication)(conversation.engine, targetAccountId!);
-    (dependencies.resolveAccount ?? accountManager.resolveSpawn)(conversation.engine, targetAccountId);
-  }
   if (!await ownsOperation()) throw new StructuredReconfigureSupersededError();
   const claim = registry.claimConversationReconfigure(conversationId, {
     operationId: effect.operationId,
@@ -127,6 +124,23 @@ export async function applyStructuredReconfigure(
     owns: () => ownsDurableReconfigure(status),
     releaseHost: release,
   });
+
+  if (switchingAccount) {
+    try {
+      await (dependencies.validateAccount ?? validateAccountAuthentication)(conversation.engine, targetAccountId!);
+      (dependencies.resolveAccount ?? accountManager.resolveSpawn)(conversation.engine, targetAccountId);
+    } catch (error) {
+      await settle("failed", error);
+      if (inheritedApplyingOperation) {
+        const restored = await recover({ path: generation.path, conversationId }, {
+          registry,
+          ownership: recoveryOwnership("failed"),
+        });
+        if (!restored) throw new Error("structured conversation preflight rollback recovery is unavailable");
+      }
+      throw error;
+    }
+  }
 
   const restoreCommittedSuccessor = async (successorId: string): Promise<void> => {
     if (!await ownsDurableReconfigure("failed")) throw new StructuredReconfigureSupersededError();

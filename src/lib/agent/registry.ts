@@ -770,6 +770,25 @@ function retireReconfigureOwnedMigration(
   advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
 }
 
+function transferReconfigureOwnedMigration(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  owner: Pick<ConversationReconfigureState, "operationId" | "revision">,
+  successor: Pick<ConversationReconfigureClaim, "operationId" | "revision">,
+): void {
+  const migration = conversation.migration;
+  if (!migration || ["committed", "rolled-back", "failed-recoverable"].includes(migration.phase)) return;
+  const intent = file.migrationIntents[migration.intentId];
+  if (intent?.scope !== "conversation"
+    || !intent.requestIds.includes(reconfigureMigrationRequestId(owner))) return;
+  intent.requestIds = [
+    ...intent.requestIds.filter((candidate) => !candidate.startsWith("reconfigure:")),
+    reconfigureMigrationRequestId(successor),
+  ];
+  intent.updatedAt = now();
+  conversation.updatedAt = intent.updatedAt;
+}
+
 export class MigrationRevisionError extends Error {
   constructor(readonly expected: number, readonly actual: number) {
     super("migration preview is stale");
@@ -4159,10 +4178,14 @@ export class AgentRegistry {
       const returnsToMigrationSource = claim.accountId !== undefined
         && claim.accountId === generation.accountId
         && conversation.migration?.targetId !== claim.accountId;
-      if (current?.status === "applying"
-        && current.accountId !== null
-        && (claim.accountId === undefined || returnsToMigrationSource)) {
-        retireReconfigureOwnedMigration(file, conversation, current);
+      const continuesMigrationTarget = claim.accountId !== undefined
+        && conversation.migration?.targetId === claim.accountId;
+      if (current?.status === "applying" && current.accountId !== null) {
+        if (continuesMigrationTarget && !returnsToMigrationSource) {
+          transferReconfigureOwnedMigration(file, conversation, current, claim);
+        } else {
+          retireReconfigureOwnedMigration(file, conversation, current);
+        }
       }
       const previousProfile = current?.status === "applying"
         ? current.previousProfile
@@ -4208,6 +4231,7 @@ export class AgentRegistry {
         return { kind: "stale" as const, state: clone(current), conversation: clone(conversation) };
       }
       if (status === "failed") {
+        retireReconfigureOwnedMigration(file, conversation, current);
         writeConversationLaunchProfile(file, conversation, generation, current.previousProfile);
       }
       current.status = status;
