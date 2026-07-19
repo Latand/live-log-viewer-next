@@ -78,6 +78,7 @@ export interface CodexAppServerHostOptions {
   approvalPolicy?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
+  deliveryConfirmationTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
   onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
@@ -123,6 +124,7 @@ const CHILD_ENV_ALLOWLIST = [
   "LLV_SPAWN_CAPABILITY",
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 5 * 60_000;
 const ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER = 3;
 const LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER = 3;
 const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
@@ -280,6 +282,7 @@ export class CodexAppServerHost implements EngineHost {
 
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly requestTimeoutMs: number;
+  private readonly deliveryConfirmationTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
@@ -341,6 +344,8 @@ export class CodexAppServerHost implements EngineHost {
     this.child = child;
     this.identity = identity;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.deliveryConfirmationTimeoutMs = options.deliveryConfirmationTimeoutMs
+      ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
@@ -1006,7 +1011,7 @@ export class CodexAppServerHost implements EngineHost {
     const timer = setTimeout(() => {
       if (this.pendingDeliveries.get(entry.id)?.promise !== promise) return;
       this.fail(new Error("Codex delivery confirmation timed out; outcome is uncertain"));
-    }, this.requestTimeoutMs);
+    }, this.deliveryConfirmationTimeoutMs);
     const pending = {
       text: entry.text ?? "",
       contentDigest: entry.contentDigest!,
