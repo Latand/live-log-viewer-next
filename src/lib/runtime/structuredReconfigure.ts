@@ -82,6 +82,8 @@ export async function applyStructuredReconfigure(
   const targetAccountId = effect.accountId ?? generation.accountId;
   const switchingAccount = Boolean(effect.accountId && effect.accountId !== generation.accountId);
   const ownsOperation = dependencies.ownsOperation ?? (async () => true);
+  const release = dependencies.releaseHost ?? releaseStructuredHost;
+  const recover = dependencies.recover ?? recoverDeadStructuredConversation;
 
   if (switchingAccount) {
     await (dependencies.validateAccount ?? validateAccountAuthentication)(conversation.engine, targetAccountId!);
@@ -111,6 +113,31 @@ export async function applyStructuredReconfigure(
     if (settled.kind === "stale") throw new StructuredReconfigureSupersededError();
   };
 
+  const ownsDurableReconfigure = async (status: "applying" | "failed"): Promise<boolean> => {
+    if (!await ownsOperation()) return false;
+    const owner = registry.conversation(conversationId)?.reconfigure;
+    return owner?.operationId === effect.operationId
+      && owner.revision === effect.eventSeq
+      && owner.status === status;
+  };
+
+  const restoreCommittedSuccessor = async (successorId: string): Promise<void> => {
+    if (!await ownsDurableReconfigure("failed")) throw new StructuredReconfigureSupersededError();
+    const latest = registry.conversation(conversationId);
+    const successor = latest?.generations.at(-1);
+    if (!latest || latest.migration?.phase !== "committed" || successor?.id !== successorId) {
+      throw new Error("committed structured successor is unavailable for profile restoration");
+    }
+    const successorKey = { engine: latest.engine, sessionId: successor.id } as const;
+    await release(successorKey);
+    if (!await ownsDurableReconfigure("failed")) throw new StructuredReconfigureSupersededError();
+    registry.terminateStructuredHost(successorKey);
+    if (!await ownsDurableReconfigure("failed")) throw new StructuredReconfigureSupersededError();
+    const restored = await recover({ path: successor.path, conversationId }, { registry });
+    if (!restored) throw new Error("structured successor profile restoration is unavailable");
+    if (!await ownsDurableReconfigure("failed")) throw new StructuredReconfigureSupersededError();
+  };
+
   if (effect.accountId
     && effect.accountId === generation.accountId
     && conversation.migration?.phase === "committed") {
@@ -118,7 +145,7 @@ export async function applyStructuredReconfigure(
       const predecessor = conversation.generations.at(-2);
       if (predecessor) {
         const predecessorKey = { engine: conversation.engine, sessionId: predecessor.id } as const;
-        await (dependencies.releaseHost ?? releaseStructuredHost)(predecessorKey);
+        await release(predecessorKey);
         registry.terminateStructuredHost(predecessorKey);
       }
       await settle("applied");
@@ -126,6 +153,7 @@ export async function applyStructuredReconfigure(
     } catch (error) {
       if (error instanceof StructuredReconfigureSupersededError) throw error;
       await settle("failed", error);
+      await restoreCommittedSuccessor(generation.id);
       throw error;
     }
   }
@@ -135,6 +163,7 @@ export async function applyStructuredReconfigure(
       operationId: effect.operationId,
       revision: effect.eventSeq,
     });
+    let committedSuccessorId: string | null = null;
     try {
       const migrated: RegistryConversation = await (dependencies.migrate ?? migrateConversation)(
         conversationId,
@@ -154,19 +183,19 @@ export async function applyStructuredReconfigure(
       if (current?.accountId !== targetAccountId || migrated.migration?.phase !== "committed") {
         return "pending";
       }
-      await (dependencies.releaseHost ?? releaseStructuredHost)(key);
+      committedSuccessorId = current.id;
+      await release(key);
       registry.terminateStructuredHost(key);
       await settle("applied");
       return "applied";
     } catch (error) {
       if (error instanceof StructuredReconfigureSupersededError) throw error;
       await settle("failed", error);
+      if (committedSuccessorId) await restoreCommittedSuccessor(committedSuccessorId);
       throw error;
     }
   }
 
-  const release = dependencies.releaseHost ?? releaseStructuredHost;
-  const recover = dependencies.recover ?? recoverDeadStructuredConversation;
   try {
     await release(key);
     registry.terminateStructuredHost(key);

@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry } from "@/lib/agent/registry";
-import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { reconcileMigrations } from "@/lib/accounts/migration/coordinator";
+import type { SuccessorProviderPort, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { applyStructuredReconfigure } from "./structuredReconfigure";
 import type { StructuredReconfigureEffect } from "./structuredDeliveryQueue";
@@ -309,6 +310,70 @@ test("a newer account reconfigure supersedes an in-flight conversation migration
   expect(Object.values(target.registry.snapshot().conversations)).toHaveLength(1);
 });
 
+test("a profile-only reconfigure retires its superseded account migration before reconciliation", async () => {
+  const target = fixture();
+  const successorPath = path.join(path.dirname(target.transcript), "profile-only-superseded.jsonl");
+  fs.writeFileSync(successorPath, "{}\n");
+  const receipt = {
+    operationId: "pending",
+    nativeId: "thread-profile-only-superseded",
+    path: successorPath,
+    continuityPaths: [successorPath],
+    historyHash: "profile-only-superseded-history",
+    host: { kind: "codex-app-server" as const, identity: "profile-only-superseded-host", epoch: 1, verifiedAt: "2026-07-19T12:00:00.000Z" },
+  };
+
+  const pending = await applyStructuredReconfigure(effect({
+    operationId: "switch-account-before-profile",
+    conversationId: target.conversationId,
+    accountId: "target",
+    eventSeq: 40,
+  }), {
+    registry: target.registry,
+    validateAccount: async () => {},
+    resolveAccount: () => ({}) as never,
+    migrate: async (conversationId, _accountId, registry) => {
+      let migration = registry.conversation(conversationId)!.migration!;
+      if (migration.phase === "waiting-turn") {
+        migration = registry.transitionConversationMigration(conversationId, migration.revision, ["waiting-turn"], { phase: "requested" }).migration!;
+      }
+      migration = registry.transitionConversationMigration(conversationId, migration.revision, ["requested"], { phase: "preparing" }).migration!;
+      migration = registry.transitionConversationMigration(conversationId, migration.revision, ["preparing"], { phase: "successor-starting" }).migration!;
+      receipt.operationId = migration.operationId;
+      return registry.persistMigrationProviderReceipt(conversationId, migration.revision, migration.operationId, receipt);
+    },
+  });
+  expect(pending).toBe("pending");
+  expect(target.registry.conversation(target.conversationId)?.migration?.phase).toBe("verifying");
+
+  await applyStructuredReconfigure(effect({
+    operationId: "profile-wins",
+    conversationId: target.conversationId,
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    eventSeq: 41,
+  }), {
+    registry: target.registry,
+    releaseHost: async () => true,
+    recover: async () => ({ target: null, path: target.transcript, conversationId: target.conversationId, spawned: true }),
+  });
+
+  const calls = { create: 0, verify: 0, publish: 0, cleanup: 0 };
+  const provider: SuccessorProviderPort = {
+    virtualSource: true,
+    async create() { calls.create += 1; return receipt; },
+    async verify() { calls.verify += 1; },
+    async publishHost() { calls.publish += 1; },
+    async cleanup() { calls.cleanup += 1; },
+  };
+  const delivery = { async deliver() { return "delivered" as const; } };
+  await reconcileMigrations(provider, delivery, target.registry);
+  await reconcileMigrations(provider, delivery, target.registry);
+
+  expect(target.registry.conversation(target.conversationId)?.migration?.phase).toBe("rolled-back");
+  expect(calls).toEqual({ create: 0, verify: 0, publish: 0, cleanup: 1 });
+});
+
 test("a failed apply durably restores a sparse profile with its operation fence", async () => {
   const target = fixture({ model: null, effort: null, fast: null });
   const request = effect({
@@ -373,6 +438,7 @@ test("a host release failure durably restores a sparse profile", async () => {
 
 test("an account-switch release failure durably restores a sparse profile", async () => {
   const target = fixture({ model: null, effort: null, fast: null });
+  const sourceGenerationId = target.registry.conversation(target.conversationId)!.generations.at(-1)!.id;
   const successorPath = path.join(path.dirname(target.transcript), "successor-release-failure.jsonl");
   fs.writeFileSync(successorPath, "{}\n");
   const request = effect({
@@ -382,12 +448,22 @@ test("an account-switch release failure durably restores a sparse profile", asyn
     previousProfile: { model: null, effort: null, fast: null },
     eventSeq: 32,
   });
+  const released: string[] = [];
+  let liveSuccessorProfile: unknown = null;
 
   await expect(applyStructuredReconfigure(request, {
     registry: target.registry,
     validateAccount: async () => {},
     resolveAccount: () => ({}) as never,
-    releaseHost: async () => { throw new Error("source host release failed"); },
+    releaseHost: async (key) => {
+      released.push(key.sessionId);
+      if (key.sessionId === sourceGenerationId) throw new Error("source host release failed");
+      return true;
+    },
+    recover: async () => {
+      liveSuccessorProfile = target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile;
+      return { target: null, path: successorPath, conversationId: target.conversationId, spawned: true };
+    },
     migrate: async (conversationId, accountId, registry) => {
       let migration = registry.conversation(conversationId)!.migration!;
       if (migration.phase === "waiting-turn") {
@@ -404,13 +480,15 @@ test("an account-switch release failure durably restores a sparse profile", asyn
         host: { kind: "codex-app-server" as const, identity: "successor-release-failure-host", epoch: 1, verifiedAt: "2026-07-19T12:00:00.000Z" },
       };
       registry.persistMigrationProviderReceipt(conversationId, migration.revision, migration.operationId, receipt);
-      return registry.commitSuccessor(conversationId, {
+      const committed = registry.commitSuccessor(conversationId, {
         id: receipt.nativeId,
         path: receipt.path,
         accountId,
         historyHash: receipt.historyHash,
         host: receipt.host,
       }, migration.revision);
+      liveSuccessorProfile = committed.generations.at(-1)?.launchProfile;
+      return committed;
     },
   })).rejects.toThrow("source host release failed");
 
@@ -428,6 +506,64 @@ test("an account-switch release failure durably restores a sparse profile", asyn
     previousProfile: { model: null, effort: null, fast: null },
     error: "source host release failed",
   });
+  expect(released).toEqual([sourceGenerationId, "thread-successor-release-failure"]);
+  expect(liveSuccessorProfile).toMatchObject({ model: null, effort: null, fast: null });
+});
+
+test("a committed account-switch replay restores the live successor profile after predecessor cleanup fails", async () => {
+  const target = fixture({ model: null, effort: null, fast: null });
+  const predecessorId = target.registry.conversation(target.conversationId)!.generations.at(-1)!.id;
+  const successorPath = path.join(path.dirname(target.transcript), "successor-replay-release-failure.jsonl");
+  fs.writeFileSync(successorPath, "{}\n");
+  let migration = target.registry.requestConversationReseat(target.conversationId, "target").migration!;
+  if (migration.phase === "waiting-turn") {
+    migration = target.registry.transitionConversationMigration(target.conversationId, migration.revision, ["waiting-turn"], { phase: "requested" }).migration!;
+  }
+  migration = target.registry.transitionConversationMigration(target.conversationId, migration.revision, ["requested"], { phase: "preparing" }).migration!;
+  migration = target.registry.transitionConversationMigration(target.conversationId, migration.revision, ["preparing"], { phase: "successor-starting" }).migration!;
+  const receipt = {
+    operationId: migration.operationId,
+    nativeId: "thread-successor-replay-release-failure",
+    path: successorPath,
+    continuityPaths: [successorPath],
+    historyHash: "successor-replay-release-failure-history",
+    host: { kind: "codex-app-server" as const, identity: "successor-replay-release-failure-host", epoch: 1, verifiedAt: "2026-07-19T12:00:00.000Z" },
+  };
+  target.registry.persistMigrationProviderReceipt(target.conversationId, migration.revision, migration.operationId, receipt);
+  target.registry.commitSuccessor(target.conversationId, {
+    id: receipt.nativeId,
+    path: receipt.path,
+    accountId: "target",
+    historyHash: receipt.historyHash,
+    host: receipt.host,
+  }, migration.revision);
+  const released: string[] = [];
+  let liveSuccessorProfile: unknown = null;
+
+  await expect(applyStructuredReconfigure(effect({
+    operationId: "committed-replay-release-failure",
+    conversationId: target.conversationId,
+    accountId: "target",
+    previousProfile: { model: null, effort: null, fast: null },
+    eventSeq: 33,
+  }), {
+    registry: target.registry,
+    releaseHost: async (key) => {
+      released.push(key.sessionId);
+      if (key.sessionId === predecessorId) {
+        liveSuccessorProfile = target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile;
+        throw new Error("predecessor cleanup failed");
+      }
+      return true;
+    },
+    recover: async () => {
+      liveSuccessorProfile = target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile;
+      return { target: null, path: successorPath, conversationId: target.conversationId, spawned: true };
+    },
+  })).rejects.toThrow("predecessor cleanup failed");
+
+  expect(released).toEqual([predecessorId, receipt.nativeId]);
+  expect(liveSuccessorProfile).toMatchObject({ model: null, effort: null, fast: null });
 });
 
 test("an applying reconfigure resumes from its durable operation after registry recovery", async () => {

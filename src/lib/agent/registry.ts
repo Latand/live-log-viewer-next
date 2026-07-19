@@ -720,6 +720,52 @@ function queueAbandonedMigrationCleanup(
   };
 }
 
+function retireReconfigureOwnedMigration(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  owner: ConversationReconfigureState,
+): void {
+  const migration = conversation.migration;
+  if (!migration || ["committed", "rolled-back", "failed-recoverable"].includes(migration.phase)) return;
+  const intent = file.migrationIntents[migration.intentId];
+  const requestId = `reconfigure:${owner.operationId}:${owner.revision}`;
+  if (intent?.scope !== "conversation" || !intent.requestIds.includes(requestId)) return;
+
+  const changedAt = now();
+  const paths = new Set([conversation.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+  const signature = migrationReadinessSignature(file, conversation.engine, paths);
+  if (intent.state !== "stopped") {
+    intent.state = "stopped";
+    intent.stoppedAt = changedAt;
+    intent.updatedAt = changedAt;
+  }
+  queueAbandonedMigrationCleanup(file, conversation, changedAt);
+  abandonPendingContinuityPaths(conversation);
+  const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
+    ?? conversation.generations.at(-1);
+  if (!source) throw new Error("conversation has no source generation");
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.conversationId !== conversation.id
+      || delivery.state === "delivered"
+      || delivery.state === "delivery-uncertain") continue;
+    delivery.state = "assigned";
+    delivery.generationId = source.id;
+    delivery.assignedAt = changedAt;
+    delivery.error = null;
+    syncDeliveryOperationOwnerState(file, delivery);
+  }
+  conversation.migration = {
+    ...migration,
+    phase: "rolled-back",
+    pendingContinuityPaths: [],
+    error: null,
+    errorCode: null,
+    updatedAt: changedAt,
+  };
+  conversation.updatedAt = changedAt;
+  advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+}
+
 export class MigrationRevisionError extends Error {
   constructor(readonly expected: number, readonly actual: number) {
     super("migration preview is stale");
@@ -4105,6 +4151,9 @@ export class AgentRegistry {
           throw new Error("conversation reconfigure replay conflicts with durable ownership");
         }
         return { kind: "replayed" as const, state: clone(current), conversation: clone(conversation) };
+      }
+      if (current?.status === "applying" && current.accountId !== null && claim.accountId === undefined) {
+        retireReconfigureOwnedMigration(file, conversation, current);
       }
       const previousProfile = current?.status === "applying"
         ? current.previousProfile
