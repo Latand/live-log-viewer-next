@@ -38,9 +38,11 @@ export function renderStagePrompt(
     "",
     "Finish the completed turn with one fenced JSON object as the final block. This block is the only completion authority:",
     "```json",
-    '{"status":"pass","findings":["optional bounded finding"],"confidence":0.9}',
+    '{"status":"pass","findings":[],"confidence":0.9}',
     "```",
     "Use pass when the stage contract is complete, fail for a retryable stage failure, and needs_decision when operator judgment is required.",
+    "Pass requires findings to be empty or omitted. Use fail or needs_decision when findings describe unresolved work.",
+    "Every prose terminal marker must agree with the JSON status: APPROVE=pass, REQUEST_CHANGES=fail, COMMENT=needs_decision. NO FINDINGS agrees with pass.",
     "Human-readable output may appear before the JSON block. Never place text after the block.",
   ].join("\n");
 }

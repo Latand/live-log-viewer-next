@@ -413,9 +413,8 @@ function commitPassedStage(
   advancePipeline(pipeline, stage, ports);
 }
 
-/** One-shot settlement of a completed stage turn. Records the verdict on the
-    attempt, then either commits + advances (pass) or parks with the verdict
-    preserved (fail / needs_decision). */
+/** One-shot settlement of a completed stage turn. Semantic contradictions park
+    with their parser reason. Valid verdicts are recorded before settlement. */
 function settleStageVerdict(
   pipeline: Pipeline,
   stage: PipelineStage,
@@ -425,6 +424,11 @@ function settleStageVerdict(
   persist: () => void,
 ): void {
   attempt.output = parsed.output;
+  if ("failureReason" in parsed) {
+    attempt.completedAt = ports.now();
+    park(pipeline, parsed.failureReason, attempt);
+    return;
+  }
   attempt.verdict = parsed.verdict;
   if (parsed.verdict.status !== "pass") {
     attempt.state = parsed.verdict.status === "fail" ? "failed" : "needs_decision";
@@ -1033,13 +1037,13 @@ export async function createPipelineFromRequest(
 /** A park without a verdict (interrupted spawn, vanished transcript) can
     leave the stage agent mid-turn in its pane; retry/skip would reset the
     worktree under it and the next passed stage would commit its strays. An
-    attempt that produced a verdict finished its turn — an idle interactive
-    CLI in the pane is safe to leave behind. */
+    attempt with a verdict or terminal completion timestamp finished its turn;
+    an idle interactive CLI in the pane is safe to leave behind. */
 async function orphanAgentPane(
   attempt: PipelineStageAttempt | null,
   ports: PipelinePorts,
 ): Promise<{ error: string; status: number } | null> {
-  if (!attempt || attempt.verdict || !attempt.paneId) return null;
+  if (!attempt || attempt.verdict || attempt.completedAt || !attempt.paneId) return null;
   if (!(await ports.paneAgentAlive(attempt.paneId))) return null;
   return { error: `stage agent may still be running in pane ${attempt.paneId}; wait for it to exit or kill the pane first`, status: 409 };
 }
