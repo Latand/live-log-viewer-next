@@ -113,6 +113,7 @@ const file: FileEntry = {
 interface SendBody {
   idempotencyKey: string;
   text: string;
+  images?: Array<{ base64: string; mime: string }>;
   runtime?: { model?: string; effort?: string; fast?: boolean };
 }
 
@@ -163,6 +164,31 @@ function composerControls(host: HTMLElement) {
   return { type, submit };
 }
 
+function pasteImage(host: HTMLElement, tag: string): void {
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, { onPaste(event: unknown): void }>)[propsKey]!;
+  const bytes = new TextEncoder().encode(`png-${tag}`);
+  props.onPaste({
+    clipboardData: {
+      items: [{
+        type: "image/png",
+        getAsFile: () => new dom.File([bytes], `${tag}.png`, { type: "image/png" }),
+      }],
+    },
+    preventDefault() {},
+  });
+}
+
+async function waitForPreviews(host: HTMLElement, count: number): Promise<void> {
+  await act(async () => {
+    for (let attempt = 0; attempt < 50 && host.querySelectorAll("img").length !== count; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+  });
+  expect(host.querySelectorAll("img")).toHaveLength(count);
+}
+
 const delivered = (body: SendBody) => ({
   status: 200,
   json: {
@@ -180,7 +206,7 @@ const delivered = (body: SendBody) => ({
   },
 });
 
-test("unhosted structured composer sends through durable recovery admission", async () => {
+test("text-only unhosted structured composer sends through durable recovery admission", async () => {
   structuredView.session.host = "unhosted";
   const sends: SendBody[] = [];
   mockWire(sends, [delivered]);
@@ -195,6 +221,84 @@ test("unhosted structured composer sends through durable recovery admission", as
     text: "continue while the host recovers",
     idempotencyKey: expect.any(String),
   });
+  await act(async () => root.unmount());
+});
+
+test("image-only input stays removable and never enters a failing dead-host recovery", async () => {
+  const sends: SendBody[] = [];
+  mockWire(sends, [() => ({
+    status: 503,
+    json: { error: "structured host recovery failed before image admission" },
+  })]);
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
+  await settle(() => pasteImage(host, "image-only"));
+  await waitForPreviews(host, 1);
+
+  structuredView.session.host = "unhosted";
+  await act(async () => {
+    root.render(<TmuxComposer file={file} deadHost />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const send = host.querySelector('button[type="submit"]') as HTMLButtonElement;
+  await settle(() => send.click());
+
+  expect(sends).toEqual([]);
+  expect(send.disabled).toBe(true);
+  const picker = host.querySelector(`[aria-label="${translate("en", "composer.addImages")}"]`) as HTMLButtonElement;
+  expect(picker.disabled).toBe(true);
+  expect(host.textContent).toContain(translate("en", "deadHost.sendBlocked"));
+  expect(host.querySelectorAll("img")).toHaveLength(1);
+  const remove = host.querySelector(`[aria-label="${translate("en", "img.removeAria", { n: 1 })}"]`) as HTMLButtonElement;
+  expect(remove).not.toBeNull();
+  await settle(() => remove.click());
+  expect(host.querySelectorAll("img")).toHaveLength(0);
+  expect(sends).toEqual([]);
+  await act(async () => root.unmount());
+});
+
+test("text plus image stays local through dead-host failure and retries after hosting returns", async () => {
+  const sends: SendBody[] = [];
+  mockWire(sends, [(body) => structuredView.session.host === "unhosted"
+    ? {
+        status: 503,
+        json: { error: "structured host recovery failed before image admission" },
+      }
+    : delivered(body)]);
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
+  const { type } = composerControls(host);
+  await settle(() => type("review the attached screenshot"));
+  await settle(() => pasteImage(host, "mixed-input"));
+  await waitForPreviews(host, 1);
+
+  structuredView.session.host = "unhosted";
+  await act(async () => {
+    root.render(<TmuxComposer file={file} deadHost />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const blockedSend = host.querySelector('button[type="submit"]') as HTMLButtonElement;
+  await settle(() => blockedSend.click());
+
+  expect(sends).toEqual([]);
+  expect(blockedSend.disabled).toBe(true);
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("review the attached screenshot");
+  expect(host.querySelectorAll("img")).toHaveLength(1);
+
+  structuredView.session.host = "hosted";
+  await act(async () => {
+    root.render(<TmuxComposer file={file} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const recoveredSend = host.querySelector('button[type="submit"]') as HTMLButtonElement;
+  expect(recoveredSend.disabled).toBe(false);
+  await settle(() => recoveredSend.click());
+
+  expect(sends).toHaveLength(1);
+  expect(sends[0]).toMatchObject({
+    text: "review the attached screenshot",
+    images: [{ mime: "image/png" }],
+  });
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+  expect(host.querySelectorAll("img")).toHaveLength(0);
   await act(async () => root.unmount());
 });
 

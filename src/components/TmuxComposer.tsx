@@ -760,9 +760,12 @@ export function TmuxComposer({
   // path at all, so the whole composer stands down below (finding 2).
   const { caps, structuredSession } = useAgentCapabilities(file);
   const structuredImageCapability = structuredSession?.session.capabilities?.imageInput;
-  const structuredImagesDisabled = Boolean(structuredSession && !structuredImageCapability?.supported);
+  const structuredImagesDisabled = Boolean(structuredSession
+    && (deadHost || !structuredImageCapability?.supported));
   const structuredImagesReason = structuredImagesDisabled
-    ? t("composer.structuredImagesProtocol")
+    ? deadHost
+      ? t("deadHost.sendBlocked")
+      : t("composer.structuredImagesProtocol")
     : undefined;
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of
@@ -945,8 +948,8 @@ export function TmuxComposer({
   // Send, quick-ack, mic, or image path, and fires zero requests. This gates the
   // gated scanner-shaped subagent (inert row) that `canMessageWithoutPane` would
   // otherwise treat as resumable and let POST /api/tmux (finding 2). Unresolved
-  // hosts keep a disabled Send. Durable structured ownership can
-  // keep a dead-host composer usable through recovery admission.
+  // hosts keep a disabled Send. Durable structured ownership keeps text-only
+  // dead-host drafts usable through recovery admission.
   if (caps.controls.send.state === "hidden") return null;
   const resumable = canMessageWithoutPane(file);
   if (target === null && !resumable) return null;
@@ -965,8 +968,8 @@ export function TmuxComposer({
        still sends and later clears the same set. */
     const sentImages: PendingImage[] = attachments.imagesRef.current.map((image) => ({ ...image }));
     if (busy || voiceSending || (!payloadText.trim() && !sentImages.length)) return;
-    /* A legacy dead host keeps its draft local. Structured ownership admits the
-       message durably and uses the same request to recover its engine host. */
+    /* A legacy dead host keeps its draft local. Structured ownership admits a
+       text-only message durably and uses that request to recover its engine host. */
     if (deadHost && !structuredSession) {
       setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
       return;
@@ -1239,9 +1242,9 @@ export function TmuxComposer({
      control strip (issue #241); the composer no longer renders them. */
 
   /* The main send surface stays inert for legacy dead hosts and unresolved
-     ownership. Structured dead hosts use durable recovery admission. Quick-ack
-     calls the same `send()`, so it obeys the same block and leaves the menu when
-     blocked (round-3 finding). */
+     ownership. Structured dead hosts use durable text-only recovery admission.
+     Quick-ack calls the same `send()`, so it obeys the same block and leaves the
+     menu when blocked (round-3 finding). */
   const deadHostBlocksSend = deadHost && !structuredSession;
   const sendBlocked = deadHostBlocksSend || Boolean(sendBlockedReason);
   const canQuickAck = (!spawnMode || relayMode) && !sendBlocked;
