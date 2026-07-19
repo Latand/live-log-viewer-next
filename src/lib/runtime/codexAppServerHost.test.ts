@@ -1791,6 +1791,44 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("context compaction can outlive the RPC deadline without killing delivery ownership", async () => {
+    const server = new FakeAppServer("compaction-delivery-thread");
+    server.autoCompleteUserMessage = false;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      requestTimeoutMs: 5,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
+    });
+
+    const delivery = host.send({ id: "compaction-delivery", text: "continue after compaction" });
+    await Bun.sleep(10);
+    server.notify("item/started", {
+      threadId: "compaction-delivery-thread",
+      turnId: "turn-1",
+      item: { id: "compaction-one", type: "contextCompaction" },
+    });
+    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: "turn-1" });
+    expect(server.signals).toEqual([]);
+
+    const request = server.requests.find((candidate) => candidate.method === "turn/start")!;
+    const params = request.params as { input: unknown };
+    server.notify("item/completed", {
+      threadId: "compaction-delivery-thread",
+      turnId: "turn-1",
+      item: {
+        type: "userMessage",
+        clientId: "compaction-delivery",
+        content: params.input,
+      },
+    });
+
+    expect(await delivery).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+    expect(server.signals).toEqual([]);
+    await host.release();
+  });
+
   test("an active turn gives thread/read enough time to answer", async () => {
     const ignoredMethods: string[] = [];
     const server = new FakeAppServer("slow-read-thread", "slow-read-thread", false, [], undefined, null, ignoredMethods);
