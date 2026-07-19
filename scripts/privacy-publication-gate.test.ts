@@ -1288,6 +1288,21 @@ describe("privacy publication gate", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
+  test("resolves the current protected base tip for long-lived pull requests", () => {
+    const workflow = readFileSync(join(import.meta.dir, "..", ".github", "workflows", "privacy-publication.yml"), "utf8");
+
+    expect(workflow).not.toContain("github.event.pull_request.base.sha");
+    expect(workflow).toContain("PRIVACY_BASE_REF: ${{ github.event.pull_request.base.ref }}");
+    expect(workflow).toContain(
+      'git fetch --no-tags --force origin "+refs/heads/${PRIVACY_BASE_REF}:refs/remotes/origin/${PRIVACY_BASE_REF}"',
+    );
+    expect(workflow).toContain(
+      'git rev-parse --verify "refs/remotes/origin/${PRIVACY_BASE_REF}^{commit}"',
+    );
+    expect(workflow).toContain('printf \'PRIVACY_BASE_SHA=%s\\n\' "$PRIVACY_BASE_SHA" >> "$GITHUB_ENV"');
+    expect(workflow).toContain('--base "$PRIVACY_BASE_SHA"');
+  });
+
   test("uses trusted scanner and fingerprints when every candidate gate surface is tampered", () => {
     const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(root);
