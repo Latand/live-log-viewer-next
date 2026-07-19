@@ -254,7 +254,9 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             defined narrow-pane behavior: below 260px the meter collapses
             (tooltip keeps the tier) instead of crowding the chip row. */}
         <header
-          className={`reasoning-host flex shrink-0 flex-col gap-y-1 border-b border-border px-2.5 py-1.5 ${tone.header} ${
+          className={`reasoning-host flex shrink-0 flex-col border-b border-border ${
+            isMobile ? "gap-y-0.5 px-2 py-1" : "gap-y-1 px-2.5 py-1.5"
+          } ${tone.header} ${
             dragHandle ? "cursor-grab active:cursor-grabbing" : ""
           }`}
           {...dragHandle}

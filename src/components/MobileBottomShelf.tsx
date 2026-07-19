@@ -18,7 +18,10 @@ export function MobileBottomShelf({ total, leading, children }: { total: number;
   const [open, setOpen] = useState(false);
   if (total === 0 && !leading) return null;
   return (
-    <div className="shrink-0 border-t border-border bg-card" data-testid="mobile-bottom-shelf">
+    <div
+      className="relative z-40 shrink-0 border-t border-border bg-card pb-[env(safe-area-inset-bottom)]"
+      data-testid="mobile-bottom-shelf"
+    >
       <div className="flex items-center gap-1.5 pr-1.5">
         {leading ? <div className="shrink-0">{leading}</div> : null}
         {total > 0 ? (
@@ -37,7 +40,14 @@ export function MobileBottomShelf({ total, leading, children }: { total: number;
           <span className="min-h-11 flex-1" aria-hidden />
         )}
       </div>
-      {open && total > 0 ? <div>{children}</div> : null}
+      {open && total > 0 ? (
+        <div
+          data-testid="mobile-bottom-shelf-overlay"
+          className="absolute inset-x-0 bottom-[calc(100%+min(38dvh,20rem)+3.5rem)] max-h-[min(30dvh,18rem)] overflow-x-clip overflow-y-auto overscroll-y-contain border-y border-border bg-card shadow-2"
+        >
+          {children}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -430,23 +430,19 @@ export function ImagePreviewStrip({
   );
 
   if (isMobile) {
-    /* One bounded, horizontally scrolling row (issue #419): `min-w-0 max-w-full`
-       and `overflow-x-auto overscroll-x-contain` keep it from ever widening the
-       document, and the fixed height keeps the transcript above dominant. */
+    /* One bounded, horizontally scrolling first row (issue #440). Compact
+       thumbnails and in-row actions keep every slot reachable while the
+       transcript retains the remaining height. */
     return (
-      <div className="flex min-w-0 max-w-full flex-col gap-1.5">
-        <div
-          data-testid="attachment-tray"
-          className="no-scrollbar flex min-w-0 max-w-full items-stretch gap-2 overflow-x-auto overscroll-x-contain pb-0.5"
-        >
-          {attachments.map((attachment, idx) => (
-            <MobileAttachmentTile key={attachment.id} attachment={attachment} index={idx} onRemove={onRemove} onRetry={onRetry} />
-          ))}
-        </div>
-        <div className="flex min-w-0 items-center justify-between gap-2">
-          {hint}
-          {clearAll}
-        </div>
+      <div
+        data-testid="attachment-tray"
+        aria-label={t("composer.imagesCount", { count: readyCount || attachments.length })}
+        className="no-scrollbar flex max-h-16 min-w-0 max-w-full items-center gap-2 overflow-x-auto overscroll-x-contain px-2 pb-1 pt-2"
+      >
+        {attachments.map((attachment, idx) => (
+          <MobileAttachmentTile key={attachment.id} attachment={attachment} index={idx} onRemove={onRemove} onRetry={onRetry} />
+        ))}
+        {clearAll}
       </div>
     );
   }
@@ -495,8 +491,8 @@ function Thumb({ attachment, index }: { attachment: PendingAttachment; index: nu
 function MobileAttachmentTile({ attachment, index, onRemove, onRetry }: { attachment: PendingAttachment; index: number; onRemove: (id: string) => void; onRetry: (id: string) => void }) {
   const { t } = useLocale();
   return (
-    <div className="relative flex h-16 w-16 shrink-0 flex-col" data-testid="attachment-tile" data-status={attachment.status}>
-      <span className="relative h-16 w-16">
+    <div className="relative flex h-12 w-12 shrink-0 flex-col" data-testid="attachment-tile" data-status={attachment.status}>
+      <span className="relative h-12 w-12">
         <Thumb attachment={attachment} index={index} />
         {statusBadge(attachment, t, index)}
       </span>
@@ -506,7 +502,7 @@ function MobileAttachmentTile({ attachment, index, onRemove, onRetry }: { attach
         type="button"
         onClick={() => onRemove(attachment.id)}
         aria-label={t("img.removeAria", { n: index + 1 })}
-        className="absolute -right-1.5 -top-1.5 flex h-6 w-6 items-center justify-center rounded-full border border-border bg-card text-muted shadow-1 before:absolute before:-inset-2.5 before:content-[''] hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="absolute right-0.5 top-0.5 flex h-6 w-6 items-center justify-center rounded-full border border-border bg-card text-muted shadow-1 before:absolute before:-inset-2.5 before:content-[''] hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
         <X className="h-3 w-3" aria-hidden />
       </button>
@@ -515,7 +511,7 @@ function MobileAttachmentTile({ attachment, index, onRemove, onRetry }: { attach
           type="button"
           onClick={() => onRetry(attachment.id)}
           aria-label={t("img.retryAria", { n: index + 1 })}
-          className="absolute inset-x-0 -bottom-1 mx-auto flex h-5 items-center justify-center gap-0.5 rounded-full border border-border bg-card px-1.5 text-[9px] font-bold text-warning before:absolute before:-inset-2 before:content-[''] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="absolute inset-x-0 bottom-0 mx-auto flex h-5 items-center justify-center gap-0.5 rounded-full border border-border bg-card px-1.5 text-[9px] font-bold text-warning before:absolute before:-inset-3 before:content-[''] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
           <RotateCw className="h-3 w-3" aria-hidden /> {t("img.retry")}
         </button>

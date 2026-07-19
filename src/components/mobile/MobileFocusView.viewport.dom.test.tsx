@@ -47,6 +47,7 @@ const OVERRIDES: Record<string, unknown> = {
   IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } },
   fetch: (async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => "" })) as unknown as typeof fetch,
 };
+(dom as unknown as { matchMedia: unknown }).matchMedia = OVERRIDES.matchMedia;
 const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
 const settle = async () => { await new Promise((r) => setTimeout(r, 0)); await new Promise((r) => setTimeout(r, 0)); };
@@ -122,6 +123,38 @@ test("a focused conversation collapses several pipelines into one summary row wi
   expect(summary!.textContent).toContain("3 pipelines");
   expect(summary!.textContent).toContain("1 active");
   expect(summary!.textContent).toContain("2 done");
+});
+
+test("the focused chat is one 100dvh-bounded shell whose pane owns the remaining height (#440)", async () => {
+  roots.push(mount(view()));
+  await settle();
+
+  const shell = dom.document.querySelector('[data-testid="mobile-focused-chat-shell"]') as HTMLElement | null;
+  expect(shell).not.toBeNull();
+  expect(shell!.className).toContain("h-full");
+  expect(shell!.className).toContain("max-h-[100dvh]");
+  expect(shell!.className).toContain("overflow-hidden");
+
+  const pane = shell!.querySelector('[data-testid="mobile-focused-pane"]') as HTMLElement | null;
+  expect(pane).not.toBeNull();
+  expect(pane!.className).toContain("min-h-0");
+  expect(pane!.className).toContain("flex-1");
+
+  const transcript = pane!.querySelector(".overflow-y-auto") as HTMLElement | null;
+  expect(transcript).not.toBeNull();
+  expect(transcript!.className).toContain("min-h-0");
+  expect(transcript!.className).toContain("flex-1");
+});
+
+test("the 390px agent header uses compact phone spacing above the transcript (#440)", async () => {
+  roots.push(mount(view()));
+  await settle();
+
+  const header = dom.document.querySelector('[data-testid="mobile-focused-pane"] header') as HTMLElement | null;
+  expect(header).not.toBeNull();
+  expect(header!.className).toContain("gap-y-0.5");
+  expect(header!.className).toContain("px-2");
+  expect(header!.className).toContain("py-1");
 });
 
 test("the sheet folds completed pipelines behind one reversible disclosure (#419)", async () => {

@@ -1249,7 +1249,10 @@ export function TmuxComposer({
   return (
     <form
       onSubmit={handleSubmit}
-      className="flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2"
+      data-testid={isMobile ? "bounded-mobile-composer" : undefined}
+      className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2 ${
+        isMobile ? "max-h-[min(38dvh,20rem)] overflow-x-clip overflow-y-auto overscroll-y-contain" : ""
+      }`}
       aria-label={structuredSession ? t("composer.sendStructuredAria") : spawnMode ? t("composer.spawnAria") : t("composer.sendAria", { target: target ?? "" })}
     >
       {/* Unmounts exactly when the textarea does (a key-churn remount, an

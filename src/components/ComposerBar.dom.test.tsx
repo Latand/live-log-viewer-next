@@ -12,6 +12,7 @@ import { ComposerBar } from "./ComposerBar";
 import { ImagePreviewStrip, type PendingImage } from "./imageAttachments";
 
 const dom = new Window();
+let mobileViewport = false;
 Object.assign(globalThis, {
   window: dom,
   document: dom.document,
@@ -23,7 +24,7 @@ Object.assign(globalThis, {
   cancelAnimationFrame: dom.cancelAnimationFrame.bind(dom),
 });
 (dom as unknown as { matchMedia(query: string): unknown }).matchMedia = (query) => ({
-  matches: false,
+  matches: mobileViewport && query.includes("max-width"),
   media: query,
   addEventListener() {},
   removeEventListener() {},
@@ -31,6 +32,7 @@ Object.assign(globalThis, {
 
 afterEach(() => {
   document.body.replaceChildren();
+  mobileViewport = false;
   setLocale("en");
 });
 
@@ -49,6 +51,56 @@ function Harness() {
     imageDisabledReason="Capability unavailable"
   />;
 }
+
+function MobileAttachmentHarness() {
+  const composer = useComposer({ initialText: () => "", persistText: () => {}, submit: () => {} });
+  const restored = useRef(false);
+  useEffect(() => {
+    if (restored.current) return;
+    restored.current = true;
+    composer.attachments.replace([
+      { base64: "AA==", mime: "image/png", preview: "data:image/png;base64,AA==" },
+      { base64: "AQ==", mime: "image/png", preview: "data:image/png;base64,AQ==" },
+      { base64: "Ag==", mime: "image/png", preview: "data:image/png;base64,Ag==" },
+    ]);
+  }, [composer.attachments]);
+  return (
+    <form>
+      <ComposerBar
+        composer={composer}
+        placeholder="Prompt"
+        textareaAriaLabel="Prompt"
+        imageAriaLabel="Add images"
+        leftSlot={null}
+        sendLabelIdle="Send"
+        sendLabelRecording="Stop"
+        sendIdleClassName="bg-accent"
+      />
+    </form>
+  );
+}
+
+test("390px staged images occupy the first compact row inside the composer (#440)", async () => {
+  mobileViewport = true;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<MobileAttachmentHarness />));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const form = host.querySelector("form")!;
+  const tray = form.querySelector('[data-testid="attachment-tray"]') as HTMLElement | null;
+  const inputSurface = form.querySelector("textarea")!.parentElement!;
+  expect(tray).not.toBeNull();
+  expect(tray!.className).toContain("overflow-x-auto");
+  expect(tray!.className).toContain("max-h-16");
+  const rows = [...form.children];
+  expect(rows.indexOf(tray!)).toBeLessThan(rows.indexOf(inputSurface));
+  expect(tray!.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(3);
+  expect(tray!.querySelectorAll('button[aria-label^="Remove image"]')).toHaveLength(3);
+
+  flushSync(() => root.unmount());
+});
 
 test("unsupported image capability disables picker, paste, and drop before admission", () => {
   const host = document.createElement("div");
