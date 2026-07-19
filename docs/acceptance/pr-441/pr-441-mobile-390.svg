@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844">
+    <rect width="390" height="844" fill="#f4f5f7"/>
+    <!-- top navigation strip -->
+    <rect x="0" y="0" width="390" height="44" fill="#ffffff" stroke="#e3e5e9"/>
+    <rect x="10" y="9" width="120" height="26" rx="13" fill="#eef0ff" stroke="#c3c8f5"/>
+    <text x="24" y="26" font-family="Inter, system-ui, sans-serif" font-size="11" font-weight="700" fill="#4b52c7">● Billing</text>
+    <rect x="140" y="9" width="70" height="26" rx="13" fill="#f2f3f5" stroke="#d7dade"/>
+    <text x="152" y="26" font-family="Inter, system-ui, sans-serif" font-size="11" font-weight="600" fill="#889">⤷ codex</text>
+    <!-- focused conversation pane -->
+    <rect x="6" y="50" width="378" height="714" rx="10" fill="#ffffff" stroke="#e3e5e9"/>
+    <text x="20" y="82" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="800" fill="#1f2430">Refactor billing module</text>
+    <text x="20" y="104" font-family="Inter, system-ui, sans-serif" font-size="11" fill="#889">Focused conversation · 390px (synthetic)</text>
+    <text x="20" y="150" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#556">Transcript…</text>
+    <!-- composer -->
+    <rect x="6" y="764" width="378" height="56" rx="12" fill="#fbfbfc" stroke="#e3e5e9"/>
+    <text x="20" y="797" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#aab">Message…</text>
+    <text x="20" y="740" font-family="Inter, system-ui, sans-serif" font-size="10.5" font-weight="700" fill="#4b52c7" text-anchor="start"> </text>
+    <!-- subagent badge rail (left edge, bottom-up, clears composer) -->
+    
+    <g>
+      <rect x="14" y="734" width="220" height="30" rx="15" fill="#ffffff" stroke="#c7cbd1" stroke-width="1"/>
+      <circle cx="29" cy="749" r="15" fill="hsl(90 62% 55%)"/>
+      <text x="29" y="752" font-family="Inter, system-ui, sans-serif" font-size="9" font-weight="800" fill="#fff" text-anchor="middle">SM</text>
+      <text x="52" y="753" font-family="Inter, system-ui, sans-serif" font-size="11.5" font-weight="700" fill="#1f2430">Schema migration</text>
+    </g>
+
+    <g opacity="1">
+      <circle cx="29" cy="713" r="15" fill="hsl(200 62% 55%)" stroke="#fff" stroke-width="1.5"/>
+      <text x="29" y="716" font-family="Inter, system-ui, sans-serif" font-size="9" font-weight="800" fill="#fff" text-anchor="middle">AT</text>
+      
+    </g>
+
+    <g opacity="0.45">
+      <circle cx="29" cy="677" r="15" fill="hsl(180 62% 55%)" stroke="#fff" stroke-width="1.5"/>
+      <text x="29" y="680" font-family="Inter, system-ui, sans-serif" font-size="9" font-weight="800" fill="#fff" text-anchor="middle">DS</text>
+      
+    </g>
+  </svg>
