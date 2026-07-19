@@ -6,7 +6,7 @@ import type { AgentRegistry } from "@/lib/agent/registry";
 import { matchesOperatorSpawnCapability, OperatorSpawnCapabilityError } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_HEADER, VIEWER_SPAWN_ENDPOINT } from "@/lib/agent/spawnPolicy";
 
-export const AGENT_SPAWN_LIVE_CHILD_CAP = 3;
+export const AGENT_SPAWN_LIVE_CHILD_CAP = 20;
 export const AGENT_SPAWN_LINEAGE_ERROR = `Agent-initiated spawns require role; reviewer spawns also require reviews (the implementer conversation or transcript). The parent is inferred from the authenticated caller conversation; src stays optional verification. POST ${VIEWER_SPAWN_ENDPOINT} with {engine, model, cwd, prompt, role, src?, reviews?}.`;
 
 export type AuthenticatedSpawnCaller =
