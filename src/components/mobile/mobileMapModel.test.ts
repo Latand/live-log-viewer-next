@@ -89,3 +89,22 @@ test("lineage edges only connect kept markers — no dangling endpoint into a cl
     expect(Number.isFinite(edge.x1) && Number.isFinite(edge.y2)).toBe(true);
   }
 });
+
+test("all-frame bounds span negative and distant markers plus overflow clusters", () => {
+  const { layout, tasks, workerStacks } = buildMobileMapFixture(500);
+  layout.nodes[0]!.x = -1_200;
+  layout.nodes[0]!.y = -800;
+  layout.nodes[399]!.x = layout.width + 20_000;
+  layout.nodes[400]!.x = layout.width + 60_000;
+  layout.nodes[400]!.y = layout.height + 30_000;
+
+  const model = buildMobileMapModel(layout, tasks, workerStacks);
+  const rects = [...model.markers, ...model.clusters].map((item) => item.rect);
+  const left = Math.min(0, ...rects.map((rect) => rect.x));
+  const top = Math.min(0, ...rects.map((rect) => rect.y));
+  const right = Math.max(layout.width, ...rects.map((rect) => rect.x + rect.w));
+  const bottom = Math.max(layout.height, ...rects.map((rect) => rect.y + rect.h));
+
+  expect(model.clusters.some((cluster) => cluster.rect.x > layout.width)).toBe(true);
+  expect(model.world).toEqual({ x: left, y: top, w: right - left, h: bottom - top });
+});

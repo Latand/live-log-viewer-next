@@ -35,6 +35,10 @@ class DeferredReader {
     this.result = dataUrl;
     this.onload?.();
   }
+  reject(message: string) {
+    this.error = new Error(message);
+    this.onerror?.();
+  }
 }
 
 const OVERRIDES: Record<string, unknown> = {
@@ -158,4 +162,40 @@ test("a read settling after unmount stays inert — no commit, no resurrect (PR 
   expect(urls.created).toHaveLength(1);
   expect(urls.revoked).toHaveLength(1);
   expect(captured.errors).toEqual([]);
+});
+
+test("receipt settlement removes intake ids while preserving every later slot and owned preview", async () => {
+  mount();
+  flushSync(() => api().addFiles([file("sent.png")]));
+  DeferredReader.take("sent.png").resolve("data:image/png;base64,c2VudA==");
+  await tick();
+  const sent = api().images.map((image) => ({ ...image }));
+  const sentPreview = sent[0]!.preview;
+
+  flushSync(() => api().addFiles([
+    file("ready-one.png"),
+    file("reading.png"),
+    file("error.png"),
+    file("ready-two.png"),
+  ]));
+  DeferredReader.take("ready-one.png").resolve("data:image/png;base64,b25l");
+  DeferredReader.take("error.png").reject("broken image");
+  DeferredReader.take("ready-two.png").resolve("data:image/png;base64,dHdv");
+  await tick();
+
+  const survivors = api().attachments.slice(1);
+  const survivorPreviews = survivors.map((attachment) => attachment.preview);
+  expect(survivors.map((attachment) => attachment.status)).toEqual(["ready", "reading", "error", "ready"]);
+
+  flushSync(() => api().settleDelivered(sent));
+
+  expect(api().attachments.map((attachment) => attachment.status)).toEqual(["ready", "reading", "error", "ready"]);
+  expect(api().attachments.map((attachment) => attachment.preview)).toEqual(survivorPreviews);
+  expect(api().attachments.every((attachment) => attachment.ownsPreview)).toBe(true);
+  expect(urls.revoked).toEqual([sentPreview]);
+
+  DeferredReader.take("reading.png").resolve("data:image/png;base64,bGF0ZXI=");
+  await tick();
+  expect(api().attachments.map((attachment) => attachment.status)).toEqual(["ready", "ready", "error", "ready"]);
+  expect(api().attachments.map((attachment) => attachment.preview)).toEqual(survivorPreviews);
 });

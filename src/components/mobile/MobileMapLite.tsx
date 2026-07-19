@@ -8,7 +8,7 @@ import type { WorkerStack } from "@/components/scheme/workerCollapse";
 import { activityDot, engineBadge } from "@/components/utils";
 import type { BoardTask } from "@/lib/tasks/types";
 
-import { buildMobileMapModel, type MapMarker, type MobileMapModel } from "./mobileMapModel";
+import { buildMobileMapModel, type MapMarker, type MapRect, type MobileMapModel } from "./mobileMapModel";
 
 const Z_MIN = 0.15;
 const Z_MAX = 1.6;
@@ -32,9 +32,9 @@ function frameRect(rect: { x: number; y: number; w: number; h: number }, viewpor
   return { z, tx: viewport.w / 2 - cx * z, ty: viewport.h / 2 - cy * z };
 }
 
-function fitAll(world: { w: number; h: number }, viewport: { w: number; h: number }): Camera {
+function fitAll(world: MapRect, viewport: { w: number; h: number }): Camera {
   const z = clamp(Math.min((viewport.w - FIT_PAD * 2) / world.w, (viewport.h - FIT_PAD * 2) / world.h), Z_MIN, Z_MAX);
-  return frameRect({ x: 0, y: 0, w: world.w, h: world.h }, viewport, z);
+  return frameRect(world, viewport, z);
 }
 
 /**

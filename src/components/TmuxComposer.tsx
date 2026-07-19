@@ -883,17 +883,15 @@ export function TmuxComposer({
     const { settled, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);
     if (!settled.length) return;
     persistPendingDeliveries(remaining);
-    let remainingImages: readonly PendingImage[] = attachments.imagesRef.current;
     for (const settlement of settled) {
       markSettled(settlement.entry.key);
       const next = draftAfterDelivery(textRef.current, settlement.text);
       if (next !== textRef.current) setText(next);
-      remainingImages = attachmentsAfterDelivery(remainingImages, settlement.entry.images);
+      attachments.settleDelivered(settlement.entry.images);
       /* The admitted attempt consumed its key: minting a fresh one keeps the
          next message from being replay-deduped into silence server-side. */
       if (settlement.entry.key === idempotencyKey.current) idempotencyKey.current = mintIdempotencyKey();
     }
-    if (remainingImages.length !== attachments.imagesRef.current.length) attachments.replace([...remainingImages]);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef/attachments are hook-stable
   }, [displayedRuntimeReceipts]);
 
@@ -1023,7 +1021,7 @@ export function TmuxComposer({
       if (settledSendKeys.current.has(clientMessageId)) return;
       markSettled(clientMessageId);
       setText(draftAfterDelivery(textRef.current, clearedText));
-      attachments.replace(attachmentsAfterDelivery(attachments.imagesRef.current, snapshot));
+      attachments.settleDelivered(snapshot);
     };
     try {
       const json: {

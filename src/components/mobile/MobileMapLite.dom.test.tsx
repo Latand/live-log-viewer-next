@@ -90,3 +90,25 @@ test("tapping a marker emits its exact pickFromMap key", async () => {
   flushSync(() => marker!.click());
   expect(picks).toEqual([fixture.sampleNodePath]);
 });
+
+test("all framing consumes the negative world origin", async () => {
+  const source = buildMobileMapFixture(8);
+  const node = { ...source.layout.nodes[0]!, x: -500, y: 0, w: 40, h: 40 };
+  const layout = {
+    ...source.layout,
+    nodes: [node],
+    edges: [],
+    stacks: [],
+    decks: [],
+    drafts: [],
+    byPath: new Map([[node.file.path, node]]),
+    width: 1,
+    height: 1,
+  };
+
+  mount(<MobileMapLite layout={layout} tasks={[]} workerStacks={[]} frame="all" ringKey={null} onPick={() => {}} />);
+  await settle();
+
+  const marker = dom.document.querySelector(`[data-map-key="${node.file.path}"]`) as unknown as HTMLElement;
+  expect(Number.parseFloat(marker.style.left)).toBeCloseTo(28, 5);
+});

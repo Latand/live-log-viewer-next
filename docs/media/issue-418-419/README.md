@@ -1,8 +1,9 @@
 # #418 / #419 mobile recovery — visual evidence
 
-Deterministic capture of the chat-first mobile surface and bounded map on top of
-current `main` (0f239192) with the preserved mobile implementation
-(bc619ebd) cherry-picked and reconciled against the #353 pipeline semantics.
+Deterministic capture of the chat-first mobile surface and bounded map, carried
+forward through the reviewed PR #431 base
+`08b12caba69f31995870ebe841217ba51e0163dd`. That base includes the preserved
+#418/#419 mobile recovery and the reconciled #353 pipeline semantics.
 
 Regenerate:
 
@@ -30,11 +31,11 @@ chat-first-390.png overflow gate: scrollWidth 390 === innerWidth 390
 map-lite-390.png overflow gate: scrollWidth 390 === innerWidth 390
 ```
 
-## Build / gate status
+## Reviewed base / gate status
 
-- Production build: `next build --webpack` **compiles successfully** ("Compiled
-  successfully in ~21s").
-- The bundled `next build` TypeScript pass fails only in
-  `src/lib/pipelines/engine.ts` (`failEdgeInput` narrowing) — a pre-existing
-  defect on `main` outside the mobile scope, owned by issue **#429**. It is
-  unchanged by this work; the mobile diff touches no pipeline-engine source.
+- Reviewed base: `08b12caba69f31995870ebe841217ba51e0163dd`.
+- Standalone TypeScript: `bunx tsc --noEmit` passes. The earlier
+  `src/lib/pipelines/engine.ts` `failEdgeInput` narrowing failure was resolved by
+  `7579942a69f44176d63294c09ce4cdd025fc4568` for issue **#429**, which is an
+  ancestor of the reviewed base.
+- Production build: `next build --webpack` compiles successfully.

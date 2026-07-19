@@ -64,7 +64,7 @@ export interface MobileMapModel {
   markers: MapMarker[];
   edges: MapEdge[];
   clusters: MapCluster[];
-  world: { w: number; h: number };
+  world: MapRect;
   /** Marker candidates before the cap — diagnostics and tests. */
   total: number;
 }
@@ -212,22 +212,21 @@ export function buildMobileMapModel(
     if (edges.length >= MAP_MARKER_CAP) break;
   }
 
-  const contentBottom = Math.max(
-    layout.height,
-    bandY,
-    ...markers.map((marker) => marker.rect.y + marker.rect.h),
-    ...clusters.map((cluster) => cluster.rect.y + cluster.rect.h),
-  );
-  const contentRight = Math.max(
-    layout.width,
-    ...markers.map((marker) => marker.rect.x + marker.rect.w),
-  );
+  const contentRects = [
+    { x: 0, y: 0, w: Math.max(layout.width, 1), h: Math.max(layout.height, bandY, 1) },
+    ...markers.map((marker) => marker.rect),
+    ...clusters.map((cluster) => cluster.rect),
+  ];
+  const left = Math.min(...contentRects.map((rect) => rect.x));
+  const top = Math.min(...contentRects.map((rect) => rect.y));
+  const right = Math.max(...contentRects.map((rect) => rect.x + rect.w));
+  const bottom = Math.max(...contentRects.map((rect) => rect.y + rect.h));
 
   return {
     markers,
     edges,
     clusters,
-    world: { w: Math.max(contentRight, 1), h: Math.max(contentBottom, 1) },
+    world: { x: left, y: top, w: Math.max(right - left, 1), h: Math.max(bottom - top, 1) },
     total: candidates.length,
   };
 }

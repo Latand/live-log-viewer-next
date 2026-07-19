@@ -323,6 +323,24 @@ export function useImageAttachments(handlers: {
     commit([]);
   };
 
+  const settleDelivered = (delivered: readonly PendingImage[]) => {
+    const remaining = [...attachmentsRef.current];
+    let changed = false;
+    for (const sent of delivered) {
+      const index = sent.id
+        ? remaining.findIndex((attachment) => attachment.id === sent.id)
+        : remaining.findIndex((attachment) =>
+          attachment.status === "ready"
+          && attachment.base64 === sent.base64
+          && attachment.mime === sent.mime);
+      if (index < 0) continue;
+      const [settled] = remaining.splice(index, 1);
+      if (settled) revokePreview(settled);
+      changed = true;
+    }
+    if (changed) commit(remaining);
+  };
+
   const hasReading = attachments.some((attachment) => attachment.status === "reading");
   const hasError = attachments.some((attachment) => attachment.status === "error");
 
@@ -344,6 +362,10 @@ export function useImageAttachments(handlers: {
     remove,
     retry,
     clearAll,
+    /** Settle a delivered snapshot against the full intake list. Exact intake
+        ids remove only the slots sent on that generation, keeping later
+        reading/error slots and every survivor's owned preview alive. */
+    settleDelivered,
     /** Drop everything after a send (no confirmation), revoking previews. */
     clear: clearAll,
     replace: (next: PendingImage[]) => {
