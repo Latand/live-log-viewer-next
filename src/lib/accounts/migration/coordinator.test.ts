@@ -2882,6 +2882,82 @@ describe("durable account migration coordinator", () => {
     expect(latest.migration).toMatchObject({ targetId: "b", phase: "verifying" });
   });
 
+  test("a same-target reconfigure takeover preserves the reusable Claude successor", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source-same-target-claude.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source-same-target-claude.jsonl")!;
+    store.claimConversationReconfigure(conversation.id, {
+      operationId: "same-target-old",
+      revision: 80,
+      accountId: "b",
+      profile: { model: "gpt-5.6-sol", effort: "high", fast: false },
+    });
+    store.requestConversationReseat(conversation.id, "b", { operationId: "same-target-old", revision: 80 });
+    let activeOperation = "same-target-old";
+    let verificationStarted!: () => void;
+    let releaseVerification!: () => void;
+    const verifying = new Promise<void>((resolve) => { verificationStarted = resolve; });
+    const verificationGate = new Promise<void>((resolve) => { releaseVerification = resolve; });
+    let verificationCount = 0;
+    let successorAlive = true;
+    const cleaned: string[] = [];
+    const published: string[] = [];
+    const provider: SuccessorProviderPort = {
+      virtualSource: true,
+      async create(input) {
+        return {
+          operationId: input.operationId,
+          nativeId: "same-target-claude-b",
+          path: "/same-target-claude-b.jsonl",
+          continuityPaths: [],
+          historyHash: "same-target-claude-b",
+          host: { kind: "claude-stream", identity: "same-target-claude-b", epoch: 1, verifiedAt: "2026-07-19T12:00:00.000Z" },
+        };
+      },
+      async verify() {
+        verificationCount += 1;
+        if (verificationCount === 1) {
+          verificationStarted();
+          await verificationGate;
+        }
+        if (!successorAlive) throw new Error("reusable Claude successor was cancelled");
+      },
+      async publishHost(receipt) {
+        if (!successorAlive) throw new Error("reusable Claude successor was cancelled");
+        published.push(receipt.nativeId);
+      },
+      async cleanup(receipt) {
+        successorAlive = false;
+        cleaned.push(receipt.nativeId);
+      },
+    };
+
+    const oldAdvance = advanceConversationMigration(conversation.id, store, provider, {
+      ownsOperation: async () => activeOperation === "same-target-old",
+    });
+    await verifying;
+    store.claimConversationReconfigure(conversation.id, {
+      operationId: "same-target-new",
+      revision: 81,
+      accountId: "b",
+      profile: { model: "gpt-5.6-terra", effort: "xhigh", fast: true },
+    });
+    activeOperation = "same-target-new";
+    releaseVerification();
+    await oldAdvance;
+
+    store.requestConversationReseat(conversation.id, "b", { operationId: "same-target-new", revision: 81 });
+    const committed = await advanceConversationMigration(conversation.id, store, provider, {
+      ownsOperation: async () => activeOperation === "same-target-new",
+    });
+
+    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.generations.at(-1)?.accountId).toBe("b");
+    expect(verificationCount).toBe(2);
+    expect(published).toEqual(["same-target-claude-b"]);
+    expect(cleaned).toEqual([]);
+  });
+
   test("a newer reconfigure admitted during publication fences the stale successor", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source-publication-fence.jsonl", "a", "idle")]);

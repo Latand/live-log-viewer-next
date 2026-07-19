@@ -20,12 +20,16 @@ import {
   effectiveProfile,
   phaseKey,
   phaseOperationKey,
+  phaseRollbackKey,
+  profileKey,
   readDraft,
+  readProfile,
   readResumeDraft,
   storageKey,
   writeProfile,
   writeResumeProfile,
   type RuntimeDraft,
+  type RuntimeProfile,
 } from "./runtimeProfile";
 
 /** The three conversation surfaces the pill mounts on; every other surface hides
@@ -33,6 +37,33 @@ import {
 type PillSurface = "structured" | "resume" | "live-root";
 
 type ApplyState = "idle" | "saving" | "pending" | "confirming" | "applied" | "error";
+
+interface BrowserProfileRollback {
+  operationId: string | null;
+  draft: RuntimeDraft;
+  profile: RuntimeProfile | null;
+}
+
+function readBrowserProfileRollback(file: FileEntry): BrowserProfileRollback | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(phaseRollbackKey(file)) ?? "null") as Partial<BrowserProfileRollback> | null;
+    const draft = value?.draft;
+    if (!draft || typeof draft.model !== "string" || typeof draft.effort !== "string" || typeof draft.fast !== "boolean") return null;
+    const profile = value?.profile;
+    if (profile !== null && (typeof profile !== "object" || Array.isArray(profile))) return null;
+    return {
+      operationId: typeof value?.operationId === "string" ? value.operationId : null,
+      draft,
+      profile: profile ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeBrowserProfileRollback(file: FileEntry, rollback: BrowserProfileRollback): void {
+  try { localStorage.setItem(phaseRollbackKey(file), JSON.stringify(rollback)); } catch { /* best-effort browser recovery */ }
+}
 
 const REASONING_TIER_KEYS: Record<string, MessageKey> = {
   minimal: "reasoningTier.minimal",
@@ -102,6 +133,7 @@ export function RuntimePill({
   const [error, setError] = useState("");
   const revisionRef = useRef(0);
   const operationRef = useRef<string | null>(null);
+  const rollbackRef = useRef<BrowserProfileRollback | null>(null);
 
   // ---- persisted-profile face (structured / resume) -------------------------
   // Bumped on every commit to re-read the identity-scoped profile so the pill,
@@ -126,6 +158,7 @@ export function RuntimePill({
     setLiveDraft(stored);
     const phase = localStorage.getItem(phaseKey(file));
     operationRef.current = localStorage.getItem(phaseOperationKey(file));
+    rollbackRef.current = readBrowserProfileRollback(file);
     setApplyState(phase === "pending" || phase === "confirming" ? phase : "idle");
     setError("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -149,6 +182,24 @@ export function RuntimePill({
       setVersion((v) => v + 1);
     }
   }, [cardId]);
+
+  const clearBrowserProfileRollback = useCallback((operationId: string | null = null) => {
+    const rollback = rollbackRef.current ?? readBrowserProfileRollback(file);
+    if (operationId && rollback?.operationId !== operationId) return;
+    rollbackRef.current = null;
+    localStorage.removeItem(phaseRollbackKey(file));
+  }, [file]);
+
+  const restoreBrowserProfile = useCallback((rollback: BrowserProfileRollback) => {
+    liveDraftRef.current = rollback.draft;
+    setLiveDraft(rollback.draft);
+    try {
+      localStorage.setItem(storageKey(file), JSON.stringify(rollback.draft));
+      if (rollback.profile) localStorage.setItem(profileKey(file), JSON.stringify(rollback.profile));
+      else localStorage.removeItem(profileKey(file));
+    } catch { /* the in-memory rollback still restores this mount */ }
+    clearBrowserProfileRollback(rollback.operationId);
+  }, [clearBrowserProfileRollback, file]);
 
   const applyReconfigure = useCallback(async (draft: RuntimeDraft) => {
     const revision = revisionRef.current;
@@ -176,6 +227,11 @@ export function RuntimePill({
       if (revision !== revisionRef.current) return;
       if (!response.ok || !body.ok) throw new Error(body.error ?? t("runtimeConfig.failed"));
       operationRef.current = body.operationId ?? body.receipt?.operationId ?? null;
+      const rollback = rollbackRef.current;
+      if (rollback) {
+        rollbackRef.current = { ...rollback, operationId: operationRef.current };
+        writeBrowserProfileRollback(file, rollbackRef.current);
+      }
       const phase = pillSurface === "structured" || body.outcome === "pending" ? "pending" : "confirming";
       localStorage.setItem(phaseKey(file), phase);
       if (operationRef.current) localStorage.setItem(phaseOperationKey(file), operationRef.current);
@@ -183,10 +239,12 @@ export function RuntimePill({
       setApplyState(phase);
     } catch (cause) {
       if (revision !== revisionRef.current) return;
+      const rollback = rollbackRef.current;
+      if (rollback) restoreBrowserProfile(rollback);
       setError(cause instanceof Error ? cause.message : t("runtimeConfig.failed"));
       setApplyState("error");
     }
-  }, [engine, file, pillSurface, runtimeConversationId, t]);
+  }, [engine, file, pillSurface, restoreBrowserProfile, runtimeConversationId, t]);
 
   // Pending re-apply loop and confirm-by-observation, ported from the retired
   // AgentRuntimeControls lifecycle (the trigger is now a selection, not Apply).
@@ -204,6 +262,11 @@ export function RuntimePill({
     const pending = runtimeSession?.pendingReconfigure;
     if (pending) {
       operationRef.current = pending.operationId;
+      const rollback = rollbackRef.current;
+      if (rollback?.operationId === null) {
+        rollbackRef.current = { ...rollback, operationId: pending.operationId };
+        writeBrowserProfileRollback(file, rollbackRef.current);
+      }
       localStorage.setItem(phaseKey(file), "pending");
       localStorage.setItem(phaseOperationKey(file), pending.operationId);
       setApplyState("pending");
@@ -223,16 +286,19 @@ export function RuntimePill({
     localStorage.removeItem(phaseKey(file));
     localStorage.removeItem(phaseOperationKey(file));
     if (receipt.status === "applied") {
+      clearBrowserProfileRollback(receipt.operationId);
       operationRef.current = null;
       setApplyState("applied");
       if (trackedOperationId) pushTaskToast("ok", t("runtimeConfig.applied"));
     } else if (receipt.status === "failed" || receipt.status === "rejected") {
+      const rollback = rollbackRef.current ?? readBrowserProfileRollback(file);
+      if (rollback?.operationId === receipt.operationId) restoreBrowserProfile(rollback);
       operationRef.current = null;
       setApplyState("error");
       setError(receipt.reason ?? t("runtimeConfig.failed"));
       if (trackedOperationId) pushTaskToast("err", receipt.reason ?? t("runtimeConfig.failed"));
     }
-  }, [file, pillSurface, runtimeSession, t]);
+  }, [clearBrowserProfileRollback, file, pillSurface, restoreBrowserProfile, runtimeSession, t]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* eslint-disable react-hooks/set-state-in-effect -- confirm-by-observation:
@@ -247,8 +313,10 @@ export function RuntimePill({
     if (!modelMatches || !effortMatches || !speedMatches) return;
     localStorage.removeItem(phaseKey(file));
     localStorage.removeItem(phaseOperationKey(file));
+    clearBrowserProfileRollback(operationRef.current);
+    operationRef.current = null;
     setApplyState("applied");
-  }, [applyState, engine, file, liveDraft, pillSurface]);
+  }, [applyState, clearBrowserProfileRollback, engine, file, liveDraft, pillSurface]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const applying = applyState === "saving"
@@ -291,9 +359,17 @@ export function RuntimePill({
     if (!engine) return;
     if (pillSurface === "live-root" || pillSurface === "structured") {
       revisionRef.current += 1;
+      operationRef.current = null;
       localStorage.removeItem(phaseKey(file));
       localStorage.removeItem(phaseOperationKey(file));
       const current = liveDraftRef.current;
+      const rollback: BrowserProfileRollback = rollbackRef.current ?? {
+        operationId: null,
+        draft: current,
+        profile: readProfile(file),
+      };
+      rollbackRef.current = rollback;
+      writeBrowserProfileRollback(file, rollback);
       const scale = patch.model ? effortScale(engine, patch.model) ?? [] : effortScale(engine, current.model) ?? [];
       const next: RuntimeDraft = {
         ...current,

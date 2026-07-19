@@ -9,6 +9,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { RuntimePill } from "./RuntimePill";
 import type { RuntimeSession } from "./runtime/runtimeModel";
+import { sendRuntimeFrom } from "./runtimeProfile";
 
 const dom = new Window();
 installActEnv();
@@ -181,6 +182,71 @@ test("Strict Mode emits one structured reconfigure request for one selection", a
   expect(requests).toHaveLength(1);
   expect(requests[0]).toMatchObject({ action: "reconfigure", effort: "ultra" });
   await act(async () => root.unmount());
+});
+
+test("a failed structured reconfigure restores the browser profile before future sends and remount", async () => {
+  const mounted = await renderPill(
+    <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
+  );
+  await click(mounted.host.querySelector("[data-runtime-pill]")!);
+  const ultra = [...mounted.host.querySelectorAll('[data-runtime-row="tier"]')]
+    .find((row) => row.textContent === "Ultra")!;
+  await click(ultra);
+  expect(sendRuntimeFrom(codexFile)).toEqual({ effort: "ultra" });
+
+  await act(async () => {
+    mounted.root.render(
+      <RuntimePill
+        file={codexFile}
+        surface="structured"
+        runtimeSettings={CODEX_STRUCTURED}
+        runtimeSession={structuredSession("failed", "replacement host failed")}
+      />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(sendRuntimeFrom(codexFile)).toBeUndefined();
+  expect(JSON.parse(localStorage.getItem(key)!)).toEqual({ model: "gpt-5.6-sol", effort: "high", fast: false });
+  await act(async () => mounted.root.unmount());
+
+  const remounted = await renderPill(
+    <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
+  );
+  expect(remounted.host.querySelector("[data-runtime-pill]")?.textContent).toContain("5.6-Sol · High");
+  await act(async () => remounted.root.unmount());
+});
+
+test("a failed newest selection restores the last confirmed browser profile", async () => {
+  localStorage.setItem(key, JSON.stringify({ model: "gpt-5.6-sol", effort: "medium", fast: false }));
+  localStorage.setItem(key + ":profile", JSON.stringify({ effort: "medium" }));
+  const mounted = await renderPill(
+    <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
+  );
+  await click(mounted.host.querySelector("[data-runtime-pill]")!);
+  const ultra = [...mounted.host.querySelectorAll('[data-runtime-row="tier"]')]
+    .find((row) => row.textContent === "Ultra")!;
+  await click(ultra);
+  await click(mounted.host.querySelector("[data-runtime-pill]")!);
+  const max = [...mounted.host.querySelectorAll('[data-runtime-row="tier"]')]
+    .find((row) => row.textContent === "Max")!;
+  await click(max);
+
+  await act(async () => {
+    mounted.root.render(
+      <RuntimePill
+        file={codexFile}
+        surface="structured"
+        runtimeSettings={CODEX_STRUCTURED}
+        runtimeSession={structuredSession("failed", "newest replacement failed")}
+      />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(sendRuntimeFrom(codexFile)).toEqual({ effort: "medium" });
+  expect(JSON.parse(localStorage.getItem(key)!)).toEqual({ model: "gpt-5.6-sol", effort: "medium", fast: false });
+  await act(async () => mounted.root.unmount());
 });
 
 for (const terminal of ["applied", "failed"] as const) {

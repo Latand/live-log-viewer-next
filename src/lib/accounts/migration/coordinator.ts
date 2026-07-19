@@ -391,6 +391,19 @@ async function cleanupDiscardedSuccessor(
   }
 }
 
+function sameTargetReconfigureCanReuseSuccessor(
+  conversation: RegistryConversation,
+  receipt: ProviderReceipt,
+): boolean {
+  const migration = conversation.migration;
+  const reconfigure = conversation.reconfigure;
+  return migration?.phase === "verifying"
+    && migration.providerReceipt !== null
+    && sameProviderReceiptOutcome(migration.providerReceipt, receipt)
+    && reconfigure?.status === "applying"
+    && reconfigure.accountId === migration.targetId;
+}
+
 export async function advanceConversationMigration(
   conversationId: ViewerConversationId,
   registry: AgentRegistry = agentRegistry(),
@@ -494,7 +507,9 @@ export async function advanceConversationMigration(
     let publishOwner = registry.conversation(publicationConversationId);
     if (!publishOwner || !await ownsPublication()) {
       if (publishOwner) {
-        await cleanupDiscardedSuccessor(successorProvider, publicationReceipt, publishOwner, registry);
+        if (!sameTargetReconfigureCanReuseSuccessor(publishOwner, publicationReceipt)) {
+          await cleanupDiscardedSuccessor(successorProvider, publicationReceipt, publishOwner, registry);
+        }
         if (!options.deferBoardRepair) await repairCommittedBoardSuccessions(
           [publishOwner],
           registry,
@@ -514,7 +529,9 @@ export async function advanceConversationMigration(
     publishOwner = registry.conversation(publicationConversationId);
     if (!publishOwner || !await ownsPublication()) {
       if (publishOwner) {
-        await cleanupDiscardedSuccessor(successorProvider, publicationReceipt, publishOwner, registry);
+        if (!sameTargetReconfigureCanReuseSuccessor(publishOwner, publicationReceipt)) {
+          await cleanupDiscardedSuccessor(successorProvider, publicationReceipt, publishOwner, registry);
+        }
         if (!options.deferBoardRepair) await repairCommittedBoardSuccessions(
           [publishOwner],
           registry,

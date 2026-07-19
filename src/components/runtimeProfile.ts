@@ -27,6 +27,11 @@ export function phaseOperationKey(file: FileEntry): string {
   return phaseKey(file) + ":operation";
 }
 
+/** Browser rollback snapshot for the operation that owns the persisted phase. */
+export function phaseRollbackKey(file: FileEntry): string {
+  return phaseKey(file) + ":rollback";
+}
+
 /** The "on resume" profile key (issue #241 §4). */
 export function resumeKey(file: FileEntry): string {
   return storageKey(file) + ":resume";
@@ -207,7 +212,7 @@ export function sendRuntimeFrom(file: FileEntry): RuntimeProfile | undefined {
 export function adoptRuntimeProfile(fromIdentity: string, toIdentity: string): void {
   if (!fromIdentity || fromIdentity === toIdentity) return;
   try {
-    for (const suffix of [":profile", ":resume", ":phase", ":phase:operation", ""]) {
+    for (const suffix of [":profile", ":resume", ":phase", ":phase:operation", ":phase:rollback", ""]) {
       const legacy = localStorage.getItem(`llvAgentRuntime:${fromIdentity}${suffix}`);
       if (legacy === null) continue;
       if (localStorage.getItem(`llvAgentRuntime:${toIdentity}${suffix}`) === null) {
