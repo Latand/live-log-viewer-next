@@ -10,6 +10,7 @@ import type { SuccessorProviderPort, ViewerConversationId } from "@/lib/accounts
 
 import { applyStructuredReconfigure } from "./structuredReconfigure";
 import type { StructuredReconfigureEffect } from "./structuredDeliveryQueue";
+import { recoverDeadStructuredConversation } from "./structuredRecovery";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -217,6 +218,123 @@ test("a stale failed apply cannot roll its profile back over a newer reconfigure
   releaseOldRecovery();
   await expect(oldApply).rejects.toThrow();
 
+  expect(target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile).toMatchObject({
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+  });
+});
+
+test("a newer profile reconfigure cannot join a superseded conversation recovery", async () => {
+  const target = fixture();
+  const generation = target.registry.conversation(target.conversationId)!.generations.at(-1)!;
+  const root = path.dirname(target.transcript);
+  let releaseFirstSpawn!: () => void;
+  let firstSpawnStarted!: () => void;
+  let secondRecoveryStarted!: () => void;
+  const firstSpawnGate = new Promise<void>((resolve) => { releaseFirstSpawn = resolve; });
+  const firstSpawnEntered = new Promise<void>((resolve) => { firstSpawnStarted = resolve; });
+  const secondRecoveryEntered = new Promise<void>((resolve) => { secondRecoveryStarted = resolve; });
+  const publishedProfiles: unknown[] = [];
+  let recoveryCalls = 0;
+  const recover: typeof recoverDeadStructuredConversation = (request, dependencies) => {
+    const pending = recoverDeadStructuredConversation(request, {
+      ...dependencies,
+      client: {} as never,
+      transport: () => "structured",
+      resolveAccount: () => ({
+        engine: "codex",
+        accountId: "source",
+        kind: "managed",
+        home: path.join(root, "account"),
+        transcriptRoot: root,
+        env: { NODE_ENV: "test" },
+      }),
+      spawn: async (input) => {
+        const launchProfile = input.spec.launchProfile;
+        if (!launchProfile) throw new Error("recovery spawn profile is unavailable");
+        publishedProfiles.push(launchProfile);
+        firstSpawnStarted();
+        await firstSpawnGate;
+        const settled = target.registry.settleSpawn(input.receipt.launchId, {
+          key: { engine: "codex", sessionId: generation.id },
+          artifactPath: target.transcript,
+          cwd: root,
+          accountId: "source",
+          status: "idle",
+          host: null,
+          structuredHost: {
+            kind: "codex-app-server",
+            endpoint: `test:reconfigure:${launchProfile.model}`,
+            process: { pid: process.pid, startIdentity: null },
+            eventCursor: 1,
+            protocolVersion: "test",
+            writerClaimEpoch: 1,
+            activeTurnRef: null,
+            pendingAttention: [],
+            activeFlags: [],
+          },
+          claimEpoch: 1,
+          claimOwner: `structured-host:${input.receipt.launchId}`,
+          pendingAction: null,
+          launchProfile,
+        });
+        if (settled.kind !== "settled") throw new Error("recovery spawn did not publish");
+        return {
+          ok: true,
+          target: null,
+          path: target.transcript,
+          launchId: input.receipt.launchId,
+          conversationId: target.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered" as const,
+          state: "settled" as const,
+        };
+      },
+    });
+    recoveryCalls += 1;
+    if (recoveryCalls === 2) secondRecoveryStarted();
+    return pending;
+  };
+  const common = {
+    registry: target.registry,
+    releaseHost: async () => true,
+    recover,
+  };
+
+  const first = applyStructuredReconfigure(effect({
+    operationId: "coalesced-profile-10",
+    conversationId: target.conversationId,
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: false,
+    eventSeq: 10,
+  }), common);
+  await firstSpawnEntered;
+
+  const second = applyStructuredReconfigure(effect({
+    operationId: "coalesced-profile-11",
+    conversationId: target.conversationId,
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+    eventSeq: 11,
+  }), common);
+  await secondRecoveryEntered;
+  releaseFirstSpawn();
+
+  await expect(first).rejects.toThrow("superseded");
+  expect(await second).toBe("applied");
+  expect(publishedProfiles).toEqual([
+    expect.objectContaining({ model: "gpt-5.6-sol", effort: "high", fast: false }),
+    expect.objectContaining({ model: "gpt-5.6-terra", effort: "xhigh", fast: true }),
+  ]);
+  expect(target.registry.snapshot().entries[`codex:${generation.id}`]?.launchProfile).toMatchObject({
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+  });
   expect(target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile).toMatchObject({
     model: "gpt-5.6-terra",
     effort: "xhigh",

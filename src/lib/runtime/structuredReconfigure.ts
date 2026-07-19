@@ -121,6 +121,13 @@ export async function applyStructuredReconfigure(
       && owner.status === status;
   };
 
+  const recoveryOwnership = (status: "applying" | "failed") => ({
+    operationId: effect.operationId,
+    revision: effect.eventSeq,
+    owns: () => ownsDurableReconfigure(status),
+    releaseHost: release,
+  });
+
   const restoreCommittedSuccessor = async (successorId: string): Promise<void> => {
     if (!await ownsDurableReconfigure("failed")) throw new StructuredReconfigureSupersededError();
     const latest = registry.conversation(conversationId);
@@ -133,7 +140,10 @@ export async function applyStructuredReconfigure(
     if (!await ownsDurableReconfigure("failed")) throw new StructuredReconfigureSupersededError();
     registry.terminateStructuredHost(successorKey);
     if (!await ownsDurableReconfigure("failed")) throw new StructuredReconfigureSupersededError();
-    const restored = await recover({ path: successor.path, conversationId }, { registry });
+    const restored = await recover({ path: successor.path, conversationId }, {
+      registry,
+      ownership: recoveryOwnership("failed"),
+    });
     if (!restored) throw new Error("structured successor profile restoration is unavailable");
     if (!await ownsDurableReconfigure("failed")) throw new StructuredReconfigureSupersededError();
   };
@@ -153,7 +163,10 @@ export async function applyStructuredReconfigure(
       if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
       registry.terminateStructuredHost(key);
       if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
-      const recovered = await recover({ path: generation.path, conversationId }, { registry });
+      const recovered = await recover({ path: generation.path, conversationId }, {
+        registry,
+        ownership: recoveryOwnership("applying"),
+      });
       if (!recovered) throw new Error("structured successor profile application is unavailable");
       if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
       await settle("applied");
@@ -231,16 +244,26 @@ export async function applyStructuredReconfigure(
   }
 
   try {
+    if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
     await release(key);
+    if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
     registry.terminateStructuredHost(key);
-    const recovered = await recover({ path: generation.path, conversationId }, { registry });
+    if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
+    const recovered = await recover({ path: generation.path, conversationId }, {
+      registry,
+      ownership: recoveryOwnership("applying"),
+    });
     if (!recovered) throw new Error("structured conversation recovery is unavailable");
+    if (!await ownsDurableReconfigure("applying")) throw new StructuredReconfigureSupersededError();
     await settle("applied");
     return "applied";
   } catch (error) {
     if (error instanceof StructuredReconfigureSupersededError) throw error;
     await settle("failed", error);
-    await recover({ path: generation.path, conversationId }, { registry }).catch(() => null);
+    await recover({ path: generation.path, conversationId }, {
+      registry,
+      ownership: recoveryOwnership("failed"),
+    }).catch(() => null);
     throw error;
   }
 }
