@@ -224,7 +224,11 @@ function isPipeline(value: unknown): value is Pipeline {
     typeof pipeline.createdAt === "string" &&
     isNullableString(pipeline.closedAt) &&
     (pipeline.hiddenAt === undefined || isNullableString(pipeline.hiddenAt)) &&
-    (pipeline.restored === undefined || typeof pipeline.restored === "boolean")
+    (pipeline.restored === undefined || typeof pipeline.restored === "boolean") &&
+    (pipeline.pos === undefined || (
+      typeof pipeline.pos === "object" && pipeline.pos !== null &&
+      Number.isFinite(pipeline.pos.x) && Number.isFinite(pipeline.pos.y)
+    ))
   )) return false;
   const stages = pipeline.stages as PipelineStage[];
   const runs = pipeline.runs as Pipeline["runs"];

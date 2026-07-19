@@ -1050,6 +1050,8 @@ export const en = {
   "pipelineShelf.aria": "Pipeline shelf",
   "pipelineShelf.title": "Pipelines",
   "pipelineShelf.edit": "Edit pipeline {task}",
+  "pipelineGroup.toggle": "Expand or collapse pipeline {task}",
+  "pipelineGroup.openHistory": "Open pipeline history for {task}",
 
   // pipeline stage placeholders + template picker (#196)
   "pipelineSlot.paneAria": "Planned stage {role}",
@@ -1082,7 +1084,7 @@ export const en = {
   "pipelineSlot.passEdgeFrozen": "This stage already ran — its pass edge is frozen evidence.",
   "pipelineSlot.failEdgeFrozen": "This fail edge was already traversed — it is frozen evidence.",
   "pipelineTemplates.title": "New pipeline",
-  "pipelineTemplates.subtitle": "Pick a template. The full plan stays in the pipeline shelf until a stage opens on the board. Stage configuration remains available on demand.",
+  "pipelineTemplates.subtitle": "Pick a template. Its pipeline group lands on the board beside the linked task. Stage configuration remains available on demand.",
   "pipelineTemplates.blank": "Blank canvas",
   "pipelineTemplates.blankHint": "Start empty and assemble the stages by hand.",
   "pipelineTemplates.noRole": "no role",

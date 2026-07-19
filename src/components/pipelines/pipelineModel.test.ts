@@ -178,6 +178,22 @@ test("pipelineLinkedTasks keeps assignment and source lineage directly navigable
   ]);
 });
 
+test("pipelineLinkedTasks prefers explicit taskIds when Stream A data is present", () => {
+  const task = (id: string): BoardTask => ({
+    id,
+    project: "proj",
+    status: "assigned",
+    text: id,
+    placement: "unplaced",
+    assignments: [],
+    createdAt: "2026-07-18T00:00:00Z",
+    updatedAt: "2026-07-18T00:00:00Z",
+  });
+  const p = pipeline({ taskIds: ["task-b", "task-a"] } as Partial<Pipeline>);
+
+  expect(pipelineLinkedTasks(p, [task("task-a"), task("task-b"), task("task-c")]).map((item) => item.id)).toEqual(["task-b", "task-a"]);
+});
+
 test("opening compact history replaces the prior inspected pane from the same pipeline", () => {
   const p = pipeline({
     runs: [{ stageId: "build", attempts: [
