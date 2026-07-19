@@ -1414,6 +1414,10 @@ export const en = {
   "branch.expand": "Expand",
   "branch.expandFull": "Expand conversation {title} to the full window",
   "branch.collapseFull": "Back to the canvas (Esc)",
+  // Chat-first mobile disclosure (issue #419): the phone folds the metadata
+  // chips and the detailed runtime controls behind one compact toggle.
+  "branch.detailsShow": "Show conversation details",
+  "branch.detailsHide": "Hide conversation details",
   // Crown favorites (issue #185)
   "branch.favorite": "Mark as favorite",
   "branch.unfavorite": "Remove from favorites",

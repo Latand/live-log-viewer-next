@@ -1,6 +1,6 @@
 "use client";
 
-import { List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2 } from "lucide-react";
+import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
@@ -372,6 +372,10 @@ export function ProjectDashboard({
      footer shelf can dock that pane's handoff control on its single row (issue
      #177 item 5). */
   const [mobileActiveFile, setMobileActiveFile] = useState<FileEntry | null>(null);
+  /* Chat-first (issue #419 reopened): on the phone the handoff/hidden/readiness
+     shelf reserves ZERO bottom rows — a compact header trigger opens it as an
+     overlay sheet instead, so the focused chat keeps its viewport budget. */
+  const [shelfOpen, setShelfOpen] = useState(false);
   /* Desktop `+ Task`: bump drops the inline sticky composer in a free slot on
      the board (pinned near the button). */
   const [newTaskNonce, setNewTaskNonce] = useState(0);
@@ -1226,6 +1230,15 @@ export function ProjectDashboard({
     viewBus.reportSlice({ mode, focusedPath: null, selectedPaths: [], visiblePaths, camera: null });
   }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile]);
 
+  /* Shelf totals for the phone header trigger (issue #419 reopened). The full
+     strips live in the overlay the trigger opens; here we only need the count
+     and whether the focused conversation can be handed off, so the trigger can
+     decide to appear and badge itself without building the strips twice. */
+  const shelfHiddenTotal =
+    workerStacks.reduce((sum, stack) => sum + stack.items.length, 0) + launchHistory.length + projectTasks.length + (!hasArchiveNodes ? residual.length : 0);
+  const shelfHandoffFile = isMobile && projectView === "scheme" && mobileActiveFile && canHandoff(mobileActiveFile) ? mobileActiveFile : null;
+  const shelfHasContent = isMobile && boardReady && (shelfHiddenTotal > 0 || Boolean(shelfHandoffFile));
+
   return (
     <FavoritesProvider value={favoritesApi}>
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1266,6 +1279,25 @@ export function ProjectDashboard({
                 actions into a `⋯` menu — every control is a 44px hit target. */}
             {viewToggle ? <ProjectViewTabs value={projectView} onChange={chooseEmptyView} header /> : null}
             <span className="min-w-0 max-w-[42vw] shrink truncate">{attention}</span>
+            {/* Handoff/hidden/readiness access as a compact header trigger (issue
+                #419 reopened) — the focused chat below reserves no bottom row for
+                it; a tap opens the overlay sheet. */}
+            {shelfHasContent ? (
+              <button
+                type="button"
+                data-testid="mobile-shelf-trigger"
+                aria-haspopup="dialog"
+                aria-expanded={shelfOpen}
+                aria-label={t("dash.hiddenShelf")}
+                onClick={() => setShelfOpen(true)}
+                className="relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <Layers className="h-4 w-4" aria-hidden />
+                {shelfHiddenTotal > 0 ? (
+                  <span className="absolute -right-0.5 -top-0.5 rounded-full bg-accent/10 px-1 text-[10px] font-bold tabular-nums text-accent">{shelfHiddenTotal}</span>
+                ) : null}
+              </button>
+            ) : null}
             <HeaderMenu triggerLabel={t("dash.createMenu")} icon={<Plus className="h-5 w-5" aria-hidden />}>
               {(close) => (
                 <>
@@ -1562,12 +1594,12 @@ export function ProjectDashboard({
           </>
         );
         if (!isMobile) return strips;
-        /* Only the scheme focus view has a focused conversation to hand off; the
-           list view and empty states dock no handoff. */
-        const handoffFile = projectView === "scheme" && mobileActiveFile && canHandoff(mobileActiveFile) ? mobileActiveFile : null;
-        const leading = handoffFile ? <HandoffHandle file={handoffFile} onHandoff={() => addHandoffDraft(handoffFile)} inline /> : null;
+        /* Chat-first (issue #419 reopened): the phone shelf reserves no bottom
+           row — it opens as an overlay sheet from the header trigger, folding the
+           handoff plus both hidden strips behind one compact disclosure. */
+        const leading = shelfHandoffFile ? <HandoffHandle file={shelfHandoffFile} onHandoff={() => addHandoffDraft(shelfHandoffFile)} inline /> : null;
         return (
-          <MobileBottomShelf total={workerTotal + quietTotal} leading={leading}>
+          <MobileBottomShelf open={shelfOpen} onClose={() => setShelfOpen(false)} total={workerTotal + quietTotal} leading={leading}>
             {strips}
           </MobileBottomShelf>
         );

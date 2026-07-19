@@ -1379,6 +1379,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "branch.expand": "Розгорнути",
   "branch.expandFull": "Розгорнути розмову {title} на все вікно",
   "branch.collapseFull": "Повернутися до полотна (Esc)",
+  // Chat-first mobile disclosure (issue #419)
+  "branch.detailsShow": "Показати деталі розмови",
+  "branch.detailsHide": "Сховати деталі розмови",
   // Crown favorites (issue #185)
   "branch.favorite": "Додати в обране",
   "branch.unfavorite": "Прибрати з обраного",
