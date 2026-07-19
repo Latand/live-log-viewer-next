@@ -195,6 +195,22 @@ describe("rule precedence and positive signals", () => {
     expect(taskReadiness(item, buildReadinessIndex([failed], []))).toBe("now");
   });
 
+  test("a passed historical child leaves its running operational task in now", () => {
+    const operationalPath = "/tmp/operational-running.jsonl";
+    const linked = pipeline({
+      attempts: [
+        { agentPath: operationalPath, state: "running", historical: false },
+        { agentPath: "/tmp/historical-passed.jsonl", state: "passed", historical: true, verdict: { status: "pass" } },
+      ],
+    });
+    const item = task({
+      status: "assigned",
+      assignments: [assignment("delivered", { path: operationalPath })],
+    });
+
+    expect(taskReadiness(item, buildReadinessIndex([linked], []))).toBe("now");
+  });
+
   test("paused containers are deliberate operator state — status rules win", () => {
     const pausedFlow = flow({ state: "paused", pausedState: "needs_decision", implementerPath: "/tmp/pause.jsonl" });
     const pausedPipeline = pipeline({ state: "paused", cursor: { stageId: "s1", state: "reviewing", input: null, activatedBy: null }, attempts: [{ agentPath: "/tmp/pp.jsonl" }] });

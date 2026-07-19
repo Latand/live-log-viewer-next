@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import { setLocale, translate } from "@/lib/i18n";
 import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -207,6 +208,48 @@ test("agent chip opens the transcript only when the assignment is openable; a go
   /* The vanished worktree stays in its section with a gone decoration. */
   expect(host.textContent).toContain("Gone agent card");
   expect(host.textContent).toContain(translate("en", "readiness.state.gone"));
+  flushSync(() => root.unmount());
+});
+
+test("pipeline chip opens the running operational attempt after a passed historical child", () => {
+  const openedPaths: string[] = [];
+  const operationalFile = { path: "/tmp/pipeline-running.jsonl", activity: "live", proc: "running" } as unknown as FileEntry;
+  const historicalFile = { path: "/tmp/pipeline-history.jsonl", activity: "idle", proc: null } as unknown as FileEntry;
+  const linked = {
+    id: "pipeline-history",
+    project: "demo",
+    state: "running",
+    stages: [{ id: "build", kind: "run", prompt: "", next: null }],
+    runs: [{
+      stageId: "build",
+      attempts: [
+        { n: 1, state: "running", agentPath: operationalFile.path, historical: false },
+        { n: 2, state: "passed", agentPath: historicalFile.path, historical: true, verdict: { status: "pass" } },
+      ],
+    }],
+    cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+  } as unknown as Pipeline;
+  const item = task("t-pipeline-history", "assigned", "Operational pipeline card", {
+    assignments: [{ path: operationalFile.path, panePid: null, state: "delivered", error: null, at: "2026-07-01T00:00:00.000Z" }],
+  });
+  const { host, root } = render(
+    <TaskReadinessStrip
+      tasks={[item]}
+      files={[operationalFile, historicalFile]}
+      pipelines={[linked]}
+      flows={[]}
+      onOpenTask={noop}
+      onOpenFile={(file) => openedPaths.push(file.path)}
+    />,
+  );
+
+  expandStrip(host);
+  expect(sectionRow(host, "now").getAttribute("aria-label")).toBe("“Now” tasks · 1");
+  flushSync(() => sectionRow(host, "now").dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  const pipelineChip = [...host.querySelectorAll("button")].find((button) =>
+    button.getAttribute("aria-label")?.startsWith("Open the linked pipeline"))!;
+  flushSync(() => pipelineChip.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  expect(openedPaths).toEqual([operationalFile.path]);
   flushSync(() => root.unmount());
 });
 
