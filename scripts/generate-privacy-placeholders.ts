@@ -51,6 +51,8 @@ const placeholders: Placeholder[] = [
   { path: "docs/media/issue-292/task-card-expanded-desktop.png", width: 2880, height: 1800, description: "Redacted placeholder for the expanded desktop task-card evidence." },
   { path: "docs/media/issue-353/edges-desktop.png", width: 1920, height: 1080, description: "Redacted placeholder for the desktop pipeline-edge evidence." },
   { path: "docs/media/issue-353/edges-onestage-desktop.png", width: 1920, height: 1080, description: "Redacted placeholder for the single-stage desktop edge evidence." },
+  { path: "docs/acceptance/pr-441/pr-441-desktop-badges.png", width: 1040, height: 600, description: "Redacted placeholder retaining the desktop subagent badge anchor viewport." },
+  { path: "docs/acceptance/pr-441/pr-441-mobile-390.png", width: 390, height: 844, description: "Redacted placeholder retaining the 390-pixel mobile subagent badge viewport." },
 ];
 
 const sourceDigests: Record<string, string> = {
@@ -91,6 +93,8 @@ const sourceDigests: Record<string, string> = {
   "docs/media/issue-292/task-card-expanded-desktop.png": "7bed3aeebfd4ece12c12774aee3dda4c4089b77aff4b618ddc92445c570ac478",
   "docs/media/issue-353/edges-desktop.png": "386c9349aa6fc59562ae62ad6a57ba4c13c21422cc81a0f7357681937ea72ae2",
   "docs/media/issue-353/edges-onestage-desktop.png": "eed6170341efdbefe837fefa4d284a8680f8c29122a4a8bee49693659df83944",
+  "docs/acceptance/pr-441/pr-441-desktop-badges.png": "1ade5a95002485fc4085c03f28cb931a309c18c264b884db43c5d55dfab10131",
+  "docs/acceptance/pr-441/pr-441-mobile-390.png": "c41651872641bc8dcf44e48c2c4a0f183153283e18ffc837db54954146b1038f",
 };
 
 const root = resolve(import.meta.dir, "..");
