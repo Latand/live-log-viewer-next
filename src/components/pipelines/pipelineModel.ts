@@ -529,7 +529,7 @@ export function stageHasNavigableHistory(
   if (!attempt) return false;
   const pathAvailable = (path: string) => !availablePaths || availablePaths.has(path);
   const attempts = stageAttempts(pipeline, stage.id);
-  if (attempts.some((prior) => prior.n < attempt.n && Boolean(prior.agentPath && pathAvailable(prior.agentPath)))) return true;
+  if (attempts.some((candidate) => candidate.n !== attempt.n && Boolean(candidate.agentPath && pathAvailable(candidate.agentPath)))) return true;
 
   const flowIds = new Set(attempts.flatMap((item) => item.flowId ? [item.flowId] : []));
   const attemptPaths = new Set(attempts.flatMap((item) => item.agentPath ? [item.agentPath] : []));

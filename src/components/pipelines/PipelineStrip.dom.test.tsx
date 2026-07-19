@@ -164,6 +164,77 @@ test("desktop history opens both durable bindings from one logical review round 
   expect(opened).toEqual(["/review-prior.jsonl", currentPath]);
 });
 
+test("a running operational attempt opens its appended historical child's transcript", async () => {
+  const stage = draftPipeline().stages[0]!;
+  const operationalPath = "/build-running.jsonl";
+  const historicalPath = "/build-adopted-child.jsonl";
+  const pipeline = {
+    ...draftPipeline(),
+    state: "running",
+    runs: [{ stageId: stage.id, attempts: [
+      {
+        n: 1,
+        state: "running",
+        effectiveRole: stage.effectiveRole,
+        launchId: "launch-running",
+        conversationId: "conversation-running",
+        sessionId: "session-running",
+        agentPath: operationalPath,
+        paneId: null,
+        flowId: null,
+        startedAt: "2026-07-18T00:00:00Z",
+        completedAt: null,
+        input: null,
+        activatedBy: null,
+        output: null,
+        verdict: null,
+        error: null,
+      },
+      {
+        n: 2,
+        state: "passed",
+        historical: true,
+        effectiveRole: stage.effectiveRole,
+        launchId: "launch-adopted-child",
+        conversationId: "conversation-adopted-child",
+        sessionId: "session-adopted-child",
+        agentPath: historicalPath,
+        paneId: null,
+        flowId: null,
+        startedAt: "2026-07-18T00:01:00Z",
+        completedAt: "2026-07-18T00:02:00Z",
+        input: null,
+        activatedBy: null,
+        output: "adopted evidence",
+        verdict: { status: "pass", findings: [] },
+        error: null,
+      },
+    ] }],
+    cursor: { stageId: stage.id, state: "running", input: null, activatedBy: null },
+  } as unknown as Pipeline;
+  const opened: string[] = [];
+  const element = dom.document.createElement("div");
+  dom.document.body.append(element);
+  root = createRoot(element as unknown as HTMLElement);
+  flushSync(() => root!.render(
+    <PipelineStrip
+      pipeline={pipeline}
+      renderablePaths={new Set([operationalPath, historicalPath])}
+      onOpenPath={(path) => opened.push(path)}
+    />,
+  ));
+
+  const verdict = element.querySelector<HTMLButtonElement>('[aria-label^="Open verdict for stage"]');
+  expect(verdict).toBeTruthy();
+  flushSync(() => verdict!.click());
+  await Promise.resolve();
+
+  const historical = dom.document.body.querySelector<HTMLButtonElement>('[aria-label="Open transcript for attempt 2"]');
+  expect(historical).toBeTruthy();
+  flushSync(() => historical!.click());
+  expect(opened).toEqual([historicalPath]);
+});
+
 function stableHeaderPipeline(): Pipeline {
   return {
     ...draftPipeline(),
