@@ -25,7 +25,7 @@
     "prepack": "node scripts/prepack.mjs",
     "privacy:check": "LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE=scripts/privacy-known-value-fingerprints.json LLV_PRIVACY_OCR_LANGUAGES=eng+ukr bun scripts/privacy-publication-gate.ts --require-known-values --base origin/main",
     "privacy:fingerprints": "bun scripts/generate-privacy-known-value-fingerprints.ts",
-    "privacy:github-audit": "bun scripts/privacy-github-audit.ts",
+    "privacy:github-audit": "LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE=scripts/privacy-known-value-fingerprints.json bun scripts/privacy-github-audit.ts",
     "privacy:placeholders": "bun scripts/generate-privacy-placeholders.ts",
     "test": "bun test"
   },
