@@ -249,6 +249,99 @@ test("a failed newest selection restores the last confirmed browser profile", as
   await act(async () => mounted.root.unmount());
 });
 
+test("remount transfers rollback ownership from pending A to durable B before B fails", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestCount = 0;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    requestCount += 1;
+    if (requestCount === 1) {
+      return new Response(JSON.stringify({
+        ok: true,
+        structured: true,
+        operationId: "reconfigure-a",
+        receipt: { operationId: "reconfigure-a", status: "queued" },
+      }), { status: 202, headers: { "content-type": "application/json" } });
+    }
+    return await new Promise<Response>(() => {});
+  }) as typeof fetch;
+
+  try {
+    const mounted = await renderPill(
+      <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
+    );
+    await click(mounted.host.querySelector("[data-runtime-pill]")!);
+    const ultra = [...mounted.host.querySelectorAll('[data-runtime-row="tier"]')]
+      .find((row) => row.textContent === "Ultra")!;
+    await click(ultra);
+
+    const pendingA = structuredSession("applied");
+    pendingA.revision = 2;
+    pendingA.recentReceipts = [];
+    pendingA.pendingReconfigure = {
+      operationId: "reconfigure-a",
+      model: "gpt-5.6-sol",
+      effort: "ultra",
+      fast: false,
+    };
+    await act(async () => {
+      mounted.root.render(
+        <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={pendingA} />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await click(mounted.host.querySelector("[data-runtime-pill]")!);
+    const max = [...mounted.host.querySelectorAll('[data-runtime-row="tier"]')]
+      .find((row) => row.textContent === "Max")!;
+    await click(max);
+    expect(requests).toHaveLength(2);
+    const stalePendingA = { ...pendingA, revision: 3 };
+    await act(async () => {
+      mounted.root.render(
+        <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={stalePendingA} />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(JSON.parse(localStorage.getItem(key + ":phase:rollback")!)).toMatchObject({
+      operationId: null,
+      supersededOperationId: "reconfigure-a",
+      runtimeRevision: 2,
+    });
+    await act(async () => mounted.root.unmount());
+
+    const pendingB = structuredSession("applied");
+    pendingB.revision = 4;
+    pendingB.recentReceipts = [];
+    pendingB.pendingReconfigure = {
+      operationId: "reconfigure-b",
+      model: "gpt-5.6-sol",
+      effort: "max",
+      fast: false,
+    };
+    const remounted = await renderPill(
+      <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={pendingB} />,
+    );
+    expect(JSON.parse(localStorage.getItem(key + ":phase:rollback")!).operationId).toBe("reconfigure-b");
+
+    const failedB = structuredSession("failed", "replacement B failed");
+    failedB.revision = 5;
+    failedB.recentReceipts[0]!.operationId = "reconfigure-b";
+    await act(async () => {
+      remounted.root.render(
+        <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={failedB} />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(sendRuntimeFrom(codexFile)).toBeUndefined();
+    expect(JSON.parse(localStorage.getItem(key)!)).toEqual({ model: "gpt-5.6-sol", effort: "high", fast: false });
+    await act(async () => remounted.root.unmount());
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 for (const terminal of ["applied", "failed"] as const) {
   test(`a remounted pill clears a persisted pending phase after a durable ${terminal} receipt`, async () => {
     localStorage.setItem(key + ":phase", "pending");

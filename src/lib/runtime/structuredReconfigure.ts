@@ -163,6 +163,31 @@ export async function applyStructuredReconfigure(
       operationId: effect.operationId,
       revision: effect.eventSeq,
     });
+    const committedSuccessorAfterCapturedPredecessor = (): RegistryConversation["generations"][number] | null => {
+      const latest = registry.conversation(conversationId);
+      if (!latest) return null;
+      const predecessorIndex = latest.generations.findIndex((candidate) =>
+        candidate.id === generation.id && candidate.path === generation.path);
+      const predecessor = latest.generations[predecessorIndex];
+      const successor = latest.generations[predecessorIndex + 1];
+      const current = latest.generations.at(-1);
+      if (predecessorIndex < 0
+        || !predecessor
+        || predecessor.archivedAt === null
+        || !successor
+        || successor.accountId !== targetAccountId
+        || !current
+        || (current.id === predecessor.id && current.path === predecessor.path)) return null;
+      return successor;
+    };
+    const cleanupCommittedPredecessorAfterSupersedence = async (): Promise<void> => {
+      const successor = committedSuccessorAfterCapturedPredecessor();
+      if (!successor) return;
+      await release(key);
+      const confirmed = committedSuccessorAfterCapturedPredecessor();
+      if (!confirmed || confirmed.id !== successor.id || confirmed.path !== successor.path) return;
+      registry.terminateStructuredHost(key);
+    };
     let committedSuccessorId: string | null = null;
     try {
       const migrated: RegistryConversation = await (dependencies.migrate ?? migrateConversation)(
@@ -174,6 +199,7 @@ export async function applyStructuredReconfigure(
       const owner = registry.conversation(conversationId)?.reconfigure;
       if (!await ownsOperation()
         || owner?.operationId !== effect.operationId || owner.revision !== effect.eventSeq) {
+        await cleanupCommittedPredecessorAfterSupersedence();
         throw new StructuredReconfigureSupersededError();
       }
       const current = migrated.generations.at(-1);

@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,7 +20,8 @@ function fixture(profile: Partial<{ model: string | null; effort: string | null;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-reconfigure-"));
   roots.push(root);
   const registry = new AgentRegistry(path.join(root, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const transcript = path.join(root, "rollout.jsonl");
+  const sessionId = crypto.randomUUID();
+  const transcript = path.join(root, `rollout-${sessionId}.jsonl`);
   fs.writeFileSync(transcript, "{}\n");
   const begun = registry.beginSpawnRequest({
     engine: "codex",
@@ -30,7 +32,7 @@ function fixture(profile: Partial<{ model: string | null; effort: string | null;
   });
   if (begun.kind !== "created") throw new Error("fixture spawn was unavailable");
   const settled = registry.settleSpawn(begun.receipt.launchId, {
-    key: { engine: "codex", sessionId: "thread-source" },
+    key: { engine: "codex", sessionId },
     artifactPath: transcript,
     cwd: root,
     accountId: "source",
@@ -308,6 +310,74 @@ test("a newer account reconfigure supersedes an in-flight conversation migration
   expect(switchToC).toBe("pending");
   expect(target.registry.conversation(target.conversationId)?.migration).toMatchObject({ targetId: "c" });
   expect(Object.values(target.registry.snapshot().conversations)).toHaveLength(1);
+});
+
+test("post-commit supersedence still releases the captured predecessor generation", async () => {
+  const target = fixture();
+  const predecessor = target.registry.conversation(target.conversationId)!.generations.at(-1)!;
+  const successorPath = path.join(path.dirname(target.transcript), "post-commit-superseded.jsonl");
+  fs.writeFileSync(successorPath, "{}\n");
+  let migrationCommitted!: () => void;
+  let releaseMigrationReturn!: () => void;
+  const committed = new Promise<void>((resolve) => { migrationCommitted = resolve; });
+  const migrationReturnGate = new Promise<void>((resolve) => { releaseMigrationReturn = resolve; });
+  let activeOperation = "post-commit-old";
+  const released: string[] = [];
+
+  const oldApply = applyStructuredReconfigure(effect({
+    operationId: "post-commit-old",
+    conversationId: target.conversationId,
+    accountId: "target",
+    eventSeq: 22,
+  }), {
+    registry: target.registry,
+    validateAccount: async () => {},
+    resolveAccount: () => ({}) as never,
+    ownsOperation: async () => activeOperation === "post-commit-old",
+    releaseHost: async (key) => { released.push(key.sessionId); return true; },
+    migrate: async (conversationId, accountId, registry) => {
+      let migration = registry.conversation(conversationId)!.migration!;
+      if (migration.phase === "waiting-turn") {
+        migration = registry.transitionConversationMigration(conversationId, migration.revision, ["waiting-turn"], { phase: "requested" }).migration!;
+      }
+      migration = registry.transitionConversationMigration(conversationId, migration.revision, ["requested"], { phase: "preparing" }).migration!;
+      migration = registry.transitionConversationMigration(conversationId, migration.revision, ["preparing"], { phase: "successor-starting" }).migration!;
+      const receipt = {
+        operationId: migration.operationId,
+        nativeId: "thread-post-commit-successor",
+        path: successorPath,
+        continuityPaths: [successorPath],
+        historyHash: "post-commit-successor-history",
+        host: { kind: "codex-app-server" as const, identity: "post-commit-successor-host", epoch: 1, verifiedAt: "2026-07-20T12:00:00.000Z" },
+      };
+      registry.persistMigrationProviderReceipt(conversationId, migration.revision, migration.operationId, receipt);
+      const result = registry.commitSuccessor(conversationId, {
+        id: receipt.nativeId,
+        path: receipt.path,
+        accountId,
+        historyHash: receipt.historyHash,
+        host: receipt.host,
+      }, migration.revision);
+      migrationCommitted();
+      await migrationReturnGate;
+      return result;
+    },
+  });
+  await committed;
+
+  activeOperation = "post-commit-new";
+  target.registry.claimConversationReconfigure(target.conversationId, {
+    operationId: "post-commit-new",
+    revision: 23,
+    profile: { model: "gpt-5.6-terra", effort: "xhigh", fast: true },
+    accountId: "target",
+  });
+  releaseMigrationReturn();
+
+  await expect(oldApply).rejects.toThrow("superseded");
+  expect(released).toEqual([predecessor.id]);
+  expect(target.registry.snapshot().entries[`codex:${predecessor.id}`]?.structuredHost).toBeNull();
+  expect(target.registry.conversation(target.conversationId)?.generations.at(-1)?.id).toBe("thread-post-commit-successor");
 });
 
 test("a profile-only reconfigure retires its superseded account migration before reconciliation", async () => {

@@ -40,6 +40,8 @@ type ApplyState = "idle" | "saving" | "pending" | "confirming" | "applied" | "er
 
 interface BrowserProfileRollback {
   operationId: string | null;
+  supersededOperationId: string | null;
+  runtimeRevision: number | null;
   draft: RuntimeDraft;
   profile: RuntimeProfile | null;
 }
@@ -51,8 +53,11 @@ function readBrowserProfileRollback(file: FileEntry): BrowserProfileRollback | n
     if (!draft || typeof draft.model !== "string" || typeof draft.effort !== "string" || typeof draft.fast !== "boolean") return null;
     const profile = value?.profile;
     if (profile !== null && (typeof profile !== "object" || Array.isArray(profile))) return null;
+    const runtimeRevision = value?.runtimeRevision;
     return {
       operationId: typeof value?.operationId === "string" ? value.operationId : null,
+      supersededOperationId: typeof value?.supersededOperationId === "string" ? value.supersededOperationId : null,
+      runtimeRevision: Number.isSafeInteger(runtimeRevision) && runtimeRevision! >= 0 ? runtimeRevision! : null,
       draft,
       profile: profile ?? null,
     };
@@ -254,17 +259,25 @@ export function RuntimePill({
     return () => window.clearInterval(id);
   }, [pillSurface, applyState, applyReconfigure, liveDraft]);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- the runtime journal and
-     identity-scoped storage are external stores whose durable projection owns
-     remount reconciliation. */
   useEffect(() => {
     if (pillSurface !== "structured") return;
     const pending = runtimeSession?.pendingReconfigure;
     if (pending) {
-      operationRef.current = pending.operationId;
       const rollback = rollbackRef.current;
-      if (rollback?.operationId === null) {
-        rollbackRef.current = { ...rollback, operationId: pending.operationId };
+      const pendingRevision = runtimeSession.revision;
+      const ownsNewerRevision = rollback !== null
+        && (rollback.runtimeRevision === null || pendingRevision > rollback.runtimeRevision);
+      const canAdoptPending = rollback === null
+        || (rollback.supersededOperationId !== pending.operationId
+          && (rollback.operationId === pending.operationId || ownsNewerRevision));
+      if (!canAdoptPending) return;
+      operationRef.current = pending.operationId;
+      if (rollback) {
+        rollbackRef.current = {
+          ...rollback,
+          operationId: pending.operationId,
+          runtimeRevision: Math.max(rollback.runtimeRevision ?? pendingRevision, pendingRevision),
+        };
         writeBrowserProfileRollback(file, rollbackRef.current);
       }
       localStorage.setItem(phaseKey(file), "pending");
@@ -299,7 +312,6 @@ export function RuntimePill({
       if (trackedOperationId) pushTaskToast("err", receipt.reason ?? t("runtimeConfig.failed"));
     }
   }, [clearBrowserProfileRollback, file, pillSurface, restoreBrowserProfile, runtimeSession, t]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   /* eslint-disable react-hooks/set-state-in-effect -- confirm-by-observation:
      the poll updates `file`, and matching observed runtime settles the phase
@@ -363,10 +375,21 @@ export function RuntimePill({
       localStorage.removeItem(phaseKey(file));
       localStorage.removeItem(phaseOperationKey(file));
       const current = liveDraftRef.current;
-      const rollback: BrowserProfileRollback = rollbackRef.current ?? {
+      const previousRollback = rollbackRef.current;
+      const observedRevision = Number.isSafeInteger(runtimeSession?.revision) ? runtimeSession!.revision : null;
+      const runtimeRevision = previousRollback?.runtimeRevision === null || previousRollback?.runtimeRevision === undefined
+        ? observedRevision
+        : observedRevision === null
+          ? previousRollback.runtimeRevision
+          : Math.max(previousRollback.runtimeRevision, observedRevision);
+      const rollback: BrowserProfileRollback = {
         operationId: null,
-        draft: current,
-        profile: readProfile(file),
+        supersededOperationId: previousRollback?.operationId
+          ?? previousRollback?.supersededOperationId
+          ?? null,
+        runtimeRevision,
+        draft: previousRollback?.draft ?? current,
+        profile: previousRollback ? previousRollback.profile : readProfile(file),
       };
       rollbackRef.current = rollback;
       writeBrowserProfileRollback(file, rollback);
@@ -391,7 +414,7 @@ export function RuntimePill({
       announceCommit(effectiveProfile(file));
     }
     setVersion((v) => v + 1);
-  }, [engine, pillSurface, file, announceCommit, applyReconfigure]);
+  }, [engine, pillSurface, file, announceCommit, applyReconfigure, runtimeSession]);
 
   const closePopover = useCallback(() => {
     setOpen(false);
