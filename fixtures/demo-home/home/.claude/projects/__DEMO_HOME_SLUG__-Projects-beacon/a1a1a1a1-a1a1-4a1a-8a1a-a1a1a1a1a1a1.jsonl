@@ -1,0 +1,2 @@
+{"type":"user","uuid":"b1000000-0000-4000-8000-000000000001","timestamp":"2100-01-02T11:10:05.000Z","cwd":"/demo/Projects/beacon","message":{"role":"user","content":"Build the beacon quota guard and hand it to review."}}
+{"type":"assistant","uuid":"b1000000-0000-4000-8000-000000000002","timestamp":"2100-01-02T11:11:00.000Z","cwd":"/demo/Projects/beacon","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Quota guard built: both engine windows are seeded and the guard trips before the burst limit."}]}}

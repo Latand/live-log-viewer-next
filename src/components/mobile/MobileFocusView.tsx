@@ -422,7 +422,12 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
           </div>
         ) : activeDeck ? (
           <div key={activeDeck.key} className="relative min-h-0 flex-1">
-            <RoundDeck flow={activeDeck.flow} rounds={activeDeck.rounds} focusRound={null} />
+            <RoundDeck
+              flow={activeDeck.flow}
+              rounds={activeDeck.rounds}
+              focusRound={null}
+              groupLabel={files.find((entry) => entry.path === activeDeck.flow.implementerPath)?.title}
+            />
           </div>
         ) : activeDraft ? (
           isWorkflowDraftId(activeDraft.id) ? (

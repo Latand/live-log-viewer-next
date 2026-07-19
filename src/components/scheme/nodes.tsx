@@ -1131,11 +1131,14 @@ function DeckShell({
   focus,
   dimmed,
   dormant,
+  groupLabel,
 }: {
   deck: DeckNode;
   focus: DeckFocus | null;
   dimmed: boolean;
   dormant: boolean;
+  /** Names the review group for screen readers (the reviewed conversation). */
+  groupLabel?: string;
 }) {
   const focusRound = focus && focus.flowId === deck.flow.id ? focus.round + focus.nonce / 1000 : null;
   return (
@@ -1144,7 +1147,7 @@ function DeckShell({
       className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${deck.x}px, ${deck.y}px)`, width: deck.w, height: deck.h, transition: MOVE_TRANSITION }}
     >
-      <RoundDeck flow={deck.flow} rounds={deck.rounds} focusRound={focusRound} dormant={dormant} />
+      <RoundDeck flow={deck.flow} rounds={deck.rounds} focusRound={focusRound} dormant={dormant} groupLabel={groupLabel} />
       <RoleTag role="reviewer" active={activeLoopRole(deck.flow) === "reviewer"} />
     </div>
   );
@@ -1292,6 +1295,7 @@ export const NodesLayer = memo(function NodesLayer({
             focus={deckFocus}
             dimmed={deckDimmed(deck)}
             dormant={dormant}
+            groupLabel={files.find((entry) => entry.path === deck.flow.implementerPath)?.title}
           />
         ),
       )}

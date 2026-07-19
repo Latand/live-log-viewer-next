@@ -258,11 +258,66 @@ body {
   animation: deck-live 1.6s ease-in-out infinite;
 }
 
+/* Verdict collapse (#289 + #325), phase 1: the deck "sucks in" toward its
+   anchor — the front card shrinks and fades toward the top edge while the
+   spines slide up under it with a slight stagger (the inline per-depth
+   transition-delay). Phase 2 swaps in the collapsed chip, which condenses out
+   of the same box. Expansion plays the unfold on the fresh mount. The phase
+   classes are driven by RoundDeck; under prefers-reduced-motion the component
+   skips the phases entirely (instant swap, no transition to wait on) and
+   these declarations are also neutralized for safety. */
+.deck-collapsing {
+  overflow: hidden;
+}
+.deck-collapsing .deck-front {
+  transform-origin: 50% 0%;
+  opacity: 0;
+  transform: scale(0.9, 0.55) translateY(-6px);
+  transition:
+    transform 0.32s cubic-bezier(0.22, 0.8, 0.36, 1),
+    opacity 0.26s ease-out;
+}
+.deck-collapsing .deck-tab {
+  opacity: 0;
+  transform: translateY(-26px) scale(0.85) !important;
+}
+
+@keyframes deck-unfold {
+  from {
+    opacity: 0;
+    transform: scale(0.92, 0.6) translateY(-6px);
+  }
+}
+.deck-expanding .deck-front {
+  transform-origin: 50% 0%;
+  animation: deck-unfold 0.38s cubic-bezier(0.22, 0.8, 0.36, 1);
+}
+
+/* The collapsed chip condenses out of the deck's box. */
+@keyframes deck-chip-pop {
+  from {
+    opacity: 0;
+    transform: scaleX(1.04) scaleY(1.5) translateY(8px);
+  }
+}
+.deck-chip-in {
+  transform-origin: 50% 0%;
+  animation: deck-chip-pop 0.26s cubic-bezier(0.22, 0.8, 0.36, 1);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .deck-tab {
     transition: none;
   }
   .deck-tab-live {
+    animation: none;
+  }
+  .deck-collapsing .deck-front,
+  .deck-collapsing .deck-tab {
+    transition: none;
+  }
+  .deck-expanding .deck-front,
+  .deck-chip-in {
     animation: none;
   }
 }

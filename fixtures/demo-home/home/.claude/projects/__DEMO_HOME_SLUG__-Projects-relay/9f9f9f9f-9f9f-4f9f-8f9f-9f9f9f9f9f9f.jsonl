@@ -1,0 +1,2 @@
+{"type":"user","uuid":"r4000000-0000-4000-8000-000000000001","timestamp":"2100-01-02T11:35:05.000Z","cwd":"/demo/Projects/relay","message":{"role":"user","content":"Review round 3 of the relay switchboard work: full regression audit before release."}}
+{"type":"assistant","uuid":"r4000000-0000-4000-8000-000000000002","timestamp":"2100-01-02T11:36:00.000Z","cwd":"/demo/Projects/relay","message":{"role":"assistant","model":"claude-opus-4-1","content":[{"type":"text","text":"Comparing both deterministic render passes against the release checklist — audit still in progress."}]}}

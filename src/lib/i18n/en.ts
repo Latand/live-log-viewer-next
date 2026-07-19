@@ -946,6 +946,8 @@ export const en = {
   "roundDeck.roundsCount": { one: "{count} round", other: "{count} rounds" },
   "roundDeck.collapseStack": "Collapse review stack ({count} rounds)",
   "roundDeck.expandStack": "Expand review stack ({count} rounds)",
+  "roundDeck.groupAria": { one: "Review conversation group · {count} round", other: "Review conversation group · {count} rounds" },
+  "roundDeck.groupAriaNamed": { one: "Review group for {name} · {count} round", other: "Review group for {name} · {count} rounds" },
 
   // flows/flowModel state labels
   "flowState.waiting_ready": "waiting for READY",
@@ -1402,6 +1404,7 @@ export const en = {
   "launchHistory.retry": "Retry launch: {title}",
   "workerStack.title": "Collapsed workers",
   "workerStack.aria": "Collapsed worker conversations",
+  "workerStack.expandGroup": "Expand review group on the board",
   "workerStack.flow": "Flow",
   "workerStack.pipeline": "Pipeline",
   "workerStack.origin": "Spawned",

@@ -41,6 +41,42 @@
         "taskPanelOpen": false
       }
     },
+    "relay": {
+      "schemaVersion": 1,
+      "revision": 1,
+      "updatedAt": "2100-01-02T11:36:00.000Z",
+      "pathAliases": {},
+      "explicitManual": [
+        "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/77777777-7777-4777-8777-777777777777.jsonl"
+      ],
+      "prefs": {
+        "manual": [
+          "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/77777777-7777-4777-8777-777777777777.jsonl"
+        ],
+        "hidden": [],
+        "expanded": [],
+        "viewMode": "scheme",
+        "taskPanelOpen": false
+      }
+    },
+    "beacon": {
+      "schemaVersion": 1,
+      "revision": 1,
+      "updatedAt": "2100-01-02T11:19:30.000Z",
+      "pathAliases": {},
+      "explicitManual": [
+        "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-beacon/a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1.jsonl"
+      ],
+      "prefs": {
+        "manual": [
+          "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-beacon/a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1.jsonl"
+        ],
+        "hidden": [],
+        "expanded": [],
+        "viewMode": "scheme",
+        "taskPanelOpen": false
+      }
+    },
     "forge": {
       "schemaVersion": 1,
       "revision": 1,

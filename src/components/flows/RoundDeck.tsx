@@ -8,9 +8,20 @@ import type { FileEntry } from "@/lib/types";
 
 import { BranchPane } from "@/components/BranchPane";
 import { ChevronDown, FoldVertical } from "@/components/icons";
+import { engineBadgeFor, fmtAge } from "@/components/utils";
 
 import { VERDICT_GLYPHS, verdictTone } from "./flowModel";
+import {
+  deckCollapsed,
+  deckDisclosureMarker,
+  deckDisclosureTerminal,
+  readDeckDisclosureOverride,
+  writeDeckDisclosureOverride,
+  type DeckDisclosureOverride,
+} from "./reviewDeckDisclosure";
 import { RoundStateIcon } from "./RoundIcons";
+
+export { reviewDeckCollapseKey } from "./reviewDeckDisclosure";
 
 /* Vertical rhythm of the card spines peeking from under the front card. */
 const TAB_H = 26;
@@ -18,9 +29,11 @@ const TAB_STEP = 30;
 /* Spines visible before the rest collapses into a «+N» tail. */
 const TAB_MAX = 5;
 
-export function reviewDeckCollapseKey(flowId: string): string {
-  return `llvReviewDeckCollapsed:${flowId}`;
-}
+/* Duration of the two-phase suck-in before the collapsed chip commits. Matches
+   the `deck-collapsing` transition in globals.css; the reduced-motion branch
+   skips the phase entirely, so nothing ever WAITS on a transition event. */
+const COLLAPSE_ANIM_MS = 320;
+const EXPAND_ANIM_MS = 380;
 
 export interface DeckRound {
   key: string;
@@ -58,6 +71,7 @@ function RoundTab({
         bottom: -(depth * TAB_STEP) - 10,
         zIndex: 10 - depth,
         transform: `scale(${1 - depth * 0.035}) translateZ(${-depth * 34}px)`,
+        transitionDelay: `${depth * 0.03}s`,
       }}
       title={round.error ? `${roundLabel(t, round)}: ${round.error}` : roundLabel(t, round)}
       onClick={onPull}
@@ -77,17 +91,33 @@ function RoundTab({
   );
 }
 
+/** Whether reduced motion is requested. A missing matchMedia (older browsers,
+    DOM test environments) fails toward the INSTANT branch, so disclosure never
+    depends on an animation timer that might not exist. */
+function prefersReducedMotion(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return true;
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 /**
  * The review-round deck: one scheme-node position holding every reviewer
  * round of a flow. The front card is a live BranchPane; previous rounds lie
  * "under" it as pullable card spines with a perspective fan. Only the front
  * round mounts a feed, so a deep loop history costs nothing.
+ *
+ * Disclosure (#289 + #325): expanded while the flow is actionable, collapsed
+ * to a verdict chip the moment the final verdict lands. A click stores a
+ * tri-state override (reviewDeckDisclosure) that a lifecycle transition
+ * invalidates, so a mid-round expand still auto-collapses on the verdict and
+ * a new round always re-expands. The collapse plays a two-phase suck-in; the
+ * chip stays clickable in place and expands the full deck again.
  */
 export function RoundDeck({
   flow,
   rounds,
   focusRound,
   dormant = false,
+  groupLabel,
 }: {
   flow: Flow;
   rounds: DeckRound[];
@@ -95,20 +125,51 @@ export function RoundDeck({
   focusRound: number | null;
   /** Far zoom on the board: the front pane's feed sleeps behind the labels. */
   dormant?: boolean;
+  /** Names the group for screen readers (the reviewed conversation / task). */
+  groupLabel?: string;
 }) {
   const { t } = useLocale();
   const latest = rounds.length ? rounds[rounds.length - 1]! : null;
-  const collapseKey = reviewDeckCollapseKey(flow.id);
-  const [collapsed, setCollapsed] = useState(false);
+  const terminal = deckDisclosureTerminal(flow);
+  const marker = deckDisclosureMarker(flow);
+  const [override, setOverride] = useState<DeckDisclosureOverride | null>(null);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrate the owner-controlled local board preference after SSR.
-    setCollapsed(window.localStorage.getItem(collapseKey) === "1");
-  }, [collapseKey]);
+    setOverride(readDeckDisclosureOverride(window.localStorage, flow.id));
+  }, [flow.id]);
+  const collapsed = deckCollapsed(override, marker, terminal);
   const setDeckCollapsed = (value: boolean) => {
-    setCollapsed(value);
-    if (value) window.localStorage.setItem(collapseKey, "1");
-    else window.localStorage.removeItem(collapseKey);
+    const v = value ? ("collapsed" as const) : ("expanded" as const);
+    setOverride({ v, at: marker });
+    writeDeckDisclosureOverride(window.localStorage, flow.id, v, marker);
   };
+  /* The painted form lags the derived one by exactly one suck-in animation:
+     collapsing keeps the deck mounted with the `deck-collapsing` phase class,
+     then commits the chip; expanding commits at once and plays the unfold on
+     the fresh mount. Reduced motion (or no matchMedia) swaps instantly. */
+  const [painted, setPainted] = useState(collapsed);
+  const [phase, setPhase] = useState<"collapsing" | "expanding" | null>(null);
+  useEffect(() => {
+    if (collapsed === painted) return;
+    if (prefersReducedMotion()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- commit the disclosure swap without an animation frame.
+      setPainted(collapsed);
+      setPhase(null);
+      return;
+    }
+    if (collapsed) {
+      setPhase("collapsing");
+      const id = window.setTimeout(() => {
+        setPainted(true);
+        setPhase(null);
+      }, COLLAPSE_ANIM_MS);
+      return () => window.clearTimeout(id);
+    }
+    setPainted(false);
+    setPhase("expanding");
+    const id = window.setTimeout(() => setPhase(null), EXPAND_ANIM_MS);
+    return () => window.clearTimeout(id);
+  }, [collapsed, painted]);
   /* Ephemeral by design: on reload the live round is in front again. */
   const [frontKey, setFrontKey] = useState<string | null>(null);
   /* State adjustments happen during render (no effects): a strip chip click
@@ -147,12 +208,16 @@ export function RoundDeck({
     latest && front.key !== latest.key && latest.round.verdict === null && !latest.round.error
       ? latest
       : null;
+  const groupAria = groupLabel
+    ? t("roundDeck.groupAriaNamed", { name: groupLabel, count: rounds.length })
+    : t("roundDeck.groupAria", { count: rounds.length });
   const collapseControl = (
     <button
       type="button"
       data-review-deck-collapse
       className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       aria-label={t("roundDeck.collapseStack", { count: rounds.length })}
+      aria-expanded="true"
       title={t("roundDeck.collapseStack", { count: rounds.length })}
       onClick={() => setDeckCollapsed(true)}
     >
@@ -160,32 +225,51 @@ export function RoundDeck({
     </button>
   );
 
-  if (collapsed) {
+  if (painted) {
+    /* The collapsed group, still a first-class board citizen at the deck's
+       anchor: rounds count, final verdict, reviewer engine and recency — one
+       click restores the full deck in place. */
+    const lastRound = latest?.round ?? front.round;
+    const lastTone = verdictTone(lastRound.verdict);
+    const badge = engineBadgeFor(flow.roles.reviewer?.engine ?? "claude");
+    const finishedAtIso = lastRound.terminalAt ?? lastRound.reviewedAt ?? lastRound.startedAt;
+    const finishedAtMs = finishedAtIso ? Date.parse(finishedAtIso) : Number.NaN;
     return (
       <button
         type="button"
         data-review-deck-collapsed
-        className="flex h-12 w-full items-center gap-2 rounded-[10px] border border-border bg-card px-3 text-left shadow-1 hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="deck-chip-in flex h-12 w-full items-center gap-2 rounded-[10px] border border-border bg-card px-3 text-left shadow-1 hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         aria-label={t("roundDeck.expandStack", { count: rounds.length })}
+        aria-expanded="false"
         title={t("roundDeck.expandStack", { count: rounds.length })}
         onClick={() => setDeckCollapsed(false)}
       >
-        <span className="inline-flex h-6 shrink-0 items-center rounded-full px-2 text-[10px] font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
+        <span className="inline-flex h-6 shrink-0 items-center rounded-full px-2 text-[10px] font-bold" style={{ backgroundColor: lastTone.soft, color: lastTone.color }}>
           {t("roundDeck.roundsCount", { count: rounds.length })}
         </span>
         <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-muted">
-          {front.round.error ? t("roundDeck.aborted") : front.round.verdict ?? t("roundDeck.reviewInProgress")}
+          {lastRound.error ? t("roundDeck.aborted") : lastRound.verdict ? `${VERDICT_GLYPHS[lastRound.verdict]} ${lastRound.verdict}` : t("roundDeck.reviewInProgress")}
+          {lastRound.findingsCount != null && lastRound.findingsCount > 0 ? ` · ${t("roundDeck.findings", { count: lastRound.findingsCount })}` : ""}
         </span>
+        <span className="shrink-0 rounded-full px-1.5 text-[9px] font-bold" style={badge.style}>{badge.label}</span>
+        {Number.isFinite(finishedAtMs) ? (
+          <span className="shrink-0 text-[10px] font-normal tabular-nums text-muted">{fmtAge(finishedAtMs / 1000)}</span>
+        ) : null}
         <ChevronDown className="h-4 w-4 shrink-0 text-accent" aria-hidden />
       </button>
     );
   }
 
   return (
-    <div className="deck-3d relative h-full" style={{ paddingBottom: Math.min(stacked.length, TAB_MAX + (hidden ? 1 : 0)) * TAB_STEP }}>
+    <div
+      role="group"
+      aria-label={groupAria}
+      className={`deck-3d relative h-full ${phase === "collapsing" ? "deck-collapsing" : phase === "expanding" ? "deck-expanding" : ""}`}
+      style={{ paddingBottom: Math.min(stacked.length, TAB_MAX + (hidden ? 1 : 0)) * TAB_STEP }}
+    >
       {/* Front card. Key by round: swapping rounds remounts the pane with the
           scheme fade instead of morphing one feed into another. */}
-      <div key={front.key} className="scheme-enter relative z-[11] flex h-full flex-col">
+      <div key={front.key} className="scheme-enter deck-front relative z-[11] flex h-full flex-col">
         {front.file ? (
           <BranchPane
             file={front.file}

@@ -38,6 +38,27 @@
       ],
       "createdAt": "2100-01-02T11:04:00.000Z",
       "updatedAt": "2100-01-02T11:05:00.000Z"
+    },
+    {
+      "id": "task-demo-relay-review",
+      "project": "relay",
+      "status": "assigned",
+      "text": "Ship the relay switchboard\nGroup the direct review rounds behind one deck and keep every verdict reachable.",
+      "placement": "unplaced",
+      "assignments": [
+        {
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/77777777-7777-4777-8777-777777777777.jsonl",
+          "conversationId": "conversation_relay_builder",
+          "panePid": null,
+          "state": "delivered",
+          "error": null,
+          "at": "2100-01-02T11:20:30.000Z",
+          "accountId": "default",
+          "engine": "claude"
+        }
+      ],
+      "createdAt": "2100-01-02T11:19:00.000Z",
+      "updatedAt": "2100-01-02T11:20:30.000Z"
     }
   ]
 }

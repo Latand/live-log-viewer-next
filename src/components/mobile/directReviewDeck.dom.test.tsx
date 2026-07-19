@@ -174,6 +174,90 @@ test("a direct review group rides the phone strip as a round deck with accessibl
   expect(banner).toBeDefined();
 });
 
+test("a terminal direct group rides the phone as a tappable collapsed verdict chip that expands to every round (#289+#325)", async () => {
+  const builder = entry({ path: "/builder", title: "Builder session", conversationId: "conversation-builder", activity: "live", mtime: 9_000 });
+  const r1 = entry({
+    path: "/reviewer-1",
+    parent: "/builder",
+    conversationId: "conversation-r1",
+    mtime: 1_000,
+    review: { verdict: "REQUEST_CHANGES", findingsCount: 2, observedAt: "2026-07-10T02:00:00.000Z" },
+    durableLineage: { kind: "review", role: "reviewer", parentConversationId: "conversation-builder", reviewsConversationId: "conversation-builder", memberships: [] },
+  });
+  const r2 = entry({
+    path: "/reviewer-2",
+    parent: "/builder",
+    conversationId: "conversation-r2",
+    mtime: 2_000,
+    review: { verdict: "APPROVE", findingsCount: 0, observedAt: "2026-07-10T03:00:00.000Z" },
+    durableLineage: { kind: "review", role: "reviewer", parentConversationId: "conversation-builder", reviewsConversationId: "conversation-builder", memberships: [] },
+  });
+  const files = [builder, r1, r2];
+  const reviewGroups = directReviewFlows({ files, flows: [], tasks: [] });
+  expect(reviewGroups).toHaveLength(1);
+  expect(reviewGroups[0]!.state).toBe("done_comment");
+  const group: BranchGroup = {
+    key: builder.path,
+    columns: [{ file: builder, tasks: [] }],
+    returnable: [],
+    finished: [],
+    smt: builder.mtime,
+    orphanTask: false,
+  };
+
+  roots.push(
+    mount(
+      <MobileFocusView
+        project="demo"
+        groups={[group]}
+        manual={[]}
+        files={files}
+        flows={[]}
+        reviewGroups={reviewGroups}
+        pipelines={[]}
+        surfacePipelines={[]}
+        workerStacks={[]}
+        tasks={[]}
+        drafts={[]}
+        loaded
+        focus={null}
+        onSelect={() => {}}
+        onClose={() => {}}
+        onDraftClose={() => {}}
+        onDraftSpawned={() => {}}
+      />,
+    ),
+  );
+  await settle();
+
+  /* The terminal group still rides the switch strip (board presence). */
+  const chips = [...dom.document.querySelectorAll("button")] as unknown as HTMLButtonElement[];
+  const deckChip = chips.find((chip) => chip.textContent?.trim().startsWith("R"));
+  expect(deckChip).toBeDefined();
+  flushSync(() => deckChip!.click());
+  await settle();
+
+  /* Collapsed by default after the final verdict: one chip carrying the
+     rounds count and the verdict, tall enough for a 390px thumb (h-12 =
+     48px ≥ the 44px target). */
+  const collapsed = dom.document.querySelector("[data-review-deck-collapsed]") as HTMLButtonElement | null;
+  expect(collapsed).not.toBeNull();
+  expect(collapsed!.className).toContain("h-12");
+  expect(collapsed!.textContent).toContain("2 rounds");
+  expect(collapsed!.textContent).toContain("APPROVE");
+  expect(collapsed!.getAttribute("aria-expanded")).toBe("false");
+
+  /* Tap → the full deck: front card banner plus the prior round spine — every
+     round reachable, no nested scroll container. */
+  flushSync(() => collapsed!.click());
+  await settle();
+  expect(dom.document.querySelector("[data-review-deck-collapse]")).not.toBeNull();
+  const spine = dom.document.querySelector('button[title="Round 1 · ✖ REQUEST_CHANGES"]');
+  expect(spine).not.toBeNull();
+  const banner = [...dom.document.querySelectorAll("div")].find((el) => el.textContent?.trim().startsWith("Round 2 · ✓ APPROVE"));
+  expect(banner).toBeDefined();
+});
+
 test("an active pipeline-owned review keeps prior same-round bindings in the compact mobile rail (#353)", async () => {
   const builder = entry({ path: "/pipeline-builder", title: "Pipeline builder", conversationId: "conversation-builder", activity: "live", mtime: 9_000 });
   const membership = (slot: string) => ({

@@ -383,6 +383,37 @@ describe("directReviewFlows", () => {
     expect(approvedGroup[0]!.state).toBe("done_comment");
   });
 
+  test("a FRESH failed-before-verdict latest round keeps the group actionable until the horizon passes (#289+#325)", () => {
+    /* The pinned spec: a round that failed before its verdict keeps the group
+       expanded — bounded by the shared 15-minute freshness horizon so days-old
+       dead reviewers still park (the 66ef346 production fix stays intact). */
+    const builder = entry({ path: "/builder", conversationId: "conversation-builder" });
+    const failed = directReviewer("/reviewer-fresh", { id: "conversation-r1", reviews: "conversation-builder", mtime: 10_000, activity: "recent", proc: "done" });
+    const idleMs = 15 * 60_000;
+
+    /* 5 minutes after the reviewer stopped: fresh failure, actionable group. */
+    const fresh = directReviewFlows({ files: [builder, failed], flows: [], tasks: [], nowMs: 10_000_000 + 5 * 60_000, idleMs });
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]!.rounds[0]!.error).toBe("no verdict");
+    expect(fresh[0]!.state).toBe("reviewing");
+    expect(splitDirectReviewGroups(fresh).active).toHaveLength(1);
+
+    /* Past the horizon the same group parks as compact history. */
+    const stale = directReviewFlows({ files: [builder, failed], flows: [], tasks: [], nowMs: 10_000_000 + idleMs, idleMs });
+    expect(stale[0]!.rounds[0]!.error).toBe("no verdict");
+    expect(stale[0]!.state).toBe("done_comment");
+    expect(splitDirectReviewGroups(stale).history).toHaveLength(1);
+
+    /* A durable verdict is terminal IMMEDIATELY — the horizon never delays the
+       collapse of a verdict-bearing group. */
+    const approved = {
+      ...failed,
+      review: { verdict: "APPROVE" as const, findingsCount: 0, observedAt: "2026-07-10T02:00:00.000Z" },
+    };
+    const verdictGroup = directReviewFlows({ files: [builder, approved], flows: [], tasks: [], nowMs: 10_000_000 + 5 * 60_000, idleMs });
+    expect(verdictGroup[0]!.state).toBe("done_comment");
+  });
+
   test("an active managed flow on the reviewed conversation keeps its deck — the direct group yields", () => {
     /* One node hosts one deck: a builder that is ALSO an implementer of a live
        managed loop keeps that loop's deck and controls; direct reviewers stay

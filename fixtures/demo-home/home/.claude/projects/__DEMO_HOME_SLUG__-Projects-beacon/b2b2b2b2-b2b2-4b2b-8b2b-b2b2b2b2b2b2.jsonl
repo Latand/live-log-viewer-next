@@ -1,0 +1,2 @@
+{"type":"user","uuid":"b2000000-0000-4000-8000-000000000001","timestamp":"2100-01-02T11:15:05.000Z","cwd":"/demo/Projects/beacon","message":{"role":"user","content":"Review round 1 of the beacon quota guard."}}
+{"type":"assistant","uuid":"b2000000-0000-4000-8000-000000000002","timestamp":"2100-01-02T11:16:00.000Z","cwd":"/demo/Projects/beacon","message":{"role":"assistant","model":"claude-opus-4-1","content":[{"type":"text","text":"VERDICT: REQUEST_CHANGES — the guard trips one request too late; tighten the burst window."}]}}

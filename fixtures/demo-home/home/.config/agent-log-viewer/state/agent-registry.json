@@ -1,0 +1,487 @@
+{
+  "version": 2,
+  "entries": {},
+  "receipts": {},
+  "lineageEdges": {
+    "conversation_relay_reviewer_1": {
+      "childConversationId": "conversation_relay_reviewer_1",
+      "parentConversationId": "conversation_relay_builder",
+      "childSessionKey": null,
+      "parentSessionKey": null,
+      "childArtifactPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/88888888-8888-4888-8888-888888888888.jsonl",
+      "parentArtifactPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/77777777-7777-4777-8777-777777777777.jsonl",
+      "kind": "review",
+      "role": "reviewer",
+      "reviewsConversationId": "conversation_relay_builder",
+      "source": "viewer-spawn",
+      "evidence": {
+        "launchId": null,
+        "clientAttemptId": null,
+        "parentSource": "explicit"
+      },
+      "createdAt": "2100-01-02T11:25:00.000Z"
+    },
+    "conversation_relay_reviewer_2": {
+      "childConversationId": "conversation_relay_reviewer_2",
+      "parentConversationId": "conversation_relay_builder",
+      "childSessionKey": null,
+      "parentSessionKey": null,
+      "childArtifactPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/99999999-9999-4999-8999-999999999999.jsonl",
+      "parentArtifactPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/77777777-7777-4777-8777-777777777777.jsonl",
+      "kind": "review",
+      "role": "reviewer",
+      "reviewsConversationId": "conversation_relay_builder",
+      "source": "viewer-spawn",
+      "evidence": {
+        "launchId": null,
+        "clientAttemptId": null,
+        "parentSource": "explicit"
+      },
+      "createdAt": "2100-01-02T11:30:00.000Z"
+    },
+    "conversation_relay_reviewer_3": {
+      "childConversationId": "conversation_relay_reviewer_3",
+      "parentConversationId": "conversation_relay_builder",
+      "childSessionKey": null,
+      "parentSessionKey": null,
+      "childArtifactPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/9f9f9f9f-9f9f-4f9f-8f9f-9f9f9f9f9f9f.jsonl",
+      "parentArtifactPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/77777777-7777-4777-8777-777777777777.jsonl",
+      "kind": "review",
+      "role": "reviewer",
+      "reviewsConversationId": "conversation_relay_builder",
+      "source": "viewer-spawn",
+      "evidence": {
+        "launchId": null,
+        "clientAttemptId": null,
+        "parentSource": "explicit"
+      },
+      "createdAt": "2100-01-02T11:35:00.000Z"
+    },
+    "conversation_beacon_reviewer_1": {
+      "childConversationId": "conversation_beacon_reviewer_1",
+      "parentConversationId": "conversation_beacon_builder",
+      "childSessionKey": null,
+      "parentSessionKey": null,
+      "childArtifactPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-beacon/b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2.jsonl",
+      "parentArtifactPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-beacon/a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1.jsonl",
+      "kind": "review",
+      "role": "reviewer",
+      "reviewsConversationId": "conversation_beacon_builder",
+      "source": "viewer-spawn",
+      "evidence": {
+        "launchId": null,
+        "clientAttemptId": null,
+        "parentSource": "explicit"
+      },
+      "createdAt": "2100-01-02T11:15:00.000Z"
+    },
+    "conversation_beacon_reviewer_2": {
+      "childConversationId": "conversation_beacon_reviewer_2",
+      "parentConversationId": "conversation_beacon_builder",
+      "childSessionKey": null,
+      "parentSessionKey": null,
+      "childArtifactPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-beacon/c3c3c3c3-c3c3-4c3c-8c3c-c3c3c3c3c3c3.jsonl",
+      "parentArtifactPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-beacon/a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1.jsonl",
+      "kind": "review",
+      "role": "reviewer",
+      "reviewsConversationId": "conversation_beacon_builder",
+      "source": "viewer-spawn",
+      "evidence": {
+        "launchId": null,
+        "clientAttemptId": null,
+        "parentSource": "explicit"
+      },
+      "createdAt": "2100-01-02T11:18:00.000Z"
+    }
+  },
+  "memberships": {},
+  "importedResumePanes": true,
+  "legacyResumePanes": {
+    "serverPid": null,
+    "panes": {}
+  },
+  "conversations": {
+    "conversation_relay_builder": {
+      "id": "conversation_relay_builder",
+      "engine": "claude",
+      "generations": [
+        {
+          "id": "gen-conversation_relay_builder",
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/77777777-7777-4777-8777-777777777777.jsonl",
+          "accountId": null,
+          "launchProfile": {
+            "cwd": "/demo/Projects/relay",
+            "model": null,
+            "effort": null,
+            "fast": null,
+            "permissionMode": null,
+            "readOnly": null,
+            "allowSubagents": false,
+            "title": "Relay switch builder",
+            "project": "relay",
+            "parentConversationId": null,
+            "role": "root",
+            "goal": null,
+            "plan": null
+          },
+          "historyHash": null,
+          "host": null,
+          "createdAt": "2100-01-02T11:20:00.000Z",
+          "archivedAt": null
+        }
+      ],
+      "continuityPaths": [],
+      "abandonedContinuityPaths": [],
+      "projectOwnership": {
+        "project": "relay",
+        "source": "operator",
+        "setAt": "2100-01-02T11:20:00.000Z",
+        "operationId": "demo-fixture-conversation_relay_builder"
+      },
+      "migration": null,
+      "migrationOptOut": null,
+      "supersededBy": null,
+      "agentRole": null,
+      "delegationDepth": 0,
+      "turn": {
+        "state": "unknown",
+        "source": "empty",
+        "terminalAt": null,
+        "observedAt": null
+      },
+      "createdAt": "2100-01-02T11:20:00.000Z",
+      "updatedAt": "2100-01-02T11:20:00.000Z"
+    },
+    "conversation_relay_reviewer_1": {
+      "id": "conversation_relay_reviewer_1",
+      "engine": "claude",
+      "generations": [
+        {
+          "id": "gen-conversation_relay_reviewer_1",
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/88888888-8888-4888-8888-888888888888.jsonl",
+          "accountId": null,
+          "launchProfile": {
+            "cwd": "/demo/Projects/relay",
+            "model": null,
+            "effort": null,
+            "fast": null,
+            "permissionMode": null,
+            "readOnly": null,
+            "allowSubagents": false,
+            "title": "Relay review round 1",
+            "project": "relay",
+            "parentConversationId": "conversation_relay_builder",
+            "role": "worker",
+            "goal": null,
+            "plan": null
+          },
+          "historyHash": null,
+          "host": null,
+          "createdAt": "2100-01-02T11:25:00.000Z",
+          "archivedAt": null
+        }
+      ],
+      "continuityPaths": [],
+      "abandonedContinuityPaths": [],
+      "projectOwnership": {
+        "project": "relay",
+        "source": "operator",
+        "setAt": "2100-01-02T11:25:00.000Z",
+        "operationId": "demo-fixture-conversation_relay_reviewer_1"
+      },
+      "migration": null,
+      "migrationOptOut": null,
+      "supersededBy": null,
+      "agentRole": "reviewer",
+      "delegationDepth": 1,
+      "turn": {
+        "state": "unknown",
+        "source": "empty",
+        "terminalAt": null,
+        "observedAt": null
+      },
+      "createdAt": "2100-01-02T11:25:00.000Z",
+      "updatedAt": "2100-01-02T11:25:00.000Z"
+    },
+    "conversation_relay_reviewer_2": {
+      "id": "conversation_relay_reviewer_2",
+      "engine": "claude",
+      "generations": [
+        {
+          "id": "gen-conversation_relay_reviewer_2",
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/99999999-9999-4999-8999-999999999999.jsonl",
+          "accountId": null,
+          "launchProfile": {
+            "cwd": "/demo/Projects/relay",
+            "model": null,
+            "effort": null,
+            "fast": null,
+            "permissionMode": null,
+            "readOnly": null,
+            "allowSubagents": false,
+            "title": "Relay review round 2",
+            "project": "relay",
+            "parentConversationId": "conversation_relay_builder",
+            "role": "worker",
+            "goal": null,
+            "plan": null
+          },
+          "historyHash": null,
+          "host": null,
+          "createdAt": "2100-01-02T11:30:00.000Z",
+          "archivedAt": null
+        }
+      ],
+      "continuityPaths": [],
+      "abandonedContinuityPaths": [],
+      "projectOwnership": {
+        "project": "relay",
+        "source": "operator",
+        "setAt": "2100-01-02T11:30:00.000Z",
+        "operationId": "demo-fixture-conversation_relay_reviewer_2"
+      },
+      "migration": null,
+      "migrationOptOut": null,
+      "supersededBy": null,
+      "agentRole": "reviewer",
+      "delegationDepth": 1,
+      "turn": {
+        "state": "unknown",
+        "source": "empty",
+        "terminalAt": null,
+        "observedAt": null
+      },
+      "createdAt": "2100-01-02T11:30:00.000Z",
+      "updatedAt": "2100-01-02T11:30:00.000Z"
+    },
+    "conversation_relay_reviewer_3": {
+      "id": "conversation_relay_reviewer_3",
+      "engine": "claude",
+      "generations": [
+        {
+          "id": "gen-conversation_relay_reviewer_3",
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-relay/9f9f9f9f-9f9f-4f9f-8f9f-9f9f9f9f9f9f.jsonl",
+          "accountId": null,
+          "launchProfile": {
+            "cwd": "/demo/Projects/relay",
+            "model": null,
+            "effort": null,
+            "fast": null,
+            "permissionMode": null,
+            "readOnly": null,
+            "allowSubagents": false,
+            "title": "Relay review round 3",
+            "project": "relay",
+            "parentConversationId": "conversation_relay_builder",
+            "role": "worker",
+            "goal": null,
+            "plan": null
+          },
+          "historyHash": null,
+          "host": null,
+          "createdAt": "2100-01-02T11:35:00.000Z",
+          "archivedAt": null
+        }
+      ],
+      "continuityPaths": [],
+      "abandonedContinuityPaths": [],
+      "projectOwnership": {
+        "project": "relay",
+        "source": "operator",
+        "setAt": "2100-01-02T11:35:00.000Z",
+        "operationId": "demo-fixture-conversation_relay_reviewer_3"
+      },
+      "migration": null,
+      "migrationOptOut": null,
+      "supersededBy": null,
+      "agentRole": "reviewer",
+      "delegationDepth": 1,
+      "turn": {
+        "state": "unknown",
+        "source": "empty",
+        "terminalAt": null,
+        "observedAt": null
+      },
+      "createdAt": "2100-01-02T11:35:00.000Z",
+      "updatedAt": "2100-01-02T11:35:00.000Z"
+    },
+    "conversation_beacon_builder": {
+      "id": "conversation_beacon_builder",
+      "engine": "claude",
+      "generations": [
+        {
+          "id": "gen-conversation_beacon_builder",
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-beacon/a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1.jsonl",
+          "accountId": null,
+          "launchProfile": {
+            "cwd": "/demo/Projects/beacon",
+            "model": null,
+            "effort": null,
+            "fast": null,
+            "permissionMode": null,
+            "readOnly": null,
+            "allowSubagents": false,
+            "title": "Beacon quota builder",
+            "project": "beacon",
+            "parentConversationId": null,
+            "role": "root",
+            "goal": null,
+            "plan": null
+          },
+          "historyHash": null,
+          "host": null,
+          "createdAt": "2100-01-02T11:10:00.000Z",
+          "archivedAt": null
+        }
+      ],
+      "continuityPaths": [],
+      "abandonedContinuityPaths": [],
+      "projectOwnership": {
+        "project": "beacon",
+        "source": "operator",
+        "setAt": "2100-01-02T11:10:00.000Z",
+        "operationId": "demo-fixture-conversation_beacon_builder"
+      },
+      "migration": null,
+      "migrationOptOut": null,
+      "supersededBy": null,
+      "agentRole": null,
+      "delegationDepth": 0,
+      "turn": {
+        "state": "unknown",
+        "source": "empty",
+        "terminalAt": null,
+        "observedAt": null
+      },
+      "createdAt": "2100-01-02T11:10:00.000Z",
+      "updatedAt": "2100-01-02T11:10:00.000Z"
+    },
+    "conversation_beacon_reviewer_1": {
+      "id": "conversation_beacon_reviewer_1",
+      "engine": "claude",
+      "generations": [
+        {
+          "id": "gen-conversation_beacon_reviewer_1",
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-beacon/b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2.jsonl",
+          "accountId": null,
+          "launchProfile": {
+            "cwd": "/demo/Projects/beacon",
+            "model": null,
+            "effort": null,
+            "fast": null,
+            "permissionMode": null,
+            "readOnly": null,
+            "allowSubagents": false,
+            "title": "Beacon review round 1",
+            "project": "beacon",
+            "parentConversationId": "conversation_beacon_builder",
+            "role": "worker",
+            "goal": null,
+            "plan": null
+          },
+          "historyHash": null,
+          "host": null,
+          "createdAt": "2100-01-02T11:15:00.000Z",
+          "archivedAt": null
+        }
+      ],
+      "continuityPaths": [],
+      "abandonedContinuityPaths": [],
+      "projectOwnership": {
+        "project": "beacon",
+        "source": "operator",
+        "setAt": "2100-01-02T11:15:00.000Z",
+        "operationId": "demo-fixture-conversation_beacon_reviewer_1"
+      },
+      "migration": null,
+      "migrationOptOut": null,
+      "supersededBy": null,
+      "agentRole": "reviewer",
+      "delegationDepth": 1,
+      "turn": {
+        "state": "unknown",
+        "source": "empty",
+        "terminalAt": null,
+        "observedAt": null
+      },
+      "createdAt": "2100-01-02T11:15:00.000Z",
+      "updatedAt": "2100-01-02T11:15:00.000Z"
+    },
+    "conversation_beacon_reviewer_2": {
+      "id": "conversation_beacon_reviewer_2",
+      "engine": "claude",
+      "generations": [
+        {
+          "id": "gen-conversation_beacon_reviewer_2",
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-beacon/c3c3c3c3-c3c3-4c3c-8c3c-c3c3c3c3c3c3.jsonl",
+          "accountId": null,
+          "launchProfile": {
+            "cwd": "/demo/Projects/beacon",
+            "model": null,
+            "effort": null,
+            "fast": null,
+            "permissionMode": null,
+            "readOnly": null,
+            "allowSubagents": false,
+            "title": "Beacon review round 2",
+            "project": "beacon",
+            "parentConversationId": "conversation_beacon_builder",
+            "role": "worker",
+            "goal": null,
+            "plan": null
+          },
+          "historyHash": null,
+          "host": null,
+          "createdAt": "2100-01-02T11:18:00.000Z",
+          "archivedAt": null
+        }
+      ],
+      "continuityPaths": [],
+      "abandonedContinuityPaths": [],
+      "projectOwnership": {
+        "project": "beacon",
+        "source": "operator",
+        "setAt": "2100-01-02T11:18:00.000Z",
+        "operationId": "demo-fixture-conversation_beacon_reviewer_2"
+      },
+      "migration": null,
+      "migrationOptOut": null,
+      "supersededBy": null,
+      "agentRole": "reviewer",
+      "delegationDepth": 1,
+      "turn": {
+        "state": "unknown",
+        "source": "empty",
+        "terminalAt": null,
+        "observedAt": null
+      },
+      "createdAt": "2100-01-02T11:18:00.000Z",
+      "updatedAt": "2100-01-02T11:18:00.000Z"
+    }
+  },
+  "conversationAliases": {},
+  "conversationRevision": {
+    "claude": 1,
+    "codex": 0
+  },
+  "migrationIntents": {},
+  "engineRouting": {
+    "claude": {
+      "activeAccountId": null,
+      "revision": 0
+    },
+    "codex": {
+      "activeAccountId": null,
+      "revision": 0
+    }
+  },
+  "autoBalance": {},
+  "quotaObservations": {
+    "claude": {},
+    "codex": {}
+  },
+  "heldDeliveries": {},
+  "deliveryOperationOwners": {},
+  "pendingSuccessorCleanups": {},
+  "pendingSupersedence": {}
+}
