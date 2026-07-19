@@ -536,12 +536,12 @@ describe("privacy publication gate", () => {
     {
       expected: "private_network",
       name: "GFM HTML5 named entities",
-      publication: () => "192&period;168&period;12&period;34",
+      publication: () => ["192", "168", "12", "34"].join("&period;"),
     },
     {
       expected: "private_network",
       name: "GFM underscore emphasis",
-      publication: () => "192._168_.12.34",
+      publication: () => ["192", "_168_", "12", "34"].join("."),
     },
   ];
 
