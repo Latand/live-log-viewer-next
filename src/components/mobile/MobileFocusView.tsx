@@ -26,7 +26,7 @@ import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 
-import { PIPELINE_ATTENTION_STATES, PIPELINE_BUSY_STATES, STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, partitionPipelineSurfaces, pipelineLinkedTasks, pipelineStateLabel, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
+import { PIPELINE_ATTENTION_STATES, PIPELINE_BUSY_STATES, STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, partitionPipelineSurfaces, pipelineLinkedTasks, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { deckKey } from "@/components/scheme/agentLinks";
@@ -333,7 +333,13 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
   );
 
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+    /* The mobile overflow contract (#353): the focus root clips horizontal
+       overflow at the viewport, so any horizontal scrolling lives ONLY in
+       internal `overflow-x-auto` strips (chip row, dock rail) with `min-w-0`
+       ancestors — never on the document. Measured acceptance: at 390px the
+       document scrollWidth equals the innerWidth (the production record showed
+       564px before this fix). */
+    <div className="relative flex min-h-0 min-w-0 max-w-[100dvw] flex-1 flex-col overflow-x-clip">
       {/* Same runtime connection pill as desktop, compact, one thumb away.
           Renders nothing while slice-one is disabled. */}
       <ConnectionPill compact />
@@ -713,11 +719,10 @@ export function MobilePipelineDock({
   const draft = pipeline.state === "draft";
   const attention = PIPELINE_ATTENTION_STATES.has(pipeline.state);
   const busyState = PIPELINE_BUSY_STATES.has(pipeline.state);
-  /* Same 1-based "stage k/n" read as the strip header, so the collapsed row and
-     the expanded rail can never disagree about position. */
-  const total = pipeline.stages.length;
-  const cursorIndex = pipeline.cursor ? pipeline.stages.findIndex((stage) => stage.id === pipeline.cursor!.stageId) : -1;
-  const position = cursorIndex >= 0 ? cursorIndex + 1 : total;
+  /* The SAME single "stage k/n" derivation as the strip header and the live
+     region (#353), so the collapsed row and the expanded rail can never
+     disagree about position. */
+  const { k: position, n: total } = pipelineStagePosition(pipeline);
   const statusBadge = busyState
     ? "bg-accent-soft text-accent"
     : attention || draft

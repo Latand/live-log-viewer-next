@@ -171,7 +171,7 @@ describe("rule precedence and positive signals", () => {
 
   test("review: reviewing cursor, completed pipeline, terminal pass verdict, review-cycle flow states, APPROVE evidence", () => {
     const cases: Array<{ pipelines?: Pipeline[]; flows?: Flow[]; path: string }> = [
-      { pipelines: [pipeline({ cursor: { stageId: "s1", state: "reviewing" }, attempts: [{ agentPath: "/tmp/r1.jsonl" }] })], path: "/tmp/r1.jsonl" },
+      { pipelines: [pipeline({ cursor: { stageId: "s1", state: "reviewing", input: null, activatedBy: null }, attempts: [{ agentPath: "/tmp/r1.jsonl" }] })], path: "/tmp/r1.jsonl" },
       { pipelines: [pipeline({ state: "completed", attempts: [{ agentPath: "/tmp/r2.jsonl" }] })], path: "/tmp/r2.jsonl" },
       {
         pipelines: [pipeline({ attempts: [{ agentPath: "/tmp/r3.jsonl", state: "passed", verdict: { status: "pass" } }] })],
@@ -197,7 +197,7 @@ describe("rule precedence and positive signals", () => {
 
   test("paused containers are deliberate operator state — status rules win", () => {
     const pausedFlow = flow({ state: "paused", pausedState: "needs_decision", implementerPath: "/tmp/pause.jsonl" });
-    const pausedPipeline = pipeline({ state: "paused", cursor: { stageId: "s1", state: "reviewing" }, attempts: [{ agentPath: "/tmp/pp.jsonl" }] });
+    const pausedPipeline = pipeline({ state: "paused", cursor: { stageId: "s1", state: "reviewing", input: null, activatedBy: null }, attempts: [{ agentPath: "/tmp/pp.jsonl" }] });
     const index = buildReadinessIndex([pausedPipeline], [pausedFlow]);
     expect(taskReadiness(task({ status: "assigned", assignments: [assignment("delivered", { path: "/tmp/pause.jsonl" })] }), index)).toBe("now");
     expect(taskReadiness(task({ status: "inbox", assignments: [assignment("handoff", { path: "/tmp/pp.jsonl" })] }), index)).toBe("planned");
@@ -222,7 +222,7 @@ describe("totality and exclusivity", () => {
     const assignmentStates: Array<AssignmentState | null> = [null, "delivered", "failed", "spawning", "handoff"];
     const containers: Array<{ pipelines: Pipeline[]; flows: Flow[]; path: string | null }> = [
       { pipelines: [], flows: [], path: null },
-      { pipelines: [pipeline({ cursor: { stageId: "s1", state: "reviewing" }, attempts: [{ agentPath: "/tmp/m1.jsonl" }] })], flows: [], path: "/tmp/m1.jsonl" },
+      { pipelines: [pipeline({ cursor: { stageId: "s1", state: "reviewing", input: null, activatedBy: null }, attempts: [{ agentPath: "/tmp/m1.jsonl" }] })], flows: [], path: "/tmp/m1.jsonl" },
       { pipelines: [pipeline({ state: "needs_decision", attempts: [{ agentPath: "/tmp/m2.jsonl" }] })], flows: [], path: "/tmp/m2.jsonl" },
       { pipelines: [], flows: [flow({ state: "approved", implementerPath: "/tmp/m3.jsonl" })], path: "/tmp/m3.jsonl" },
       { pipelines: [], flows: [flow({ state: "needs_decision", implementerPath: "/tmp/m4.jsonl" })], path: "/tmp/m4.jsonl" },
@@ -272,18 +272,18 @@ describe("alias remap", () => {
   test("an old conversation id plus the alias map links the pipeline identically pre/post remap", () => {
     const item = task({ status: "assigned", assignments: [assignment("delivered", { conversationId: "conversation_old" })] });
     /* Pre-remap: the durable stores still carry the provisional id everywhere. */
-    const prePipeline = pipeline({ cursor: { stageId: "s1", state: "reviewing" }, attempts: [{ conversationId: "conversation_old" }] });
+    const prePipeline = pipeline({ cursor: { stageId: "s1", state: "reviewing", input: null, activatedBy: null }, attempts: [{ conversationId: "conversation_old" }] });
     const pre = buildReadinessIndex([prePipeline], []);
     /* Post-remap: the registry canonicalized the pipeline side; the task's
        assignment still says conversation_old and resolves through the alias. */
-    const postPipeline = pipeline({ cursor: { stageId: "s1", state: "reviewing" }, attempts: [{ conversationId: "conversation_new" }] });
+    const postPipeline = pipeline({ cursor: { stageId: "s1", state: "reviewing", input: null, activatedBy: null }, attempts: [{ conversationId: "conversation_new" }] });
     const post = buildReadinessIndex([postPipeline], [], { conversation_old: "conversation_new" });
     expect(taskReadiness(item, pre)).toBe("review");
     expect(taskReadiness(item, post)).toBe("review");
   });
 
   test("aliases apply on the index-build side too", () => {
-    const linked = pipeline({ cursor: { stageId: "s1", state: "reviewing" }, attempts: [{ conversationId: "conversation_old" }] });
+    const linked = pipeline({ cursor: { stageId: "s1", state: "reviewing", input: null, activatedBy: null }, attempts: [{ conversationId: "conversation_old" }] });
     const index = buildReadinessIndex([linked], [], { conversation_old: "conversation_new" });
     const item = task({ status: "assigned", assignments: [assignment("delivered", { conversationId: "conversation_new" })] });
     expect(taskReadiness(item, index)).toBe("review");

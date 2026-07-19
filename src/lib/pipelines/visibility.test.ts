@@ -100,7 +100,7 @@ test("a resumed member keeps its pipeline rail, halo, and open target on the cur
     ...hiddenPipeline(memberId),
     hiddenAt: undefined,
     state: "running",
-    cursor: { stageId: "verify", state: "running" },
+    cursor: { stageId: "verify", state: "running", input: null, activatedBy: null },
     stages: [
       { id: "build", kind: "run", prompt: "build", next: "verify" },
       { id: "verify", kind: "run", prompt: "verify", next: null },

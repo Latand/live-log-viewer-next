@@ -293,18 +293,22 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
             const geom = railByKey.get(link.key)!;
             const color = PIPELINE_RAIL_COLOR[link.pipeline!.tone];
             const line = geom.d;
-            const active = link.pipeline!.tone === "active" && !link.pipeline!.paused;
+            /* The predicted-next pass edge keeps the live march too, so "which
+               edge runs next" reads at a glance (#353); fail edges are dashed
+               amber loop arcs, distinct from the solid pass rails. */
+            const active = (link.pipeline!.tone === "active" || Boolean(link.pipeline!.isNext)) && !link.pipeline!.paused;
+            const failEdge = link.pipeline!.edge === "fail";
             return (
-              <g key={link.key}>
+              <g key={link.key} data-pipeline-edge={link.pipeline!.edge ?? "pass"} data-edge-next={link.pipeline!.isNext ? "true" : undefined}>
                 <path
                   d={line}
-                  className={active ? "pipeline-rail-live" : undefined}
+                  className={active && !failEdge ? "pipeline-rail-live" : undefined}
                   style={{ d: `path("${line}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}
                   fill="none"
                   stroke={color}
                   strokeWidth={2.5}
                   strokeLinecap="round"
-                  strokeDasharray={link.pipeline!.tone === "dim" ? "5 7" : undefined}
+                  strokeDasharray={failEdge ? "6 6" : link.pipeline!.tone === "dim" ? "5 7" : undefined}
                 />
                 {geom.chevrons.map((chevron, index) => (
                   <path key={index} d={chevron} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" opacity={0.9} />

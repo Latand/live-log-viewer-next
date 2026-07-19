@@ -24,11 +24,19 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
 import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase } from "./git";
-import { MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "./limits";
+import {
+  DEFAULT_FAIL_EDGE_ROUNDS,
+  MAX_FAIL_EDGE_ROUNDS,
+  MAX_PIPELINE_STAGES,
+  MAX_SPEC_LENGTH,
+  MAX_STAGE_PROMPT_LENGTH,
+  MAX_TASK_LENGTH,
+  MIN_STARTED_PIPELINE_STAGES,
+} from "./limits";
 import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipelineRepo } from "./preflight";
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
-import { buildPipeline, isEffectiveRole, loadPipelines, pipelineIdentity, PipelineStoreError, withPipelineMutation } from "./store";
+import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, PipelineStoreError, withPipelineMutation } from "./store";
 import type {
   CreatePipelineRequest,
   EffectivePipelineRole,
@@ -325,6 +333,18 @@ function park(pipeline: Pipeline, detail: string, attempt?: PipelineStageAttempt
   pipeline.stateDetail = detail;
 }
 
+/** Moves the cursor's lifecycle state while preserving the durable relay record
+    (#353): the persisted input/activatedBy of the current activation survive
+    every pending → spawning → running → committing transition, so a crash at
+    any point replays the identical prompt. A move to a DIFFERENT stage must go
+    through advance/fail-edge routing, which writes a fresh relay record. */
+function setCursorState(pipeline: Pipeline, stageId: string, state: NonNullable<Pipeline["cursor"]>["state"]): void {
+  const keep = pipeline.cursor?.stageId === stageId
+    ? { input: pipeline.cursor.input, activatedBy: pipeline.cursor.activatedBy }
+    : { input: null, activatedBy: null };
+  pipeline.cursor = { stageId, state, ...keep };
+}
+
 function normalizedOutput(pipeline: Pipeline): string {
   if (!pipeline.cursor) return "";
   const currentIndex = pipeline.stages.findIndex((stage) => stage.id === pipeline.cursor?.stageId);
@@ -361,6 +381,7 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAtte
     park(pipeline, "pipeline stage run record is missing");
     return null;
   }
+  const cursorRelay = pipeline.cursor?.stageId === stage.id ? pipeline.cursor : null;
   const attempt: PipelineStageAttempt = {
     n: run.attempts.length + 1,
     state: "pending",
@@ -373,6 +394,11 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAtte
     flowId: null,
     startedAt: null,
     completedAt: null,
+    /* The activation's persisted relay record becomes the attempt's durable
+       provenance; the spawn digest derives from it, so it is stable across
+       restarts and sibling-record evolution (#353 exactly-once). */
+    input: cursorRelay?.input ?? null,
+    activatedBy: cursorRelay?.activatedBy ? { ...cursorRelay.activatedBy } : null,
     output: null,
     verdict: null,
     error: null,
@@ -381,7 +407,10 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAtte
   return attempt;
 }
 
-function advancePipeline(pipeline: Pipeline, stage: PipelineStage, ports: PipelinePorts): void {
+/** Advance along the pass edge, persisting the relay record: the completed
+    attempt's output is the next activation's `{{prev.output}}`, written in the
+    same mutation as the verdict/commit that produced it (exactly-once, #353). */
+function advancePipeline(pipeline: Pipeline, stage: PipelineStage, ports: PipelinePorts, attempt?: PipelineStageAttempt | null): void {
   if (stage.next === null) {
     pipeline.cursor = null;
     pipeline.state = "completed";
@@ -390,10 +419,36 @@ function advancePipeline(pipeline: Pipeline, stage: PipelineStage, ports: Pipeli
     pipeline.closedAt = ports.now();
     return;
   }
-  pipeline.cursor = { stageId: stage.next, state: "pending" };
+  pipeline.cursor = {
+    stageId: stage.next,
+    state: "pending",
+    input: attempt?.output ?? null,
+    activatedBy: attempt ? { stageId: stage.id, attempt: attempt.n, edge: "pass" } : null,
+  };
   pipeline.state = "running";
   pipeline.stateDetail = null;
   pipeline.pausedState = null;
+}
+
+/** Attempts of the fail edge's target that this stage's fail edge activated —
+    the derived (never stored) loop budget, so counts cannot drift from the
+    durable evidence. */
+function failEdgeRoundsUsed(pipeline: Pipeline, stage: PipelineStage): number {
+  if (!stage.onFail) return 0;
+  const target = runFor(pipeline, stage.onFail.to);
+  if (!target) return 0;
+  return target.attempts.filter((attempt) => attempt.activatedBy?.edge === "fail" && attempt.activatedBy.stageId === stage.id).length;
+}
+
+/** The `{{prev.output}}` payload a fail edge forwards: the failed attempt's
+    narrative output plus its structured findings, so the loop target sees what
+    to fix without re-deriving it from transcripts. */
+function failEdgeInput(parsed: NonNullable<ReturnType<typeof parseStageVerdict>>): string | null {
+  const findings = parsed.verdict.findings?.length
+    ? `Fail verdict findings:\n${parsed.verdict.findings.map((finding) => `- ${finding}`).join("\n")}`
+    : "";
+  const combined = [parsed.output, findings].filter(Boolean).join("\n\n").trim();
+  return combined || null;
 }
 
 function commitPassedStage(
@@ -410,7 +465,7 @@ function commitPassedStage(
   pipeline.lastPassedCommit = result.sha;
   attempt.state = "passed";
   attempt.completedAt = ports.now();
-  advancePipeline(pipeline, stage, ports);
+  advancePipeline(pipeline, stage, ports, attempt);
 }
 
 /** One-shot settlement of a completed stage turn. Records the verdict on the
@@ -429,11 +484,38 @@ function settleStageVerdict(
   if (parsed.verdict.status !== "pass") {
     attempt.state = parsed.verdict.status === "fail" ? "failed" : "needs_decision";
     attempt.completedAt = ports.now();
+    /* Fail-edge routing (#353): a fail verdict on a stage with a fail edge and
+       remaining round budget advances the cursor along that edge instead of
+       parking. The failed attempt keeps its truthful failed state and verdict;
+       the relay record (input + fail activation) lands in the SAME atomic
+       mutation as the verdict. No worktree reset — the target continues from
+       lastPassedCommit plus its own committed passes. needs_decision always
+       parks; an exhausted budget parks with an actionable detail. */
+    if (parsed.verdict.status === "fail" && stage.onFail) {
+      const targetStage = pipeline.stages.find((candidate) => candidate.id === stage.onFail!.to);
+      const used = failEdgeRoundsUsed(pipeline, stage);
+      if (targetStage && used < stage.onFail.maxRounds) {
+        pipeline.cursor = {
+          stageId: targetStage.id,
+          state: "pending",
+          input: failEdgeInput(parsed),
+          activatedBy: { stageId: stage.id, attempt: attempt.n, edge: "fail" },
+        };
+        pipeline.state = "running";
+        pipeline.stateDetail = null;
+        pipeline.pausedState = null;
+        return;
+      }
+      if (targetStage) {
+        park(pipeline, `fail-edge budget exhausted after ${used} round(s): ${parsed.verdict.findings?.[0] ?? "stage verdict: fail"}`, attempt);
+        return;
+      }
+    }
     park(pipeline, parsed.verdict.findings?.[0] ?? `stage verdict: ${parsed.verdict.status}`, attempt);
     return;
   }
   attempt.state = "committing";
-  pipeline.cursor = { stageId: stage.id, state: "committing" };
+  setCursorState(pipeline, stage.id, "committing");
   persist();
   commitPassedStage(pipeline, stage, attempt, ports);
 }
@@ -487,11 +569,20 @@ async function tickRunStage(
   if (attempt.state === "pending") {
     attempt.state = "spawning";
     attempt.startedAt = ports.now();
-    pipeline.cursor = { stageId: stage.id, state: "spawning" };
+    setCursorState(pipeline, stage.id, "spawning");
     spawnsThisProcess.add(attemptKey(pipeline, stage, attempt));
     persist();
     try {
-      const prompt = renderStagePrompt(pipeline, stage, attempt.effectiveRole, normalizedOutput(pipeline));
+      /* {{prev.output}} comes from the attempt's persisted relay input (#353),
+         so the spawn digest is stable across restarts; a migrated pre-v3
+         attempt (input === null with no recorded activation) keeps the legacy
+         positional scan byte-identically. */
+      const prompt = renderStagePrompt(
+        pipeline,
+        stage,
+        attempt.effectiveRole,
+        attempt.activatedBy ? attempt.input ?? "" : attempt.input ?? normalizedOutput(pipeline),
+      );
       /* The retried attempt supersedes its predecessor's round (issue #383):
          the prior attempt of the SAME stage that carries a conversation. */
       const priorAttempt = runFor(pipeline, stage.id)?.attempts.at(-2) ?? null;
@@ -524,7 +615,7 @@ async function tickRunStage(
       attempt.agentPath = spawned.transcript;
       attempt.paneId = spawned.paneId;
       attempt.state = "running";
-      pipeline.cursor = { stageId: stage.id, state: "running" };
+      setCursorState(pipeline, stage.id, "running");
     } catch (error) {
       park(pipeline, error instanceof Error ? error.message : String(error), attempt);
     } finally {
@@ -621,11 +712,16 @@ async function tickRunStage(
   settleStageVerdict(pipeline, stage, attempt, parsed, ports, persist);
 }
 
-/** Substitute the {{task}}/{{prev.output}} placeholders and trim. */
+/** Substitute the {{task}}/{{prev.output}} placeholders and trim. The relay
+    payload prefers the cursor's persisted input (#353), falling back to the
+    legacy positional scan only for pre-v3 activations without provenance. */
 function renderNoteTemplate(text: string, pipeline: Pipeline): string {
+  const relay = pipeline.cursor?.activatedBy
+    ? pipeline.cursor.input ?? ""
+    : pipeline.cursor?.input ?? normalizedOutput(pipeline);
   return text
     .split("{{task}}").join(pipeline.task)
-    .split("{{prev.output}}").join(normalizedOutput(pipeline))
+    .split("{{prev.output}}").join(relay)
     .trim();
 }
 
@@ -684,7 +780,7 @@ async function tickReviewStage(
   }
   if (!attempt.startedAt) attempt.startedAt = ports.now();
   attempt.state = "reviewing";
-  pipeline.cursor = { stageId: stage.id, state: "reviewing" };
+  setCursorState(pipeline, stage.id, "reviewing");
 
   if (!attempt.flowId) {
     const existing = ports.findFlow(implementer.agentPath, pipeline.baseRef, attempt.startedAt);
@@ -764,7 +860,7 @@ async function tickReviewStage(
     attempt.output = `Review loop approved after ${flow.rounds.length} round(s).`;
     attempt.verdict = { status: "pass", confidence: 1 };
     attempt.state = "committing";
-    pipeline.cursor = { stageId: stage.id, state: "committing" };
+    setCursorState(pipeline, stage.id, "committing");
     persist();
     commitPassedStage(pipeline, stage, attempt, ports);
   } else if (flow.state === "needs_decision" || flow.state === "done_comment" || flow.state === "closed") {
@@ -851,16 +947,21 @@ function normalizeStages(
   lookup?: PipelineRoleLookup | null,
   preservedStages?: ReadonlyMap<string, PipelineStage>,
   /* Drafts assemble from zero on the canvas (#136), so their edit path accepts
-     0–4 stages; the run path (create-and-start) keeps the 2-stage floor. The
-     review-loop-needs-a-preceding-run and linear-chain rules apply either way. */
-  minStages = 2,
+     0–8 stages; the run path (create-and-start) keeps the 1-stage floor (#353:
+     the minimum graph is one implement conversation). The graph rules —
+     acyclic pass edges, valid fail edges, review-loop reachability — apply
+     either way. */
+  minStages: number = MIN_STARTED_PIPELINE_STAGES,
 ): { stages?: PipelineStage[]; error?: string } {
-  if (!Array.isArray(value) || value.length < minStages || value.length > 4) {
-    return { error: minStages === 0 ? "pipelines require at most 4 stages" : "pipelines require 2–4 stages" };
+  if (!Array.isArray(value) || value.length < minStages || value.length > MAX_PIPELINE_STAGES) {
+    return {
+      error: minStages === 0
+        ? `pipelines require at most ${MAX_PIPELINE_STAGES} stages`
+        : `pipelines require ${MIN_STARTED_PIPELINE_STAGES}–${MAX_PIPELINE_STAGES} stages`,
+    };
   }
   const stages: PipelineStage[] = [];
   const ids = new Set<string>();
-  let hasRun = false;
   for (const raw of value) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "invalid pipeline stage" };
     const stage = raw as Partial<PipelineStageInput>;
@@ -868,7 +969,16 @@ function normalizeStages(
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || ids.has(id)) return { error: "stage ids must be unique URL-safe names" };
     const preservedStage = preservedStages?.get(id);
     if (stage.kind !== "run" && stage.kind !== "review-loop") return { error: "stage kind must be run or review-loop" };
-    if (stage.kind === "review-loop" && !hasRun) return { error: "review-loop stage requires a preceding run stage" };
+    const rawOnFail = (raw as { onFail?: unknown }).onFail;
+    if (rawOnFail !== undefined && rawOnFail !== null) {
+      if (!rawOnFail || typeof rawOnFail !== "object" || Array.isArray(rawOnFail)) return { error: `stage ${id} onFail must be an object or null` };
+      const edge = rawOnFail as { to?: unknown; maxRounds?: unknown };
+      if (typeof edge.to !== "string" || !edge.to.trim()) return { error: `stage ${id} onFail requires a target stage id` };
+      const maxRounds = edge.maxRounds === undefined ? DEFAULT_FAIL_EDGE_ROUNDS : edge.maxRounds;
+      if (!Number.isInteger(maxRounds) || (maxRounds as number) < 1 || (maxRounds as number) > MAX_FAIL_EDGE_ROUNDS) {
+        return { error: `stage ${id} onFail maxRounds must be an integer between 1 and ${MAX_FAIL_EDGE_ROUNDS}` };
+      }
+    }
     const prompt = typeof stage.prompt === "string" ? stage.prompt.trim() : "";
     if (!prompt) return { error: `stage ${id} prompt is required` };
     if (prompt.length > MAX_STAGE_PROMPT_LENGTH) return { error: `stage ${id} prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters` };
@@ -900,6 +1010,12 @@ function normalizeStages(
     }
     if (stage.model !== undefined && stage.model !== null && typeof stage.model !== "string") return { error: `stage ${id} model must be a string or null` };
     if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") return { error: `stage ${id} effort must be a string or null` };
+    const onFailEdge = rawOnFail
+      ? {
+          to: (rawOnFail as { to: string }).to.trim(),
+          maxRounds: ((rawOnFail as { maxRounds?: number }).maxRounds ?? DEFAULT_FAIL_EDGE_ROUNDS),
+        }
+      : null;
     const input: PipelineStageInput = {
       id,
       kind: stage.kind,
@@ -910,18 +1026,18 @@ function normalizeStages(
       ...(stage.access !== undefined ? { access: stage.access } : {}),
       prompt,
       next: stage.next ?? null,
+      onFail: onFailEdge,
     };
     const resolved = preservedStage ? { role: preservedStage.effectiveRole } : resolvePipelineRole(input, stage.kind, lookup);
     if (!resolved.role) return { error: "error" in resolved ? resolved.error : "invalid stage role" };
     const normalizedStage: PipelineStage = { ...input, effectiveRole: structuredClone(resolved.role) };
     ids.add(id);
-    if (stage.kind === "run") hasRun = true;
     stages.push(normalizedStage);
   }
-  for (let index = 0; index < stages.length; index += 1) {
-    const expected = stages[index + 1]?.id ?? null;
-    if (stages[index]!.next !== expected) return { error: `stage ${stages[index]!.id} next must be ${expected ?? "null"}` };
-  }
+  /* v3 graph contract: acyclic pass edges over valid targets, bounded fail
+     edges, review-loop pass-reachability — shared with the store validator. */
+  const graphError = pipelineGraphError(stages);
+  if (graphError) return { error: graphError };
   return { stages };
 }
 
@@ -936,6 +1052,7 @@ function draftStageInputs(stages: PipelineStage[]): PipelineStageInput[] {
     ...(stage.access !== undefined ? { access: stage.access } : {}),
     prompt: stage.prompt,
     next: stages[index + 1]?.id ?? null,
+    onFail: stage.onFail ?? null,
   }));
 }
 
@@ -944,15 +1061,25 @@ function replaceDraftStages(
   inputs: PipelineStageInput[],
   lookup?: PipelineRoleLookup | null,
 ): { error?: string } {
-  const relinked = inputs.map((stage, index) => ({ ...stage, next: inputs[index + 1]?.id ?? null }));
+  /* Array edits (add/remove/reorder) relink the pass chain in array order —
+     custom pass edges are re-drawn through set-edge afterwards — while each
+     kept stage's fail edge survives unless its target left the plan. */
+  const keptIds = new Set(inputs.map((stage) => stage.id));
+  const relinked = inputs.map((stage, index) => ({
+    ...stage,
+    next: inputs[index + 1]?.id ?? null,
+    onFail: stage.onFail && keptIds.has(stage.onFail.to) ? stage.onFail : null,
+  }));
   const preserved = new Map(pipeline.stages.map((stage) => [stage.id, stage]));
-  /* Draft edits may empty the plan entirely (remove down to zero); the 2-stage
-     floor is enforced only at Start (#136). */
+  /* Draft edits may empty the plan entirely (remove down to zero); the 1-stage
+     floor is enforced only at Start (#136, #353). */
   const normalized = normalizeStages(relinked, lookup, preserved, 0);
   if (!normalized.stages) return { error: normalized.error ?? "invalid stages" };
   pipeline.stages = normalized.stages;
   pipeline.runs = normalized.stages.map((stage) => ({ stageId: stage.id, attempts: [] }));
-  pipeline.cursor = normalized.stages.length ? { stageId: normalized.stages[0]!.id, state: "pending" } : null;
+  pipeline.cursor = normalized.stages.length
+    ? { stageId: normalized.stages[0]!.id, state: "pending", input: null, activatedBy: null }
+    : null;
   return {};
 }
 
@@ -994,8 +1121,9 @@ export async function createPipelineFromRequest(
   if (!admission.ok) return preflightFailure(admission);
   const repoDir = admission.repoDir;
   /* A draft (autoStart:false) may be created empty and assembled on the canvas
-     (#136); an immediately-started pipeline still needs its full 2–4 stage plan. */
-  const normalized = normalizeStages(req.stages, ports.roleLookup, undefined, req.autoStart === false ? 0 : 2);
+     (#136); an immediately-started pipeline needs at least its one implement
+     conversation (#353). */
+  const normalized = normalizeStages(req.stages, ports.roleLookup, undefined, req.autoStart === false ? 0 : MIN_STARTED_PIPELINE_STAGES);
   if (!normalized.stages) return { error: normalized.error ?? "invalid stages", status: 400 };
   const explicitBaseRef = req.baseRef?.trim();
   if (req.autoStart === false && req.baseBranch?.trim() && !explicitBaseRef) {
@@ -1058,10 +1186,10 @@ export async function patchPipeline(
 
     if (req.action === "start") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
-      /* Start enforces the 2–4 stage floor (#136): a draft may hold zero stages
-         while it is assembled on the canvas, and it needs a full stage plan to run.
-         The review-loop-needs-a-preceding-run rule already held on every draft edit. */
-      if (pipeline.stages.length < 2) return { error: "add at least 2 stages before starting", status: 409 };
+      /* Start enforces the 1-stage floor (#353): the minimum graph is a single
+         implement conversation. The graph rules (acyclic pass edges,
+         review-loop reachability) already held on every draft edit. */
+      if (pipeline.stages.length < MIN_STARTED_PIPELINE_STAGES) return { error: `add at least ${MIN_STARTED_PIPELINE_STAGES} stage before starting`, status: 409 };
       const admission = ports.preflightRepo(pipeline.repoDir);
       if (!admission.ok) return preflightFailure(admission);
       if (admission.repoDir !== pipeline.repoDir) {
@@ -1122,6 +1250,9 @@ export async function patchPipeline(
          a Start-time gate. remove that would orphan a review-loop (drop its only
          preceding run) is still rejected by replaceDraftStages' normalization. */
       if (pipeline.stages.length === 0) return { error: "no stage to remove", status: 409 };
+      /* Every pipeline keeps at least one default action (#353): the last stage
+         can be reconfigured but not removed, so no empty shell can re-form. */
+      if (pipeline.stages.length === 1) return { error: "a pipeline keeps at least one stage; reconfigure it instead", status: 409 };
       const index = pipeline.stages.findIndex((stage) => stage.id === req.stageId);
       if (index < 0) return { error: "stage not found", status: 404 };
       const inputs = draftStageInputs(pipeline.stages);
@@ -1150,6 +1281,46 @@ export async function patchPipeline(
       }
       const replaced = replaceDraftStages(pipeline, ordered, ports.roleLookup);
       if (replaced.error) return { error: replaced.error, status: 400 };
+    } else if (req.action === "set-edge") {
+      /* Conversation-graph editing (#353): rewires a stage's pass or fail edge.
+         Edits always shape the future, never rewrite evidence: a stage that has
+         already run keeps its pass edge frozen (its history names its
+         successor), and a fail edge freezes once traversed. Accepted for drafts
+         AND running/parked pipelines — that is the point of an editable graph. */
+      if (TERMINAL_STATES.has(pipeline.state)) return { error: "pipeline is closed or completed", status: 409 };
+      const from = typeof req.stageId === "string" ? pipeline.stages.find((item) => item.id === req.stageId) ?? null : null;
+      if (!from) return { error: "stage not found", status: 404 };
+      if (req.edge !== "pass" && req.edge !== "fail") return { error: "edge must be pass or fail", status: 400 };
+      if (req.to === undefined) return { error: "to is required (null clears the edge)", status: 400 };
+      if (req.to !== null && (typeof req.to !== "string" || !pipeline.stages.some((item) => item.id === req.to))) {
+        return { error: "edge target stage not found", status: 400 };
+      }
+      if (req.edge === "pass") {
+        if (req.maxRounds !== undefined) return { error: "maxRounds applies only to fail edges", status: 400 };
+        const fromRun = pipeline.runs.find((item) => item.stageId === from.id);
+        if (fromRun && fromRun.attempts.length > 0) return { error: "stage has already run; its pass edge is frozen evidence", status: 409 };
+        const candidate = pipeline.stages.map((item) => (item.id === from.id ? { ...item, next: req.to as string | null } : item));
+        const graphError = pipelineGraphError(candidate);
+        if (graphError) return { error: graphError, status: 400 };
+        from.next = req.to;
+      } else {
+        const traversed = pipeline.runs.some((run) =>
+          run.attempts.some((item) => item.activatedBy?.edge === "fail" && item.activatedBy.stageId === from.id));
+        if (traversed) return { error: "fail edge has already been traversed; it is frozen evidence", status: 409 };
+        if (req.to === null) {
+          if (req.maxRounds !== undefined) return { error: "maxRounds requires a fail-edge target", status: 400 };
+          from.onFail = null;
+        } else {
+          const maxRounds = req.maxRounds === undefined ? DEFAULT_FAIL_EDGE_ROUNDS : req.maxRounds;
+          if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > MAX_FAIL_EDGE_ROUNDS) {
+            return { error: `maxRounds must be an integer between 1 and ${MAX_FAIL_EDGE_ROUNDS}`, status: 400 };
+          }
+          const candidate = pipeline.stages.map((item) => (item.id === from.id ? { ...item, onFail: { to: req.to as string, maxRounds } } : item));
+          const graphError = pipelineGraphError(candidate);
+          if (graphError) return { error: graphError, status: 400 };
+          from.onFail = { to: req.to, maxRounds };
+        }
+      }
     } else if (req.action === "pause") {
       if (pipeline.state === "draft") return { error: "draft pipelines can only be started, edited, or deleted", status: 409 };
       if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused") {
@@ -1178,7 +1349,9 @@ export async function patchPipeline(
       } else {
         pipeline.state = "provisioning";
       }
-      if (stage) pipeline.cursor = { stageId: stage.id, state: "pending" };
+      /* Re-activate the cursor stage preserving its persisted relay record, so
+         the retried attempt receives the identical {{prev.output}} (#353). */
+      if (stage) setCursorState(pipeline, stage.id, "pending");
       pipeline.pausedState = null;
       pipeline.stateDetail = null;
     } else if (req.action === "skip-stage") {
@@ -1194,7 +1367,7 @@ export async function patchPipeline(
         attempt.completedAt = ports.now();
         attempt.output = "Skipped by operator.";
       }
-      advancePipeline(pipeline, stage, ports);
+      advancePipeline(pipeline, stage, ports, attempt);
     } else if (req.action === "override-stage") {
       if (TERMINAL_STATES.has(pipeline.state)) return { error: "pipeline is closed or completed", status: 409 };
       const targetId = typeof req.stageId === "string" ? req.stageId : null;

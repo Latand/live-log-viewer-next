@@ -19,6 +19,8 @@ import {
   STAGE_TONES,
   latestAttempt,
   patchPipeline,
+  pipelineCursorActive,
+  pipelineStagePosition,
   pipelineStagePresentation,
   pipelineStateLabel,
   stageAccess,
@@ -26,6 +28,7 @@ import {
   stageChipLabel,
   stageChipState,
   stageDockCompact,
+  stageFailEdgeRoundsUsed,
   stageHasEvidence,
   stageHasNavigableHistory,
   compactStageOpenTarget,
@@ -301,13 +304,30 @@ function StageChip({
     h: 620,
   };
 
+  /* Truthful graph rendering (#353): the between-chip connector is drawn ONLY
+     when the previous chip's pass edge actually targets this stage; a pass edge
+     that jumps elsewhere renders as an explicit "→ target" badge on its source
+     chip instead, and fail edges render as dashed amber loop badges. The edge
+     the engine traverses next (the active cursor stage's pass edge) pulses. */
+  const previousPassesHere = Boolean(previousStage && previousStage.next === stage.id);
+  const cursorActive = pipelineCursorActive(pipeline);
+  const previousIsNextEdge = Boolean(previousStage && cursorActive && pipeline.cursor?.stageId === previousStage.id);
+  const arraySuccessorId = pipeline.stages[index + 1]?.id ?? null;
+  const passTarget = stage.next ? pipeline.stages.find((candidate) => candidate.id === stage.next) ?? null : null;
+  const passJump = passTarget && stage.next !== arraySuccessorId ? passTarget : null;
+  const passJumpIsNext = Boolean(passJump && cursorActive && pipeline.cursor?.stageId === stage.id);
+  const failTarget = stage.onFail ? pipeline.stages.find((candidate) => candidate.id === stage.onFail!.to) ?? null : null;
+  const failRoundsUsed = stageFailEdgeRoundsUsed(pipeline, stage);
+
   return (
     <li ref={chipRef} className="relative flex shrink-0 items-center gap-1.5" data-pipeline-stage={stage.id} data-stage-state={state} data-stage-presentation={presentation}>
-      {previousStage && !mobile ? (
+      {previousStage && !mobile && previousPassesHere ? (
         <span
           role="group"
           aria-label={t("pipelineStrip.lineageAria", { from: previousLabel, to: label })}
-          className="inline-flex h-7 shrink-0 items-center rounded-full border border-border bg-sunken px-0.5 text-muted"
+          data-edge-kind="pass"
+          data-edge-next={previousIsNextEdge ? "true" : undefined}
+          className={`inline-flex h-7 shrink-0 items-center rounded-full border px-0.5 ${previousIsNextEdge ? "border-accent/60 bg-accent-soft text-accent" : "border-border bg-sunken text-muted"}`}
         >
           <button
             type="button"
@@ -321,7 +341,13 @@ function StageChip({
           >
             <ArrowLeft className="h-3 w-3" aria-hidden />
           </button>
-          <span className="h-px w-3 bg-strong" aria-hidden />
+          {previousIsNextEdge ? (
+            <span className={`text-caption font-bold ${pipeline.state !== "paused" ? "animate-pulse" : ""}`} title={t("pipelineStrip.nextEdgeAria")}>
+              {t("pipelineStrip.nextEdge")}
+            </span>
+          ) : (
+            <span className="h-px w-3 bg-strong" aria-hidden />
+          )}
           <button
             type="button"
             disabled={!canOpen}
@@ -404,6 +430,30 @@ function StageChip({
         ) : null}
       </span>
       )}
+      {passJump ? (
+        <span
+          data-edge-kind="pass-jump"
+          data-edge-next={passJumpIsNext ? "true" : undefined}
+          role="img"
+          aria-label={t("pipelineStrip.passEdgeAria", { from: label, to: stageChipLabel(t, passJump) })}
+          title={passJumpIsNext ? t("pipelineStrip.nextEdgeAria") : undefined}
+          className={`inline-flex h-6 shrink-0 items-center gap-0.5 rounded-full border px-1.5 text-caption font-bold ${
+            passJumpIsNext ? `border-accent/60 bg-accent-soft text-accent ${pipeline.state !== "paused" ? "animate-pulse" : ""}` : "border-border bg-sunken text-muted"
+          }`}
+        >
+          <span aria-hidden>→ {stageChipLabel(t, passJump)}</span>
+        </span>
+      ) : null}
+      {failTarget && stage.onFail ? (
+        <span
+          data-edge-kind="fail"
+          role="img"
+          aria-label={t("pipelineStrip.failEdgeAria", { from: label, to: stageChipLabel(t, failTarget), k: failRoundsUsed, n: stage.onFail.maxRounds })}
+          className="inline-flex h-6 shrink-0 items-center gap-0.5 rounded-full border border-dashed border-warning/70 bg-warning-soft px-1.5 text-caption font-bold text-warning"
+        >
+          <span aria-hidden>↩ {stageChipLabel(t, failTarget)} {failRoundsUsed}/{stage.onFail.maxRounds}</span>
+        </span>
+      ) : null}
       {open && attempt ? (
         <AnchoredVerdict anchorRef={chipRef}>
           <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} flows={flows} files={files} availablePaths={renderablePaths} mobile={mobile} canOpenFlow={canOpenFlow} canOpenPath={canOpenPath} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
@@ -531,11 +581,9 @@ export function PipelineStrip({
   const draft = pipeline.state === "draft";
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const detail = parkedDetail(pipeline);
-  /* 1-based cursor position for the readable "stage k/n" counter; a finished
-     chain reads n/n. */
-  const total = pipeline.stages.length;
-  const cursorIndex = pipeline.cursor ? pipeline.stages.findIndex((stage) => stage.id === pipeline.cursor!.stageId) : -1;
-  const position = cursorIndex >= 0 ? cursorIndex + 1 : total;
+  /* The header counter comes from the same single derivation every other
+     surface reads (#353), so it can never disagree with the rendered members. */
+  const { k: position, n: total } = pipelineStagePosition(pipeline);
   /* Redesigned container header (issue #196): the status is a readable tinted
      badge and the controls are labeled design-system buttons — no icon soup.
      Tone matrix (§3) matches the hub + rail: busy → accent, needs_decision +
@@ -660,8 +708,8 @@ export function PipelineStrip({
           <button
             className={`${actionBtn} ${primaryActionSlot} border-warning bg-warning text-white hover:opacity-90`}
             aria-label={t("pipelineStrip.start")}
-            disabled={busy || pipeline.stages.length < 2}
-            title={pipeline.stages.length < 2 ? t("groupOverride.startNeedsStages") : undefined}
+            disabled={busy || pipeline.stages.length < 1}
+            title={pipeline.stages.length < 1 ? t("groupOverride.startNeedsStages") : undefined}
             onClick={() => void mutate("start")}
           >
             <Play className="h-3.5 w-3.5" aria-hidden /> {compact && !mobile ? null : t("pipelineStrip.start")}

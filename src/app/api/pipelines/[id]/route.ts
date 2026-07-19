@@ -10,7 +10,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const ACTIONS = new Set<PipelineAction>([
-  "start", "update-draft", "add-stage", "remove-stage", "reorder-stage",
+  "start", "update-draft", "add-stage", "remove-stage", "reorder-stage", "set-edge",
   "pause", "resume", "retry-stage", "skip-stage", "override-stage", "delete", "close",
 ]);
 

@@ -8,6 +8,7 @@ import { Select } from "@/components/ui/Select";
 import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
 import type { FlowEngine } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
+import { MAX_PIPELINE_STAGES, MIN_STARTED_PIPELINE_STAGES } from "@/lib/pipelines/limits";
 import type { Pipeline, PipelineStage, PipelineStageKind } from "@/lib/pipelines/types";
 
 import {
@@ -22,6 +23,7 @@ import {
   stagePromptExtra,
   stageReceivesPrevOutput,
 } from "./pipelineModel";
+import { StageEdgeControls } from "./StageEdgeControls";
 
 const ENGINES: FlowEngine[] = ["claude", "codex"];
 const fieldLabel = "text-label font-semibold text-secondary";
@@ -160,8 +162,8 @@ function DraftStageCards({
   };
   const canMoveTo = (fromIndex: number, toIndex: number) =>
     toIndex >= 0 && toIndex < stages.length && toIndex !== fromIndex && reviewLoopChainValid(orderAfterMove(fromIndex, toIndex));
-  const canRemove = (index: number) => reviewLoopChainValid(kinds.filter((_, candidate) => candidate !== index));
-  const canAddReview = stages.length < 4 && stages.some((item) => item.kind === "run");
+  const canRemove = (index: number) => stages.length > 1 && reviewLoopChainValid(kinds.filter((_, candidate) => candidate !== index));
+  const canAddReview = stages.length < MAX_PIPELINE_STAGES && stages.some((item) => item.kind === "run");
   const moveTo = (stageId: string, toIndex: number) => {
     const from = stages.findIndex((item) => item.id === stageId);
     if (from < 0 || !canMoveTo(from, toIndex)) return;
@@ -212,11 +214,12 @@ function DraftStageCards({
               <button className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30" disabled={busy || !canRemove(index)} aria-label={t("groupOverride.removeStage")} onClick={() => removeStage(stage.id)}><Trash2 className="h-3 w-3" aria-hidden /></button>
             </div>
             <StageForm key={`${stage.id}:${stage.role?.roleId ?? ""}:${stage.effectiveRole.engine}:${stage.effectiveRole.model ?? ""}:${stage.effectiveRole.effort ?? ""}:${stage.prompt}`} pipeline={pipeline} stage={stage} index={index} busy={busy} disabled={false} run={run} />
+            {stages.length > 1 ? <StageEdgeControls pipeline={pipeline} stage={stage} disabled={busy} /> : null}
           </div>
         ))}
       </div>
       <div className="grid grid-cols-2 gap-1.5">
-        <button className={ghostBtn} disabled={busy || stages.length >= 4} onClick={() => addStage("run")}><Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addRunStage")}</button>
+        <button className={ghostBtn} disabled={busy || stages.length >= MAX_PIPELINE_STAGES} onClick={() => addStage("run")}><Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addRunStage")}</button>
         <button className={ghostBtn} disabled={busy || !canAddReview} onClick={() => addStage("review-loop")}><Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addReviewStage")}</button>
       </div>
     </div>
@@ -285,7 +288,7 @@ export function PipelineEditor({ pipeline, onClose, label = pipeline.task }: { p
       ) : null}
       <div className="flex items-center gap-1.5">
         {draft ? (
-          <button className="inline-flex min-h-11 flex-1 items-center justify-center gap-1 rounded-full border border-accent bg-accent px-3 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40" disabled={busy || pipeline.stages.length < 2} title={pipeline.stages.length < 2 ? t("groupOverride.startNeedsStages") : undefined} onClick={() => void run(t("pipelineStrip.start"), () => patchPipeline(pipeline.id, "start"))}><Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.start")}</button>
+          <button className="inline-flex min-h-11 flex-1 items-center justify-center gap-1 rounded-full border border-accent bg-accent px-3 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40" disabled={busy || pipeline.stages.length < MIN_STARTED_PIPELINE_STAGES} title={pipeline.stages.length < MIN_STARTED_PIPELINE_STAGES ? t("groupOverride.startNeedsStages") : undefined} onClick={() => void run(t("pipelineStrip.start"), () => patchPipeline(pipeline.id, "start"))}><Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.start")}</button>
         ) : closed ? null : pipeline.state === "paused" ? (
           <button className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-success/40 bg-success-soft px-3 py-1 text-[11px] font-bold text-success focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void run(t("pipelineStrip.resume"), () => patchPipeline(pipeline.id, "resume"))}><Play className="h-3 w-3" aria-hidden /> {t("pipelineStrip.resume")}</button>
         ) : (

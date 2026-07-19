@@ -98,7 +98,7 @@ test("mobile renders a read-only draft plan with a 44px Start action", () => {
     baseRef: "",
     lastPassedCommit: "",
     runs: provisioning.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
-    cursor: { stageId: "plan", state: "pending" },
+    cursor: { stageId: "plan", state: "pending", input: null, activatedBy: null },
   } as Pipeline;
   const html = renderToStaticMarkup(<MobilePipelineDock pipeline={draft} />);
 

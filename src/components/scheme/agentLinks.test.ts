@@ -94,7 +94,7 @@ function threeStagePipeline(overrides: Partial<Pipeline> = {}): Pipeline {
   return {
     id: "pipeline-2",
     state: "running",
-    cursor: { stageId: "build", state: "running" },
+    cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
     stages: [
       { id: "plan", kind: "run", next: "build" },
       { id: "build", kind: "run", next: "verify" },
@@ -128,7 +128,7 @@ describe("derivePipelineLinks tones and hub", () => {
   test("a parked stage tones its incoming edge amber, reserving red for chips", () => {
     const parked = threeStagePipeline({
       state: "needs_decision",
-      cursor: { stageId: "build", state: "running" },
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
       runs: [
         { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed" }] },
         { stageId: "build", attempts: [{ agentPath: "/build", state: "needs_decision" }] },
@@ -173,7 +173,7 @@ describe("derivePipelineLinks review-loop vertices (no duplicate hub on the flow
   const reviewPipeline = {
     id: "p-rev",
     state: "running",
-    cursor: { stageId: "review", state: "reviewing" },
+    cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
     stages: [
       { id: "build", kind: "run", next: "review" },
       { id: "review", kind: "review-loop", next: "verify" },
@@ -217,7 +217,7 @@ describe("derivePipelineLinks review-loop vertices (no duplicate hub on the flow
        implementer, leaving no drawn rail. An anchor-only hub must still be
        emitted on the implementer node so the pipeline keeps board controls. */
     const twoStage = {
-      id: "p2", state: "running", cursor: { stageId: "review", state: "reviewing" },
+      id: "p2", state: "running", cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
       stages: [
         { id: "build", kind: "run", next: "review" },
         { id: "review", kind: "review-loop", next: null },
@@ -241,7 +241,7 @@ describe("derivePipelineLinks review-loop vertices (no duplicate hub on the flow
     /* No adjacent pair exists yet, so nothing collapsed — no anchor hub, matching
        the prior behavior for a partially spawned chain. */
     const spawning = {
-      id: "p3", state: "provisioning", cursor: { stageId: "build", state: "running" },
+      id: "p3", state: "provisioning", cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
       stages: [
         { id: "build", kind: "run", next: "review" },
         { id: "review", kind: "review-loop", next: null },

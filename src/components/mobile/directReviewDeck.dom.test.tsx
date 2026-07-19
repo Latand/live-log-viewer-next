@@ -301,7 +301,7 @@ test("an active pipeline-owned review keeps prior same-round bindings in the com
       { stageId: "build", attempts: [{ n: 1, state: "passed", agentPath: builder.path, flowId: null, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } }] },
       { stageId: "review", attempts: [{ n: 1, state: "reviewing", agentPath: reviewer.path, flowId: flow.id, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-only", promptScaffold: null } }] },
     ],
-    cursor: { stageId: "review", state: "reviewing" }, state: "reviewing", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2026-07-18T00:00:00Z", closedAt: null,
+    cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null }, state: "reviewing", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2026-07-18T00:00:00Z", closedAt: null,
   } as unknown as Pipeline;
   const group: BranchGroup = { key: builder.path, columns: [{ file: builder, tasks: [] }], returnable: [], finished: [], smt: builder.mtime, orphanTask: false };
   const selected: { path: string | null } = { path: null };
@@ -357,7 +357,7 @@ test("an active retry opens prior transcript history from the mobile focus row (
       { n: 1, state: "failed", agentPath: prior.path, error: "failed", effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } },
       { n: 2, state: "running", agentPath: current.path, error: null, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } },
     ] }],
-    cursor: { stageId: "build", state: "running" }, state: "running", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2026-07-18T00:00:00Z", closedAt: null,
+    cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, state: "running", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2026-07-18T00:00:00Z", closedAt: null,
   } as unknown as Pipeline;
   const group: BranchGroup = { key: current.path, columns: [{ file: current, tasks: [] }], returnable: [], finished: [], smt: current.mtime, orphanTask: false };
   const selected: { path: string | null } = { path: null };

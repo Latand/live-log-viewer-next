@@ -49,6 +49,14 @@ export type EffectivePipelineRole = RoleConfig & {
 
 export type PipelineStageKind = "run" | "review-loop";
 
+export type PipelineEdgeKind = "pass" | "fail";
+
+/** Verdict-keyed fail successor (#353): where a `fail` verdict routes next, and
+    how many times this edge may fire before the pipeline parks for the
+    operator. Cycles live exclusively on fail edges; the pass graph stays
+    acyclic so every pass path terminates. */
+export type PipelineFailEdge = { to: string; maxRounds: number };
+
 export type PipelineStageInput = {
   id: string;
   kind: PipelineStageKind;
@@ -58,7 +66,11 @@ export type PipelineStageInput = {
   effort?: string | null;
   access?: PipelineAccess;
   prompt: string;
+  /** Pass edge: the stage activated when this one passes. Schema v3 allows any
+      stage id (direct links, merges), constrained to an acyclic pass graph. */
   next: string | null;
+  /** Fail edge; absent/null parks a failed stage for the operator as before. */
+  onFail?: PipelineFailEdge | null;
 };
 
 export type PipelineStage = PipelineStageInput & {
@@ -85,6 +97,11 @@ export type PipelineAttemptState =
   | "needs_decision"
   | "skipped";
 
+/** Durable provenance for a cursor activation / attempt: which stage's attempt
+    advanced here, along which verdict edge. Loop budgets are derived from these
+    records (never a separate counter), so counts cannot drift from evidence. */
+export type PipelineEdgeActivation = { stageId: string; attempt: number; edge: PipelineEdgeKind };
+
 export type PipelineStageAttempt = {
   n: number;
   state: PipelineAttemptState;
@@ -97,6 +114,11 @@ export type PipelineStageAttempt = {
   flowId: string | null;
   startedAt: string | null;
   completedAt: string | null;
+  /** Exactly-once relay (#353): the `{{prev.output}}` payload persisted when the
+      cursor advanced here. Null on pre-v3 attempts, which fall back to the
+      legacy positional scan. */
+  input: string | null;
+  activatedBy: PipelineEdgeActivation | null;
   output: string | null;
   verdict: StageVerdict | null;
   error: string | null;
@@ -125,7 +147,11 @@ export type Pipeline = {
   lastPassedCommit: string;
   stages: PipelineStage[];
   runs: PipelineStageRun[];
-  cursor: { stageId: string; state: PipelineCursorState } | null;
+  /** The cursor carries the durable relay record (#353): the forwarded input and
+      the activating edge are persisted in the same atomic write as the verdict
+      that advanced here, so a crash between advance and spawn replays the
+      identical prompt. */
+  cursor: { stageId: string; state: PipelineCursorState; input: string | null; activatedBy: PipelineEdgeActivation | null } | null;
   state: PipelineState;
   pausedState: Exclude<PipelineState, "paused" | "draft"> | null;
   stateDetail: string | null;
@@ -157,6 +183,7 @@ export type PipelineAction =
   | "add-stage"
   | "remove-stage"
   | "reorder-stage"
+  | "set-edge"
   | "pause"
   | "resume"
   | "retry-stage"
@@ -187,6 +214,13 @@ export type PatchPipelineRequest = {
   index?: number;
   stageIds?: string[];
   toIndex?: number;
+  /** for set-edge (#353): rewires `stageId`'s pass or fail edge. `to: null`
+      clears it (a cleared pass edge makes the stage terminal). A stage that has
+      already run keeps its pass edge frozen (history names its successor); a
+      fail edge freezes once traversed. `maxRounds` bounds fail-edge cycles. */
+  edge?: PipelineEdgeKind;
+  to?: string | null;
+  maxRounds?: number;
 };
 
 export type PipelinesResponse = {

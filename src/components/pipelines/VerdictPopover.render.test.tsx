@@ -20,6 +20,8 @@ function attempt(n: number, over: Partial<PipelineStageAttempt> = {}): PipelineS
     flowId: null,
     startedAt: null,
     completedAt: null,
+    input: null,
+    activatedBy: null,
     output: null,
     verdict: { status: "fail", findings: [] },
     error: null,

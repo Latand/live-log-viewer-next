@@ -54,7 +54,7 @@ function draftPipeline(): Pipeline {
       effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-5.6-sol", effort: "high", access: "read-write", promptScaffold: null },
     }],
     runs: [],
-    cursor: { stageId: "build", state: "pending" },
+    cursor: { stageId: "build", state: "pending", input: null, activatedBy: null },
     state: "draft",
     pausedState: null,
     stateDetail: null,
@@ -116,7 +116,7 @@ test("desktop history opens both durable bindings from one logical review round 
       verdict: null,
       error: null,
     }] }],
-    cursor: { stageId: stage.id, state: "reviewing" },
+    cursor: { stageId: stage.id, state: "reviewing", input: null, activatedBy: null },
   } as unknown as Pipeline;
   const membership = (slot: string) => ({
     kind: "flow" as const, containerId: "flow-1", role: "reviewer", slot,
@@ -174,7 +174,7 @@ function stableHeaderPipeline(): Pipeline {
       { id: "build", kind: "run", prompt: "", next: "review", effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-5.6", effort: "xhigh", access: "read-write", promptScaffold: null } },
       { id: "review", kind: "review-loop", prompt: "", next: null, effectiveRole: { roleId: "reviewer", engine: "claude", model: "fable", effort: "high", access: "read-only", promptScaffold: null } },
     ],
-    cursor: { stageId: "build", state: "spawning" },
+    cursor: { stageId: "build", state: "spawning", input: null, activatedBy: null },
     state: "running",
   } as Pipeline;
 }

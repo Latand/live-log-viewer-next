@@ -97,7 +97,8 @@ export interface AgentLink {
   leg: "forward" | "back" | null;
   /** Flow links: the loop this link materializes. */
   flow?: { flow: Flow; round: number; phase: FlowLinkPhase };
-  /** Pipeline links: one linear handoff edge between adjacent stage sessions. */
+  /** Pipeline links: one verdict-keyed conversation-graph edge between two
+      materialized stage sessions (#353). */
   pipeline?: {
     pipeline: Pipeline;
     fromStageId: string;
@@ -111,6 +112,12 @@ export interface AgentLink {
     hub: boolean;
     /** Whole-pipeline pause: freezes chevron drift while keeping tones. */
     paused: boolean;
+    /** Which verdict routes along this edge: pass (solid) or fail (dashed
+        amber loop). Absent on legacy callers ⇒ pass. */
+    edge?: "pass" | "fail";
+    /** The edge the engine traverses next (the active cursor stage's pass
+        edge) — drives the pulse highlight. */
+    isNext?: boolean;
     /** A hub with no drawn rail: `from === to` and it only positions the control
         pill. Emitted when every real edge collapsed (e.g. a 2-stage
         build→review whose sole edge folds into the implementer) so the pipeline
@@ -367,10 +374,13 @@ function pipelineLinkTone(pipeline: Pipeline, stageId: string): PipelineLinkTone
 }
 
 /**
- * Pipeline links (#93 §2.2): one straight handoff rail per materialized adjacent
- * stage pair. Each edge is toned by its target stage; exactly one edge per
- * pipeline — the one into the current stage (or the last drawn edge as a
- * fallback) — carries the interactive hub, the rest a stage-index chevron badge.
+ * Pipeline links (#93 §2.2, graph-aware since #353): one straight handoff rail
+ * per materialized conversation-graph edge — the stage's pass edge (`next`,
+ * solid, toned by its target) plus its fail edge (`onFail`, dashed amber loop).
+ * Exactly one edge per pipeline — the one into the current stage (or the last
+ * drawn edge as a fallback) — carries the interactive hub, the rest a
+ * stage-index chevron badge. The active cursor stage's outgoing pass edge is
+ * flagged `isNext` so the board can show which edge runs next.
  */
 export function derivePipelineLinks(
   pipelines: Pipeline[],
@@ -382,56 +392,71 @@ export function derivePipelineLinks(
     if (pipeline.state === "closed" && !pipeline.restored) continue;
     const total = pipeline.stages.length;
     const cursorStageId = pipeline.cursor?.stageId ?? pipeline.stages.at(-1)?.id ?? null;
+    const cursorActive = pipelineCursorActive(pipeline);
     const own: AgentLink[] = [];
     /* Every materialized stage's resolved board vertex, kept so a pipeline whose
        edges all collapse still has a node to anchor its control hub on. */
     const vertices: Array<{ stageId: string; index: number; path: string }> = [];
-    /* An adjacent pair resolved to the same board node (a review-loop folding
+    /* An edge pair resolved to the same board node (a review-loop folding
        into its implementer), so a real edge was intended but suppressed. */
     let collapsed = false;
-    let previous: { stageId: string; path: string } | null = null;
-    for (let index = 0; index < pipeline.stages.length; index += 1) {
-      const stage = pipeline.stages[index]!;
+    /* A review-loop stage's agentPath is the reviewer transcript, which the
+       board folds into the flow's round deck — anchoring a rail there would
+       draw an implementer→deck→next chain and drop a PipelineHub on top of the
+       FlowHub. Resolve the stage to its flow's implementer node instead; the
+       resulting edge from the preceding run collapses (from === to) and is
+       suppressed below, leaving the loop's own grammar to represent it. */
+    const vertexPathOf = (stage: Pipeline["stages"][number]): string | null => {
       const attempt = pipeline.runs.find((run) => run.stageId === stage.id)?.attempts.at(-1);
-      /* A review-loop stage's agentPath is the reviewer transcript, which the
-         board folds into the flow's round deck — anchoring a rail there would
-         draw an implementer→deck→next chain and drop a PipelineHub on top of the
-         FlowHub. Resolve the stage to its flow's implementer node instead; the
-         resulting edge from the preceding run collapses (from === to) and is
-         suppressed below, leaving the loop's own grammar to represent it. */
-      const vertexPath = stage.kind === "review-loop"
+      return stage.kind === "review-loop"
         ? (attempt?.flowId ? flowImplementerPath(attempt.flowId) : null)
         : attempt?.agentPath ?? null;
-      if (!vertexPath) continue;
-      vertices.push({ stageId: stage.id, index, path: vertexPath });
-      if (previous) {
-        const from = anchorOf(previous.path);
-        const to = anchorOf(vertexPath);
-        if (from && to && from === to) collapsed = true;
-        if (from && to && from !== to) {
-          own.push({
-            key: `pipelinelink::${pipeline.id}::${previous.stageId}::${stage.id}`,
-            kind: "pipeline",
-            from,
-            to,
-            leg: "forward",
-            pipeline: {
-              pipeline,
-              fromStageId: previous.stageId,
-              toStageId: stage.id,
-              tone: pipelineLinkTone(pipeline, stage.id),
-              index: index + 1,
-              total,
-              hub: false,
-              paused: pipeline.state === "paused",
-            },
-          });
-        }
-      }
-      previous = { stageId: stage.id, path: vertexPath };
+    };
+    const stageIndex = new Map(pipeline.stages.map((stage, index) => [stage.id, index] as const));
+    for (let index = 0; index < pipeline.stages.length; index += 1) {
+      const stage = pipeline.stages[index]!;
+      const vertexPath = vertexPathOf(stage);
+      if (vertexPath) vertices.push({ stageId: stage.id, index, path: vertexPath });
     }
-    /* One hub per pipeline: the edge into the current stage, else the last edge. */
-    const hubLink = own.find((link) => link.pipeline!.toStageId === cursorStageId) ?? own.at(-1);
+    const vertexByStage = new Map(vertices.map((vertex) => [vertex.stageId, vertex] as const));
+    for (const stage of pipeline.stages) {
+      const fromVertex = vertexByStage.get(stage.id);
+      if (!fromVertex) continue;
+      const graphEdges: Array<{ toStageId: string; edge: "pass" | "fail" }> = [
+        ...(stage.next ? [{ toStageId: stage.next, edge: "pass" as const }] : []),
+        ...(stage.onFail ? [{ toStageId: stage.onFail.to, edge: "fail" as const }] : []),
+      ];
+      for (const graphEdge of graphEdges) {
+        const toVertex = vertexByStage.get(graphEdge.toStageId);
+        if (!toVertex) continue;
+        const from = anchorOf(fromVertex.path);
+        const to = anchorOf(toVertex.path);
+        if (from && to && from === to) collapsed = true;
+        if (!from || !to || from === to) continue;
+        own.push({
+          key: `pipelinelink::${pipeline.id}::${stage.id}::${graphEdge.toStageId}::${graphEdge.edge}`,
+          kind: "pipeline",
+          from,
+          to,
+          leg: "forward",
+          pipeline: {
+            pipeline,
+            fromStageId: stage.id,
+            toStageId: graphEdge.toStageId,
+            tone: graphEdge.edge === "fail" ? "amber" : pipelineLinkTone(pipeline, graphEdge.toStageId),
+            index: (stageIndex.get(graphEdge.toStageId) ?? 0) + 1,
+            total,
+            hub: false,
+            paused: pipeline.state === "paused",
+            edge: graphEdge.edge,
+            isNext: graphEdge.edge === "pass" && cursorActive && pipeline.cursor?.stageId === stage.id,
+          },
+        });
+      }
+    }
+    /* One hub per pipeline: the pass edge into the current stage, else the last
+       drawn edge. */
+    const hubLink = own.find((link) => link.pipeline!.toStageId === cursorStageId && link.pipeline!.edge !== "fail") ?? own.at(-1);
     if (hubLink) {
       hubLink.pipeline!.hub = true;
       links.push(...own);

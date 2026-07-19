@@ -229,7 +229,7 @@ function draftFixture(): SchemeGroup {
       ...pipelineGroup.pipeline!,
       state: "draft",
       repoDir: "/repo",
-      cursor: { stageId: "plan", state: "pending" },
+      cursor: { stageId: "plan", state: "pending", input: null, activatedBy: null },
       runs: pipelineGroup.pipeline!.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
     } as Pipeline,
   };
@@ -262,7 +262,7 @@ function reviewDraftFixture(): SchemeGroup {
       repoDir: "/repo",
       stages,
       runs: stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
-      cursor: { stageId: "build", state: "pending" },
+      cursor: { stageId: "build", state: "pending", input: null, activatedBy: null },
     } as unknown as Pipeline,
   };
 }

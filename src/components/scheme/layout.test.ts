@@ -368,7 +368,7 @@ describe("sibling pipeline halos never overlap (#136 finding 1)", () => {
       id, task: id, project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main",
       baseRef: "a", lastPassedCommit: "a", stages: [{ id: "build", kind: "run", prompt: "", next: null }],
       runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath, flowId: null }] }],
-      cursor: { stageId: "build", state: "running" }, state: "running", pausedState: null, stateDetail: null,
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, state: "running", pausedState: null, stateDetail: null,
       srcPath: null, srcConversationId: null, createdAt: "1970", closedAt: null,
     }) as unknown as Pipeline;
 
@@ -434,7 +434,7 @@ describe("pipeline world ownership (#353/#388)", () => {
     const group: BranchGroup = { key: "/arch", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
     const running = staged({
       state: "running",
-      cursor: { stageId: "builder", state: "spawning" },
+      cursor: { stageId: "builder", state: "spawning", input: null, activatedBy: null },
       runs: [{ stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] }],
     });
     const layout = buildSchemeLayout([group], [], [root], [], [], [running], [running]);
@@ -454,7 +454,7 @@ describe("pipeline world ownership (#353/#388)", () => {
     const group: BranchGroup = { key: "/builder", columns: [{ file: implementer, tasks: [] }], returnable: [], finished: [], smt: implementer.mtime, orphanTask: false };
     const reviewing = staged({
       state: "reviewing",
-      cursor: { stageId: "review", state: "reviewing" },
+      cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
       runs: [
         { stageId: "builder", attempts: [{ n: 1, state: "passed", agentPath: "/builder", flowId: null }] },
         { stageId: "review", attempts: [{ n: 1, state: "reviewing", agentPath: "/reviewer", flowId: "flow-1" }] },

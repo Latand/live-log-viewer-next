@@ -26,7 +26,7 @@ globalThis.fetch = (async () => ({ ok: true, json: async () => ({}) })) as unkno
 const pipeline = {
   id: "p1", task: "t", state: "running",
   stages: [{ id: "build", kind: "run" }, { id: "review", kind: "review-loop" }],
-  cursor: { stageId: "build", state: "running" }, runs: [],
+  cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, runs: [],
 } as unknown as Pipeline;
 
 afterEach(() => document.body.replaceChildren());

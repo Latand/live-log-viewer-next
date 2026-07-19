@@ -17,7 +17,7 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-test("POSTs an EMPTY autoStart:false draft with zero spawn or file discovery calls", async () => {
+test("POSTs an autoStart:false draft seeded with the default implement action (#353)", async () => {
   const requests: Array<{ url: string; body?: unknown }> = [];
   globalThis.fetch = (async (url: string, init?: { body?: string }) => {
     requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
@@ -31,9 +31,9 @@ test("POSTs an EMPTY autoStart:false draft with zero spawn or file discovery cal
   expect(body?.autoStart).toBe(false);
   expect(body?.repoDir).toBe("/home/me/repo");
   expect(requests.map((request) => request.url)).toEqual(["/api/pipelines"]);
-  /* The draft is created EMPTY (#136 recast) — the operator assembles stages on
-     the canvas; the 2-stage floor is enforced only at Start. */
-  expect(body?.stages).toEqual([]);
+  /* Every fresh draft carries the default implement action (#353) — no empty
+     shell ever reaches the board; the 1-stage floor is enforced at Start. */
+  expect(body?.stages).toEqual([{ id: "implement", kind: "run", role: { roleId: "builder" }, prompt: "{{task}}", next: null }]);
 });
 
 test("uses the explicit canonical repo prefill", async () => {

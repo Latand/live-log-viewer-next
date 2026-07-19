@@ -28,6 +28,7 @@ import {
   stagePromptExtra,
   stageReceivesPrevOutput,
 } from "./pipelineModel";
+import { StageEdgeControls } from "./StageEdgeControls";
 
 const PIPELINE_ROLE_ID_SET: ReadonlySet<string> = new Set(PIPELINE_ROLE_OPTIONS);
 
@@ -296,6 +297,9 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
       ) : null}
       {interactive && !editable ? (
         <div className="shrink-0 px-2.5 py-1 text-label font-semibold text-muted">{t("pipelineSlot.frozen")}</div>
+      ) : null}
+      {interactive && pipeline.stages.length > 1 ? (
+        <StageEdgeControls pipeline={pipeline} stage={stage} disabled={busy} />
       ) : null}
 
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 overflow-y-auto px-4 py-3 text-center">

@@ -113,7 +113,7 @@ test("group carries the plan even when the current stage node is hidden/collapse
      non-null) but whose node is NOT placed on the board: it is absent from
      nodeStripPipelineIds, so no per-node strip is mounted and the group must own
      the plan. */
-  const hiddenCurrent = { ...planPipeline, cursor: { stageId: "build", state: "running" } } as unknown as Pipeline;
+  const hiddenCurrent = { ...planPipeline, cursor: { stageId: "build", state: "running", input: null, activatedBy: null } } as unknown as Pipeline;
   const group: SchemeGroup = { ...pipelineGroup, pipeline: hiddenCurrent };
   const noMountedStrip: PipelineGroupControls = { ...controls, nodeStripPipelineIds: new Set() };
   const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={noMountedStrip} />);

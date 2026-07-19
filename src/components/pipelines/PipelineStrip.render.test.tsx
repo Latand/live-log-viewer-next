@@ -14,17 +14,21 @@ function attempt(over: Partial<PipelineStageAttempt> = {}): PipelineStageAttempt
   return {
     n: 1, state: "failed", effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null },
     launchId: null, conversationId: null, sessionId: null, agentPath: "/s.jsonl", paneId: null, flowId: null,
-    startedAt: null, completedAt: null, output: null, verdict: null, error: null, ...over,
+    startedAt: null, completedAt: null, input: null, activatedBy: null, output: null, verdict: null, error: null, ...over,
   };
 }
 
 function pipeline(over: Partial<Pipeline>): Pipeline {
-  return {
+  const merged = {
     id: "p1", task: "t", project: "proj", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main",
     baseRef: "a", lastPassedCommit: "a", stages: [stage("build")], runs: [], cursor: null, state: "running",
     pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: new Date(0).toISOString(), closedAt: null,
     ...over,
   } as Pipeline;
+  /* The fixture mirrors the server's linear relink: chips draw connectors only
+     along real pass edges (#353), so the fixture chain must carry them. */
+  merged.stages = merged.stages.map((item, index) => ({ ...item, next: item.next ?? merged.stages[index + 1]?.id ?? null }));
+  return merged;
 }
 
 const render = (p: Pipeline) => renderToStaticMarkup(<PipelineStrip pipeline={p} />);
@@ -38,20 +42,20 @@ test("a verdict-less errored attempt still exposes the verdict popover trigger",
 test("a parked stage without a verdict exposes the trigger for Retry/Skip", () => {
   const p = pipeline({
     state: "needs_decision",
-    cursor: { stageId: "build", state: "running" },
+    cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
     runs: [{ stageId: "build", attempts: [attempt({ state: "needs_decision", verdict: null })] }],
   });
   expect(render(p)).toContain("Open verdict for stage");
 });
 
 test("a running attempt with no verdict, error, or park shows no trigger", () => {
-  const p = pipeline({ cursor: { stageId: "build", state: "running" }, runs: [{ stageId: "build", attempts: [attempt({ state: "running", error: null })] }] });
+  const p = pipeline({ cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, runs: [{ stageId: "build", attempts: [attempt({ state: "running", error: null })] }] });
   expect(render(p)).not.toContain("Open verdict for stage");
 });
 
 test("a running retry exposes its prior failed transcript through history", () => {
   const p = pipeline({
-    cursor: { stageId: "build", state: "running" },
+    cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
     runs: [{ stageId: "build", attempts: [
       attempt({ n: 1, state: "failed", agentPath: "/build-1.jsonl", error: "failed" }),
       attempt({ n: 2, state: "running", agentPath: "/build-2.jsonl", error: null }),
@@ -67,7 +71,7 @@ test("an active multi-round review exposes its earlier reviewer transcript throu
   const review = stage("review", "review-loop");
   const p = pipeline({
     stages: [stage("build"), review],
-    cursor: { stageId: "review", state: "reviewing" },
+    cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
     runs: [{ stageId: "review", attempts: [attempt({ n: 1, state: "reviewing", agentPath: "/round-2.jsonl", flowId: "flow-1" })] }],
   });
   const flows = [{
@@ -98,7 +102,7 @@ test("an empty draft's strip disables Start until it holds 2 stages (#136)", () 
   const empty = pipeline({ state: "draft", stages: [], runs: [], cursor: null });
   expect(startTag(render(empty), "Start pipeline")).toContain('disabled=""');
   /* Once it reaches the 2-stage floor, Start is live. */
-  const two = pipeline({ state: "draft", stages: [stage("a"), stage("b")], runs: [], cursor: { stageId: "a", state: "pending" } });
+  const two = pipeline({ state: "draft", stages: [stage("a"), stage("b")], runs: [], cursor: { stageId: "a", state: "pending", input: null, activatedBy: null } });
   expect(startTag(render(two), "Start pipeline")).not.toContain('disabled=""');
 });
 
@@ -173,7 +177,7 @@ test("mobile labels empty stages as waiting placeholders while a parked decision
   const pending = renderToStaticMarkup(
     <PipelineStrip
       mobile
-      pipeline={pipeline({ state: "draft", stages: [build], cursor: { stageId: build.id, state: "pending" } })}
+      pipeline={pipeline({ state: "draft", stages: [build], cursor: { stageId: build.id, state: "pending", input: null, activatedBy: null } })}
     />,
   );
   const parked = renderToStaticMarkup(
@@ -182,7 +186,7 @@ test("mobile labels empty stages as waiting placeholders while a parked decision
       pipeline={pipeline({
         state: "needs_decision",
         stages: [build],
-        cursor: { stageId: build.id, state: "running" },
+        cursor: { stageId: build.id, state: "running", input: null, activatedBy: null },
         runs: [{ stageId: build.id, attempts: [attempt({ state: "needs_decision", agentPath: null })] }],
       })}
     />,
@@ -218,7 +222,7 @@ test("compact history exposes evidence, configuration, and ordered lineage contr
       pipeline={pipeline({
         stages,
         state: "draft",
-        cursor: { stageId: "verify", state: "pending" },
+        cursor: { stageId: "verify", state: "pending", input: null, activatedBy: null },
         runs: [{ stageId: "build", attempts: [passed] }],
       })}
       renderablePaths={new Set(["/build.jsonl"])}
@@ -266,7 +270,7 @@ test("the compact board strip is one bounded scrolling row — it can never wrap
     id: `task-${index + 1}`, project: "proj", status: "assigned" as const, text: `Linked ${index + 1}`,
     placement: "unplaced" as const, assignments: [], createdAt: "2026-07-18T00:00:00Z", updatedAt: "2026-07-18T00:00:00Z",
   }));
-  const parked = pipeline({ state: "needs_decision", cursor: { stageId: "build", state: "running" } });
+  const parked = pipeline({ state: "needs_decision", cursor: { stageId: "build", state: "running", input: null, activatedBy: null } });
   const compact = renderToStaticMarkup(<PipelineStrip pipeline={parked} linkedTasks={linkedTasks} compact onOpenTask={() => undefined} />);
   /* The board mounts anchor the strip's TOP inside the group's 44px headroom /
      above a node's pane; a wrapped second row paints over the chat. The compact
@@ -290,7 +294,7 @@ test("the compact board strip is one bounded scrolling row — it can never wrap
 });
 
 test("the mobile action slot stays stable while the rail takes its own row — no button is clipped off-screen (#388)", () => {
-  const parked = pipeline({ state: "needs_decision", cursor: { stageId: "build", state: "running" } });
+  const parked = pipeline({ state: "needs_decision", cursor: { stageId: "build", state: "running", input: null, activatedBy: null } });
   const mobile = renderToStaticMarkup(<PipelineStrip mobile pipeline={parked} />);
   /* Actions hold a fixed-order slot beside the header/SHA; the stage rail wraps
      to a dedicated full-width scrolling row underneath, so no control is ever

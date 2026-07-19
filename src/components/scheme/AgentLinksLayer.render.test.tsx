@@ -14,7 +14,7 @@ const byPath = new Map<string, SchemeRect>([
 
 const pipeline = {
   id: "p1", task: "t", state: "running", stages: [{ id: "a", kind: "run" }, { id: "b", kind: "run" }],
-  cursor: { stageId: "b", state: "running" }, runs: [],
+  cursor: { stageId: "b", state: "running", input: null, activatedBy: null }, runs: [],
 } as unknown as Pipeline;
 
 const hubLink: AgentLink = {

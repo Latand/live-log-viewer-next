@@ -14,6 +14,7 @@ import type {
   PipelineAccess,
   PipelineAction,
   PipelineAttemptState,
+  PipelineEdgeKind,
   PipelineRepoPreflight,
   PipelineRepoPreflightErrorCode,
   PipelineStage,
@@ -538,21 +539,31 @@ export function stageChipLabel(t: TFunction, stage: PipelineStage): string {
   return stage.id;
 }
 
+/**
+ * The single source of the header "stage k/n" counter (#353): every consumer —
+ * strip header, live-region announcement, dock, projection — reads this one
+ * derivation so the counter can never disagree with the rendered members.
+ * k is the 1-based cursor position; a finished chain reads n/n.
+ */
+export function pipelineStagePosition(pipeline: Pipeline): { k: number; n: number } {
+  const n = pipeline.stages.length;
+  const index = pipeline.cursor ? pipeline.stages.findIndex((stage) => stage.id === pipeline.cursor!.stageId) : -1;
+  return { k: index >= 0 ? index + 1 : n, n };
+}
+
 /** A spoken one-liner for a pipeline's current position — used by the board's
     live region so a state/cursor transition gets its own announcement alongside
     the spatial-nav messages. */
 export function pipelineAnnouncement(t: TFunction, pipeline: Pipeline): string {
-  const total = pipeline.stages.length;
-  const cursorStageId = pipeline.cursor?.stageId ?? null;
-  const index = cursorStageId ? pipeline.stages.findIndex((stage) => stage.id === cursorStageId) : -1;
-  const stage = index >= 0 ? pipeline.stages[index]! : null;
+  const { k, n } = pipelineStagePosition(pipeline);
+  const stage = pipeline.cursor ? pipeline.stages.find((candidate) => candidate.id === pipeline.cursor!.stageId) ?? null : null;
   const stageLabel = stage ? stageChipLabel(t, stage) : "";
   return t("pipelineStrip.announce", {
     task: pipeline.task,
     state: pipelineStateLabel(t, pipeline.state),
     stage: stageLabel,
-    k: index >= 0 ? index + 1 : total,
-    n: total,
+    k,
+    n,
   });
 }
 
@@ -843,11 +854,17 @@ export function templateStageInputs(template: PipelineTemplate): PipelineStageIn
   );
 }
 
+/** The default action every fresh draft carries (#353): one implement
+    conversation wired to the task, so no empty shell ever reaches the board. */
+export function defaultDraftStageInputs(): PipelineStageInput[] {
+  return [{ id: "implement", kind: "run", role: { roleId: "builder" }, prompt: "{{task}}", next: null }];
+}
+
 /**
  * Creates a draft pipeline from a repository that passed the picker preflight,
  * then POSTs `autoStart:false`. A template carries the full role chain from the
- * first render, and the shelf shows that chain before any stage materializes.
- * Empty drafts are assembled visually through the shared editor; the 2-stage
+ * first render; without one the draft seeds the default implement conversation
+ * (#353 — every pipeline contains at least one default action). The 1-stage
  * floor is enforced at Start.
  */
 export async function createDraftPipeline(
@@ -863,7 +880,7 @@ export async function createDraftPipeline(
   return createPipeline({
     task: translate(getLocale(), "pipelineBuilder.untitledTask"),
     repoDir,
-    stages: template ? templateStageInputs(template) : [],
+    stages: template ? templateStageInputs(template) : defaultDraftStageInputs(),
     ...(src ? { src } : {}),
     autoStart: false,
   });
@@ -904,6 +921,109 @@ export function pipelineStagePresentation(
   return "waiting";
 }
 
+/* ── Board projection (#353): one derivation for every truthful surface ──── */
+
+export type PipelineBoardEdge = {
+  from: string;
+  to: string;
+  kind: PipelineEdgeKind;
+  /** Fail edges: rounds already traversed / budget, derived from durable
+      activation records (never a stored counter). */
+  usedRounds?: number;
+  maxRounds?: number;
+  /** The edge the engine will traverse next (the active cursor stage's pass
+      edge) — drives the "which edge runs next" highlight. */
+  isNext: boolean;
+};
+
+export type PipelineBoardMember = {
+  stageId: string;
+  /** Materialized attempts of this stage (0 = placeholder-only). */
+  attempts: number;
+  presentation: PipelineStagePresentation;
+};
+
+export type PipelineBoardProjection = {
+  id: string;
+  /** Header counter — identical to the strip/dock/announcement k/n. */
+  position: { k: number; n: number };
+  members: PipelineBoardMember[];
+  edges: PipelineBoardEdge[];
+  /** Total materialized attempts across all stages; the invariant gate asserts
+      members' attempt sum equals this. */
+  materializedAttempts: number;
+  /** Every transcript path this pipeline's group claims (lineage). */
+  lineagePaths: Set<string>;
+  /** Zero-stage shells stay outside every board surface (#353). */
+  onBoard: boolean;
+};
+
+/** Rounds a stage's fail edge has already traversed, derived from the durable
+    activation records on the target stage's attempts. */
+export function stageFailEdgeRoundsUsed(pipeline: Pipeline, stage: PipelineStage): number {
+  if (!stage.onFail) return 0;
+  const target = pipeline.runs.find((run) => run.stageId === stage.onFail!.to);
+  if (!target) return 0;
+  return target.attempts.filter((attempt) => attempt.activatedBy?.edge === "fail" && attempt.activatedBy.stageId === stage.id).length;
+}
+
+/** Verdict-keyed edge list of the conversation graph, with the predicted next
+    edge marked (the active cursor stage's pass edge). */
+export function pipelineBoardEdges(pipeline: Pipeline): PipelineBoardEdge[] {
+  const cursorActive = pipelineCursorActive(pipeline);
+  const edges: PipelineBoardEdge[] = [];
+  for (const stage of pipeline.stages) {
+    if (stage.next) {
+      edges.push({
+        from: stage.id,
+        to: stage.next,
+        kind: "pass",
+        isNext: cursorActive && pipeline.cursor?.stageId === stage.id,
+      });
+    }
+    if (stage.onFail) {
+      edges.push({
+        from: stage.id,
+        to: stage.onFail.to,
+        kind: "fail",
+        usedRounds: stageFailEdgeRoundsUsed(pipeline, stage),
+        maxRounds: stage.onFail.maxRounds,
+        isNext: false,
+      });
+    }
+  }
+  return edges;
+}
+
+/**
+ * The single derivation source for the board's pipeline surfaces (#353, the
+ * reopened release gate): header counts, member list, edge list, and claimed
+ * lineage all come from here, so the strip header, halo membership, dock, and
+ * connector layers cannot disagree with one another.
+ */
+export function pipelineBoardProjection(
+  pipeline: Pipeline,
+  flows: readonly Flow[] = [],
+  files: readonly FileEntry[] = [],
+  placedPaths: ReadonlySet<string> = new Set(),
+  placedFlowIds: ReadonlySet<string> = new Set(),
+): PipelineBoardProjection {
+  const members = pipeline.stages.map((stage) => ({
+    stageId: stage.id,
+    attempts: stageAttempts(pipeline, stage.id).length,
+    presentation: pipelineStagePresentation(pipeline, stage, placedPaths, placedFlowIds),
+  }));
+  return {
+    id: pipeline.id,
+    position: pipelineStagePosition(pipeline),
+    members,
+    edges: pipelineBoardEdges(pipeline),
+    materializedAttempts: pipeline.runs.reduce((sum, run) => sum + run.attempts.length, 0),
+    lineagePaths: pipelineLineage(pipeline, flows, files).paths,
+    onBoard: pipeline.stages.length > 0 && (pipeline.state !== "closed" || Boolean(pipeline.restored)),
+  };
+}
+
 export function partitionPipelineSurfaces(
   pipelines: readonly Pipeline[],
   memberfulGroupIds: ReadonlySet<string>,
@@ -941,9 +1061,15 @@ const OPTIMISTIC_EFFECTIVE_ROLE: Omit<EffectivePipelineRole, "access"> = {
 };
 
 /** Recompute the linear `next` chain after a local insert/removal — the same
-    normalization the server applies when it persists the mutation. */
+    normalization the server applies when it persists the mutation. A kept
+    stage's fail edge survives unless its target left the plan (server rule). */
 function chainStages(stages: PipelineStage[]): PipelineStage[] {
-  return stages.map((stage, index) => ({ ...stage, next: stages[index + 1]?.id ?? null }));
+  const keptIds = new Set(stages.map((stage) => stage.id));
+  return stages.map((stage, index) => ({
+    ...stage,
+    next: stages[index + 1]?.id ?? null,
+    onFail: stage.onFail && keptIds.has(stage.onFail.to) ? stage.onFail : null,
+  }));
 }
 
 /** The pipeline as it will look once `add-stage` persists — applied locally
@@ -966,6 +1092,40 @@ export function optimisticAddStage(pipeline: Pipeline, input: PipelineStageInput
 /** The pipeline as it will look once `remove-stage` persists. */
 export function optimisticRemoveStage(pipeline: Pipeline, stageId: string): Pipeline {
   return { ...pipeline, stages: chainStages(pipeline.stages.filter((stage) => stage.id !== stageId)) };
+}
+
+/** The pipeline as it will look once `set-edge` persists (#353). */
+export function optimisticSetEdge(
+  pipeline: Pipeline,
+  stageId: string,
+  edge: PipelineEdgeKind,
+  to: string | null,
+  maxRounds?: number,
+): Pipeline {
+  return {
+    ...pipeline,
+    stages: pipeline.stages.map((stage) => {
+      if (stage.id !== stageId) return stage;
+      if (edge === "pass") return { ...stage, next: to };
+      return { ...stage, onFail: to === null ? null : { to, maxRounds: maxRounds ?? 5 } };
+    }),
+  };
+}
+
+/** Issues a `set-edge` PATCH with the optimistic echo applied (#353). */
+export async function setPipelineEdge(
+  pipeline: Pipeline,
+  stageId: string,
+  edge: PipelineEdgeKind,
+  to: string | null,
+  maxRounds?: number,
+): Promise<string | null> {
+  return patchPipeline(
+    pipeline.id,
+    "set-edge",
+    { stageId, edge, to, ...(maxRounds !== undefined ? { maxRounds } : {}) },
+    optimisticSetEdge(pipeline, stageId, edge, to, maxRounds),
+  );
 }
 
 export async function patchPipeline(

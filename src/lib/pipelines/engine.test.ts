@@ -148,13 +148,18 @@ async function create(ports: PipelinePorts, stages = RUN_STAGES as never) {
   return result.pipeline;
 }
 
-test("creation validates linear 2–4 stage chains and optional roles", async () => {
+test("creation validates the 1–8 stage conversation graph and optional roles", async () => {
   const { ports } = harness();
   expect((await createPipelineFromRequest({ task: "x", repoDir: "/repo", stages: [] }, ports)).status).toBe(400);
+  /* v3 graph rules: edge targets must exist and pass edges stay acyclic. */
   expect((await createPipelineFromRequest({ task: "x", repoDir: "/repo", stages: [
-    { id: "a", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "a", next: null },
+    { id: "a", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "a", next: "missing" },
     { id: "b", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "b", next: null },
-  ] }, ports)).error).toContain("next must be b");
+  ] }, ports)).error).toContain("must reference an existing stage");
+  expect((await createPipelineFromRequest({ task: "x", repoDir: "/repo", stages: [
+    { id: "a", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "a", next: "b" },
+    { id: "b", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "b", next: "a" },
+  ] }, ports)).error).toContain("cycle");
   const roleless = await createPipelineFromRequest({ task: "x", repoDir: "/repo", stages: [
     { id: "a", kind: "run", prompt: "a", next: "b" },
     { id: "b", kind: "run", prompt: "b", next: null },
@@ -309,7 +314,7 @@ test("autoStart false persists a draft without provisioning or spawning", async 
     autoStart: false,
   }, h.ports);
 
-  expect(result.pipeline).toMatchObject({ state: "draft", cursor: { stageId: "plan", state: "pending" } });
+  expect(result.pipeline).toMatchObject({ state: "draft", cursor: { stageId: "plan", state: "pending", input: null, activatedBy: null } });
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
 
@@ -556,11 +561,13 @@ test("restart after a bare spawn reservation parks instead of waiting forever", 
     flowId: null,
     startedAt: h.ports.now(),
     completedAt: null,
+    input: null,
+    activatedBy: null,
     output: null,
     verdict: null,
     error: null,
   });
-  pipeline.cursor = { stageId: "plan", state: "spawning" };
+  pipeline.cursor = { stageId: "plan", state: "spawning", input: null, activatedBy: null };
   h.ports.spawnReceipt = () => ({
     state: "starting",
     launchId: "launch-reserved",
@@ -593,11 +600,13 @@ test("durable conversation identity never adopts a competing cwd session", async
     flowId: null,
     startedAt: h.ports.now(),
     completedAt: null,
+    input: null,
+    activatedBy: null,
     output: null,
     verdict: null,
     error: null,
   });
-  pipeline.cursor = { stageId: "plan", state: "running" };
+  pipeline.cursor = { stageId: "plan", state: "running", input: null, activatedBy: null };
   savePipelines([pipeline]);
 
   await tickPipelines([h.finish("/codex/competing.jsonl", "pass")], h.ports);
@@ -706,7 +715,7 @@ test("a durable terminal pass verdict settles a stage despite a stale running ru
   const current = loadPipelines()[0]!;
   expect(current.state).toBe("running");
   expect(current.stateDetail).toBeNull();
-  expect(current.cursor).toEqual({ stageId: "build", state: "pending" });
+  expect(current.cursor).toEqual({ stageId: "build", state: "pending", input: "integration complete", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
   /* The actual clean stage HEAD advances, not the pipeline base. */
   expect(current.lastPassedCommit).toBe(STAGE_HEAD);
   expect(current.runs[0]!.attempts[0]).toMatchObject({
@@ -732,7 +741,7 @@ test("scanner projection loss cannot park a durably completed stage (#337, pipel
 
   const current = loadPipelines()[0]!;
   expect(current.state).toBe("running");
-  expect(current.cursor).toEqual({ stageId: "build", state: "pending" });
+  expect(current.cursor).toEqual({ stageId: "build", state: "pending", input: "integration complete", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
   expect(current.lastPassedCommit).toBe(STAGE_HEAD);
   expect(current.runs[0]!.attempts[0]!.state).toBe("passed");
   /* No reset happened on the way through: the committed work survives. */
@@ -809,7 +818,7 @@ test("a pane-less stalled projection with a stuck running runtime ledger settles
 
   const current = loadPipelines()[0]!;
   expect(current.state).toBe("running");
-  expect(current.cursor).toEqual({ stageId: "build", state: "pending" });
+  expect(current.cursor).toEqual({ stageId: "build", state: "pending", input: "integration complete", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
   expect(current.lastPassedCommit).toBe(STAGE_HEAD);
   expect(current.runs[0]!.attempts[0]).toMatchObject({
     state: "passed",
@@ -840,7 +849,7 @@ test("a restart-primed stalled cache at final size settles without a runtime ses
 
   const current = loadPipelines()[0]!;
   expect(current.state).toBe("running");
-  expect(current.cursor).toEqual({ stageId: "build", state: "pending" });
+  expect(current.cursor).toEqual({ stageId: "build", state: "pending", input: "integration complete", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
   expect(current.lastPassedCommit).toBe(STAGE_HEAD);
   expect(current.runs[0]!.attempts[0]!.state).toBe("passed");
 });
@@ -960,7 +969,7 @@ test("durable settlement is idempotent across repeated wake-up ticks", async () 
   });
 
   await tickPipelines([], h.ports);
-  expect(loadPipelines()[0]!.cursor).toEqual({ stageId: "build", state: "pending" });
+  expect(loadPipelines()[0]!.cursor).toEqual({ stageId: "build", state: "pending", input: "integration complete", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
   /* The next wake-up materializes the build attempt; further wake-ups with the
      same durable evidence neither re-settle nor duplicate anything. */
   await tickPipelines([], h.ports);
@@ -983,13 +992,13 @@ test("a pass that advances to a pending stage schedules its own follow-up tick (
   const unregister = registerPipelineTick(async () => { ticks += 1; });
   try {
     await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
-    expect(loadPipelines()[0]!.cursor).toEqual({ stageId: "build", state: "pending" });
+    expect(loadPipelines()[0]!.cursor).toEqual({ stageId: "build", state: "pending", input: "done", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(ticks).toBe(1);
 
     /* A pass that leaves no pending cursor does not wake the controller. */
     await tickPipelines([], h.ports);
-    expect(loadPipelines()[0]!.cursor).toEqual({ stageId: "build", state: "running" });
+    expect(loadPipelines()[0]!.cursor).toEqual({ stageId: "build", state: "running", input: "done", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(ticks).toBe(1);
   } finally {
@@ -1313,7 +1322,7 @@ test("override-stage re-configures an unstarted stage and rejects a started one 
   started.runs.find((run) => run.stageId === "build")!.attempts.push({
     n: 1, state: "running", effectiveRole: structuredClone(buildStage.effectiveRole), launchId: null,
     conversationId: null, sessionId: null, agentPath: null, paneId: null, flowId: null,
-    startedAt: null, completedAt: null, output: null, verdict: null, error: null,
+    startedAt: null, completedAt: null, input: null, activatedBy: null, output: null, verdict: null, error: null,
   });
   savePipelines([started]);
   expect((await patchPipeline(started.id, { action: "override-stage", stageId: "build", prompt: "x" }, ports)).status).toBe(409);
@@ -1410,44 +1419,43 @@ test("draft stages can be added, reordered, and removed while keeping a linear p
   expect(removed.pipeline?.runs.map((run) => run.stageId)).toEqual(["plan", "build"]);
 });
 
-test("an empty draft is created, assembled from zero, and cannot start until it has 2 stages (#136)", async () => {
+test("an empty draft is created, assembled from zero, and starts with one stage (#136, #353)", async () => {
   const h = harness();
   const { ports } = h;
   savePipelines([]);
-  /* The canvas builder POSTs a stageless draft — no 2-stage minimum at creation. */
+  /* The legacy stageless draft POST still loads; the current client seeds a
+     default implement stage (#353), but the API keeps accepting zero. */
   const created = await createPipelineFromRequest({ task: "Build on canvas", repoDir: "/repo", stages: [], autoStart: false }, ports);
   expect(created.pipeline?.state).toBe("draft");
   expect(created.pipeline?.stages).toEqual([]);
   expect(created.pipeline?.cursor).toBeNull();
   const id = created.pipeline!.id;
 
-  /* Start is refused while under two stages, on the draft, without side effects. */
+  /* Start is refused while the draft is empty, without side effects. */
   const tooFew = await patchPipeline(id, { action: "start" }, ports);
   expect(tooFew.status).toBe(409);
   expect(loadPipelines()[0]!.state).toBe("draft");
 
+  /* One implement conversation is the minimum graph (#353): Start succeeds. */
   const one = await patchPipeline(id, { action: "add-stage", stage: { id: "plan", kind: "run", role: { roleId: "builder" }, prompt: "Plan it", next: null } }, ports);
   expect(one.pipeline?.stages.map((stage) => stage.id)).toEqual(["plan"]);
-  expect(one.pipeline?.cursor).toEqual({ stageId: "plan", state: "pending" });
-  expect((await patchPipeline(id, { action: "start" }, ports)).status).toBe(409);
-
-  await patchPipeline(id, { action: "add-stage", stage: { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build it", next: null } }, ports);
+  expect(one.pipeline?.cursor).toEqual({ stageId: "plan", state: "pending", input: null, activatedBy: null });
   const started = await patchPipeline(id, { action: "start" }, ports);
   expect(started.pipeline?.state).toBe("provisioning");
 });
 
-test("a draft can be emptied stage by stage on the canvas (#136)", async () => {
+test("a draft keeps at least one stage on the canvas (#136, #353)", async () => {
   const h = harness();
   const { ports } = h;
   savePipelines([]);
   const created = await createPipelineFromRequest({ task: "Empty me", repoDir: "/repo", stages: RUN_STAGES as never, autoStart: false }, ports);
   const id = created.pipeline!.id;
   await patchPipeline(id, { action: "remove-stage", stageId: "build" }, ports);
-  const oneLeft = await patchPipeline(id, { action: "remove-stage", stageId: "plan" }, ports);
-  expect(oneLeft.pipeline?.stages).toEqual([]);
-  expect(oneLeft.pipeline?.cursor).toBeNull();
-  /* Removing from an already-empty draft returns a clean 409. */
-  expect((await patchPipeline(id, { action: "remove-stage", stageId: "plan" }, ports)).status).toBe(409);
+  /* The final stage is not removable (#353: every pipeline keeps at least one
+     default action) — reconfigure it instead. */
+  const lastRemove = await patchPipeline(id, { action: "remove-stage", stageId: "plan" }, ports);
+  expect(lastRemove.status).toBe(409);
+  expect(loadPipelines()[0]!.stages.map((stage) => stage.id)).toEqual(["plan"]);
 });
 
 test("draft edits that would orphan a review-loop are rejected (#136)", async () => {
@@ -1582,4 +1590,168 @@ test("override-stage enforces the same prompt-size ceiling as creation (issue #1
   /* Exactly at the ceiling is accepted. */
   const atLimit = await patchPipeline(created.id, { action: "override-stage", stageId: "build", prompt: "y".repeat(MAX_STAGE_PROMPT_LENGTH) }, ports);
   expect(atLimit.error).toBeUndefined();
+});
+
+/* ── #353: persisted exactly-once relay, fail-edge cycles, set-edge editing ── */
+
+const CYCLE_STAGES = [
+  { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Build {{task}} from {{prev.output}}", next: "verify" },
+  { id: "verify", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Verify {{prev.output}}", next: null, onFail: { to: "build", maxRounds: 1 } },
+] as const;
+
+test("a completed stage's output is persisted once and relayed exactly once (#353)", async () => {
+  const h = harness();
+  const prompts: string[] = [];
+  const baseSpawn = h.ports.spawnAgent;
+  h.ports.spawnAgent = async (input, onReserved) => {
+    prompts.push(input.prompt);
+    return baseSpawn(input, onReserved);
+  };
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "plan output")], h.ports);
+
+  /* The relay record lands in the same mutation as the verdict. */
+  let current = loadPipelines()[0]!;
+  expect(current.cursor).toEqual({ stageId: "build", state: "pending", input: "plan output", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
+
+  /* Sibling-record evolution after the advance must not change the delivered
+     prompt: the persisted input is authoritative, not a positional re-scan. */
+  current.runs[0]!.attempts[0]!.output = "mutated later";
+  savePipelines([current]);
+  await tickPipelines([], h.ports);
+
+  current = loadPipelines()[0]!;
+  expect(current.runs[1]!.attempts[0]).toMatchObject({
+    input: "plan output",
+    activatedBy: { stageId: "plan", attempt: 1, edge: "pass" },
+    state: "running",
+  });
+  expect(prompts.at(-1)).toContain("Build from plan output");
+  /* Exactly once: re-ticking the same state neither respawns nor rewrites. */
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.runs[1]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("spawn:")).length).toBe(2);
+});
+
+test("a fail verdict traverses the fail edge, loops once, then parks on budget exhaustion (#353)", async () => {
+  const h = harness();
+  const prompts: string[] = [];
+  const baseSpawn = h.ports.spawnAgent;
+  h.ports.spawnAgent = async (input, onReserved) => {
+    prompts.push(input.prompt);
+    return baseSpawn(input, onReserved);
+  };
+  await create(h.ports, CYCLE_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "built v1")], h.ports);
+  await tickPipelines([], h.ports);
+
+  /* verify fails with findings → the fail edge routes back to build with the
+     failure narrative as {{prev.output}}; no park, no worktree reset. */
+  h.messages.set("/codex/stage-2.jsonl", { text: "cannot pass\n\n```json\n{\"status\":\"fail\",\"findings\":[\"broken test\"]}\n```", ts: Date.now() + 100_000_000 });
+  await tickPipelines([entry("/codex/stage-2.jsonl")], h.ports);
+
+  let current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[1]!.attempts[0]).toMatchObject({ state: "failed", verdict: { status: "fail" } });
+  expect(current.cursor).toEqual({
+    stageId: "build",
+    state: "pending",
+    input: "cannot pass\n\nFail verdict findings:\n- broken test",
+    activatedBy: { stageId: "verify", attempt: 1, edge: "fail" },
+  });
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
+
+  /* The loop round re-runs build with the failure input, passes, re-enters
+     verify as a fresh attempt. */
+  await tickPipelines([], h.ports);
+  expect(prompts.at(-1)).toContain("Fail verdict findings:\n- broken test");
+  current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts).toHaveLength(2);
+  expect(current.runs[0]!.attempts[1]!.activatedBy).toEqual({ stageId: "verify", attempt: 1, edge: "fail" });
+  h.messages.set("/codex/stage-3.jsonl", { text: "fixed\n\n```json\n{\"status\":\"pass\"}\n```", ts: Date.now() + 100_000_000 });
+  await tickPipelines([entry("/codex/stage-3.jsonl")], h.ports);
+  await tickPipelines([], h.ports);
+  current = loadPipelines()[0]!;
+  expect(current.runs[1]!.attempts).toHaveLength(2);
+
+  /* Second verify failure exhausts maxRounds: 1 → parks for the operator. */
+  h.messages.set("/codex/stage-4.jsonl", { text: "still broken\n\n```json\n{\"status\":\"fail\",\"findings\":[\"regression\"]}\n```", ts: Date.now() + 100_000_000 });
+  await tickPipelines([entry("/codex/stage-4.jsonl")], h.ports);
+  current = loadPipelines()[0]!;
+  expect(current.state).toBe("needs_decision");
+  expect(current.stateDetail).toContain("fail-edge budget exhausted after 1 round(s)");
+  expect(current.runs[1]!.attempts[1]!.state).toBe("failed");
+});
+
+test("needs_decision always parks — a fail edge never auto-loops it (#353)", async () => {
+  const h = harness();
+  await create(h.ports, CYCLE_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "built")], h.ports);
+  await tickPipelines([], h.ports);
+  h.messages.set("/codex/stage-2.jsonl", { text: "unsure\n\n```json\n{\"status\":\"needs_decision\"}\n```", ts: Date.now() + 100_000_000 });
+  await tickPipelines([entry("/codex/stage-2.jsonl")], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("needs_decision");
+  expect(current.cursor?.stageId).toBe("verify");
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+});
+
+test("set-edge rewires future edges and freezes traversed evidence (#353)", async () => {
+  const h = harness();
+  const { ports } = h;
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Graph edit",
+    repoDir: "/repo",
+    stages: [
+      { id: "plan", kind: "run", role: { roleId: "builder" }, prompt: "Plan", next: "build" },
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build", next: "verify" },
+      { id: "verify", kind: "run", role: { roleId: "builder" }, prompt: "Verify", next: null },
+    ] as never,
+    autoStart: false,
+  }, ports);
+  const id = created.pipeline!.id;
+
+  /* Validation matrix. */
+  expect((await patchPipeline(id, { action: "set-edge", stageId: "missing", edge: "pass", to: null }, ports)).status).toBe(404);
+  expect((await patchPipeline(id, { action: "set-edge", stageId: "plan", edge: "up" as never, to: null }, ports)).status).toBe(400);
+  expect((await patchPipeline(id, { action: "set-edge", stageId: "plan", edge: "pass" }, ports)).status).toBe(400);
+  expect((await patchPipeline(id, { action: "set-edge", stageId: "plan", edge: "pass", to: "missing" }, ports)).status).toBe(400);
+  expect((await patchPipeline(id, { action: "set-edge", stageId: "verify", edge: "pass", to: "plan" }, ports)).error).toContain("cycle");
+  expect((await patchPipeline(id, { action: "set-edge", stageId: "plan", edge: "pass", to: "plan" }, ports)).error).toContain("itself");
+  expect((await patchPipeline(id, { action: "set-edge", stageId: "verify", edge: "fail", to: "build", maxRounds: 10 }, ports)).status).toBe(400);
+  expect((await patchPipeline(id, { action: "set-edge", stageId: "verify", edge: "fail", to: null, maxRounds: 3 }, ports)).status).toBe(400);
+  expect((await patchPipeline(id, { action: "set-edge", stageId: "plan", edge: "pass", to: "build", maxRounds: 2 }, ports)).status).toBe(400);
+
+  /* A direct pass link (skipping build) and a fail-edge cycle are accepted. */
+  const direct = await patchPipeline(id, { action: "set-edge", stageId: "plan", edge: "pass", to: "verify" }, ports);
+  expect(direct.pipeline?.stages[0]?.next).toBe("verify");
+  const cycle = await patchPipeline(id, { action: "set-edge", stageId: "verify", edge: "fail", to: "build", maxRounds: 2 }, ports);
+  expect(cycle.pipeline?.stages[2]?.onFail).toEqual({ to: "build", maxRounds: 2 });
+  /* Defaulted budget mirrors the review flow's round limit. */
+  const defaulted = await patchPipeline(id, { action: "set-edge", stageId: "build", edge: "fail", to: "plan" }, ports);
+  expect(defaulted.pipeline?.stages[1]?.onFail).toEqual({ to: "plan", maxRounds: 5 });
+  /* Clearing works. */
+  const cleared = await patchPipeline(id, { action: "set-edge", stageId: "build", edge: "fail", to: null }, ports);
+  expect(cleared.pipeline?.stages[1]?.onFail).toBeNull();
+
+  /* Restore the chain, start, run plan to completion: its pass edge freezes. */
+  await patchPipeline(id, { action: "set-edge", stageId: "plan", edge: "pass", to: "build" }, ports);
+  await patchPipeline(id, { action: "start" }, ports);
+  await tickPipelines([], ports);
+  await tickPipelines([], ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "planned")], ports);
+  const frozen = await patchPipeline(id, { action: "set-edge", stageId: "plan", edge: "pass", to: "verify" }, ports);
+  expect(frozen.status).toBe(409);
+  expect(frozen.error).toContain("frozen evidence");
+  /* An untraversed fail edge on a started-but-not-run stage stays editable. */
+  const stillEditable = await patchPipeline(id, { action: "set-edge", stageId: "verify", edge: "fail", to: "build", maxRounds: 1 }, ports);
+  expect(stillEditable.pipeline?.stages[2]?.onFail).toEqual({ to: "build", maxRounds: 1 });
 });

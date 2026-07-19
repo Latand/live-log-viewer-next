@@ -89,27 +89,27 @@ describe("stageChipState", () => {
   const stages = [stage("plan"), stage("build"), stage("review", "review-loop")];
 
   test("a stage with no attempt before the cursor is pending", () => {
-    const p = pipeline({ stages, cursor: { stageId: "plan", state: "running" } });
+    const p = pipeline({ stages, cursor: { stageId: "plan", state: "running", input: null, activatedBy: null } });
     expect(stageChipState(p, stages[2]!)).toBe("pending");
   });
 
   test("the cursor stage of a busy pipeline is running", () => {
-    const p = pipeline({ stages, cursor: { stageId: "build", state: "running" }, runs: [{ stageId: "build", attempts: [{ state: "running" } as never] }] });
+    const p = pipeline({ stages, cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, runs: [{ stageId: "build", attempts: [{ state: "running" } as never] }] });
     expect(stageChipState(p, stages[1]!)).toBe("running");
   });
 
   test("a review-loop cursor stage reads as reviewing", () => {
-    const p = pipeline({ stages, cursor: { stageId: "review", state: "reviewing" }, runs: [{ stageId: "review", attempts: [{ state: "reviewing" } as never] }] });
+    const p = pipeline({ stages, cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null }, runs: [{ stageId: "review", attempts: [{ state: "reviewing" } as never] }] });
     expect(stageChipState(p, stages[2]!)).toBe("reviewing");
   });
 
   test("a committing cursor state overrides running", () => {
-    const p = pipeline({ stages, cursor: { stageId: "build", state: "committing" }, runs: [{ stageId: "build", attempts: [{ state: "committing" } as never] }] });
+    const p = pipeline({ stages, cursor: { stageId: "build", state: "committing", input: null, activatedBy: null }, runs: [{ stageId: "build", attempts: [{ state: "committing" } as never] }] });
     expect(stageChipState(p, stages[1]!)).toBe("committing");
   });
 
   test("terminal attempt states win over the cursor", () => {
-    const p = pipeline({ stages, cursor: { stageId: "build", state: "running" }, state: "needs_decision", runs: [{ stageId: "build", attempts: [{ state: "needs_decision" } as never] }] });
+    const p = pipeline({ stages, cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, state: "needs_decision", runs: [{ stageId: "build", attempts: [{ state: "needs_decision" } as never] }] });
     expect(stageChipState(p, stages[1]!)).toBe("needs_decision");
     const passed = pipeline({ stages, runs: [{ stageId: "plan", attempts: [{ state: "passed" } as never] }] });
     expect(stageChipState(passed, stages[0]!)).toBe("passed");
@@ -122,7 +122,7 @@ describe("stageChipState", () => {
       stages,
       state: "paused",
       pausedState: "running",
-      cursor: { stageId: "build", state: "running" },
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
       runs: [{ stageId: "build", attempts: [{ state: "running" } as never] }],
     });
     expect(stageChipState(p, stages[1]!)).toBe("running");
@@ -223,7 +223,7 @@ describe("compactPipelineArtifactPaths", () => {
   test("keeps one current run pane and compacts passed stages plus prior retries", () => {
     const p = pipeline({
       stages,
-      cursor: { stageId: "builder", state: "running" },
+      cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
       runs: [
         { stageId: "architect", attempts: [{ state: "passed", agentPath: "/architect" } as never] },
         {
@@ -242,7 +242,7 @@ describe("compactPipelineArtifactPaths", () => {
   test("keeps the review target pane while folding review transcripts into compact evidence", () => {
     const p = pipeline({
       stages,
-      cursor: { stageId: "review", state: "reviewing" },
+      cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
       runs: [
         { stageId: "builder", attempts: [{ state: "passed", agentPath: "/builder" } as never] },
         { stageId: "review", attempts: [{ state: "reviewing", agentPath: "/reviewer", flowId: "f1" } as never] },
@@ -256,7 +256,7 @@ describe("compactPipelineArtifactPaths", () => {
   test("compacts every durable binding from a retried logical review round", () => {
     const p = pipeline({
       stages,
-      cursor: { stageId: "review", state: "reviewing" },
+      cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
       runs: [
         { stageId: "builder", attempts: [{ state: "passed", agentPath: "/builder" } as never] },
         { stageId: "review", attempts: [{ state: "reviewing", agentPath: "/review-current", flowId: "f1" } as never] },
@@ -282,7 +282,7 @@ describe("compactPipelineArtifactPaths", () => {
   test("keeps the latest passed run pane while a review flow is materializing", () => {
     const p = pipeline({
       stages,
-      cursor: { stageId: "review", state: "reviewing" },
+      cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
       runs: [
         { stageId: "architect", attempts: [{ state: "passed", agentPath: "/architect" } as never] },
         { stageId: "builder", attempts: [{ state: "passed", agentPath: "/builder" } as never] },
@@ -319,7 +319,7 @@ describe("compactPipelineArtifactPaths", () => {
 describe("pipelineAnnouncement", () => {
   test("names the pipeline's task, state, and cursor position", () => {
     const stages = [stage("plan"), stage("build"), stage("review", "review-loop")];
-    const p = pipeline({ task: "ship it", stages, state: "running", cursor: { stageId: "build", state: "running" } });
+    const p = pipeline({ task: "ship it", stages, state: "running", cursor: { stageId: "build", state: "running", input: null, activatedBy: null } });
     const message = pipelineAnnouncement(fakeT, p);
     expect(message).toContain("ship it");
     expect(message).toContain('"k":2');
@@ -580,7 +580,7 @@ describe("stageHasEvidence (running attempts have no verdict sheet)", () => {
   test("a verdict, an error, or a park on this stage each count as evidence", () => {
     expect(stageHasEvidence(p({}), runStage, att({ verdict: { status: "fail" } }))).toBe(true);
     expect(stageHasEvidence(p({}), runStage, att({ error: "spawn failed" }))).toBe(true);
-    expect(stageHasEvidence(p({ state: "needs_decision", cursor: { stageId: "build", state: "running" } }), runStage, att({}))).toBe(true);
+    expect(stageHasEvidence(p({ state: "needs_decision", cursor: { stageId: "build", state: "running", input: null, activatedBy: null } }), runStage, att({}))).toBe(true);
   });
   test("no attempt is no evidence", () => {
     expect(stageHasEvidence(p({}), runStage, null)).toBe(false);
@@ -640,12 +640,12 @@ test("stageDockCompact keeps every stage with transcript evidence fully disclose
   const parked = { n: 1, state: "needs_decision", agentPath: null, verdict: null, error: null } as never;
   const passedWithVerdict = { n: 1, state: "passed", agentPath: null, verdict: { status: "pass" }, error: null } as never;
   const passedWithPath = { n: 1, state: "passed", agentPath: "/build.jsonl", verdict: null, error: null } as never;
-  const pendingPipeline = pipeline({ stages: [build], state: "draft", cursor: { stageId: build.id, state: "pending" } });
+  const pendingPipeline = pipeline({ stages: [build], state: "draft", cursor: { stageId: build.id, state: "pending", input: null, activatedBy: null } });
 
   expect(stageDockCompact(pendingPipeline, build, null, [], new Set(), new Set(), [])).toBe(true);
   expect(stageDockCompact(pipeline({ stages: [build] }), build, skipped, [], new Set(), new Set(), [])).toBe(true);
   expect(stageDockCompact(
-    pipeline({ stages: [build], state: "needs_decision", cursor: { stageId: build.id, state: "running" } }),
+    pipeline({ stages: [build], state: "needs_decision", cursor: { stageId: build.id, state: "running", input: null, activatedBy: null } }),
     build,
     parked,
     [],
@@ -673,7 +673,7 @@ describe("stageHasNavigableHistory", () => {
     const current = { n: 2, state: "running", agentPath: "/build-2", verdict: null, error: null } as never;
     const p = pipeline({
       stages: [runStage],
-      cursor: { stageId: runStage.id, state: "running" },
+      cursor: { stageId: runStage.id, state: "running", input: null, activatedBy: null },
       runs: [{ stageId: runStage.id, attempts: [prior, current] }],
     });
 
@@ -686,7 +686,7 @@ describe("stageHasNavigableHistory", () => {
     const current = { n: 1, state: "reviewing", agentPath: "/round-2", flowId: "flow-1", verdict: null, error: null } as never;
     const p = pipeline({
       stages: [reviewStage],
-      cursor: { stageId: reviewStage.id, state: "reviewing" },
+      cursor: { stageId: reviewStage.id, state: "reviewing", input: null, activatedBy: null },
       runs: [{ stageId: reviewStage.id, attempts: [current] }],
     });
     const flows = [{
@@ -704,7 +704,7 @@ describe("stageHasNavigableHistory", () => {
     const current = { n: 1, state: "reviewing", agentPath: "/round-current", flowId: "flow-1", verdict: null, error: null } as never;
     const p = pipeline({
       stages: [reviewStage],
-      cursor: { stageId: reviewStage.id, state: "reviewing" },
+      cursor: { stageId: reviewStage.id, state: "reviewing", input: null, activatedBy: null },
       runs: [{ stageId: reviewStage.id, attempts: [current] }],
     });
     const flows = [{
@@ -754,22 +754,22 @@ describe("pipelineBoardStripPath (§2.2 board strip anchor)", () => {
   const run = (stageId: string, agentPath: string | null) => ({ stageId, attempts: [{ state: "running", agentPath } as never] });
 
   test("anchors on the current run stage's latest attempt path", () => {
-    const p = pipeline({ stages, cursor: { stageId: "build", state: "running" }, runs: [run("plan", "/a"), run("build", "/b")] });
+    const p = pipeline({ stages, cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, runs: [run("plan", "/a"), run("build", "/b")] });
     expect(pipelineBoardStripPath(p)).toBe("/b");
   });
 
   test("a review-loop current stage yields the slot (null) so FlowStrip owns it", () => {
-    const p = pipeline({ stages, cursor: { stageId: "review", state: "reviewing" }, runs: [run("review", "/r")] });
+    const p = pipeline({ stages, cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null }, runs: [run("review", "/r")] });
     expect(pipelineBoardStripPath(p)).toBeNull();
   });
 
   test("an unmaterialized current stage (no agent path) anchors nowhere", () => {
-    const p = pipeline({ stages, cursor: { stageId: "build", state: "running" }, runs: [run("build", null)] });
+    const p = pipeline({ stages, cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, runs: [run("build", null)] });
     expect(pipelineBoardStripPath(p)).toBeNull();
   });
 
   test("a closed pipeline never anchors a strip", () => {
-    const p = pipeline({ stages, state: "closed", cursor: { stageId: "build", state: "running" }, runs: [run("build", "/b")] });
+    const p = pipeline({ stages, state: "closed", cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, runs: [run("build", "/b")] });
     expect(pipelineBoardStripPath(p)).toBeNull();
   });
 
@@ -780,8 +780,8 @@ describe("pipelineBoardStripPath (§2.2 board strip anchor)", () => {
   });
 
   test("pipelineStripByPath maps every anchored pipeline by its node path", () => {
-    const a = pipeline({ id: "a", stages, cursor: { stageId: "build", state: "running" }, runs: [run("build", "/b")] });
-    const b = pipeline({ id: "b", stages, cursor: { stageId: "review", state: "reviewing" }, runs: [run("review", "/r")] });
+    const a = pipeline({ id: "a", stages, cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, runs: [run("build", "/b")] });
+    const b = pipeline({ id: "b", stages, cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null }, runs: [run("review", "/r")] });
     const map = pipelineStripByPath([a, b]);
     expect(map.get("/b")?.id).toBe("a");
     expect(map.has("/r")).toBe(false);
@@ -944,7 +944,7 @@ describe("pipelineStagePresentation", () => {
     const active = pipeline({
       state: "running",
       stages,
-      cursor: { stageId: "build", state: "spawning" },
+      cursor: { stageId: "build", state: "spawning", input: null, activatedBy: null },
       runs: [{ stageId: "plan", attempts: [{ n: 1, state: "passed", agentPath: "/plan" } as never] }],
     });
 
@@ -958,7 +958,7 @@ describe("pipelineStagePresentation", () => {
     const review = pipeline({
       state: "running",
       stages,
-      cursor: { stageId: "review", state: "reviewing" },
+      cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
       runs: [{ stageId: "review", attempts: [{ n: 1, state: "reviewing", flowId: "flow-1" } as never] }],
     });
     expect(pipelineStagePresentation(review, stages[2]!, new Set(), new Set(["flow-1"]))).toBe("materialized");
