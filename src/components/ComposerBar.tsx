@@ -5,6 +5,7 @@ import type { CSSProperties, ReactNode } from "react";
 
 import { Loader2, Play } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useLocale } from "@/lib/i18n";
 import type { UseComposerReturn } from "@/hooks/useComposer";
 import { prewarmLiveToken } from "@/hooks/useDictation";
 
@@ -155,10 +156,18 @@ export function ComposerBar({
     busy,
     status,
   } = composer;
+  const { t } = useLocale();
   const isMobile = useIsMobile();
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
   const hasSendMenu = sendMenuActions.length > 0;
   const imageSendBlocked = imageDisabled && attachments.images.length > 0;
+  /* An attachment still decoding (or one that failed to read) blocks Send with a
+     visible reason, so no image is silently dropped mid-read (issue #419). */
+  const attachmentBlockedReason = attachments.hasReading
+    ? t("img.blockedReading")
+    : attachments.hasError
+      ? t("img.blockedFailed")
+      : undefined;
   const sendBlocked = Boolean(sendDisabledReason);
   const sendDisabled = sendBlocked || (!canSend && !hasSendMenu) || imageSendBlocked;
   /* Composer action buttons (send, image) are a 32px visual control with a 44px
@@ -318,7 +327,20 @@ export function ComposerBar({
       ) : null}
       {/* The task composer renders its own durable-ref strip; the in-memory one
           stays for the pane/draft composers that still upload at send time. */}
-      {onImageFiles ? null : <ImagePreviewStrip images={attachments.images} onRemove={attachments.removeAt} />}
+      {onImageFiles ? null : (
+        <ImagePreviewStrip
+          attachments={attachments.attachments}
+          onRemove={attachments.remove}
+          onRetry={attachments.retry}
+          onClearAll={attachments.clearAll}
+        />
+      )}
+      {/* A decoding/failed attachment blocks Send — say why, and never silently
+          drop the image (issue #419). Suppressed while a host-death reason
+          already occupies the send tooltip. */}
+      {!onImageFiles && !sendBlocked && attachmentBlockedReason ? (
+        <span role="status" aria-live="polite" className="text-caption font-semibold text-warning">{attachmentBlockedReason}</span>
+      ) : null}
       {status ? (
         <span
           role="status"

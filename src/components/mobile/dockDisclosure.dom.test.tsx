@@ -131,7 +131,7 @@ function view(groups: BranchGroup[], files: FileEntry[], stacks: WorkerStack[] =
   );
 }
 
-test("a focused conversation keeps docked pipelines collapsed inside a ≤34vh bar; expanding reveals the rail (#156)", async () => {
+test("a focused conversation collapses docked pipelines into ONE summary row; the sheet reveals the full rail (#419/#156)", async () => {
   const conversation = entry({ path: "/session", title: "Main session", activity: "live", mtime: 9_000 });
   const group: BranchGroup = {
     key: conversation.path,
@@ -144,23 +144,27 @@ test("a focused conversation keeps docked pipelines collapsed inside a ≤34vh b
   roots.push(mount(view([group], [conversation])));
   await settle();
 
-  /* The dock bar below the focused pane is height-bounded tighter than before. */
-  const dock = dom.document.querySelector('[data-testid="mobile-pipeline-dock"]');
-  expect(dock).not.toBeNull();
-  const bar = dock!.closest("div.shrink-0");
-  expect(bar).not.toBeNull();
-  expect(bar!.className).toContain("max-h-[34vh]");
+  /* Chat-first (#419): no per-pipeline dock rows below the pane — just one
+     44px summary row, and no stage rail is mounted until the sheet opens. */
+  expect(dom.document.querySelector('[data-testid="mobile-pipeline-dock"]')).toBeNull();
+  const summary = dom.document.querySelector('[data-testid="mobile-pipeline-summary"]') as unknown as HTMLButtonElement | null;
+  expect(summary).not.toBeNull();
+  expect(dom.document.querySelector('[aria-label="Pipeline stages"]')).toBeNull();
 
-  /* Collapsed by default: only the summary row, no stage rail, so the
-     conversation stays dominant. */
-  expect(dock!.querySelector('[data-testid="mobile-pipeline-dock-summary"]')).not.toBeNull();
+  /* Tapping the summary opens the bottom sheet; docks mount collapsed there. */
+  flushSync(() => summary!.click());
+  await settle();
+  const sheet = dom.document.querySelector('[data-testid="mobile-pipeline-sheet"]');
+  expect(sheet).not.toBeNull();
+  const dock = sheet!.querySelector('[data-testid="mobile-pipeline-dock"]');
+  expect(dock).not.toBeNull();
   expect(dock!.querySelector('[aria-label="Pipeline stages"]')).toBeNull();
 
   /* The disclosure expands to the full rail on demand. */
   const toggle = dock!.querySelector('[data-testid="mobile-pipeline-dock-summary"]') as unknown as HTMLButtonElement;
   flushSync(() => toggle.click());
   await settle();
-  expect(dom.document.querySelector('[data-testid="mobile-pipeline-dock"] [aria-label="Pipeline stages"]')).not.toBeNull();
+  expect(sheet!.querySelector('[aria-label="Pipeline stages"]')).not.toBeNull();
 });
 
 test("the empty-state branch (no conversation) mounts its docks expanded — the dock IS the surface", async () => {
@@ -172,7 +176,7 @@ test("the empty-state branch (no conversation) mounts its docks expanded — the
   expect(dock!.querySelector('[aria-label="Pipeline stages"]')).not.toBeNull();
 });
 
-test("the map overlay dock bar is bounded to 30vh with collapsed docks (#156)", async () => {
+test("the map overlay shows the one-row pipeline summary; the sheet keeps every plan reachable (#419/#156)", async () => {
   const conversation = entry({ path: "/session", title: "Main session", activity: "live", mtime: 9_000 });
   const group: BranchGroup = {
     key: conversation.path,
@@ -191,11 +195,16 @@ test("the map overlay dock bar is bounded to 30vh with collapsed docks (#156)", 
   flushSync(() => openBtn!.click());
   await settle();
 
+  /* The map overlay carries the same one-row summary — no stack of dock rows
+     stealing the map (#419), but the plan stays one tap away. */
   const overlay = dom.document.querySelector('[aria-label="Close the map"]')!.closest("div.fixed")!;
-  const dock = overlay.querySelector('[data-testid="mobile-pipeline-dock"]');
-  expect(dock).not.toBeNull();
-  const bar = dock!.closest("div.shrink-0");
-  expect(bar!.className).toContain("max-h-[30vh]");
-  expect(dock!.querySelector('[data-testid="mobile-pipeline-dock-summary"]')).not.toBeNull();
-  expect(dock!.querySelector('[aria-label="Pipeline stages"]')).toBeNull();
+  const summary = overlay.querySelector('[data-testid="mobile-pipeline-summary"]') as unknown as HTMLButtonElement | null;
+  expect(summary).not.toBeNull();
+  expect(overlay.querySelector('[data-testid="mobile-pipeline-dock"]')).toBeNull();
+
+  flushSync(() => summary!.click());
+  await settle();
+  const sheet = dom.document.querySelector('[data-testid="mobile-pipeline-sheet"]');
+  expect(sheet).not.toBeNull();
+  expect(sheet!.querySelector('[data-testid="mobile-pipeline-dock-summary"]')).not.toBeNull();
 });

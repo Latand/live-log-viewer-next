@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ChevronUp, ListTodo, Map as MapIcon } from "lucide-react";
+import { ListTodo, Map as MapIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Loader2, X } from "@/components/icons";
@@ -26,13 +26,18 @@ import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 
-import { PIPELINE_ATTENTION_STATES, PIPELINE_BUSY_STATES, STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, partitionPipelineSurfaces, pipelineLinkedTasks, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
-import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
+import { STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, partitionPipelineSurfaces, pipelineLinkedTasks, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
+import { MobilePipelineDock } from "./MobilePipelineDock";
+import { MobilePipelineDockSheet, MobilePipelineSummaryRow } from "./MobilePipelineDockSheet";
 import { deckKey } from "@/components/scheme/agentLinks";
 import { buildSchemeLayout } from "@/components/scheme/layout";
-import { SchemeBoard } from "@/components/scheme/SchemeBoard";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
+import { MobileMapLite } from "./MobileMapLite";
+
+/* Re-exported so existing importers (and tests) keep resolving it here after
+   the component moved to its own module (issue #419). */
+export { MobilePipelineDock } from "./MobilePipelineDock";
 
 const focusKey = (project: string) => "llvFocus:" + project;
 
@@ -113,6 +118,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
+  const [pipelineSheetOpen, setPipelineSheetOpen] = useState(false);
   const [mapFrame, setMapFrame] = useState<"all" | "current">("all");
   const [taskSheet, setTaskSheet] = useState<TaskSheetView | null>(null);
   /* The header `+ Task` button opens the create view; the first render's nonce
@@ -474,14 +480,12 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
         )}
       </div>
 
-      {/* When a conversation IS focused, docked pipelines keep a compact
-          plan/control bar below the pane so their surface never disappears. */}
+      {/* Chat owns the viewport (issue #419): with a conversation focused, the
+          docked pipelines collapse into ONE 44px summary row instead of a row
+          per pipeline — a tap opens the bottom sheet with the full rails, so a
+          handful of completed pipelines never crowd out the transcript. */}
       {(activeNode || activeDeck || activeDraft) && dockedPipelines.length ? (
-        <div className="max-h-[34vh] shrink-0 divide-y divide-border overflow-y-auto border-t border-border bg-card">
-          {dockedPipelines.map((pipeline) => (
-            <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} files={files} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} defaultExpanded={false} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
-          ))}
-        </div>
+        <MobilePipelineSummaryRow pipelines={dockedPipelines} onOpen={() => setPipelineSheetOpen(true)} />
       ) : null}
 
       {mapOpen ? (
@@ -516,44 +520,48 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
               <X className="h-5 w-5" aria-hidden />
             </button>
           </div>
-          <SchemeBoard
-            project={project}
-            groups={groups}
-            manual={manual}
-            files={files}
-            flows={flows}
-            pipelines={pipelines}
-            surfacePipelines={surfacePipelines}
-            workerStacks={workerStacks}
+          {/* Bounded lightweight projection (issue #418): fed the layout memo the
+              focus view already computed — no second buildSchemeLayout, no
+              world-sized composited layer, no transcript/pane mount, and zero
+              fetches on open — so it survives the largest board over Tailscale
+              where the full SchemeBoard OOM-killed the tab. */}
+          <MobileMapLite
+            layout={layout}
             tasks={tasks}
-            drafts={drafts}
-            isolatedManualPaths={isolatedManualPaths}
-            focus={null}
-            ring={resolvedKey}
-            onSelect={onSelect}
-            onClose={onClose}
-            onDraftClose={onDraftClose}
-            onDraftSpawned={onDraftSpawned}
-            onNodePick={pickFromMap}
-            mapFrame={mapFrame}
+            workerStacks={workerStacks}
+            frame={mapFrame}
+            ringKey={resolvedKey}
+            onPick={pickFromMap}
           />
           {/* The lite map is pick-only and cannot paint a readable stage strip at
-              its zoom, so it never surfaces a pipeline's full plan on its own
-              (SchemeBoard passes no pipelineControls in map mode). The dock cards
-              ride below it here too — otherwise opening the map would hide the
-              only full-plan surface for every active pipeline, memberful ones
-              included (issue #156). */}
+              its zoom, so it never surfaces a pipeline's full plan on its own.
+              The same one-row summary rides below it (issue #419) — a tap opens
+              the sheet, keeping every active pipeline's full plan reachable
+              without a stack of rows stealing the map (issue #156). */}
           {dockedPipelines.length ? (
-            <div className="max-h-[30vh] shrink-0 divide-y divide-border overflow-y-auto border-t border-border bg-card">
-              {dockedPipelines.map((pipeline) => (
-                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} files={files} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} defaultExpanded={false} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
-              ))}
-            </div>
+            <MobilePipelineSummaryRow pipelines={dockedPipelines} onOpen={() => setPipelineSheetOpen(true)} />
           ) : null}
           <div className="shrink-0 border-t border-border bg-card px-3 py-1.5 text-center text-[11px] text-muted">
             {t("mobile.tapNode")}
           </div>
         </div>
+      ) : null}
+
+      {pipelineSheetOpen && dockedPipelines.length ? (
+        <MobilePipelineDockSheet
+          pipelines={dockedPipelines}
+          render={{
+            flows,
+            files,
+            renderablePaths,
+            renderableFlows,
+            linkedTasksByPipeline,
+            onOpenPath: openStagePath,
+            onOpenFlow: openPipelineFlow,
+            onOpenTask: openPipelineTask,
+          }}
+          onClose={() => setPipelineSheetOpen(false)}
+        />
       ) : null}
 
       {taskSheet ? (
@@ -678,98 +686,6 @@ function PipelineFocusRow({ pipeline, index, flows, files, renderableFlows, rend
             />
           </div>
         </div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * The phone uses the shared compact pipeline rail with 44px tap targets. This
- * preserves configuration, evidence history, transcript navigation, task links,
- * and pipeline actions on every mobile surface.
- */
-export function MobilePipelineDock({
-  pipeline,
-  flows = [],
-  files = [],
-  renderablePaths,
-  renderableFlows,
-  linkedTasks = [],
-  /** With a conversation focused, docks mount collapsed to one 44px disclosure
-      row so the transcript stays the dominant surface (issue #156). The
-      empty-state branch — where the dock IS the surface — mounts expanded. */
-  defaultExpanded = true,
-  onOpenPath,
-  onOpenFlow,
-  onOpenTask,
-}: {
-  pipeline: Pipeline;
-  flows?: Flow[];
-  files?: readonly FileEntry[];
-  renderablePaths?: ReadonlySet<string>;
-  renderableFlows?: ReadonlySet<string>;
-  linkedTasks?: BoardTask[];
-  defaultExpanded?: boolean;
-  onOpenPath?: (path: string) => void;
-  onOpenFlow?: (flowId: string) => void;
-  onOpenTask?: (task: BoardTask) => void;
-}) {
-  const { t } = useLocale();
-  const [expanded, setExpanded] = useState(defaultExpanded);
-  const draft = pipeline.state === "draft";
-  const attention = PIPELINE_ATTENTION_STATES.has(pipeline.state);
-  const busyState = PIPELINE_BUSY_STATES.has(pipeline.state);
-  /* The SAME single "stage k/n" derivation as the strip header and the live
-     region (#353), so the collapsed row and the expanded rail can never
-     disagree about position. */
-  const { k: position, n: total } = pipelineStagePosition(pipeline);
-  const statusBadge = busyState
-    ? "bg-accent-soft text-accent"
-    : attention || draft
-      ? "bg-warning-soft text-warning"
-      : pipeline.state === "completed"
-        ? "bg-success-soft text-success"
-        : "bg-sunken text-muted";
-  return (
-    <div className="px-2 py-1.5 [&_button]:!h-11 [&_button]:!min-h-11" data-testid="mobile-pipeline-dock" data-pipeline-draft={draft || undefined}>
-      <button
-        type="button"
-        data-testid="mobile-pipeline-dock-summary"
-        aria-expanded={expanded}
-        aria-label={t(expanded ? "pipelineMobile.collapseDock" : "pipelineMobile.expandDock", { task: pipeline.task })}
-        onClick={() => setExpanded((prev) => !prev)}
-        className="flex min-h-11 w-full items-center gap-2 rounded-control px-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-      >
-        <span
-          className={`h-2.5 w-2.5 shrink-0 rounded-full ${
-            busyState ? "animate-pulse bg-accent" : attention || draft ? "bg-warning" : pipeline.state === "completed" ? "bg-success" : "bg-strong"
-          }`}
-          aria-hidden
-        />
-        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-primary">{pipeline.task}</span>
-        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-caption font-semibold ${statusBadge}`}>
-          {pipelineStateLabel(t, pipeline.state)}
-        </span>
-        {!draft && total ? (
-          <span className="shrink-0 text-label font-semibold tabular-nums text-muted">
-            {t("pipelineStrip.stageOf", { k: position, n: total })}
-          </span>
-        ) : null}
-        {expanded ? <ChevronUp className="h-4 w-4 shrink-0 text-muted" aria-hidden /> : <ChevronDown className="h-4 w-4 shrink-0 text-muted" aria-hidden />}
-      </button>
-      {expanded ? (
-        <PipelineStrip
-          pipeline={pipeline}
-          flows={flows}
-          files={files}
-          renderablePaths={renderablePaths}
-          renderableFlows={renderableFlows}
-          mobile
-          linkedTasks={linkedTasks}
-          onOpenPath={onOpenPath}
-          onOpenFlow={onOpenFlow}
-          onOpenTask={onOpenTask}
-        />
       ) : null}
     </div>
   );

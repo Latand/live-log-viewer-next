@@ -316,7 +316,9 @@ test("an active pipeline-owned review keeps prior same-round bindings in the com
   await settle();
 
   expect(dom.document.querySelector("[data-review-deck-collapse]")).toBeNull();
-  expect(dom.document.querySelector('[data-testid="mobile-pipeline-dock"]')).not.toBeNull();
+  /* Chat-first (#419): the dock lives behind the one-row summary now. */
+  const pipelineSummary = dom.document.querySelector('[data-testid="mobile-pipeline-summary"]') as unknown as HTMLButtonElement | null;
+  expect(pipelineSummary).not.toBeNull();
   const focusRow = dom.document.querySelector('[data-testid="mobile-pipeline-focus-row"]');
   expect(focusRow).not.toBeNull();
   const focusLabels = [...focusRow!.querySelectorAll("button")].map((button) => button.getAttribute("aria-label"));
@@ -325,9 +327,12 @@ test("an active pipeline-owned review keeps prior same-round bindings in the com
   const deckChip = [...dom.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "R Flow");
   expect(deckChip).toBeUndefined();
 
-  const dock = dom.document.querySelector('[data-testid="mobile-pipeline-dock"]');
-  /* With a conversation focused the dock mounts collapsed (#156); the full rail
-     — and its verdict/round history — stays reachable behind the disclosure. */
+  /* Open the sheet, then expand the dock (#156/#419); the full rail — and its
+     verdict/round history — stays reachable behind the two disclosures. */
+  flushSync(() => pipelineSummary!.click());
+  await settle();
+  const dock = dom.document.querySelector('[data-testid="mobile-pipeline-sheet"] [data-testid="mobile-pipeline-dock"]');
+  expect(dock).not.toBeNull();
   const summary = dock!.querySelector('[data-testid="mobile-pipeline-dock-summary"]') as unknown as HTMLButtonElement;
   flushSync(() => summary.click());
   await settle();

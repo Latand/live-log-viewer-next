@@ -528,15 +528,19 @@ export function settlePendingDeliveries(
   return { settled, remaining };
 }
 
-/** Removes one attachment per delivered snapshot entry (matched by content,
-    not position), so attachments added while the send was in flight survive. */
+/** Removes one attachment per delivered snapshot entry, so attachments added
+    while the send was in flight survive. Matches by the intake id first — the
+    exact attachment this attempt carried, even if an identical image is
+    re-attached later — and falls back to a `base64+mime` content match for
+    snapshots persisted by pre-id sessions (issue #419). */
 export function attachmentsAfterDelivery(
   current: readonly PendingImage[],
   delivered: readonly PendingImage[],
 ): PendingImage[] {
   const remaining = [...current];
   for (const sent of delivered) {
-    const index = remaining.findIndex((image) => image.base64 === sent.base64 && image.mime === sent.mime);
+    let index = sent.id ? remaining.findIndex((image) => image.id === sent.id) : -1;
+    if (index < 0) index = remaining.findIndex((image) => image.base64 === sent.base64 && image.mime === sent.mime);
     if (index >= 0) remaining.splice(index, 1);
   }
   return remaining;

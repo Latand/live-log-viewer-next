@@ -129,28 +129,32 @@ test("opening the mobile map keeps every active pipeline's full plan on a dock i
 
   flushSync(() => openBtn!.click());
 
-  /* Assert against the map overlay itself — the nearest fixed container of the
-     Close-map control. The page root also holds the focus-surface dock, so
-     querying it would pass even with the overlay dock removed; scoping to the
-     overlay makes the assertion fail without the fix. */
+  /* The map overlay carries the one-row pipeline summary (#419) instead of a
+     stack of dock rows; scoping to the overlay makes the assertion fail if the
+     summary is dropped. */
   const found = await waitFor(() => {
     const close = dom.document.querySelector('[aria-label="Close the map"]');
     const overlay = close?.closest("div.fixed");
-    return Boolean(overlay?.querySelector('[data-testid="mobile-pipeline-dock"]'));
+    return Boolean(overlay?.querySelector('[data-testid="mobile-pipeline-summary"]'));
   });
   expect(found).toBe(true);
 
   const overlay = dom.document.querySelector('[aria-label="Close the map"]')!.closest("div.fixed");
-  /* Docks mount collapsed inside the overlay (#156); the whole planned stage
-     graph stays one disclosure tap away. */
-  const summary = overlay!.querySelector('[data-testid="mobile-pipeline-dock-summary"]') as HTMLButtonElement | null;
+  /* Tapping the summary opens the sheet where docks mount collapsed (#156/#419);
+     the whole planned stage graph stays two taps away. */
+  const overlaySummary = overlay!.querySelector('[data-testid="mobile-pipeline-summary"]') as HTMLButtonElement | null;
+  expect(overlaySummary).not.toBeNull();
+  flushSync(() => overlaySummary!.click());
+  await settle();
+  const sheet = dom.document.querySelector('[data-testid="mobile-pipeline-sheet"]')!;
+  const summary = sheet.querySelector('[data-testid="mobile-pipeline-dock-summary"]') as HTMLButtonElement | null;
   expect(summary).not.toBeNull();
   flushSync(() => summary!.click());
   await settle();
   /* Every planned stage keeps a labeled queued/waiting placeholder (#388): the
      full stage graph is present with each stage named and its state visible. */
-  const plan = overlay!.querySelector('[data-pipeline-stage="plan"]');
-  const build = overlay!.querySelector('[data-pipeline-stage="build"]');
+  const plan = sheet.querySelector('[data-pipeline-stage="plan"]');
+  const build = sheet.querySelector('[data-pipeline-stage="build"]');
   expect(plan).not.toBeNull();
   expect(build).not.toBeNull();
   expect(plan!.getAttribute("data-stage-presentation")).toBe("waiting");
@@ -158,6 +162,10 @@ test("opening the mobile map keeps every active pipeline's full plan on a dock i
   expect(plan!.textContent).toContain("Waiting");
   expect(build!.textContent).toContain("Waiting");
 
+  /* Close the sheet so it stops covering the map's framing control. */
+  const sheetClose = sheet.querySelector('[aria-label="Close pipelines"]') as unknown as HTMLButtonElement;
+  flushSync(() => sheetClose.click());
+  await settle();
   const framing = overlay!.querySelector('[aria-label="Map framing"]')!;
   const all = Array.from(framing.querySelectorAll("button")).find((button) => button.textContent === "All");
   const current = Array.from(framing.querySelectorAll("button")).find((button) => button.textContent === "Current");
