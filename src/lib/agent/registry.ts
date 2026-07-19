@@ -229,6 +229,9 @@ export interface SpawnRequest {
   engine: AgentEngine;
   cwd: string;
   transport?: "tmux" | "structured" | null;
+  /** Persist the current process as owner of a pre-host actuation. A replay
+      may adopt the receipt after this owner exits. */
+  ownStartingActuation?: boolean;
   launchProfile?: Partial<LaunchProfile>;
   clientAttemptId?: string | null;
   requestDigest?: string | null;
@@ -2717,7 +2720,7 @@ export class AgentRegistry {
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
         transport: input.transport ?? null,
-        admissionOwner: input.transport === "structured"
+        admissionOwner: input.transport === "structured" || input.ownStartingActuation === true
           ? { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }
           : null,
         spawnCapabilityDigest: typeof input.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(input.spawnCapabilityDigest)
@@ -2801,13 +2804,11 @@ export class AgentRegistry {
     }
   }
 
-  /** Atomically adopts a structured receipt whose pre-host owner exited.
-      A live owner keeps responsibility for its process-local deferred work. */
-  claimStartingStructuredSpawn(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
+  private claimStartingSpawn(launchId: string, transport: "tmux" | "structured"): { claimed: boolean; receipt: SpawnReceipt } {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt) throw new Error("unknown spawn receipt");
-      if (receipt.transport !== "structured" || receipt.state !== "starting" || receipt.key || receipt.pane) {
+      if (receipt.transport !== transport || receipt.state !== "starting" || receipt.key || receipt.pane) {
         return { claimed: false, receipt: clone(receipt) };
       }
       if (receipt.admissionOwner && this.ownerAlive(receipt.admissionOwner)) {
@@ -2819,6 +2820,17 @@ export class AgentRegistry {
       };
       return { claimed: true, receipt: clone(receipt) };
     });
+  }
+
+  /** Atomically adopts a structured receipt whose pre-host owner exited.
+      A live owner keeps responsibility for its process-local deferred work. */
+  claimStartingStructuredSpawn(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
+    return this.claimStartingSpawn(launchId, "structured");
+  }
+
+  /** Atomically adopts an unbound tmux receipt after its actuation owner exits. */
+  claimStartingTmuxSpawn(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
+    return this.claimStartingSpawn(launchId, "tmux");
   }
 
   /** Compare-and-set release of a starting structured admission: only the

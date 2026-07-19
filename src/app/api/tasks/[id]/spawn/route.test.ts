@@ -616,3 +616,128 @@ test("process stop after pane settlement replays one launch into one task pipeli
     srcPath: artifactPath,
   })]);
 });
+
+test("process stop after pipeline intent resumes one unbound launch exactly once", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-pre-actuation-recovery-"));
+  const registryPath = path.join(cwd, "registry.json");
+  let registry = new AgentRegistry(registryPath, () => true, undefined, { sqliteMode: "off" });
+  const sessionId = crypto.randomUUID();
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  let tasks: BoardTask[] = [{
+    id: "f4371000-89c5-0064-9118-51661c4f0437",
+    project: "live-log-viewer-next",
+    status: "inbox",
+    text: "Recover pre-actuation task ownership",
+    placement: "pinned",
+    pos: { x: 0, y: 0 },
+    assignments: [],
+    createdAt: "2026-07-20T09:00:00.000Z",
+    updatedAt: "2026-07-20T09:00:00.000Z",
+  }];
+  const pipelineIntents: Array<{
+    id: string;
+    taskId: string;
+    launchId: string;
+    conversationId: string;
+    srcPath: string | null;
+  }> = [];
+  let stopAfterIntent = true;
+  let spawnCalls = 0;
+  const dependencies = {
+    registry: () => registry,
+    loadTasks: () => tasks,
+    mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
+      const mutation = mutator(tasks);
+      if (mutation.tasks) tasks = mutation.tasks;
+      return mutation.result;
+    },
+    resolveSpawnAccount: () => ({
+      engine: "claude" as const,
+      accountId: "claude-work",
+      kind: "managed" as const,
+      home: cwd,
+      transcriptRoot: cwd,
+      env: { NODE_ENV: "test" },
+    }),
+    resolveSpawnedTranscriptPath: async () => artifactPath,
+    ensureTaskPipelineForAssignment: async (task: BoardTask, spawnParams: {
+      launchId: string;
+      conversationId: string;
+      srcPath: string | null;
+    }) => {
+      let intent = pipelineIntents.find((candidate) => candidate.taskId === task.id) ?? null;
+      if (!intent) {
+        intent = {
+          id: "pipeline-pre-actuation-437",
+          taskId: task.id,
+          launchId: spawnParams.launchId,
+          conversationId: spawnParams.conversationId,
+          srcPath: spawnParams.srcPath,
+        };
+        pipelineIntents.push(intent);
+        if (stopAfterIntent) {
+          stopAfterIntent = false;
+          throw new Error("process stopped after pipeline intent");
+        }
+      }
+      if (spawnParams.srcPath) intent.srcPath = spawnParams.srcPath;
+      return { pipeline: { id: intent.id } as Pipeline };
+    },
+    spawnAgentWithPrompt: async (_spec: unknown, _prompt: string, receipt: SpawnReceipt) => {
+      spawnCalls += 1;
+      const binding = {
+        endpoint: "/tmp",
+        server: { pid: 93, startIdentity: "93:one" },
+        paneId: "%44",
+        panePid: { pid: 3627440, startIdentity: "3627440:one" },
+        target: "agents:44.0",
+      };
+      registry.bindSpawnPane(receipt.launchId, binding);
+      const host = {
+        kind: "tmux" as const,
+        ...binding,
+        windowName: "claude-builder",
+        agent: { pid: 3627441, startIdentity: "3627441:one" },
+        argv: ["claude"],
+      };
+      registry.markSpawnHostVerified(receipt.launchId, host);
+      registry.markSpawnPromptDelivered(receipt.launchId);
+      fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: { content: tasks[0]!.text } })}\n`);
+      return { paneId: "%44", display: "agents:44.0", panePid: 3627440, host, receipt };
+    },
+  } as Parameters<typeof POST.withDependencies>[2];
+  const request = () => new NextRequest(`http://127.0.0.1/api/tasks/${tasks[0]!.id}/spawn`, {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      clientAttemptId: "task_pre_actuation_recovery_20260720_a1",
+    }),
+  });
+  const context = { params: Promise.resolve({ id: tasks[0]!.id }) };
+
+  await expect(POST.withDependencies(request(), context, dependencies)).rejects.toThrow("process stopped after pipeline intent");
+  expect(pipelineIntents).toHaveLength(1);
+  expect(spawnCalls).toBe(0);
+  expect(Object.values(registry.snapshot().receipts)).toEqual([expect.objectContaining({
+    state: "starting",
+    artifactPath: null,
+    pane: null,
+  })]);
+
+  registry = new AgentRegistry(registryPath, () => false, undefined, { sqliteMode: "off" });
+  const recovered = await POST.withDependencies(request(), context, dependencies);
+  const replayed = await POST.withDependencies(request(), context, dependencies);
+
+  expect([recovered.status, replayed.status]).toEqual([200, 200]);
+  expect(spawnCalls).toBe(1);
+  expect(pipelineIntents).toEqual([expect.objectContaining({
+    taskId: tasks[0]!.id,
+    srcPath: artifactPath,
+  })]);
+  expect(tasks[0]!.assignments).toEqual([expect.objectContaining({
+    path: artifactPath,
+    state: "delivered",
+  })]);
+});

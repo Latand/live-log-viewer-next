@@ -276,6 +276,7 @@ async function postTaskSpawn(
     transport: "tmux",
     accountId: account.accountId,
     origin: { kind: "operator" },
+    ownStartingActuation: true,
     launchProfile: spec.launchProfile,
     clientAttemptId,
     requestDigest: taskRequestDigest(task, shape),
@@ -283,73 +284,80 @@ async function postTaskSpawn(
   if (begun.kind === "conflict") {
     return NextResponse.json({ error: "task spawn attempt conflicts with its original request" }, { status: 409 });
   }
+  let launchReceipt = begun.receipt;
 
   const pipelineSpawnParams = (srcPath: string | null) => ({
     repoDir: cwdResult.cwd!,
     engine,
     model: selectedModel.model,
     effort: reasoning.effort,
-    launchId: begun.receipt.launchId,
-    conversationId: begun.receipt.conversationId,
+    launchId: launchReceipt.launchId,
+    conversationId: launchReceipt.conversationId,
     srcPath,
     retryOfLaunchId: retryOf?.launchId ?? null,
   });
 
   if (begun.kind === "replay") {
     if (dependencies.ensureTaskPipelineForAssignment) {
-      const binding = await dependencies.ensureTaskPipelineForAssignment(task, pipelineSpawnParams(begun.receipt.artifactPath));
+      const binding = await dependencies.ensureTaskPipelineForAssignment(task, pipelineSpawnParams(launchReceipt.artifactPath));
       if (!binding.pipeline) {
         const at = isoNow();
-        const patch = assignmentPatch(begun.receipt, at, account.accountId, engine);
-        return NextResponse.json(taskSpawnResponse(begun.receipt, task, { ...patch, state: "spawning" }, {
+        const patch = assignmentPatch(launchReceipt, at, account.accountId, engine);
+        return NextResponse.json(taskSpawnResponse(launchReceipt, task, { ...patch, state: "spawning" }, {
           error: binding.error ?? "could not bind task to a pipeline",
         }), { status: 202 });
       }
     }
-    const at = isoNow();
-    const patch = assignmentPatch(begun.receipt, at, account.accountId, engine);
-    try {
-      const result = persistAssignment(dependencies, id, patch, at);
-      if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-      const response = taskSpawnResponse(begun.receipt, result.task, patch);
-      const status = patch.state === "spawning" ? 202 : 200;
-      return NextResponse.json(response, { status });
-    } catch (error) {
-      return NextResponse.json(taskSpawnResponse(begun.receipt, task, { ...patch, state: "spawning" }, {
-        error: error instanceof Error ? error.message : "task assignment write failed",
-      }), { status: 202 });
+    const claim = registry.claimStartingTmuxSpawn(launchReceipt.launchId);
+    launchReceipt = claim.receipt;
+    if (!claim.claimed) {
+      const at = isoNow();
+      const patch = assignmentPatch(launchReceipt, at, account.accountId, engine);
+      try {
+        const result = persistAssignment(dependencies, id, patch, at);
+        if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
+        const response = taskSpawnResponse(launchReceipt, result.task, patch);
+        const status = patch.state === "spawning" ? 202 : 200;
+        return NextResponse.json(response, { status });
+      } catch (error) {
+        return NextResponse.json(taskSpawnResponse(launchReceipt, task, { ...patch, state: "spawning" }, {
+          error: error instanceof Error ? error.message : "task assignment write failed",
+        }), { status: 202 });
+      }
     }
   }
 
-  const admittedAt = isoNow();
-  const admittedPatch = assignmentPatch(begun.receipt, admittedAt, account.accountId, engine);
   let admittedTask = task;
-  try {
-    const admitted = persistAssignment(dependencies, id, admittedPatch, admittedAt);
-    if (!admitted.ok) {
-      registry.failSpawn(begun.receipt.launchId, admitted.error);
-      return NextResponse.json({ error: admitted.error }, { status: admitted.status });
+  if (begun.kind === "created") {
+    const admittedAt = isoNow();
+    const admittedPatch = assignmentPatch(launchReceipt, admittedAt, account.accountId, engine);
+    try {
+      const admitted = persistAssignment(dependencies, id, admittedPatch, admittedAt);
+      if (!admitted.ok) {
+        registry.failSpawn(launchReceipt.launchId, admitted.error);
+        return NextResponse.json({ error: admitted.error }, { status: admitted.status });
+      }
+      admittedTask = admitted.task;
+    } catch (error) {
+      registry.failSpawn(launchReceipt.launchId, "task admission could not be persisted");
+      const failed = registry.snapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
+      return NextResponse.json(taskSpawnResponse(failed, task, { ...admittedPatch, state: "failed" }, {
+        error: error instanceof Error ? error.message : "task admission could not be persisted",
+      }), { status: 500 });
     }
-    admittedTask = admitted.task;
-  } catch (error) {
-    registry.failSpawn(begun.receipt.launchId, "task admission could not be persisted");
-    const failed = registry.snapshot().receipts[begun.receipt.launchId] ?? begun.receipt;
-    return NextResponse.json(taskSpawnResponse(failed, task, { ...admittedPatch, state: "failed" }, {
-      error: error instanceof Error ? error.message : "task admission could not be persisted",
-    }), { status: 500 });
-  }
 
-  if (dependencies.ensureTaskPipelineForAssignment) {
-    const binding = await dependencies.ensureTaskPipelineForAssignment(admittedTask, pipelineSpawnParams(null));
-    if (!binding.pipeline) {
-      registry.failSpawn(begun.receipt.launchId, binding.error ?? "could not reserve task pipeline");
-      const failed = registry.snapshot().receipts[begun.receipt.launchId] ?? begun.receipt;
-      const failedAt = isoNow();
-      const failedPatch = assignmentPatch(failed, failedAt, account.accountId, engine);
-      const persisted = persistAssignment(dependencies, id, failedPatch, failedAt);
-      return NextResponse.json(taskSpawnResponse(failed, persisted.ok ? persisted.task : admittedTask, failedPatch, {
-        error: binding.error ?? "could not reserve task pipeline",
-      }), { status: binding.status ?? 500 });
+    if (dependencies.ensureTaskPipelineForAssignment) {
+      const binding = await dependencies.ensureTaskPipelineForAssignment(admittedTask, pipelineSpawnParams(null));
+      if (!binding.pipeline) {
+        registry.failSpawn(launchReceipt.launchId, binding.error ?? "could not reserve task pipeline");
+        const failed = registry.snapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
+        const failedAt = isoNow();
+        const failedPatch = assignmentPatch(failed, failedAt, account.accountId, engine);
+        const persisted = persistAssignment(dependencies, id, failedPatch, failedAt);
+        return NextResponse.json(taskSpawnResponse(failed, persisted.ok ? persisted.task : admittedTask, failedPatch, {
+          error: binding.error ?? "could not reserve task pipeline",
+        }), { status: binding.status ?? 500 });
+      }
     }
   }
 
@@ -357,7 +365,7 @@ async function postTaskSpawn(
   const prompt = [task.text, ...attachmentPaths].join("\n");
   const startedAtMs = Date.now();
   try {
-    const pane: SpawnedPane = await dependencies.spawnAgentWithPrompt(spec, prompt, begun.receipt);
+    const pane: SpawnedPane = await dependencies.spawnAgentWithPrompt(spec, prompt, launchReceipt);
     const transcript = await dependencies.resolveSpawnedTranscriptPath({
       engine,
       knownTranscript: spec.transcript ?? null,
@@ -368,7 +376,7 @@ async function postTaskSpawn(
     });
     const key = transcript ? sessionKeyFromTranscript(engine, transcript) : null;
     if (transcript && key) {
-      const settled = registry.settleSpawn(begun.receipt.launchId, {
+      const settled = registry.settleSpawn(launchReceipt.launchId, {
         key,
         artifactPath: transcript,
         cwd: cwdResult.cwd,
@@ -382,10 +390,10 @@ async function postTaskSpawn(
       });
       if (settled.kind === "conflict") throw new Error(settled.code);
     } else {
-      registry.markSpawnPathPending(begun.receipt.launchId);
+      registry.markSpawnPathPending(launchReceipt.launchId);
     }
   } catch (error) {
-    const observed = registry.snapshot().receipts[begun.receipt.launchId] ?? begun.receipt;
+    const observed = registry.snapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
     if (observed.pane) {
       if (observed.state === "prompt-delivered" || observed.state === "host-verified") {
         registry.markSpawnPathPending(observed.launchId);
@@ -404,8 +412,8 @@ async function postTaskSpawn(
         error: error instanceof Error ? error.message : "task spawn attribution is pending",
       }), { status: 202 });
     }
-    registry.failSpawn(begun.receipt.launchId, error instanceof Error ? error.message : "task spawn failed");
-    const failed = registry.snapshot().receipts[begun.receipt.launchId] ?? observed;
+    registry.failSpawn(launchReceipt.launchId, error instanceof Error ? error.message : "task spawn failed");
+    const failed = registry.snapshot().receipts[launchReceipt.launchId] ?? observed;
     const at = isoNow();
     const patch = assignmentPatch(failed, at, account.accountId, engine);
     try {
@@ -419,7 +427,7 @@ async function postTaskSpawn(
     }), { status: 500 });
   }
 
-  const completed = registry.snapshot().receipts[begun.receipt.launchId] ?? begun.receipt;
+  const completed = registry.snapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
   const completedAt = isoNow();
   const completedPatch = assignmentPatch(completed, completedAt, account.accountId, engine);
   if (dependencies.ensureTaskPipelineForAssignment && completed.artifactPath) {
