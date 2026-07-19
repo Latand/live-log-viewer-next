@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
+import { act } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -58,6 +59,20 @@ const SAVED: Record<string, unknown> = {};
 
 /* Reads resolve on a microtask, so let the promise `.then` and React's flush run. */
 const tick = async () => { await Promise.resolve(); await new Promise((resolve) => setTimeout(resolve, 0)); };
+const waitFor = async (condition: () => boolean, timeoutMs = 1000): Promise<void> => {
+  const previousActEnvironment = G.IS_REACT_ACT_ENVIRONMENT;
+  G.IS_REACT_ACT_ENVIRONMENT = true;
+  const deadline = Date.now() + timeoutMs;
+  try {
+    while (!condition()) {
+      if (Date.now() >= deadline) throw new Error("timed out waiting for React state to settle");
+      await act(tick);
+    }
+  } finally {
+    if (previousActEnvironment === undefined) delete G.IS_REACT_ACT_ENVIRONMENT;
+    else G.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+  }
+};
 
 const captured: { api: UseImageAttachmentsReturn | null; errors: string[] } = { api: null, errors: [] };
 const api = () => captured.api!;
@@ -114,7 +129,7 @@ test("each read settles independently — a slow file never blocks its siblings"
   expect(statusesOf()).toEqual(["reading", "ready"]);
   expect(api().images.map((image) => image.base64)).toEqual(["ZmFzdA=="]);
   DeferredReader.take("slow.png").resolve("data:image/png;base64,c2xvdw==");
-  await tick();
+  await waitFor(() => statusesOf().join() === "ready,ready");
   expect(statusesOf()).toEqual(["ready", "ready"]);
   /* Ready projection preserves selection order regardless of settle order. */
   expect(api().images.map((image) => image.base64)).toEqual(["c2xvdw==", "ZmFzdA=="]);

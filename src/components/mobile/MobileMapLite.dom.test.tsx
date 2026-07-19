@@ -18,6 +18,7 @@ const OVERRIDES: Record<string, unknown> = {
   HTMLElement: dom.HTMLElement,
   Event: dom.Event,
   MouseEvent: dom.MouseEvent,
+  WheelEvent: dom.WheelEvent,
   sessionStorage: dom.sessionStorage,
   localStorage: dom.localStorage,
   matchMedia: (q: string) => ({ matches: /max-width/.test(String(q)), media: String(q), onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent() { return false; } }),
@@ -111,4 +112,106 @@ test("all framing consumes the negative world origin", async () => {
 
   const marker = dom.document.querySelector(`[data-map-key="${node.file.path}"]`) as unknown as HTMLElement;
   expect(Number.parseFloat(marker.style.left)).toBeCloseTo(28, 5);
+});
+
+test("all framing fits negative, distant, and clustered bounds while wheel zoom stays continuous", async () => {
+  const source = buildMobileMapFixture(500);
+  source.layout.nodes[0]!.x = -1_200;
+  source.layout.nodes[0]!.y = -800;
+  source.layout.nodes[399]!.x = source.layout.width + 20_000;
+  source.layout.nodes[400]!.x = source.layout.width + 60_000;
+  source.layout.nodes[400]!.y = source.layout.height + 30_000;
+
+  mount(<MobileMapLite layout={source.layout} tasks={source.tasks} workerStacks={source.workerStacks} frame="all" ringKey={null} onPick={() => {}} />);
+  await settle();
+
+  const map = dom.document.querySelector('[data-testid="mobile-map"]') as unknown as HTMLElement;
+  const markers = [...dom.document.querySelectorAll('[data-testid="mobile-map-marker"]')] as unknown as HTMLElement[];
+  const clusters = [...dom.document.querySelectorAll('[data-testid="mobile-map-cluster"]')] as unknown as HTMLElement[];
+  expect(markers).toHaveLength(400);
+  expect(clusters.length).toBeGreaterThan(0);
+
+  for (const element of [...markers, ...clusters]) {
+    const left = Number.parseFloat(element.style.left);
+    const top = Number.parseFloat(element.style.top);
+    const width = element.dataset.testid === "mobile-map-marker" ? Number.parseFloat(element.style.width) : 40;
+    const height = element.dataset.testid === "mobile-map-marker" ? Number.parseFloat(element.style.height) : 40;
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect(top).toBeGreaterThanOrEqual(0);
+    expect(left + width).toBeLessThanOrEqual(390);
+    expect(top + height).toBeLessThanOrEqual(620);
+  }
+  expect(markers.every((marker) => Number.parseFloat(marker.style.width) >= 40 && Number.parseFloat(marker.style.height) >= 40)).toBe(true);
+
+  const negativeMarker = dom.document.querySelector(`[data-map-key="${source.layout.nodes[0]!.file.path}"]`) as unknown as HTMLElement;
+  const leftBeforeZoom = Number.parseFloat(negativeMarker.style.left);
+  const zoomIn = new dom.WheelEvent("wheel", { bubbles: true, deltaY: -100 });
+  Object.defineProperties(zoomIn, { clientX: { value: 195 }, clientY: { value: 310 } });
+  flushSync(() => map.dispatchEvent(zoomIn as unknown as Event));
+  await settle();
+  const leftAfterZoomIn = Number.parseFloat(negativeMarker.style.left);
+  expect(leftAfterZoomIn).toBeLessThan(leftBeforeZoom);
+  expect(Math.abs(leftAfterZoomIn - leftBeforeZoom)).toBeLessThan(100);
+
+  const zoomOut = new dom.WheelEvent("wheel", { bubbles: true, deltaY: 100 });
+  Object.defineProperties(zoomOut, { clientX: { value: 195 }, clientY: { value: 310 } });
+  flushSync(() => map.dispatchEvent(zoomOut as unknown as Event));
+  await settle();
+  expect(Number.parseFloat(negativeMarker.style.left)).toBeCloseTo(leftBeforeZoom, 5);
+});
+
+test("current framing centers the retained focus marker at interactive scale", async () => {
+  const source = buildMobileMapFixture(500);
+  const focused = source.layout.nodes[450]!;
+  mount(
+    <MobileMapLite
+      layout={source.layout}
+      tasks={source.tasks}
+      workerStacks={source.workerStacks}
+      frame="current"
+      ringKey={focused.file.path}
+      onPick={() => {}}
+    />,
+  );
+  await settle();
+
+  const marker = dom.document.querySelector(`[data-map-key="${focused.file.path}"]`) as unknown as HTMLElement;
+  const left = Number.parseFloat(marker.style.left);
+  const top = Number.parseFloat(marker.style.top);
+  const width = Number.parseFloat(marker.style.width);
+  const height = Number.parseFloat(marker.style.height);
+  expect(left + width / 2).toBeCloseTo(195, 5);
+  expect(top + height / 2).toBeCloseTo(310, 5);
+  expect({ width, height }).toEqual({ width: focused.w, height: focused.h });
+});
+
+test("current framing without a ring keeps the fitted fallback gesture floor", async () => {
+  const source = buildMobileMapFixture(8);
+  const leftNode = { ...source.layout.nodes[0]!, x: -5_000 };
+  const rightNode = { ...source.layout.nodes[1]!, x: 5_000 };
+  const layout = {
+    ...source.layout,
+    nodes: [leftNode, rightNode],
+    edges: [],
+    stacks: [],
+    decks: [],
+    drafts: [],
+    byPath: new Map([[leftNode.file.path, leftNode], [rightNode.file.path, rightNode]]),
+    width: 1,
+    height: 1,
+  };
+  mount(<MobileMapLite layout={layout} tasks={[]} workerStacks={[]} frame="current" ringKey={null} onPick={() => {}} />);
+  await settle();
+
+  const map = dom.document.querySelector('[data-testid="mobile-map"]') as unknown as HTMLElement;
+  const marker = dom.document.querySelector(`[data-map-key="${leftNode.file.path}"]`) as unknown as HTMLElement;
+  const leftBeforeZoom = Number.parseFloat(marker.style.left);
+  const zoomIn = new dom.WheelEvent("wheel", { bubbles: true, deltaY: -100 });
+  Object.defineProperties(zoomIn, { clientX: { value: 195 }, clientY: { value: 310 } });
+  flushSync(() => map.dispatchEvent(zoomIn as unknown as Event));
+  await settle();
+
+  const leftAfterZoom = Number.parseFloat(marker.style.left);
+  expect(leftAfterZoom).toBeLessThan(leftBeforeZoom);
+  expect(Math.abs(leftAfterZoom - leftBeforeZoom)).toBeLessThan(100);
 });

@@ -95,7 +95,7 @@ export interface PipelinePorts {
   patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
   closeFlow(id: string): Promise<unknown>;
   getFlow(id: string): Flow | null;
-  findFlow(implementerPath: string, baseRef: string, createdAfter: string): Flow | null;
+  findFlow(implementerPath: string, implementerConversationId: string | null, baseRef: string): Flow | null;
   projectForCwd(cwd: string): string | null;
   now(): string;
 }
@@ -287,8 +287,13 @@ export function defaultPipelinePorts(): PipelinePorts {
     patchFlow: (id, action, note) => patchFlow(id, { action, ...(note ? { note } : {}) }),
     closeFlow,
     getFlow: (id) => loadFlows().find((flow) => flow.id === id) ?? null,
-    findFlow: (implementerPath, baseRef, createdAfter) => loadFlows()
-      .filter((flow) => flow.implementerPath === implementerPath && flow.baseRef === baseRef && flow.createdAt >= createdAfter)
+    findFlow: (implementerPath, implementerConversationId, baseRef) => loadFlows()
+      .filter((flow) =>
+        flow.baseRef === baseRef
+        && flow.closedAt === null
+        && flow.state !== "closed"
+        && (flow.implementerPath === implementerPath
+          || Boolean(implementerConversationId && flow.implementerConversationId === implementerConversationId)))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null,
     projectForCwd,
     now: () => new Date().toISOString(),
@@ -463,6 +468,16 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAtte
   };
   run.attempts.push(attempt);
   return attempt;
+}
+
+function attachReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow): void {
+  attempt.flowId = flow.id;
+  const round = flow.rounds.at(-1);
+  attempt.launchId = round?.launchId ?? attempt.launchId;
+  attempt.sessionId = round?.sessionId ?? attempt.sessionId;
+  attempt.agentPath = round?.reviewerPath ?? attempt.agentPath;
+  attempt.conversationId = round?.reviewerConversationId ?? attempt.conversationId;
+  attempt.paneId = round?.reviewerPane?.paneId ?? attempt.paneId;
 }
 
 /** Advance along the pass edge, persisting the relay record: the completed
@@ -845,9 +860,10 @@ async function tickReviewStage(
   setCursorState(pipeline, stage.id, "reviewing");
 
   if (!attempt.flowId) {
-    const existing = ports.findFlow(implementer.agentPath, pipeline.baseRef, attempt.startedAt);
+    const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, pipeline.baseRef);
     if (existing) {
-      attempt.flowId = existing.id;
+      attachReviewFlowAttempt(attempt, existing);
+      persist();
       return;
     }
     persist();
@@ -863,6 +879,8 @@ async function tickReviewStage(
     };
     const created = await ports.createFlow({
       implementerPath: implementer.agentPath,
+      ...(implementer.conversationId ? { implementerConversationId: implementer.conversationId } : {}),
+      deliverKickoff: false,
       roles: { implementer: implementerRole, reviewer: reviewerRole },
       baseMode: "head",
       baseRef: pipeline.baseRef,
@@ -875,7 +893,7 @@ async function tickReviewStage(
       park(pipeline, `creating the review flow failed: ${created.error ?? "unknown error"}`, attempt);
       return;
     }
-    attempt.flowId = created.flow.id;
+    attachReviewFlowAttempt(attempt, created.flow);
     persist();
     if (created.flow.state === "paused") {
       park(pipeline, `review flow startup paused: ${created.flow.stateDetail ?? "kickoff delivery failed"}`, attempt);
@@ -914,10 +932,7 @@ async function tickReviewStage(
     if (advanced.error) park(pipeline, `advancing the review flow failed: ${advanced.error}`, attempt);
     return;
   }
-  const round = flow.rounds.at(-1);
-  attempt.sessionId = round?.sessionId ?? attempt.sessionId;
-  attempt.agentPath = round?.reviewerPath ?? attempt.agentPath;
-  attempt.conversationId = round?.reviewerConversationId ?? attempt.conversationId;
+  attachReviewFlowAttempt(attempt, flow);
   if (flow.state === "approved") {
     attempt.output = `Review loop approved after ${flow.rounds.length} round(s).`;
     attempt.verdict = { status: "pass", confidence: 1 };

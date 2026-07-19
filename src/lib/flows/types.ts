@@ -160,6 +160,12 @@ export type FlowPreset = {
 
 export type CreateFlowRequest = {
   implementerPath: string;
+  /** Stable Viewer identity supplied by durable controllers when the current
+      scanner slice does not contain the implementer transcript. */
+  implementerConversationId?: string;
+  /** Live implement-review flows deliver their kickoff to the implementer.
+      Terminal pipeline stages start review directly through advance. */
+  deliverKickoff?: boolean;
   preset?: string; // preset name; mutually exclusive with roles
   roles?: Record<FlowRoleKey, RoleConfig>;
   baseMode: "head" | "merge-base";

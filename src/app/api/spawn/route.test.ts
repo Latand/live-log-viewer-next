@@ -737,7 +737,7 @@ test("agent capability binds src to the caller conversation", () => {
   expect(authenticatedAgentSpawnCaller(request, callerPath, store)).toEqual({
     kind: "agent",
     conversationId: begun.receipt.conversationId,
-    liveChildrenCap: 3,
+    liveChildrenCap: 20,
   });
 
   const other = store.ensureConversation("codex", "/sessions/other.jsonl", "terra");
@@ -800,7 +800,7 @@ test("operator capability file failures preserve agent admission and reject unkn
     expect(authenticatedAgentSpawnCaller(request(capability), callerPath, store)).toEqual({
       kind: "agent",
       conversationId: begun.receipt.conversationId,
-      liveChildrenCap: 3,
+      liveChildrenCap: 20,
     });
     expect(authenticatedAgentSpawnCaller(request("C".repeat(43)), "/caller.jsonl", store)).toEqual({
       error: expect.stringContaining("capability read failed"),
