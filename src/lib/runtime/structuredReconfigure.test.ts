@@ -374,6 +374,94 @@ test("a profile-only reconfigure retires its superseded account migration before
   expect(calls).toEqual({ create: 0, verify: 0, publish: 0, cleanup: 1 });
 });
 
+test("a profile-only reconfigure retires a migration after a newer same-target account claim", async () => {
+  const target = fixture();
+  const successorPath = path.join(path.dirname(target.transcript), "same-target-superseded.jsonl");
+  fs.writeFileSync(successorPath, "{}\n");
+  const receipt = {
+    operationId: "pending",
+    nativeId: "thread-same-target-superseded",
+    path: successorPath,
+    continuityPaths: [successorPath],
+    historyHash: "same-target-superseded-history",
+    host: { kind: "codex-app-server" as const, identity: "same-target-superseded-host", epoch: 1, verifiedAt: "2026-07-19T12:00:00.000Z" },
+  };
+  const common = {
+    registry: target.registry,
+    validateAccount: async () => {},
+    resolveAccount: () => ({}) as never,
+  };
+
+  const first = await applyStructuredReconfigure(effect({
+    operationId: "same-target-first",
+    conversationId: target.conversationId,
+    accountId: "target",
+    eventSeq: 50,
+  }), {
+    ...common,
+    migrate: async (conversationId, _accountId, registry) => {
+      let migration = registry.conversation(conversationId)!.migration!;
+      if (migration.phase === "waiting-turn") {
+        migration = registry.transitionConversationMigration(conversationId, migration.revision, ["waiting-turn"], { phase: "requested" }).migration!;
+      }
+      migration = registry.transitionConversationMigration(conversationId, migration.revision, ["requested"], { phase: "preparing" }).migration!;
+      migration = registry.transitionConversationMigration(conversationId, migration.revision, ["preparing"], { phase: "successor-starting" }).migration!;
+      receipt.operationId = migration.operationId;
+      return registry.persistMigrationProviderReceipt(conversationId, migration.revision, migration.operationId, receipt);
+    },
+  });
+  expect(first).toBe("pending");
+
+  const second = await applyStructuredReconfigure(effect({
+    operationId: "same-target-second",
+    conversationId: target.conversationId,
+    accountId: "target",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    eventSeq: 51,
+  }), {
+    ...common,
+    migrate: async (conversationId, _accountId, registry) => registry.conversation(conversationId)!,
+  });
+  expect(second).toBe("pending");
+  expect(target.registry.conversation(target.conversationId)?.reconfigure).toMatchObject({
+    operationId: "same-target-second",
+    revision: 51,
+    status: "applying",
+  });
+  const migrationIntentId = target.registry.conversation(target.conversationId)!.migration!.intentId;
+  expect(target.registry.snapshot().migrationIntents[migrationIntentId]?.requestIds).toEqual([
+    "reconfigure:same-target-second:51",
+  ]);
+
+  await applyStructuredReconfigure(effect({
+    operationId: "same-target-profile-wins",
+    conversationId: target.conversationId,
+    model: "gpt-5.6-sol",
+    effort: "ultra",
+    eventSeq: 52,
+  }), {
+    registry: target.registry,
+    releaseHost: async () => true,
+    recover: async () => ({ target: null, path: target.transcript, conversationId: target.conversationId, spawned: true }),
+  });
+
+  const calls = { create: 0, verify: 0, publish: 0, cleanup: 0 };
+  const provider: SuccessorProviderPort = {
+    virtualSource: true,
+    async create() { calls.create += 1; return receipt; },
+    async verify() { calls.verify += 1; },
+    async publishHost() { calls.publish += 1; },
+    async cleanup() { calls.cleanup += 1; },
+  };
+  const delivery = { async deliver() { return "delivered" as const; } };
+  await reconcileMigrations(provider, delivery, target.registry);
+  await reconcileMigrations(provider, delivery, target.registry);
+
+  expect(target.registry.conversation(target.conversationId)?.migration?.phase).toBe("rolled-back");
+  expect(calls).toEqual({ create: 0, verify: 0, publish: 0, cleanup: 1 });
+});
+
 test("a failed apply durably restores a sparse profile with its operation fence", async () => {
   const target = fixture({ model: null, effort: null, fast: null });
   const request = effect({

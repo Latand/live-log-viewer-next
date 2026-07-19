@@ -720,6 +720,10 @@ function queueAbandonedMigrationCleanup(
   };
 }
 
+function reconfigureMigrationRequestId(owner: { operationId: string; revision: number }): string {
+  return `reconfigure:${owner.operationId}:${owner.revision}`;
+}
+
 function retireReconfigureOwnedMigration(
   file: RegistryFile,
   conversation: RegistryConversation,
@@ -728,7 +732,7 @@ function retireReconfigureOwnedMigration(
   const migration = conversation.migration;
   if (!migration || ["committed", "rolled-back", "failed-recoverable"].includes(migration.phase)) return;
   const intent = file.migrationIntents[migration.intentId];
-  const requestId = `reconfigure:${owner.operationId}:${owner.revision}`;
+  const requestId = reconfigureMigrationRequestId(owner);
   if (intent?.scope !== "conversation" || !intent.requestIds.includes(requestId)) return;
 
   const changedAt = now();
@@ -4442,7 +4446,20 @@ export class AgentRegistry {
       if (!source || source.accountId === null || source.accountId === targetId) return clone(conversation);
       if (conversation.migration
         && !["committed", "rolled-back", "failed-recoverable"].includes(conversation.migration.phase)) {
-        if (!reconfigureOwner || conversation.migration.targetId === targetId) return clone(conversation);
+        if (!reconfigureOwner) return clone(conversation);
+        if (conversation.migration.targetId === targetId) {
+          const intent = file.migrationIntents[conversation.migration.intentId];
+          if (intent?.scope === "conversation") {
+            const requestId = reconfigureMigrationRequestId(reconfigureOwner);
+            intent.requestIds = [
+              ...intent.requestIds.filter((candidate) => !candidate.startsWith("reconfigure:")),
+              requestId,
+            ];
+            intent.updatedAt = now();
+            conversation.updatedAt = intent.updatedAt;
+          }
+          return clone(conversation);
+        }
         const changedAt = now();
         const priorIntent = file.migrationIntents[conversation.migration.intentId];
         if (priorIntent?.scope === "conversation" && priorIntent.state !== "stopped") {
@@ -4458,7 +4475,7 @@ export class AgentRegistry {
       const changedAt = now();
       if (conversation.migrationOptOut?.targetId === targetId) conversation.migrationOptOut = null;
       const requestId = reconfigureOwner
-        ? `reconfigure:${reconfigureOwner.operationId}:${reconfigureOwner.revision}`
+        ? reconfigureMigrationRequestId(reconfigureOwner)
         : `reseat:${canonicalId}:${source.id}`;
       let intent = Object.values(file.migrationIntents)
         .filter((candidate) => candidate.scope === "conversation"

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -164,6 +164,22 @@ test("selecting a tier persists the sparse profile, announces, and closes (auto-
   expect(status.textContent).toBe("Next message: GPT-5.6-Sol · Ultra");
   expect(host.querySelector("[data-runtime-switch-pending]")?.textContent).toBe("switch pending");
   expect(requests.at(-1)).toMatchObject({ action: "reconfigure", model: "gpt-5.6-sol", effort: "ultra", fast: false });
+  await act(async () => root.unmount());
+});
+
+test("Strict Mode emits one structured reconfigure request for one selection", async () => {
+  const { host, root } = await renderPill(
+    <StrictMode>
+      <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />
+    </StrictMode>,
+  );
+  await click(host.querySelector("[data-runtime-pill]")!);
+  const ultra = [...host.querySelectorAll('[data-runtime-row="tier"]')]
+    .find((row) => row.textContent === "Ultra")!;
+  await click(ultra);
+
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toMatchObject({ action: "reconfigure", effort: "ultra" });
   await act(async () => root.unmount());
 });
 

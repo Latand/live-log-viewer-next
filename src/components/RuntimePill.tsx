@@ -97,6 +97,7 @@ export function RuntimePill({
   // catalog — the component renders null for those below, after the hooks.
   const [liveDraft, setLiveDraft] = useState<RuntimeDraft>(() =>
     engine ? defaults(file) : { model: "", effort: "", fast: false });
+  const liveDraftRef = useRef(liveDraft);
   const [applyState, setApplyState] = useState<ApplyState>("idle");
   const [error, setError] = useState("");
   const revisionRef = useRef(0);
@@ -121,6 +122,7 @@ export function RuntimePill({
     if (!engine) return;
     if (pillSurface !== "live-root" && pillSurface !== "structured") return;
     const stored = readDraft(file);
+    liveDraftRef.current = stored;
     setLiveDraft(stored);
     const phase = localStorage.getItem(phaseKey(file));
     operationRef.current = localStorage.getItem(phaseOperationKey(file));
@@ -291,18 +293,18 @@ export function RuntimePill({
       revisionRef.current += 1;
       localStorage.removeItem(phaseKey(file));
       localStorage.removeItem(phaseOperationKey(file));
-      setLiveDraft((current) => {
-        const scale = patch.model ? effortScale(engine, patch.model) ?? [] : effortScale(engine, current.model) ?? [];
-        const next: RuntimeDraft = {
-          ...current,
-          ...patch,
-          effort: patch.effort ?? (scale.includes(current.effort) ? current.effort : scale[0] ?? current.effort),
-        };
-        announceCommit(next);
-        if (pillSurface === "structured") writeProfile(file, patch);
-        void applyReconfigure(next);
-        return next;
-      });
+      const current = liveDraftRef.current;
+      const scale = patch.model ? effortScale(engine, patch.model) ?? [] : effortScale(engine, current.model) ?? [];
+      const next: RuntimeDraft = {
+        ...current,
+        ...patch,
+        effort: patch.effort ?? (scale.includes(current.effort) ? current.effort : scale[0] ?? current.effort),
+      };
+      liveDraftRef.current = next;
+      setLiveDraft(next);
+      announceCommit(next);
+      if (pillSurface === "structured") writeProfile(file, patch);
+      void applyReconfigure(next);
       return;
     }
     // Resume keeps a client-side profile that the next host launch consumes.
