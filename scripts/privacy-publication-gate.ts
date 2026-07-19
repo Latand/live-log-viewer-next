@@ -268,10 +268,16 @@ function decodeCommonMarkEscapes(text: string): string {
   return text.replaceAll(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, "$1");
 }
 
+function removeZeroWidthSeparators(text: string): string {
+  return text.replaceAll(/[\u200B-\u200D\u2060\uFEFF]/g, "");
+}
+
 export function canonicalSensitiveText(text: string): { error: boolean; text: string } {
-  let decoded = text.replaceAll(/[\u200B-\u200D\u2060\uFEFF]/g, "");
+  let decoded = removeZeroWidthSeparators(text);
   for (let pass = 0; pass < 16; pass += 1) {
-    const next = decodeCommonMarkEscapes(decodeHtmlEntities(decodePercentEncoding(decoded)));
+    const next = removeZeroWidthSeparators(
+      decodeCommonMarkEscapes(decodeHtmlEntities(decodePercentEncoding(decoded))),
+    );
     if (next === decoded) return { error: false, text: decoded };
     decoded = next;
   }
@@ -532,7 +538,7 @@ export function sensitiveClasses(text: string): Set<FindingClass> {
   if (/\b(?:10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|192\.168(?:\.\d{1,3}){2})\b/.test(searchableText)) {
     findings.add("private_network");
   }
-  if (/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i.test(searchableText)) {
+  if (/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i.test(searchableText)) {
     findings.add("resource_identifier");
   }
   if (/(?:^|\n)\s*(?:assistant|prompt|transcript|user)\s*:\s*\S/im.test(searchableText)) {

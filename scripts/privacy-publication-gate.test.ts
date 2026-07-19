@@ -469,6 +469,37 @@ describe("privacy publication gate", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
+  test("detects UUIDv7 session identifiers with class-only diagnostics", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const text = join(directory, "publication.md");
+    const sessionIdentifier = ["0190f47d", "1a2b", "7c3d", "8def", "123456789abc"].join("-");
+    writeFileSync(text, `Synthetic session: ${sessionIdentifier}\n`);
+
+    const result = runGate([text]);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\nresource_identifier: 1\n");
+    expect(output).not.toContain(sessionIdentifier);
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("keeps the all-zero UUID placeholder exempt", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const text = join(directory, "publication.md");
+    const placeholder = ["00000000", "0000", "0000", "0000", "000000000000"].join("-");
+    writeFileSync(text, `Synthetic placeholder: ${placeholder}\n`);
+
+    const result = runGate([text]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("detects a plain fine-grained GitHub PAT without exposing it", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
@@ -600,6 +631,19 @@ describe("privacy publication gate", () => {
       expected: "home_path",
       name: "mixed entity and percent encoding",
       publication: () => `${"&#37;26&#37;23x2f&#37;3B"}home&#37;26&#37;23x2f&#37;3Bfixture-person&#37;26&#37;23x2f&#37;3Brecords`,
+    },
+    {
+      expected: "home_path",
+      name: "entity-encoded zero-width separators",
+      publication: () => ["", "ho&#8203;me", "fixture-person", "records"].join("/"),
+    },
+    {
+      expected: "home_path",
+      name: "percent-encoded zero-width separators",
+      publication: () => {
+        const encodedSeparator = encodeURIComponent(String.fromCodePoint(0x200b));
+        return ["", `ho${encodedSeparator}me`, "fixture-person", "records"].join("/");
+      },
     },
     {
       expected: "home_path",
