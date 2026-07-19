@@ -202,12 +202,14 @@ export function buildMobileMapModel(
   }
   const clusters = clusterOverflow(overflow);
 
-  /* Parent lineage only, one path each — resolved against markers so a dangling
-     endpoint (an edge into a clustered node) is dropped rather than drawn. */
+  /* Parent lineage only, one path each. Clustering either endpoint removes the
+     connector, so every retained edge terminates at two visible markers. */
   const kept = new Set(markers.map((marker) => marker.key));
+  const visibleSources = markers.filter((marker) => marker.kind === "node").map((marker) => marker.rect);
   const edges: MapEdge[] = [];
   for (const edge of layout.edges) {
     if (!kept.has(edge.to)) continue;
+    if (!visibleSources.some((rect) => pointInRect(rect, edge.x1, edge.y1))) continue;
     edges.push({ x1: edge.x1, y1: edge.y1, x2: edge.x2, y2: edge.y2 });
     if (edges.length >= MAP_MARKER_CAP) break;
   }
@@ -229,6 +231,10 @@ export function buildMobileMapModel(
     world: { x: left, y: top, w: Math.max(right - left, 1), h: Math.max(bottom - top, 1) },
     total: candidates.length,
   };
+}
+
+function pointInRect(rect: MapRect, x: number, y: number): boolean {
+  return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
 }
 
 function bandRow(count: number, worldW: number): number {
