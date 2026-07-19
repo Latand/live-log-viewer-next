@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { deflateSync } from "node:zlib";
 
@@ -9,6 +9,8 @@ type Placeholder = {
   path: string;
   width: number;
 };
+
+const PRIVACY_GENERATOR_VERSION = "privacy-placeholders-v2";
 
 const placeholders: Placeholder[] = [
   { path: "docs/issue-177/after-bottom.png", width: 780, height: 1688, description: "Redacted placeholder for the post-change mobile bottom layout evidence." },
@@ -50,6 +52,46 @@ const placeholders: Placeholder[] = [
   { path: "docs/media/issue-353/edges-onestage-desktop.png", width: 1920, height: 1080, description: "Redacted placeholder for the single-stage desktop edge evidence." },
 ];
 
+const sourceDigests: Record<string, string> = {
+  "docs/issue-177/after-bottom.png": "f313695f6f53a836cc1068c6b90564d72f9ea34db5c4179f1a7ec2807f4e3715",
+  "docs/issue-177/after-card-header.png": "88c9604843d035d49b8cc2c8473e7c928fc5e54c74426b55587de1aa478a1875",
+  "docs/issue-177/after-composer.png": "c2abd18fa6b8b89ccab35867d3bdb5ab481c318e538a21e717868df49771176b",
+  "docs/issue-177/after-toggle-list.png": "e5c3f858b5e607e70eda2686bf95ebc142e657516252ecdda6b4ed9cdb288e2c",
+  "docs/issue-177/before-bottom.png": "2f16aac105f47becc0e281315a901c6ecc9b0a3b980f30a561541c73db9aed31",
+  "docs/issue-177/before-card-header.png": "adff93817b822ecb3c399019089085c1facfd36f490aae97e2c288bcb66225ce",
+  "docs/issue-177/before-composer.png": "689d51bc772e2b169ee6e6f7c41abfd749a3d15ca847628557cd64b7b791f05d",
+  "docs/issue-177/before-toggle-list.png": "ac525a2179a3b5ac985f3d5616b1eed75eac90665360c1670bae86d2dcc6183e",
+  "docs/acceptance/issue-388/desktop-en.png": "48feae049382008d409ed92c7ed8f0c2b63d2c4702c593422a33b591ae0b0354",
+  "docs/acceptance/issue-388/desktop-uk-preflight.png": "da1a4c5f6ac85201a814ed9198ced35ca6bafe81209b2c5f770ea5207d58427e",
+  "docs/acceptance/issue-388/desktop-uk.png": "8a20e0f407b5114f6ddad4c3d6e799bb562d341b9f1f1d4f97e5f1be93854139",
+  "docs/acceptance/issue-388/mobile-390-en.png": "90c4d3c7e02c845cb87173d85774adb5526b0bd1f04ac196fa40a85a44c65dfb",
+  "docs/acceptance/issue-388/mobile-390-uk.png": "395ddf2f81be9ea3906655b906ef44427f6c8dc776bf0182ff1bd34b9726a47e",
+  "docs/screenshots/issue-196/template-draft-desktop-1440.png": "715159ce6078ccb80316962f4a21000a7ee22bc46a77176d98079557a70e10ed",
+  "docs/screenshots/issue-196/template-draft-mobile-390.png": "217a32bf18afacc8cb2b1a6286136b55355e15d10026e10fbe7c9a2ab2d9727c",
+  "docs/screenshots/issue-136/builder-desktop-1440.png": "073fe5e8d008ecf7484989d482b3fef97930f12c39a6fab3126be40c1a764a2e",
+  "docs/screenshots/issue-136/builder-mobile-390.png": "f9236e9d7677c236bad5cc76b98ac8f756c55329664ed5cd8c92216b8a7514a4",
+  "docs/screenshots/mobile-tail-148-156/01-mobile-pipeline-full-plan.png": "f439de6c723f5630bc58716d0d738ef201aa0e52f7eb076c8202b637f8d25547",
+  "docs/screenshots/mobile-tail-148-156/02-mobile-drawer-header.png": "d2ab35caf766754f20ee9697256e0b0827032868df5d79bdecc1e8f63b317474",
+  "docs/screenshots/mobile-tail-148-156/03-mobile-accounts-sheet.png": "1c61facd071e6e0ab64edd0fed47e5bf6a00f5e54363f2819636e5dbe4c7a672",
+  "docs/screenshots/mobile-tail-148-156/04-drawer-header-before.png": "3616aceb4f9a5382eeaa285f51723ffb3f1f3291ca634c4f6c6272ff1e39719c",
+  "docs/screenshots/mobile-tail-148-156/05-drawer-header-after.png": "1e892c87be05892fe44b9711201e8b732290843b96d896c3b0f9d90b70a57a9a",
+  "docs/screenshots/mobile-tail-148-156/06-drawer-header-99plus-capped.png": "0b73a36e716ad2a9a34ac927bbe16fcedd3caf72b824b0d0f19f60ff4a4ac886",
+  "docs/acceptance/issue-290/readiness-kanban.png": "4bbee6dd05cd6ea991910ccb602e6eebe97160678a987fcbd82906635e9a4ff5",
+  "docs/media/issue-145/after-create-menu.png": "70fd36785d9fe5eaa5ad7a578e504b797d5ea3cf847c0b8f595f4be566eb60ab",
+  "docs/media/issue-145/after-desktop-unchanged.png": "94560d1282a1ff288f5c1ea5e9d0686d1f671005e9d3d139897581348feaf79c",
+  "docs/media/issue-145/after-drawer.png": "c361ca5e7abcc7e0fb5bfa5177d35fefc0d808f93ef6c8214e12bd3d1557546c",
+  "docs/media/issue-145/after-more-menu.png": "c9a419630a062a0fe918084bc7682ae02eba04de4e994cecdacc2c3a3ee6ce3e",
+  "docs/media/issue-145/after-scheme.png": "4b36302bc2db9182a331f1e436b3d01e9f3a0b233107069d7e9809672eb32c3f",
+  "docs/media/issue-145/before-scheme.png": "ef33aea419f8e0f69303ad1aef162356ce4889e4f4475ec49b1a7366f3eafc31",
+  "docs/media/issue-155-slice2/before-1440.png": "a43428d86f66669bd0ef35565c43ff997d41db83b4f684add04bdea542ca2af1",
+  "docs/media/issue-292/relation-navigate-desktop.png": "c61162c12b20e4080cabe341b59048a2427337c3215b56ceab6cd8a907cea238",
+  "docs/media/issue-292/relation-strip-desktop-uk.png": "284f9627ccbda4e32734d64bf01a8c67814dbad0153d964fba7cc8ca8c0d3122",
+  "docs/media/issue-292/relation-strip-desktop.png": "4113df0ba59d4f2a077b9a598b265b5d06faebeabbbca5d34d36d7bb5ebe8c39",
+  "docs/media/issue-292/task-card-expanded-desktop.png": "7bed3aeebfd4ece12c12774aee3dda4c4089b77aff4b618ddc92445c570ac478",
+  "docs/media/issue-353/edges-desktop.png": "386c9349aa6fc59562ae62ad6a57ba4c13c21422cc81a0f7357681937ea72ae2",
+  "docs/media/issue-353/edges-onestage-desktop.png": "eed6170341efdbefe837fefa4d284a8680f8c29122a4a8bee49693659df83944",
+};
+
 const root = resolve(import.meta.dir, "..");
 const generatorPath = resolve(import.meta.path);
 
@@ -73,7 +115,7 @@ function chunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, typeBytes, data, checksum]);
 }
 
-function placeholderPng({ height, path, width }: Placeholder): Buffer {
+function placeholderPng({ height, path, width }: Placeholder, sourceDigest: string): Buffer {
   const stride = width * 3 + 1;
   const pixels = Buffer.alloc(stride * height);
   const fill = (x: number, y: number, rectangleWidth: number, rectangleHeight: number, color: Buffer) => {
@@ -87,7 +129,9 @@ function placeholderPng({ height, path, width }: Placeholder): Buffer {
   };
   const background = Buffer.from([244, 247, 250]);
   for (let row = 0; row < height; row += 1) pixels.fill(background, row * stride + 1, (row + 1) * stride);
-  const variant = createHash("sha256").update(path).digest()[0];
+  const variant = createHash("sha256")
+    .update(`${PRIVACY_GENERATOR_VERSION}\0${sourceDigest}\0${path}`)
+    .digest()[0];
   const headerHeight = Math.max(18, Math.round(height * 0.07));
   const railWidth = width >= 700 ? Math.round(width * 0.22) : 0;
   fill(0, 0, width, headerHeight, Buffer.from([22, 34, 58]));
@@ -123,12 +167,15 @@ function placeholderPng({ height, path, width }: Placeholder): Buffer {
   ]);
 }
 
-const manifests = new Map<string, Array<Record<string, string>>>();
+const manifests = new Map<string, Array<Record<string, unknown>>>();
+const generatorSha256 = createHash("sha256").update(readFileSync(generatorPath)).digest("hex");
 for (const placeholder of placeholders) {
   const output = resolve(root, placeholder.path);
   const directory = dirname(output);
   mkdirSync(directory, { recursive: true });
-  const contents = placeholderPng(placeholder);
+  const sourceDigest = sourceDigests[placeholder.path];
+  if (!sourceDigest) throw new Error("Missing source digest for privacy placeholder");
+  const contents = placeholderPng(placeholder, sourceDigest);
   writeFileSync(output, contents);
   const assets = manifests.get(directory) ?? [];
   assets.push({
@@ -136,6 +183,9 @@ for (const placeholder of placeholders) {
     classification: "redacted-placeholder",
     source: "redacted-live-capture",
     generator: relative(directory, generatorPath),
+    generatorVersion: PRIVACY_GENERATOR_VERSION,
+    generatorSha256,
+    sourceDigests: [sourceDigest],
     description: placeholder.description,
     sha256: createHash("sha256").update(contents).digest("hex"),
   });
@@ -144,7 +194,7 @@ for (const placeholder of placeholders) {
 
 for (const [directory, assets] of manifests) {
   writeFileSync(resolve(directory, "privacy-manifest.json"), `${JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     policy: "synthetic-and-redacted-media-only",
     assets,
   }, null, 2)}\n`);

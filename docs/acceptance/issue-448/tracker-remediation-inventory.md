@@ -18,14 +18,13 @@ synthetic placeholder while preserving the surrounding technical meaning.
 Synthetic all-zero UUID placeholders are intentionally exempt from the
 identifier pattern, so re-running the sanitizer is idempotent and never rewrites
 an already-redacted placeholder. The repository owner's public GitHub handle and
-display name were left untouched: they are the owner's existing public identity,
-not a leak. Domain vocabulary such as `tmux`, `session`, and `pid` was left
-untouched: these are product concepts for this agent-log viewer, not runtime
-disclosures.
+display name were left untouched because they are the owner's established public
+identity. Domain vocabulary such as `tmux`, `session`, and `pid` was left
+untouched because these terms are product concepts for this agent-log viewer.
 
 ## Remediated surfaces
 
-Replacement counts are class counts, not values.
+Replacement counts report classes only.
 
 ### Pull-request bodies
 
@@ -75,7 +74,7 @@ were replaced with the neutral placeholders above.
 Two candidate classes were reviewed and deliberately excluded from
 auto-remediation:
 
-- `process_metadata`: every match was the product term `tmux` or `session`,
-  which are core concepts of this agent-log viewer rather than runtime leaks.
+- `process_metadata`: every match was the product term `tmux` or `session`.
+  These are core concepts of this agent-log viewer.
 - `known_value`: matches were the repository owner's own public GitHub handle
-  and display name in their own tracker, which are not a disclosure.
+  and display name in their own tracker. Both are established public identity.

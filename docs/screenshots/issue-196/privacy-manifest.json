@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "policy": "synthetic-and-redacted-media-only",
   "assets": [
     {
@@ -7,16 +7,26 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "sourceDigests": [
+        "715159ce6078ccb80316962f4a21000a7ee22bc46a77176d98079557a70e10ed"
+      ],
       "description": "Redacted placeholder for the desktop template-draft evidence.",
-      "sha256": "066fe5d878728eb692e8e1e2177b97ab83463f11f918b1d059d3ccc789fda051"
+      "sha256": "3332c113f23fe6195baca256545c5db2664bf57a3d2de5ae5853a54982b5f9e8"
     },
     {
       "path": "template-draft-mobile-390.png",
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "sourceDigests": [
+        "217a32bf18afacc8cb2b1a6286136b55355e15d10026e10fbe7c9a2ab2d9727c"
+      ],
       "description": "Redacted placeholder for the mobile template-draft evidence.",
-      "sha256": "168d7c3b8cbba86431b274bfaea43f5e3c1c1d944f26b96cb8a8425066f8cb6f"
+      "sha256": "795c068e7803a48e737cc28f47558df7737daaa747a6f3bcd8d864a62f20e387"
     }
   ]
 }

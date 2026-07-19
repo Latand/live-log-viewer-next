@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "policy": "synthetic-and-redacted-media-only",
   "assets": [
     {
@@ -7,8 +7,13 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "sourceDigests": [
+        "4bbee6dd05cd6ea991910ccb602e6eebe97160678a987fcbd82906635e9a4ff5"
+      ],
       "description": "Redacted placeholder retaining the readiness Kanban acceptance viewport.",
-      "sha256": "b7fdcb994b0551afb20f7ab0175b88bca84fe6c13834251dcdcbd33158cb1136"
+      "sha256": "5c6a3608b10f0c03486a4c30e14ed3c53c66da9041469fe06175c3259753a830"
     }
   ]
 }

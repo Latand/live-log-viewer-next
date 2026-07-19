@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "policy": "synthetic-and-redacted-media-only",
   "assets": [
     {
@@ -7,8 +7,13 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "sourceDigests": [
+        "a43428d86f66669bd0ef35565c43ff997d41db83b4f684add04bdea542ca2af1"
+      ],
       "description": "Redacted placeholder retaining the desktop pre-change viewport.",
-      "sha256": "6fce0a4dccc0ec2ba4d5118ddce2cff1460a94f350e0c98990073e7838340e00"
+      "sha256": "f896a479077d37e5441005d3829f12869a4435e5026b1a458a910a7c7b451ab0"
     }
   ]
 }

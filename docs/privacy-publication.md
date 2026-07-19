@@ -1,9 +1,9 @@
 # Privacy-safe publication
 
-Every pull request runs the `privacy-publication` check over committed, staged,
-unstaged, and untracked changes relative to its base branch. The check emits
-finding classes and counts only. Matched values, OCR output, metadata values,
-and file paths stay suppressed.
+Every pull request runs `privacy-publication` across committed, staged,
+unstaged, and untracked changes relative to its base branch. Diagnostics expose
+finding classes and counts. Matched values, OCR text, metadata values, and file
+paths remain suppressed.
 
 Run the same check locally:
 
@@ -11,32 +11,89 @@ Run the same check locally:
 bun run privacy:check
 ```
 
-The gate requires Tesseract for raster OCR and FFmpeg/FFprobe for GIF and video
-inspection. Missing tools and failed inspection make the check fail closed.
-Animations are sampled at five deterministic points when duration metadata is
-available. Text, extracted media metadata, raster pixels, and sampled frames
-share the same redacted classification rules.
+The gate requires Tesseract plus FFmpeg and FFprobe. CI installs English and
+Ukrainian OCR data and configures `eng+ukr`; operators can set
+`LLV_PRIVACY_OCR_LANGUAGES` to another Tesseract language expression. Missing
+tools, missing language data, failed inspection, and malformed configuration
+fail closed.
 
-Operators may place one known private label per line in
-`.privacy-known-values` and set `LLV_PRIVACY_KNOWN_VALUES_FILE` to that path.
-CI accepts the same newline-delimited values through the
-`LLV_PRIVACY_KNOWN_VALUES` repository secret. The file is ignored by Git.
+Text inspection decodes nested percent encoding and HTML entities, removes
+zero-width separators, and inspects Markdown destinations, HTML attributes,
+credential-bearing forms, URI authentication, authorization headers, and split
+token shapes. Publication inputs that are symlinks are rejected before their
+targets are read.
+
+Raster inspection covers pixels and metadata. PNG inspection validates chunk
+CRCs and scans `tEXt`, compressed `zTXt` and `iTXt`, `eXIf`, UTF-oriented
+metadata strings, and bytes after `IEND`. Animation and video inspection scans
+container metadata plus five representative frames. Frame-count sampling keeps
+that coverage when duration metadata is unavailable.
+
+## Known-value fingerprints
+
+CI reads the committed
+[`scripts/privacy-known-value-fingerprints.json`](../scripts/privacy-known-value-fingerprints.json)
+catalog and passes `--require-known-values`. A missing, empty, or malformed
+catalog produces `configuration_error`. The workflow has no dependency on an
+Actions secret for this coverage.
+
+Catalog entries contain normalized lengths and SHA-256 fingerprints. Runtime
+matching hashes same-length windows after NFKC, lowercase, markup, and separator
+normalization, so formatting and token splitting cannot bypass the catalog.
+
+Keep raw private labels in the ignored `.privacy-known-values` operator file.
+Refresh the committed fingerprints with:
+
+```sh
+bun run privacy:fingerprints -- \
+  --input .privacy-known-values \
+  --output scripts/privacy-known-value-fingerprints.json
+```
+
+The generator emits a status and count. Raw labels stay out of its diagnostics
+and the generated catalog.
+
+## Authenticated GitHub publication audit
+
+The `privacy-tracker-audit` workflow audits the event's issue or pull request
+through GitHub's authenticated API. Coverage includes issue bodies, issue
+comments, pull-request bodies, inline review comments, review bodies, Markdown
+media links, HTML media attributes, and raw GitHub media URLs.
+
+`pull_request_target` events check out the default branch, so the token-bearing
+audit always executes trusted code. The checkout excludes persisted Git
+credentials. API requests use the automatic read-only `github.token`. Media
+downloads accept a fixed GitHub host allowlist, apply redirect and size limits,
+and send authorization only to the API origin and `github.com`. Missing auth,
+untrusted media origins, API failures, and unsupported media types fail closed.
+
+An operator can run the same audit with `GITHUB_TOKEN` or `GH_TOKEN` already set:
+
+```sh
+bun run privacy:github-audit -- --repo OWNER/REPO --number 456
+```
 
 ## Media provenance
 
 Every changed raster, GIF, or video needs a co-located
-`privacy-manifest.json`. Each manifest entry binds the asset to:
+`privacy-manifest.json` using schema version 2. Each asset entry binds:
 
-- an allowed classification;
-- a deterministic generator;
-- a source classification;
-- a useful evidence description; and
-- the exact SHA-256 digest of the published bytes.
+- an allowed classification and source class;
+- the exact SHA-256 digest of the published bytes;
+- one or more SHA-256 source digests;
+- a deterministic generator path and generator version;
+- the exact SHA-256 digest of the generator bytes; and
+- a useful evidence description.
+
+The gate verifies regular files for manifests and generators, validates every
+digest, confirms the declared generator version exists in the bound generator,
+and requires source digests to differ from the published output digest.
 
 The normal classifications are `synthetic` and `redacted-placeholder`.
 `adversarial-synthetic` is reserved for documented fixture directories. Its
-manifest must declare the exact synthetic finding classes expected from the
-fixture. A checksum change or class mismatch fails provenance validation.
+manifest declares the exact synthetic finding classes expected from the
+fixture. A checksum, class, source, version, or generator mismatch fails
+provenance validation.
 
 ## Redacted evidence placeholders
 
@@ -47,10 +104,10 @@ placeholders generated by:
 bun run privacy:placeholders
 ```
 
-The placeholders retain the original path, viewport dimensions, comparison
-name, and a synthetic layout skeleton. Their manifests retain the evidence
-purpose in safe prose. Regeneration updates both the PNG bytes and their
-checksum-bound provenance entries.
+Each placeholder keeps its path, viewport dimensions, comparison name, and a
+synthetic layout skeleton. Generation derives its visual variant from the
+original source digest, generator version, and output path. Repeated generation
+reproduces identical PNG bytes and manifest bindings.
 
 ## Issue #448 remediation record
 
@@ -58,8 +115,8 @@ Two redacted records document the wider audit and cleanup:
 
 - [`docs/acceptance/issue-448/tracker-remediation-inventory.md`](acceptance/issue-448/tracker-remediation-inventory.md)
   lists every sanitized issue, comment, and pull-request body by surface and
-  exposure class, without recording any private value.
+  exposure class while omitting private values.
 - [`docs/acceptance/issue-448/historical-retention.md`](acceptance/issue-448/historical-retention.md)
-  records what remains reachable through ancestor blobs and GitHub edit history,
-  and the explicit, operator-owned options for fuller removal. Shared Git
-  history is never rewritten implicitly.
+  records reachability through ancestor blobs and GitHub edit history, along
+  with the operator-owned options for fuller removal. Shared history changes
+  require an explicit decision.

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "policy": "synthetic-and-redacted-media-only",
   "assets": [
     {
@@ -7,16 +7,26 @@
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "sourceDigests": [
+        "073fe5e8d008ecf7484989d482b3fef97930f12c39a6fab3126be40c1a764a2e"
+      ],
       "description": "Redacted placeholder for the desktop builder evidence.",
-      "sha256": "45eeb6cb98bcb5562fe860405653e0b3c8a271985bbf88a426cf42e7c143c1b5"
+      "sha256": "be2ade89de92938ad2748e7d85b5d206476a7c38d45e5496059ecd9f9dbcd4f4"
     },
     {
       "path": "builder-mobile-390.png",
       "classification": "redacted-placeholder",
       "source": "redacted-live-capture",
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "97d419b653cc2e49623095454d395c07cae05f42a9156c45196e110359f10dc0",
+      "sourceDigests": [
+        "f9236e9d7677c236bad5cc76b98ac8f756c55329664ed5cd8c92216b8a7514a4"
+      ],
       "description": "Redacted placeholder for the mobile builder evidence.",
-      "sha256": "93445ee37a814f2d6624cbfeb658aae77e0304caeb2dcfab64f68f1c7dd35548"
+      "sha256": "b71188eac5b29b97742e178919cd30cbcbde6fb87ed63be43d310e14cb074a33"
     }
   ]
 }
