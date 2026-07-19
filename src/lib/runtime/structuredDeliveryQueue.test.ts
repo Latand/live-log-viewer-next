@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 
-import type { RuntimeEvent as JournalEvent } from "./contracts";
 import type { DeliveryReceipt, EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContentDigest, type StructuredImageRef } from "./structuredContent";
@@ -140,7 +139,14 @@ test("unrelated outbox effects cannot starve structured message delivery", async
 
   await queue.drain();
 
-  expect(requestedKinds).toEqual([["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill"]]);
+  expect(requestedKinds).toEqual([[
+    "runtime.send",
+    "runtime.steer",
+    "runtime.answer",
+    "runtime.interrupt",
+    "runtime.kill",
+    "runtime.kill-boundary",
+  ]]);
   expect(sent).toEqual(["op-after-spawns"]);
 });
 
@@ -194,41 +200,46 @@ test("a full page from one busy conversation cannot hide a later ready conversat
   expect(busySends).toBe(0);
 });
 
-test("repeated drains resume successful-kill replay from the prior cursor", async () => {
-  const receiptEvent = (seq: number, status: "pending" | "delivered"): JournalEvent => ({
-    schemaVersion: 1,
-    seq,
-    eventId: `event-${seq}`,
-    scope: { type: "operation", id: "kill-one" },
-    revision: seq,
-    kind: "receipt",
-    occurredAt: "2026-07-19T12:00:00.000Z",
-    recordedAt: "2026-07-19T12:00:00.000Z",
-    producer: { kind: "runtime-effect" },
-    causationId: null,
-    correlationId: null,
-    payload: {
-      operationId: "kill-one",
-      conversationId: "conversation-one",
-      kind: "kill",
-      status,
-    },
-  });
-  const history = [receiptEvent(1, "pending"), receiptEvent(2, "delivered")];
-  const replayCursors: number[] = [];
+test("a retained successful-kill boundary fences only earlier operations", async () => {
+  const pending = new Set(["send-before", "send-after"]);
+  const transitions: Array<[string, string]> = [];
+  const writes: string[] = [];
   const queue = new StructuredDeliveryQueue({
-    events: async (afterEventSeq) => {
-      replayCursors.push(afterEventSeq);
-      return { reset: false, floorSeq: 0, events: history.filter((event) => event.seq > afterEventSeq) };
+    effects: async (_kinds, afterEventSeq = 0) => [{
+      id: "effect:send-before",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: { operationId: "send-before", conversationId: "conversation-one", text: "stale", policy: "queue" },
+    }, {
+      id: "kill-boundary:conversation-one",
+      kind: "runtime.kill-boundary",
+      eventSeq: 2,
+      payload: { operationId: "kill-one", conversationId: "conversation-one", admissionEventSeq: 2 },
+    }, {
+      id: "effect:send-after",
+      kind: "runtime.send",
+      eventSeq: 3,
+      payload: { operationId: "send-after", conversationId: "conversation-one", text: "successor", policy: "queue" },
+    }].filter((effect) => effect.eventSeq > afterEventSeq
+      && (effect.kind === "runtime.kill-boundary" || pending.has(String(effect.payload.operationId)))),
+    transition: async (operationId, status) => {
+      transitions.push([operationId, status]);
+      if (status === "delivered" || status === "failed") pending.delete(operationId);
     },
-    effects: async () => [],
-    transition: async () => {},
-  }, () => null);
+  }, () => host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started", turnId: `turn:${entry.id}` };
+  }));
 
   await queue.drain();
   await queue.drain();
 
-  expect(replayCursors).toEqual([0, 2, 2]);
+  expect(writes).toEqual(["send-after"]);
+  expect(transitions).toEqual([
+    ["send-before", "failed"],
+    ["send-after", "delivering"],
+    ["send-after", "delivered"],
+  ]);
 });
 
 test("structured delivery surfaces a host actuation failure", async () => {

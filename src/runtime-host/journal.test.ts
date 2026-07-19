@@ -1982,6 +1982,57 @@ test("issue 367: a delivered structured kill converges host and turn projection 
   journal.close();
 });
 
+test("a delivered kill retains its original admission boundary through compaction", () => {
+  const dir = sandbox("kill-boundary-compaction");
+  const filename = path.join(dir, "events.sqlite");
+  let journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conversation_boundary"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation_boundary",
+      sessionKey: { engine: "claude", sessionId: "session-boundary" },
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "turn-boundary",
+      provenance: "structured",
+      capabilities: { steer: false, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "kill",
+    conversationId: "conversation_boundary",
+    operationId: "op-kill-boundary",
+    idempotencyKey: "op-kill-boundary",
+    sessionKey: { engine: "claude", sessionId: "session-boundary" },
+  });
+  const admissionEventSeq = journal.effectBatch(100, ["runtime.kill"])[0]!.eventSeq;
+
+  journal.transitionOperation("op-kill-boundary", "delivering");
+  journal.transitionOperation("op-kill-boundary", "delivered");
+
+  expect(journal.effectBatch()).toEqual([]);
+  expect(journal.effectBatch(100, ["runtime.kill-boundary"])).toEqual([{
+    id: "kill-boundary:conversation_boundary",
+    kind: "runtime.kill-boundary",
+    eventSeq: admissionEventSeq,
+    payload: {
+      operationId: "op-kill-boundary",
+      conversationId: "conversation_boundary",
+      admissionEventSeq,
+    },
+  }]);
+  journal.compact(1);
+  journal.close();
+
+  journal = new RuntimeJournal(filename, { structuredHosts: true });
+  expect(journal.effectBatch(100, ["runtime.kill-boundary"])).toEqual([
+    expect.objectContaining({ eventSeq: admissionEventSeq }),
+  ]);
+  journal.close();
+});
+
 test("issue 367: a failed structured kill leaves the live projection untouched", () => {
   const dir = sandbox("kill-failed-projection");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100, structuredHosts: true });
@@ -2007,6 +2058,7 @@ test("issue 367: a failed structured kill leaves the live projection untouched",
     sessionKey: { engine: "claude", sessionId: "session-alive" },
   });
   journal.transitionOperation("op-kill-alive", "failed", { reason: "structured host termination is unavailable" });
+  expect(journal.effectBatch(100, ["runtime.kill-boundary"])).toEqual([]);
   expect(journal.snapshot().sessions[0]).toMatchObject({
     host: "hosted",
     turn: "running",

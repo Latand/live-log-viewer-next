@@ -1,4 +1,4 @@
-import type { RuntimeReplay, RuntimeSendSettings } from "./contracts";
+import type { RuntimeSendSettings } from "./contracts";
 import type { DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import type { RuntimeHostClient } from "./client";
 import {
@@ -18,7 +18,6 @@ export type StructuredDeliveryTransition = "queued" | "delivering" | "delivered"
 
 export interface StructuredDeliveryQueuePort {
   effects(kinds?: readonly string[], afterEventSeq?: number): Promise<StructuredDeliveryEffect[]>;
-  events?(afterEventSeq: number): Promise<RuntimeReplay>;
   transition(
     operationId: string,
     status: StructuredDeliveryTransition,
@@ -35,7 +34,6 @@ const THREAD_READ_ATTEMPTS = 2;
 export function runtimeClientDeliveryPort(client: RuntimeHostClient): StructuredDeliveryQueuePort {
   return {
     effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
-    ...(typeof client.events === "function" ? { events: (afterEventSeq: number) => client.events(afterEventSeq) } : {}),
     transition: async (operationId, status, details) => {
       await client.transitionOperation(operationId, status, details);
     },
@@ -160,6 +158,17 @@ function deliveryEffect(effect: StructuredDeliveryEffect): DeliveryEffect | null
   return controlEffect(effect) ?? sendEffect(effect);
 }
 
+function successfulKillBoundary(effect: StructuredDeliveryEffect): SuccessfulKillBoundary | null {
+  if (effect.kind !== "runtime.kill-boundary") return null;
+  const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
+  const conversationId = typeof effect.payload.conversationId === "string" ? effect.payload.conversationId : "";
+  const admissionEventSeq = effect.payload.admissionEventSeq;
+  if (!operationId || !conversationId
+    || !Number.isSafeInteger(admissionEventSeq)
+    || admissionEventSeq !== effect.eventSeq) return null;
+  return { operationId, conversationId, eventSeq: effect.eventSeq };
+}
+
 function failureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return (message.trim() || "structured host delivery failed").slice(0, 240);
@@ -184,9 +193,7 @@ export class StructuredDeliveryQueue {
   private activeDrain: Promise<void> | null = null;
   private rerun = false;
   private readonly interruptAcknowledged = new Set<string>();
-  private readonly killAdmissionSeqByOperation = new Map<string, number>();
   private readonly successfulKillBoundaries = new Map<string, SuccessfulKillBoundary>();
-  private killHistoryCursor = 0;
 
   constructor(
     private readonly port: StructuredDeliveryQueuePort,
@@ -211,47 +218,10 @@ export class StructuredDeliveryQueue {
   }
 
   private async drainUntilSettled(): Promise<void> {
-    await this.refreshSuccessfulKillBoundaries();
     do {
       this.rerun = false;
       await this.drainPass();
     } while (this.rerun);
-  }
-
-  private async refreshSuccessfulKillBoundaries(): Promise<void> {
-    if (!this.port.events) return;
-    let afterEventSeq = this.killHistoryCursor;
-    while (true) {
-      const replay = await this.port.events(afterEventSeq);
-      if (replay.reset) {
-        if (!Number.isSafeInteger(replay.floorSeq) || replay.floorSeq <= afterEventSeq) {
-          throw new Error("structured delivery event replay did not reset to a valid floor");
-        }
-        afterEventSeq = replay.floorSeq;
-        this.killHistoryCursor = replay.floorSeq;
-        continue;
-      }
-      if (replay.events.length === 0) return;
-      for (const event of replay.events) {
-        if (event.kind !== "receipt") continue;
-        const operationId = typeof event.payload.operationId === "string" ? event.payload.operationId : "";
-        const conversationId = typeof event.payload.conversationId === "string" ? event.payload.conversationId : "";
-        if (!operationId || !conversationId || event.payload.kind !== "kill") continue;
-        const admissionSeq = this.killAdmissionSeqByOperation.get(operationId) ?? event.seq;
-        this.killAdmissionSeqByOperation.set(operationId, admissionSeq);
-        if (event.payload.status !== "delivered") continue;
-        const current = this.successfulKillBoundaries.get(conversationId);
-        if (!current || admissionSeq > current.eventSeq) {
-          this.successfulKillBoundaries.set(conversationId, { operationId, conversationId, eventSeq: admissionSeq });
-        }
-      }
-      const nextCursor = replay.events.at(-1)?.seq ?? afterEventSeq;
-      if (!Number.isSafeInteger(nextCursor) || nextCursor <= afterEventSeq) {
-        throw new Error("structured delivery event replay did not advance");
-      }
-      afterEventSeq = nextCursor;
-      this.killHistoryCursor = nextCursor;
-    }
   }
 
   private async drainPass(): Promise<void> {
@@ -259,7 +229,7 @@ export class StructuredDeliveryQueue {
     let afterEventSeq = 0;
     while (true) {
       const page = await this.port.effects(
-        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill"],
+        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill", "runtime.kill-boundary"],
         afterEventSeq,
       );
       if (page.length === 0) break;
@@ -275,6 +245,15 @@ export class StructuredDeliveryQueue {
     const grouped = new Map<string, DeliveryEffect[]>();
     const effects: DeliveryEffect[] = [];
     for (const rawEffect of rawEffects) {
+      if (rawEffect.kind === "runtime.kill-boundary") {
+        const boundary = successfulKillBoundary(rawEffect);
+        if (!boundary) throw new Error(`structured kill boundary ${rawEffect.eventSeq} is invalid`);
+        const current = this.successfulKillBoundaries.get(boundary.conversationId);
+        if (!current || boundary.eventSeq > current.eventSeq) {
+          this.successfulKillBoundaries.set(boundary.conversationId, boundary);
+        }
+        continue;
+      }
       const effect = deliveryEffect(rawEffect);
       if (effect) {
         effects.push(effect);

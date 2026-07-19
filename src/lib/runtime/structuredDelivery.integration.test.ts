@@ -25,7 +25,6 @@ afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 function journalPort(journal: RuntimeJournal, failDelivered = false): StructuredDeliveryQueuePort {
   return {
     effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
-    events: async (afterEventSeq) => journal.replay(afterEventSeq),
     transition: async (operationId, status, details) => {
       if (failDelivered && status === "delivered") throw new Error("runtime stopped before confirmation commit");
       journal.transitionOperation(operationId, status, details);
@@ -1339,7 +1338,7 @@ test("ledger recovery drains every entry beyond one effect batch", async () => {
   journal.close();
 });
 
-test("a successful kill beyond one effect page fences older sends through repeated restart", async () => {
+test("a successful kill beyond one effect page fences older sends through compaction and repeated restart", async () => {
   const filename = path.join(sandbox, "durable-kill-boundary.sqlite");
   const conversationId = "conversation-durable-kill";
   const sessionKey = { engine: "codex" as const, sessionId: "session-durable-kill" };
@@ -1393,7 +1392,6 @@ test("a successful kill beyond one effect page fences older sends through repeat
   let crashesRemaining = 2;
   const queue = () => new StructuredDeliveryQueue({
     effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
-    events: async (afterEventSeq: number) => journal.replay(afterEventSeq),
     transition: async (operationId, status, details) => {
       journal.transitionOperation(operationId, status, details);
       if (status === "failed" && operationId.startsWith("operation-stale-") && crashesRemaining > 0) {
@@ -1411,6 +1409,7 @@ test("a successful kill beyond one effect page fences older sends through repeat
 
   await expect(queue().drain()).rejects.toThrow("runtime crashed after kill settlement");
   expect(journal.operationResult(killOperationId)?.receipt.status).toBe("delivered");
+  journal.compact(2);
   journal.close();
 
   journal = new RuntimeJournal(filename, { structuredHosts: true });
@@ -1432,7 +1431,7 @@ test("a successful kill beyond one effect page fences older sends through repeat
   journal.close();
 });
 
-test("a retry admitted during kill drain starts one successor turn after restart", async () => {
+test("a retry admitted during kill drain starts one successor turn after compaction and restart", async () => {
   const filename = path.join(sandbox, "post-kill-retry.sqlite");
   const conversationId = "conversation-post-kill-retry";
   const sessionKey = { engine: "codex" as const, sessionId: "session-post-kill-retry" };
@@ -1481,7 +1480,6 @@ test("a retry admitted during kill drain starts one successor turn after restart
   const crashGate = new Promise<void>((resolve) => { releaseCrash = resolve; });
   const queue = () => new StructuredDeliveryQueue({
     effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
-    events: async (afterEventSeq) => journal.replay(afterEventSeq),
     transition: async (operationId, status, details) => {
       journal.transitionOperation(operationId, status, details);
       if (crashAfterStaleFence && operationId === originalOperationId && status === "failed") {
@@ -1523,6 +1521,7 @@ test("a retry admitted during kill drain starts one successor turn after restart
   releaseCrash();
   await expect(drain).rejects.toThrow("runtime crashed with a retry kick pending");
   await expect(kicked).rejects.toThrow("runtime crashed with a retry kick pending");
+  journal.compact(2);
   journal.close();
 
   crashAfterStaleFence = false;
@@ -1545,7 +1544,7 @@ test("a retry admitted during kill drain starts one successor turn after restart
   journal.close();
 });
 
-test("a failed kill creates no durable boundary across restart", async () => {
+test("a failed kill creates no durable boundary across compaction and restart", async () => {
   const filename = path.join(sandbox, "failed-kill-boundary.sqlite");
   const conversationId = "conversation-failed-kill-boundary";
   const sessionKey = { engine: "codex" as const, sessionId: "session-failed-kill-boundary" };
@@ -1588,7 +1587,6 @@ test("a failed kill creates no durable boundary across restart", async () => {
   let recoveryCalls = 0;
   const queue = () => new StructuredDeliveryQueue({
     effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
-    events: async (afterEventSeq) => journal.replay(afterEventSeq),
     transition: async (operationId, status, details) => {
       journal.transitionOperation(operationId, status, details);
       if (crashAfterFailedKill && operationId === killOperationId && status === "failed") {
@@ -1603,6 +1601,7 @@ test("a failed kill creates no durable boundary across restart", async () => {
   await expect(queue().drain()).rejects.toThrow();
   expect(journal.operationResult(killOperationId)?.receipt.status).toBe("failed");
   expect(journal.operationResult(sendOperationId)?.receipt.status).toBe("queued");
+  journal.compact(2);
   journal.close();
 
   crashAfterFailedKill = false;
