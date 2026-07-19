@@ -80,7 +80,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; p
   try {
     const originRejection = pipelineOriginRejection(req, body);
     if (originRejection) return originRejection;
-    const result = await createPipelineFromRequest(body);
+    const result = await createPipelineFromRequest(body, undefined, {
+      allowOperatorDraftWithoutLineage: !isAgentInitiatedSpawn(req),
+    });
     if (!result.pipeline) return NextResponse.json({
       error: result.error ?? "could not create pipeline",
       ...(result.code ? { code: result.code, field: result.field, path: result.path } : {}),

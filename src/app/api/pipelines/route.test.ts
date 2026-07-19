@@ -88,6 +88,35 @@ test("pipeline POST returns a persisted draft id for autoStart false", async () 
   unregister();
 });
 
+test("same-origin desktop and mobile global actions create an operator draft without a transcript", async () => {
+  const request = new NextRequest("http://127.0.0.1/api/pipelines", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1",
+      origin: "http://127.0.0.1",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      task: "global pipeline action",
+      repoDir: process.cwd(),
+      autoStart: false,
+      stages: [{ id: "implement", kind: "run", role: { roleId: "builder" }, prompt: "{{task}}", next: null }],
+    }),
+  });
+
+  const response = await POST(request);
+  expect(response.status).toBe(201);
+  expect(await response.json()).toMatchObject({
+    ok: true,
+    pipeline: {
+      state: "draft",
+      srcPath: null,
+      srcConversationId: null,
+    },
+  });
+});
+
 test("pipeline POST rejects malformed JSON", async () => {
   const response = await POST(new NextRequest("http://127.0.0.1/api/pipelines", { method: "POST", headers: { host: "127.0.0.1" }, body: "{" }));
   expect(response.status).toBe(400);

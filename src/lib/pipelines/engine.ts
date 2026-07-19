@@ -1385,7 +1385,7 @@ type PipelineMutationResult = {
 
 type PipelineCreatorLineage = {
   srcPath: string | null;
-  srcConversationId: string;
+  srcConversationId: string | null;
 };
 
 function resolvePipelineCreatorLineage(
@@ -1403,6 +1403,7 @@ function resolvePipelineCreatorLineage(
 type CreatePipelineOptions = {
   ensureTask?: BoardTask;
   spawnParams?: TaskPipelineSpawnParams;
+  allowOperatorDraftWithoutLineage?: boolean;
 };
 
 function taskSpawnCreatorLineage(
@@ -1489,8 +1490,13 @@ export async function createPipelineFromRequest(
   const taskSpawn = options.ensureTask && options.spawnParams && isTaskSpawnPipelineParams(options.spawnParams)
     ? { task: options.ensureTask, params: options.spawnParams }
     : null;
+  const operatorDraftWithoutLineage = options.allowOperatorDraftWithoutLineage
+    && req.autoStart === false
+    && (typeof req.src !== "string" || !req.src.trim());
   const creator = taskSpawn
     ? taskSpawnCreatorLineage(taskSpawn.params, ports)
+    : operatorDraftWithoutLineage
+      ? { lineage: { srcPath: null, srcConversationId: null } }
     : resolvePipelineCreatorLineage(req.src, ports);
   if (!creator.lineage) return { error: creator.error, status: creator.status };
   const taskIds = [...new Set((req.taskIds ?? []).map((taskId) => taskId.trim()))];
