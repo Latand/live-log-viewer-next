@@ -224,12 +224,12 @@ test("a running operational attempt opens its appended historical child's transc
     />,
   ));
 
-  const verdict = element.querySelector<HTMLButtonElement>('[aria-label^="Open verdict for stage"]');
+  const verdict = element.querySelector('[aria-label^="Open verdict for stage"]') as unknown as HTMLButtonElement | null;
   expect(verdict).toBeTruthy();
   flushSync(() => verdict!.click());
   await Promise.resolve();
 
-  const historical = dom.document.body.querySelector<HTMLButtonElement>('[aria-label="Open transcript for attempt 2"]');
+  const historical = dom.document.body.querySelector('[aria-label="Open transcript for attempt 2"]') as unknown as HTMLButtonElement | null;
   expect(historical).toBeTruthy();
   flushSync(() => historical!.click());
   expect(opened).toEqual([historicalPath]);
