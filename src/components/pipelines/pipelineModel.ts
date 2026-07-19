@@ -478,6 +478,28 @@ export function compactStageOpenTarget(
   return null;
 }
 
+/** First navigable artifact for a compact pipeline, newest stage first. */
+export function compactPipelineOpenTarget(
+  pipeline: Pipeline,
+  flows: readonly Flow[],
+  renderableFlows?: ReadonlySet<string>,
+  renderablePaths?: ReadonlySet<string>,
+  files: readonly FileEntry[] = [],
+): { kind: "flow"; flowId: string } | { kind: "path"; path: string } | null {
+  for (const stage of [...pipeline.stages].reverse()) {
+    const target = compactStageOpenTarget(
+      stage,
+      latestAttempt(pipeline, stage.id),
+      flows,
+      renderableFlows,
+      renderablePaths,
+      files,
+    );
+    if (target) return target;
+  }
+  return null;
+}
+
 /**
  * Does a stage attempt have something the verdict popover can show — a
  * structured verdict, an error, or a park on this stage (inline Retry/Skip)? A

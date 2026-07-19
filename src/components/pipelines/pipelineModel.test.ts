@@ -20,6 +20,7 @@ import {
   resolvePipelineMemberPaths,
   stageDockCompact,
   compactStageOpenTarget,
+  compactPipelineOpenTarget,
   excludeCompactPipelineArtifacts,
   pipelineAnnouncement,
   pipelineStagePosition,
@@ -741,6 +742,27 @@ describe("compactStageOpenTarget", () => {
 
     expect(compactStageOpenTarget(reviewStage, reviewAttempt, [resumedFlow], new Set(), new Set(["/reviewer-resumed"]), files))
       .toEqual({ kind: "path", path: "/reviewer-resumed" });
+  });
+
+  test("a completed pipeline resolves history through the current reviewer binding", () => {
+    const buildStage = { ...stage("build"), next: reviewStage.id };
+    const completed = pipeline({
+      state: "completed",
+      stages: [buildStage, reviewStage],
+      runs: [
+        { stageId: buildStage.id, attempts: [{ n: 1, state: "passed", agentPath: "/builder" } as never] },
+        { stageId: reviewStage.id, attempts: [reviewAttempt] },
+      ],
+    });
+    const reboundFlow = {
+      ...flow,
+      rounds: [{ n: 1, reviewerPath: "/reviewer-current" }],
+    } as unknown as Flow;
+
+    expect(compactPipelineOpenTarget(completed, [reboundFlow], new Set(), new Set(["/reviewer-current"])))
+      .toEqual({ kind: "path", path: "/reviewer-current" });
+    expect(compactPipelineOpenTarget(completed, [reboundFlow], new Set(), new Set()))
+      .toBeNull();
   });
 });
 

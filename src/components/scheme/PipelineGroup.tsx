@@ -9,6 +9,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 
 import type { Camera } from "./Minimap";
 import type { SchemeRect } from "./layout";
+import { PIPELINE_GROUP_COLLAPSED_H } from "./pipelineAnchor";
 
 export interface PipelineGroupContextValue {
   id: string;
@@ -38,6 +39,9 @@ export const PipelineGroup = memo(function PipelineGroup({
   rect,
   camRef,
   onPin,
+  interactive,
+  expanded,
+  onExpandedChange,
   autoOpen = false,
   onAutoOpen,
   children,
@@ -46,12 +50,14 @@ export const PipelineGroup = memo(function PipelineGroup({
   rect: SchemeRect;
   camRef: React.RefObject<Camera>;
   onPin: (pipeline: Pipeline, pos: { x: number; y: number }) => Promise<string | null>;
+  interactive: boolean;
+  expanded: boolean;
+  onExpandedChange: (pipelineId: string, expanded: boolean) => void;
   autoOpen?: boolean;
   onAutoOpen?: () => void;
   children?: React.ReactNode | ((controls: { collapse: () => void }) => React.ReactNode);
 }) {
   const { t } = useLocale();
-  const [expanded, setExpanded] = useState(false);
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
   const [localPos, setLocalPos] = useState<{ x: number; y: number } | null>(null);
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
@@ -60,21 +66,25 @@ export const PipelineGroup = memo(function PipelineGroup({
   const context = useMemo(() => ({ id: pipeline.id, worldRect }), [pipeline.id, worldRect]);
   const position = pipelineStagePosition(pipeline);
   const draft = pipeline.state === "draft" || pipeline.stages.length === 0;
-  const collapse = useCallback(() => setExpanded(false), []);
+  const collapse = useCallback(() => onExpandedChange(pipeline.id, false), [onExpandedChange, pipeline.id]);
 
   useEffect(() => {
     if (!autoOpen) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- a newly created draft opens once on its world-space owner
-    setExpanded(true);
+    onExpandedChange(pipeline.id, true);
     onAutoOpen?.();
-  }, [autoOpen, onAutoOpen]);
+  }, [autoOpen, onAutoOpen, onExpandedChange, pipeline.id]);
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || (event.target as HTMLElement).closest("button, a, input, textarea, select")) return;
+    if (!interactive || event.button !== 0 || (event.target as HTMLElement).closest("button, a, input, textarea, select")) return;
     dragRef.current = { sx: event.clientX, sy: event.clientY, ox: pos.x, oy: pos.y, moved: false };
     event.currentTarget.setPointerCapture?.(event.pointerId);
   };
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!interactive) {
+      dragRef.current = null;
+      setDrag(null);
+      return;
+    }
     const start = dragRef.current;
     if (!start) return;
     const dx = event.clientX - start.sx;
@@ -85,6 +95,11 @@ export const PipelineGroup = memo(function PipelineGroup({
     setDrag({ x: start.ox + dx / z, y: start.oy + dy / z });
   };
   const onPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!interactive) {
+      dragRef.current = null;
+      setDrag(null);
+      return;
+    }
     const start = dragRef.current;
     dragRef.current = null;
     if (!start?.moved) return;
@@ -103,11 +118,11 @@ export const PipelineGroup = memo(function PipelineGroup({
   return (
     <PipelineGroupContext.Provider value={context}>
       <section
-        data-scheme-ui
+        data-scheme-ui={interactive ? "" : undefined}
         data-pipeline-group={pipeline.id}
         {...(draft ? { "data-pipeline-draft": "" } : {})}
-        className={`absolute z-[5] overflow-visible rounded-[10px] border bg-card/96 shadow-2 ${draft ? "border-dashed border-warning/70" : "border-border"}`}
-        style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, width: rect.w }}
+        className={`absolute z-[5] overflow-visible rounded-[10px] border bg-card/96 shadow-2 ${interactive ? "" : "pointer-events-none select-none"} ${draft ? "border-dashed border-warning/70" : "border-border"}`}
+        style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, width: rect.w, height: rect.h }}
         aria-label={`${pipeline.task}: ${pipelineStateLabel(t, pipeline.state)}`}
       >
         <div
@@ -138,13 +153,17 @@ export const PipelineGroup = memo(function PipelineGroup({
             aria-expanded={expanded}
             aria-label={t("pipelineGroup.toggle", { task: pipeline.task })}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] text-muted hover:bg-sunken hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            onClick={() => setExpanded((value) => !value)}
+            onClick={() => onExpandedChange(pipeline.id, !expanded)}
           >
             <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? "rotate-180" : ""}`} aria-hidden />
           </button>
         </div>
         {expanded ? (
-          <div data-pipeline-group-body className="border-t border-border px-3 py-3">
+          <div
+            data-pipeline-group-body
+            className="overflow-y-auto border-t border-border px-3 py-3"
+            style={{ height: Math.max(0, rect.h - PIPELINE_GROUP_COLLAPSED_H) }}
+          >
             {typeof children === "function" ? children({ collapse }) : children}
           </div>
         ) : null}

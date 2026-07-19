@@ -1,12 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
+import { useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { Pipeline } from "@/lib/pipelines/types";
 
 import type { Camera } from "./Minimap";
 import { PipelineGroup, usePipelineGroupContext } from "./PipelineGroup";
+import { PIPELINE_GROUP_COLLAPSED_H, PIPELINE_GROUP_EXPANDED_H } from "./pipelineAnchor";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -59,7 +61,7 @@ function pipeline(overrides: Record<string, unknown> = {}): Pipeline {
 
 function StreamCProbe() {
   const context = usePipelineGroupContext();
-  return <div data-stream-c-slot data-context={`${context.id}:${context.worldRect.x},${context.worldRect.y}`}>stage graph</div>;
+  return <div data-stream-c-slot data-context={`${context.id}:${context.worldRect.x},${context.worldRect.y},${context.worldRect.w}x${context.worldRect.h}`}>stage graph</div>;
 }
 
 function renderGroup(value = pipeline(), pins: Array<{ x: number; y: number }> = [], zoom = 1): HTMLElement {
@@ -68,11 +70,23 @@ function renderGroup(value = pipeline(), pins: Array<{ x: number; y: number }> =
   const root = createRoot(host);
   roots.add(root);
   const camRef = { current: { x: 0, y: 0, z: zoom } as Camera };
-  flushSync(() => root.render(
-    <PipelineGroup pipeline={value} rect={{ x: 420, y: 180, w: 360, h: 76 }} camRef={camRef} onPin={async (_pipeline, pos) => { pins.push(pos); return null; }}>
-      <StreamCProbe />
-    </PipelineGroup>,
-  ));
+  function Harness() {
+    const [expanded, setExpanded] = useState(false);
+    return (
+      <PipelineGroup
+        pipeline={value}
+        rect={{ x: 420, y: 180, w: 360, h: expanded ? PIPELINE_GROUP_EXPANDED_H : PIPELINE_GROUP_COLLAPSED_H }}
+        camRef={camRef}
+        onPin={async (_pipeline, pos) => { pins.push(pos); return null; }}
+        interactive
+        expanded={expanded}
+        onExpandedChange={(_pipelineId, nextExpanded) => setExpanded(nextExpanded)}
+      >
+        <StreamCProbe />
+      </PipelineGroup>
+    );
+  }
+  flushSync(() => root.render(<Harness />));
   return host;
 }
 
@@ -108,5 +122,5 @@ test("expanded body exposes children with the pipeline id and world rect", () =>
 
   const slot = host.querySelector("[data-stream-c-slot]");
   expect(slot).toBeTruthy();
-  expect(slot!.getAttribute("data-context")).toBe("pipeline-a:420,180");
+  expect(slot!.getAttribute("data-context")).toBe("pipeline-a:420,180,360x520");
 });
