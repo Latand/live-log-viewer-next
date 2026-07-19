@@ -8,7 +8,6 @@ import {
   PIPELINE_GROUP_COLLAPSED_H,
   PIPELINE_GROUP_EXPANDED_H,
   PIPELINE_GROUP_GAP,
-  PIPELINE_GROUP_STACK_GAP,
   PIPELINE_GROUP_W,
   anchorFor,
   layoutPipelineGroups,
@@ -152,23 +151,28 @@ describe("layoutPipelineGroups", () => {
     expect(crowded).toMatchObject({ x: 1337, y: 512 });
   });
 
-  test("an expanded group reserves its full height before the next linked group", () => {
-    const linked = task("task-expanded", { x: 420, y: 180 });
-    const rows = [
-      pipeline({ id: "expanded", taskIds: [linked.id] }),
-      pipeline({ id: "next", taskIds: [linked.id], createdAt: "2026-07-19T00:01:00.000Z" }),
-    ];
-    const layout = layoutPipelineGroups(
-      rows,
-      [linked],
+  test("a legal collapsed pin expands around a neighbouring task while its header origin stays exact", () => {
+    const pinned = pipeline({ id: "expanded", pos: { x: 420, y: 180 } });
+    const neighbour = { x: 420, y: 280, w: TASK_W, h: 180 };
+    const placement = layoutPipelineGroups(
+      [pinned],
       [],
-      [{ x: linked.pos!.x, y: linked.pos!.y, w: TASK_W, h: 180 }],
-      new Map([["expanded", PIPELINE_GROUP_EXPANDED_H]]),
-    );
-    const expanded = layout.get("expanded")!;
-    const next = layout.get("next")!;
+      [],
+      [neighbour],
+      new Map([[pinned.id, PIPELINE_GROUP_EXPANDED_H]]),
+    ).get(pinned.id)!;
 
-    expect(expanded.h).toBe(PIPELINE_GROUP_EXPANDED_H);
-    expect(next.y).toBeGreaterThanOrEqual(expanded.y + expanded.h + PIPELINE_GROUP_STACK_GAP);
+    expect(placement.header).toEqual({ x: 420, y: 180, w: PIPELINE_GROUP_W, h: PIPELINE_GROUP_COLLAPSED_H });
+    expect(placement.body).not.toBeNull();
+    expect(
+      placement.body!.x < neighbour.x + neighbour.w
+      && placement.body!.x + placement.body!.w > neighbour.x
+      && placement.body!.y < neighbour.y + neighbour.h
+      && placement.body!.y + placement.body!.h > neighbour.y,
+    ).toBe(false);
+    expect(placement.bounds.x).toBeLessThanOrEqual(placement.header.x);
+    expect(placement.bounds.y).toBeLessThanOrEqual(placement.header.y);
+    expect(placement.bounds.x + placement.bounds.w).toBeGreaterThanOrEqual(placement.body!.x + placement.body!.w);
+    expect(placement.bounds.y + placement.bounds.h).toBeGreaterThanOrEqual(placement.body!.y + placement.body!.h);
   });
 });

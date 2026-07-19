@@ -8,7 +8,8 @@ import type { Pipeline } from "@/lib/pipelines/types";
 
 import type { Camera } from "./Minimap";
 import { PipelineGroup, usePipelineGroupContext } from "./PipelineGroup";
-import { PIPELINE_GROUP_COLLAPSED_H, PIPELINE_GROUP_EXPANDED_H } from "./pipelineAnchor";
+import { PIPELINE_GROUP_BODY_H, PIPELINE_GROUP_COLLAPSED_H, PIPELINE_GROUP_EXPANDED_H, layoutPipelineGroups, type PipelineGroupPlacement } from "./pipelineAnchor";
+import { TASK_W } from "./taskGeometry";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -64,6 +65,13 @@ function StreamCProbe() {
   return <div data-stream-c-slot data-context={`${context.id}:${context.worldRect.x},${context.worldRect.y},${context.worldRect.w}x${context.worldRect.h}`}>stage graph</div>;
 }
 
+function placement(expanded: boolean): PipelineGroupPlacement {
+  const header = { x: 420, y: 180, w: 360, h: PIPELINE_GROUP_COLLAPSED_H };
+  const body = expanded ? { x: 420, y: 180 + PIPELINE_GROUP_COLLAPSED_H, w: 360, h: PIPELINE_GROUP_BODY_H } : null;
+  const bounds = expanded ? { x: 420, y: 180, w: 360, h: PIPELINE_GROUP_EXPANDED_H } : header;
+  return { ...bounds, header, body, bounds, direction: expanded ? "down" : "collapsed" };
+}
+
 function renderGroup(value = pipeline(), pins: Array<{ x: number; y: number }> = [], zoom = 1): HTMLElement {
   const host = document.createElement("div");
   document.body.append(host);
@@ -75,7 +83,7 @@ function renderGroup(value = pipeline(), pins: Array<{ x: number; y: number }> =
     return (
       <PipelineGroup
         pipeline={value}
-        rect={{ x: 420, y: 180, w: 360, h: expanded ? PIPELINE_GROUP_EXPANDED_H : PIPELINE_GROUP_COLLAPSED_H }}
+        rect={placement(expanded)}
         camRef={camRef}
         onPin={async (_pipeline, pos) => { pins.push(pos); return null; }}
         interactive
@@ -123,4 +131,40 @@ test("expanded body exposes children with the pipeline id and world rect", () =>
   const slot = host.querySelector("[data-stream-c-slot]");
   expect(slot).toBeTruthy();
   expect(slot!.getAttribute("data-context")).toBe("pipeline-a:420,180,360x520");
+});
+
+test("an expanded pinned group renders its header at the durable origin and its body at the collision-safe offset", () => {
+  const value = pipeline({ pos: { x: 420, y: 180 } });
+  const placement = layoutPipelineGroups(
+    [value],
+    [],
+    [],
+    [{ x: 420, y: 280, w: TASK_W, h: 180 }],
+    new Map([[value.id, PIPELINE_GROUP_EXPANDED_H]]),
+  ).get(value.id)!;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  flushSync(() => root.render(
+    <PipelineGroup
+      pipeline={value}
+      rect={placement}
+      camRef={{ current: { x: 0, y: 0, z: 1 } }}
+      onPin={async () => null}
+      interactive
+      expanded
+      onExpandedChange={() => {}}
+    >
+      <StreamCProbe />
+    </PipelineGroup>,
+  ));
+
+  const group = host.querySelector('[data-pipeline-group="pipeline-a"]') as HTMLElement;
+  const body = host.querySelector("[data-pipeline-group-body]") as HTMLElement;
+  expect(group.style.transform).toBe("translate(420px, 180px)");
+  expect(body.style.left).toBe(`${placement.body!.x - placement.header.x}px`);
+  expect(body.style.top).toBe(`${placement.body!.y - placement.header.y}px`);
+  expect(host.querySelector("[data-stream-c-slot]")!.getAttribute("data-context"))
+    .toBe(`pipeline-a:${placement.bounds.x},${placement.bounds.y},${placement.bounds.w}x${placement.bounds.h}`);
 });

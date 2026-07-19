@@ -1507,6 +1507,7 @@ export const en = {
   "mobile.marker.stack": "history",
   "mobile.marker.worker": "workers",
   "mobile.marker.task": "task",
+  "mobile.marker.pipeline": "pipeline",
 
   // Board tasks
   "tasks.failed": "failed ({status})",

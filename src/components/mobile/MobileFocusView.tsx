@@ -32,6 +32,8 @@ import { MobilePipelineDock } from "./MobilePipelineDock";
 import { MobilePipelineDockSheet, MobilePipelineSummaryRow } from "./MobilePipelineDockSheet";
 import { deckKey } from "@/components/scheme/agentLinks";
 import { buildSchemeLayout } from "@/components/scheme/layout";
+import { layoutPipelineGroups, type PipelinePane } from "@/components/scheme/pipelineAnchor";
+import { isPlacedTask, taskRect } from "@/components/scheme/taskGeometry";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
 import { MobileMapLite } from "./MobileMapLite";
 
@@ -149,6 +151,32 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
     () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths),
     [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths],
   );
+  const mobilePipelineOutlines = useMemo(() => {
+    const live = surfacePipelines.filter((pipeline) => pipeline.state !== "completed" && pipeline.state !== "closed");
+    const panes: PipelinePane[] = layout.nodes.map((node) => ({
+      x: node.x,
+      y: node.y,
+      w: node.w,
+      h: node.h,
+      path: node.file.path,
+      conversationId: node.file.conversationId,
+    }));
+    const placedTasks = tasks.filter(isPlacedTask);
+    const taskRects = placedTasks.map((task) => taskRect(task, false));
+    const obstacles = [
+      ...layout.nodes,
+      ...layout.decks,
+      ...layout.stacks,
+      ...layout.drafts,
+      ...layout.slots,
+      ...taskRects,
+    ];
+    const placements = layoutPipelineGroups(live, tasks, panes, obstacles);
+    return live.flatMap((pipeline) => {
+      const placement = placements.get(pipeline.id);
+      return placement ? [{ id: pipeline.id, title: pipeline.task, rect: placement.bounds }] : [];
+    });
+  }, [surfacePipelines, layout, tasks]);
   /* Scheme order (depth-first, groups left to right) becomes the strip order,
      so chips and the map agree on what "next" means. */
   const entries = useMemo<Entry[]>(
@@ -388,7 +416,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
           {/* Collapsed worker stacks count toward map availability (issue #136):
               a worker-heavy board is often one visible root plus several stacks,
               and the map is the only place their per-origin dots can be seen. */}
-          {mapReachable(layout.nodes.length, workerStacks.length) ? (
+          {mapReachable(layout.nodes.length, workerStacks.length, mobilePipelineOutlines.length) ? (
             <button
               type="button"
               className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -529,6 +557,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
             layout={layout}
             tasks={tasks}
             workerStacks={workerStacks}
+            pipelineOutlines={mobilePipelineOutlines}
             frame={mapFrame}
             ringKey={resolvedKey}
             onPick={pickFromMap}

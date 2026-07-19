@@ -215,3 +215,77 @@ test("current framing without a ring keeps the fitted fallback gesture floor", a
   expect(leftAfterZoom).toBeLessThan(leftBeforeZoom);
   expect(Math.abs(leftAfterZoom - leftBeforeZoom)).toBeLessThan(100);
 });
+
+test("pipeline-only All and Current framing preserve a manual camera across equivalent polls", async () => {
+  const source = buildMobileMapFixture(8);
+  const emptyLayout = {
+    ...source.layout,
+    nodes: [],
+    edges: [],
+    groups: [],
+    stacks: [],
+    decks: [],
+    drafts: [],
+    slots: [],
+    links: [],
+    loops: [],
+    byPath: new Map(),
+    width: 1,
+    height: 1,
+  };
+  const outline = { id: "pipeline-only", title: "Synthetic pipeline", rect: { x: 720, y: 240, w: 360, h: 76 } };
+  const render = (root: Root, frame: "all" | "current", poll = false) => flushSync(() => root.render(
+    <MobileMapLite
+      layout={poll ? { ...emptyLayout, byPath: new Map() } : emptyLayout}
+      tasks={[]}
+      workerStacks={[]}
+      pipelineOutlines={[{ ...outline, rect: { ...outline.rect } }]}
+      frame={frame}
+      ringKey={null}
+      onPick={() => {}}
+    />,
+  ));
+  const root = mount(
+    <MobileMapLite
+      layout={emptyLayout}
+      tasks={[]}
+      workerStacks={[]}
+      pipelineOutlines={[outline]}
+      frame="all"
+      ringKey={null}
+      onPick={() => {}}
+    />,
+  );
+  await settle();
+
+  const marker = () => dom.document.querySelector('[data-map-kind="pipeline"]') as unknown as HTMLElement;
+  const map = dom.document.querySelector('[data-testid="mobile-map"]') as unknown as HTMLElement;
+  const initialLeft = Number.parseFloat(marker().style.left);
+  const initialTop = Number.parseFloat(marker().style.top);
+  const initialWidth = Number.parseFloat(marker().style.width);
+  const initialHeight = Number.parseFloat(marker().style.height);
+  expect(initialLeft).toBeGreaterThanOrEqual(0);
+  expect(initialTop).toBeGreaterThanOrEqual(0);
+  expect(initialLeft + initialWidth).toBeLessThanOrEqual(390);
+  expect(initialTop + initialHeight).toBeLessThanOrEqual(620);
+
+  const zoomIn = new dom.WheelEvent("wheel", { bubbles: true, deltaY: -180 });
+  Object.defineProperties(zoomIn, { clientX: { value: 195 }, clientY: { value: 310 } });
+  flushSync(() => map.dispatchEvent(zoomIn as unknown as Event));
+  await settle();
+  const manualLeft = Number.parseFloat(marker().style.left);
+  expect(manualLeft).not.toBeCloseTo(initialLeft, 5);
+
+  render(root, "all", true);
+  await settle();
+  expect(Number.parseFloat(marker().style.left)).toBeCloseTo(manualLeft, 5);
+
+  render(root, "current", true);
+  await settle();
+  expect(Number.parseFloat(marker().style.left) + Number.parseFloat(marker().style.width) / 2).toBeCloseTo(195, 5);
+  expect(Number.parseFloat(marker().style.top) + Number.parseFloat(marker().style.height) / 2).toBeCloseTo(310, 5);
+
+  render(root, "all", true);
+  await settle();
+  expect(Number.parseFloat(marker().style.left)).toBeCloseTo(initialLeft, 5);
+});

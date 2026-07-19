@@ -9,7 +9,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 
 import type { Camera } from "./Minimap";
 import type { SchemeRect } from "./layout";
-import { PIPELINE_GROUP_COLLAPSED_H } from "./pipelineAnchor";
+import type { PipelineGroupPlacement } from "./pipelineAnchor";
 
 export interface PipelineGroupContextValue {
   id: string;
@@ -47,7 +47,7 @@ export const PipelineGroup = memo(function PipelineGroup({
   children,
 }: {
   pipeline: Pipeline;
-  rect: SchemeRect;
+  rect: PipelineGroupPlacement;
   camRef: React.RefObject<Camera>;
   onPin: (pipeline: Pipeline, pos: { x: number; y: number }) => Promise<string | null>;
   interactive: boolean;
@@ -61,8 +61,12 @@ export const PipelineGroup = memo(function PipelineGroup({
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
   const [localPos, setLocalPos] = useState<{ x: number; y: number } | null>(null);
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
-  const pos = drag ?? localPos ?? rect;
-  const worldRect = useMemo(() => ({ x: pos.x, y: pos.y, w: rect.w, h: rect.h }), [pos.x, pos.y, rect.w, rect.h]);
+  const pos = drag ?? localPos ?? rect.header;
+  const worldRect = useMemo(() => {
+    const dx = pos.x - rect.header.x;
+    const dy = pos.y - rect.header.y;
+    return { x: rect.bounds.x + dx, y: rect.bounds.y + dy, w: rect.bounds.w, h: rect.bounds.h };
+  }, [pos.x, pos.y, rect.header.x, rect.header.y, rect.bounds]);
   const context = useMemo(() => ({ id: pipeline.id, worldRect }), [pipeline.id, worldRect]);
   const position = pipelineStagePosition(pipeline);
   const draft = pipeline.state === "draft" || pipeline.stages.length === 0;
@@ -121,13 +125,13 @@ export const PipelineGroup = memo(function PipelineGroup({
         data-scheme-ui={interactive ? "" : undefined}
         data-pipeline-group={pipeline.id}
         {...(draft ? { "data-pipeline-draft": "" } : {})}
-        className={`absolute z-[5] overflow-visible rounded-[10px] border bg-card/96 shadow-2 ${interactive ? "" : "pointer-events-none select-none"} ${draft ? "border-dashed border-warning/70" : "border-border"}`}
-        style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, width: rect.w, height: rect.h }}
+        className={`absolute z-[5] overflow-visible ${interactive ? "" : "pointer-events-none select-none"}`}
+        style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, width: rect.header.w, height: rect.header.h }}
         aria-label={`${pipeline.task}: ${pipelineStateLabel(t, pipeline.state)}`}
       >
         <div
           data-pipeline-group-drag
-          className="flex h-[76px] touch-none items-center gap-3 px-4"
+          className={`flex h-[76px] touch-none items-center gap-3 rounded-[10px] border bg-card/96 px-4 shadow-2 ${draft ? "border-dashed border-warning/70" : "border-border"}`}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
@@ -158,11 +162,16 @@ export const PipelineGroup = memo(function PipelineGroup({
             <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? "rotate-180" : ""}`} aria-hidden />
           </button>
         </div>
-        {expanded ? (
+        {expanded && rect.body ? (
           <div
             data-pipeline-group-body
-            className="overflow-y-auto border-t border-border px-3 py-3"
-            style={{ height: Math.max(0, rect.h - PIPELINE_GROUP_COLLAPSED_H) }}
+            className={`absolute overflow-y-auto rounded-[10px] border bg-card/96 px-3 py-3 shadow-2 ${draft ? "border-dashed border-warning/70" : "border-border"}`}
+            style={{
+              left: rect.body.x - rect.header.x,
+              top: rect.body.y - rect.header.y,
+              width: rect.body.w,
+              height: rect.body.h,
+            }}
           >
             {typeof children === "function" ? children({ collapse }) : children}
           </div>

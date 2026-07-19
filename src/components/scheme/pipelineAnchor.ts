@@ -1,7 +1,7 @@
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 
-import { findFreeSlot } from "./findFreeSlot";
+import { findFreeSlot, OB_GUTTER, RING_MAX, SLOT_Q } from "./findFreeSlot";
 import type { SchemeRect } from "./layout";
 import { TASK_W } from "./taskGeometry";
 
@@ -11,6 +11,7 @@ export const PIPELINE_GROUP_COLLAPSED_H = 76;
 /** Expanded groups reserve a bounded world-space surface; their body scrolls within it. */
 export const PIPELINE_GROUP_EXPANDED_H = 520;
 export const PIPELINE_GROUP_STACK_GAP = 24;
+export const PIPELINE_GROUP_BODY_H = PIPELINE_GROUP_EXPANDED_H - PIPELINE_GROUP_COLLAPSED_H;
 
 const FREE_GRID_COLUMNS = 4;
 const FREE_GRID_X_GAP = 24;
@@ -32,6 +33,18 @@ export interface PipelinePane {
   h: number;
   path: string;
   conversationId?: string | null;
+}
+
+export type PipelineGroupDirection = "collapsed" | "down" | "up" | "right" | "left" | "free";
+
+export interface PipelineGroupPlacement extends SchemeRect {
+  /** Durable or automatic collapsed-header coordinates. */
+  header: SchemeRect;
+  /** Session-only expanded surface. */
+  body: SchemeRect | null;
+  /** Camera, minimap, and descendant-context extent. */
+  bounds: SchemeRect;
+  direction: PipelineGroupDirection;
 }
 
 type PipelineWithTaskIds = Pipeline & { taskIds?: readonly string[] };
@@ -64,6 +77,46 @@ function manuallyLinkedTask(pipeline: Pipeline, tasks: readonly BoardTask[]): Bo
       ),
     ),
   ) ?? null;
+}
+
+function rectUnion(rects: readonly SchemeRect[]): SchemeRect {
+  const left = Math.min(...rects.map((rect) => rect.x));
+  const top = Math.min(...rects.map((rect) => rect.y));
+  const right = Math.max(...rects.map((rect) => rect.x + rect.w));
+  const bottom = Math.max(...rects.map((rect) => rect.y + rect.h));
+  return { x: left, y: top, w: right - left, h: bottom - top };
+}
+
+function clashes(rect: SchemeRect, obstacles: readonly SchemeRect[]): boolean {
+  return obstacles.some((obstacle) =>
+    rect.x < obstacle.x + obstacle.w + OB_GUTTER
+    && rect.x + rect.w + OB_GUTTER > obstacle.x
+    && rect.y < obstacle.y + obstacle.h + OB_GUTTER
+    && rect.y + rect.h + OB_GUTTER > obstacle.y,
+  );
+}
+
+function placeExpandedBody(
+  header: SchemeRect,
+  obstacles: readonly SchemeRect[],
+): { body: SchemeRect; direction: Exclude<PipelineGroupDirection, "collapsed"> } {
+  const bodySize = { w: PIPELINE_GROUP_W, h: PIPELINE_GROUP_BODY_H };
+  const candidate = (direction: Exclude<PipelineGroupDirection, "collapsed" | "free">, distance: number): SchemeRect => {
+    if (direction === "down") return { x: header.x, y: header.y + header.h + distance, ...bodySize };
+    if (direction === "up") return { x: header.x, y: header.y - bodySize.h - distance, ...bodySize };
+    if (direction === "right") return { x: header.x + header.w + distance, y: header.y, ...bodySize };
+    return { x: header.x - bodySize.w - distance, y: header.y, ...bodySize };
+  };
+  const directions = ["down", "up", "right", "left"] as const;
+  for (let step = 0; step <= RING_MAX; step += 1) {
+    for (const direction of directions) {
+      const body = candidate(direction, step * SLOT_Q);
+      if (!clashes(body, obstacles)) return { body, direction };
+    }
+  }
+  const anchor = candidate("right", (RING_MAX + 1) * SLOT_Q);
+  const free = findFreeSlot(anchor, bodySize, obstacles);
+  return { body: { ...free, ...bodySize }, direction: "free" };
 }
 
 /** Base world anchor for one pipeline group before obstacle clearance. */
@@ -111,35 +164,48 @@ export function layoutPipelineGroups(
   panes: readonly PipelinePane[],
   obstacles: readonly SchemeRect[],
   groupHeights: ReadonlyMap<string, number> = new Map(),
-): Map<string, SchemeRect> {
+): Map<string, PipelineGroupPlacement> {
   const byAge = [...pipelines].sort((a, b) =>
     a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id.localeCompare(b.id),
   );
-  const result = new Map<string, SchemeRect>();
+  const result = new Map<string, PipelineGroupPlacement>();
+  const headers = new Map<string, SchemeRect>();
   const occupied: SchemeRect[] = [...obstacles];
   const stackOffset = new Map<string, number>();
-
-  const heightFor = (pipeline: Pipeline) => groupHeights.get(pipeline.id) ?? PIPELINE_GROUP_COLLAPSED_H;
 
   for (const pipeline of byAge) {
     const pinned = (pipeline as PositionedPipeline).pos;
     if (!pinned) continue;
-    const rect = { ...pinned, w: PIPELINE_GROUP_W, h: heightFor(pipeline) };
-    result.set(pipeline.id, rect);
-    occupied.push(rect);
+    const header = { ...pinned, w: PIPELINE_GROUP_W, h: PIPELINE_GROUP_COLLAPSED_H };
+    headers.set(pipeline.id, header);
+    occupied.push(header);
   }
   for (const pipeline of byAge) {
     if ((pipeline as PositionedPipeline).pos) continue;
     const anchor = anchorFor(pipeline, tasks, panes);
     const key = `${anchor.x}:${anchor.y}`;
-    const height = heightFor(pipeline);
     const offset = stackOffset.get(key) ?? 0;
-    stackOffset.set(key, offset + height + PIPELINE_GROUP_STACK_GAP);
+    stackOffset.set(key, offset + PIPELINE_GROUP_COLLAPSED_H + PIPELINE_GROUP_STACK_GAP);
     const stackedAnchor = { x: anchor.x, y: anchor.y + offset };
-    const spot = findFreeSlot(stackedAnchor, { w: PIPELINE_GROUP_W, h: height }, occupied);
-    const rect = { ...spot, w: PIPELINE_GROUP_W, h: height };
-    result.set(pipeline.id, rect);
-    occupied.push(rect);
+    const spot = findFreeSlot(stackedAnchor, { w: PIPELINE_GROUP_W, h: PIPELINE_GROUP_COLLAPSED_H }, occupied);
+    const header = { ...spot, w: PIPELINE_GROUP_W, h: PIPELINE_GROUP_COLLAPSED_H };
+    headers.set(pipeline.id, header);
+    occupied.push(header);
+  }
+
+  const surfaces = [...occupied];
+  for (const pipeline of byAge) {
+    const header = headers.get(pipeline.id)!;
+    const expanded = (groupHeights.get(pipeline.id) ?? PIPELINE_GROUP_COLLAPSED_H) > PIPELINE_GROUP_COLLAPSED_H;
+    if (!expanded) {
+      result.set(pipeline.id, { ...header, header, body: null, bounds: header, direction: "collapsed" });
+      continue;
+    }
+    const otherSurfaces = surfaces.filter((surface) => surface !== header);
+    const { body, direction } = placeExpandedBody(header, otherSurfaces);
+    surfaces.push(body);
+    const bounds = rectUnion([header, body]);
+    result.set(pipeline.id, { ...bounds, header, body, bounds, direction });
   }
   return result;
 }

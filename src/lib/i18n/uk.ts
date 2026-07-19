@@ -1464,6 +1464,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile.marker.stack": "історія",
   "mobile.marker.worker": "воркери",
   "mobile.marker.task": "задача",
+  "mobile.marker.pipeline": "пайплайн",
 
   "tasks.failed": "не вдалося ({status})",
   "tasks.tool": "Задача — наступний клік кладе картку на полотно (T)",
