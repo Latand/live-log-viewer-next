@@ -919,6 +919,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "roundDeck.roundsCount": { one: "{count} раунд", few: "{count} раунди", many: "{count} раундів", other: "{count} раундів" },
   "roundDeck.collapseStack": "Згорнути стек ревʼю ({count} раундів)",
   "roundDeck.expandStack": "Розгорнути стек ревʼю ({count} раундів)",
+  "roundDeck.groupAria": { one: "Група ревʼю · {count} раунд", few: "Група ревʼю · {count} раунди", many: "Група ревʼю · {count} раундів", other: "Група ревʼю · {count} раундів" },
+  "roundDeck.groupAriaNamed": { one: "Група ревʼю для {name} · {count} раунд", few: "Група ревʼю для {name} · {count} раунди", many: "Група ревʼю для {name} · {count} раундів", other: "Група ревʼю для {name} · {count} раундів" },
 
   "flowState.waiting_ready": "чекає READY",
   "flowState.spawn_pending": "готовий спавнити ревʼюера",
@@ -1365,6 +1367,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "launchHistory.retry": "Повторити запуск: {title}",
   "workerStack.title": "Згорнуті воркери",
   "workerStack.aria": "Згорнуті розмови воркерів",
+  "workerStack.expandGroup": "Розгорнути групу ревʼю на дошці",
   "workerStack.flow": "Потік",
   "workerStack.pipeline": "Пайплайн",
   "workerStack.origin": "Породжені",

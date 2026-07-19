@@ -23,7 +23,9 @@ import { TaskStrip } from "./BranchPane";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
-import { directReviewFlows, isDirectReviewFlow, splitDirectReviewGroups } from "./flows/directReviewGroups";
+import { reviewerCloseMutations } from "./reviewerAutoClose";
+import { directReviewFlows, isDirectReviewFlow } from "./flows/directReviewGroups";
+import { deckDisclosureMarker, writeDeckDisclosureOverride } from "./flows/reviewDeckDisclosure";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow, resolveFlowMemberPaths } from "./flows/flowModel";
 import { compactPipelineArtifactPaths, compactPipelineLayoutFlows, createDraftPipeline, excludeCompactPipelineArtifacts, pipelinesForProject, replaceCompactPipelineEphemeral, resolvePipelineMemberPaths, type PipelineTemplate } from "./pipelines/pipelineModel";
 import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
@@ -506,23 +508,20 @@ export function ProjectDashboard({
      `deckFlows` is what the deck grammar consumes (folding, layout, worker
      collapse); every PATCH-backed control surface keeps the real `flows`. */
   const directReviewGroups = useMemo(
-    () => directReviewFlows({ files, flows, tasks, conversationAliases }),
-    [files, flows, tasks, conversationAliases],
+    () => directReviewFlows({ files, flows, tasks, conversationAliases, nowMs }),
+    [files, flows, tasks, conversationAliases, nowMs],
   );
   const deckFlows = useMemo(
     () => (directReviewGroups.length ? [...flows, ...directReviewGroups] : flows),
     [flows, directReviewGroups],
   );
-  /* Terminal review-history stacks: a direct group whose every round is
-     terminal renders NO deck — its reviewers fold into a per-group worker
-     stack instead, leaving the layout and minimap until explicitly expanded.
-     Only ACTIVE groups reach the layout as deck flows; the full `deckFlows`
-     keeps claiming/folding every reviewer so none resurfaces as a card. */
-  const activeReviewGroups = useMemo(() => splitDirectReviewGroups(directReviewGroups).active, [directReviewGroups]);
-  const layoutDeckFlows = useMemo(
-    () => (activeReviewGroups.length ? [...flows, ...activeReviewGroups] : flows),
-    [flows, activeReviewGroups],
-  );
+  /* Terminal groups stay board citizens (#289 + #325): every direct group —
+     active AND terminal — reaches the layout, so a finished group renders as
+     its collapsed verdict chip at the deck anchor whenever the reviewed
+     conversation is on the board for its own reasons. The expansion gate
+     below still keeps a terminal group from FORCING a quiet anchor onto the
+     board; with no placed anchor the group parks as its per-group
+     review-history stack row (the off-board form). */
   /* Reviewer transcripts of active flows live inside their round decks:
      they never build their own groups, quiet trees or residual chips. */
   const expandedFlowConversations = useMemo(() => {
@@ -571,8 +570,8 @@ export function ProjectDashboard({
     [pipelines, deckFlows, files],
   );
   const compactLayoutFlows = useMemo(
-    () => compactPipelineLayoutFlows(pipelines, layoutDeckFlows),
-    [pipelines, layoutDeckFlows],
+    () => compactPipelineLayoutFlows(pipelines, deckFlows),
+    [pipelines, deckFlows],
   );
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
@@ -723,11 +722,11 @@ export function ProjectDashboard({
       ...manualPaths,
       ...extra.map((file) => file.path),
     ]);
-    const protectedNodes = protectedReviewerNodes({ files, flows: layoutDeckFlows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths })
+    const protectedNodes = protectedReviewerNodes({ files, flows: deckFlows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths })
       .filter((file) => projectKey(file) === project && !compactPipelinePaths.has(file.path));
     const extras = [...extra, ...protectedNodes];
     return extras.length ? [...manualNodes, ...extras] : manualNodes;
-  }, [ephemeral, groupFiles, files, compactPipelinePaths, layoutDeckFlows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
+  }, [ephemeral, groupFiles, files, compactPipelinePaths, deckFlows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
   const liveCount = useMemo(
     () =>
       groups.reduce(
@@ -997,6 +996,33 @@ export function ProjectDashboard({
        delegated to a ref-stable store; manual is read through that ref. */
   }, [rootGroups, files, projectCatalog, catalogComplete, project, board.loaded, board.sync, focusRequest]);
 
+  /* Durable close of verdict-complete reviewers (#289): a reviewer the owner
+     once manually placed keeps a pin that outranks folding; once its terminal
+     verdict is durably observed, release the pin with ONE revision-fenced
+     `close` per session. The session guard means an operator who deliberately
+     re-opens a closed reviewer is not fought within this tab; the transcript
+     stays reachable from the group's deck spines and the conversation list
+     either way. A concurrent-revision conflict simply retries on the next
+     poll through the store's fence. */
+  const autoClosedReviewersRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!board.loaded || board.sync === "unavailable") return;
+    const closes = reviewerCloseMutations({
+      files,
+      flows: deckFlows,
+      project,
+      explicitManual: board.explicitManual,
+      manual: prefsSnapshotRef.current.manual,
+      expanded: prefsSnapshotRef.current.expanded,
+      hidden: prefsSnapshotRef.current.hidden,
+    }).filter((mutation) => !autoClosedReviewersRef.current.has(mutation.path));
+    if (!closes.length) return;
+    for (const mutation of closes) autoClosedReviewersRef.current.add(mutation.path);
+    board.mutate(closes);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps -- board.mutate is
+       delegated to a ref-stable store; prefs are read through the snapshot ref. */
+  }, [files, deckFlows, project, board.loaded, board.sync, board.explicitManual, board.revision]);
+
   /* Any open lands on the scheme: a card of another project pre-adds its node
      and switches the project; a conversation of this project joins the managed
      node list (or gets flashed when already there). */
@@ -1040,6 +1066,18 @@ export function ProjectDashboard({
     pendingFocusRef.current = file.path;
   };
   const openFullCatalogFile = onOpenCatalogFile ?? openSwitchboardFile;
+
+  /* Expand a terminal direct review group back onto the board (#289 + #325):
+     record the durable disclosure override as EXPANDED (so the deck
+     materializes fully instead of its collapsed chip), then open the reviewed
+     anchor through the shared restore grammar — role-based placement, pins,
+     and reload survival come free. */
+  const expandReviewGroup = (flow: Flow) => {
+    writeDeckDisclosureOverride(window.localStorage, flow.id, "expanded", deckDisclosureMarker(flow));
+    const anchor = files.find((file) => file.path === flow.implementerPath);
+    if (anchor) openSwitchboardFile(anchor);
+    else board.restore(flow.implementerPath, "manual");
+  };
 
   /* Undo a close: reopen the card through the shared restore path so #199's
      durable membership rebinds it to its pipeline/review zone automatically. When
@@ -1354,7 +1392,7 @@ export function ProjectDashboard({
               manual={hasNodes ? schemeManual : []}
               files={files}
               flows={flows}
-              reviewGroups={activeReviewGroups}
+              reviewGroups={directReviewGroups}
               pipelines={pipelines}
               surfacePipelines={activePipelines}
               workerStacks={workerStacks}
@@ -1398,7 +1436,7 @@ export function ProjectDashboard({
                 manual={hasNodes ? schemeManual : []}
                 files={files}
                 flows={flows}
-                reviewGroups={activeReviewGroups}
+                reviewGroups={directReviewGroups}
                 pipelines={pipelines}
                 surfacePipelines={activePipelines}
                 tasks={hasNodes ? boardTasks : []}
@@ -1507,7 +1545,7 @@ export function ProjectDashboard({
           <>
             <TaskStacksStrip stacks={taskPartition.stacks} onOpen={(task) => openTaskOnBoard(task.id)} />
             <LaunchHistory items={launchHistory} onRetry={retryLaunch} />
-            <WorkerStacks stacks={workerStacks} files={files} flows={deckFlows} pipelines={pipelines} onSelect={openSwitchboardFile} />
+            <WorkerStacks stacks={workerStacks} files={files} flows={deckFlows} pipelines={pipelines} onSelect={openSwitchboardFile} onExpandGroup={expandReviewGroup} />
             {!hasArchiveNodes && residual.length ? (
               <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
             ) : null}

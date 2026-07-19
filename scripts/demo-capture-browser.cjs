@@ -223,6 +223,33 @@ async function render(browser, config, shot, capturePng) {
       expand.click();
     }, shot.file);
   }
+  if (shot.id === "review-group-expanded" || shot.id === "review-group-collapsed") {
+    // Frame the whole board: the default camera centers the live implementer
+    // and can leave the review deck at the viewport edge.
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll("button")).some((button) => ((button.getAttribute("title") || "")).startsWith("Fit all content")),
+      { timeout: 30_000 },
+    );
+    await page.evaluate(() => {
+      const fit = Array.from(document.querySelectorAll("button")).find((button) => ((button.getAttribute("title") || "")).startsWith("Fit all content"));
+      if (!(fit instanceof HTMLElement)) throw new Error("missing fit-all control");
+      fit.click();
+    });
+  }
+  if (shot.id === "review-group-mobile") {
+    // The 390px shell focuses one card at a time: bring the review deck chip
+    // forward so the collapsed verdict group is the captured surface.
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll("button")).some((chip) => /^R\s/.test((chip.textContent || "").trim())),
+      { timeout: 30_000 },
+    );
+    await page.evaluate(() => {
+      const chip = Array.from(document.querySelectorAll("button")).find((candidate) => /^R\s/.test((candidate.textContent || "").trim()));
+      if (!(chip instanceof HTMLElement)) throw new Error("missing review deck strip chip");
+      chip.click();
+    });
+    await page.waitForSelector("[data-review-deck-collapsed]", { timeout: 30_000 });
+  }
   if (shot.id === "chat-feed") {
     // The compact scheme card renders the same transcript in miniature, so the
     // command group must be toggled inside the expanded dialog specifically.

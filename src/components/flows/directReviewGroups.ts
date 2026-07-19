@@ -5,6 +5,7 @@ import type { FileEntry } from "@/lib/types";
 import { currentConversationFile, withoutArchivedPredecessors } from "@/lib/accounts/identity";
 
 import { projectKey } from "@/components/projectModel";
+import { workerCollapseIdleMs } from "@/components/scheme/workerCollapse";
 
 import { isActiveFlow } from "./flowModel";
 
@@ -42,12 +43,14 @@ export function isDirectReviewFlow(flow: Pick<Flow, "id">): boolean {
 /**
  * Split direct review groups into the ones that still carry an actionable
  * latest round (they place a deck + loop beside the reviewed conversation)
- * and terminal HISTORY groups — every round ended with a verdict or a
- * failure. A history group renders NO deck at all: its reviewers fold into a
- * compact per-group worker stack (the terminal review-history stack), leaving
- * the board layout and minimap until one is explicitly expanded. Both halves
- * keep claiming their reviewers, so a folded round never resurfaces as a
- * standalone card.
+ * and terminal HISTORY groups — every round ended with a verdict or an aged
+ * failure. Since #289 + #325 a terminal group is still a board citizen: it
+ * places its deck (rendered collapsed to the verdict chip by default)
+ * whenever its reviewed anchor is on the board for its own reasons, and
+ * otherwise parks as a compact per-group worker stack (the review-history
+ * stack) without ever forcing the quiet anchor back onto the board. Both
+ * halves keep claiming their reviewers, so a folded round never resurfaces
+ * as a standalone card.
  */
 export function splitDirectReviewGroups(groups: readonly Flow[]): { active: Flow[]; history: Flow[] } {
   const active: Flow[] = [];
@@ -63,6 +66,10 @@ export interface DirectReviewGroupsInput {
   tasks?: readonly BoardTask[];
   /** Durable registry alias map (old id → canonical id). */
   conversationAliases?: Readonly<Record<string, string>>;
+  /** Wall clock for the failed-round freshness horizon; defaults to Date.now(). */
+  nowMs?: number;
+  /** Freshness horizon override (tests); defaults to the shared worker idle window. */
+  idleMs?: number;
 }
 
 /** An activity read that must not mislabel a still-working reviewer as failed:
@@ -80,6 +87,8 @@ function reviewerStillWorking(file: FileEntry): boolean {
 export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
   const visible = withoutArchivedPredecessors([...input.files]);
   const groups = groupDirectReviewers(input);
+  const nowMs = input.nowMs ?? Date.now();
+  const idleMs = input.idleMs ?? workerCollapseIdleMs();
 
   const out: Flow[] = [];
   for (const { key, members } of groups) {
@@ -97,10 +106,11 @@ export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
       const { file } = member;
       const outcome = file.review ?? null;
       /* A verdict-less reviewer that stopped working failed before its verdict —
-         the LATEST round included (production regression on 66ef346): a
-         days-old stopped reviewer parks its group as compact history, keeping
-         quiet reviewed anchors off the board. Anything live, mid-turn, or
-         waiting on input stays the actionable front card. */
+         the LATEST round included (production regression on 66ef346). The round
+         reads as aborted either way; whether the GROUP stays actionable for a
+         fresh failure is the freshness-horizon clause on `state` below.
+         Anything live, mid-turn, or waiting on input stays the actionable
+         front card. */
       const failed = !outcome && !reviewerStillWorking(file);
       return {
         n: index + 1,
@@ -144,8 +154,16 @@ export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
       roundLimit: 0,
       /* An unfinished latest round is the actionable loop; an all-terminal
          group parks as compact history and never forces its reviewed
-         conversation onto the board (see ProjectDashboard's expansion gate). */
-      state: last.verdict === null && last.error === null ? "reviewing" : "done_comment",
+         conversation onto the board (see ProjectDashboard's expansion gate).
+         A latest round that FAILED before its verdict stays actionable only
+         inside the shared freshness horizon (#289/#325 spec: a fresh failure
+         must stay visible), then parks — the unbounded rule flooded the board
+         with days-old dead reviewers (production regression on 66ef346). */
+      state:
+        last.verdict === null
+          && (last.error === null || nowMs - latest.file.mtime * 1000 < idleMs)
+          ? "reviewing"
+          : "done_comment",
       stateDetail: null,
       rounds,
       createdAt: rounds[0]!.startedAt,

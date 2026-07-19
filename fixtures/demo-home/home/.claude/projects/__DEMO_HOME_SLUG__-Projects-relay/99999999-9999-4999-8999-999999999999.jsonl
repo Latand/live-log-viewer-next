@@ -1,0 +1,2 @@
+{"type":"user","uuid":"r3000000-0000-4000-8000-000000000001","timestamp":"2100-01-02T11:30:05.000Z","cwd":"/demo/Projects/relay","message":{"role":"user","content":"Review round 2 of the relay switchboard work: verify the spine ordering fix."}}
+{"type":"assistant","uuid":"r3000000-0000-4000-8000-000000000002","timestamp":"2100-01-02T11:31:00.000Z","cwd":"/demo/Projects/relay","message":{"role":"assistant","model":"claude-opus-4-1","content":[{"type":"text","text":"VERDICT: APPROVE — spine order now follows transcript age and the verdict tone survives reload."}]}}

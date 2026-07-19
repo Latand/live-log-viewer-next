@@ -109,8 +109,10 @@ export const SHOTS: DemoShot[] = [
     output: "overview-board.png",
     project: null,
     file: null,
-    viewport: { width: 920, height: 420 },
-    stableText: ["atlas", "orbit", "forge"],
+    /* Five fixture projects since the review-group shots joined (relay,
+       beacon): the grid needs the taller frame to keep every card in view. */
+    viewport: { width: 920, height: 880 },
+    stableText: ["atlas", "orbit", "forge", "relay", "beacon"],
     frame: {
       visible: [
         { selector: "button", text: "atlas", minWidth: 140, minHeight: 60 },
@@ -143,6 +145,53 @@ export const SHOTS: DemoShot[] = [
         { selector: "#question button", text: "Overview first", minWidth: 420, minHeight: 36 },
       ],
       absentText: ["tmux pane unavailable"],
+      pixels: FRAME_PIXELS,
+    },
+  },
+  {
+    id: "review-group-expanded",
+    output: "review-group-expanded.png",
+    project: "relay",
+    file: null,
+    viewport: { width: 1180, height: 720 },
+    stableText: ["Relay switch builder", "Round 3 · in progress", "REQUEST_CHANGES", "APPROVE"],
+    frame: {
+      visible: [
+        { selector: "[role=\"group\"]", text: "Round 3 · in progress", minWidth: 200, minHeight: 200 },
+        { selector: "button", text: "REQUEST_CHANGES", minWidth: 160, minHeight: 14 },
+        { selector: "button", text: "APPROVE", minWidth: 160, minHeight: 14 },
+      ],
+      absentText: [],
+      pixels: FRAME_PIXELS,
+    },
+  },
+  {
+    id: "review-group-collapsed",
+    output: "review-group-collapsed.png",
+    project: "beacon",
+    file: null,
+    viewport: { width: 1180, height: 720 },
+    stableText: ["Beacon quota builder", "2 rounds", "APPROVE"],
+    frame: {
+      visible: [
+        { selector: "[data-review-deck-collapsed]", text: "APPROVE", minWidth: 180, minHeight: 22 },
+      ],
+      absentText: [],
+      pixels: FRAME_PIXELS,
+    },
+  },
+  {
+    id: "review-group-mobile",
+    output: "review-group-mobile.png",
+    project: "beacon",
+    file: null,
+    viewport: { width: 390, height: 720 },
+    stableText: ["2 rounds", "APPROVE"],
+    frame: {
+      visible: [
+        { selector: "[data-review-deck-collapsed]", text: "APPROVE", minWidth: 300, minHeight: 44 },
+      ],
+      absentText: [],
       pixels: FRAME_PIXELS,
     },
   },

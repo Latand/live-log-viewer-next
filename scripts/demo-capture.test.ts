@@ -48,6 +48,9 @@ describe("demo capture contract", () => {
       "codex-session.png",
       "overview-board.png",
       "pending-question.png",
+      "review-group-expanded.png",
+      "review-group-collapsed.png",
+      "review-group-mobile.png",
       "review-loop.png",
     ]);
     expect(SHOTS.every((shot) => shot.stableText.length > 0)).toBeTrue();

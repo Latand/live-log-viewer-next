@@ -147,7 +147,7 @@ test("a direct review group's deck shows on the minimap like any managed deck (#
   expect((html.match(/fill="var\(--color-accent\)"/g) ?? []).length).toBeGreaterThanOrEqual(1);
 });
 
-test("a terminal review-history group leaves the layout and minimap; tasks dots track only full cards", () => {
+test("a terminal group keeps its deck slot beside a placed anchor but never forces a quiet anchor onto the board (#289+#325)", () => {
   const quietBuilder: FileEntry = {
     root: "claude-projects", name: "/quiet", project: "demo", title: "Quiet builder", engine: "claude",
     kind: "session", fmt: "claude", parent: null, mtime: 9_000, size: 10, activity: "idle",
@@ -173,10 +173,17 @@ test("a terminal review-history group leaves the layout and minimap; tasks dots 
     smt: quietBuilder.mtime,
     orphanTask: false,
   };
-  /* The dashboard hands the layout only the ACTIVE groups: the terminal
-     group's deck (and its minimap rect) is gone; its rounds live in the
-     compact history stack legend instead. */
-  const layout = buildSchemeLayout([group], [], [quietBuilder, reviewer], active, []);
+  /* Since #289 + #325 the dashboard hands the layout EVERY direct group: with
+     the reviewed anchor placed for its own reasons, the terminal group keeps a
+     deck slot (rendered as the collapsed verdict chip) — board and minimap
+     stay in agreement about the group's presence. */
+  const placed = buildSchemeLayout([group], [], [quietBuilder, reviewer], projected, []);
+  expect(placed.decks).toHaveLength(1);
+
+  /* With NO placed anchor, the terminal group never forces the quiet
+     conversation onto the board: no deck, no minimap rect — the rounds park
+     as a per-group review-history stack in the legend instead. */
+  const layout = buildSchemeLayout([], [], [quietBuilder, reviewer], projected, []);
   expect(layout.decks).toHaveLength(0);
   const html = renderToStaticMarkup(
     <Minimap
