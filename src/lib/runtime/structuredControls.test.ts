@@ -29,6 +29,7 @@ function structuredConversation(
   const begun = registry.beginSpawnRequest({
     engine,
     cwd: sandbox,
+    transport: "structured",
     accountId: `${engine}-subscription`,
     ...(options.parentConversationId ? { parentConversationId: options.parentConversationId } : {}),
   });
@@ -120,6 +121,89 @@ test("structured reconfigure validates and enters the runtime command channel", 
     reconfiguration: { model: "claude-opus-4-6", effort: "unknown", fast: true },
   }, { registry: fixture.registry, client, enabled: () => true });
   expect(invalid).toEqual({ status: 400, body: { error: "model is not supported by codex" } });
+  expect(commands).toHaveLength(1);
+});
+
+test("an applying structured restart keeps a newer reconfigure on the durable command channel", async () => {
+  const fixture = structuredConversation();
+  fixture.registry.claimConversationReconfigure(fixture.conversationId as `conversation_${string}`, {
+    operationId: "reconfigure-restarting",
+    revision: 10,
+    profile: { model: "gpt-5.6-sol", effort: "max", fast: false },
+  });
+  terminateStructuredFixture(fixture);
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "reconfigure-newer", receipt: { operationId: "reconfigure-newer", status: "queued" }, replayed: false };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: fixture.conversationId,
+    action: "reconfigure",
+    reconfiguration: { model: "gpt-5.6-terra", effort: "ultra", fast: true },
+  }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "reconfigure-newer",
+    kick: () => {},
+    enabled: () => true,
+  });
+
+  expect(result).toMatchObject({
+    status: 202,
+    body: { structured: true, operationId: "reconfigure-newer", receipt: { status: "queued" } },
+  });
+  expect(commands).toEqual([expect.objectContaining({
+    kind: "reconfigure",
+    operationId: "reconfigure-newer",
+    conversationId: fixture.conversationId,
+  })]);
+});
+
+test("a failed structured restart keeps reconfigure routing during host recovery", async () => {
+  const fixture = structuredConversation();
+  fixture.registry.claimConversationReconfigure(fixture.conversationId as `conversation_${string}`, {
+    operationId: "reconfigure-failed",
+    revision: 11,
+    profile: { model: "gpt-5.6-sol", effort: "max", fast: false },
+  });
+  terminateStructuredFixture(fixture);
+  fixture.registry.settleConversationReconfigure(
+    fixture.conversationId as `conversation_${string}`,
+    "reconfigure-failed",
+    11,
+    "failed",
+    "replacement failed",
+  );
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "reconfigure-after-failure", receipt: { operationId: "reconfigure-after-failure", status: "queued" }, replayed: false };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: fixture.conversationId,
+    action: "reconfigure",
+    reconfiguration: { model: "gpt-5.6-terra", effort: "max", fast: true },
+  }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "reconfigure-after-failure",
+    kick: () => {},
+    enabled: () => true,
+  });
+
+  expect(result).toMatchObject({
+    status: 202,
+    body: { structured: true, operationId: "reconfigure-after-failure", receipt: { status: "queued" } },
+  });
   expect(commands).toHaveLength(1);
 });
 

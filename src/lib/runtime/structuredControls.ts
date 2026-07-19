@@ -45,15 +45,23 @@ export async function dispatchStructuredControl(
       : null;
   const generation = conversation?.generations.at(-1);
   if (!conversation || !generation) return null;
-  const entry = registry.snapshot().entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+  const snapshot = registry.snapshot();
+  const entry = snapshot.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
   if (!entry) return null;
-  /* A delivered kill tears the structuredHost column down, so kill ownership
-     must outlive it: once a conversation has no legacy tmux pane, its kill
-     stays on the structured channel. Falling through to the legacy pane-close
-     ladder here is what turned a durably delivered kill into path-required
-     and branch/root failures (#372). */
+  /* Host teardown clears the structuredHost column before terminal kill
+     projection or reconfigure recovery finishes. Durable conversation state
+     keeps those controls on the structured channel throughout that gap. */
   const structuredKill = request.action === "kill" && !entry.host;
-  if (!entry.structuredHost && !structuredKill) return null;
+  const completedStructuredOwnership = request.action === "reconfigure"
+    && !entry.host
+    && Object.values(snapshot.receipts).some((receipt) =>
+      receipt.transport === "structured"
+        && receipt.state === "completed"
+        && registry.canonicalConversationId(receipt.conversationId) === conversation.id);
+  const structuredReconfigureRestart = request.action === "reconfigure"
+    && !entry.host
+    && (conversation.reconfigure?.status === "applying" || completedStructuredOwnership);
+  if (!entry.structuredHost && !structuredKill && !structuredReconfigureRestart) return null;
 
   if (request.action !== "interrupt" && request.action !== "kill" && request.action !== "reconfigure") {
     if (request.action === "resume" && (entry.status === "dead" || entry.status === "unhosted")) {
