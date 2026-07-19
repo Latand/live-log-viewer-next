@@ -30,6 +30,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "entities": "^7.0.1",
     "highlight.js": "^11.11.1",
     "lucide-react": "^1.23.0",
     "next": "16.2.10",

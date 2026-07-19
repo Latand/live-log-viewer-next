@@ -1,7 +1,10 @@
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, extname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { inflateSync } from "node:zlib";
+
+import { decodeHTMLStrict } from "entities";
 
 export type FindingClass =
   | "configuration_error"
@@ -55,6 +58,7 @@ const textExtensions = new Set([
 ]);
 const textBasenames = new Set(["CODEOWNERS", "Dockerfile", "LICENSE", "Makefile", "README"]);
 const maxPublicationBytes = 32 * 1024 * 1024;
+const maxVideoStreams = 16;
 const supportedGeneratorRuntime = "bun-1.3.3";
 const credentialInputPattern = new RegExp([
   String.raw`<in`,
@@ -225,27 +229,7 @@ function decodePercentEncoding(text: string): string {
 }
 
 function decodeHtmlEntities(text: string): string {
-  const named: Record<string, string> = {
-    amp: "&",
-    apos: "'",
-    colon: ":",
-    gt: ">",
-    lt: "<",
-    percnt: "%",
-    quot: "\"",
-    sol: "/",
-  };
-  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, code: string) => {
-    if (code.startsWith("#x") || code.startsWith("#X")) {
-      const value = Number.parseInt(code.slice(2), 16);
-      return Number.isSafeInteger(value) && value >= 0 && value <= 0x10ffff ? String.fromCodePoint(value) : entity;
-    }
-    if (code.startsWith("#")) {
-      const value = Number.parseInt(code.slice(1), 10);
-      return Number.isSafeInteger(value) && value >= 0 && value <= 0x10ffff ? String.fromCodePoint(value) : entity;
-    }
-    return named[code.toLowerCase()] ?? entity;
-  });
+  return decodeHTMLStrict(text);
 }
 
 function decodeCommonMarkEscapes(text: string): string {
@@ -265,7 +249,7 @@ export function canonicalSensitiveText(text: string): { error: boolean; text: st
 function normalizedSensitiveText(text: string): { compact: string; error: boolean; searchable: string } {
   const canonical = canonicalSensitiveText(text);
   const decoded = canonical.text;
-  const withoutMarkup = decoded.replaceAll(/<[^>]*>/g, "").replaceAll(/[\[\]*`~]/g, "");
+  const withoutMarkup = decoded.replaceAll(/<[^>]*>/g, "").replaceAll(/[\[\]*_`~]/g, "");
   return {
     compact: `${compactSensitiveText(decoded)}\0${compactSensitiveText(withoutMarkup)}`,
     error: canonical.error,
@@ -288,12 +272,6 @@ function matchesKnownFingerprint(compact: string): boolean {
     }
   }
   return false;
-}
-
-function hasLiveCaptureMetadata(path: string): boolean {
-  if (extname(path).toLowerCase() !== ".png") return false;
-  const bytes = readFileSync(path);
-  return bytes.includes(Buffer.from("capture-source\0live-", "latin1"));
 }
 
 function crc32(input: Buffer): number {
@@ -348,11 +326,13 @@ function internationalText(data: Buffer): string[] {
   ];
 }
 
-function pngMetadata(bytes: Buffer): { error: boolean; text: string } {
+function pngMetadata(bytes: Buffer): { animated?: boolean; error: boolean; liveSource?: boolean; text: string } {
   if (!bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) {
     return { error: true, text: "" };
   }
   const values: string[] = [];
+  let animated = false;
+  let liveSource = false;
   let offset = 8;
   let iendOffset = -1;
   while (offset + 12 <= bytes.length) {
@@ -365,10 +345,23 @@ function pngMetadata(bytes: Buffer): { error: boolean; text: string } {
     if (crc32(bytes.subarray(offset + 4, offset + 8 + length)) !== expectedCrc) {
       return { error: true, text: "" };
     }
-    if (type === "tEXt") values.push(data.toString("latin1"));
+    if (type === "acTL") {
+      if (animated || data.length !== 8 || data.readUInt32BE(0) < 1) return { error: true, text: "" };
+      animated = true;
+    }
+    if (type === "tEXt") {
+      const separator = data.indexOf(0);
+      if (separator > 0 && data.subarray(0, separator).toString("latin1") === "capture-source"
+        && data.subarray(separator + 1).toString("latin1").startsWith("live-")) {
+        liveSource = true;
+      }
+      values.push(data.toString("latin1"));
+    }
     if (type === "iTXt") {
       try {
-        values.push(...internationalText(data));
+        const decoded = internationalText(data);
+        values.push(...decoded);
+        if (decoded[0] === "capture-source" && decoded[3].startsWith("live-")) liveSource = true;
       } catch {
         return { error: true, text: "" };
       }
@@ -377,8 +370,10 @@ function pngMetadata(bytes: Buffer): { error: boolean; text: string } {
       const separator = data.indexOf(0);
       if (separator === -1 || data[separator + 1] !== 0) return { error: true, text: "" };
       try {
-        values.push(data.subarray(0, separator).toString("latin1"));
-        values.push(inflateSync(data.subarray(separator + 2), { maxOutputLength: 1024 * 1024 }).toString("latin1"));
+        const keyword = data.subarray(0, separator).toString("latin1");
+        const decoded = inflateSync(data.subarray(separator + 2), { maxOutputLength: 1024 * 1024 }).toString("latin1");
+        values.push(keyword, decoded);
+        if (keyword === "capture-source" && decoded.startsWith("live-")) liveSource = true;
       } catch {
         return { error: true, text: "" };
       }
@@ -418,7 +413,8 @@ function pngMetadata(bytes: Buffer): { error: boolean; text: string } {
       return { error: true, text: "" };
     }
   }
-  return { error: false, text: values.join("\n") };
+  if (values.some((value) => value.includes("capture-source\0live-"))) liveSource = true;
+  return { animated, error: false, liveSource, text: values.join("\n") };
 }
 
 function inspectRasterMetadata(path: string): Set<FindingClass> {
@@ -428,7 +424,11 @@ function inspectRasterMetadata(path: string): Set<FindingClass> {
     const bytes = readFileSync(path);
     if (extension === ".png") {
       const metadata = pngMetadata(bytes);
-      return metadata.error ? new Set(["inspection_error"]) : sensitiveClasses(metadata.text);
+      if (metadata.error) return new Set(["inspection_error"]);
+      const findings = sensitiveClasses(metadata.text);
+      if (metadata.animated) findings.add("inspection_error");
+      if (metadata.liveSource) findings.add("media_live_source");
+      return findings;
     }
     if (bytes.length > 32 * 1024 * 1024) return new Set(["inspection_error"]);
     const printableMetadata = bytes.toString("latin1").match(/[\x20-\x7e]{4,}/g)?.join("\n") ?? "";
@@ -576,7 +576,7 @@ function inspectAnimated(path: string): Set<FindingClass> {
       "error",
       "-count_frames",
       "-select_streams",
-      "v:0",
+      "v",
       "-show_entries",
       "format=duration:format_tags:stream=duration,nb_frames,nb_read_frames:stream_tags",
       "-of",
@@ -588,72 +588,87 @@ function inspectAnimated(path: string): Set<FindingClass> {
   });
   if (probe.exitCode !== 0) return new Set(["inspection_error"]);
   const findings = sensitiveClasses(probe.stdout.toString());
-  let duration = 0;
-  let frameCount = 0;
+  let formatDuration = 0;
+  let streams: Array<{ duration?: unknown; nb_frames?: unknown; nb_read_frames?: unknown }>;
   try {
     const metadata = JSON.parse(probe.stdout.toString()) as {
       format?: { duration?: unknown };
-      streams?: Array<{ duration?: unknown; nb_frames?: unknown; nb_read_frames?: unknown }>;
+      streams?: unknown;
     };
-    duration = Number(metadata.format?.duration ?? metadata.streams?.[0]?.duration);
-    if (!Number.isFinite(duration) || duration < 0) duration = 0;
-    for (const candidate of [metadata.streams?.[0]?.nb_read_frames, metadata.streams?.[0]?.nb_frames]) {
+    formatDuration = Number(metadata.format?.duration);
+    if (!Number.isFinite(formatDuration) || formatDuration < 0) formatDuration = 0;
+    if (!Array.isArray(metadata.streams) || metadata.streams.length === 0 || metadata.streams.length > maxVideoStreams
+      || metadata.streams.some((stream) => typeof stream !== "object" || stream === null || Array.isArray(stream))) {
+      findings.add("inspection_error");
+      return findings;
+    }
+    streams = metadata.streams as Array<{ duration?: unknown; nb_frames?: unknown; nb_read_frames?: unknown }>;
+  } catch {
+    return new Set([...findings, "inspection_error"]);
+  }
+  const fractions = [0, 0.25, 0.5, 0.75, 0.95];
+  for (const [streamOrdinal, stream] of streams.entries()) {
+    let duration = Number(stream.duration);
+    if (!Number.isFinite(duration) || duration < 0) duration = formatDuration;
+    let frameCount = 0;
+    for (const candidate of [stream.nb_read_frames, stream.nb_frames]) {
       const count = Number(candidate);
       if (!Number.isSafeInteger(count) || count < 1) continue;
       frameCount = count;
       break;
     }
-  } catch {
-    return new Set([...findings, "inspection_error"]);
-  }
-  if (duration === 0 && frameCount === 0) {
-    findings.add("inspection_error");
-    return findings;
-  }
-  const fractions = [0, 0.25, 0.5, 0.75, 0.95];
-  const samples = duration > 0
-    ? fractions.map((fraction) => ({ kind: "time" as const, value: (duration * fraction).toFixed(3) }))
-    : fractions.map((fraction) => ({
-      kind: "frame" as const,
-      value: Math.floor((frameCount - 1) * fraction).toString(),
-    }));
-  const uniqueSamples = new Map(samples.map((sample) => [`${sample.kind}:${sample.value}`, sample]));
-  for (const sample of uniqueSamples.values()) {
-    const seekArguments = sample.kind === "time"
-      ? ["-ss", sample.value, "-i", path]
-      : ["-i", path, "-vf", `select=eq(n\\,${sample.value})`];
-    const frame = Bun.spawnSync({
-      cmd: [
-        "ffmpeg",
-        "-v",
-        "error",
-        ...seekArguments,
-        "-frames:v",
-        "1",
-        "-f",
-        "image2pipe",
-        "-vcodec",
-        "png",
-        "pipe:1",
-      ],
-      stderr: "pipe",
-      stdout: "pipe",
-    });
-    if (frame.exitCode !== 0 || frame.stdout.length === 0) {
+    if (duration === 0 && frameCount === 0) {
       findings.add("inspection_error");
       continue;
     }
-    const ocr = Bun.spawnSync({
-      cmd: ["tesseract", "stdin", "stdout", "-l", languages],
-      stdin: frame.stdout,
-      stderr: "pipe",
-      stdout: "pipe",
-    });
-    if (ocr.exitCode !== 0) {
-      findings.add("inspection_error");
-      continue;
+    const samples = duration > 0
+      ? fractions.map((fraction) => ({ kind: "time" as const, value: (duration * fraction).toFixed(3) }))
+      : fractions.map((fraction) => ({
+        kind: "frame" as const,
+        value: Math.floor((frameCount - 1) * fraction).toString(),
+      }));
+    const uniqueSamples = new Map(samples.map((sample) => [`${sample.kind}:${sample.value}`, sample]));
+    for (const sample of uniqueSamples.values()) {
+      const inputArguments = sample.kind === "time"
+        ? ["-ss", sample.value, "-i", path]
+        : ["-i", path];
+      const filterArguments = sample.kind === "frame" ? ["-vf", `select=eq(n\\,${sample.value})`] : [];
+      const frame = Bun.spawnSync({
+        cmd: [
+          "ffmpeg",
+          "-v",
+          "error",
+          ...inputArguments,
+          "-map",
+          `0:v:${streamOrdinal}`,
+          ...filterArguments,
+          "-frames:v",
+          "1",
+          "-f",
+          "image2pipe",
+          "-vcodec",
+          "png",
+          "pipe:1",
+        ],
+        stderr: "pipe",
+        stdout: "pipe",
+      });
+      if (frame.exitCode !== 0 || frame.stdout.length === 0) {
+        findings.add("inspection_error");
+        continue;
+      }
+      const ocr = Bun.spawnSync({
+        cmd: ["tesseract", "stdin", "stdout", "-l", languages],
+        stdin: frame.stdout,
+        stderr: "pipe",
+        stdout: "pipe",
+      });
+      if (ocr.exitCode !== 0) {
+        findings.add("inspection_error");
+        continue;
+      }
+      for (const finding of sensitiveClasses(ocr.stdout.toString())) findings.add(finding);
     }
-    for (const finding of sensitiveClasses(ocr.stdout.toString())) findings.add(finding);
   }
   return findings;
 }
@@ -673,6 +688,37 @@ function canonicalPathIsWithin(root: string, candidate: string): boolean {
   return pathIsWithin(realpathSync(root), realpathSync(candidate));
 }
 
+function assetExistsInTrustedBase(
+  manifestPath: string,
+  asset: ProvenanceAsset,
+  inspectionRoot: string | undefined,
+  trustedBase: string | undefined,
+): boolean {
+  if (!inspectionRoot || !trustedBase || trustedBase.startsWith("--")) return false;
+  if (!canonicalPathIsWithin(inspectionRoot, manifestPath)) return false;
+  const relativeManifest = relative(resolve(inspectionRoot), resolve(manifestPath));
+  if (relativeManifest === "" || relativeManifest === ".." || relativeManifest.startsWith(`..${sep}`) || isAbsolute(relativeManifest)) {
+    return false;
+  }
+  const result = Bun.spawnSync({
+    cmd: ["git", "-C", inspectionRoot, "show", `${trustedBase}:${relativeManifest.split(sep).join("/")}`],
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  if (result.exitCode !== 0) return false;
+  try {
+    const manifest = JSON.parse(result.stdout.toString()) as { assets?: unknown; schemaVersion?: unknown };
+    if (manifest.schemaVersion !== 2 || !Array.isArray(manifest.assets)) return false;
+    const trustedAsset = manifest.assets.find((candidate) => {
+      return typeof candidate === "object" && candidate !== null
+        && (candidate as ProvenanceAsset).path === asset.path;
+    });
+    return trustedAsset !== undefined && isDeepStrictEqual(trustedAsset, asset);
+  } catch {
+    return false;
+  }
+}
+
 function currentRepositoryRoot(): string | undefined {
   const result = Bun.spawnSync({ cmd: ["git", "rev-parse", "--show-toplevel"], stderr: "pipe", stdout: "pipe" });
   if (result.exitCode !== 0) return undefined;
@@ -682,7 +728,7 @@ function currentRepositoryRoot(): string | undefined {
 
 const repositoryRoot = currentRepositoryRoot();
 
-function provenanceFor(path: string, inspectionRoot = repositoryRoot): ProvenanceResult {
+function provenanceFor(path: string, inspectionRoot = repositoryRoot, trustedBase?: string): ProvenanceResult {
   const manifestPath = join(dirname(path), "privacy-manifest.json");
   const invalid: ProvenanceResult = { expectedFindingClasses: new Set(), status: "invalid" };
   const manifestPathResult = safePath(manifestPath);
@@ -736,6 +782,7 @@ function provenanceFor(path: string, inspectionRoot = repositoryRoot): Provenanc
       if (asset.expectedFindingClasses !== undefined) return invalid;
       return { expectedFindingClasses: new Set(), status: "valid" };
     }
+    if (!assetExistsInTrustedBase(manifestPath, asset, inspectionRoot, trustedBase)) return invalid;
     const fixtureDirectory = dirname(path).split(/[\\/]/).some((segment) => /(?:^|-)fixtures?$/.test(segment));
     if (!fixtureDirectory || !Array.isArray(asset.expectedFindingClasses) || asset.expectedFindingClasses.length === 0) return invalid;
     const expectedFindingClasses = new Set<FindingClass>();
@@ -755,6 +802,7 @@ export function inspectPaths(
   configurationError = false,
   requireKnownValues = false,
   inspectionRoot = repositoryRoot,
+  trustedBase?: string,
 ): Map<FindingClass, number> {
   const findings = new Map<FindingClass, number>();
   if (knownValues.error || configurationError || (requireKnownValues && knownValues.fingerprints.length === 0)) {
@@ -775,13 +823,12 @@ export function inspectPaths(
       continue;
     }
     const pathFindings = new Set<FindingClass>();
-    if (hasLiveCaptureMetadata(path)) pathFindings.add("media_live_source");
     for (const finding of inspectRasterMetadata(path)) pathFindings.add(finding);
     for (const finding of inspectRaster(path)) pathFindings.add(finding);
     for (const finding of inspectAnimated(path)) pathFindings.add(finding);
     for (const finding of inspectText(path)) pathFindings.add(finding);
     if (isMedia(path)) {
-      const provenance = provenanceFor(path, inspectionRoot);
+      const provenance = provenanceFor(path, inspectionRoot, trustedBase);
       if (provenance.status === "missing") pathFindings.add("provenance_missing");
       if (provenance.status === "invalid") pathFindings.add("provenance_invalid");
       if (provenance.status === "valid" && provenance.expectedFindingClasses.size > 0) {
@@ -821,6 +868,7 @@ if (import.meta.main) {
   const arguments_ = process.argv.slice(2);
   const repositoryArgument = argumentValue(arguments_, "--repository");
   const inspectionRoot = repositoryArgument ? resolve(repositoryArgument) : (repositoryRoot ?? resolve("."));
+  const trustedBase = argumentValue(arguments_, "--base") ?? "origin/main";
   const repositoryPath = safePath(inspectionRoot);
   const repositoryError = repositoryPath.status !== "safe" || !repositoryPath.metadata?.isDirectory();
   const explicitPaths = requestedPaths(arguments_);
@@ -835,5 +883,6 @@ if (import.meta.main) {
     selection.error || repositoryError,
     arguments_.includes("--require-known-values"),
     inspectionRoot,
+    trustedBase,
   ));
 }

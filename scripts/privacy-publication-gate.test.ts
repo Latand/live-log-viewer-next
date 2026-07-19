@@ -52,6 +52,55 @@ function liveCapturePng(): Buffer {
   ]);
 }
 
+function compressedLiveCapturePng(type: "iTXt" | "zTXt"): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8;
+  header[9] = 2;
+  return Buffer.concat([
+    Buffer.from("89504e470d0a1a0a", "hex"),
+    pngChunk("IHDR", header),
+    pngChunk(type, Buffer.concat([
+      Buffer.from(type === "zTXt" ? "capture-source\0\0" : "capture-source\0\x01\x00\0\0", "latin1"),
+      deflateSync(Buffer.from("live-runtime", "latin1")),
+    ])),
+    pngChunk("IDAT", deflateSync(Buffer.from([0, 255, 255, 255]))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function animatedPng(): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8;
+  header[9] = 2;
+  const animation = Buffer.alloc(8);
+  animation.writeUInt32BE(2, 0);
+  const frameControl = (sequence: number) => {
+    const control = Buffer.alloc(26);
+    control.writeUInt32BE(sequence, 0);
+    control.writeUInt32BE(1, 4);
+    control.writeUInt32BE(1, 8);
+    control.writeUInt16BE(1, 20);
+    control.writeUInt16BE(10, 22);
+    return control;
+  };
+  const secondFrame = Buffer.alloc(4);
+  secondFrame.writeUInt32BE(2);
+  return Buffer.concat([
+    Buffer.from("89504e470d0a1a0a", "hex"),
+    pngChunk("IHDR", header),
+    pngChunk("acTL", animation),
+    pngChunk("fcTL", frameControl(0)),
+    pngChunk("IDAT", deflateSync(Buffer.from([0, 245, 247, 250]))),
+    pngChunk("fcTL", frameControl(1)),
+    pngChunk("fdAT", Buffer.concat([secondFrame, deflateSync(Buffer.from([0, 255, 255, 255]))])),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
 function redactedPlaceholderPng(): Buffer {
   const header = Buffer.alloc(13);
   header.writeUInt32BE(1, 0);
@@ -215,6 +264,46 @@ describe("privacy publication gate", () => {
       "",
     ].join("\n"));
     expect(output).not.toContain("live-runtime");
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  for (const metadataType of ["zTXt", "iTXt"] as const) {
+    test(`detects live-source metadata inside compressed PNG ${metadataType}`, () => {
+      const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+      temporaryDirectories.push(directory);
+      const image = join(directory, "capture.png");
+      writeFileSync(image, compressedLiveCapturePng(metadataType));
+
+      const result = runGate([image], installTool(directory, "tesseract"));
+      const output = result.stdout.toString();
+
+      expect(result.exitCode).toBe(1);
+      expect(output).toBe([
+        "PRIVACY GATE: FAIL",
+        "media_live_source: 1",
+        "provenance_missing: 1",
+        "",
+      ].join("\n"));
+      expect(output).not.toContain("live-runtime");
+      expect(output).not.toContain(directory);
+      expect(result.stderr.toString()).toBe("");
+    });
+  }
+
+  test("fails closed for animated PNG publication input", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const image = join(directory, "capture.png");
+    const contents = animatedPng();
+    writeFileSync(image, contents);
+    writeValidProvenance(directory, "capture.png", contents);
+
+    const result = runGate([image], installTool(directory, "tesseract"));
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\n");
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
   });
@@ -443,6 +532,16 @@ describe("privacy publication gate", () => {
       expected: "home_path",
       name: "lowercase Windows home paths",
       publication: () => ["c:", "users", "fixture-person", "records"].join("\\"),
+    },
+    {
+      expected: "private_network",
+      name: "GFM HTML5 named entities",
+      publication: () => "192&period;168&period;12&period;34",
+    },
+    {
+      expected: "private_network",
+      name: "GFM underscore emphasis",
+      publication: () => "192._168_.12.34",
     },
   ];
 
@@ -696,7 +795,7 @@ describe("privacy publication gate", () => {
     writeValidProvenance(directory, "capture.gif", contents);
     const counter = join(directory, "sample-count");
     const syntheticHome = ["", "Users", "fixture-person", "records"].join("/");
-    installTool(directory, "ffprobe", `printf '%s' '{"format":{"duration":"8","tags":{}}}'`);
+    installTool(directory, "ffprobe", `printf '%s' '{"format":{"duration":"8","tags":{}},"streams":[{"duration":"8","nb_frames":"80","tags":{}}]}'`);
     installTool(directory, "ffmpeg", "printf '%s' 'synthetic-frame'");
     const environment = installTool(directory, "tesseract", `printf x >> "$FRAME_COUNTER"\nprintf '%s\\n' '${syntheticHome}'`);
 
@@ -707,6 +806,76 @@ describe("privacy publication gate", () => {
     expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
     expect(readFileSync(counter, "utf8")).toHaveLength(5);
     expect(output).not.toContain(syntheticHome);
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("inspects every video stream with class-only diagnostics", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const animation = join(directory, "capture.mp4");
+    const contents = Buffer.from("deterministic synthetic multi-stream video fixture");
+    writeFileSync(animation, contents);
+    writeValidProvenance(directory, "capture.mp4", contents);
+    const syntheticHome = ["", "Users", "fixture-person", "second-stream"].join("/");
+    installTool(directory, "ffprobe", `printf '%s' '{"format":{"duration":"8","tags":{}},"streams":[{"duration":"8","nb_frames":"80","tags":{"title":"safe-zero"}},{"duration":"8","nb_frames":"80","tags":{"title":"safe-one"}}]}'`);
+    installTool(directory, "ffmpeg", `case "$*" in *"0:v:1"*) printf '%s' 'private-frame';; *) printf '%s' 'safe-frame';; esac`);
+    const environment = installTool(directory, "tesseract", `frame=$(cat)\nif [ "$frame" = "private-frame" ]; then printf '%s\\n' '${syntheticHome}'; fi`);
+
+    const result = runGate([animation], environment);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+    expect(output).not.toContain(syntheticHome);
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("inspects metadata from every video stream", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const animation = join(directory, "capture.mp4");
+    const contents = Buffer.from("deterministic synthetic multi-stream metadata fixture");
+    writeFileSync(animation, contents);
+    writeValidProvenance(directory, "capture.mp4", contents);
+    const syntheticHome = ["", "Users", "fixture-person", "stream-metadata"].join("/");
+    installTool(directory, "ffprobe", `case "$*" in *"v:0"*) printf '%s' '{"format":{"duration":"8"},"streams":[{"duration":"8","nb_frames":"80","tags":{"title":"safe-zero"}}]}';; *) printf '%s' '{"format":{"duration":"8"},"streams":[{"duration":"8","nb_frames":"80","tags":{"title":"safe-zero"}},{"duration":"8","nb_frames":"80","tags":{"title":"${syntheticHome}"}}]}';; esac`);
+    installTool(directory, "ffmpeg", "printf '%s' 'safe-frame'");
+    const environment = installTool(directory, "tesseract");
+
+    const result = runGate([animation], environment);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+    expect(output).not.toContain(syntheticHome);
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("fails closed before sampling excessive video streams", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const animation = join(directory, "capture.mp4");
+    const contents = Buffer.from("deterministic synthetic excessive-stream video fixture");
+    writeFileSync(animation, contents);
+    writeValidProvenance(directory, "capture.mp4", contents);
+    const counter = join(directory, "sample-count");
+    const probe = JSON.stringify({
+      format: { duration: "8" },
+      streams: Array.from({ length: 17 }, () => ({ duration: "8", nb_frames: "80", tags: {} })),
+    });
+    installTool(directory, "ffprobe", `printf '%s' '${probe}'`);
+    installTool(directory, "ffmpeg", `printf x >> "$FRAME_COUNTER"\nprintf '%s' 'safe-frame'`);
+    const environment = installTool(directory, "tesseract");
+
+    const result = runGate([animation], { ...environment, FRAME_COUNTER: counter });
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\n");
+    expect(existsSync(counter)).toBe(false);
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
   });
@@ -890,9 +1059,15 @@ describe("privacy publication gate", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
-  test("allows checksum-bound adversarial synthetic fixtures with declared classes", () => {
+  test("rejects candidate-created adversarial exemptions", () => {
     const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(root);
+    runGit(root, ["init", "--quiet"]);
+    runGit(root, ["config", "user.name", "Synthetic Fixture"]);
+    runGit(root, ["config", "user.email", "fixture@example.invalid"]);
+    writeFileSync(join(root, "README.md"), "Synthetic baseline.\n");
+    runGit(root, ["add", "."]);
+    runGit(root, ["commit", "--quiet", "-m", "fixture baseline"]);
     const directory = join(root, "privacy-fixtures");
     mkdirSync(directory);
     const image = join(directory, "synthetic-path.png");
@@ -916,9 +1091,60 @@ describe("privacy publication gate", () => {
         sha256: createHash("sha256").update(contents).digest("hex"),
       }],
     }));
+    runGit(root, ["add", "."]);
+    runGit(root, ["commit", "--quiet", "-m", "candidate exemption"]);
     const syntheticHome = ["", "home", "fixture-person", "records"].join("/");
 
-    const result = runGate([image], installTool(directory, "tesseract", `printf '%s\\n' '${syntheticHome}'`));
+    const result = runGateArguments(
+      ["--repository", root, "--base", "HEAD^", "--paths", image],
+      installTool(directory, "tesseract", `printf '%s\\n' '${syntheticHome}'`),
+    );
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_invalid: 1\n");
+    expect(output).not.toContain(syntheticHome);
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("allows adversarial exemptions already present in the trusted base", () => {
+    const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(root);
+    runGit(root, ["init", "--quiet"]);
+    runGit(root, ["config", "user.name", "Synthetic Fixture"]);
+    runGit(root, ["config", "user.email", "fixture@example.invalid"]);
+    const directory = join(root, "privacy-fixtures");
+    mkdirSync(directory);
+    const image = join(directory, "synthetic-path.png");
+    const contents = redactedPlaceholderPng();
+    writeFileSync(image, contents);
+    const generator = Buffer.from('export const PRIVACY_GENERATOR_RUNTIME = "1.3.3";\nexport const PRIVACY_GENERATOR_VERSION = "fixture-generator-v2";\n');
+    writeFileSync(join(directory, "generate-fixture.mjs"), generator);
+    writeFileSync(join(directory, "privacy-manifest.json"), JSON.stringify({
+      schemaVersion: 2,
+      assets: [{
+        path: "synthetic-path.png",
+        classification: "adversarial-synthetic",
+        source: "deterministic-generator",
+        generator: "generate-fixture.mjs",
+        generatorRuntime: "bun-1.3.3",
+        generatorVersion: "fixture-generator-v2",
+        generatorSha256: createHash("sha256").update(generator).digest("hex"),
+        sourceDigests: [createHash("sha256").update("adversarial-fixture-source").digest("hex")],
+        description: "Synthetic adversarial raster for path-detection regression coverage.",
+        expectedFindingClasses: ["home_path"],
+        sha256: createHash("sha256").update(contents).digest("hex"),
+      }],
+    }));
+    runGit(root, ["add", "."]);
+    runGit(root, ["commit", "--quiet", "-m", "trusted exemption"]);
+    const syntheticHome = ["", "home", "fixture-person", "records"].join("/");
+
+    const result = runGateArguments(
+      ["--repository", root, "--base", "HEAD", "--paths", image],
+      installTool(directory, "tesseract", `printf '%s\\n' '${syntheticHome}'`),
+    );
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(0);

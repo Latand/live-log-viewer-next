@@ -20,20 +20,24 @@ Ukrainian OCR data and configures `eng+ukr`; operators can set
 tools, missing language data, failed inspection, and malformed configuration
 fail closed.
 
-Text inspection applies bounded fixed-point decoding to nested percent and HTML
-entity encoding, normalizes CommonMark escapes and zero-width separators, and
-inspects Markdown destinations, HTML attributes, credential-bearing forms, URI
-authentication, authorization headers, and split token shapes. Text-like files
-remain inspectable with NUL bytes or UTF-16 encoding. Unsupported binary inputs
-fail closed. Publication inputs and supporting files with symlinks in any path
+Text inspection applies bounded fixed-point decoding to nested percent encoding
+and the complete GFM HTML5 named-entity table. It normalizes CommonMark escapes,
+emphasis delimiters, and zero-width separators, then inspects Markdown
+destinations, HTML attributes, credential-bearing forms, URI authentication,
+authorization headers, and split token shapes. Text-like files remain
+inspectable with NUL bytes or UTF-16 encoding. Unsupported binary inputs fail
+closed. Publication inputs and supporting files with symlinks in any path
 component are rejected before their targets are read.
 
 Raster inspection covers pixels and metadata. PNG inspection validates chunk
 CRCs and scans `tEXt`, compressed `zTXt` and `iTXt`, `eXIf`, UTF-oriented
-metadata strings, and bytes after `IEND`. Animation and video inspection scans
-container metadata plus five representative frames. Frame-count sampling keeps
-that coverage when duration metadata is unavailable. Missing duration and frame
-count produce `inspection_error`.
+metadata strings, and bytes after `IEND`. Live-capture classification runs over
+every decoded PNG metadata channel. APNG animation controls produce
+`inspection_error` until multi-frame PNG sampling is supported. GIF and video
+inspection scans container metadata plus five representative frames from every
+video stream. Frame-count sampling keeps that coverage when duration metadata
+is unavailable. Missing duration and frame count, malformed stream inventories,
+and excessive stream counts produce `inspection_error`.
 
 ## Known-value fingerprints
 
@@ -101,8 +105,9 @@ differ from the published output digest.
 The normal classifications are `synthetic` and `redacted-placeholder`.
 `adversarial-synthetic` is reserved for documented fixture directories. Its
 manifest declares the exact synthetic finding classes expected from the
-fixture. A checksum, class, source, version, or generator mismatch fails
-provenance validation.
+fixture. Finding suppression requires an identical asset entry at the supplied
+trusted base revision. Candidate-created exemptions and any checksum, class,
+source, version, or generator mismatch fail provenance validation.
 
 ## Redacted evidence placeholders
 
