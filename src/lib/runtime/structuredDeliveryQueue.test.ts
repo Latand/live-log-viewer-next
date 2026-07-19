@@ -962,6 +962,52 @@ test("a structured kill terminates its host and completes its receipt", async ()
   ]);
 });
 
+test("a failed kill leaves the queued send eligible for its live host", async () => {
+  const pending = new Set(["send-one", "kill-one"]);
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const writes: string[] = [];
+  const target = host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started", turnId: `turn:${entry.id}` };
+  });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "send-one",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: {
+        operationId: "send-one",
+        conversationId: "conversation-one",
+        text: "deliver after the failed kill",
+        policy: "queue",
+      },
+    }, {
+      id: "kill-one",
+      kind: "runtime.kill",
+      eventSeq: 2,
+      payload: {
+        operationId: "kill-one",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }].filter((effect) => pending.has(String(effect.payload.operationId))),
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+      if (status === "delivered" || status === "failed") pending.delete(operationId);
+    },
+  }, () => target, async () => false);
+
+  await queue.drain();
+
+  expect(writes).toEqual(["send-one"]);
+  expect(transitions).toEqual([
+    ["kill-one", "delivering", undefined],
+    ["kill-one", "failed", "structured host termination is unavailable"],
+    ["send-one", "delivering", undefined],
+    ["send-one", "delivered", undefined],
+  ]);
+});
+
 test("concurrent kills finish after the first kill removes the host", async () => {
   const pending = new Set(["kill-one", "kill-two"]);
   const transitions: Array<[string, string]> = [];

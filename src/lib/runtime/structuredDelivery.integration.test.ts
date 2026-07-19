@@ -914,7 +914,7 @@ test("a kill cancels an automatic delivery retry and fails the send retryably", 
     turn: { state: "busy", source: "assistant", terminalAt: null },
     observedAt: "2026-07-14T12:00:00.000Z",
   }]);
-  const conversationId = Object.keys(registry.snapshot().conversations)[0]!;
+  const conversationId = Object.keys(registry.snapshot().conversations)[0]! as `conversation_${string}`;
   const key = { engine: "codex" as const, sessionId };
   registry.upsert({
     key,
@@ -979,9 +979,29 @@ test("a kill cancels an automatic delivery retry and fails the send retryably", 
     },
     onStateChange: () => () => {},
   } satisfies EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+  const successorLedger = createFakeDeliveryLedger();
+  const successor = observableFakeHost(new FakeEngineHost(successorLedger));
+  let recoveryCalls = 0;
+  const recover = async (request: { conversationId?: string | null }) => {
+    recoveryCalls += 1;
+    expect(request.conversationId).toBe(conversationId);
+    registry.setStructuredHost(key, {
+      kind: "codex-app-server",
+      endpoint: "fake:revived-after-kill",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    }, "idle");
+    await publishStructuredDeliveryHost({ key, host: successor });
+    return { target: null, path: artifactPath, conversationId, spawned: true } as const;
+  };
 
   try {
-    await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+    await bindStructuredDeliveryQueue([{ key, host }], { registry, client, recover });
     const sendOperationId = "operation-send-before-kill";
     journal.executeOperation({
       kind: "send",
@@ -1016,6 +1036,8 @@ test("a kill cancels an automatic delivery retry and fails the send retryably", 
 
     expect(releaseCount).toBe(1);
     expect(sendCount).toBe(2);
+    expect(recoveryCalls).toBe(0);
+    expect(successorLedger.writes).toEqual([]);
     expect(effectBatchCalls).toBe(effectBatchCallsAfterKill);
     expect(journal.operationResult(killOperationId)?.receipt).toMatchObject({
       kind: "kill",
@@ -1025,7 +1047,7 @@ test("a kill cancels an automatic delivery retry and fails the send retryably", 
     expect(journal.operationResult(sendOperationId)?.receipt).toMatchObject({
       kind: "send",
       status: "failed",
-      reason: "structured host recovery did not start; retry the operation",
+      reason: "structured host was intentionally terminated; retry the operation",
     });
     expect(journal.effectBatch(100, ["runtime.kill"], 0)).toEqual([]);
     expect(journal.effectBatch(100, ["runtime.send"], 0)).toEqual([]);

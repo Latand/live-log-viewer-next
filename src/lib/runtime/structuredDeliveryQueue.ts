@@ -76,6 +76,11 @@ interface ControlEffect {
   eventSeq: number;
 }
 
+interface ControlDrainResult {
+  blocked: boolean;
+  terminated: boolean;
+}
+
 type DeliveryEffect = SendEffect | ControlEffect;
 
 function isControlEffect(effect: DeliveryEffect): effect is ControlEffect {
@@ -195,13 +200,14 @@ export class StructuredDeliveryQueue {
   }
 
   private async drainUntilSettled(): Promise<void> {
+    const intentionallyTerminatedConversations = new Set<string>();
     do {
       this.rerun = false;
-      await this.drainPass();
+      await this.drainPass(intentionallyTerminatedConversations);
     } while (this.rerun);
   }
 
-  private async drainPass(): Promise<void> {
+  private async drainPass(intentionallyTerminatedConversations: Set<string>): Promise<void> {
     const blockedConversations = new Set<string>();
     let afterEventSeq = 0;
     while (true) {
@@ -239,7 +245,11 @@ export class StructuredDeliveryQueue {
       }
       const results = await Promise.all([...grouped.entries()].map(async ([conversationId, target]) => ({
         conversationId,
-        blocked: await this.drainTarget(target),
+        blocked: await this.drainTarget(
+          target,
+          intentionallyTerminatedConversations,
+          blockedConversations,
+        ),
       })));
       for (const result of results) if (result.blocked) blockedConversations.add(result.conversationId);
       if (rawEffects.length < STRUCTURED_DELIVERY_BATCH_SIZE) return;
@@ -247,11 +257,25 @@ export class StructuredDeliveryQueue {
     }
   }
 
-  private async drainTarget(effects: DeliveryEffect[]): Promise<boolean> {
+  private async drainTarget(
+    effects: DeliveryEffect[],
+    intentionallyTerminatedConversations: Set<string>,
+    blockedConversations: Set<string>,
+  ): Promise<boolean> {
     for (const effect of effects) {
       if (isControlEffect(effect)) {
-        const blocked = await this.drainControl(effect);
-        if (blocked) return true;
+        const result = await this.drainControl(effect);
+        if (result.blocked) return true;
+        if (result.terminated) {
+          intentionallyTerminatedConversations.add(effect.conversationId);
+          if (blockedConversations.delete(effect.conversationId)) this.rerun = true;
+        }
+        continue;
+      }
+      if (intentionallyTerminatedConversations.has(effect.conversationId)) {
+        await this.port.transition(effect.operationId, "failed", {
+          reason: "structured host was intentionally terminated; retry the operation",
+        });
         continue;
       }
       const host = this.resolveHost(effect.conversationId);
@@ -376,19 +400,21 @@ export class StructuredDeliveryQueue {
     }
   }
 
-  private async drainControl(effect: ControlEffect): Promise<boolean> {
+  private async drainControl(effect: ControlEffect): Promise<ControlDrainResult> {
     const host = this.resolveHost(effect.conversationId);
     if (effect.kind === "kill") {
       if (!effect.sessionKey) {
         await this.port.transition(effect.operationId, "failed", { reason: "structured host termination target is unavailable" });
-        return false;
+        return { blocked: false, terminated: false };
       }
       if (!host) {
         try {
-          if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) return true;
+          if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) {
+            return { blocked: true, terminated: false };
+          }
           await this.port.transition(effect.operationId, "delivering");
           await this.port.transition(effect.operationId, "delivered");
-          return false;
+          return { blocked: false, terminated: true };
         } catch (error) {
           await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
           throw error;
@@ -398,20 +424,20 @@ export class StructuredDeliveryQueue {
       try {
         if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) {
           await this.port.transition(effect.operationId, "failed", { reason: "structured host termination is unavailable" });
-          return false;
+          return { blocked: false, terminated: false };
         }
         await this.port.transition(effect.operationId, "delivered");
-        return false;
+        return { blocked: false, terminated: true };
       } catch (error) {
         await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
         throw error;
       }
     }
-    if (!host) return true;
+    if (!host) return { blocked: true, terminated: false };
     const health = await host.health();
     if (health.status === "dead" || health.status === "unhosted") {
       await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
-      return true;
+      return { blocked: true, terminated: false };
     }
     await this.port.transition(effect.operationId, "delivering", {
       ...(effect.kind === "interrupt" ? { turnId: effect.turnId ?? health.activeTurnRef } : {}),
@@ -424,21 +450,21 @@ export class StructuredDeliveryQueue {
         const turnId = effect.turnId ?? health.activeTurnRef;
         if (!turnId || (health.activeTurnRef && health.activeTurnRef !== turnId)) {
           await this.port.transition(effect.operationId, "failed", { reason: "stale-turn" });
-          return false;
+          return { blocked: false, terminated: false };
         }
         await host.interrupt(turnId);
         await this.port.transition(effect.operationId, "interrupted", { turnId });
       }
-      return false;
+      return { blocked: false, terminated: false };
     } catch (error) {
       const reason = failureReason(error);
       const afterFailure = await host.health().catch(() => null);
       if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
         await this.port.transition(effect.operationId, "queued", { reason });
-        return true;
+        return { blocked: true, terminated: false };
       }
       await this.port.transition(effect.operationId, "failed", { reason });
-      return false;
+      return { blocked: false, terminated: false };
     }
   }
 }
