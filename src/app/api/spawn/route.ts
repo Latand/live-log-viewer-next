@@ -34,7 +34,7 @@ import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structured
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
-import { adoptPipelineAttemptFromSource } from "@/lib/pipelines/engine";
+import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "@/lib/pipelines/engine";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
@@ -60,6 +60,7 @@ interface SpawnRouteDependencies {
   defer(work: () => Promise<void>): void;
   storeImages(images: readonly RuntimeImageUpload[]): StructuredImageRef[];
   adoptPipelineAttemptFromSource?: typeof adoptPipelineAttemptFromSource;
+  pipelineAttemptTargetForSource?: typeof pipelineAttemptTargetForSource;
 }
 
 class RuntimeImageStorageError extends Error {}
@@ -75,6 +76,7 @@ const productionSpawnRouteDependencies: SpawnRouteDependencies = {
   defer: (work) => after(work),
   storeImages: (images) => runtimeImageStore().putMany(images),
   adoptPipelineAttemptFromSource,
+  pipelineAttemptTargetForSource,
 };
 
 interface SuggestResponse {
@@ -339,6 +341,9 @@ async function postSpawn(
       prompt,
       images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
     });
+    const pipelineAttemptTarget = pipelineSourceConversationId && dependencies.pipelineAttemptTargetForSource
+      ? dependencies.pipelineAttemptTargetForSource(pipelineSourceConversationId)
+      : null;
     const specBase = freshSpecFor(engine, cwd, {
       model: selectedModel.model,
       effort: reasoning.effort,
@@ -391,6 +396,16 @@ async function postSpawn(
       launchProfile: spec.launchProfile,
       clientAttemptId,
       requestDigest: digest,
+      memberships: pipelineAttemptTarget && pipelineSourceConversationId ? [{
+        kind: "pipeline",
+        containerId: pipelineAttemptTarget.pipelineId,
+        role: pipelineAttemptTarget.role,
+        slot: `adopt:${pipelineAttemptTarget.stageId}:${digest.slice(0, 24)}`,
+        stageId: pipelineAttemptTarget.stageId,
+        stageOrder: pipelineAttemptTarget.stageOrder,
+        round: null,
+        parentConversationId: pipelineSourceConversationId as `conversation_${string}`,
+      }] : [],
     });
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
     const adoptMaterializedAttempt = async (receipt: typeof begun.receipt, agentPath: string): Promise<void> => {

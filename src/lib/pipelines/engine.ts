@@ -5,6 +5,7 @@ import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type DurableMembershipInput } from "@/lib/agent/registry";
+import { transcriptAllowed } from "@/lib/agent/spawnParent";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
@@ -93,7 +94,9 @@ export interface PipelinePorts {
   headCwd(transcriptPath: string): string | null;
   lastMessage(entry: FileEntry): { text: string; ts: number } | null;
   pathForConversation(conversationId: string): string | null;
+  sourcePathAllowed(pathname: string): boolean;
   conversationIdForPath(pathname: string): string | null;
+  pipelineAdoptionCandidates(pipelineId: string): PipelineAdoptionCandidate[];
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
   patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
   closeFlow(id: string): Promise<unknown>;
@@ -285,7 +288,34 @@ export function defaultPipelinePorts(): PipelinePorts {
     pathForConversation: (conversationId) => conversationId.startsWith("conversation_")
       ? agentRegistry().conversation(conversationId as ViewerConversationId)?.generations.at(-1)?.path ?? null
       : null,
+    sourcePathAllowed: transcriptAllowed,
     conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
+    pipelineAdoptionCandidates: (pipelineId) => {
+      const snapshot = agentRegistry().snapshot();
+      const receipts = Object.values(snapshot.receipts);
+      const candidates: PipelineAdoptionCandidate[] = [];
+      for (const [conversationId, memberships] of Object.entries(snapshot.memberships)) {
+        for (const membership of memberships) {
+          if (membership.kind !== "pipeline" || membership.containerId !== pipelineId
+            || !membership.slot.startsWith("adopt:") || !membership.stageId || !membership.parentConversationId) continue;
+          const receipt = receipts.find((candidate) => candidate.conversationId === conversationId) ?? null;
+          const conversation = snapshot.conversations[conversationId as ViewerConversationId] ?? null;
+          const agentPath = receipt?.artifactPath ?? conversation?.generations.at(-1)?.path ?? null;
+          if (!agentPath) continue;
+          candidates.push({
+            stageId: membership.stageId,
+            sourceConversationId: membership.parentConversationId,
+            launchId: receipt?.launchId ?? null,
+            conversationId,
+            sessionId: receipt?.key?.sessionId ?? null,
+            agentPath,
+            paneId: receipt?.verifiedHost?.paneId ?? receipt?.pane?.paneId ?? null,
+            startedAt: receipt?.createdAt ?? membership.createdAt,
+          });
+        }
+      }
+      return candidates;
+    },
     createFlow: createFlowFromRequest,
     patchFlow: (id, action, note) => patchFlow(id, { action, ...(note ? { note } : {}) }),
     closeFlow,
@@ -323,7 +353,7 @@ function runFor(pipeline: Pipeline, stageId: string) {
 }
 
 function currentAttempt(pipeline: Pipeline, stageId: string): PipelineStageAttempt | null {
-  return runFor(pipeline, stageId)?.attempts.at(-1) ?? null;
+  return runFor(pipeline, stageId)?.attempts.findLast((attempt) => !attempt.historical) ?? null;
 }
 
 function unixMs(value: string | null): number {
@@ -478,6 +508,33 @@ export type PipelineAttemptConversationRef = {
   startedAt: string | null;
 };
 
+export type PipelineAdoptionCandidate = PipelineAttemptConversationRef & { stageId: string };
+
+export type PipelineAttemptTarget = {
+  pipelineId: string;
+  stageId: string;
+  stageOrder: number;
+  role: string;
+};
+
+/** Resolves the durable container slot that owns a fallback spawn source. */
+export function pipelineAttemptTargetForSource(sourceConversationId: string): PipelineAttemptTarget | null {
+  for (const pipeline of loadPipelines()) {
+    for (let stageOrder = 0; stageOrder < pipeline.runs.length; stageOrder += 1) {
+      const run = pipeline.runs[stageOrder]!;
+      const source = run.attempts.find((attempt) => attempt.conversationId === sourceConversationId);
+      if (!source) continue;
+      return {
+        pipelineId: pipeline.id,
+        stageId: run.stageId,
+        stageOrder,
+        role: source.effectiveRole.roleId ?? "agent",
+      };
+    }
+  }
+  return null;
+}
+
 /** Adds a lineage child as historical evidence on its source stage. */
 export function adoptAttempt(
   pipeline: Pipeline,
@@ -495,6 +552,7 @@ export function adoptAttempt(
   if (!source) return null;
   const attempt: PipelineStageAttempt = {
     n: run.attempts.length + 1,
+    historical: true,
     state: "running",
     effectiveRole: structuredClone(source.effectiveRole ?? stage.effectiveRole),
     launchId: conversationRef.launchId,
@@ -533,6 +591,71 @@ export async function adoptPipelineAttemptFromSource(
   });
 }
 
+function reconcilePendingPipelineAdoptions(pipeline: Pipeline, ports: PipelinePorts): boolean {
+  let changed = false;
+  for (const candidate of ports.pipelineAdoptionCandidates(pipeline.id)) {
+    const run = runFor(pipeline, candidate.stageId);
+    const existing = run?.attempts.find((attempt) =>
+      attempt.conversationId === candidate.conversationId
+      || (candidate.launchId !== null && attempt.launchId === candidate.launchId));
+    if (existing) continue;
+    const adopted = adoptAttempt(pipeline, candidate.stageId, candidate);
+    changed = adopted !== null || changed;
+  }
+  return changed;
+}
+
+async function reconcileHistoricalAttempts(pipeline: Pipeline, entries: FileEntry[], ports: PipelinePorts): Promise<boolean> {
+  let changed = false;
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      if (!attempt.historical || !["spawning", "running"].includes(attempt.state)) continue;
+      const before = JSON.stringify(attempt);
+      updateAttemptIdentity(pipeline, attempt, entries, ports);
+      if (!attempt.agentPath) {
+        if (attempt.launchId) {
+          const receipt = ports.spawnReceipt(attempt.launchId);
+          if (receipt) {
+            attempt.conversationId = receipt.conversationId;
+            attempt.sessionId = receipt.sessionId;
+            attempt.agentPath = receipt.transcript;
+            attempt.paneId = receipt.paneId;
+            if (receipt.state === "failed" || receipt.state === "conflicted") {
+              attempt.state = "failed";
+              attempt.completedAt = ports.now();
+              attempt.error = `historical spawn ended in receipt state ${receipt.state}`;
+            }
+          }
+        }
+        changed = JSON.stringify(attempt) !== before || changed;
+        continue;
+      }
+      const durable = await ports.durableTurnEvidence(attempt.effectiveRole.engine, attempt.agentPath);
+      const terminal = durable?.turn === "terminal" && durable.message !== null && durable.message.ts > unixMs(attempt.startedAt);
+      if (!terminal) {
+        changed = JSON.stringify(attempt) !== before || changed;
+        continue;
+      }
+      const parsed = parseStageVerdict(durable.message!.text);
+      attempt.completedAt = new Date(durable.message!.ts).toISOString();
+      attempt.output = null;
+      if (!parsed) {
+        attempt.state = "failed";
+        attempt.error = "historical attempt completed without a valid final JSON verdict";
+      } else if ("failureReason" in parsed) {
+        attempt.state = "failed";
+        attempt.error = parsed.failureReason;
+      } else {
+        attempt.verdict = parsed.verdict;
+        attempt.state = parsed.verdict.status === "pass" ? "passed" : parsed.verdict.status === "fail" ? "failed" : "needs_decision";
+        attempt.error = parsed.verdict.findings?.[0] ?? null;
+      }
+      changed = JSON.stringify(attempt) !== before || changed;
+    }
+  }
+  return changed;
+}
+
 /** Advance along the pass edge, persisting the relay record: the completed
     attempt's output is the next activation's `{{prev.output}}`, written in the
     same mutation as the verdict/commit that produced it (exactly-once, #353). */
@@ -563,7 +686,7 @@ function failEdgeRoundsUsed(pipeline: Pipeline, stage: PipelineStage): number {
   if (!stage.onFail) return 0;
   const target = runFor(pipeline, stage.onFail.to);
   if (!target) return 0;
-  return target.attempts.filter((attempt) => attempt.activatedBy?.edge === "fail" && attempt.activatedBy.stageId === stage.id).length;
+  return target.attempts.filter((attempt) => !attempt.historical && attempt.activatedBy?.edge === "fail" && attempt.activatedBy.stageId === stage.id).length;
 }
 
 /** The `{{prev.output}}` payload a fail edge forwards: the failed attempt's
@@ -715,7 +838,7 @@ async function tickRunStage(
       );
       /* The retried attempt supersedes its predecessor's round (issue #383):
          the prior attempt of the SAME stage that carries a conversation. */
-      const priorAttempt = runFor(pipeline, stage.id)?.attempts.at(-2) ?? null;
+      const priorAttempt = runFor(pipeline, stage.id)?.attempts.filter((candidate) => !candidate.historical).at(-2) ?? null;
       const spawned = await ports.spawnAgent({
         role: attempt.effectiveRole,
         cwd: pipeline.worktreeDir,
@@ -1040,7 +1163,9 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
     const result = await withPipelineMutation(async (pipelines, persist) => {
       let changed = false;
       for (const pipeline of pipelines) {
-        let pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports);
+        let pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports);
+        pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
+        pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
           pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
         }
@@ -1236,6 +1361,23 @@ type PipelineMutationResult = {
   path?: string;
 };
 
+type PipelineCreatorLineage = {
+  srcPath: string;
+  srcConversationId: string;
+};
+
+function resolvePipelineCreatorLineage(
+  value: unknown,
+  ports: Pick<PipelinePorts, "sourcePathAllowed" | "conversationIdForPath">,
+): { lineage?: PipelineCreatorLineage; error?: string; status?: number } {
+  const srcPath = typeof value === "string" ? value.trim() : "";
+  if (!srcPath) return { error: "pipeline creator lineage is required; pass src", status: 400 };
+  if (!ports.sourcePathAllowed(srcPath)) return { error: "src path is not an allowed conversation transcript", status: 400 };
+  const srcConversationId = ports.conversationIdForPath(srcPath);
+  if (!srcConversationId) return { error: "src conversation does not exist", status: 400 };
+  return { lineage: { srcPath, srcConversationId } };
+}
+
 type CreatePipelineOptions = {
   ensureTask?: BoardTask;
   spawnParams?: TaskPipelineSpawnParams;
@@ -1268,6 +1410,8 @@ export async function createPipelineFromRequest(
   if (req.taskIds !== undefined && (!Array.isArray(req.taskIds) || req.taskIds.some((taskId) => typeof taskId !== "string" || !taskId.trim()))) {
     return { error: "taskIds must be an array of non-empty strings", status: 400 };
   }
+  const creator = resolvePipelineCreatorLineage(req.src, ports);
+  if (!creator.lineage) return { error: creator.error, status: creator.status };
   const taskIds = [...new Set((req.taskIds ?? []).map((taskId) => taskId.trim()))];
   const requestedRepoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
   if (!requestedRepoDir) return { error: "repoDir is required", status: 400 };
@@ -1287,7 +1431,6 @@ export async function createPipelineFromRequest(
     ? null
     : resolvePipelineBase(repoDir, { baseBranch: req.baseBranch, baseRef: explicitBaseRef }, ports.exec);
   if (base && !base.ok) return { error: base.error, status: 409 };
-  const srcPath = typeof req.src === "string" && req.src.trim() ? req.src.trim() : null;
   const pipeline = buildPipeline({
     id: crypto.randomUUID().slice(0, 8),
     task,
@@ -1296,8 +1439,8 @@ export async function createPipelineFromRequest(
     project: ports.projectForCwd(repoDir) ?? path.basename(repoDir),
     repoDir,
     stages: normalized.stages,
-    srcPath,
-    srcConversationId: srcPath ? ports.conversationIdForPath(srcPath) : null,
+    srcPath: creator.lineage.srcPath,
+    srcConversationId: creator.lineage.srcConversationId,
     now: ports.now(),
     state: req.autoStart === false ? "draft" : "provisioning",
   });
@@ -1366,7 +1509,21 @@ export async function patchPipeline(
     const attempt = stage ? currentAttempt(pipeline, stage.id) : null;
     const flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
 
-    if (req.action === "link-task") {
+    if (req.action === "set-src") {
+      if (req.overwrite !== undefined && typeof req.overwrite !== "boolean") {
+        return { error: "overwrite must be a boolean", status: 400 };
+      }
+      const creator = resolvePipelineCreatorLineage(req.srcPath, ports);
+      if (!creator.lineage) return { error: creator.error, status: creator.status };
+      const hasLineage = pipeline.srcPath !== null || pipeline.srcConversationId !== null;
+      const sameLineage = pipeline.srcPath === creator.lineage.srcPath
+        && pipeline.srcConversationId === creator.lineage.srcConversationId;
+      if (hasLineage && !sameLineage && req.overwrite !== true) {
+        return { error: "pipeline creator lineage already exists; pass overwrite: true to replace it", status: 409 };
+      }
+      pipeline.srcPath = creator.lineage.srcPath;
+      pipeline.srcConversationId = creator.lineage.srcConversationId;
+    } else if (req.action === "link-task") {
       const taskId = typeof req.taskId === "string" ? req.taskId.trim() : "";
       if (!taskId) return { error: "taskId is required", status: 400 };
       const taskLinkError = pipelineTaskLinkError(pipeline, [taskId], loadTasks());
@@ -1529,7 +1686,7 @@ export async function patchPipeline(
            the in-flight round (#353). */
         const traversed = (pipeline.cursor?.activatedBy?.edge === "fail" && pipeline.cursor.activatedBy.stageId === from.id)
           || pipeline.runs.some((run) =>
-            run.attempts.some((item) => item.activatedBy?.edge === "fail" && item.activatedBy.stageId === from.id));
+            run.attempts.some((item) => !item.historical && item.activatedBy?.edge === "fail" && item.activatedBy.stageId === from.id));
         if (traversed) return { error: "fail edge has already been traversed; it is frozen evidence", status: 409 };
         if (req.to === null) {
           if (req.maxRounds !== undefined) return { error: "maxRounds requires a fail-edge target", status: 400 };

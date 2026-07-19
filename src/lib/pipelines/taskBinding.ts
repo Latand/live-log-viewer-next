@@ -10,6 +10,8 @@ export type TaskPipelineSpawnParams = {
   engine: FlowEngine;
   model: string | null;
   effort: string | null;
+  /** Conversation receiving the first assignment. */
+  srcPath: string;
 };
 
 export type TaskPipelineReadModel = BoardTask & { pipelineIds: string[] };
@@ -39,6 +41,7 @@ export function ensurePipelineForTask(
     spec: task.text,
     taskIds: [task.id],
     repoDir: spawnParams.repoDir,
+    src: spawnParams.srcPath,
     autoStart: false,
     stages: [{
       id: "run",

@@ -89,6 +89,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
   const source = store.ensureConversation("codex", sourcePath, null);
   const deferred: Array<() => Promise<void>> = [];
   const adoptions: unknown[] = [];
+  let structuredLaunches = 0;
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
   const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
   const previousEvents = process.env.LLV_RUNTIME_EVENTS;
@@ -105,20 +106,42 @@ test("a materialized structured child is offered for pipeline attempt adoption",
       ...structuredRouteDependencies(cwd),
       registry: () => store,
       defer: (work: () => Promise<void>) => { deferred.push(work); },
-      spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => ({
-        ok: true,
-        target: null,
-        path: childPath,
-        effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default",
-        launchId: input.receipt.launchId,
-        conversationId: input.receipt.conversationId,
-        launched: true,
-        retrySafe: false,
-        initialMessage: "delivered" as const,
-        state: "settled" as const,
+      pipelineAttemptTargetForSource: () => ({
+        pipelineId: "pipeline-adoption",
+        stageId: "build",
+        stageOrder: 1,
+        role: "builder",
       }),
+      spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
+        structuredLaunches += 1;
+        const settled = store.settleSpawn(input.receipt.launchId, {
+          key: { engine: "claude", sessionId: crypto.randomUUID() },
+          artifactPath: childPath,
+          cwd,
+          accountId: "claude-test",
+          status: "starting",
+          host: null,
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: "spawn",
+        });
+        if (settled.kind !== "settled") throw new Error(settled.code);
+        return {
+          ok: true,
+          target: null,
+          path: childPath,
+          effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default",
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered" as const,
+          state: "settled" as const,
+        };
+      },
       adoptPipelineAttemptFromSource: async (sourceConversationId: string, conversationRef: unknown) => {
         adoptions.push({ sourceConversationId, conversationRef });
+        if (adoptions.length === 1) throw new Error("injected pipeline store write failure");
         return null;
       },
     } as SpawnRouteTestDependencies;
@@ -130,7 +153,32 @@ test("a materialized structured child is offered for pipeline attempt adoption",
 
     expect({ status: response.status, body: await response.clone().json() }).toMatchObject({ status: 202 });
     await Promise.all(deferred.map((work) => work()));
+    const receipt = Object.values(store.snapshot().receipts).find((candidate) => candidate.clientAttemptId === "pipeline_adoption_20260719")!;
+    expect(store.snapshot().memberships[receipt.conversationId]).toEqual([
+      expect.objectContaining({
+        kind: "pipeline",
+        containerId: "pipeline-adoption",
+        stageId: "build",
+        parentConversationId: source.id,
+        round: null,
+      }),
+    ]);
+
+    const replay = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "x-llv-spawn-capability": capability },
+      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
+    }), dependencies);
+    expect(replay.status).toBe(200);
+    expect(structuredLaunches).toBe(1);
     expect(adoptions).toEqual([{
+      sourceConversationId: source.id,
+      conversationRef: expect.objectContaining({
+        launchId: expect.any(String),
+        conversationId: expect.stringMatching(/^conversation_/),
+        agentPath: childPath,
+      }),
+    }, {
       sourceConversationId: source.id,
       conversationRef: expect.objectContaining({
         launchId: expect.any(String),

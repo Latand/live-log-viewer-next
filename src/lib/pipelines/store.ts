@@ -84,6 +84,7 @@ function isAttempt(value: unknown, index: number): boolean {
   const attempt = value as Record<string, unknown>;
   return (
     attempt.n === index + 1 &&
+    (attempt.historical === undefined || typeof attempt.historical === "boolean") &&
     ["pending", "spawning", "running", "reviewing", "committing", "passed", "failed", "needs_decision", "skipped"].includes(String(attempt.state)) &&
     isEffectiveRole(attempt.effectiveRole) &&
     isNullableString(attempt.launchId) &&

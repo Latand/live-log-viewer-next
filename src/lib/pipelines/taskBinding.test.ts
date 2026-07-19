@@ -33,6 +33,7 @@ test("an unlinked task produces a minimal builder pipeline request", () => {
     engine: "codex",
     model: "gpt-5.6-sol",
     effort: "high",
+    srcPath: "/sessions/assigned.jsonl",
   });
 
   expect(decision).toEqual({
@@ -40,6 +41,7 @@ test("an unlinked task produces a minimal builder pipeline request", () => {
     spec: "Durable binding\nFull acceptance criteria",
     taskIds: ["task-binding-1"],
     repoDir: "/repo",
+    src: "/sessions/assigned.jsonl",
     autoStart: false,
     stages: [{
       id: "run",
@@ -68,18 +70,18 @@ test("live links suppress auto-create while closed and hidden links remain histo
     now: "now",
   });
 
-  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null })).toBeNull();
+  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null, srcPath: "/sessions/assigned.jsonl" })).toBeNull();
 
   linked.state = "closed";
   linked.cursor = null;
   linked.closedAt = "later";
-  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null })).not.toBeNull();
+  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null, srcPath: "/sessions/assigned.jsonl" })).not.toBeNull();
 
   linked.state = "provisioning";
   linked.cursor = { stageId: "run", state: "pending", input: null, activatedBy: null };
   linked.closedAt = null;
   linked.hiddenAt = "later";
-  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null })).not.toBeNull();
+  expect(ensurePipelineForTask(task(), [linked], { repoDir: "/repo", engine: "codex", model: null, effort: null, srcPath: "/sessions/assigned.jsonl" })).not.toBeNull();
 });
 
 test("auto-create bounds a valid long board-task title to the pipeline limit", () => {
@@ -91,6 +93,7 @@ test("auto-create bounds a valid long board-task title to the pipeline limit", (
     engine: "codex",
     model: null,
     effort: null,
+    srcPath: "/sessions/assigned.jsonl",
   });
 
   expect(decision?.task).toHaveLength(4_000);

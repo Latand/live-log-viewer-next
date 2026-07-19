@@ -8,8 +8,11 @@ import { NextRequest } from "next/server";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 const previousStateDir = process.env.LLV_STATE_DIR;
+const previousCodexHome = process.env.LLV_CODEX_HOME;
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-admission-"));
 process.env.LLV_STATE_DIR = path.join(sandbox, "state");
+process.env.LLV_CODEX_HOME = path.join(sandbox, "codex");
+fs.mkdirSync(path.join(process.env.LLV_CODEX_HOME, "sessions"), { recursive: true });
 
 const { agentRegistry } = await import("@/lib/agent/registry");
 const { POST } = await import("./route");
@@ -17,6 +20,8 @@ const { POST } = await import("./route");
 afterAll(() => {
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
+  if (previousCodexHome === undefined) delete process.env.LLV_CODEX_HOME;
+  else process.env.LLV_CODEX_HOME = previousCodexHome;
   fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
@@ -37,7 +42,8 @@ function seedCaller(role: string): { capability: string; conversationId: ViewerC
   });
   if (begun.kind !== "created") throw new Error("expected create");
   const sessionId = crypto.randomUUID();
-  const artifactPath = `/sessions/caller-${sessionId}.jsonl`;
+  const artifactPath = path.join(process.env.LLV_CODEX_HOME!, "sessions", `caller-${sessionId}.jsonl`);
+  fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`);
   const settled = store.settleSpawn(begun.receipt.launchId, {
     key: { engine: "codex", sessionId },
     artifactPath,
@@ -83,18 +89,30 @@ test("a declared reviewer src is rejected even without a capability header", asy
   expect(await response.json()).toMatchObject({ code: "reviewer_origin_spawn" });
 });
 
-test("an authenticated builder caller and an unattributed external caller keep today's behavior", async () => {
+test("an authenticated builder caller without src derives durable creator lineage", async () => {
   const caller = seedCaller("builder");
   const authenticated = await POST(pipelineRequest(
-    { task: "", repoDir: process.cwd(), src: caller.path },
+    { task: "derived creator", repoDir: process.cwd(), autoStart: false, stages: [] },
     { "x-llv-spawn-capability": caller.capability },
   ));
-  expect(authenticated.status).toBe(400);
-  expect(await authenticated.json()).toEqual({ error: "task is required" });
+  expect(authenticated.status).toBe(201);
+  expect(await authenticated.json()).toMatchObject({
+    pipeline: {
+      srcPath: caller.path,
+      srcConversationId: caller.conversationId,
+    },
+  });
+});
 
-  const external = await POST(pipelineRequest({ task: "" }));
+test("an unattributed caller must pass src when creating a pipeline", async () => {
+  const external = await POST(pipelineRequest({
+    task: "missing creator",
+    repoDir: process.cwd(),
+    autoStart: false,
+    stages: [],
+  }));
   expect(external.status).toBe(400);
-  expect(await external.json()).toEqual({ error: "task is required" });
+  expect(await external.json()).toEqual({ error: "pipeline creator lineage is required; pass src" });
 });
 
 test("a capability header that does not authenticate is rejected before pipeline creation", async () => {

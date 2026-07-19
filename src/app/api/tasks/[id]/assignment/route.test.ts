@@ -25,7 +25,7 @@ test("POST ensures a pipeline from the attached conversation profile", async () 
       if (mutation.tasks) tasks = mutation.tasks;
       return mutation.result;
     },
-    spawnParamsForPath: () => ({ repoDir: "/repo", engine: "codex" as const, model: "gpt-5.6-sol", effort: "high" }),
+    spawnParamsForPath: () => ({ repoDir: "/repo", engine: "codex" as const, model: "gpt-5.6-sol", effort: "high", srcPath: "/sessions/builder.jsonl" }),
     ensureTaskPipelineForAssignment: async (task: BoardTask, spawnParams: unknown) => {
       bindingCalls.push({ taskId: task.id, spawnParams });
       return { pipeline: { id: "pipeline-test" } as Pipeline };
@@ -40,7 +40,7 @@ test("POST ensures a pipeline from the attached conversation profile", async () 
   expect(response.status).toBe(200);
   expect(bindingCalls).toEqual([{
     taskId: "task-1",
-    spawnParams: { repoDir: "/repo", engine: "codex", model: "gpt-5.6-sol", effort: "high" },
+    spawnParams: { repoDir: "/repo", engine: "codex", model: "gpt-5.6-sol", effort: "high", srcPath: "/sessions/builder.jsonl" },
   }]);
   expect(tasks[0]!.assignments).toEqual([expect.objectContaining({ path: "/sessions/builder.jsonl", state: "handoff" })]);
 

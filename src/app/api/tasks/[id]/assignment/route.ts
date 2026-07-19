@@ -36,6 +36,7 @@ function spawnParamsForPath(pathname: string): TaskPipelineSpawnParams | null {
     engine: conversation.engine,
     model: profile?.model ?? null,
     effort: profile?.effort ?? null,
+    srcPath: pathname,
   };
 }
 

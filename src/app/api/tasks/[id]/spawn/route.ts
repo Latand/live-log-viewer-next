@@ -285,6 +285,22 @@ async function postTaskSpawn(
   }
 
   if (begun.kind === "replay") {
+    if (dependencies.ensureTaskPipelineForAssignment && begun.receipt.artifactPath) {
+      const binding = await dependencies.ensureTaskPipelineForAssignment(task, {
+        repoDir: cwdResult.cwd,
+        engine,
+        model: selectedModel.model,
+        effort: reasoning.effort,
+        srcPath: begun.receipt.artifactPath,
+      });
+      if (!binding.pipeline) {
+        const at = isoNow();
+        const patch = assignmentPatch(begun.receipt, at, account.accountId, engine);
+        return NextResponse.json(taskSpawnResponse(begun.receipt, task, { ...patch, state: "spawning" }, {
+          error: binding.error ?? "could not bind task to a pipeline",
+        }), { status: 202 });
+      }
+    }
     const at = isoNow();
     const patch = assignmentPatch(begun.receipt, at, account.accountId, engine);
     try {
@@ -297,19 +313,6 @@ async function postTaskSpawn(
       return NextResponse.json(taskSpawnResponse(begun.receipt, task, { ...patch, state: "spawning" }, {
         error: error instanceof Error ? error.message : "task assignment write failed",
       }), { status: 202 });
-    }
-  }
-
-  if (dependencies.ensureTaskPipelineForAssignment) {
-    const binding = await dependencies.ensureTaskPipelineForAssignment(task, {
-      repoDir: cwdResult.cwd,
-      engine,
-      model: selectedModel.model,
-      effort: reasoning.effort,
-    });
-    if (!binding.pipeline) {
-      registry.failSpawn(begun.receipt.launchId, binding.error ?? "could not bind task to a pipeline");
-      return NextResponse.json({ error: binding.error ?? "could not bind task to a pipeline" }, { status: binding.status ?? 400 });
     }
   }
 
@@ -400,6 +403,20 @@ async function postTaskSpawn(
   const completed = registry.snapshot().receipts[begun.receipt.launchId] ?? begun.receipt;
   const completedAt = isoNow();
   const completedPatch = assignmentPatch(completed, completedAt, account.accountId, engine);
+  if (dependencies.ensureTaskPipelineForAssignment && completed.artifactPath) {
+    const binding = await dependencies.ensureTaskPipelineForAssignment(task, {
+      repoDir: cwdResult.cwd,
+      engine,
+      model: selectedModel.model,
+      effort: reasoning.effort,
+      srcPath: completed.artifactPath,
+    });
+    if (!binding.pipeline) {
+      return NextResponse.json(taskSpawnResponse(completed, admittedTask, { ...completedPatch, state: "spawning" }, {
+        error: binding.error ?? "could not bind task to a pipeline",
+      }), { status: 202 });
+    }
+  }
   try {
     const result = persistAssignment(dependencies, id, completedPatch, completedAt);
     if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });

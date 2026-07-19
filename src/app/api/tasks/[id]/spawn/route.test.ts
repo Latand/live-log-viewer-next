@@ -30,6 +30,7 @@ test("task attribution failure replays one launched pane into one durable assign
   let writes = 0;
   let spawnCalls = 0;
   let bindingCalls = 0;
+  let bindingParams: unknown = null;
   const dependencies = {
     registry: () => registry,
     loadTasks: () => tasks,
@@ -49,8 +50,9 @@ test("task attribution failure replays one launched pane into one durable assign
       env: { NODE_ENV: "test" },
     }),
     resolveSpawnedTranscriptPath: async () => artifactPath,
-    ensureTaskPipelineForAssignment: async () => {
+    ensureTaskPipelineForAssignment: async (_task: BoardTask, spawnParams: unknown) => {
       bindingCalls += 1;
+      bindingParams = spawnParams;
       return { pipeline: { id: "pipeline-test" } as Pipeline };
     },
     spawnAgentWithPrompt: async (_spec: unknown, _prompt: string, receipt: SpawnReceipt) => {
@@ -114,7 +116,14 @@ test("task attribution failure replays one launched pane into one durable assign
     initialMessage: "delivered",
   });
   expect(spawnCalls).toBe(1);
-  expect(bindingCalls).toBe(1);
+  expect(bindingCalls).toBe(2);
+  expect(bindingParams).toEqual({
+    repoDir: cwd,
+    engine: "claude",
+    model: "opus",
+    effort: "high",
+    srcPath: artifactPath,
+  });
   expect(tasks[0]?.assignments).toEqual([expect.objectContaining({
     launchId: uncertainBody.launchId,
     clientAttemptId: "task_282_post_launch_write_20260715_a1",
@@ -206,10 +215,7 @@ test("pre-pane spawn failure returns an ownerless task to inbox", async () => {
     state: "failed",
     error: "process exited before pane creation",
   });
-  expect(bindingCalls).toEqual([{
-    taskId: tasks[0]!.id,
-    spawnParams: { repoDir: cwd, engine: "claude", model: null, effort: null },
-  }]);
+  expect(bindingCalls).toEqual([]);
 });
 
 test("a deliberate retry after pre-pane failure creates one fresh launch", async () => {
