@@ -387,8 +387,24 @@ describe("pipelineStagePosition (#353)", () => {
     test("closed on a running stage keeps that stage", () => {
       expect(pipelineStagePosition(closed({ n: 1, state: "running", startedAt: "2026-01-01T00:00:02Z" } as never))).toEqual({ k: 2, n: 3 });
     });
-    test("closed on a pending stage keeps that stage", () => {
+    test("closed on a post-advance pending stage keeps that stage", () => {
       expect(pipelineStagePosition(closed({ n: 1, state: "pending" } as never))).toEqual({ k: 2, n: 3 });
+    });
+    test("closed on the initial pending stage keeps the first stage", () => {
+      /* The resting stage carries a materialized pending attempt and no stage has
+         completed yet, so the header reads 1/3 from the live attempt alone. */
+      const p = pipeline({
+        stages,
+        state: "closed",
+        cursor: null,
+        closedAt: "2026-01-01T00:00:05Z",
+        runs: [
+          { stageId: "plan", attempts: [{ n: 1, state: "pending" } as never] },
+          { stageId: "build", attempts: [] },
+          { stageId: "verify", attempts: [] },
+        ],
+      });
+      expect(pipelineStagePosition(p)).toEqual({ k: 1, n: 3 });
     });
     test("closed on a failed stage keeps that stage", () => {
       expect(pipelineStagePosition(closed({ n: 1, state: "failed", completedAt: "2026-01-01T00:00:02Z" } as never))).toEqual({ k: 2, n: 3 });

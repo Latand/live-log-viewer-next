@@ -1556,6 +1556,13 @@ export async function patchPipeline(
         return { pipeline };
       }
       if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
+      /* A cursor can rest at state pending before its attempt materializes — the
+         initial stage right after provisioning, or the next stage in the window
+         after an advance and before the next tick. Record that resting stage as a
+         truthful pending attempt so the cursorless projection keeps the k/n
+         position once the cursor clears. The attempt inherits the cursor's durable
+         relay record and carries no run timestamps (it never started). */
+      if (stage && !attempt) newAttempt(pipeline, stage);
       pipeline.state = "closed";
       pipeline.cursor = null;
       pipeline.pausedState = null;

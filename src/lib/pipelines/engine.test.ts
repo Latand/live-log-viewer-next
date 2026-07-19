@@ -1947,3 +1947,45 @@ test("a fail loop crosses a migration boundary and resumes positional parent sel
   expect(lastSpawn).toContain("_build_2");
   expect(lastSpawn).toContain("parent=/codex/stage-1.jsonl");
 });
+
+test("closing an initial pending stage records the resting stage as a durable pending attempt (#353)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports); // RUN_STAGES: plan → build
+  await tickPipelines([], h.ports); // provision → running, cursor plan pending, no attempts
+  const before = loadPipelines()[0]!;
+  expect(before.cursor).toMatchObject({ stageId: "plan", state: "pending" });
+  expect(before.runs.every((run) => run.attempts.length === 0)).toBe(true);
+
+  await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  const reloaded = loadPipelines()[0]!;
+  expect(reloaded.state).toBe("closed");
+  expect(reloaded.cursor).toBeNull();
+  const planRun = reloaded.runs.find((run) => run.stageId === "plan")!;
+  expect(planRun.attempts).toHaveLength(1);
+  expect(planRun.attempts[0]).toMatchObject({ state: "pending", startedAt: null, completedAt: null, input: null, activatedBy: null });
+  expect(reloaded.runs.find((run) => run.stageId === "build")!.attempts).toHaveLength(0);
+});
+
+test("closing a post-advance pending stage records the resting stage with its relay record (#353)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports); // RUN_STAGES: plan → build
+  await tickPipelines([], h.ports); // provision
+  await tickPipelines([], h.ports); // spawn plan
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "planned")], h.ports); // plan passes → advance to build
+  const before = loadPipelines()[0]!;
+  expect(before.cursor).toMatchObject({ stageId: "build", state: "pending", input: "planned", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
+  expect(before.runs.find((run) => run.stageId === "build")!.attempts).toHaveLength(0);
+
+  await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  const reloaded = loadPipelines()[0]!;
+  expect(reloaded.state).toBe("closed");
+  expect(reloaded.cursor).toBeNull();
+  const buildRun = reloaded.runs.find((run) => run.stageId === "build")!;
+  expect(buildRun.attempts).toHaveLength(1);
+  /* The resting attempt inherits the durable relay record and carries no run
+     timestamps (it never started). */
+  expect(buildRun.attempts[0]).toMatchObject({ state: "pending", startedAt: null, completedAt: null, input: "planned", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } });
+  expect(reloaded.runs.find((run) => run.stageId === "plan")!.attempts[0]!.state).toBe("passed");
+});
