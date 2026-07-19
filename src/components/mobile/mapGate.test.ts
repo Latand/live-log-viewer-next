@@ -13,3 +13,7 @@ test("collapsed worker stacks make the mobile map reachable, not just >1 node (#
   expect(mapReachable(1, 0)).toBe(false);
   expect(mapReachable(0, 0)).toBe(false);
 });
+
+test("an active pipeline makes an otherwise empty mobile map reachable", () => {
+  expect(mapReachable(0, 0, 1)).toBe(true);
+});

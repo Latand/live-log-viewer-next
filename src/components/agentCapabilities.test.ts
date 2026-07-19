@@ -270,12 +270,13 @@ test("resume: runtime picks the on-resume profile, stop/compact/kill hidden", ()
   expect(state("send", f, null)).toBe("enabled");
 });
 
-test("dead: only terminal (the escape hatch) survives; send is disabled, not attempted", () => {
+test("dead structured host keeps durable text send available and disables images until recovery", () => {
   const f = file({ proc: "running" });
   const view = rv("claude-broker", "dead");
   expect(state("terminal", f, view)).toBe("enabled");
-  expect(reason("send", f, view)).toBe("deadHost.sendBlocked");
-  for (const c of ["stop", "compact", "runtime", "kill", "images"] as ControlName[]) {
+  expect(state("send", f, view)).toBe("enabled");
+  expect(reason("images", f, view)).toBe("composer.imagesBlockedDuringRecovery");
+  for (const c of ["stop", "compact", "runtime", "kill"] as ControlName[]) {
     expect(state(c, f, view)).toBe("hidden");
   }
 });

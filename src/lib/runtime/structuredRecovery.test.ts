@@ -583,7 +583,7 @@ test.each(["codex", "claude"] as const)("current verified %s tmux ownership outr
   expect(state.registry.snapshot().entries[`${engine}:${state.key.sessionId}`]?.host).toEqual(state.tmuxHost);
 });
 
-test.each(["codex", "claude"] as const)("concurrent %s sends wait for recovery publication before either admission", async (engine) => {
+test.each(["codex", "claude"] as const)("duplicate %s recovery clicks reuse one stale-live recovery until host publication", async (engine) => {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `${engine}-publication-barrier-${sessionId}`);
   const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
@@ -599,16 +599,16 @@ test.each(["codex", "claude"] as const)("concurrent %s sends wait for recovery p
     cwd,
     accountId: `${engine}-account`,
     launchProfile: profile,
-    status: "dead",
+    status: "live",
     host: null,
     structuredHost: {
       kind: engine === "codex" ? "codex-app-server" : "claude-broker",
-      endpoint: "stdio:released",
-      process: null,
+      endpoint: "stdio:stale",
+      process: { pid: 2_000_000_000, startIdentity: `${engine}-stale-process` },
       eventCursor: 0,
       protocolVersion: "v2",
       writerClaimEpoch: 1,
-      activeTurnRef: null,
+      activeTurnRef: `${engine}-stale-turn`,
       pendingAttention: [],
       activeFlags: [],
     },
@@ -629,9 +629,10 @@ test.each(["codex", "claude"] as const)("concurrent %s sends wait for recovery p
   let claimed!: () => void;
   const claimObserved = new Promise<void>((resolve) => { claimed = resolve; });
   let spawnCalls = 0;
+  let deliveryDrainRequests = 0;
   let admissions = 0;
   let terminalRejections = 0;
-  const recoverAndAdmit = async () => {
+  const recoverFromClick = async () => {
     const recovered = await recoverDeadStructuredConversation({ path: artifactPath, conversationId: conversation.id }, {
       registry,
       client: {} as RuntimeHostClient,
@@ -699,15 +700,21 @@ test.each(["codex", "claude"] as const)("concurrent %s sends wait for recovery p
           state: "settled",
         };
       },
+      requestDeliveryDrain: () => {
+        const published = registry.snapshot().entries[`${engine}:${sessionId}`];
+        expect(published).toMatchObject({ status: "idle", pendingAction: null });
+        expect(published?.structuredHost?.process).not.toBeNull();
+        deliveryDrainRequests += 1;
+      },
     });
     const entry = registry.snapshot().entries[`${engine}:${sessionId}`];
     if (!recovered || !entry?.structuredHost?.process || !entry.claimOwner) terminalRejections += 1;
     else admissions += 1;
   };
 
-  const first = recoverAndAdmit();
+  const first = recoverFromClick();
   await claimObserved;
-  const second = recoverAndAdmit();
+  const second = recoverFromClick();
   await Promise.resolve();
   expect(admissions).toBe(0);
   expect(terminalRejections).toBe(0);
@@ -715,6 +722,7 @@ test.each(["codex", "claude"] as const)("concurrent %s sends wait for recovery p
   await Promise.all([first, second]);
 
   expect(spawnCalls).toBe(1);
+  expect(deliveryDrainRequests).toBe(1);
   expect(admissions).toBe(2);
   expect(terminalRejections).toBe(0);
 });

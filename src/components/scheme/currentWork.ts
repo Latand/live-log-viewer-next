@@ -45,8 +45,8 @@ export function rectUnion(rects: readonly SchemeRect[]): SchemeRect | null {
 
 /**
  * Pure geometry for the operator's working set. `tasks` is the full-size board
- * partition, so compact history remains reachable through TaskStacksStrip and
- * does not inflate this frame. No persisted board/task state is changed.
+ * partition, so compact history remains reachable from completed task cards
+ * without inflating this frame. No persisted board/task state is changed.
  */
 export function currentWorkRect(
   layout: SchemeLayout,

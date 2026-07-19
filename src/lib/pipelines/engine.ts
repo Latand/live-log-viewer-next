@@ -1326,6 +1326,11 @@ export async function patchPipeline(
         pipeline.baseRef = "";
         pipeline.lastPassedCommit = "";
       }
+    } else if (req.action === "set-position") {
+      if (!req.pos || typeof req.pos !== "object" || !Number.isFinite(req.pos.x) || !Number.isFinite(req.pos.y)) {
+        return { error: "position requires finite x and y", status: 400 };
+      }
+      pipeline.pos = { x: Math.round(req.pos.x), y: Math.round(req.pos.y) };
     } else if (req.action === "add-stage") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       if (!req.stage || typeof req.stage !== "object" || Array.isArray(req.stage)) return { error: "stage is required", status: 400 };

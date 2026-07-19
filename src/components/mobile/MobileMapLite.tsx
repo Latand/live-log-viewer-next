@@ -8,13 +8,14 @@ import type { WorkerStack } from "@/components/scheme/workerCollapse";
 import { activityDot, engineBadge } from "@/components/utils";
 import type { BoardTask } from "@/lib/tasks/types";
 
-import { buildMobileMapModel, type MapMarker, type MapRect, type MobileMapModel } from "./mobileMapModel";
+import { buildMobileMapModel, type MapMarker, type MapRect, type MobileMapModel, type MobilePipelineOutline } from "./mobileMapModel";
 
 const Z_MIN = 0.15;
 const Z_MAX = 1.6;
 const FIT_PAD = 28;
 const MARKER_MIN_SIZE = 40;
 const DEFAULT_VIEWPORT = { w: 390, h: 620 };
+const EMPTY_PIPELINE_OUTLINES: readonly MobilePipelineOutline[] = [];
 
 interface Camera {
   tx: number;
@@ -31,6 +32,14 @@ function frameRect(rect: { x: number; y: number; w: number; h: number }, viewpor
   const cx = rect.x + rect.w / 2;
   const cy = rect.y + rect.h / 2;
   return { z, tx: viewport.w / 2 - cx * z, ty: viewport.h / 2 - cy * z };
+}
+
+/** Fit one semantic frame with a 1x ceiling so Current never hides its edges. */
+function fitCurrent(rect: MapRect, viewport: { w: number; h: number }): Camera {
+  const availableW = Math.max(viewport.w - FIT_PAD * 2, 1);
+  const availableH = Math.max(viewport.h - FIT_PAD * 2, 1);
+  const z = Math.min(availableW / Math.max(rect.w, 1), availableH / Math.max(rect.h, 1), 1);
+  return frameRect(rect, viewport, z);
 }
 
 function fitAll(world: MapRect, viewport: { w: number; h: number }): Camera {
@@ -61,6 +70,7 @@ export function MobileMapLite({
   layout,
   tasks,
   workerStacks,
+  pipelineOutlines = EMPTY_PIPELINE_OUTLINES,
   frame,
   ringKey,
   onPick,
@@ -68,6 +78,7 @@ export function MobileMapLite({
   layout: SchemeLayout;
   tasks: readonly BoardTask[];
   workerStacks: readonly WorkerStack[];
+  pipelineOutlines?: readonly MobilePipelineOutline[];
   frame: "all" | "current";
   ringKey: string | null;
   onPick: (key: string) => void;
@@ -75,9 +86,11 @@ export function MobileMapLite({
   const { t } = useLocale();
   /* The ring key rides into the model so the focused marker is never folded
      into a cluster past the cap (PR #431) — `ringRect` below must resolve. */
-  const model = useMemo<MobileMapModel>(() => buildMobileMapModel(layout, tasks, workerStacks, ringKey), [layout, tasks, workerStacks, ringKey]);
-  const ringRect = useMemo(() => model.markers.find((marker) => marker.key === ringKey)?.rect ?? null, [model.markers, ringKey]);
-  const currentRect = frame === "current" ? ringRect : null;
+  const model = useMemo<MobileMapModel>(
+    () => buildMobileMapModel(layout, tasks, workerStacks, ringKey, pipelineOutlines),
+    [layout, tasks, workerStacks, ringKey, pipelineOutlines],
+  );
+  const currentRect = frame === "current" ? model.current : null;
 
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState(DEFAULT_VIEWPORT);
@@ -86,8 +99,24 @@ export function MobileMapLite({
      even on the largest board. */
   const [ready, setReady] = useState(false);
   const [camera, setCamera] = useState<Camera>(() => fitAll(model.world, DEFAULT_VIEWPORT));
-  const allCamera = useMemo(() => fitAll(model.world, viewport), [model.world, viewport]);
-  const gestureMinZoom = currentRect ? Z_MIN : Math.min(Z_MIN, allCamera.z);
+  const { x: worldX, y: worldY, w: worldW, h: worldH } = model.world;
+  const { w: viewportW, h: viewportH } = viewport;
+  const currentX = currentRect?.x ?? null;
+  const currentY = currentRect?.y ?? null;
+  const currentW = currentRect?.w ?? null;
+  const currentH = currentRect?.h ?? null;
+  const allCamera = useMemo(
+    () => fitAll({ x: worldX, y: worldY, w: worldW, h: worldH }, { w: viewportW, h: viewportH }),
+    [worldX, worldY, worldW, worldH, viewportW, viewportH],
+  );
+  const currentCamera = useMemo(
+    () => currentX === null || currentY === null || currentW === null || currentH === null
+      ? null
+      : fitCurrent({ x: currentX, y: currentY, w: currentW, h: currentH }, { w: viewportW, h: viewportH }),
+    [currentX, currentY, currentW, currentH, viewportW, viewportH],
+  );
+  const targetCamera = currentCamera ?? allCamera;
+  const gestureMinZoom = Math.min(Z_MIN, targetCamera.z);
 
   /* Measure the surface (default viewport keeps SSR/tests stable) and reframe. */
   useEffect(() => {
@@ -114,18 +143,13 @@ export function MobileMapLite({
     return () => cancelAnimationFrame(id);
   }, []);
 
-  /* Reframe when the frame toggle, the ring, or the measured viewport changes —
-     never mid-gesture (the deps exclude camera). */
-  /* Reframe the camera when the frame toggle, ring, viewport, or world changes —
-     never mid-gesture (the deps exclude camera). */
+  /* Semantic frame or geometry changes reframe the camera. Equivalent poll
+     objects preserve a manually adjusted view because their scalar geometry
+     retains the memoized target identity. */
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (currentRect) {
-      setCamera(frameRect(currentRect, viewport, clamp(1, Z_MIN, Z_MAX)));
-    } else {
-      setCamera(allCamera);
-    }
-  }, [currentRect, viewport, allCamera]);
+    setCamera(targetCamera);
+  }, [frame, targetCamera]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* Pointer pan + pinch/wheel zoom, all clamped. Pointer math only — no camera
