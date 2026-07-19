@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "after-bottom.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "f313695f6f53a836cc1068c6b90564d72f9ea34db5c4179f1a7ec2807f4e3715"
+      ],
+      "description": "Redacted placeholder for the post-change mobile bottom layout evidence.",
+      "sha256": "231f306ec73e7f08a2c380160a974c93603154f0b11bdf5135538da0f1fce4d7"
+    },
+    {
+      "path": "after-card-header.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "88c9604843d035d49b8cc2c8473e7c928fc5e54c74426b55587de1aa478a1875"
+      ],
+      "description": "Redacted placeholder for the post-change mobile card-header evidence.",
+      "sha256": "dbf49ccf25f31ac99f4adf2636990b88d2226b1ce2c39390516c4cc1d7be5502"
+    },
+    {
+      "path": "after-composer.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "c2abd18fa6b8b89ccab35867d3bdb5ab481c318e538a21e717868df49771176b"
+      ],
+      "description": "Redacted placeholder for the post-change mobile composer evidence.",
+      "sha256": "31ff3557cf6f48340e996a79462e9c36394f4228340053a3f9e6ac31dcce96f7"
+    },
+    {
+      "path": "after-toggle-list.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "e5c3f858b5e607e70eda2686bf95ebc142e657516252ecdda6b4ed9cdb288e2c"
+      ],
+      "description": "Redacted placeholder for the post-change mobile toggle-list evidence.",
+      "sha256": "6c3c70a33ad87fb7f7e2a3d810c46c87f4a10acbd250e8ae166f6c69a6294cca"
+    },
+    {
+      "path": "before-bottom.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "2f16aac105f47becc0e281315a901c6ecc9b0a3b980f30a561541c73db9aed31"
+      ],
+      "description": "Redacted placeholder for the pre-change mobile bottom layout evidence.",
+      "sha256": "61851f0e04bed1d0c3c55e0d3efd997deac390f989aebbdf5a1bf6c7adc035ed"
+    },
+    {
+      "path": "before-card-header.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "adff93817b822ecb3c399019089085c1facfd36f490aae97e2c288bcb66225ce"
+      ],
+      "description": "Redacted placeholder for the pre-change mobile card-header evidence.",
+      "sha256": "3868c3e79141cde1a96799f201207ed278f103f815ed7dbc75dbe753d9557dca"
+    },
+    {
+      "path": "before-composer.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "689d51bc772e2b169ee6e6f7c41abfd749a3d15ca847628557cd64b7b791f05d"
+      ],
+      "description": "Redacted placeholder for the pre-change mobile composer evidence.",
+      "sha256": "f39edc7df550b45e488d51c5a0f5310bb8167f79bbb7a5a7e4352324d56b7355"
+    },
+    {
+      "path": "before-toggle-list.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "ac525a2179a3b5ac985f3d5616b1eed75eac90665360c1670bae86d2dcc6183e"
+      ],
+      "description": "Redacted placeholder for the pre-change mobile toggle-list evidence.",
+      "sha256": "beb1ba4cad09abcaa7fda4c448a31fd4216a7f5f351c361d5a73bfbe096921a1"
+    }
+  ]
+}
