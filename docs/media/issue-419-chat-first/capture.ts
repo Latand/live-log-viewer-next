@@ -9,9 +9,21 @@
  *   - chat-first-390.png     390×844 phone, chat-first shell (folded chrome)
  *   - chat-first-430.png     430×932 phone, chat-first shell (folded chrome)
  *
- * Every phone frame asserts the chat-first contract before capture:
+ * Every phone frame asserts the chat-first contract before capture by MEASURING
+ * rendered geometry (never a self-declared constant):
  *   - document.scrollWidth === window.innerWidth (no document-level h-overflow),
- *   - the focus shell exposes data-chat-min-share >= 0.6,
+ *   - the real LogFeed scroller ([data-log-feed-scroller]) owns >= 0.60 of the
+ *     usable visual viewport (visualViewport.height) in the default chat-first
+ *     state — a waiting focused conversation with long metadata, folded runtime
+ *     controls, and many docked pipelines,
+ *   - with the conversation-details AND composer-options disclosures driven open
+ *     (materializing the long metadata row and the model/reasoning + attachment
+ *     row), the document still shows no horizontal overflow,
+ *   - attachments add no PERSISTENT chrome: the image picker is folded behind the
+ *     composer-options disclosure, and a staged image is transient operator
+ *     content (its preview tray legitimately consumes space while shown, with no
+ *     horizontal overflow) that reserves ZERO height once cleared — the default
+ *     >= 0.60 budget is fully restored,
  *   - the focused chat reserves ZERO persistent bottom rows: the pipeline
  *     summary rides the top strip and no MobilePipelineSummaryRow /
  *     MobileBottomShelf row is rendered inline.
@@ -34,6 +46,54 @@ const { bootstrapDemoRuntime, renderFixtureTemplate, claudePath, DEMO_FIXED_ISO 
 
 const PORT = 3043;
 const OUT_DIR = path.join(repoRoot, "docs/media/issue-419-chat-first");
+
+/* A 1×1 PNG staged into the composer to exercise the attachment path (issue
+   #419 §attachments): a real image so the preview tray renders and its height
+   enters the measured transcript budget. */
+const ATTACHMENT_PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+/* Measures the REAL chat-first budget from rendered geometry: the LogFeed
+   scroller height against the usable visual viewport, plus the overflow and
+   zero-bottom-row invariants. Returned as JSON so a self-declared constant can
+   never stand in for measured layout (round-1 finding 1). */
+const MEASURE_EXPR = `(() => {
+  const shell = document.querySelector('[data-testid="mobile-chat-shell"]');
+  const feed = shell && shell.querySelector('[data-log-feed-scroller]');
+  const vv = window.visualViewport;
+  const usable = Math.round(vv ? vv.height : window.innerHeight);
+  const feedH = feed ? Math.round(feed.getBoundingClientRect().height) : 0;
+  return JSON.stringify({
+    hasShell: !!shell,
+    hasFeed: !!feed,
+    feedH,
+    usable,
+    share: usable > 0 ? feedH / usable : 0,
+    scrollWidth: document.documentElement.scrollWidth,
+    innerWidth: window.innerWidth,
+    bottomShelfRows: document.querySelectorAll('[data-testid="mobile-bottom-shelf"]').length,
+    pipelineTriggers: document.querySelectorAll('[data-testid="mobile-pipeline-summary"]').length,
+    attachmentTrays: document.querySelectorAll('[data-testid="mobile-chat-shell"] [data-testid="attachment-tray"]').length,
+  });
+})()`;
+
+type ChatMeasure = {
+  hasShell: boolean;
+  hasFeed: boolean;
+  feedH: number;
+  usable: number;
+  share: number;
+  scrollWidth: number;
+  innerWidth: number;
+  bottomShelfRows: number;
+  pipelineTriggers: number;
+  attachmentTrays: number;
+};
+
+/* Clicks a chat-shell disclosure toggle by test id when it is in `want` state. */
+function toggleExpr(testid: string, want: "true" | "false"): string {
+  return `(() => { const s = document.querySelector('[data-testid="mobile-chat-shell"]'); const b = s && s.querySelector('[data-testid="${testid}"]'); if (b && b.getAttribute('aria-expanded') === '${want}') { b.click(); return true; } return false; })()`;
+}
 
 type CdpResponse = { result?: { value?: unknown }; data?: string };
 type Cdp = {
@@ -169,6 +229,29 @@ function pipelineFixture(home: string): unknown {
         cursor: null,
         state: "completed", pausedState: null, closedAt: "2100-01-02T10:30:00.000Z",
       }),
+      /* Two more live chains so the phone docks MANY pipelines (five total): the
+         folded pipelines icon must still keep the transcript dominant when the
+         board behind it is busy. */
+      shell("a4190004", "Composer disclosure fold", {
+        runs: [
+          { stageId: "plan", attempts: [attempt(1, { agentPath: planPath, output: "Plan: fold the composer second row." })] },
+          { stageId: "implement", attempts: [attempt(1, { input: "Plan: fold the composer second row.", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" }, output: "Primary-row disclosure landed." })] },
+          { stageId: "verify", attempts: [
+            attempt(1, { state: "running", agentPath: verifyPath, completedAt: null, input: "Primary-row disclosure landed.", activatedBy: { stageId: "implement", attempt: 1, edge: "pass" }, output: null, verdict: null }),
+          ] },
+        ],
+        cursor: { stageId: "verify", state: "running", input: "Primary-row disclosure landed.", activatedBy: { stageId: "implement", attempt: 1, edge: "pass" } },
+        state: "paused", pausedState: "running",
+      }),
+      shell("a4190005", "Shelf modal lifecycle", {
+        runs: [
+          { stageId: "plan", attempts: [attempt(1, { agentPath: planPath, output: "Plan: give the shelf modal semantics." })] },
+          { stageId: "implement", attempts: [attempt(1, { input: "Plan: give the shelf modal semantics.", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" }, output: "Focus trap + scroll lock landed." })] },
+          { stageId: "verify", attempts: [attempt(1, { input: "Focus trap + scroll lock landed.", activatedBy: { stageId: "implement", attempt: 1, edge: "pass" }, output: "All checks pass." })] },
+        ],
+        cursor: null,
+        state: "completed", pausedState: null, closedAt: "2100-01-02T10:40:00.000Z",
+      }),
     ],
   };
 }
@@ -194,6 +277,10 @@ async function main() {
     const portFile = path.join(chromeDir, "DevToolsActivePort");
     for (let i = 0; i < 100 && !fs.existsSync(portFile); i += 1) await Bun.sleep(200);
     const debugPort = fs.readFileSync(portFile, "utf8").split("\n")[0]!.trim();
+
+    /* Staged on the same host Chrome reads from, for DOM.setFileInputFiles. */
+    const attachmentPngPath = path.join(chromeDir, "attachment.png");
+    fs.writeFileSync(attachmentPngPath, Buffer.from(ATTACHMENT_PNG_B64, "base64"));
 
     const shots = [
       { name: "board-desktop.png", width: 1920, height: 1080, mobile: false, view: "board" as const },
@@ -228,26 +315,77 @@ async function main() {
       await Bun.sleep(600);
 
       if (shot.mobile) {
-        /* No document-level horizontal overflow (#353 class). */
-        const measured = await evalJson<{ scrollWidth: number; innerWidth: number }>(cdp, `JSON.stringify({ scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth })`);
-        if (measured.scrollWidth !== measured.innerWidth) {
-          throw new Error(`overflow gate failed (${shot.name}): scrollWidth ${measured.scrollWidth} != innerWidth ${measured.innerWidth}`);
+        /* Wait for the LogFeed scroller to mount and lay out before measuring. */
+        await evalUntil(cdp, `!!document.querySelector('[data-testid="mobile-chat-shell"] [data-log-feed-scroller]')`, 30_000);
+        await Bun.sleep(500);
+
+        /* GATE — measure the REAL transcript budget in the default chat-first
+           state (waiting focused conversation, folded chrome, many docked
+           pipelines): the LogFeed scroller height over the usable visual
+           viewport must clear 0.60, with no document-level horizontal overflow
+           (#353 class) and ZERO persistent bottom rows (pipeline summary is a
+           top-strip trigger; the shelf is an overlay). */
+        const base = await evalJson<ChatMeasure>(cdp, MEASURE_EXPR);
+        if (!base.hasFeed) throw new Error(`feed scroller missing (${shot.name})`);
+        if (base.scrollWidth !== base.innerWidth) throw new Error(`overflow gate failed (${shot.name}): scrollWidth ${base.scrollWidth} != innerWidth ${base.innerWidth}`);
+        if (base.bottomShelfRows !== 0) throw new Error(`bottom-shelf row present (${shot.name}): expected 0, got ${base.bottomShelfRows}`);
+        if (!(base.share >= 0.6)) throw new Error(`chat budget gate failed (${shot.name}): measured transcript share ${base.share.toFixed(3)} (feed ${base.feedH}px / usable ${base.usable}px) < 0.60`);
+        console.log(`${shot.name} default chat-first budget: share ${base.share.toFixed(3)} (feed ${base.feedH}px / usable ${base.usable}px), pipelineTriggers ${base.pipelineTriggers}, bottomShelfRows 0, scrollWidth ${base.scrollWidth} === innerWidth ${base.innerWidth}`);
+
+        /* Attachment coverage. The image affordance never adds a PERSISTENT row:
+           the picker is folded behind the composer-options disclosure (issue
+           #419), so the default budget above already reflects zero attachment
+           chrome. A staged image is TRANSIENT operator content — its preview
+           tray is expected to consume space while present (the transcript yields
+           to it, as it should) — so the contract is that it (a) stages without
+           horizontal overflow and (b) reserves ZERO height once cleared, i.e.
+           the default >= 0.60 budget is fully restored. Images are either
+           capability-folded (picker disabled, no input) or exercised live. */
+        await cdp.send("DOM.enable");
+        await cdp.send("Runtime.evaluate", { expression: toggleExpr("composer-options-toggle", "false"), returnByValue: true });
+        await Bun.sleep(300);
+        const picker = await evalJson<{ hasInput: boolean; disabled: boolean | null }>(cdp, `(() => { const s = document.querySelector('[data-testid="mobile-chat-shell"]'); const i = s && s.querySelector('input[type=file]'); return JSON.stringify({ hasInput: !!i, disabled: i ? !!i.disabled : null }); })()`);
+        if (picker.hasInput && picker.disabled === false) {
+          const handle = await cdp.send("Runtime.evaluate", { expression: `document.querySelector('[data-testid="mobile-chat-shell"] input[type=file]')` });
+          const objectId = (handle.result as { objectId?: string } | undefined)?.objectId;
+          if (!objectId) throw new Error(`could not resolve the composer file input (${shot.name})`);
+          await cdp.send("DOM.setFileInputFiles", { files: [attachmentPngPath], objectId });
+          await evalUntil(cdp, `!!document.querySelector('[data-testid="mobile-chat-shell"] [data-testid="attachment-tray"]')`, 15_000);
+          await Bun.sleep(300);
+          /* Fold the options row again so the tray is the only added element. */
+          await cdp.send("Runtime.evaluate", { expression: toggleExpr("composer-options-toggle", "true"), returnByValue: true });
+          await Bun.sleep(200);
+          const withAttachment = await evalJson<ChatMeasure>(cdp, MEASURE_EXPR);
+          if (withAttachment.attachmentTrays < 1) throw new Error(`attachment tray missing after staging (${shot.name})`);
+          if (withAttachment.scrollWidth !== withAttachment.innerWidth) throw new Error(`attachment overflow gate failed (${shot.name}): scrollWidth ${withAttachment.scrollWidth} != innerWidth ${withAttachment.innerWidth}`);
+          console.log(`${shot.name} attachment (staged, transient): share ${withAttachment.share.toFixed(3)} (feed ${withAttachment.feedH}px / usable ${withAttachment.usable}px), no h-overflow`);
+          /* Clear the attachment and prove it reserved ZERO height: the default
+             transcript budget must be fully restored to >= 0.60. */
+          await cdp.send("Runtime.evaluate", { expression: `(() => { const tray = document.querySelector('[data-testid="mobile-chat-shell"] [data-testid="attachment-tray"]'); if (!tray) return false; const btns = Array.from(tray.querySelectorAll('button')); const clear = btns.find((b) => /clear|remove|delete|видал|очист/i.test((b.getAttribute('aria-label') || ''))); (clear || btns[0])?.click(); return true; })()`, returnByValue: true });
+          await evalUntil(cdp, `document.querySelectorAll('[data-testid="mobile-chat-shell"] [data-testid="attachment-tray"]').length === 0`, 10_000);
+          await Bun.sleep(200);
+          const cleared = await evalJson<ChatMeasure>(cdp, MEASURE_EXPR);
+          if (!(cleared.share >= 0.6)) throw new Error(`attachment did not reserve zero height (${shot.name}): restored share ${cleared.share.toFixed(3)} < 0.60`);
+          console.log(`${shot.name} attachment cleared: restored share ${cleared.share.toFixed(3)} (feed ${cleared.feedH}px / usable ${cleared.usable}px) — tray reserves zero height`);
+        } else {
+          console.log(`${shot.name} attachment: image picker capability-folded (hasInput ${picker.hasInput}, disabled ${picker.disabled}) — zero attachment row height`);
         }
-        /* Chat-first shell contract: the transcript budget rides the DOM, and the
-           focused chat reserves ZERO persistent bottom rows for the secondary
-           surfaces (pipeline summary is a top-strip trigger; the shelf is an
-           overlay). */
-        const contract = await evalJson<{ minShare: number; bottomShelfRows: number; pipelineSummaryButtons: number }>(cdp, `(() => {
-          const shell = document.querySelector('[data-testid="mobile-chat-shell"]');
-          return JSON.stringify({
-            minShare: Number(shell && shell.getAttribute("data-chat-min-share")),
-            bottomShelfRows: document.querySelectorAll('[data-testid="mobile-bottom-shelf"]').length,
-            pipelineSummaryButtons: document.querySelectorAll('[data-testid="mobile-pipeline-summary"]').length,
-          });
-        })()`);
-        if (!(contract.minShare >= 0.6)) throw new Error(`chat budget gate failed (${shot.name}): data-chat-min-share ${contract.minShare} < 0.6`);
-        if (contract.bottomShelfRows !== 0) throw new Error(`bottom-shelf row present (${shot.name}): expected 0, got ${contract.bottomShelfRows}`);
-        console.log(`${shot.name} chat-first gate: minShare ${contract.minShare}, bottomShelfRows 0, pipelineTriggers ${contract.pipelineSummaryButtons}, scrollWidth ${measured.scrollWidth} === innerWidth ${measured.innerWidth}`);
+
+        /* Expanded worst case: open BOTH disclosures (the long-metadata row and
+           the composer model/reasoning + attachment row) and confirm no
+           horizontal overflow persists; the expanded share is logged for the
+           record (opening chrome is the operator's explicit act). */
+        await cdp.send("Runtime.evaluate", { expression: toggleExpr("mobile-details-toggle", "false"), returnByValue: true });
+        await cdp.send("Runtime.evaluate", { expression: toggleExpr("composer-options-toggle", "false"), returnByValue: true });
+        await Bun.sleep(300);
+        const expanded = await evalJson<ChatMeasure>(cdp, MEASURE_EXPR);
+        if (expanded.scrollWidth !== expanded.innerWidth) throw new Error(`expanded overflow gate failed (${shot.name}): scrollWidth ${expanded.scrollWidth} != innerWidth ${expanded.innerWidth}`);
+        console.log(`${shot.name} expanded (details+options open): share ${expanded.share.toFixed(3)} (feed ${expanded.feedH}px / usable ${expanded.usable}px), scrollWidth ${expanded.scrollWidth} === innerWidth ${expanded.innerWidth}`);
+
+        /* Restore the clean chat-first default for the screenshot. */
+        await cdp.send("Runtime.evaluate", { expression: toggleExpr("mobile-details-toggle", "true"), returnByValue: true });
+        await cdp.send("Runtime.evaluate", { expression: toggleExpr("composer-options-toggle", "true"), returnByValue: true });
+        await Bun.sleep(300);
       } else {
         await cdp.send("Runtime.evaluate", { expression: `
           const fit = Array.from(document.querySelectorAll("button")).find((b) => (b.getAttribute("title") || "").startsWith("Fit all content"));
