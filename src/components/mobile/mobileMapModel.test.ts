@@ -90,6 +90,31 @@ test("lineage edges only connect kept markers — no dangling endpoint into a cl
   }
 });
 
+test("focus retention keeps lineage only when both endpoint markers remain visible", () => {
+  const { layout, tasks, workerStacks } = buildMobileMapFixture(500);
+  const visibleSource = layout.nodes[0]!;
+  const clusteredSource = layout.nodes[MAP_MARKER_CAP - 1]!;
+  const focusedDestination = layout.nodes[450]!;
+  const edgeFrom = (source: typeof visibleSource) => ({
+    to: focusedDestination.file.path,
+    x1: source.x + 40,
+    y1: source.y + source.h,
+    x2: focusedDestination.x + focusedDestination.w / 2,
+    y2: focusedDestination.y,
+    color: "#888",
+    live: false,
+  });
+  const visibleEdge = edgeFrom(visibleSource);
+  layout.edges = [edgeFrom(clusteredSource), visibleEdge];
+
+  const model = buildMobileMapModel(layout, tasks, workerStacks, focusedDestination.file.path);
+  const visibleKeys = new Set(model.markers.map((marker) => marker.key));
+  expect(visibleKeys.has(visibleSource.file.path)).toBe(true);
+  expect(visibleKeys.has(clusteredSource.file.path)).toBe(false);
+  expect(visibleKeys.has(focusedDestination.file.path)).toBe(true);
+  expect(model.edges).toEqual([{ x1: visibleEdge.x1, y1: visibleEdge.y1, x2: visibleEdge.x2, y2: visibleEdge.y2 }]);
+});
+
 test("all-frame bounds span negative and distant markers plus overflow clusters", () => {
   const { layout, tasks, workerStacks } = buildMobileMapFixture(500);
   layout.nodes[0]!.x = -1_200;

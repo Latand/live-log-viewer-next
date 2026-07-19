@@ -13,6 +13,7 @@ import { buildMobileMapModel, type MapMarker, type MapRect, type MobileMapModel 
 const Z_MIN = 0.15;
 const Z_MAX = 1.6;
 const FIT_PAD = 28;
+const MARKER_MIN_SIZE = 40;
 const DEFAULT_VIEWPORT = { w: 390, h: 620 };
 
 interface Camera {
@@ -33,8 +34,18 @@ function frameRect(rect: { x: number; y: number; w: number; h: number }, viewpor
 }
 
 function fitAll(world: MapRect, viewport: { w: number; h: number }): Camera {
-  const z = clamp(Math.min((viewport.w - FIT_PAD * 2) / world.w, (viewport.h - FIT_PAD * 2) / world.h), Z_MIN, Z_MAX);
-  return frameRect(world, viewport, z);
+  /* Anchored marker buttons retain a 40px footprint at distant zoom levels.
+     Reserve that footprint and allow All below the regular interaction floor. */
+  const availableW = Math.max(viewport.w - FIT_PAD * 2 - MARKER_MIN_SIZE, 1);
+  const availableH = Math.max(viewport.h - FIT_PAD * 2 - MARKER_MIN_SIZE, 1);
+  const z = Math.min(availableW / world.w, availableH / world.h, Z_MAX);
+  const renderedW = world.w * z + MARKER_MIN_SIZE;
+  const renderedH = world.h * z + MARKER_MIN_SIZE;
+  return {
+    z,
+    tx: FIT_PAD + (viewport.w - FIT_PAD * 2 - renderedW) / 2 - world.x * z,
+    ty: FIT_PAD + (viewport.h - FIT_PAD * 2 - renderedH) / 2 - world.y * z,
+  };
 }
 
 /**
@@ -65,6 +76,8 @@ export function MobileMapLite({
   /* The ring key rides into the model so the focused marker is never folded
      into a cluster past the cap (PR #431) — `ringRect` below must resolve. */
   const model = useMemo<MobileMapModel>(() => buildMobileMapModel(layout, tasks, workerStacks, ringKey), [layout, tasks, workerStacks, ringKey]);
+  const ringRect = useMemo(() => model.markers.find((marker) => marker.key === ringKey)?.rect ?? null, [model.markers, ringKey]);
+  const currentRect = frame === "current" ? ringRect : null;
 
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState(DEFAULT_VIEWPORT);
@@ -73,6 +86,8 @@ export function MobileMapLite({
      even on the largest board. */
   const [ready, setReady] = useState(false);
   const [camera, setCamera] = useState<Camera>(() => fitAll(model.world, DEFAULT_VIEWPORT));
+  const allCamera = useMemo(() => fitAll(model.world, viewport), [model.world, viewport]);
+  const gestureMinZoom = currentRect ? Z_MIN : Math.min(Z_MIN, allCamera.z);
 
   /* Measure the surface (default viewport keeps SSR/tests stable) and reframe. */
   useEffect(() => {
@@ -101,17 +116,16 @@ export function MobileMapLite({
 
   /* Reframe when the frame toggle, the ring, or the measured viewport changes —
      never mid-gesture (the deps exclude camera). */
-  const ringRect = useMemo(() => model.markers.find((marker) => marker.key === ringKey)?.rect ?? null, [model.markers, ringKey]);
   /* Reframe the camera when the frame toggle, ring, viewport, or world changes —
      never mid-gesture (the deps exclude camera). */
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (frame === "current" && ringRect) {
-      setCamera(frameRect(ringRect, viewport, clamp(1, Z_MIN, Z_MAX)));
+    if (currentRect) {
+      setCamera(frameRect(currentRect, viewport, clamp(1, Z_MIN, Z_MAX)));
     } else {
-      setCamera(fitAll(model.world, viewport));
+      setCamera(allCamera);
     }
-  }, [frame, ringRect, viewport, model.world]);
+  }, [currentRect, viewport, allCamera]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* Pointer pan + pinch/wheel zoom, all clamped. Pointer math only — no camera
@@ -133,7 +147,7 @@ export function MobileMapLite({
       const dist = Math.hypot(a!.x - b!.x, a!.y - b!.y);
       if (!pinch.current) pinch.current = { dist, z: camera.z };
       else if (pinch.current.dist > 0) {
-        const z = clamp(pinch.current.z * (dist / pinch.current.dist), Z_MIN, Z_MAX);
+        const z = clamp(pinch.current.z * (dist / pinch.current.dist), gestureMinZoom, Z_MAX);
         setCamera((cam) => ({ ...cam, z }));
       }
       return;
@@ -147,7 +161,7 @@ export function MobileMapLite({
   const onWheel = (event: React.WheelEvent) => {
     const factor = Math.exp(-event.deltaY * 0.0015);
     setCamera((cam) => {
-      const z = clamp(cam.z * factor, Z_MIN, Z_MAX);
+      const z = clamp(cam.z * factor, gestureMinZoom, Z_MAX);
       /* Zoom about the pointer so the point under the cursor stays put. */
       const rect = surfaceRef.current?.getBoundingClientRect();
       const px = rect ? event.clientX - rect.left : viewport.w / 2;
@@ -215,8 +229,8 @@ function Marker({ marker, camera, active, onPick }: { marker: MapMarker; camera:
   const { t } = useLocale();
   const left = marker.rect.x * camera.z + camera.tx;
   const top = marker.rect.y * camera.z + camera.ty;
-  const width = Math.max(marker.rect.w * camera.z, 40);
-  const height = Math.max(marker.rect.h * camera.z, 40);
+  const width = Math.max(marker.rect.w * camera.z, MARKER_MIN_SIZE);
+  const height = Math.max(marker.rect.h * camera.z, MARKER_MIN_SIZE);
   const badge = marker.file ? engineBadge(marker.file) : null;
   const label = marker.title || t(`mobile.marker.${marker.kind}`);
   const disabled = marker.pickKey === null;
@@ -232,7 +246,7 @@ function Marker({ marker, camera, active, onPick }: { marker: MapMarker; camera:
       className={`absolute flex flex-col justify-center gap-0.5 overflow-hidden rounded-[8px] border px-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
         active ? "border-accent bg-accent/10" : marker.kind === "draft" ? "border-dashed border-border bg-canvas" : "border-border bg-card"
       } ${disabled ? "opacity-60" : ""}`}
-      style={{ left, top, width, height, minWidth: 40, minHeight: 40 }}
+      style={{ left, top, width, height, minWidth: MARKER_MIN_SIZE, minHeight: MARKER_MIN_SIZE }}
     >
       <span className="flex items-center gap-1">
         {marker.file ? <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(marker.file.activity)}`} aria-hidden /> : null}
