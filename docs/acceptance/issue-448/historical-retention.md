@@ -34,7 +34,7 @@ None of the following is performed implicitly. Each has a distinct cost.
    operator choice for each comment.
 3. **Ask GitHub Support to purge blobs and edit history.** Full removal of
    force-pushed blobs and prior edit revisions requires a GitHub Support request
-  referencing the specific objects. This route removes values already retained
+   referencing the specific objects. This route removes values already retained
   server-side.
 4. **Rewrite Git history.** Filtering the affected media out of history and
    force-pushing every branch would remove the committed blobs. The operation

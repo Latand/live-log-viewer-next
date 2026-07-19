@@ -12,7 +12,7 @@ synthetic placeholder while preserving the surrounding technical meaning.
 | --- | --- | --- |
 | `home_path` | Absolute local home paths, OS username, encoded per-conversation project directories, incident filenames carrying the username | `/home/user/…`, `/Users/user/…`, `-home-user-…` |
 | `project_name` | Unrelated private project names unrelated to this repository | `example-project-a`, `example-project-b` |
-| `resource_identifier` | Real conversation, session, and board task identifiers (v1–v5 UUIDs) | `00000000-0000-0000-0000-000000000000` |
+| `resource_identifier` | Real conversation, session, and board task identifiers (v1–v8 UUIDs) | `00000000-0000-0000-0000-000000000000` |
 | `private_network` | Docker bridge host in a dev-origin example | `<docker-bridge-host>` |
 
 Synthetic all-zero UUID placeholders are intentionally exempt from the
