@@ -393,7 +393,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
       <div className="flex shrink-0 items-stretch border-b border-border bg-card">
         {entries.length > 1 || pipelineFocus ? (
           <div className="relative min-w-0 flex-1">
-            <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1.5">
+            <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1">
               {pipelineFocus ? (
                 <>
                   <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} flows={flows} files={files} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
@@ -458,7 +458,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
 
       {/* Even card gutters that also clear the notch/rounded corners (finding 8):
           the safe-area insets keep the pane off the screen edges symmetrically. */}
-      <div className="relative flex min-h-0 flex-1 flex-col py-1.5 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
+      <div className="relative flex min-h-0 flex-1 flex-col pt-1 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
         {activeNode ? (
           /* The handoff control for this pane docks in the footer shelf row
              (issue #177 item 5), so the focus view itself renders only the pane. */

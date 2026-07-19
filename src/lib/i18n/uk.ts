@@ -282,6 +282,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.placeholderSpawn": "промпт — агент запуститься в tmux…",
   "composer.placeholderSend": "написати агенту…",
   "composer.textAria": "Текст для агента",
+  "composer.optionsShow": "Показати параметри повідомлення",
+  "composer.optionsHide": "Сховати параметри повідомлення",
   "composer.titleRelay": "передасться через кореневу сесію гілки",
   "composer.titleSpawnResumed": "нове tmux-вікно з відновленим агентом",
   "composer.root": "корінь",
