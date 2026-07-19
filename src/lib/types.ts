@@ -244,6 +244,10 @@ export interface ProjectCatalogEntry {
   project: string;
   /** Canonical repository root derived from every conversation in the full scan. */
   projectRoot?: string;
+  /** GitHub `owner/repo` of the projectRoot's origin remote, cached server-side;
+      null when the root has no resolvable GitHub remote (issue chips then render
+      as plain text instead of dead links). */
+  repository?: string | null;
   /** Unix seconds of the newest valid transcript candidate in the project. */
   smt: number;
   /** Lightweight count from the full candidate scan. */

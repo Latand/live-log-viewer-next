@@ -10,9 +10,10 @@ Two deterministic pipelines produce everything:
 bun run demo:capture
 ```
 
-Renders the six PNGs (`chat-feed.png`, `session-tree.png`, `codex-session.png`,
-`overview-board.png`, `pending-question.png`, `review-loop.png`). The runner
-(`scripts/demo-capture.ts`):
+Renders every PNG in the `scripts/demo-capture.ts` shot manifest (`chat-feed.png`,
+`session-tree.png`, `codex-session.png`, `overview-board.png`,
+`pending-question.png`, the `review-group-*.png` trio, `readiness-kanban.png`,
+`readiness-kanban-mobile.png`, `review-loop.png`). The runner:
 
 1. materializes a disposable home under `fixtures/demo-home/.capture/`,
 2. boots an isolated Next.js dev server against it (port `3028`, override with

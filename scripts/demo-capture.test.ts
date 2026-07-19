@@ -51,6 +51,8 @@ describe("demo capture contract", () => {
       "review-group-expanded.png",
       "review-group-collapsed.png",
       "review-group-mobile.png",
+      "readiness-kanban.png",
+      "readiness-kanban-mobile.png",
       "review-loop.png",
     ]);
     expect(SHOTS.every((shot) => shot.stableText.length > 0)).toBeTrue();
@@ -60,6 +62,28 @@ describe("demo capture contract", () => {
     expect(SHOTS.every((shot) => shot.frame.pixels.tileSize > 0)).toBeTrue();
     expect(SHOTS.every((shot) => shot.frame.pixels.minColorCount > 0)).toBeTrue();
     expect(new Set(SHOTS.map((shot) => shot.output)).size).toBe(SHOTS.length);
+  });
+
+  test("readiness Kanban shots pin the Ukrainian locale, both viewports, and the five section headings", () => {
+    const desktop = SHOTS.find((shot) => shot.id === "readiness-kanban")!;
+    const mobile = SHOTS.find((shot) => shot.id === "readiness-kanban-mobile")!;
+    expect(desktop.locale).toBe("uk");
+    expect(mobile.locale).toBe("uk");
+    expect(desktop.viewport).toEqual({ width: 1180, height: 720 });
+    expect(mobile.viewport).toEqual({ width: 390, height: 720 });
+    for (const shot of [desktop, mobile]) {
+      expect(shot.project).toBe("kanban");
+      for (const heading of ["Готовність задач", "Зараз", "На рев'ю", "Заблоковано", "Заплановано", "Готово"]) {
+        expect(shot.stableText).toContain(heading);
+      }
+      /* Every heading is also a gated element, so a collapsed or clipped
+         section fails the capture instead of shipping a partial board. */
+      for (const readiness of ["now", "review", "blocked", "planned", "done"]) {
+        expect(shot.frame.visible.some((expected) => expected.selector.includes(`data-readiness-section="${readiness}"`))).toBeTrue();
+      }
+    }
+    /* The remaining shots keep the default English locale. */
+    expect(SHOTS.filter((shot) => shot.locale === undefined).length).toBe(SHOTS.length - 2);
   });
 
   test("keeps every mutable capture path inside the generated fixture home", () => {

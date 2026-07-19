@@ -23,6 +23,8 @@ export type DemoShot = {
   output: string;
   project: string | null;
   file: string | null;
+  /** UI locale seeded into llv_lang before load; defaults to "en". */
+  locale?: "en" | "uk";
   viewport: { width: number; height: number };
   stableText: string[];
   frame: {
@@ -190,6 +192,73 @@ export const SHOTS: DemoShot[] = [
     frame: {
       visible: [
         { selector: "[data-review-deck-collapsed]", text: "APPROVE", minWidth: 300, minHeight: 44 },
+      ],
+      absentText: [],
+      pixels: FRAME_PIXELS,
+    },
+  },
+  {
+    id: "readiness-kanban",
+    output: "readiness-kanban.png",
+    project: "kanban",
+    file: null,
+    locale: "uk",
+    viewport: { width: 1180, height: 720 },
+    stableText: [
+      "Готовність задач",
+      "Зараз",
+      "На рев'ю",
+      "Заблоковано",
+      "Заплановано",
+      "Готово",
+      /* Chip titles pass through cleanTitle, which strips markdown '#'. */
+      "Wire the readiness strip 290",
+      "Ship the review evidence 290",
+      "#290",
+    ],
+    frame: {
+      visible: [
+        { selector: '[data-testid="task-readiness"]', text: "Готовність задач", minWidth: 900, minHeight: 200 },
+        { selector: '[data-readiness-section="now"] > button', text: "Зараз", minWidth: 600, minHeight: 20 },
+        { selector: '[data-readiness-section="review"] > button', text: "На рев'ю", minWidth: 600, minHeight: 20 },
+        { selector: '[data-readiness-section="blocked"] > button', text: "Заблоковано", minWidth: 600, minHeight: 20 },
+        { selector: '[data-readiness-section="planned"] > button', text: "Заплановано", minWidth: 600, minHeight: 20 },
+        { selector: '[data-readiness-section="done"] > button', text: "Готово", minWidth: 600, minHeight: 20 },
+        { selector: '[data-readiness-section="now"] button', text: "Wire the readiness strip", minWidth: 120, minHeight: 16 },
+        { selector: '[data-readiness-section="review"] button', text: "Ship the review evidence", minWidth: 120, minHeight: 16 },
+      ],
+      absentText: [],
+      pixels: FRAME_PIXELS,
+    },
+  },
+  {
+    id: "readiness-kanban-mobile",
+    output: "readiness-kanban-mobile.png",
+    project: "kanban",
+    file: null,
+    locale: "uk",
+    viewport: { width: 390, height: 720 },
+    stableText: [
+      "Готовність задач",
+      "Зараз",
+      "На рев'ю",
+      "Заблоковано",
+      "Заплановано",
+      "Готово",
+      /* Only the «Зараз» section expands at 390px (internal scroll budget);
+         its chip row carries the title, issue and agent link evidence. */
+      "Wire the readiness strip 290",
+      "#290",
+    ],
+    frame: {
+      visible: [
+        { selector: '[data-testid="task-readiness"]', text: "Готовність задач", minWidth: 350, minHeight: 280 },
+        { selector: '[data-readiness-section="now"] > button', text: "Зараз", minWidth: 300, minHeight: 40 },
+        { selector: '[data-readiness-section="review"] > button', text: "На рев'ю", minWidth: 300, minHeight: 40 },
+        { selector: '[data-readiness-section="blocked"] > button', text: "Заблоковано", minWidth: 300, minHeight: 40 },
+        { selector: '[data-readiness-section="planned"] > button', text: "Заплановано", minWidth: 300, minHeight: 40 },
+        { selector: '[data-readiness-section="done"] > button', text: "Готово", minWidth: 300, minHeight: 40 },
+        { selector: '[data-readiness-section="now"] button', text: "Wire the readiness strip", minWidth: 100, minHeight: 36 },
       ],
       absentText: [],
       pixels: FRAME_PIXELS,

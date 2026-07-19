@@ -1,0 +1,2 @@
+{"type":"user","uuid":"d2000000-0000-4000-8000-000000000001","timestamp":"2100-01-02T11:31:00.000Z","cwd":"/demo/Projects/kanban","message":{"role":"user","content":"Wire the readiness strip into the dashboard footer."}}
+{"type":"assistant","uuid":"d2000000-0000-4000-8000-000000000002","timestamp":"2100-01-02T11:31:20.000Z","cwd":"/demo/Projects/kanban","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Wiring the five readiness sections into the dashboard footer now."}]}}
