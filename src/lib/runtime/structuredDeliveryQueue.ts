@@ -1,4 +1,4 @@
-import type { RuntimeSendSettings } from "./contracts";
+import type { RuntimeReplay, RuntimeSendSettings } from "./contracts";
 import type { DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import type { RuntimeHostClient } from "./client";
 import {
@@ -18,6 +18,7 @@ export type StructuredDeliveryTransition = "queued" | "delivering" | "delivered"
 
 export interface StructuredDeliveryQueuePort {
   effects(kinds?: readonly string[], afterEventSeq?: number): Promise<StructuredDeliveryEffect[]>;
+  events?(afterEventSeq: number): Promise<RuntimeReplay>;
   transition(
     operationId: string,
     status: StructuredDeliveryTransition,
@@ -34,6 +35,7 @@ const THREAD_READ_ATTEMPTS = 2;
 export function runtimeClientDeliveryPort(client: RuntimeHostClient): StructuredDeliveryQueuePort {
   return {
     effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
+    ...(typeof client.events === "function" ? { events: (afterEventSeq: number) => client.events(afterEventSeq) } : {}),
     transition: async (operationId, status, details) => {
       await client.transitionOperation(operationId, status, details);
     },
@@ -79,6 +81,12 @@ interface ControlEffect {
 interface ControlDrainResult {
   blocked: boolean;
   terminated: boolean;
+}
+
+interface SuccessfulKillBoundary {
+  operationId: string;
+  conversationId: string;
+  eventSeq: number;
 }
 
 type DeliveryEffect = SendEffect | ControlEffect;
@@ -176,6 +184,9 @@ export class StructuredDeliveryQueue {
   private activeDrain: Promise<void> | null = null;
   private rerun = false;
   private readonly interruptAcknowledged = new Set<string>();
+  private readonly killAdmissionSeqByOperation = new Map<string, number>();
+  private readonly successfulKillBoundaries = new Map<string, SuccessfulKillBoundary>();
+  private killHistoryCursor = 0;
 
   constructor(
     private readonly port: StructuredDeliveryQueuePort,
@@ -200,79 +211,111 @@ export class StructuredDeliveryQueue {
   }
 
   private async drainUntilSettled(): Promise<void> {
-    const intentionallyTerminatedConversations = new Set<string>();
+    await this.refreshSuccessfulKillBoundaries();
     do {
       this.rerun = false;
-      await this.drainPass(intentionallyTerminatedConversations);
+      await this.drainPass();
     } while (this.rerun);
   }
 
-  private async drainPass(intentionallyTerminatedConversations: Set<string>): Promise<void> {
-    const blockedConversations = new Set<string>();
-    let afterEventSeq = 0;
+  private async refreshSuccessfulKillBoundaries(): Promise<void> {
+    if (!this.port.events) return;
+    let afterEventSeq = this.killHistoryCursor;
     while (true) {
-      const rawEffects = await this.port.effects(
-        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill"],
-        afterEventSeq,
-      );
-      if (rawEffects.length === 0) return;
-      const nextCursor = Math.max(...rawEffects.map((effect) => effect.eventSeq));
-      if (!Number.isSafeInteger(nextCursor) || nextCursor <= afterEventSeq) {
-        throw new Error("structured delivery effect page did not advance");
-      }
-      const grouped = new Map<string, DeliveryEffect[]>();
-      const effects: DeliveryEffect[] = [];
-      for (const rawEffect of rawEffects) {
-        const effect = deliveryEffect(rawEffect);
-        if (effect) {
-          effects.push(effect);
-          continue;
+      const replay = await this.port.events(afterEventSeq);
+      if (replay.reset) {
+        if (!Number.isSafeInteger(replay.floorSeq) || replay.floorSeq <= afterEventSeq) {
+          throw new Error("structured delivery event replay did not reset to a valid floor");
         }
-        const operationId = typeof rawEffect.payload.operationId === "string" ? rawEffect.payload.operationId : "";
-        if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
-        await this.port.transition(operationId, "failed", { reason: "structured delivery effect is invalid" });
+        afterEventSeq = replay.floorSeq;
+        this.killHistoryCursor = replay.floorSeq;
+        continue;
       }
-      effects.sort((left, right) => {
-          const leftControl = isControlEffect(left);
-          const rightControl = isControlEffect(right);
-          return Number(rightControl) - Number(leftControl) || left.eventSeq - right.eventSeq;
-        });
-      for (const effect of effects) {
-        if (blockedConversations.has(effect.conversationId) && !isControlEffect(effect)) continue;
-        const target = grouped.get(effect.conversationId) ?? [];
-        target.push(effect);
-        grouped.set(effect.conversationId, target);
+      if (replay.events.length === 0) return;
+      for (const event of replay.events) {
+        if (event.kind !== "receipt") continue;
+        const operationId = typeof event.payload.operationId === "string" ? event.payload.operationId : "";
+        const conversationId = typeof event.payload.conversationId === "string" ? event.payload.conversationId : "";
+        if (!operationId || !conversationId || event.payload.kind !== "kill") continue;
+        const admissionSeq = this.killAdmissionSeqByOperation.get(operationId) ?? event.seq;
+        this.killAdmissionSeqByOperation.set(operationId, admissionSeq);
+        if (event.payload.status !== "delivered") continue;
+        const current = this.successfulKillBoundaries.get(conversationId);
+        if (!current || admissionSeq > current.eventSeq) {
+          this.successfulKillBoundaries.set(conversationId, { operationId, conversationId, eventSeq: admissionSeq });
+        }
       }
-      const results = await Promise.all([...grouped.entries()].map(async ([conversationId, target]) => ({
-        conversationId,
-        blocked: await this.drainTarget(
-          target,
-          intentionallyTerminatedConversations,
-          blockedConversations,
-        ),
-      })));
-      for (const result of results) if (result.blocked) blockedConversations.add(result.conversationId);
-      if (rawEffects.length < STRUCTURED_DELIVERY_BATCH_SIZE) return;
+      const nextCursor = replay.events.at(-1)?.seq ?? afterEventSeq;
+      if (!Number.isSafeInteger(nextCursor) || nextCursor <= afterEventSeq) {
+        throw new Error("structured delivery event replay did not advance");
+      }
       afterEventSeq = nextCursor;
+      this.killHistoryCursor = nextCursor;
     }
   }
 
-  private async drainTarget(
-    effects: DeliveryEffect[],
-    intentionallyTerminatedConversations: Set<string>,
-    blockedConversations: Set<string>,
-  ): Promise<boolean> {
+  private async drainPass(): Promise<void> {
+    const rawEffects: StructuredDeliveryEffect[] = [];
+    let afterEventSeq = 0;
+    while (true) {
+      const page = await this.port.effects(
+        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill"],
+        afterEventSeq,
+      );
+      if (page.length === 0) break;
+      rawEffects.push(...page);
+      const nextCursor = Math.max(...page.map((effect) => effect.eventSeq));
+      if (!Number.isSafeInteger(nextCursor) || nextCursor <= afterEventSeq) {
+        throw new Error("structured delivery effect page did not advance");
+      }
+      if (page.length < STRUCTURED_DELIVERY_BATCH_SIZE) break;
+      afterEventSeq = nextCursor;
+    }
+    if (rawEffects.length === 0) return;
+    const grouped = new Map<string, DeliveryEffect[]>();
+    const effects: DeliveryEffect[] = [];
+    for (const rawEffect of rawEffects) {
+      const effect = deliveryEffect(rawEffect);
+      if (effect) {
+        effects.push(effect);
+        continue;
+      }
+      const operationId = typeof rawEffect.payload.operationId === "string" ? rawEffect.payload.operationId : "";
+      if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
+      await this.port.transition(operationId, "failed", { reason: "structured delivery effect is invalid" });
+    }
+    effects.sort((left, right) => {
+      const leftControl = isControlEffect(left);
+      const rightControl = isControlEffect(right);
+      return Number(rightControl) - Number(leftControl) || left.eventSeq - right.eventSeq;
+    });
+    for (const effect of effects) {
+      const target = grouped.get(effect.conversationId) ?? [];
+      target.push(effect);
+      grouped.set(effect.conversationId, target);
+    }
+    await Promise.all([...grouped.values()].map((target) => this.drainTarget(target)));
+  }
+
+  private async drainTarget(effects: DeliveryEffect[]): Promise<boolean> {
     for (const effect of effects) {
       if (isControlEffect(effect)) {
         const result = await this.drainControl(effect);
         if (result.blocked) return true;
-        if (result.terminated) {
-          intentionallyTerminatedConversations.add(effect.conversationId);
-          if (blockedConversations.delete(effect.conversationId)) this.rerun = true;
+        if (result.terminated && effect.kind === "kill") {
+          const current = this.successfulKillBoundaries.get(effect.conversationId);
+          if (!current || effect.eventSeq > current.eventSeq) {
+            this.successfulKillBoundaries.set(effect.conversationId, {
+              operationId: effect.operationId,
+              conversationId: effect.conversationId,
+              eventSeq: effect.eventSeq,
+            });
+          }
         }
         continue;
       }
-      if (intentionallyTerminatedConversations.has(effect.conversationId)) {
+      const killBoundary = this.successfulKillBoundaries.get(effect.conversationId);
+      if (killBoundary && effect.eventSeq <= killBoundary.eventSeq) {
         await this.port.transition(effect.operationId, "failed", {
           reason: "structured host was intentionally terminated; retry the operation",
         });

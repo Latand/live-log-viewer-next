@@ -24,7 +24,8 @@ afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
 function journalPort(journal: RuntimeJournal, failDelivered = false): StructuredDeliveryQueuePort {
   return {
-    effects: async () => journal.effectBatch(),
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    events: async (afterEventSeq) => journal.replay(afterEventSeq),
     transition: async (operationId, status, details) => {
       if (failDelivered && status === "delivered") throw new Error("runtime stopped before confirmation commit");
       journal.transitionOperation(operationId, status, details);
@@ -137,6 +138,7 @@ async function waitForCondition(assertion: () => boolean): Promise<void> {
 function runtimeJournalClient(journal: RuntimeJournal): RuntimeHostClient {
   return {
     snapshot: async () => journal.snapshot(),
+    events: async (afterEventSeq) => journal.replay(afterEventSeq),
     append: async (event) => journal.append(event),
     command: async (command) => journal.executeOperation(command),
     operationStatus: async (operationId) => journal.operationResult(operationId),
@@ -1333,6 +1335,288 @@ test("ledger recovery drains every entry beyond one effect batch", async () => {
   expect(ledger.writes.map((entry) => entry.id)).toEqual(
     Array.from({ length: 101 }, (_, index) => `operation-${index}`),
   );
+  expect(journal.effectBatch()).toEqual([]);
+  journal.close();
+});
+
+test("a successful kill beyond one effect page fences older sends through repeated restart", async () => {
+  const filename = path.join(sandbox, "durable-kill-boundary.sqlite");
+  const conversationId = "conversation-durable-kill";
+  const sessionKey = { engine: "codex" as const, sessionId: "session-durable-kill" };
+  let journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/durable-kill.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const sendOperationIds = Array.from({ length: 101 }, (_, index) => `operation-stale-${index}`);
+  for (const [index, operationId] of sendOperationIds.entries()) {
+    journal.executeOperation({
+      kind: "send",
+      operationId,
+      idempotencyKey: `message-stale-${index}`,
+      conversationId,
+      text: `stale message ${index}`,
+      policy: "queue",
+    });
+  }
+  for (let index = 0; index < 40; index += 1) {
+    journal.append({
+      scope: { type: "system", id: "durable-kill-history-padding" },
+      kind: "test.padding",
+      producer: { kind: "integration-test", eventKey: `durable-kill-padding:${index}` },
+      payload: { index },
+    });
+  }
+  const killOperationId = "operation-durable-kill";
+  journal.executeOperation({
+    kind: "kill",
+    operationId: killOperationId,
+    idempotencyKey: killOperationId,
+    conversationId,
+    sessionKey,
+  });
+
+  const ledger = createFakeDeliveryLedger();
+  const host = new FakeEngineHost(ledger);
+  let terminated = false;
+  let recoveryCalls = 0;
+  let crashesRemaining = 2;
+  const queue = () => new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    events: async (afterEventSeq: number) => journal.replay(afterEventSeq),
+    transition: async (operationId, status, details) => {
+      journal.transitionOperation(operationId, status, details);
+      if (status === "failed" && operationId.startsWith("operation-stale-") && crashesRemaining > 0) {
+        crashesRemaining -= 1;
+        throw new Error("runtime crashed after kill settlement");
+      }
+    },
+  } as StructuredDeliveryQueuePort, () => terminated ? null : host, async () => {
+    terminated = true;
+    return true;
+  }, () => {}, async () => {
+    recoveryCalls += 1;
+    return false;
+  });
+
+  await expect(queue().drain()).rejects.toThrow("runtime crashed after kill settlement");
+  expect(journal.operationResult(killOperationId)?.receipt.status).toBe("delivered");
+  journal.close();
+
+  journal = new RuntimeJournal(filename, { structuredHosts: true });
+  await expect(queue().drain()).rejects.toThrow("runtime crashed after kill settlement");
+  journal.close();
+
+  journal = new RuntimeJournal(filename, { structuredHosts: true });
+  await queue().drain();
+
+  expect(recoveryCalls).toBe(0);
+  expect(ledger.writes).toEqual([]);
+  for (const operationId of sendOperationIds) {
+    expect(journal.operationResult(operationId)?.receipt).toMatchObject({
+      status: "failed",
+      reason: "structured host was intentionally terminated; retry the operation",
+    });
+  }
+  expect(journal.effectBatch()).toEqual([]);
+  journal.close();
+});
+
+test("a retry admitted during kill drain starts one successor turn after restart", async () => {
+  const filename = path.join(sandbox, "post-kill-retry.sqlite");
+  const conversationId = "conversation-post-kill-retry";
+  const sessionKey = { engine: "codex" as const, sessionId: "session-post-kill-retry" };
+  let journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/post-kill-retry.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const originalOperationId = "operation-before-kill";
+  journal.executeOperation({
+    kind: "send",
+    operationId: originalOperationId,
+    idempotencyKey: "message-before-kill",
+    conversationId,
+    text: "deliver on the successor",
+    policy: "queue",
+  });
+  const killOperationId = "operation-kill-before-retry";
+  journal.executeOperation({
+    kind: "kill",
+    operationId: killOperationId,
+    idempotencyKey: killOperationId,
+    conversationId,
+    sessionKey,
+  });
+
+  const staleLedger = createFakeDeliveryLedger();
+  const successorLedger = createFakeDeliveryLedger();
+  const successorHost = new FakeEngineHost(successorLedger);
+  let currentHost: EngineHost | null = new FakeEngineHost(staleLedger);
+  let recoveryCalls = 0;
+  let crashAfterStaleFence = true;
+  let staleFenceCommitted!: () => void;
+  let releaseCrash!: () => void;
+  const staleFence = new Promise<void>((resolve) => { staleFenceCommitted = resolve; });
+  const crashGate = new Promise<void>((resolve) => { releaseCrash = resolve; });
+  const queue = () => new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    events: async (afterEventSeq) => journal.replay(afterEventSeq),
+    transition: async (operationId, status, details) => {
+      journal.transitionOperation(operationId, status, details);
+      if (crashAfterStaleFence && operationId === originalOperationId && status === "failed") {
+        staleFenceCommitted();
+        await crashGate;
+        throw new Error("runtime crashed with a retry kick pending");
+      }
+    },
+  }, () => currentHost, async () => {
+    currentHost = null;
+    return true;
+  }, () => {}, async () => {
+    recoveryCalls += 1;
+    return false;
+  });
+
+  const activeQueue = queue();
+  const drain = activeQueue.drain();
+  await staleFence;
+  currentHost = successorHost;
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/post-kill-retry.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const replacement = journal.retryOperation(originalOperationId, "message-after-kill");
+  const replayed = journal.retryOperation(originalOperationId, "message-after-kill-replay");
+  const kicked = activeQueue.drain();
+  expect(replayed).toMatchObject({ operationId: replacement.operationId, replayed: true });
+  releaseCrash();
+  await expect(drain).rejects.toThrow("runtime crashed with a retry kick pending");
+  await expect(kicked).rejects.toThrow("runtime crashed with a retry kick pending");
+  journal.close();
+
+  crashAfterStaleFence = false;
+  journal = new RuntimeJournal(filename, { structuredHosts: true });
+  const restartedQueue = queue();
+  await restartedQueue.drain();
+  await restartedQueue.drain();
+
+  expect(recoveryCalls).toBe(0);
+  expect(staleLedger.writes).toEqual([]);
+  expect(successorLedger.writes).toEqual([
+    expect.objectContaining({ id: replacement.operationId, text: "deliver on the successor" }),
+  ]);
+  expect(journal.operationResult(replacement.operationId)?.receipt).toMatchObject({
+    status: "delivered",
+    turnId: `turn:${replacement.operationId}`,
+    retryOfOperationId: originalOperationId,
+  });
+  expect(journal.effectBatch()).toEqual([]);
+  journal.close();
+});
+
+test("a failed kill creates no durable boundary across restart", async () => {
+  const filename = path.join(sandbox, "failed-kill-boundary.sqlite");
+  const conversationId = "conversation-failed-kill-boundary";
+  const sessionKey = { engine: "codex" as const, sessionId: "session-failed-kill-boundary" };
+  let journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/failed-kill-boundary.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const sendOperationId = "operation-survives-failed-kill";
+  journal.executeOperation({
+    kind: "send",
+    operationId: sendOperationId,
+    idempotencyKey: sendOperationId,
+    conversationId,
+    text: "deliver after failed kill",
+    policy: "queue",
+  });
+  const killOperationId = "operation-failed-kill-boundary";
+  journal.executeOperation({
+    kind: "kill",
+    operationId: killOperationId,
+    idempotencyKey: killOperationId,
+    conversationId,
+    sessionKey,
+  });
+
+  const ledger = createFakeDeliveryLedger();
+  const host = new FakeEngineHost(ledger);
+  let crashAfterFailedKill = true;
+  let recoveryCalls = 0;
+  const queue = () => new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    events: async (afterEventSeq) => journal.replay(afterEventSeq),
+    transition: async (operationId, status, details) => {
+      journal.transitionOperation(operationId, status, details);
+      if (crashAfterFailedKill && operationId === killOperationId && status === "failed") {
+        throw new Error("runtime crashed after failed kill");
+      }
+    },
+  }, () => host, async () => false, () => {}, async () => {
+    recoveryCalls += 1;
+    return false;
+  });
+
+  await expect(queue().drain()).rejects.toThrow();
+  expect(journal.operationResult(killOperationId)?.receipt.status).toBe("failed");
+  expect(journal.operationResult(sendOperationId)?.receipt.status).toBe("queued");
+  journal.close();
+
+  crashAfterFailedKill = false;
+  journal = new RuntimeJournal(filename, { structuredHosts: true });
+  await queue().drain();
+
+  expect(recoveryCalls).toBe(0);
+  expect(ledger.writes).toEqual([
+    expect.objectContaining({ id: sendOperationId, text: "deliver after failed kill" }),
+  ]);
+  expect(journal.operationResult(sendOperationId)?.receipt).toMatchObject({
+    status: "delivered",
+    turnId: `turn:${sendOperationId}`,
+  });
   expect(journal.effectBatch()).toEqual([]);
   journal.close();
 });

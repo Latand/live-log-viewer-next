@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import type { RuntimeEvent as JournalEvent } from "./contracts";
 import type { DeliveryReceipt, EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContentDigest, type StructuredImageRef } from "./structuredContent";
@@ -191,6 +192,43 @@ test("a full page from one busy conversation cannot hide a later ready conversat
 
   expect(sent).toEqual(["ready-101"]);
   expect(busySends).toBe(0);
+});
+
+test("repeated drains resume successful-kill replay from the prior cursor", async () => {
+  const receiptEvent = (seq: number, status: "pending" | "delivered"): JournalEvent => ({
+    schemaVersion: 1,
+    seq,
+    eventId: `event-${seq}`,
+    scope: { type: "operation", id: "kill-one" },
+    revision: seq,
+    kind: "receipt",
+    occurredAt: "2026-07-19T12:00:00.000Z",
+    recordedAt: "2026-07-19T12:00:00.000Z",
+    producer: { kind: "runtime-effect" },
+    causationId: null,
+    correlationId: null,
+    payload: {
+      operationId: "kill-one",
+      conversationId: "conversation-one",
+      kind: "kill",
+      status,
+    },
+  });
+  const history = [receiptEvent(1, "pending"), receiptEvent(2, "delivered")];
+  const replayCursors: number[] = [];
+  const queue = new StructuredDeliveryQueue({
+    events: async (afterEventSeq) => {
+      replayCursors.push(afterEventSeq);
+      return { reset: false, floorSeq: 0, events: history.filter((event) => event.seq > afterEventSeq) };
+    },
+    effects: async () => [],
+    transition: async () => {},
+  }, () => null);
+
+  await queue.drain();
+  await queue.drain();
+
+  expect(replayCursors).toEqual([0, 2, 2]);
 });
 
 test("structured delivery surfaces a host actuation failure", async () => {
