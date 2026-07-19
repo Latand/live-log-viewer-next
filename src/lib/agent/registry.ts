@@ -213,6 +213,13 @@ export interface DurableConversationMembership {
   stageOrder: number | null;
   round: number | null;
   parentConversationId: ViewerConversationId | null;
+  /** Child runtime captured at adoption admission so pipeline recovery can
+      parse the materialized transcript with its owning engine. */
+  runtime?: {
+    engine: Extract<AgentEngine, "claude" | "codex">;
+    model: string | null;
+    effort: string | null;
+  } | null;
   createdAt: string;
 }
 
@@ -910,6 +917,14 @@ function normalizeMemberships(value: unknown): RegistryFile["memberships"] {
         || typeof row.containerId !== "string" || !row.containerId
         || typeof row.role !== "string" || !row.role
         || typeof row.slot !== "string" || !row.slot) return [];
+      const runtime = row.runtime && typeof row.runtime === "object"
+        && (row.runtime.engine === "claude" || row.runtime.engine === "codex")
+        ? {
+            engine: row.runtime.engine,
+            model: typeof row.runtime.model === "string" ? row.runtime.model : null,
+            effort: typeof row.runtime.effort === "string" ? row.runtime.effort : null,
+          }
+        : null;
       return [{
         conversationId: conversationId as ViewerConversationId,
         kind: row.kind,
@@ -922,6 +937,7 @@ function normalizeMemberships(value: unknown): RegistryFile["memberships"] {
         parentConversationId: typeof row.parentConversationId === "string" && row.parentConversationId.startsWith("conversation_")
           ? row.parentConversationId as ViewerConversationId
           : null,
+        runtime,
         createdAt: typeof row.createdAt === "string" ? row.createdAt : now(),
       }];
     });
@@ -1509,6 +1525,7 @@ function recordMembership(
     stageOrder: Number.isInteger(input.stageOrder) ? input.stageOrder : null,
     round: Number.isInteger(input.round) ? input.round : null,
     parentConversationId,
+    runtime: input.runtime ? { ...input.runtime } : null,
     createdAt,
   };
   const rows = file.memberships[canonicalConversationId] ?? [];

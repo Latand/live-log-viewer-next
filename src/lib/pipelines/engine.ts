@@ -300,8 +300,18 @@ export function defaultPipelinePorts(): PipelinePorts {
             || !membership.slot.startsWith("adopt:") || !membership.stageId || !membership.parentConversationId) continue;
           const receipt = receipts.find((candidate) => candidate.conversationId === conversationId) ?? null;
           const conversation = snapshot.conversations[conversationId as ViewerConversationId] ?? null;
+          const generation = conversation?.generations.at(-1) ?? null;
           const agentPath = receipt?.artifactPath ?? conversation?.generations.at(-1)?.path ?? null;
           if (!agentPath) continue;
+          const runtime = membership.runtime ?? (receipt ? {
+            engine: receipt.engine,
+            model: receipt.launchProfile.model,
+            effort: receipt.launchProfile.effort,
+          } : conversation ? {
+            engine: conversation.engine,
+            model: generation?.launchProfile.model ?? null,
+            effort: generation?.launchProfile.effort ?? null,
+          } : null);
           candidates.push({
             stageId: membership.stageId,
             sourceConversationId: membership.parentConversationId,
@@ -311,6 +321,7 @@ export function defaultPipelinePorts(): PipelinePorts {
             agentPath,
             paneId: receipt?.verifiedHost?.paneId ?? receipt?.pane?.paneId ?? null,
             startedAt: receipt?.createdAt ?? membership.createdAt,
+            runtime,
           });
         }
       }
@@ -511,6 +522,7 @@ export type PipelineAttemptConversationRef = {
   agentPath: string;
   paneId: string | null;
   startedAt: string | null;
+  runtime?: Pick<EffectivePipelineRole, "engine" | "model" | "effort"> | null;
 };
 
 export type PipelineAdoptionCandidate = PipelineAttemptConversationRef & { stageId: string };
@@ -555,11 +567,17 @@ export function adoptAttempt(
   if (existing) return existing;
   const source = run.attempts.find((attempt) => attempt.conversationId === conversationRef.sourceConversationId) ?? null;
   if (!source) return null;
+  const effectiveRole = structuredClone(source.effectiveRole ?? stage.effectiveRole);
+  if (conversationRef.runtime) {
+    effectiveRole.engine = conversationRef.runtime.engine;
+    effectiveRole.model = conversationRef.runtime.model;
+    effectiveRole.effort = conversationRef.runtime.effort;
+  }
   const attempt: PipelineStageAttempt = {
     n: run.attempts.length + 1,
     historical: true,
     state: "running",
-    effectiveRole: structuredClone(source.effectiveRole ?? stage.effectiveRole),
+    effectiveRole,
     launchId: conversationRef.launchId,
     conversationId: conversationRef.conversationId,
     sessionId: conversationRef.sessionId,

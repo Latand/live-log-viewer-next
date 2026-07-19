@@ -405,6 +405,11 @@ async function postSpawn(
         stageOrder: pipelineAttemptTarget.stageOrder,
         round: null,
         parentConversationId: pipelineSourceConversationId as `conversation_${string}`,
+        runtime: {
+          engine,
+          model: spec.launchProfile.model,
+          effort: spec.launchProfile.effort,
+        },
       }] : [],
     });
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
@@ -419,6 +424,11 @@ async function postSpawn(
           agentPath,
           paneId: materialized.verifiedHost?.paneId ?? materialized.pane?.paneId ?? null,
           startedAt: materialized.createdAt,
+          runtime: {
+            engine: materialized.engine,
+            model: materialized.launchProfile.model,
+            effort: materialized.launchProfile.effort,
+          },
         });
       } catch (error) {
         console.error("[spawn] pipeline attempt adoption failed", {

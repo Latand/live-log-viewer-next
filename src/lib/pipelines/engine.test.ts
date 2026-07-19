@@ -9,7 +9,8 @@ import type { FileEntry } from "@/lib/types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
 const engineModule = await import("./engine");
-const { adoptAttempt, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reviewNote, tickPipelines } = engineModule;
+const { adoptAttempt, defaultPipelinePorts, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reviewNote, tickPipelines } = engineModule;
+const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const rawCreatePipelineFromRequest = engineModule.createPipelineFromRequest;
 const createPipelineFromRequest: typeof rawCreatePipelineFromRequest = async (request, ports, options) =>
   await rawCreatePipelineFromRequest({ src: "/codex/creator.jsonl", ...request }, ports, options);
@@ -679,6 +680,123 @@ test("a terminal historical adoption settles without changing the cursor", async
   await tickPipelines([entry("/codex/child.jsonl")], h.ports);
   expect(JSON.stringify(loadPipelines()[0])).toBe(afterFirst);
   expect(adopted.conversationId).toBe("conversation_child");
+});
+
+test("a cross-engine historical adoption settles with the child runtime", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  const sourceRun = pipeline.runs.find((run) => run.stageId === "plan")!;
+  sourceRun.attempts.push({
+    n: 1,
+    state: "passed",
+    effectiveRole: {
+      roleId: "architect",
+      engine: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      access: "read-only",
+      promptScaffold: "Architect guidance",
+    },
+    launchId: "launch-source-codex",
+    conversationId: "conversation_source_codex",
+    sessionId: "session-source-codex",
+    agentPath: "/codex/source-cross-engine.jsonl",
+    paneId: "%3",
+    flowId: null,
+    startedAt: "1970-01-01T00:10:00.000Z",
+    completedAt: "1970-01-01T00:11:00.000Z",
+    input: "original input",
+    activatedBy: null,
+    output: "source output",
+    verdict: { status: "pass" },
+    error: null,
+  });
+  pipeline.cursor = { stageId: "build", state: "running", input: "source output", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } };
+  pipeline.state = "paused";
+  pipeline.pausedState = "running";
+  savePipelines([pipeline]);
+  const registryPath = path.join(process.env.LLV_STATE_DIR!, "cross-engine-agent-registry.json");
+  const registry = new AgentRegistry(registryPath);
+  const begun = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd: "/repo",
+    accountId: "claude-test",
+    parentConversationId: "conversation_source_codex",
+    launchProfile: { model: "claude-sonnet-4-6", effort: "high" },
+    memberships: [{
+      kind: "pipeline",
+      containerId: pipeline.id,
+      role: "architect",
+      slot: "adopt:plan:cross-engine",
+      stageId: "plan",
+      stageOrder: 0,
+      round: null,
+      parentConversationId: "conversation_source_codex",
+      runtime: { engine: "claude", model: "claude-sonnet-4-6", effort: "high" },
+    }],
+  });
+  if (begun.kind !== "created") throw new Error("cross-engine spawn reservation conflicted");
+  const childPath = "/claude/child-cross-engine.jsonl";
+  const childSessionId = crypto.randomUUID();
+  const settled = registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "claude", sessionId: childSessionId },
+    artifactPath: childPath,
+    cwd: "/repo",
+    accountId: "claude-test",
+    launchProfile: begun.receipt.launchProfile,
+    status: "starting",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  if (settled.kind !== "settled") throw new Error("cross-engine spawn settlement conflicted");
+  const candidates = (() => {
+    setAgentRegistryForTests(new AgentRegistry(registryPath));
+    try {
+      return defaultPipelinePorts().pipelineAdoptionCandidates(pipeline.id);
+    } finally {
+      setAgentRegistryForTests(null);
+    }
+  })();
+  expect(candidates).toEqual([
+    expect.objectContaining({
+      sourceConversationId: "conversation_source_codex",
+      conversationId: begun.receipt.conversationId,
+      agentPath: childPath,
+      runtime: { engine: "claude", model: "claude-sonnet-4-6", effort: "high" },
+    }),
+  ]);
+  h.ports.pipelineAdoptionCandidates = () => candidates;
+  const observedEngines: string[] = [];
+  h.ports.durableTurnEvidence = async (engine, transcriptPath) => {
+    observedEngines.push(engine);
+    if (engine !== "claude" || transcriptPath !== childPath) return null;
+    return {
+      turn: "terminal",
+      message: {
+        text: "cross-engine historical result\n\n```json\n{\"status\":\"pass\",\"findings\":[],\"confidence\":0.9}\n```",
+        ts: Date.parse(begun.receipt.createdAt) + 1_000,
+      },
+    };
+  };
+
+  await tickPipelines([entry(childPath)], h.ports);
+
+  expect(observedEngines).toContain("claude");
+  const adopted = loadPipelines()[0]!.runs.find((run) => run.stageId === "plan")!.attempts[1]!;
+  expect(adopted.effectiveRole).toMatchObject({
+    roleId: "architect",
+    engine: "claude",
+    model: "claude-sonnet-4-6",
+    effort: "high",
+    access: "read-only",
+  });
+  expect(loadPipelines()[0]!.runs.find((run) => run.stageId === "plan")!.attempts[1]).toMatchObject({
+    historical: true,
+    state: "passed",
+    verdict: { status: "pass" },
+  });
 });
 
 test("historical adoption never replaces the operational retry predecessor", async () => {

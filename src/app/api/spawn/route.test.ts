@@ -161,6 +161,20 @@ test("a materialized structured child is offered for pipeline attempt adoption",
         stageId: "build",
         parentConversationId: source.id,
         round: null,
+        runtime: {
+          engine: "claude",
+          model: "claude-sonnet-4-6",
+          effort: expect.any(String),
+        },
+      }),
+    ]);
+    expect(new AgentRegistry(store.filename).snapshot().memberships[receipt.conversationId]).toEqual([
+      expect.objectContaining({
+        runtime: {
+          engine: "claude",
+          model: "claude-sonnet-4-6",
+          effort: expect.any(String),
+        },
       }),
     ]);
 
@@ -177,6 +191,11 @@ test("a materialized structured child is offered for pipeline attempt adoption",
         launchId: expect.any(String),
         conversationId: expect.stringMatching(/^conversation_/),
         agentPath: childPath,
+        runtime: {
+          engine: "claude",
+          model: "claude-sonnet-4-6",
+          effort: expect.any(String),
+        },
       }),
     }, {
       sourceConversationId: source.id,
@@ -184,6 +203,11 @@ test("a materialized structured child is offered for pipeline attempt adoption",
         launchId: expect.any(String),
         conversationId: expect.stringMatching(/^conversation_/),
         agentPath: childPath,
+        runtime: {
+          engine: "claude",
+          model: "claude-sonnet-4-6",
+          effort: expect.any(String),
+        },
       }),
     }]);
   } finally {
