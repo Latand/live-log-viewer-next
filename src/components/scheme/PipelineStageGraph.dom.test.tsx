@@ -488,6 +488,22 @@ test("a path-only prior attempt stays linkable inside the retry stack (PR #439)"
   expect(opened).toEqual(["/pipelines/retry-1.jsonl"]);
 });
 
+test("an attempt with neither a conversation id nor a path stays the unavailable disabled state (PR #439)", () => {
+  const build = runStage("build", null);
+  const opened: string[] = [];
+  const host = mount(
+    // A launch that failed before recording either a conversation id or a
+    // transcript path — nothing to open, so the surface must not navigate.
+    pipeline([build], { build: [attempt(1, "failed", null)] }),
+    (target) => opened.push(navKey(target)),
+  );
+  const button = host.querySelector('[data-stage-graph-node="build"] button[data-open-stage]') as HTMLButtonElement;
+
+  expect(button.disabled).toBe(true);
+  button.click();
+  expect(opened).toEqual([]);
+});
+
 test("a review cycle opens its path-only implementer and reviewer by path (PR #439)", () => {
   const build = runStage("build", "review");
   const review = reviewStage("review", null);

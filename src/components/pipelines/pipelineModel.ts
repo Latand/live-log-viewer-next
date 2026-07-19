@@ -1,6 +1,6 @@
 import { roleNameById } from "@/components/builderCopy";
 import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
-import { currentMemberPath } from "@/lib/accounts/identity";
+import { currentConversationFile, currentMemberPath, isArchivedPredecessor } from "@/lib/accounts/identity";
 import { applyPipelineSnapshot, revertPipelineSnapshot } from "@/hooks/useFiles";
 import { getLocale, translate, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -470,17 +470,29 @@ export function attemptNavTarget(attempt: PipelineStageAttempt | null): StageNav
 }
 
 /** Resolve a stage-graph navigation target to the file its card should open.
-    The stored conversation id's CURRENT (non-archived) generation wins so a
-    migrated attempt never opens the folded predecessor; a path-only attempt (or
-    one whose id has no live generation) falls back to `agentPath`, redirecting a
-    recorded path that itself became an archived predecessor. Returns null when
-    nothing in the scanned file set matches yet — the caller leaves the click a
-    no-op rather than opening a stale transcript. */
+    Precedence is strict: the stored conversation id resolves ONLY to its CURRENT
+    (non-archived) generation — never to a folded predecessor — so a migrated
+    attempt opens the live card; an id that survives only as an archived
+    predecessor (its successor left the scan) yields nothing and the target then
+    evaluates its `agentPath` fallback. A path-only attempt (no adopted id) and a
+    recorded path that itself became an archived predecessor both resolve through
+    `agentPath`, which redirects a folded path to its live generation. Returns
+    null when nothing in the scanned file set matches yet — the caller leaves the
+    click a no-op rather than opening a stale transcript. */
 export function resolveStageNavFile(target: StageNavTarget | null, files: readonly FileEntry[]): FileEntry | null {
   if (!target) return null;
-  const path = currentMemberPath(target.agentPath, target.conversationId, files);
-  if (!path) return null;
-  return files.find((entry) => entry.path === path) ?? null;
+  if (target.conversationId) {
+    /* Only a live (non-archived) generation counts; currentConversationFile
+       falls back to the archived predecessor when no successor is in scan, so
+       reject that here and let agentPath take over. */
+    const current = currentConversationFile(files, target.conversationId);
+    if (current && !isArchivedPredecessor(current)) return current;
+  }
+  if (target.agentPath) {
+    const path = currentMemberPath(target.agentPath, null, files);
+    if (path) return files.find((entry) => entry.path === path) ?? null;
+  }
+  return null;
 }
 
 /** Resolve compact history after pipeline review decks leave the board. */

@@ -1222,8 +1222,25 @@ describe("stage-graph attempt navigation (path-only + current generation — PR 
     expect(resolved?.path).toBe("/new.jsonl");
   });
 
+  test("resolveStageNavFile falls back to agentPath when the id resolves only to an archived predecessor", () => {
+    // The stored conversation id survives only as a folded archived predecessor
+    // (its successor left the scan), while the recorded agentPath still hosts a
+    // live transcript. Navigation must open the live path, never the predecessor.
+    const files = [
+      fileAt("/old.jsonl", { conversationId: "c1", migratedTo: "/new.jsonl" }),
+      fileAt("/live-path.jsonl", { conversationId: "c2" }),
+    ];
+    const resolved = resolveStageNavFile({ conversationId: "c1", agentPath: "/live-path.jsonl" }, files);
+    expect(resolved?.path).toBe("/live-path.jsonl");
+  });
+
   test("resolveStageNavFile is a no-op when nothing in the scan matches", () => {
     expect(resolveStageNavFile(null, [fileAt("/a.jsonl", { conversationId: "c1" })])).toBeNull();
     expect(resolveStageNavFile({ conversationId: "gone", agentPath: "/gone.jsonl" }, [fileAt("/a.jsonl", { conversationId: "c1" })])).toBeNull();
+  });
+
+  test("resolveStageNavFile stays a no-op when the id is only an archived predecessor and no path is recorded", () => {
+    const files = [fileAt("/old.jsonl", { conversationId: "c1", migratedTo: "/new.jsonl" })];
+    expect(resolveStageNavFile({ conversationId: "c1", agentPath: null }, files)).toBeNull();
   });
 });
