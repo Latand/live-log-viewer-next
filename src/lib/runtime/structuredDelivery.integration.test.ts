@@ -3375,7 +3375,7 @@ test("late discarded-successor cleanup republishes the committed retarget host",
     launchProfile: profile,
     historyHash: receipt.historyHash,
     host: receipt.host,
-  }, revision);
+  }, revision, receipt.operationId, receipt);
   await cleanupOnlyProvider().cleanup({
     operationId: "discarded-retarget-successor",
     nativeId: discardedId,

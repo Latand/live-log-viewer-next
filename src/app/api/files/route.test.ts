@@ -1661,10 +1661,20 @@ test("a provisional Codex fork projects as archived history of its stable conver
     targetId: "target",
     revision: 1,
     error: null,
+    operationId: "files-route-continuity-operation",
+    providerReceipt: {
+      operationId: "files-route-continuity-operation",
+      nativeId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1302",
+      path: targetPath,
+      continuityPaths: [forkPath],
+      historyHash: "files-route-continuity-history",
+      host: { kind: "codex-app-server", identity: "019f4906-3f67-7b72-9fbc-9ec3b5ad1302", epoch: 1, verifiedAt: "2026-07-20T12:00:00.000Z" },
+    },
     updatedAt: "2026-07-10T12:00:00.000Z",
   });
   registry.recordConversationContinuityPath(conversation.id, forkPath);
-  registry.commitSuccessor(conversation.id, { id: "019f4906-3f67-7b72-9fbc-9ec3b5ad1302", path: targetPath, accountId: "target" }, 1);
+  registry.commitSuccessor(conversation.id, { id: "019f4906-3f67-7b72-9fbc-9ec3b5ad1302", path: targetPath, accountId: "target" }, 1,
+    registry.conversation(conversation.id)!.migration!.operationId, registry.conversation(conversation.id)!.migration!.providerReceipt!);
   scannedFiles = [file(forkPath), file(targetPath)];
 
   const response = await GET(new Request("http://127.0.0.1/api/files"));

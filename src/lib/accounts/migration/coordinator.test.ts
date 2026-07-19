@@ -21,6 +21,27 @@ function registry(): AgentRegistry {
   return new AgentRegistry(path.join(root, "registry.json"));
 }
 
+function commitCurrentSuccessor(
+  store: AgentRegistry,
+  conversationId: Parameters<AgentRegistry["conversation"]>[0],
+  successor: Parameters<AgentRegistry["commitSuccessor"]>[1],
+  revision: number,
+): ReturnType<AgentRegistry["commitSuccessor"]> {
+  let migration = store.conversation(conversationId)!.migration!;
+  const receipt = migration.providerReceipt ?? {
+    operationId: migration.operationId,
+    nativeId: successor.id,
+    path: successor.path,
+    continuityPaths: [],
+    historyHash: successor.historyHash ?? `history-${successor.id}`,
+    host: successor.host ?? { kind: "codex-app-server", identity: successor.id, epoch: 1, verifiedAt: "2026-07-20T12:00:00.000Z" },
+  };
+  if (!migration.providerReceipt) {
+    migration = store.transitionConversationMigration(conversationId, revision, ["verifying"], { providerReceipt: receipt }).migration!;
+  }
+  return store.commitSuccessor(conversationId, successor, revision, migration.operationId, receipt);
+}
+
 function observation(
   pathname: string,
   accountId: string | null,
@@ -1583,7 +1604,7 @@ describe("durable account migration coordinator", () => {
     current = store.transitionConversationMigration(current.id, current.migration!.revision, ["preparing"], { phase: "successor-starting" });
     current = store.transitionConversationMigration(current.id, current.migration!.revision, ["successor-starting"], { phase: "verifying" });
     store.holdDelivery(current.id, "continue after restart", "repair-client");
-    store.commitSuccessor(current.id, { id: "repair-successor", path: successorPath, accountId: "b" }, current.migration!.revision);
+    commitCurrentSuccessor(store, current.id, { id: "repair-successor", path: successorPath, accountId: "b" }, current.migration!.revision);
     const closed = mutateBoard(project, boardFor(project).revision, [{ kind: "close", path: sourcePath }]);
     expect(closed.ok).toBeTrue();
 
@@ -1638,7 +1659,7 @@ describe("durable account migration coordinator", () => {
       host: { kind: "codex-app-server", identity: "partial-target", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
     };
     current = store.transitionConversationMigration(current.id, current.migration!.revision, ["successor-starting"], { phase: "verifying", providerReceipt: receipt });
-    store.commitSuccessor(current.id, { id: receipt.nativeId, path: targetPath, accountId: "b" }, current.migration!.revision);
+    commitCurrentSuccessor(store, current.id, { id: receipt.nativeId, path: targetPath, accountId: "b" }, current.migration!.revision);
     const arranged = mutateBoard(project, boardFor(project).revision, [
       { kind: "restore", path: sourcePath, placement: "manual" },
       { kind: "remap-paths", pairs: [{ from: sourcePath, to: targetPath }] },
@@ -1903,7 +1924,7 @@ describe("durable account migration coordinator", () => {
     current = store.transitionConversationMigration(current.id, current.migration!.revision, ["requested"], { phase: "preparing" });
     current = store.transitionConversationMigration(current.id, current.migration!.revision, ["preparing"], { phase: "successor-starting" });
     current = store.transitionConversationMigration(current.id, current.migration!.revision, ["successor-starting"], { phase: "verifying" });
-    store.commitSuccessor(current.id, { id: "group-target", path: "/group-target.jsonl", accountId: "b" }, current.migration!.revision);
+    commitCurrentSuccessor(store, current.id, { id: "group-target", path: "/group-target.jsonl", accountId: "b" }, current.migration!.revision);
     store.reconcileConversations([observation("/group-target.jsonl", "b", "idle", "worker", "canonical-project")]);
 
     await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
@@ -1936,7 +1957,7 @@ describe("durable account migration coordinator", () => {
       current = store.transitionConversationMigration(current.id, current.migration!.revision, ["requested"], { phase: "preparing" });
       current = store.transitionConversationMigration(current.id, current.migration!.revision, ["preparing"], { phase: "successor-starting" });
       current = store.transitionConversationMigration(current.id, current.migration!.revision, ["successor-starting"], { phase: "verifying" });
-      store.commitSuccessor(current.id, { id: `restart-${placement}-target`, path: targetPath, accountId: "b" }, current.migration!.revision);
+      commitCurrentSuccessor(store, current.id, { id: `restart-${placement}-target`, path: targetPath, accountId: "b" }, current.migration!.revision);
       store.reconcileConversations([
         observation(sourcePath, "a", "idle", "worker", newProject),
         observation(targetPath, "b", "idle", "worker", newProject),
@@ -2193,7 +2214,7 @@ describe("durable account migration coordinator", () => {
     await advanceConversationMigration(conversation.id, store, provider(["/b.jsonl"]));
     const committedOnce = store.conversation(conversation.id)!;
     const successor = committedOnce.generations.at(-1)!;
-    expect(store.commitSuccessor(conversation.id, { id: successor.id, path: successor.path, accountId: successor.accountId }, committedOnce.migration!.revision).generations).toHaveLength(2);
+    expect(commitCurrentSuccessor(store, conversation.id, { id: successor.id, path: successor.path, accountId: successor.accountId }, committedOnce.migration!.revision).generations).toHaveLength(2);
     const delivered: string[] = [];
     await drainHeldDeliveries(conversation.id, { async deliver(input) { delivered.push(input.clientMessageId); return "delivered"; } }, store);
     expect(delivered).toEqual(["client-1"]);
@@ -2620,7 +2641,7 @@ describe("durable account migration coordinator", () => {
             host: { kind: "codex-app-server", identity: "late", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
           },
         });
-        store.commitSuccessor(conversation.id, {
+        commitCurrentSuccessor(store, conversation.id, {
           id: "late-successor",
           path: "/late-successor.jsonl",
           accountId: "b",
@@ -2746,7 +2767,7 @@ describe("durable account migration coordinator", () => {
     });
     const beforeCommit = store.engineRouting("codex").revision;
     const successor = { id: "preview-successor", path: "/preview-successor.jsonl", accountId: "b" };
-    store.commitSuccessor(conversation.id, successor, revision);
+    commitCurrentSuccessor(store, conversation.id, successor, revision);
     const afterCommit = store.engineRouting("codex").revision;
 
     expect(afterCommit).toBe(beforeCommit + 1);
@@ -2758,7 +2779,7 @@ describe("durable account migration coordinator", () => {
       expectedRevision: preview.previewRevision,
       scope: "all",
     })).toThrow(MigrationRevisionError);
-    store.commitSuccessor(conversation.id, successor, revision);
+    commitCurrentSuccessor(store, conversation.id, successor, revision);
     expect(store.engineRouting("codex").revision).toBe(afterCommit);
   });
 

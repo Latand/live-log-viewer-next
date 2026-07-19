@@ -548,7 +548,7 @@ export async function advanceConversationMigration(
       launchProfile: source.launchProfile,
       historyHash: publicationReceipt.historyHash,
       host: publicationReceipt.host,
-    }, publicationRevision);
+    }, publicationRevision, publicationOperationId, publicationReceipt);
     if (!options.deferBoardRepair) await repairCommittedBoardSuccessions(
       [committed],
       registry,

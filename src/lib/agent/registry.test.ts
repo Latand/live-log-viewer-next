@@ -1272,10 +1272,44 @@ describe("agent registry", () => {
     fs.writeFileSync(store.filename, JSON.stringify({ version: 1, entries: {}, receipts: {}, importedResumePanes: false, legacyResumePanes: { serverPid: null, panes: {} } }));
     const conversation = store.ensureConversation("codex", "/a.jsonl", "a");
     expect(store.snapshot().version).toBe(2);
-    store.setConversationMigration(conversation.id, { intentId: "intent-a", phase: "verifying", targetId: "b", revision: 1, error: null, updatedAt: new Date().toISOString() });
-    store.commitSuccessor(conversation.id, { id: "native-b", path: "/b.jsonl", accountId: "b" }, 1);
-    store.setConversationMigration(conversation.id, { intentId: "intent-b", phase: "verifying", targetId: "a", revision: 2, error: null, updatedAt: new Date().toISOString() });
-    const final = store.commitSuccessor(conversation.id, { id: "native-a2", path: "/a2.jsonl", accountId: "a" }, 2);
+    store.setConversationMigration(conversation.id, {
+      intentId: "intent-a",
+      phase: "verifying",
+      targetId: "b",
+      revision: 1,
+      error: null,
+      operationId: "intent-a-operation",
+      providerReceipt: {
+        operationId: "intent-a-operation",
+        nativeId: "native-b",
+        path: "/b.jsonl",
+        continuityPaths: [],
+        historyHash: "history-native-b",
+        host: { kind: "codex-app-server", identity: "native-b", epoch: 1, verifiedAt: "2026-07-20T12:00:00.000Z" },
+      },
+      updatedAt: new Date().toISOString(),
+    });
+    store.commitSuccessor(conversation.id, { id: "native-b", path: "/b.jsonl", accountId: "b" }, 1,
+      store.conversation(conversation.id)!.migration!.operationId, store.conversation(conversation.id)!.migration!.providerReceipt!);
+    store.setConversationMigration(conversation.id, {
+      intentId: "intent-b",
+      phase: "verifying",
+      targetId: "a",
+      revision: 2,
+      error: null,
+      operationId: "intent-b-operation",
+      providerReceipt: {
+        operationId: "intent-b-operation",
+        nativeId: "native-a2",
+        path: "/a2.jsonl",
+        continuityPaths: [],
+        historyHash: "history-native-a2",
+        host: { kind: "codex-app-server", identity: "native-a2", epoch: 1, verifiedAt: "2026-07-20T12:00:00.000Z" },
+      },
+      updatedAt: new Date().toISOString(),
+    });
+    const final = store.commitSuccessor(conversation.id, { id: "native-a2", path: "/a2.jsonl", accountId: "a" }, 2,
+      store.conversation(conversation.id)!.migration!.operationId, store.conversation(conversation.id)!.migration!.providerReceipt!);
     expect(final.id).toBe(conversation.id);
     expect(final.generations.map((generation) => generation.path)).toEqual(["/a.jsonl", "/b.jsonl", "/a2.jsonl"]);
     expect(store.canonicalPath("/a.jsonl")).toBe("/a2.jsonl");

@@ -357,7 +357,7 @@ test("post-commit supersedence still releases the captured predecessor generatio
         accountId,
         historyHash: receipt.historyHash,
         host: receipt.host,
-      }, migration.revision);
+      }, migration.revision, migration.operationId, receipt);
       migrationCommitted();
       await migrationReturnGate;
       return result;
@@ -442,6 +442,58 @@ test("a profile-only reconfigure retires its superseded account migration before
 
   expect(target.registry.conversation(target.conversationId)?.migration?.phase).toBe("rolled-back");
   expect(calls).toEqual({ create: 0, verify: 0, publish: 0, cleanup: 1 });
+});
+
+test("an explicit return to the source account retires the superseded migration", async () => {
+  const target = fixture();
+  const pending = await applyStructuredReconfigure(effect({
+    operationId: "switch-away-before-return",
+    conversationId: target.conversationId,
+    accountId: "target",
+    eventSeq: 45,
+  }), {
+    registry: target.registry,
+    validateAccount: async () => {},
+    resolveAccount: () => ({}) as never,
+    migrate: async (conversationId, _accountId, registry) => registry.conversation(conversationId)!,
+  });
+  expect(pending).toBe("pending");
+  expect(target.registry.conversation(target.conversationId)?.migration).toMatchObject({
+    targetId: "target",
+    phase: "waiting-turn",
+  });
+
+  const returned = await applyStructuredReconfigure(effect({
+    operationId: "return-to-source",
+    conversationId: target.conversationId,
+    accountId: "source",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    eventSeq: 46,
+  }), {
+    registry: target.registry,
+    releaseHost: async () => true,
+    recover: async () => ({ target: null, path: target.transcript, conversationId: target.conversationId, spawned: true }),
+  });
+  expect(returned).toBe("applied");
+
+  let creates = 0;
+  await reconcileMigrations({
+    virtualSource: true,
+    async create() { creates += 1; throw new Error("superseded target must stay retired"); },
+    async verify() {},
+  }, { async deliver() { return "delivered" as const; } }, target.registry);
+
+  expect(creates).toBe(0);
+  expect(target.registry.conversation(target.conversationId)?.migration).toMatchObject({
+    targetId: "target",
+    phase: "rolled-back",
+  });
+  expect(target.registry.conversation(target.conversationId)?.reconfigure).toMatchObject({
+    operationId: "return-to-source",
+    status: "applied",
+    accountId: "source",
+  });
 });
 
 test("a profile-only reconfigure retires a migration after a newer same-target account claim", async () => {
@@ -644,7 +696,7 @@ test("an account-switch release failure durably restores a sparse profile", asyn
         accountId,
         historyHash: receipt.historyHash,
         host: receipt.host,
-      }, migration.revision);
+      }, migration.revision, migration.operationId, receipt);
       liveSuccessorProfile = committed.generations.at(-1)?.launchProfile;
       return committed;
     },
@@ -694,7 +746,7 @@ test("a same-account reconfigure restarts the committed successor with the newes
     accountId: "target",
     historyHash: receipt.historyHash,
     host: receipt.host,
-  }, migration.revision);
+  }, migration.revision, migration.operationId, receipt);
   const released: string[] = [];
   const recoveredProfiles: unknown[] = [];
 
@@ -748,7 +800,7 @@ test("a committed account-switch replay restores the live successor profile afte
     accountId: "target",
     historyHash: receipt.historyHash,
     host: receipt.host,
-  }, migration.revision);
+  }, migration.revision, migration.operationId, receipt);
   const released: string[] = [];
   let liveSuccessorProfile: unknown = null;
 
@@ -853,7 +905,7 @@ test("account migration preserves conversation continuity without a duplicate ca
         accountId,
         historyHash: receipt.historyHash,
         host: receipt.host,
-      }, migration.revision);
+      }, migration.revision, migration.operationId, receipt);
     },
   });
 

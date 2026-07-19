@@ -4156,7 +4156,12 @@ export class AgentRegistry {
         }
         return { kind: "replayed" as const, state: clone(current), conversation: clone(conversation) };
       }
-      if (current?.status === "applying" && current.accountId !== null && claim.accountId === undefined) {
+      const returnsToMigrationSource = claim.accountId !== undefined
+        && claim.accountId === generation.accountId
+        && conversation.migration?.targetId !== claim.accountId;
+      if (current?.status === "applying"
+        && current.accountId !== null
+        && (claim.accountId === undefined || returnsToMigrationSource)) {
         retireReconfigureOwnedMigration(file, conversation, current);
       }
       const previousProfile = current?.status === "applying"
@@ -4696,16 +4701,39 @@ export class AgentRegistry {
     });
   }
 
-  commitSuccessor(id: ViewerConversationId, successor: SuccessorGenerationInput, expectedRevision: number): RegistryConversation {
+  commitSuccessor(
+    id: ViewerConversationId,
+    successor: SuccessorGenerationInput,
+    expectedRevision: number,
+    expectedOperationId: string,
+    expectedReceipt: ProviderReceipt,
+  ): RegistryConversation {
     return this.mutate((file) => {
       const conversation = file.conversations[resolveConversationAlias(file, id)];
-      if (!conversation?.migration || conversation.migration.revision !== expectedRevision) throw new Error("migration revision is stale");
-      if (conversation.migration.phase === "committed") {
+      const migration = conversation?.migration;
+      const successorMatchesReceipt = expectedReceipt.operationId === expectedOperationId
+        && expectedReceipt.nativeId === successor.id
+        && expectedReceipt.path === successor.path
+        && (successor.historyHash === undefined || expectedReceipt.historyHash === successor.historyHash)
+        && (successor.host === undefined || isDeepStrictEqual(expectedReceipt.host, successor.host));
+      const durableReceiptMatches = migration?.providerReceipt !== null
+        && migration?.providerReceipt !== undefined
+        && sameProviderReceiptOutcome(migration.providerReceipt, expectedReceipt);
+      if (!conversation
+        || !migration
+        || migration.revision !== expectedRevision
+        || migration.operationId !== expectedOperationId
+        || migration.targetId !== successor.accountId
+        || !durableReceiptMatches
+        || !successorMatchesReceipt) {
+        throw new Error("migration succession ownership is stale");
+      }
+      if (migration.phase === "committed") {
         const current = conversation.generations.at(-1);
         if (current?.id === successor.id && current.path === successor.path) return clone(conversation);
         throw new Error("migration succession is already committed");
       }
-      if (conversation.migration.phase !== "verifying") throw new Error("migration succession is not ready to commit");
+      if (migration.phase !== "verifying") throw new Error("migration succession is not ready to commit");
       const predecessor = conversation.generations.at(-1);
       if (!predecessor) throw new Error("viewer conversation has no native generation");
       const committedAt = now();
@@ -4720,11 +4748,11 @@ export class AgentRegistry {
       };
       conversation.generations.push(generation);
       conversation.continuityPaths = conversation.continuityPaths.filter((pathname) => pathname !== generation.path);
-      const committedContinuityPaths = new Set(conversation.migration.pendingContinuityPaths);
+      const committedContinuityPaths = new Set(migration.pendingContinuityPaths);
       conversation.abandonedContinuityPaths = conversation.abandonedContinuityPaths.filter(
         (pathname) => !committedContinuityPaths.has(pathname),
       );
-      conversation.migration = { ...conversation.migration, phase: "committed", updatedAt: now() };
+      conversation.migration = { ...migration, phase: "committed", updatedAt: now() };
       conversation.updatedAt = now();
       for (const delivery of Object.values(file.heldDeliveries)) {
         if (delivery.conversationId !== id || delivery.state !== "held") continue;
