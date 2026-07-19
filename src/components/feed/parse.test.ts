@@ -291,6 +291,101 @@ describe("feed session parity with one-shot parse", () => {
   });
 });
 
+describe("Viewer MCP transcript detection", () => {
+  test("uses Claude structured tool metadata and upgrades a pending call in place", () => {
+    const call = JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-07-19T10:00:00Z",
+      message: {
+        content: [{
+          type: "tool_use",
+          id: "mcp-call-1",
+          name: "mcp__viewer__spawn_agent",
+          input: { clientRequestId: "spawn-431", model: "gpt-5.6-sol", role: "reviewer", prompt: "Review PR #431" },
+          caller: { type: "direct" },
+        }],
+      },
+    });
+    const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
+    const pending = session.feed([call], 0, true).items[0]?.item;
+    expect(pending).toMatchObject({
+      kind: "tool",
+      status: "run",
+      mcp: { serverName: "viewer", toolName: "spawn_agent", result: null },
+    });
+
+    const result = claudeResult("mcp-call-1", JSON.stringify({
+      ok: true,
+      conversationId: "conversation_431",
+      transcriptPath: "/sessions/reviewer.jsonl",
+    }));
+    const completed = session.feed([call, result], 0, true).items[0]?.item;
+    expect(completed).toMatchObject({
+      kind: "tool",
+      status: "ok",
+      mcp: {
+        serverName: "viewer",
+        toolName: "spawn_agent",
+        result: { conversationId: "conversation_431" },
+      },
+    });
+  });
+
+  test("uses the Codex invocation envelope for a completed viewer MCP call", () => {
+    const begin = JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-07-19T10:00:59Z",
+      payload: {
+        type: "mcp_tool_call_begin",
+        call_id: "mcp-call-2",
+        invocation: {
+          server: "viewer",
+          tool: "create_task",
+          arguments: { clientRequestId: "task-431", project: "viewer", text: "Audit MCP cards" },
+        },
+      },
+    });
+    const end = JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-07-19T10:01:00Z",
+      payload: {
+        type: "mcp_tool_call_end",
+        call_id: "mcp-call-2",
+        result: { Ok: { content: [{ type: "text", text: JSON.stringify({ ok: true, taskId: "task-431" }) }], isError: false } },
+      },
+    });
+    expect(buildFeed(codexFile, [begin, end], false, "").items[0]).toMatchObject({
+      kind: "tool",
+      status: "ok",
+      mcp: { serverName: "viewer", toolName: "create_task", result: { taskId: "task-431" } },
+    });
+  });
+
+  test("bounds image payloads and redacts credentials before the MCP card sees them", () => {
+    const call = JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-07-19T10:02:00Z",
+      message: { content: [{
+        type: "tool_use",
+        id: "mcp-call-3",
+        name: "mcp__viewer__spawn_agent",
+        input: {
+          prompt: "Inspect image",
+          apiKey: "secret-value",
+          image: `data:image/png;base64,${"a".repeat(20_000)}`,
+        },
+      }] },
+    });
+    const item = buildFeed(claudeFile, [call], false, "").items[0];
+    expect(item).toMatchObject({
+      kind: "tool",
+      mcp: { args: { apiKey: "[redacted]" } },
+    });
+    if (item.kind !== "tool") throw new Error("expected MCP tool");
+    expect(String(item.mcp?.args.image)).toContain("[image data · 20022 chars]");
+  });
+});
+
 describe("feed session identity stability", () => {
   test("appending prose keeps every existing item identity", () => {
     const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
