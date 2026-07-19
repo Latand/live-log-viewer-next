@@ -5,6 +5,10 @@ export type SubagentBadgeState = "running" | "live" | "closed" | "dead";
 
 export interface SubagentBadge {
   id: string;
+  /** The current non-archived generation's transcript path: navigation opens
+      exactly this entry instead of re-resolving the id against file order,
+      which can land on a stale earlier generation. */
+  path: string;
   title: string;
   engine: Engine;
   model: string | null;
@@ -64,6 +68,7 @@ export function subagentsOf(conversationId: string, entries: readonly FileEntry[
       const id = conversationIdentity(entry);
       return {
         id,
+        path: entry.path,
         title: entry.title,
         engine: entry.engine,
         model: entry.model,

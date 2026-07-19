@@ -4,7 +4,7 @@ import { Check, Layers } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
-import { conversationIdentity, isArchivedPredecessor } from "@/lib/accounts/identity";
+import { conversationIdentity } from "@/lib/accounts/identity";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { Activity, FileEntry } from "@/lib/types";
@@ -994,8 +994,8 @@ function NodeShell({
         cardRect={node}
         anchorRegistry={badgeAnchors}
         onExpandedChange={setBadgesExpanded}
-        onNavigate={(conversationId) => {
-          const target = files.find((entry) => conversationIdentity(entry) === conversationId && !isArchivedPredecessor(entry));
+        onNavigate={(path) => {
+          const target = files.find((entry) => entry.path === path);
           if (target) onSelect(target);
         }}
       />

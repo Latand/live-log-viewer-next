@@ -72,11 +72,11 @@ function mount(entries: FileEntry[], onNavigate: (id: string) => void) {
   return host;
 }
 
-test("hover expands a subagent circle to its title and click navigates by conversation id", async () => {
+test("hover expands a subagent circle to its title and click navigates by current transcript path", async () => {
   const navigated: string[] = [];
   const parent = entry({ path: "/parent", conversationId: "parent" });
   const child = entry({ path: "/child", conversationId: "child", parent: parent.path, title: "Badge interaction worker" });
-  const host = mount([parent, child], (id) => navigated.push(id));
+  const host = mount([parent, child], (path) => navigated.push(path));
   const badge = host.querySelector('[data-subagent-badge="child"]') as HTMLButtonElement;
 
   expect(badge).toBeTruthy();
@@ -87,7 +87,34 @@ test("hover expands a subagent circle to its title and click navigates by conver
   expect(badge.textContent).toContain("Badge interaction worker");
 
   flushSync(() => badge.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  expect(navigated).toEqual(["child"]);
+  expect(navigated).toEqual(["/child"]);
+});
+
+test("badges own their taps under a coarse-pointer hand board: interactive and exempt from camera capture", () => {
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  const child = entry({ path: "/child", conversationId: "child", parent: parent.path, title: "Owned worker" });
+  const host = mount([parent, child], () => undefined);
+  const badge = host.querySelector('[data-subagent-badge="child"]') as HTMLButtonElement;
+
+  /* data-scheme-ui makes the camera's pointer/click/dblclick handlers bail on
+     this element (so a tap is never swallowed into a pan), and pointer-events
+     stay on even inside the hand-mode pointer-events-none node layer. */
+  expect(badge.hasAttribute("data-scheme-ui")).toBe(true);
+  expect(badge.className).toContain("pointer-events-auto");
+});
+
+test("navigation targets the current generation path, never the stale file-order entry", () => {
+  const navigated: string[] = [];
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  const stale = entry({ path: "/child-gen1", conversationId: "child", parent: parent.path, generation: 1, mtime: 5, title: "Worker" });
+  const current = entry({ path: "/child-gen2", conversationId: "child", parent: parent.path, generation: 2, mtime: 6, title: "Worker" });
+  /* Stale generation first in file order — a re-resolution from order would
+     open it; the badge must carry the selected current path. */
+  const host = mount([stale, current, parent], (path) => navigated.push(path));
+  const badge = host.querySelector('[data-subagent-badge="child"]') as HTMLButtonElement;
+
+  flushSync(() => badge.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  expect(navigated).toEqual(["/child-gen2"]);
 });
 
 test("a dead child is dimmed, explains its unavailable state, and does not navigate", () => {
@@ -128,7 +155,7 @@ test("a killed child with a retained transcript stays dimmed and navigable", () 
   expect(badge.dataset.subagentState).toBe("closed");
   expect(badge.className).toContain("opacity-45");
   flushSync(() => badge.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  expect(navigated).toEqual(["killed"]);
+  expect(navigated).toEqual(["/killed"]);
 });
 
 test("the hard cap renders a final overflow circle with the complete hidden count", () => {
@@ -160,7 +187,7 @@ test("touch expands on the first tap and navigates on the second", async () => {
 
   tap();
   await Bun.sleep(0);
-  expect(navigated).toEqual(["touch"]);
+  expect(navigated).toEqual(["/touch"]);
 });
 
 test("visible circles register their fixed world-space centers for structural arrows", async () => {

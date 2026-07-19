@@ -13,7 +13,10 @@ export interface SubagentBadgesProps {
   conversationId: string;
   entries: readonly FileEntry[];
   cardRect: SchemeRect;
-  onNavigate: (conversationId: string) => void;
+  /** Receives the badge's current-generation transcript PATH — the caller opens
+      that exact entry rather than re-resolving the conversation id against file
+      order (which can land on a stale earlier generation). */
+  onNavigate: (path: string) => void;
   onExpandedChange?: (expanded: boolean) => void;
   anchorRegistry?: SubagentBadgeAnchorRegistry;
 }
@@ -64,7 +67,8 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
             <span
               key="overflow"
               data-subagent-overflow
-              className="absolute z-[6] inline-flex w-[30px] items-center justify-center rounded-full border border-border bg-card text-[10px] font-bold tabular-nums text-muted shadow-1"
+              data-scheme-ui
+              className="pointer-events-auto absolute z-[6] inline-flex w-[30px] items-center justify-center rounded-full border border-border bg-card text-[10px] font-bold tabular-nums text-muted shadow-1"
               style={relativeStyle}
               title={`${position.count} more subagents`}
               aria-label={`${position.count} more subagents`}
@@ -86,11 +90,16 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
             type="button"
             data-subagent-badge={child.id}
             data-subagent-state={child.state}
+            /* data-scheme-ui exempts the badge from the camera's pan/tap capture
+               so a coarse-pointer default hand board still delivers the tap;
+               pointer-events-auto re-enables it inside the hand-mode
+               pointer-events-none node layer. Panning elsewhere is untouched. */
+            data-scheme-ui
             aria-expanded={expanded}
             aria-disabled={unavailable}
             aria-label={child.title}
             title={tooltip}
-            className={`absolute flex max-w-[220px] items-center overflow-hidden rounded-full border border-card bg-card text-left shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55 ${
+            className={`pointer-events-auto absolute flex max-w-[220px] items-center overflow-hidden rounded-full border border-card bg-card text-left shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55 ${
               expanded ? "z-[70] w-[220px]" : "z-[6] w-[30px]"
             } ${dimmed ? "opacity-45 grayscale" : ""} ${unavailable ? "cursor-default" : "cursor-pointer hover:shadow-2"}`}
             style={{
@@ -106,7 +115,7 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
               if (event.pointerType !== "touch" || unavailable) return;
               event.preventDefault();
               suppressTouchClick.current = true;
-              if (expanded) onNavigate(child.id);
+              if (expanded) onNavigate(child.path);
               else setExpandedId(child.id);
             }}
             onClick={() => {
@@ -114,7 +123,7 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
                 suppressTouchClick.current = false;
                 return;
               }
-              if (!unavailable) onNavigate(child.id);
+              if (!unavailable) onNavigate(child.path);
             }}
           >
             <span

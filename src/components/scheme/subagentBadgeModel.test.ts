@@ -78,6 +78,7 @@ test("subagentsOf returns direct lineage children with active spawn order before
   expect(subagentsOf("parent", [closed, grandchild, backgroundTask, activeSecond, parent, activeFirst])).toEqual([
     {
       id: "active-first",
+      path: "/active-first",
       title: "active-first",
       engine: "codex",
       model: null,
@@ -86,6 +87,7 @@ test("subagentsOf returns direct lineage children with active spawn order before
     },
     {
       id: "active-second",
+      path: "/active-second",
       title: "active-second",
       engine: "codex",
       model: null,
@@ -94,12 +96,39 @@ test("subagentsOf returns direct lineage children with active spawn order before
     },
     {
       id: "closed",
+      path: "/closed",
       title: "closed",
       engine: "codex",
       model: null,
       state: "closed",
       avatarSeed: "closed",
     },
+  ]);
+});
+
+test("subagentsOf carries the current non-archived generation path for navigation", () => {
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  /* Two live generations of one child share a conversation id; the stale one
+     sorts first in file order but must never be the navigation target. */
+  const stale = entry({
+    path: "/child-gen1",
+    conversationId: "child",
+    parent: parent.path,
+    generation: 1,
+    mtime: 5,
+    title: "Child",
+  });
+  const current = entry({
+    path: "/child-gen2",
+    conversationId: "child",
+    parent: parent.path,
+    generation: 2,
+    mtime: 6,
+    title: "Child",
+  });
+
+  expect(subagentsOf("parent", [stale, current, parent])).toEqual([
+    expect.objectContaining({ id: "child", path: "/child-gen2" }),
   ]);
 });
 
