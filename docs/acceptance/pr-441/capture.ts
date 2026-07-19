@@ -10,17 +10,21 @@
  * evidence` commits deliberately stripped) it renders the badge surface from the
  * SAME pure geometry the product ships — `subagentsOf` (current-generation
  * selection + bottom-up order) and `layoutBadges` (30x30 placement, right-edge
- * anchoring, hard-cap overflow) — over hand-authored fictional data.
+ * anchoring, hard-cap overflow) — over hand-authored fictional data, and emits
+ * the auditable `.svg` geometry stills.
  *
- * PRIVACY: every id, title, path, project and model below is invented for this
- * still. No real project name, account, filesystem path, transcript text, or
- * user data is read or embedded. The output PNGs are therefore safe to publish.
+ * The published `.png` companions are NOT rendered here: they are deterministic
+ * redacted placeholders emitted by the approved trusted generator
+ * `scripts/generate-privacy-placeholders.ts`, carrying schema-v2 provenance in
+ * `privacy-manifest.json`. This keeps the raster evidence reproducible from the
+ * trusted publication gate rather than from an ad-hoc `sharp` rasterization.
+ *
+ * PRIVACY: every id, title, path, project and model below is invented for these
+ * stills. No real project name, account, filesystem path, transcript text, or
+ * user data is read or embedded. The output SVGs are therefore safe to publish.
  */
-import { Buffer } from "node:buffer";
 import fs from "node:fs";
 import path from "node:path";
-
-import sharp from "sharp";
 
 import type { FileEntry } from "@/lib/types";
 import { subagentsOf, type SubagentBadge } from "@/components/scheme/subagentBadgeModel";
@@ -173,14 +177,12 @@ function mobileSvg(): string {
   </svg>`;
 }
 
-async function render(name: string, svg: string): Promise<void> {
+function render(name: string, svg: string): void {
   const svgPath = path.join(OUT_DIR, `${name}.svg`);
-  const pngPath = path.join(OUT_DIR, `${name}.png`);
   fs.writeFileSync(svgPath, svg);
-  await sharp(Buffer.from(svg)).png().toFile(pngPath);
-  console.log(`wrote ${path.relative(process.cwd(), pngPath)}`);
+  console.log(`wrote ${path.relative(process.cwd(), svgPath)}`);
 }
 
-await render("pr-441-desktop-badges", desktopSvg());
-await render("pr-441-mobile-390", mobileSvg());
+render("pr-441-desktop-badges", desktopSvg());
+render("pr-441-mobile-390", mobileSvg());
 console.log("badge order:", badges.map((b) => `${b.id}:${b.state}:${b.path}`).join(", "));
