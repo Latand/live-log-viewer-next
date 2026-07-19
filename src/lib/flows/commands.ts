@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
+import path from "node:path";
 
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { isCodexLaunchModel, normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { agentRegistry } from "@/lib/agent/registry";
 import { headCwd } from "@/lib/agent/transcript";
 import { livePaneTarget } from "@/lib/delivery";
+import { projectForCwd } from "@/lib/scanner/describe";
 import { isShellCommand } from "@/lib/status";
 import { killPane, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
@@ -88,42 +90,67 @@ export function normalizeFlowSpec(value: unknown): { ok: true; spec?: string } |
 }
 
 export async function createFlowFromRequest(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string; status?: number }> {
-  const entry = entries.find((item) => item.path === req.implementerPath);
-  if (!entry) return { error: "implementer transcript is unknown", status: 404 };
-  if (entry.root !== "claude-projects" && entry.root !== "codex-sessions") {
-    return { error: "implementer must be a Claude or Codex session", status: 400 };
-  }
-  if (entry.engine !== "claude" && entry.engine !== "codex") {
-    return { error: "implementer must use the Claude or Codex engine", status: 400 };
-  }
   const normalizedSpec = normalizeFlowSpec(req.spec);
   if (!normalizedSpec.ok) {
     return { error: "spec must be a string", status: 400 };
   }
   const roles = rolesFromRequest(req);
   if (!roles) return { error: "invalid flow roles or preset", status: 400 };
-  const baseMode = req.baseMode === "merge-base" ? "merge-base" : "head";
-  const cwd = headCwd(entry.path);
+  const registry = agentRegistry();
+  const requestedConversationId = req.implementerConversationId?.startsWith("conversation_")
+    ? req.implementerConversationId as `conversation_${string}`
+    : null;
+  if (req.implementerConversationId && !requestedConversationId) {
+    return { error: "implementer conversation identity is invalid", status: 400 };
+  }
+  const durableConversation = requestedConversationId ? registry.conversation(requestedConversationId) : null;
+  const scannedByPath = entries.find((item) => item.path === req.implementerPath);
+  const scannedByConversation = requestedConversationId
+    ? entries.find((item) => item.conversationId === requestedConversationId)
+    : undefined;
+  const durablePaths = requestedConversationId
+    ? [req.implementerPath, durableConversation?.generations.at(-1)?.path, scannedByConversation?.path]
+    : [];
+  const durablePath = [...new Set(durablePaths.filter((candidate): candidate is string => Boolean(candidate)))]
+    .find((candidate) => headCwd(candidate) !== null);
+  const resolvedPath = durablePath ?? scannedByPath?.path ?? null;
+  const scanned = resolvedPath
+    ? entries.find((item) => item.path === resolvedPath) ?? scannedByConversation
+    : undefined;
+  if (!resolvedPath) return { error: "implementer transcript is unknown", status: 404 };
+  const owner = durableConversation
+    ?? registry.conversationForPath(resolvedPath)
+    ?? registry.ensureConversation(roles.implementer.engine, resolvedPath, null);
+  if (owner.engine !== roles.implementer.engine) {
+    return { error: "implementer engine does not match its durable conversation", status: 400 };
+  }
+  if (scanned && scanned.root !== "claude-projects" && scanned.root !== "codex-sessions") {
+    return { error: "implementer must be a Claude or Codex session", status: 400 };
+  }
+  if (scanned && scanned.engine !== "claude" && scanned.engine !== "codex") {
+    return { error: "implementer must use the Claude or Codex engine", status: 400 };
+  }
+  const cwd = headCwd(resolvedPath);
   if (!cwd) return { error: "could not determine the session working directory", status: 409 };
+  const project = scanned?.project ?? projectForCwd(cwd) ?? path.basename(cwd);
+  const baseMode = req.baseMode === "merge-base" ? "merge-base" : "head";
   const base =
     typeof req.baseRef === "string" && req.baseRef.trim()
       ? { ok: true as const, sha: req.baseRef.trim() }
       : resolveBaseRef(cwd, baseMode);
   if (!base.ok) return { error: base.error, status: 409 };
   const flows = loadFlows();
-  const existing = flows.find((flow) => flow.implementerPath === entry.path && flow.closedAt === null && flow.state !== "closed");
+  const existing = flows.find((flow) =>
+    (flow.implementerConversationId === owner.id || flow.implementerPath === resolvedPath)
+    && flow.closedAt === null
+    && flow.state !== "closed");
   if (existing) return { error: "implementer already has an active flow", status: 409 };
-  const registry = agentRegistry();
-  const implementerConversation = entry.conversationId?.startsWith("conversation_")
-    ? registry.conversation(entry.conversationId as `conversation_${string}`)
-    : null;
-  const owner = implementerConversation ?? registry.ensureConversation(entry.engine, entry.path, null);
   const flow: Flow = {
     id: crypto.randomUUID().slice(0, 8),
     template: "implement-review-loop",
-    project: entry.project,
+    project,
     cwd,
-    implementerPath: entry.path,
+    implementerPath: resolvedPath,
     implementerConversationId: owner.id,
     roles,
     reviewerFallback: roles.reviewer.engine === "codex" ? configuredReviewerFallback() : null,
@@ -157,15 +184,17 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   });
   flows.push(flow);
   saveFlows(flows);
-  try {
-    const deliveryPath = await sendToImplementer(flow, new Map(entries.map((item) => [item.path, item])), kickoffPrompt(flow.spec));
-    flow.kickoffDelivery = { path: deliveryPath, deliveredAt: isoNow() };
-    saveFlows(flows);
-  } catch (error) {
-    flow.state = "paused";
-    flow.pausedState = "waiting_ready";
-    flow.stateDetail = error instanceof Error ? error.message : String(error);
-    saveFlows(flows);
+  if (req.deliverKickoff !== false) {
+    try {
+      const deliveryPath = await sendToImplementer(flow, new Map(entries.map((item) => [item.path, item])), kickoffPrompt(flow.spec));
+      flow.kickoffDelivery = { path: deliveryPath, deliveredAt: isoNow() };
+      saveFlows(flows);
+    } catch (error) {
+      flow.state = "paused";
+      flow.pausedState = "waiting_ready";
+      flow.stateDetail = error instanceof Error ? error.message : String(error);
+      saveFlows(flows);
+    }
   }
   return { flow };
 }

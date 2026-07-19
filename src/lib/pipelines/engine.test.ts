@@ -1081,6 +1081,52 @@ test("review-loop stage delegates to one regular flow and maps approval", async 
   expect(loadPipelines()[0]!.runs[1]!.attempts[0]!.verdict).toEqual({ status: "pass", confidence: 1 });
 });
 
+test("pipeline 8fa12bb4 creates review flow from a terminal builder's durable identity with an empty scanner slice", async () => {
+  const h = harness();
+  h.ports.spawnAgent = async (_input, onReserved) => {
+    onReserved({ launchId: "launch-1", conversationId: "conversation_stage_1" });
+    return {
+      launchId: "launch-1",
+      conversationId: "conversation_stage_1",
+      sessionId: "session-1",
+      transcript: "/codex/stage-1.jsonl",
+      paneId: null,
+    };
+  };
+  const createFlow = h.ports.createFlow;
+  h.ports.createFlow = async (req, entries) => {
+    const durableConversationId = (req as typeof req & { implementerConversationId?: string }).implementerConversationId;
+    if (!entries.some((candidate) => candidate.path === req.implementerPath) && !durableConversationId) {
+      return { error: "implementer transcript is unknown" };
+    }
+    h.calls.push(`flow-implementer:${durableConversationId ?? "scanner"}`);
+    return createFlow(req, entries);
+  };
+  h.setConversationActive(false);
+  const pipeline = await create(h.ports, [
+    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines().find((candidate) => candidate.id === pipeline.id)!;
+  const build = current.runs.find((run) => run.stageId === "build")!.attempts[0]!;
+  const review = current.runs.find((run) => run.stageId === "review")!.attempts[0]!;
+  expect(build).toMatchObject({
+    state: "passed",
+    conversationId: "conversation_stage_1",
+    agentPath: "/codex/stage-1.jsonl",
+    paneId: null,
+  });
+  expect(current.stateDetail ?? "").not.toContain("implementer transcript is unknown");
+  expect(review.flowId).toBe("flow-1");
+  expect(h.calls).toContain("flow-implementer:conversation_stage_1");
+});
+
 test("retrying a parked review-loop appends a fresh attempt and flow", async () => {
   const h = harness();
   const stages = [
@@ -1101,6 +1147,102 @@ test("retrying a parked review-loop appends a fresh attempt and flow", async () 
   const reviewRun = loadPipelines()[0]!.runs[1]!;
   expect(reviewRun.attempts).toHaveLength(2);
   expect(reviewRun.attempts[1]!.flowId).toBe("flow-2");
+});
+
+test("retry-stage adopts a partially created flow and records its reviewer on the pipeline attempt", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  const pipeline = await create(h.ports, stages as never);
+  const partial = {
+    id: "flow-partial",
+    implementerPath: "/codex/stage-1.jsonl",
+    implementerConversationId: "conversation_stage_1",
+    baseRef: ORIGIN_MAIN_SHA,
+    state: "reviewing",
+    rounds: [{
+      n: 1,
+      sessionId: "reviewer-session",
+      reviewerPath: "/codex/reviewer.jsonl",
+      reviewerConversationId: "conversation_reviewer",
+    }],
+    createdAt: new Date(1_005_000).toISOString(),
+    closedAt: null,
+  } as unknown as Flow;
+  let createCalls = 0;
+  h.ports.createFlow = async () => {
+    createCalls += 1;
+    if (createCalls === 1) {
+      h.flows.set(partial.id, partial);
+      return { error: "flow persistence completed before response transport failed" };
+    }
+    return { error: "implementer already has an active flow" };
+  };
+  h.ports.findFlow = (_implementerPath, stableIdentity) =>
+    h.flows.has(partial.id) && stableIdentity === "conversation_stage_1" ? partial : null;
+
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.stateDetail).toContain("response transport failed");
+
+  await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  await tickPipelines([], h.ports);
+
+  const reviewRun = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!;
+  expect(reviewRun.attempts).toHaveLength(2);
+  expect(reviewRun.attempts[1]).toMatchObject({
+    flowId: "flow-partial",
+    sessionId: "reviewer-session",
+    agentPath: "/codex/reviewer.jsonl",
+    conversationId: "conversation_reviewer",
+  });
+  expect(createCalls).toBe(1);
+});
+
+test("retry-stage recovers after the three identical pipeline 8fa12bb4 review creation failures", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  const pipeline = await create(h.ports, stages as never);
+  const createFlow = h.ports.createFlow;
+  let causePresent = true;
+  h.ports.createFlow = async (req, entries) => {
+    if (causePresent || !req.implementerConversationId) {
+      return { error: "implementer transcript is unknown" };
+    }
+    return createFlow(req, entries);
+  };
+
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([], h.ports);
+  for (let retry = 0; retry < 2; retry += 1) {
+    await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+    await tickPipelines([], h.ports);
+  }
+
+  const failed = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts;
+  expect(failed).toHaveLength(3);
+  expect(failed.map((attempt) => attempt.error)).toEqual([
+    "creating the review flow failed: implementer transcript is unknown",
+    "creating the review flow failed: implementer transcript is unknown",
+    "creating the review flow failed: implementer transcript is unknown",
+  ]);
+
+  causePresent = false;
+  await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  await tickPipelines([], h.ports);
+
+  const recovered = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts;
+  expect(recovered).toHaveLength(4);
+  expect(recovered[3]).toMatchObject({ state: "reviewing", flowId: "flow-1", error: null });
 });
 
 test("review-loop startup parks when advance fails", async () => {
