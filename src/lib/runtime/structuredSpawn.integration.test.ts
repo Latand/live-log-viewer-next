@@ -10,6 +10,7 @@ import type { AccountContext } from "@/lib/accounts/contracts";
 import type { ResumeSpec } from "@/lib/agent/cli";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
+import { procBackend } from "@/lib/proc";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
@@ -19,6 +20,7 @@ import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./struct
 import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { INITIAL_MESSAGE_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
 
@@ -777,6 +779,138 @@ class RoundTripHost implements SpawnedStructuredHost {
     });
   }
 }
+
+test.each(["codex", "claude"] as const)("%s stale-live recovery converges registry and runtime on one durable conversation", async (engine) => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `stale-live-recovery-${engine}-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const accountId = `${engine}-subscription`;
+  const conversation = registry.ensureConversation(engine, artifactPath, accountId);
+  const key = { engine, sessionId } as const;
+  const staleProcess = { pid: 2_000_000_000, startIdentity: `${engine}-stale-start` };
+  const launchProfile = emptyLaunchProfile({ cwd });
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId,
+    launchProfile,
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      endpoint: "stdio:stale",
+      process: staleProcess,
+      eventCursor: 7,
+      protocolVersion: "v2",
+      writerClaimEpoch: 4,
+      activeTurnRef: `${engine}-stale-turn`,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: `structured-host:${JSON.stringify(staleProcess)}`,
+    pendingAction: null,
+  });
+  await client.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    producer: {
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      eventKey: `${engine}-stale-unhosted`,
+    },
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      host: "unhosted",
+      turn: "idle",
+      provenance: "derived",
+      accountId,
+      cwd,
+      artifactPath,
+      capabilities: { steer: engine === "codex", structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+  const host = new RoundTripHost(engine, artifactPath, sessionId);
+  const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  let drainRequests = 0;
+
+  const recovered = await recoverDeadStructuredConversation({
+    path: artifactPath,
+    conversationId: conversation.id,
+  }, {
+    registry,
+    client,
+    transport: () => "structured",
+    resolveAccount: () => ({
+      engine,
+      accountId,
+      kind: "managed",
+      home: cwd,
+      transcriptRoot: cwd,
+      env: { NODE_ENV: "test" },
+    }),
+    spawn: (input) => spawnStructuredConversation(input, {
+      startHost: async () => host,
+      bindHost: async (targetRegistry, targetKey, runningHost, claimOwner, claimEpoch) => {
+        const state = await runningHost.health();
+        targetRegistry.setStructuredHostClaimed(targetKey, {
+          kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+          endpoint: state.endpoint,
+          process: owner,
+          eventCursor: state.eventCursor,
+          protocolVersion: state.protocolVersion,
+          writerClaimEpoch: claimEpoch,
+          activeTurnRef: state.activeTurnRef,
+          pendingAttention: state.pendingAttention,
+          activeFlags: state.activeFlags,
+        }, "idle", claimOwner, claimEpoch);
+        return () => {};
+      },
+      publishHost: async (targetKey, runningHost) => {
+        await bindStructuredDeliveryQueue([{ key: targetKey, host: runningHost }], { registry, client });
+        return async () => {};
+      },
+      processIdentity: () => owner,
+    }),
+    processIdentity: () => owner,
+    requestDeliveryDrain: () => { drainRequests += 1; },
+  });
+
+  expect(recovered).toMatchObject({
+    conversationId: conversation.id,
+    path: artifactPath,
+    spawned: true,
+  });
+  expect(registry.conversation(conversation.id)).toMatchObject({
+    id: conversation.id,
+    generations: [expect.objectContaining({ id: sessionId, path: artifactPath })],
+  });
+  expect(registry.snapshot().entries[`${engine}:${sessionId}`]).toMatchObject({
+    status: "idle",
+    pendingAction: null,
+    structuredHost: {
+      process: owner,
+      activeTurnRef: null,
+      writerClaimEpoch: 5,
+    },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    conversationId: conversation.id,
+    sessionKey: key,
+    host: "hosted",
+    turn: "idle",
+  });
+  expect(drainRequests).toBe(1);
+  expect(host.sent).toEqual([]);
+});
 
 class UnreapableRoundTripHost extends RoundTripHost {
   override async release(): Promise<void> {

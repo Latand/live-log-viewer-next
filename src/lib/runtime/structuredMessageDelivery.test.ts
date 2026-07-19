@@ -1360,11 +1360,12 @@ test("structured message routing only falls through for an explicit legacy owner
   expect(result).toBeNull();
 });
 
-test("dead structured message routing recovers the host before admitting the send", async () => {
+test("dead structured composer send is durable before recovery and delivers after claim", async () => {
   const { registry, conversation } = registryWithConversation();
   const deadSnapshot = snapshot(conversation.id);
   deadSnapshot.sessions[0] = { ...deadSnapshot.sessions[0]!, host: "dead" };
   let recovered = false;
+  let durableBeforeRecovery = false;
   const commands: unknown[] = [];
   const client = {
     snapshot: async () => deadSnapshot,
@@ -1407,6 +1408,9 @@ test("dead structured message routing recovers the host before admitting the sen
       client: () => client,
       registry: () => registry,
       recover: async () => {
+        durableBeforeRecovery = registry.pendingDeliveries(conversation.id).some((delivery) =>
+          delivery.clientMessageId === "recovered-message-one"
+            && delivery.text === "continue after host loss");
         recovered = true;
         return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
       },
@@ -1414,6 +1418,7 @@ test("dead structured message routing recovers the host before admitting the sen
     } as never,
   );
 
+  expect(durableBeforeRecovery).toBe(true);
   expect(recovered).toBe(true);
   expect(commands).toHaveLength(1);
   expect(result).toMatchObject({
@@ -1478,7 +1483,12 @@ test("structured recovery failures remain admitted, avoid delivery, and allow a 
     status: 503,
   });
   expect(commands).toEqual([]);
-  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+  expect(registry.pendingDeliveries(conversation.id)).toHaveLength(1);
+  expect(registry.pendingDeliveries(conversation.id)[0]).toMatchObject({
+    clientMessageId: "recovery-retry-message",
+    state: "assigned",
+    text: "retain this draft through recovery failure",
+  });
 
   await expect(enqueueStructuredMessage(request, dependencies)).resolves.toMatchObject({
     ok: true,
@@ -1487,6 +1497,7 @@ test("structured recovery failures remain admitted, avoid delivery, and allow a 
     outcome: "queued",
   });
   expect(commands).toHaveLength(1);
+  expect(Object.values(registry.snapshot().heldDeliveries)).toHaveLength(1);
 });
 
 test("structured message republishes an in-process host after runtime restart before recovery", async () => {

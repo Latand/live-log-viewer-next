@@ -17,7 +17,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { FileEntry } from "@/lib/types";
-import { setLocale } from "@/lib/i18n";
+import { setLocale, translate } from "@/lib/i18n";
 
 const dom = new Window();
 installActEnv();
@@ -96,6 +96,7 @@ const realFetch = globalThis.fetch;
 
 afterEach(() => {
   setLocale("en");
+  structuredView.session.host = "hosted";
   globalThis.fetch = realFetch;
   document.body.replaceChildren();
   localStorage.clear();
@@ -177,6 +178,55 @@ const delivered = (body: SendBody) => ({
       revision: 1,
     },
   },
+});
+
+test("unhosted structured composer sends through durable recovery admission", async () => {
+  structuredView.session.host = "unhosted";
+  const sends: SendBody[] = [];
+  mockWire(sends, [delivered]);
+
+  const { host, root } = await renderInto(<TmuxComposer file={file} deadHost />);
+  const { type, submit } = composerControls(host);
+  await settle(() => type("continue while the host recovers"));
+  await settle(() => submit());
+
+  expect(sends).toHaveLength(1);
+  expect(sends[0]).toMatchObject({
+    text: "continue while the host recovers",
+    idempotencyKey: expect.any(String),
+  });
+  await act(async () => root.unmount());
+});
+
+test("structured recovery state is bounded and exposes retry details", async () => {
+  structuredView.session.host = "unhosted";
+  let finishRecovery!: (response: Response) => void;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "/api/tmux/targets") {
+      return { ok: true, status: 200, json: async () => ({ targets: {} }) } as Response;
+    }
+    if (url !== "/api/runtime/send") throw new Error(`unexpected request: ${url}`);
+    return new Promise<Response>((resolve) => { finishRecovery = resolve; });
+  }) as typeof fetch;
+
+  const { host, root } = await renderInto(<TmuxComposer file={file} deadHost />);
+  const { type, submit } = composerControls(host);
+  await settle(() => type("preserve this recovery draft"));
+  await settle(() => submit());
+  expect(host.textContent).toContain(translate("en", "composer.receiptRecovering"));
+
+  await act(async () => {
+    finishRecovery({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: "recovery attempt failed; retry is available" }),
+    } as Response);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(host.textContent).toContain("recovery attempt failed; retry is available");
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("preserve this recovery draft");
+  await act(async () => root.unmount());
 });
 
 test("a same-key retry re-sends the ORIGINAL runtime snapshot even after the selection changed", async () => {
