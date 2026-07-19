@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronRight, ListTree } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { X } from "@/components/icons";
 import { useLocale } from "@/lib/i18n";
@@ -75,8 +75,63 @@ export function MobilePipelineDockSheet({
 }) {
   const { t } = useLocale();
   const [showCompleted, setShowCompleted] = useState(false);
+  const sheetRef = useRef<HTMLDivElement>(null);
   const ongoing = pipelines.filter((pipeline) => pipeline.state !== "completed");
   const completed = pipelines.filter((pipeline) => pipeline.state === "completed");
+
+  /* Complete modal semantics (PR #431): focus moves into the sheet on open,
+     Tab cycles inside it in both directions, Escape closes it, and focus
+     returns to the opener (the summary row) on close. Body scroll locks like
+     the runtime sheet so the page behind never pans under the modal. Mount-only
+     — the parent re-renders on every poll, and re-running this would yank focus
+     back to the sheet root mid-interaction. */
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    sheetRef.current?.focus();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      if (opener?.isConnected) opener.focus();
+    };
+  }, []);
+
+  /* The key listener re-binds per `onClose` identity; attaching/detaching a
+     window listener has no focus side effects, so poll re-renders stay quiet. */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const sheet = sheetRef.current;
+      if (!sheet) return;
+      const focusables = [...sheet.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      )].filter((el) => !el.hasAttribute("disabled"));
+      if (!focusables.length) {
+        event.preventDefault();
+        sheet.focus();
+        return;
+      }
+      const first = focusables[0]!;
+      const last = focusables[focusables.length - 1]!;
+      const active = document.activeElement;
+      const inside = active instanceof HTMLElement && sheet.contains(active);
+      if (event.shiftKey) {
+        if (!inside || active === first || active === sheet) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (!inside || active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const dock = (pipeline: Pipeline) => (
     <MobilePipelineDock
@@ -103,10 +158,13 @@ export function MobilePipelineDockSheet({
       }}
     >
       <div
+        ref={sheetRef}
         role="dialog"
+        aria-modal="true"
         aria-label={t("pipelineMobile.sheetTitle")}
+        tabIndex={-1}
         data-testid="mobile-pipeline-sheet"
-        className="flex max-h-[80vh] w-full max-w-[520px] flex-col rounded-t-[16px] bg-card pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-2"
+        className="flex max-h-[80vh] w-full max-w-[520px] flex-col rounded-t-[16px] bg-card pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-2 focus-visible:outline-none"
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
           <div className="mx-auto mb-0 h-1 w-10 rounded-full bg-border" aria-hidden />

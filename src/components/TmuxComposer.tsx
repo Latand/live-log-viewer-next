@@ -529,18 +529,20 @@ export function settlePendingDeliveries(
 }
 
 /** Removes one attachment per delivered snapshot entry, so attachments added
-    while the send was in flight survive. Matches by the intake id first — the
-    exact attachment this attempt carried, even if an identical image is
-    re-attached later — and falls back to a `base64+mime` content match for
-    snapshots persisted by pre-id sessions (issue #419). */
+    while the send was in flight survive. An id-bearing snapshot matches ONLY
+    its intake id — if that slot is already gone, a late replayed receipt must
+    settle as a no-op, never consume an identical image the user attached for
+    the next message (PR #431). Only snapshots persisted by pre-id sessions
+    (no id at all) settle by `base64+mime` content (issue #419). */
 export function attachmentsAfterDelivery(
   current: readonly PendingImage[],
   delivered: readonly PendingImage[],
 ): PendingImage[] {
   const remaining = [...current];
   for (const sent of delivered) {
-    let index = sent.id ? remaining.findIndex((image) => image.id === sent.id) : -1;
-    if (index < 0) index = remaining.findIndex((image) => image.base64 === sent.base64 && image.mime === sent.mime);
+    const index = sent.id
+      ? remaining.findIndex((image) => image.id === sent.id)
+      : remaining.findIndex((image) => image.base64 === sent.base64 && image.mime === sent.mime);
     if (index >= 0) remaining.splice(index, 1);
   }
   return remaining;

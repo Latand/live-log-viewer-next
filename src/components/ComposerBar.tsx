@@ -286,10 +286,15 @@ export function ComposerBar({
           onKeyDown={(event) => {
             /* Enter sends like the old single-line input; Shift+Enter makes a
                new line. Composition guard keeps IME confirms from sending.
-               During recording Enter means stop-and-send — a plain submit would
-               fire off just the typed prefix and leave the recording running. */
+               Enter honors the exact admission gate of the Send button (PR
+               #431): a blocked send — dead host, an attachment still decoding
+               or failed, images disabled with images staged — must do nothing
+               rather than submit and silently drop an attachment. During
+               recording Enter means stop-and-send — a plain submit would fire
+               off just the typed prefix and leave the recording running. */
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
+              if (sendBlocked || !canSend || imageSendBlocked) return;
               if (dictation.phase === "rec") void stopAndSend();
               else void submit();
             }

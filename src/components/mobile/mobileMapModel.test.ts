@@ -60,6 +60,27 @@ test("every pickable marker key round-trips through the pickFromMap contract", (
   expect(keys.some((key) => key.startsWith("task::"))).toBe(true);
 });
 
+test("the focused marker survives the cap instead of vanishing into a cluster (PR #431)", () => {
+  const { layout, tasks, workerStacks } = buildMobileMapFixture(500);
+  /* Node 450 sits past the 400-marker cap, so without focus it is clustered. */
+  const focusKey = "/codex/session-450.jsonl";
+  const base = buildMobileMapModel(layout, tasks, workerStacks);
+  expect(base.total).toBeGreaterThan(MAP_MARKER_CAP);
+  expect(base.markers.some((marker) => marker.key === focusKey)).toBe(false);
+
+  /* Focused, that same key must be an individual marker — the ring and the
+     "current" frame need a rect — while the cap and the accounting hold. */
+  const model = buildMobileMapModel(layout, tasks, workerStacks, focusKey);
+  expect(model.markers.some((marker) => marker.key === focusKey)).toBe(true);
+  expect(model.markers.length).toBeLessThanOrEqual(MAP_MARKER_CAP);
+  const clustered = model.clusters.reduce((sum, cluster) => sum + cluster.count, 0);
+  expect(model.markers.length + clustered).toBe(model.total);
+
+  /* A focus key already inside the cap (or absent) changes nothing. */
+  const kept = buildMobileMapModel(layout, tasks, workerStacks, "/codex/session-0.jsonl");
+  expect(kept.markers.map((marker) => marker.key)).toEqual(base.markers.map((marker) => marker.key));
+});
+
 test("lineage edges only connect kept markers — no dangling endpoint into a cluster", () => {
   const { layout, tasks, workerStacks } = buildMobileMapFixture(500);
   const model = buildMobileMapModel(layout, tasks, workerStacks);

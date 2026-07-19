@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ArrowRight, ImageIcon, Loader2, RotateCw, Trash2, X } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -155,9 +155,26 @@ export function useImageAttachments(handlers: {
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
   const imagesRef = useRef<PendingImage[]>([]);
+  const unmountedRef = useRef(false);
   const capability = handlers.imageCapability ?? null;
 
+  /* Owned object URLs live exactly as long as the tray: remove/clear revoke
+     theirs on the spot, and unmount revokes whatever is left — exactly once,
+     since the list is emptied in the same pass. After unmount the tray is
+     inert: a FileReader that settles late must neither commit state nor
+     resurrect a slot (PR #431). */
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      for (const attachment of attachmentsRef.current) revokePreview(attachment);
+      attachmentsRef.current = [];
+      imagesRef.current = [];
+    };
+  }, []);
+
   const commit = (next: PendingAttachment[]) => {
+    if (unmountedRef.current) return;
     attachmentsRef.current = next;
     imagesRef.current = readyImages(next);
     setAttachments(next);

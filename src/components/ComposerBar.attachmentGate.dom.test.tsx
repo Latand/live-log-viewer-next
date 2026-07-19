@@ -48,8 +48,10 @@ const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
 const tick = async () => { await Promise.resolve(); await new Promise((r) => setTimeout(r, 0)); };
 
+const submits: string[] = [];
+
 function Harness() {
-  const composer = useComposer({ initialText: () => "hello agent", persistText: () => {}, submit: () => {} });
+  const composer = useComposer({ initialText: () => "hello agent", persistText: () => {}, submit: () => { submits.push("submit"); } });
   return (
     <ComposerBar
       composer={composer}
@@ -73,7 +75,7 @@ afterAll(async () => {
   await tick();
   for (const key of Object.keys(OVERRIDES)) { if (HAS[key]) G[key] = SAVED[key]; else delete G[key]; }
 });
-beforeEach(() => { dom.document.body.replaceChildren(); roots = []; DeferredReader.queue = []; });
+beforeEach(() => { dom.document.body.replaceChildren(); roots = []; DeferredReader.queue = []; submits.length = 0; });
 afterEach(async () => { for (const r of roots) flushSync(() => r.unmount()); roots = []; await tick(); });
 
 function mount() {
@@ -94,6 +96,13 @@ function paste(host: HTMLElement, name: string) {
 }
 
 const send = (host: HTMLElement) => host.querySelector('button[aria-label="Send"]') as unknown as HTMLButtonElement;
+
+function pressEnter(host: HTMLElement) {
+  const textarea = host.querySelector("textarea")!;
+  const key = Object.keys(textarea).find((k) => k.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, { onKeyDown(event: unknown): void }>)[key]!;
+  flushSync(() => props.onKeyDown({ key: "Enter", shiftKey: false, nativeEvent: { isComposing: false }, preventDefault() {} }));
+}
 
 test("Send is blocked with a reason while an attachment is still decoding, then unblocks (#419)", async () => {
   const host = mount();
@@ -127,4 +136,36 @@ test("Send stays blocked on a failed read until it is removed or retried (#419)"
   flushSync(() => remove.click());
   await tick();
   expect(send(host).disabled).toBe(false);
+});
+
+test("Enter honors the attachment admission gate exactly like the Send button (PR #431)", async () => {
+  const host = mount();
+  paste(host, "reading.png");
+  await tick();
+  /* The slot is still decoding — Enter must not submit and silently drop it. */
+  expect(send(host).disabled).toBe(true);
+  pressEnter(host);
+  await tick();
+  expect(submits).toHaveLength(0);
+
+  /* Once every slot settles, the same Enter sends. */
+  DeferredReader.next().resolve("data:image/png;base64,cmVhZHk=");
+  await tick();
+  expect(send(host).disabled).toBe(false);
+  pressEnter(host);
+  await tick();
+  expect(submits).toHaveLength(1);
+});
+
+test("Enter stays inert while a failed attachment blocks Send (PR #431)", async () => {
+  const host = mount();
+  paste(host, "bad.png");
+  await tick();
+  DeferredReader.next().reject("couldn't read the image");
+  await tick();
+  expect(send(host).disabled).toBe(true);
+
+  pressEnter(host);
+  await tick();
+  expect(submits).toHaveLength(0);
 });

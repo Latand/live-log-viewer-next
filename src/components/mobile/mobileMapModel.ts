@@ -88,6 +88,10 @@ export function buildMobileMapModel(
   layout: SchemeLayout,
   tasks: readonly BoardTask[],
   workerStacks: readonly WorkerStack[],
+  /** The focused (ring) marker's key: always kept as an individual marker even
+      past the cap, so the ring and the "current" frame never lose their rect to
+      a cluster chip (PR #431). */
+  focusKey: string | null = null,
 ): MobileMapModel {
   const candidates: MapMarker[] = [];
 
@@ -185,6 +189,17 @@ export function buildMobileMapModel(
 
   const markers = candidates.slice(0, MAP_MARKER_CAP);
   const overflow = candidates.slice(MAP_MARKER_CAP);
+  /* The focused marker must survive the cap: swap it with the last kept marker
+     so the ceiling holds and the demoted marker joins the clustered overflow. */
+  if (focusKey) {
+    const focusedIndex = overflow.findIndex((marker) => marker.key === focusKey);
+    if (focusedIndex >= 0) {
+      const focused = overflow.splice(focusedIndex, 1)[0]!;
+      const demoted = markers.pop();
+      markers.push(focused);
+      if (demoted) overflow.unshift(demoted);
+    }
+  }
   const clusters = clusterOverflow(overflow);
 
   /* Parent lineage only, one path each — resolved against markers so a dangling

@@ -62,7 +62,9 @@ export function MobileMapLite({
   onPick: (key: string) => void;
 }) {
   const { t } = useLocale();
-  const model = useMemo<MobileMapModel>(() => buildMobileMapModel(layout, tasks, workerStacks), [layout, tasks, workerStacks]);
+  /* The ring key rides into the model so the focused marker is never folded
+     into a cluster past the cap (PR #431) — `ringRect` below must resolve. */
+  const model = useMemo<MobileMapModel>(() => buildMobileMapModel(layout, tasks, workerStacks, ringKey), [layout, tasks, workerStacks, ringKey]);
 
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState(DEFAULT_VIEWPORT);
