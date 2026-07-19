@@ -207,7 +207,7 @@ function markdownDestinations(text: string): string[] {
   return destinations;
 }
 
-function publishedMediaUrls(text: string): URL[] {
+function publishedMediaUrls(text: string, githubBase: URL): URL[] {
   const canonicalText = canonicalSensitiveText(text).text;
   const candidates = markdownDestinations(canonicalText);
   const patterns = [
@@ -228,7 +228,7 @@ function publishedMediaUrls(text: string): URL[] {
         if (closings <= openings) break;
         normalizedCandidate = normalizedCandidate.slice(0, -1);
       }
-      url = new URL(normalizedCandidate);
+      url = new URL(normalizedCandidate, githubBase);
     } catch {
       continue;
     }
@@ -268,6 +268,7 @@ export async function auditGithubPublication(options: GithubAuditOptions): Promi
     return findings;
   }
   const fetcher = options.fetcher ?? fetch;
+  const githubBase = new URL(`https://github.com/${options.repo}/`);
   const root = `repos/${options.repo}`;
   const issueResult = await fetchJson(
     new URL(`${root}/issues/${options.number}`, apiBase),
@@ -303,7 +304,7 @@ export async function auditGithubPublication(options: GithubAuditOptions): Promi
 
   const mediaUrls = new Map<string, URL>();
   for (const text of texts) {
-    for (const url of publishedMediaUrls(text)) mediaUrls.set(url.href, url);
+    for (const url of publishedMediaUrls(text, githubBase)) mediaUrls.set(url.href, url);
   }
   if (mediaUrls.size === 0) return findings;
 

@@ -1,5 +1,6 @@
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { inflateSync } from "node:zlib";
@@ -75,6 +76,8 @@ type SafePathResult = {
   metadata?: ReturnType<typeof lstatSync>;
   status: "missing" | "safe" | "symlink";
 };
+
+type MediaKind = "animated" | "png" | "raster";
 
 function safePath(path: string): SafePathResult {
   const absolute = resolve(path);
@@ -169,9 +172,38 @@ function configuredOcrLanguages(): string | undefined {
   return /^[a-z0-9_]+(?:\+[a-z0-9_]+)*$/i.test(languages) ? languages : undefined;
 }
 
-function isMedia(path: string): boolean {
+function extensionMediaKind(path: string): MediaKind | undefined {
   const extension = extname(path).toLowerCase();
-  return rasterExtensions.has(extension) || animatedExtensions.has(extension);
+  if (extension === ".png") return "png";
+  if (rasterExtensions.has(extension)) return "raster";
+  if (animatedExtensions.has(extension)) return "animated";
+  return undefined;
+}
+
+function signatureMediaKind(bytes: Buffer): MediaKind | undefined {
+  if (bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) return "png";
+  if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return "raster";
+  const prefix = bytes.subarray(0, 12).toString("latin1");
+  if (prefix.startsWith("GIF87a") || prefix.startsWith("GIF89a")) return "animated";
+  if (prefix.startsWith("BM")) return "raster";
+  if (bytes.subarray(0, 4).equals(Buffer.from([0x49, 0x49, 0x2a, 0x00]))
+    || bytes.subarray(0, 4).equals(Buffer.from([0x4d, 0x4d, 0x00, 0x2a]))) return "raster";
+  if (prefix.startsWith("RIFF") && prefix.slice(8, 12) === "AVI ") return "animated";
+  if (prefix.startsWith("RIFF") && prefix.slice(8, 12) === "WEBP") {
+    const webpChunks = bytes.subarray(12).toString("latin1");
+    return webpChunks.includes("ANIM") || webpChunks.includes("ANMF") ? "animated" : "raster";
+  }
+  if (bytes.length >= 8 && bytes.subarray(4, 8).toString("latin1") === "ftyp") return "animated";
+  if (bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "animated";
+  return undefined;
+}
+
+function mediaKind(path: string): MediaKind | undefined {
+  try {
+    return signatureMediaKind(readFileSync(path)) ?? extensionMediaKind(path);
+  } catch {
+    return extensionMediaKind(path);
+  }
 }
 
 function requestedPaths(arguments_: string[]): string[] | undefined {
@@ -417,12 +449,11 @@ function pngMetadata(bytes: Buffer): { animated?: boolean; error: boolean; liveS
   return { animated, error: false, liveSource, text: values.join("\n") };
 }
 
-function inspectRasterMetadata(path: string): Set<FindingClass> {
-  const extension = extname(path).toLowerCase();
-  if (!rasterExtensions.has(extension)) return new Set();
+function inspectRasterMetadata(path: string, kind: MediaKind | undefined): Set<FindingClass> {
+  if (kind !== "png" && kind !== "raster") return new Set();
   try {
     const bytes = readFileSync(path);
-    if (extension === ".png") {
+    if (kind === "png") {
       const metadata = pngMetadata(bytes);
       if (metadata.error) return new Set(["inspection_error"]);
       const findings = sensitiveClasses(metadata.text);
@@ -503,8 +534,8 @@ export function sensitiveClasses(text: string): Set<FindingClass> {
   return findings;
 }
 
-function inspectText(path: string): Set<FindingClass> {
-  if (isMedia(path)) return new Set();
+function inspectText(path: string, kind: MediaKind | undefined): Set<FindingClass> {
+  if (kind) return new Set();
   try {
     const contents = readFileSync(path);
     const utf8 = contents.toString("utf8");
@@ -548,8 +579,8 @@ function inspectText(path: string): Set<FindingClass> {
   }
 }
 
-function inspectRaster(path: string): Set<FindingClass> {
-  if (!rasterExtensions.has(extname(path).toLowerCase())) return new Set();
+function inspectRaster(path: string, kind: MediaKind | undefined): Set<FindingClass> {
+  if (kind !== "png" && kind !== "raster") return new Set();
   if (!Bun.which("tesseract")) return new Set(["tool_unavailable"]);
   const languages = configuredOcrLanguages();
   if (!languages) return new Set(["configuration_error"]);
@@ -562,8 +593,8 @@ function inspectRaster(path: string): Set<FindingClass> {
   return sensitiveClasses(result.stdout.toString());
 }
 
-function inspectAnimated(path: string): Set<FindingClass> {
-  if (!animatedExtensions.has(extname(path).toLowerCase())) return new Set();
+function inspectAnimated(path: string, kind: MediaKind | undefined): Set<FindingClass> {
+  if (kind !== "animated") return new Set();
   if (!Bun.which("ffprobe") || !Bun.which("ffmpeg") || !Bun.which("tesseract")) {
     return new Set(["tool_unavailable"]);
   }
@@ -678,6 +709,13 @@ type ProvenanceResult = {
   status: "invalid" | "missing" | "valid";
 };
 
+type ReproducedAsset = {
+  asset: ProvenanceAsset;
+  sha256: string;
+};
+
+const reproducedCatalogs = new Map<string, Map<string, ReproducedAsset> | undefined>();
+
 function pathIsWithin(root: string, candidate: string): boolean {
   const relation = relative(root, candidate);
   return relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
@@ -686,6 +724,94 @@ function pathIsWithin(root: string, candidate: string): boolean {
 function canonicalPathIsWithin(root: string, candidate: string): boolean {
   if (safePath(root).status !== "safe" || safePath(candidate).status !== "safe") return false;
   return pathIsWithin(realpathSync(root), realpathSync(candidate));
+}
+
+function repositoryRelativePath(root: string, candidate: string): string | undefined {
+  const relativePath = relative(resolve(root), resolve(candidate));
+  if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    return undefined;
+  }
+  return relativePath.split(sep).join("/");
+}
+
+function collectReproducedAssets(root: string, directory: string, assets: Map<string, ReproducedAsset>): boolean {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      if (!collectReproducedAssets(root, path, assets)) return false;
+      continue;
+    }
+    if (!entry.isFile() || entry.name !== "privacy-manifest.json") continue;
+    const manifest = JSON.parse(readFileSync(path, "utf8")) as { assets?: unknown; schemaVersion?: unknown };
+    if (manifest.schemaVersion !== 2 || !Array.isArray(manifest.assets)) return false;
+    for (const candidate of manifest.assets) {
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
+      const asset = candidate as ProvenanceAsset;
+      if (typeof asset.path !== "string" || asset.path.length === 0 || isAbsolute(asset.path)) return false;
+      const assetPath = resolve(dirname(path), asset.path);
+      const key = repositoryRelativePath(root, assetPath);
+      if (!key || assets.has(key) || !canonicalPathIsWithin(root, assetPath)) return false;
+      const metadata = safePath(assetPath);
+      if (metadata.status !== "safe" || !metadata.metadata?.isFile()) return false;
+      assets.set(key, {
+        asset,
+        sha256: createHash("sha256").update(readFileSync(assetPath)).digest("hex"),
+      });
+    }
+  }
+  return true;
+}
+
+function reproduceTrustedGenerator(generatorBytes: Buffer): Map<string, ReproducedAsset> | undefined {
+  const generatorHash = createHash("sha256").update(generatorBytes).digest("hex");
+  if (reproducedCatalogs.has(generatorHash)) return reproducedCatalogs.get(generatorHash);
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "llv-privacy-generator-"));
+  let catalog: Map<string, ReproducedAsset> | undefined;
+  try {
+    const scriptsDirectory = join(temporaryRoot, "scripts");
+    mkdirSync(scriptsDirectory, { recursive: true });
+    const isolatedGenerator = join(scriptsDirectory, "generate-privacy-placeholders.ts");
+    writeFileSync(isolatedGenerator, generatorBytes);
+    const generation = Bun.spawnSync({
+      cmd: [process.execPath, isolatedGenerator],
+      cwd: temporaryRoot,
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    if (generation.exitCode === 0) {
+      const generatedAssets = new Map<string, ReproducedAsset>();
+      if (collectReproducedAssets(temporaryRoot, temporaryRoot, generatedAssets)) catalog = generatedAssets;
+    }
+  } catch {
+    catalog = undefined;
+  } finally {
+    rmSync(temporaryRoot, { force: true, recursive: true });
+  }
+  reproducedCatalogs.set(generatorHash, catalog);
+  return catalog;
+}
+
+function matchesTrustedReproduction(
+  path: string,
+  generatorPath: string,
+  asset: ProvenanceAsset,
+  inspectionRoot: string | undefined,
+): boolean {
+  if (!repositoryRoot || !inspectionRoot || typeof asset.generatorSha256 !== "string") return false;
+  const relativeGenerator = repositoryRelativePath(inspectionRoot, generatorPath);
+  const relativeAsset = repositoryRelativePath(inspectionRoot, path);
+  if (!relativeGenerator || !relativeAsset) return false;
+  const trustedGeneratorPath = resolve(repositoryRoot, relativeGenerator);
+  if (!canonicalPathIsWithin(repositoryRoot, trustedGeneratorPath)) return false;
+  const trustedGenerator = safePath(trustedGeneratorPath);
+  if (trustedGenerator.status !== "safe" || !trustedGenerator.metadata?.isFile()) return false;
+  const trustedGeneratorBytes = readFileSync(trustedGeneratorPath);
+  const trustedHash = createHash("sha256").update(trustedGeneratorBytes).digest("hex");
+  if (trustedHash !== asset.generatorSha256) return false;
+  const reproduced = reproduceTrustedGenerator(trustedGeneratorBytes)?.get(relativeAsset);
+  return reproduced !== undefined
+    && reproduced.sha256 === asset.sha256
+    && isDeepStrictEqual(reproduced.asset, asset);
 }
 
 function assetExistsInTrustedBase(
@@ -780,6 +906,7 @@ function provenanceFor(path: string, inspectionRoot = repositoryRoot, trustedBas
     if (sourceDigests.size !== asset.sourceDigests.length) return invalid;
     if (asset.classification !== "adversarial-synthetic") {
       if (asset.expectedFindingClasses !== undefined) return invalid;
+      if (!matchesTrustedReproduction(path, generatorPath, asset, inspectionRoot)) return invalid;
       return { expectedFindingClasses: new Set(), status: "valid" };
     }
     if (!assetExistsInTrustedBase(manifestPath, asset, inspectionRoot, trustedBase)) return invalid;
@@ -823,11 +950,12 @@ export function inspectPaths(
       continue;
     }
     const pathFindings = new Set<FindingClass>();
-    for (const finding of inspectRasterMetadata(path)) pathFindings.add(finding);
-    for (const finding of inspectRaster(path)) pathFindings.add(finding);
-    for (const finding of inspectAnimated(path)) pathFindings.add(finding);
-    for (const finding of inspectText(path)) pathFindings.add(finding);
-    if (isMedia(path)) {
+    const kind = mediaKind(path);
+    for (const finding of inspectRasterMetadata(path, kind)) pathFindings.add(finding);
+    for (const finding of inspectRaster(path, kind)) pathFindings.add(finding);
+    for (const finding of inspectAnimated(path, kind)) pathFindings.add(finding);
+    for (const finding of inspectText(path, kind)) pathFindings.add(finding);
+    if (kind) {
       const provenance = provenanceFor(path, inspectionRoot, trustedBase);
       if (provenance.status === "missing") pathFindings.add("provenance_missing");
       if (provenance.status === "invalid") pathFindings.add("provenance_invalid");

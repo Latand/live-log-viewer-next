@@ -303,7 +303,7 @@ describe("privacy publication gate", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\nprovenance_invalid: 1\n");
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
   });
@@ -387,6 +387,19 @@ describe("privacy publication gate", () => {
     expect(manifest.assets?.[0]?.sourceDigests).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)]);
   });
 
+  test("accepts media reproduced by the trusted source-bound generator", () => {
+    const toolsDirectory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(toolsDirectory);
+    const repositoryRoot = join(import.meta.dir, "..");
+    const image = join(repositoryRoot, "docs", "acceptance", "issue-290", "readiness-kanban.png");
+
+    const result = runGate([image], installTool(toolsDirectory, "tesseract"));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("detects private text in raster pixels without echoing OCR content", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
@@ -400,7 +413,7 @@ describe("privacy publication gate", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_invalid: 1\n");
     expect(output).not.toContain(syntheticHome);
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
@@ -803,7 +816,7 @@ describe("privacy publication gate", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_invalid: 1\n");
     expect(readFileSync(counter, "utf8")).toHaveLength(5);
     expect(output).not.toContain(syntheticHome);
     expect(output).not.toContain(directory);
@@ -826,7 +839,7 @@ describe("privacy publication gate", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_invalid: 1\n");
     expect(output).not.toContain(syntheticHome);
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
@@ -848,7 +861,7 @@ describe("privacy publication gate", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_invalid: 1\n");
     expect(output).not.toContain(syntheticHome);
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
@@ -874,7 +887,7 @@ describe("privacy publication gate", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\nprovenance_invalid: 1\n");
     expect(existsSync(counter)).toBe(false);
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
@@ -897,7 +910,7 @@ describe("privacy publication gate", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_invalid: 1\n");
     expect(readFileSync(counter, "utf8")).toHaveLength(5);
     expect(output).not.toContain(syntheticHome);
     expect(output).not.toContain(directory);
@@ -919,7 +932,7 @@ describe("privacy publication gate", () => {
     const result = runGate([animation], { ...environment, SAMPLE_LOG: sampleLog });
 
     expect(result.exitCode).toBe(1);
-    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\n");
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\nprovenance_invalid: 1\n");
     expect(existsSync(sampleLog)).toBe(false);
     expect(result.stdout.toString()).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
@@ -948,7 +961,7 @@ describe("privacy publication gate", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\nknown_value: 1\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\nknown_value: 1\nprovenance_invalid: 1\n");
     expect(readFileSync(argumentsFile, "utf8")).toContain("-l eng+ukr");
     expect(output).not.toContain(ukrainianValue);
     expect(output).not.toContain(directory);
@@ -970,8 +983,48 @@ describe("privacy publication gate", () => {
     });
 
     expect(result.exitCode).toBe(1);
-    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\n");
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: FAIL\ninspection_error: 1\nprovenance_invalid: 1\n");
     expect(result.stdout.toString()).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("detects PNG media renamed with a Markdown extension", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const image = join(directory, "capture.md");
+    writeFileSync(image, liveCapturePng());
+
+    const result = runGate([image], installTool(directory, "tesseract"));
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe([
+      "PRIVACY GATE: FAIL",
+      "media_live_source: 1",
+      "provenance_missing: 1",
+      "",
+    ].join("\n"));
+    expect(result.stdout.toString()).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("detects video media renamed with a text extension", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const video = join(directory, "capture.txt");
+    const signature = Buffer.from("000000186674797069736f6d0000020069736f6d", "hex");
+    writeFileSync(video, signature);
+    const syntheticHome = ["", "home", "fixture-person", "renamed-video"].join("/");
+    installTool(directory, "ffprobe", `printf '%s' '{"format":{"duration":"1"},"streams":[{"duration":"1","nb_frames":"5"}]}'`);
+    installTool(directory, "ffmpeg", "printf '%s' 'synthetic-frame'");
+    const environment = installTool(directory, "tesseract", `printf '%s' '${syntheticHome}'`);
+
+    const result = runGate([video], environment);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_missing: 1\n");
+    expect(output).not.toContain(syntheticHome);
+    expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
   });
 
@@ -1105,6 +1158,104 @@ describe("privacy publication gate", () => {
     expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_invalid: 1\n");
     expect(output).not.toContain(syntheticHome);
     expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("rejects live output and source digests that contradict the trusted generator", () => {
+    const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(root);
+    runGit(root, ["init", "--quiet"]);
+    runGit(root, ["config", "user.name", "Synthetic Fixture"]);
+    runGit(root, ["config", "user.email", "fixture@example.invalid"]);
+    writeFileSync(join(root, "README.md"), "Synthetic baseline.\n");
+    runGit(root, ["add", "."]);
+    runGit(root, ["commit", "--quiet", "-m", "fixture baseline"]);
+    const directory = join(root, "docs", "acceptance", "issue-290");
+    const scriptsDirectory = join(root, "scripts");
+    mkdirSync(directory, { recursive: true });
+    mkdirSync(scriptsDirectory, { recursive: true });
+    const image = join(directory, "readiness-kanban.png");
+    const contents = liveCapturePng();
+    writeFileSync(image, contents);
+    const generator = readFileSync(join(import.meta.dir, "generate-privacy-placeholders.ts"));
+    writeFileSync(join(scriptsDirectory, "generate-privacy-placeholders.ts"), generator);
+    writeFileSync(join(directory, "privacy-manifest.json"), JSON.stringify({
+      schemaVersion: 2,
+      assets: [{
+        path: "readiness-kanban.png",
+        classification: "redacted-placeholder",
+        source: "redacted-live-capture",
+        generator: "../../../scripts/generate-privacy-placeholders.ts",
+        generatorRuntime: "bun-1.3.3",
+        generatorVersion: "privacy-placeholders-v2",
+        generatorSha256: createHash("sha256").update(generator).digest("hex"),
+        sourceDigests: [createHash("sha256").update("candidate-declared-source").digest("hex")],
+        description: "Candidate-declared source and output for a live publication capture.",
+        sha256: createHash("sha256").update(contents).digest("hex"),
+      }],
+    }));
+    runGit(root, ["add", "."]);
+    runGit(root, ["commit", "--quiet", "-m", "candidate publication"]);
+
+    const result = runGateArguments(
+      ["--repository", root, "--base", "HEAD^", "--paths", image],
+      installTool(root, "tesseract"),
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe([
+      "PRIVACY GATE: FAIL",
+      "media_live_source: 1",
+      "provenance_invalid: 1",
+      "",
+    ].join("\n"));
+    expect(result.stdout.toString()).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("rejects candidate-controlled generators that self-certify live media", () => {
+    const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(root);
+    const directory = join(root, "published");
+    mkdirSync(directory);
+    const image = join(directory, "capture.png");
+    const contents = liveCapturePng();
+    writeFileSync(image, contents);
+    const generator = Buffer.from([
+      'export const PRIVACY_GENERATOR_RUNTIME = "1.3.3";',
+      'export const PRIVACY_GENERATOR_VERSION = "privacy-placeholders-v2";',
+      "",
+    ].join("\n"));
+    writeFileSync(join(directory, "generate-placeholder.mjs"), generator);
+    writeFileSync(join(directory, "privacy-manifest.json"), JSON.stringify({
+      schemaVersion: 2,
+      assets: [{
+        path: "capture.png",
+        classification: "redacted-placeholder",
+        source: "redacted-live-capture",
+        generator: "generate-placeholder.mjs",
+        generatorRuntime: "bun-1.3.3",
+        generatorVersion: "privacy-placeholders-v2",
+        generatorSha256: createHash("sha256").update(generator).digest("hex"),
+        sourceDigests: [createHash("sha256").update("candidate-declared-source").digest("hex")],
+        description: "Candidate-declared provenance for a live publication capture.",
+        sha256: createHash("sha256").update(contents).digest("hex"),
+      }],
+    }));
+
+    const result = runGateArguments(
+      ["--repository", root, "--paths", image],
+      installTool(directory, "tesseract"),
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe([
+      "PRIVACY GATE: FAIL",
+      "media_live_source: 1",
+      "provenance_invalid: 1",
+      "",
+    ].join("\n"));
+    expect(result.stdout.toString()).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
   });
 
@@ -1375,6 +1526,7 @@ describe("privacy publication gate", () => {
     expect(output).toBe([
       "PRIVACY GATE: FAIL",
       "private_network: 1",
+      "provenance_invalid: 1",
       "resource_identifier: 1",
       "transcript_content: 1",
       "",
@@ -1399,7 +1551,7 @@ describe("privacy publication gate", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_invalid: 1\n");
     expect(output).not.toContain(syntheticHome);
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
@@ -1430,7 +1582,7 @@ describe("privacy publication gate", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 5\n");
+    expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 5\nprovenance_invalid: 5\n");
     expect(output).not.toContain(syntheticHome);
     expect(output).not.toContain(root);
     expect(result.stderr.toString()).toBe("");
@@ -1458,7 +1610,7 @@ describe("privacy publication gate", () => {
       const output = result.stdout.toString();
 
       expect(result.exitCode).toBe(1);
-      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\n");
+      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_invalid: 1\n");
       expect(output).not.toContain(syntheticHome);
       expect(output).not.toContain(directory);
       expect(result.stderr.toString()).toBe("");
@@ -1633,6 +1785,66 @@ describe("privacy publication gate", () => {
       expect(requests.at(-1)).toBe("https://github.com/example/repository/assets/encoded.png");
       expect(output).not.toContain(syntheticHome);
       expect(output).not.toContain(encodedMedia);
+    } finally {
+      if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
+      else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;
+    }
+  });
+
+  test("resolves relative GitHub media references before trusted-host inspection", async () => {
+    const originalOcrLanguages = process.env.LLV_PRIVACY_OCR_LANGUAGES;
+    const syntheticHome = ["", "home", "fixture-person", "relative-media"].join("/");
+    const media = pngWithCustomMetadata("eXIf", syntheticHome);
+    const requests: Array<{ authorization: string | null; url: string }> = [];
+    const languageResult = Bun.spawnSync({ cmd: ["tesseract", "--list-langs"], stderr: "pipe", stdout: "pipe" });
+    const ocrLanguage = languageResult.stdout.toString().split(/\r?\n/).find((language) => /^[a-z0-9_]+$/i.test(language) && language !== "osd");
+    process.env.LLV_PRIVACY_OCR_LANGUAGES = ocrLanguage ?? "missing-test-language";
+    const fetcher = async (input: string | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input);
+      requests.push({
+        authorization: new Headers(init?.headers).get("authorization"),
+        url: url.href,
+      });
+      if (url.hostname === "github.com" || url.hostname === "raw.githubusercontent.com") {
+        return new Response(Uint8Array.from(media), { headers: { "content-type": "image/png" } });
+      }
+      if (url.pathname.endsWith("/issues/448")) {
+        return Response.json({
+          body: [
+            "![root relative](/user-attachments/assets/capture.png)",
+            '<img src="//raw.githubusercontent.com/example/repository/main/capture.png">',
+            "![blocked](//127.0.0.2/private.png)",
+          ].join("\n"),
+          title: "Synthetic issue",
+        });
+      }
+      if (url.pathname.endsWith("/issues/448/comments")) return Response.json([]);
+      return new Response(null, { status: 404 });
+    };
+
+    try {
+      const findings = await auditGithubPublication({
+        apiUrl: "https://api.github.test/",
+        fetcher,
+        number: 448,
+        repo: "example/repository",
+        requireKnownValues: false,
+        token: "synthetic-github-audit-token",
+      });
+      const output = formatPrivacyReport(findings);
+
+      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 2\ninspection_error: 1\nprovenance_missing: 2\n");
+      expect(requests).toHaveLength(4);
+      expect(requests).toContainEqual({
+        authorization: "Bearer synthetic-github-audit-token",
+        url: "https://github.com/user-attachments/assets/capture.png",
+      });
+      expect(requests).toContainEqual({
+        authorization: null,
+        url: "https://raw.githubusercontent.com/example/repository/main/capture.png",
+      });
+      expect(requests.some((request) => request.url.includes("127.0.0.2"))).toBe(false);
+      expect(output).not.toContain(syntheticHome);
     } finally {
       if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
       else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;

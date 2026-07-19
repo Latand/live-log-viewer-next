@@ -29,6 +29,9 @@ inspectable with NUL bytes or UTF-16 encoding. Unsupported binary inputs fail
 closed. Publication inputs and supporting files with symlinks in any path
 component are rejected before their targets are read.
 
+Media dispatch recognizes PNG, JPEG, GIF, BMP, TIFF, WebP, ISO-BMFF, AVI, and
+Matroska signatures before applying the declared-extension fallback. Renamed
+media therefore receives the same OCR, container, and provenance checks.
 Raster inspection covers pixels and metadata. PNG inspection validates chunk
 CRCs and scans `tEXt`, compressed `zTXt` and `iTXt`, `eXIf`, UTF-oriented
 metadata strings, and bytes after `IEND`. Live-capture classification runs over
@@ -70,6 +73,8 @@ through GitHub's authenticated API. Coverage includes issue and pull-request
 titles and bodies, issue comments, inline review comments, review bodies,
 Markdown media links, HTML media attributes, and raw GitHub media URLs. Media
 references use the same bounded canonical representation as text scanning.
+Root-relative and scheme-relative references resolve from a fixed repository
+base before the trusted-host policy runs.
 
 `pull_request_target` events check out the default branch, so the token-bearing
 audit always executes trusted code. The checkout excludes persisted Git
@@ -100,7 +105,12 @@ Every changed raster, GIF, or video needs a co-located
 The gate verifies canonical regular-file paths for manifests and generators,
 validates every digest, confirms the declared generator version and exact
 supported runtime exist in the bound generator, and requires source digests to
-differ from the published output digest.
+differ from the published output digest. Normal provenance maps the candidate
+generator path to the default-branch checkout, requires the trusted generator
+digest, and executes those trusted bytes once in an isolated temporary root.
+The candidate entry must exactly match the reproduced manifest, source digests,
+and output digest. Unsupported generators and reproduction failures produce
+`provenance_invalid`.
 
 The normal classifications are `synthetic` and `redacted-placeholder`.
 `adversarial-synthetic` is reserved for documented fixture directories. Its
