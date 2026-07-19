@@ -1245,7 +1245,7 @@ export function ProjectDashboard({
       <div
         className={
           isMobile
-            ? "flex min-h-[52px] shrink-0 items-center gap-1.5 border-b border-border bg-card px-2 py-1.5"
+            ? "flex min-h-[52px] shrink-0 items-center gap-1 border-b border-border bg-card px-2 py-1.5"
             : "flex h-10 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4"
         }
       >
@@ -1261,7 +1261,12 @@ export function ProjectDashboard({
             <Menu className={isMobile ? "h-5 w-5" : "h-4 w-4"} aria-hidden />
           </button>
         ) : null}
-        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 flex-1" : ""}`} title={project}>{projectDisplayName(project)}</h1>
+        {/* The project name takes priority on the phone (issue #419 finding 2):
+            it shows in full (short names like «atlas» never compress to «a…»),
+            capped at 45vw so a very long name truncates instead of overflowing.
+            The attention filler beside it yields the slack. Desktop keeps its
+            natural width. */}
+        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 shrink-0 max-w-[45vw]" : ""}`} title={project}>{projectDisplayName(project)}</h1>
         <BoardHistoryControls
           canUndo={history.canUndo}
           canRedo={history.canRedo}
@@ -1278,7 +1283,10 @@ export function ProjectDashboard({
                 actions collapse into one `+` menu, and the secondary project
                 actions into a `⋯` menu — every control is a 44px hit target. */}
             {viewToggle ? <ProjectViewTabs value={projectView} onChange={chooseEmptyView} header /> : null}
-            <span className="min-w-0 max-w-[42vw] shrink truncate">{attention}</span>
+            {/* Flexible filler beside the prioritized title: absorbs the slack
+                and shrinks/truncates first so the row never overflows and the
+                project name keeps its width (issue #419 finding 2). */}
+            <span className="min-w-0 flex-1 shrink truncate">{attention}</span>
             {/* Handoff/hidden/readiness access as a compact header trigger (issue
                 #419 reopened) — the focused chat below reserves no bottom row for
                 it; a tap opens the overlay sheet. */}
@@ -1573,6 +1581,17 @@ export function ProjectDashboard({
            just the canvas-folded subset — so the shelf badge stays truthful. */
         const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0) + launchHistory.length + projectTasks.length;
         const quietTotal = !hasArchiveNodes ? residual.length : 0;
+        /* Every shelf action is TERMINAL — it navigates to a board card, another
+           project, or a fresh draft that lives BEHIND the overlay. On the phone
+           the shelf is a modal (issue #419): leaving it open after a terminal
+           action would strand the target under the sheet with the body scroll
+           still locked. So on mobile each terminal callback first closes the
+           shelf (unmounting the modal restores focus and unlocks the body via
+           its own lifecycle), then runs. Desktop renders the strips inline with
+           no modal, so the callbacks pass through untouched. Internal disclosure
+           toggles live inside the strips' own state and are never wrapped. */
+        const closeShelfThen = <A extends unknown[]>(fn: (...args: A) => void) =>
+          isMobile ? (...args: A) => { setShelfOpen(false); fn(...args); } : fn;
         const strips = (
           <>
             <TaskReadinessStrip
@@ -1582,14 +1601,14 @@ export function ProjectDashboard({
               flows={deckFlows}
               conversationAliases={conversationAliases}
               repository={projectCatalogEntries.find((entry) => entry.project === project)?.repository ?? null}
-              onOpenTask={openTask}
+              onOpenTask={closeShelfThen(openTask)}
               onPlaceOnMap={isMobile ? undefined : placeOnMap}
-              onOpenFile={openSwitchboardFile}
+              onOpenFile={closeShelfThen(openSwitchboardFile)}
             />
-            <LaunchHistory items={launchHistory} onRetry={retryLaunch} />
-            <WorkerStacks stacks={workerStacks} files={files} flows={deckFlows} pipelines={pipelines} onSelect={openSwitchboardFile} onExpandGroup={expandReviewGroup} />
+            <LaunchHistory items={launchHistory} onRetry={closeShelfThen(retryLaunch)} />
+            <WorkerStacks stacks={workerStacks} files={files} flows={deckFlows} pipelines={pipelines} onSelect={closeShelfThen(openSwitchboardFile)} onExpandGroup={closeShelfThen(expandReviewGroup)} />
             {!hasArchiveNodes && residual.length ? (
-              <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
+              <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={closeShelfThen(openSwitchboardFile)} />
             ) : null}
           </>
         );
@@ -1597,7 +1616,7 @@ export function ProjectDashboard({
         /* Chat-first (issue #419 reopened): the phone shelf reserves no bottom
            row — it opens as an overlay sheet from the header trigger, folding the
            handoff plus both hidden strips behind one compact disclosure. */
-        const leading = shelfHandoffFile ? <HandoffHandle file={shelfHandoffFile} onHandoff={() => addHandoffDraft(shelfHandoffFile)} inline /> : null;
+        const leading = shelfHandoffFile ? <HandoffHandle file={shelfHandoffFile} onHandoff={() => { setShelfOpen(false); addHandoffDraft(shelfHandoffFile); }} inline /> : null;
         return (
           <MobileBottomShelf open={shelfOpen} onClose={() => setShelfOpen(false)} total={workerTotal + quietTotal} leading={leading}>
             {strips}
