@@ -19,7 +19,8 @@ const planPipeline = {
 } as unknown as Pipeline;
 
 const controls: PipelineGroupControls = {
-  flows: [], files: [], renderablePaths: new Set(), renderableFlows: new Set(), nodeStripPipelineIds: new Set(), linkedTasksByPipeline: new Map(), onOpenPath: () => {}, onOpenFlow: () => {}, onOpenTask: () => {},
+  flows: [],
+  onOpenAttempt: () => {},
 };
 
 const flowGroup: SchemeGroup = {
@@ -95,35 +96,25 @@ test("no groups renders nothing", () => {
   expect(render([], true)).toBe("");
 });
 
-test("a pipeline group carries the full stage plan on its halo when no per-node strip does (#136)", () => {
+test("a pipeline group carries its full declared stage graph", () => {
   const group: SchemeGroup = { ...pipelineGroup, pipeline: planPipeline };
-  /* With controls: the group is the stage-plan surface — the strip and every
-     planned stage chip (incl. the not-yet-run review stage) render on the halo. */
+  /* Every planned stage, including the pending review, renders on the halo. */
   const withControls = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
   expect(withControls).toContain("data-scheme-group-strip");
   expect(withControls).toContain("build");
   expect(withControls).toContain("review");
+  expect(withControls.match(/data-stage-graph-node=/g)).toHaveLength(2);
+  expect(withControls.match(/data-stage-graph-edge=/g)).toHaveLength(1);
   /* Without controls (e.g. the lite map) the halo keeps only its label chip. */
   const noControls = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive />);
   expect(noControls).not.toContain("data-scheme-group-strip");
 });
 
-test("group carries the plan even when the current stage node is hidden/collapsed (finding 1)", () => {
-  /* A pipeline whose current stage resolves to a path (pipelineBoardStripPath is
-     non-null) but whose node is NOT placed on the board: it is absent from
-     nodeStripPipelineIds, so no per-node strip is mounted and the group must own
-     the plan. */
+test("group keeps the graph when the current stage node is hidden", () => {
   const hiddenCurrent = { ...planPipeline, cursor: { stageId: "build", state: "running", input: null, activatedBy: null } } as unknown as Pipeline;
   const group: SchemeGroup = { ...pipelineGroup, pipeline: hiddenCurrent };
-  const noMountedStrip: PipelineGroupControls = { ...controls, nodeStripPipelineIds: new Set() };
-  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={noMountedStrip} />);
-  expect(html).toContain("data-scheme-group-strip");
-
-  /* When the per-node strip IS mounted (pipeline id present), the group must not
-     duplicate it. */
-  const mounted: PipelineGroupControls = { ...controls, nodeStripPipelineIds: new Set(["p1"]) };
-  const dup = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={mounted} />);
-  expect(dup).not.toContain("data-scheme-group-strip");
+  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
+  expect(html).toContain("data-pipeline-stage-graph");
 });
 
 test("a draft pipeline has a scheme-only draft treatment and its complete stage plan", () => {
@@ -132,13 +123,10 @@ test("a draft pipeline has a scheme-only draft treatment and its complete stage 
   const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
 
   expect(html).toContain('data-pipeline-draft="true"');
-  /* One title, one draft badge (issue #221 §2): the chip names the pipeline
-     (once), the strip carries the single "draft" state badge — no separate
-     DRAFT pill, and the compact strip repeats no title. */
+  /* The group chip remains the single pipeline title. */
   expect(html).not.toContain("DRAFT");
   expect(html.split(">Refactor the scheme<").length - 1).toBe(1); // visible title: the chip only (aria-labels aside)
-  expect(html.split(">draft<").length - 1).toBe(1);
   expect(html).toContain("build");
   expect(html).toContain("review");
-  expect(html).toContain("Start pipeline");
+  expect(html).toContain("data-pipeline-stage-graph");
 });

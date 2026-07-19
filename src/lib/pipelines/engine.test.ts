@@ -62,6 +62,7 @@ function entry(pathname: string): FileEntry {
 
 function harness() {
   const calls: string[] = [];
+  const spawnRoles: Array<Parameters<PipelinePorts["spawnAgent"]>[0]["role"]> = [];
   const messages = new Map<string, { text: string; ts: number }>();
   const durableTurns = new Map<string, StageTurnEvidence>();
   const flows = new Map<string, Flow>();
@@ -93,8 +94,9 @@ function harness() {
       return null;
     },
     spawnReceipt: () => null,
-    spawnAgent: async ({ parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
+    spawnAgent: async ({ role, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
       spawn += 1;
+      spawnRoles.push(structuredClone(role));
       calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}:supersedes=${supersedes ?? "none"}`);
       calls.push(`membership:${membership.kind}:${membership.containerId}:${membership.slot}:${membership.role}:${membership.stageOrder}:round=${membership.round}`);
       onReserved({ launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}` });
@@ -134,6 +136,7 @@ function harness() {
     messages,
     durableTurns,
     flows,
+    spawnRoles,
     finish,
     setBuilderEffort: (effort: string) => { builderEffort = effort; },
     setPaneAlive: (alive: boolean) => { paneAlive = alive; },
@@ -1160,6 +1163,32 @@ test("retrying a parked review-loop appends a fresh attempt and flow", async () 
   expect(reviewRun.attempts[1]!.flowId).toBe("flow-2");
 });
 
+test("reopening an embedded review flow resumes its parked pipeline attempt", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.flows.get("flow-1")!.state = "done_comment";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+
+  h.flows.get("flow-1")!.state = "waiting_ready";
+  h.flows.get("flow-1")!.stateDetail = null;
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const resumed = loadPipelines()[0]!;
+  const reviewRun = resumed.runs[1]!;
+  expect(resumed.state).toBe("running");
+  expect(reviewRun.attempts).toHaveLength(1);
+  expect(reviewRun.attempts[0]).toMatchObject({ flowId: "flow-1", state: "reviewing", error: null });
+});
+
 test("retry-stage adopts a partially created flow and records its reviewer on the pipeline attempt", async () => {
   const h = harness();
   const stages = [
@@ -1554,6 +1583,34 @@ test("override-stage re-configures an unstarted stage and rejects a started one 
   });
   savePipelines([started]);
   expect((await patchPipeline(started.id, { action: "override-stage", stageId: "build", prompt: "x" }, ports)).status).toBe(409);
+});
+
+test("a stage spawn uses the model and effort saved by override-stage", async () => {
+  const h = harness();
+  const created = await create(h.ports);
+  const updated = await patchPipeline(created.id, {
+    action: "override-stage",
+    stageId: "build",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+  }, h.ports);
+  expect(updated.error).toBeUndefined();
+
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "planned")], h.ports);
+  await tickPipelines([], h.ports);
+
+  expect(h.spawnRoles.at(-1)).toMatchObject({
+    roleId: "builder",
+    engine: "codex",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+  });
+  expect(loadPipelines()[0]!.runs.find((run) => run.stageId === "build")?.attempts[0]?.effectiveRole).toMatchObject({
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+  });
 });
 
 test("override-stage edits every stage while a pipeline is a draft", async () => {
