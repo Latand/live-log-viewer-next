@@ -8,13 +8,6 @@ type Placeholder = {
   height: number;
   path: string;
   width: number;
-  /* Redacted stand-ins for confirmed live captures keep the default
-     `redacted-placeholder`/`redacted-live-capture` binding. Freshly authored
-     acceptance frames that never had a live original are `synthetic` media
-     sourced from this `deterministic-generator`; both are deterministic PNG
-     bytes emitted here, and the publication gate validates either class. */
-  classification?: "redacted-placeholder" | "synthetic";
-  source?: "deterministic-generator" | "redacted-live-capture";
 };
 
 const PRIVACY_GENERATOR_RUNTIME = "1.3.3";
@@ -60,8 +53,6 @@ const placeholders: Placeholder[] = [
   { path: "docs/media/issue-353/edges-onestage-desktop.png", width: 1920, height: 1080, description: "Redacted placeholder for the single-stage desktop edge evidence." },
   { path: "docs/acceptance/pr-441/pr-441-desktop-badges.png", width: 1040, height: 600, description: "Redacted placeholder retaining the desktop subagent badge anchor viewport." },
   { path: "docs/acceptance/pr-441/pr-441-mobile-390.png", width: 390, height: 844, description: "Redacted placeholder retaining the 390-pixel mobile subagent badge viewport." },
-  { path: "docs/acceptance/pr-439/stage-graph-desktop.png", width: 1400, height: 560, classification: "synthetic", source: "deterministic-generator", description: "Synthetic desktop stage-graph frame for PR #439 navigation evidence — fabricated stages, no live capture or personal data." },
-  { path: "docs/acceptance/pr-439/stage-graph-390px.png", width: 390, height: 760, classification: "synthetic", source: "deterministic-generator", description: "Synthetic 390px stage-graph frame for PR #439 navigation evidence — fabricated stages, no live capture or personal data." },
 ];
 
 const sourceDigests: Record<string, string> = {
@@ -129,7 +120,7 @@ function chunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, typeBytes, data, checksum]);
 }
 
-function placeholderPng({ height, path, width }: Placeholder, sourceDigest: string, classification: string): Buffer {
+function placeholderPng({ height, path, width }: Placeholder, sourceDigest: string): Buffer {
   const stride = width * 3 + 1;
   const pixels = Buffer.alloc(stride * height);
   const fill = (x: number, y: number, rectangleWidth: number, rectangleHeight: number, color: Buffer) => {
@@ -173,8 +164,8 @@ function placeholderPng({ height, path, width }: Placeholder, sourceDigest: stri
   return Buffer.concat([
     Buffer.from("89504e470d0a1a0a", "hex"),
     chunk("IHDR", header),
-    chunk("tEXt", Buffer.from(`capture-source\0${classification}`, "latin1")),
-    chunk("tEXt", Buffer.from(`privacy-classification\0${classification}`, "latin1")),
+    chunk("tEXt", Buffer.from("capture-source\0redacted-placeholder", "latin1")),
+    chunk("tEXt", Buffer.from("privacy-classification\0redacted-placeholder", "latin1")),
     chunk("tEXt", Buffer.from("generator\0scripts/generate-privacy-placeholders.ts", "latin1")),
     chunk("IDAT", deflateSync(pixels, { level: 9 })),
     chunk("IEND", Buffer.alloc(0)),
@@ -190,22 +181,15 @@ for (const placeholder of placeholders) {
   const output = resolve(root, placeholder.path);
   const directory = dirname(output);
   mkdirSync(directory, { recursive: true });
-  const classification = placeholder.classification ?? "redacted-placeholder";
-  const source = placeholder.source ?? "redacted-live-capture";
-  /* A redacted stand-in binds the SHA-256 of the confirmed live original it
-     replaces; a `synthetic` frame never had one, so its source digest is a
-     deterministic fabricated seed distinct from the published bytes. */
-  const sourceDigest = classification === "synthetic"
-    ? createHash("sha256").update(`${PRIVACY_GENERATOR_VERSION}\0synthetic-stage-graph-source\0${placeholder.path}`).digest("hex")
-    : sourceDigests[placeholder.path];
+  const sourceDigest = sourceDigests[placeholder.path];
   if (!sourceDigest) throw new Error("Missing source digest for privacy placeholder");
-  const contents = placeholderPng(placeholder, sourceDigest, classification);
+  const contents = placeholderPng(placeholder, sourceDigest);
   writeFileSync(output, contents);
   const assets = manifests.get(directory) ?? [];
   assets.push({
     path: output.slice(directory.length + 1),
-    classification,
-    source,
+    classification: "redacted-placeholder",
+    source: "redacted-live-capture",
     generator: relative(directory, generatorPath),
     generatorRuntime: `bun-${PRIVACY_GENERATOR_RUNTIME}`,
     generatorVersion: PRIVACY_GENERATOR_VERSION,
@@ -225,4 +209,4 @@ for (const [directory, assets] of manifests) {
   }, null, 2)}\n`);
 }
 
-process.stdout.write(`Generated ${placeholders.length} deterministic synthetic/redacted media assets with provenance.\n`);
+process.stdout.write(`Generated ${placeholders.length} deterministic redacted placeholders with provenance.\n`);

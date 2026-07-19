@@ -15,26 +15,15 @@ unchanged.
 
 ## Frames
 
-- `stage-graph-desktop.png` — desktop stage-graph frame (1400×560).
-- `stage-graph-390px.png` — the same graph framed in a 390px mobile column
+- `stage-graph-desktop.svg` — desktop stage-graph frame (1400×560).
+- `stage-graph-390px.svg` — the same graph framed in a 390px mobile column
   (390×760).
 
-Both frames are **deterministic synthetic** media: abstract, privacy-safe skeletons
-carrying no live capture, project name, filesystem path, account name, transcript,
-or personal data. They are emitted by the approved deterministic generator and
-bound by the co-located `privacy-manifest.json` (schema version 2,
-classification `synthetic`, source `deterministic-generator`), which the privacy
-publication gate reproduces byte-for-byte from the trusted generator.
-
-Regenerate (identical bytes on every run) with:
-
-```
-bun run privacy:placeholders
-```
-
-The generator pins Bun 1.3.3, synthesises the PNG bytes directly (no browser, no
-compiled CSS, no network), and rewrites both the frames and the schema-v2
-`privacy-manifest.json` provenance.
+Both frames are **deterministic synthetic** vector artifacts: hand-authored SVG
+skeletons with fabricated stage ids and no live capture, project name, filesystem
+path, account name, transcript, or personal data. They are static text files
+(byte-stable by construction), so they publish without any raster provenance
+manifest and carry no live-capture surface.
 
 ## Behavioural reverification
 
