@@ -6,6 +6,7 @@ import { expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
 import { AgentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { POST } from "./route";
@@ -28,6 +29,8 @@ test("task attribution failure replays one launched pane into one durable assign
   }];
   let writes = 0;
   let spawnCalls = 0;
+  let bindingCalls = 0;
+  let bindingParams: unknown = null;
   const dependencies = {
     registry: () => registry,
     loadTasks: () => tasks,
@@ -47,6 +50,11 @@ test("task attribution failure replays one launched pane into one durable assign
       env: { NODE_ENV: "test" },
     }),
     resolveSpawnedTranscriptPath: async () => artifactPath,
+    ensureTaskPipelineForAssignment: async (_task: BoardTask, spawnParams: unknown) => {
+      bindingCalls += 1;
+      bindingParams = spawnParams;
+      return { pipeline: { id: "pipeline-test" } as Pipeline };
+    },
     spawnAgentWithPrompt: async (_spec: unknown, _prompt: string, receipt: SpawnReceipt) => {
       spawnCalls += 1;
       const binding = {
@@ -108,6 +116,14 @@ test("task attribution failure replays one launched pane into one durable assign
     initialMessage: "delivered",
   });
   expect(spawnCalls).toBe(1);
+  expect(bindingCalls).toBe(2);
+  expect(bindingParams).toEqual({
+    repoDir: cwd,
+    engine: "claude",
+    model: "opus",
+    effort: "high",
+    srcPath: artifactPath,
+  });
   expect(tasks[0]?.assignments).toEqual([expect.objectContaining({
     launchId: uncertainBody.launchId,
     clientAttemptId: "task_282_post_launch_write_20260715_a1",
@@ -132,6 +148,7 @@ test("pre-pane spawn failure returns an ownerless task to inbox", async () => {
     createdAt: "2026-07-17T10:00:00.000Z",
     updatedAt: "2026-07-17T10:00:00.000Z",
   }];
+  const bindingCalls: unknown[] = [];
   const dependencies = {
     registry: () => registry,
     loadTasks: () => tasks,
@@ -150,6 +167,10 @@ test("pre-pane spawn failure returns an ownerless task to inbox", async () => {
     }),
     resolveSpawnedTranscriptPath: async () => {
       throw new Error("transcript lookup must stay unreachable");
+    },
+    ensureTaskPipelineForAssignment: async (task: BoardTask, spawnParams: unknown) => {
+      bindingCalls.push({ taskId: task.id, spawnParams });
+      return { pipeline: { id: "pipeline-test" } as Pipeline };
     },
     spawnAgentWithPrompt: async () => {
       throw new Error("process exited before pane creation");
@@ -194,6 +215,7 @@ test("pre-pane spawn failure returns an ownerless task to inbox", async () => {
     state: "failed",
     error: "process exited before pane creation",
   });
+  expect(bindingCalls).toEqual([]);
 });
 
 test("a deliberate retry after pre-pane failure creates one fresh launch", async () => {

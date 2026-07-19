@@ -4,12 +4,18 @@ import os from "node:os";
 import path from "node:path";
 
 import type { Flow } from "@/lib/flows/types";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
-const { createPipelineFromRequest, patchPipeline, pipelineClaudePermissionMode, reviewNote, tickPipelines } = await import("./engine");
+const engineModule = await import("./engine");
+const { adoptAttempt, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reviewNote, tickPipelines } = engineModule;
+const rawCreatePipelineFromRequest = engineModule.createPipelineFromRequest;
+const createPipelineFromRequest: typeof rawCreatePipelineFromRequest = async (request, ports, options) =>
+  await rawCreatePipelineFromRequest({ src: "/codex/creator.jsonl", ...request }, ports, options);
 const { registerPipelineTick } = await import("./controllerSignal");
 const { loadPipelines, savePipelines } = await import("./store");
+const { saveTasks } = await import("@/lib/tasks/store");
 type PipelinePorts = import("./engine").PipelinePorts;
 type StageTurnEvidence = import("./durableEvidence").StageTurnEvidence;
 
@@ -106,7 +112,11 @@ function harness() {
     headCwd: () => loadPipelines()[0]?.worktreeDir ?? null,
     lastMessage: (item) => messages.get(item.path) ?? null,
     pathForConversation: (id) => id === "conversation_stage_1" ? "/codex/stage-1.jsonl" : id === "conversation_stage_2" ? "/codex/stage-2.jsonl" : null,
-    conversationIdForPath: (pathname) => pathname.includes("stage-1") ? "conversation_stage_1" : pathname.includes("stage-2") ? "conversation_stage_2" : null,
+    sourcePathAllowed: (pathname) => pathname.startsWith("/codex/") && pathname.endsWith(".jsonl"),
+    conversationIdForPath: (pathname) => pathname === "/codex/creator.jsonl"
+      ? "conversation_creator"
+      : pathname.includes("stage-1") ? "conversation_stage_1" : pathname.includes("stage-2") ? "conversation_stage_2" : null,
+    pipelineAdoptionCandidates: () => [],
     createFlow: async (req) => {
       calls.push(`flow:${req.implementerPath}:${req.baseRef}:${req.spec}`);
       const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
@@ -143,10 +153,428 @@ function harness() {
 
 async function create(ports: PipelinePorts, stages = RUN_STAGES as never) {
   savePipelines([]);
-  const result = await createPipelineFromRequest({ task: "Ship pipelines", spec: "AC1", repoDir: "/repo", stages }, ports);
+  const result = await createPipelineFromRequest({ task: "Ship pipelines", spec: "AC1", repoDir: "/repo", stages, src: "/codex/creator.jsonl" }, ports);
   if (!result.pipeline) throw new Error(result.error);
   return result.pipeline;
 }
+
+function boardTask(id: string, project = "viewer"): BoardTask {
+  return {
+    id,
+    project,
+    status: "inbox",
+    text: `Task ${id}`,
+    placement: "unplaced",
+    assignments: [],
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:00:00.000Z",
+  };
+}
+
+test("new pipelines require an allowed creator transcript with an existing conversation", async () => {
+  const h = harness();
+  savePipelines([]);
+
+  const missing = await rawCreatePipelineFromRequest({
+    task: "Missing creator",
+    repoDir: "/repo",
+    autoStart: false,
+    stages: [],
+  }, h.ports);
+  expect(missing).toEqual({
+    error: "pipeline creator lineage is required; pass src",
+    status: 400,
+  });
+
+  const invalidPath = await createPipelineFromRequest({
+    task: "Invalid creator",
+    repoDir: "/repo",
+    src: "/outside/creator.jsonl",
+    autoStart: false,
+    stages: [],
+  }, h.ports);
+  expect(invalidPath).toEqual({ error: "src path is not an allowed conversation transcript", status: 400 });
+
+  const unknownConversation = await createPipelineFromRequest({
+    task: "Unknown creator",
+    repoDir: "/repo",
+    src: "/codex/unknown.jsonl",
+    autoStart: false,
+    stages: [],
+  }, h.ports);
+  expect(unknownConversation).toEqual({ error: "src conversation does not exist", status: 400 });
+
+  const created = await createPipelineFromRequest({
+    task: "Known creator",
+    repoDir: "/repo",
+    src: "/codex/creator.jsonl",
+    autoStart: false,
+    stages: [],
+  }, h.ports);
+  expect(created.pipeline).toMatchObject({
+    srcPath: "/codex/creator.jsonl",
+    srcConversationId: "conversation_creator",
+  });
+});
+
+test("set-src repairs closed history and requires overwrite for existing lineage", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  pipeline.srcPath = null;
+  pipeline.srcConversationId = null;
+  pipeline.state = "closed";
+  pipeline.cursor = null;
+  pipeline.closedAt = h.ports.now();
+  savePipelines([pipeline]);
+
+  const invalid = await patchPipeline(pipeline.id, {
+    action: "set-src",
+    srcPath: "/outside/creator.jsonl",
+  } as never, h.ports);
+  expect(invalid).toEqual({ error: "src path is not an allowed conversation transcript", status: 400 });
+
+  const repaired = await patchPipeline(pipeline.id, {
+    action: "set-src",
+    srcPath: "/codex/creator.jsonl",
+  } as never, h.ports);
+  expect(repaired.pipeline).toMatchObject({
+    state: "closed",
+    srcPath: "/codex/creator.jsonl",
+    srcConversationId: "conversation_creator",
+  });
+  const repeated = await patchPipeline(pipeline.id, {
+    action: "set-src",
+    srcPath: "/codex/creator.jsonl",
+  }, h.ports);
+  expect(repeated.pipeline).toMatchObject({
+    srcPath: "/codex/creator.jsonl",
+    srcConversationId: "conversation_creator",
+  });
+
+  const blocked = await patchPipeline(pipeline.id, {
+    action: "set-src",
+    srcPath: "/codex/stage-1.jsonl",
+  } as never, h.ports);
+  expect(blocked).toEqual({ error: "pipeline creator lineage already exists; pass overwrite: true to replace it", status: 409 });
+
+  const overwritten = await patchPipeline(pipeline.id, {
+    action: "set-src",
+    srcPath: "/codex/stage-1.jsonl",
+    overwrite: true,
+  } as never, h.ports);
+  expect(overwritten.pipeline).toMatchObject({
+    state: "closed",
+    srcPath: "/codex/stage-1.jsonl",
+    srcConversationId: "conversation_stage_1",
+  });
+});
+
+test("link-task is idempotent for an existing task in the pipeline project", async () => {
+  const h = harness();
+  const task = boardTask("task-link-1");
+  saveTasks([task]);
+  const pipeline = await create(h.ports);
+
+  const first = await patchPipeline(pipeline.id, { action: "link-task", taskId: task.id }, h.ports);
+  const duplicate = await patchPipeline(pipeline.id, { action: "link-task", taskId: task.id }, h.ports);
+
+  expect(first.pipeline?.taskIds).toEqual([task.id]);
+  expect(duplicate.pipeline?.taskIds).toEqual([task.id]);
+  expect(loadPipelines()[0]!.taskIds).toEqual([task.id]);
+});
+
+test("task links reject project mismatches without persisting a change", async () => {
+  const h = harness();
+  const foreignTask = boardTask("task-foreign", "other-project");
+  saveTasks([foreignTask]);
+  const pipeline = await create(h.ports);
+
+  const result = await patchPipeline(pipeline.id, { action: "link-task", taskId: foreignTask.id }, h.ports);
+
+  expect(result).toEqual({ error: `task project does not match pipeline project: ${foreignTask.id}`, status: 400 });
+  expect(loadPipelines()[0]!.taskIds).toEqual([]);
+});
+
+test("a linked draft cannot move to a different task project", async () => {
+  const h = harness();
+  const task = boardTask("task-repo-move");
+  saveTasks([task]);
+  savePipelines([]);
+  h.ports.projectForCwd = (cwd) => cwd === "/other" ? "other-project" : "viewer";
+  const created = await createPipelineFromRequest({
+    task: "Linked draft",
+    taskIds: [task.id],
+    repoDir: "/repo",
+    autoStart: false,
+    stages: [{ id: "run", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "run", next: null }],
+  }, h.ports);
+
+  const moved = await patchPipeline(created.pipeline!.id, { action: "update-draft", repoDir: "/other" }, h.ports);
+
+  expect(moved).toEqual({ error: `task project does not match pipeline project: ${task.id}`, status: 400 });
+  expect(loadPipelines()[0]).toMatchObject({ repoDir: "/repo", project: "viewer", taskIds: [task.id] });
+});
+
+test("a deleted task stays linked until unlink-task removes its stale id", async () => {
+  const h = harness();
+  const task = boardTask("task-stale");
+  saveTasks([task]);
+  const pipeline = await create(h.ports);
+  await patchPipeline(pipeline.id, { action: "link-task", taskId: task.id }, h.ports);
+  saveTasks([]);
+
+  expect(loadPipelines()[0]!.taskIds).toEqual([task.id]);
+  const result = await patchPipeline(pipeline.id, { action: "unlink-task", taskId: task.id }, h.ports);
+
+  expect(result.pipeline?.taskIds).toEqual([]);
+  expect(loadPipelines()[0]!.taskIds).toEqual([]);
+});
+
+test("pipeline creation validates and persists explicit taskIds atomically", async () => {
+  const h = harness();
+  const task = boardTask("task-create");
+  saveTasks([task]);
+  savePipelines([]);
+
+  const created = await createPipelineFromRequest({
+    task: "Bound pipeline",
+    taskIds: [task.id, task.id],
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+  }, h.ports);
+
+  expect(created.pipeline?.taskIds).toEqual([task.id]);
+  expect(loadPipelines()[0]!.taskIds).toEqual([task.id]);
+
+  savePipelines([]);
+  const missing = await createPipelineFromRequest({
+    task: "Missing task",
+    taskIds: ["task-missing"],
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+  }, h.ports);
+  expect(missing).toEqual({ error: "task not found: task-missing", status: 400 });
+  expect(loadPipelines()).toEqual([]);
+});
+
+test("auto-create rechecks task links inside the pipeline mutation", async () => {
+  const h = harness();
+  const task = boardTask("task-race");
+  saveTasks([task]);
+  savePipelines([]);
+
+  const [explicit, automatic] = await Promise.all([
+    createPipelineFromRequest({
+      task: "Explicit owner",
+      taskIds: [task.id],
+      repoDir: "/repo",
+      autoStart: false,
+      stages: [{ id: "run", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "run", next: null }],
+    }, h.ports),
+    ensureTaskPipelineForAssignment(task, {
+      repoDir: "/repo",
+      engine: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      srcPath: "/codex/creator.jsonl",
+    }, h.ports),
+  ]);
+
+  expect(explicit.pipeline).toBeDefined();
+  expect(automatic.pipeline?.id).toBe(explicit.pipeline?.id);
+  expect(loadPipelines()).toHaveLength(1);
+  expect(loadPipelines()[0]!.taskIds).toEqual([task.id]);
+});
+
+test("adoptAttempt appends to the source stage after the cursor moved on", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  const sourceRun = pipeline.runs.find((run) => run.stageId === "plan")!;
+  sourceRun.attempts.push({
+    n: 1,
+    state: "passed",
+    effectiveRole: structuredClone(pipeline.stages[0]!.effectiveRole),
+    launchId: "launch-source",
+    conversationId: "conversation_source",
+    sessionId: "session-source",
+    agentPath: "/codex/source.jsonl",
+    paneId: "%1",
+    flowId: null,
+    startedAt: "t0",
+    completedAt: "t1",
+    input: "original input",
+    activatedBy: null,
+    output: "source output",
+    verdict: { status: "pass" },
+    error: null,
+  });
+  pipeline.cursor = { stageId: "build", state: "running", input: "source output", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } };
+  const cursorBefore = structuredClone(pipeline.cursor);
+
+  const adopted = adoptAttempt(pipeline, "plan", {
+    sourceConversationId: "conversation_source",
+    launchId: "launch-child",
+    conversationId: "conversation_child",
+    sessionId: "session-child",
+    agentPath: "/codex/child.jsonl",
+    paneId: "%2",
+    startedAt: "t2",
+  });
+
+  expect(adopted).toMatchObject({ n: 2, state: "running", conversationId: "conversation_child", input: "original input" });
+  expect(sourceRun.attempts).toHaveLength(2);
+  expect(pipeline.cursor).toEqual(cursorBefore);
+  expect(adoptAttempt(pipeline, "plan", {
+    sourceConversationId: "conversation_source",
+    launchId: "launch-child",
+    conversationId: "conversation_child",
+    sessionId: "session-child",
+    agentPath: "/codex/child.jsonl",
+    paneId: "%2",
+    startedAt: "t2",
+  })).toBe(adopted);
+  expect(sourceRun.attempts).toHaveLength(2);
+});
+
+test("durable pipeline membership recovers one pending adoption", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  const sourceRun = pipeline.runs.find((run) => run.stageId === "plan")!;
+  sourceRun.attempts.push({
+    n: 1,
+    state: "passed",
+    effectiveRole: structuredClone(pipeline.stages[0]!.effectiveRole),
+    launchId: "launch-source",
+    conversationId: "conversation_source",
+    sessionId: "session-source",
+    agentPath: "/codex/source.jsonl",
+    paneId: "%1",
+    flowId: null,
+    startedAt: "1970-01-01T00:10:00.000Z",
+    completedAt: "1970-01-01T00:11:00.000Z",
+    input: "original input",
+    activatedBy: null,
+    output: "source output",
+    verdict: { status: "pass" },
+    error: null,
+  });
+  pipeline.cursor = { stageId: "build", state: "running", input: "source output", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } };
+  pipeline.state = "paused";
+  pipeline.pausedState = "running";
+  savePipelines([pipeline]);
+  expect(pipelineAttemptTargetForSource("conversation_source")).toEqual({
+    pipelineId: pipeline.id,
+    stageId: "plan",
+    stageOrder: 0,
+    role: "architect",
+  });
+  h.ports.pipelineAdoptionCandidates = () => [{
+    stageId: "plan",
+    sourceConversationId: "conversation_source",
+    launchId: "launch-child",
+    conversationId: "conversation_child",
+    sessionId: "session-child",
+    agentPath: "/codex/child.jsonl",
+    paneId: null,
+    startedAt: "1970-01-01T00:12:00.000Z",
+  }];
+  h.durableTurns.set("/codex/child.jsonl", { turn: "busy", message: null });
+
+  await tickPipelines([entry("/codex/child.jsonl")], h.ports);
+  await tickPipelines([entry("/codex/child.jsonl")], h.ports);
+
+  const attempts = loadPipelines()[0]!.runs.find((run) => run.stageId === "plan")!.attempts;
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toMatchObject({ historical: true, conversationId: "conversation_child", state: "running" });
+});
+
+test("a terminal historical adoption settles without changing the cursor", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  const sourceRun = pipeline.runs.find((run) => run.stageId === "plan")!;
+  sourceRun.attempts.push({
+    n: 1,
+    state: "passed",
+    effectiveRole: structuredClone(pipeline.stages[0]!.effectiveRole),
+    launchId: "launch-source",
+    conversationId: "conversation_source",
+    sessionId: "session-source",
+    agentPath: "/codex/source.jsonl",
+    paneId: "%1",
+    flowId: null,
+    startedAt: "1970-01-01T00:10:00.000Z",
+    completedAt: "1970-01-01T00:11:00.000Z",
+    input: "original input",
+    activatedBy: null,
+    output: "source output",
+    verdict: { status: "pass" },
+    error: null,
+  });
+  pipeline.cursor = { stageId: "build", state: "running", input: "source output", activatedBy: { stageId: "plan", attempt: 1, edge: "pass" } };
+  pipeline.state = "paused";
+  pipeline.pausedState = "running";
+  const cursorBefore = structuredClone(pipeline.cursor);
+  const adopted = adoptAttempt(pipeline, "plan", {
+    sourceConversationId: "conversation_source",
+    launchId: "launch-child",
+    conversationId: "conversation_child",
+    sessionId: "session-child",
+    agentPath: "/codex/child.jsonl",
+    paneId: null,
+    startedAt: "1970-01-01T00:12:00.000Z",
+  })!;
+  savePipelines([pipeline]);
+  h.durableTurns.set("/codex/child.jsonl", {
+    turn: "terminal",
+    message: {
+      text: "historical result\n\n```json\n{\"status\":\"pass\",\"findings\":[],\"confidence\":0.9}\n```",
+      ts: 2_000_000,
+    },
+  });
+
+  await tickPipelines([entry("/codex/child.jsonl")], h.ports);
+  const settled = loadPipelines()[0]!;
+  const historical = settled.runs.find((run) => run.stageId === "plan")!.attempts[1]!;
+  expect(historical).toMatchObject({
+    historical: true,
+    state: "passed",
+    completedAt: new Date(2_000_000).toISOString(),
+    verdict: { status: "pass" },
+    output: null,
+  });
+  expect(settled.cursor).toEqual(cursorBefore);
+  expect(settled.state).toBe("paused");
+
+  const afterFirst = JSON.stringify(settled);
+  await tickPipelines([entry("/codex/child.jsonl")], h.ports);
+  expect(JSON.stringify(loadPipelines()[0])).toBe(afterFirst);
+  expect(adopted.conversationId).toBe("conversation_child");
+});
+
+test("historical adoption never replaces the operational retry predecessor", async () => {
+  const h = harness();
+  const created = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "retry me")], h.ports);
+  const pipeline = loadPipelines()[0]!;
+  const adopted = adoptAttempt(pipeline, "plan", {
+    sourceConversationId: "conversation_stage_1",
+    launchId: "launch-historical",
+    conversationId: "conversation_historical",
+    sessionId: "session-historical",
+    agentPath: "/codex/historical.jsonl",
+    paneId: null,
+    startedAt: "1970-01-01T00:12:00.000Z",
+  });
+  expect(adopted?.historical).toBe(true);
+  savePipelines([pipeline]);
+
+  await patchPipeline(created.id, { action: "retry-stage" }, h.ports);
+  await tickPipelines([], h.ports);
+
+  expect(h.calls).toContain(`spawn:pipeline_${created.id}_plan_3:parent=/codex/creator.jsonl:supersedes=conversation_stage_1`);
+});
 
 test("creation validates the 1–8 stage conversation graph and optional roles", async () => {
   const { ports } = harness();
@@ -1308,7 +1736,7 @@ test("a stage retry supersedes the prior attempt's conversation and numbers its 
   const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
-  expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_1:parent=root:supersedes=none`);
+  expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_1:parent=/codex/creator.jsonl:supersedes=none`);
 
   await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
   await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
@@ -1316,7 +1744,7 @@ test("a stage retry supersedes the prior attempt's conversation and numbers its 
 
   /* Attempt 2 chains onto attempt 1's conversation; the durable membership
      carries the round so decks number chained recoveries. */
-  expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_2:parent=root:supersedes=conversation_stage_1`);
+  expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_2:parent=/codex/creator.jsonl:supersedes=conversation_stage_1`);
   expect(h.calls).toContain(`membership:pipeline:${pipeline.id}:plan:2:architect:0:round=2`);
 
   /* A second failure and retry chains again from attempt 2, never re-naming
@@ -1324,7 +1752,7 @@ test("a stage retry supersedes the prior attempt's conversation and numbers its 
   await tickPipelines([h.finish("/codex/stage-2.jsonl", "fail", "still blocked")], h.ports);
   await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
   await tickPipelines([], h.ports);
-  expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_3:parent=root:supersedes=conversation_stage_2`);
+  expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_3:parent=/codex/creator.jsonl:supersedes=conversation_stage_2`);
 });
 
 test("a retried attempt whose predecessor never reserved a conversation records nothing (#383)", async () => {

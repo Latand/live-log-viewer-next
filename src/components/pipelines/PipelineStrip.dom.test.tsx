@@ -38,6 +38,7 @@ function draftPipeline(): Pipeline {
   return {
     id: "p1",
     task: "Compact stages",
+    taskIds: [],
     project: "proj",
     repoDir: "/r",
     worktreeDir: "/w",

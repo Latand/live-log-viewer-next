@@ -76,6 +76,130 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
   };
 }
 
+test("a materialized structured child is offered for pipeline attempt adoption", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "pipeline-adoption-"));
+  const store = registry();
+  const sourceSessionId = crypto.randomUUID();
+  const sourceAccount = createManagedCodexAccount(`pipeline-adoption-${sourceSessionId}`);
+  const sourcePath = path.join(sourceAccount.sessionsDir, `${sourceSessionId}.jsonl`);
+  const childPath = path.join(cwd, "child.jsonl");
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, "{}\n");
+  fs.writeFileSync(childPath, "{}\n");
+  const source = store.ensureConversation("codex", sourcePath, null);
+  const deferred: Array<() => Promise<void>> = [];
+  const adoptions: unknown[] = [];
+  let structuredLaunches = 0;
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const capability = rotateOperatorSpawnCapability();
+    const dependencies = {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      defer: (work: () => Promise<void>) => { deferred.push(work); },
+      pipelineAttemptTargetForSource: () => ({
+        pipelineId: "pipeline-adoption",
+        stageId: "build",
+        stageOrder: 1,
+        role: "builder",
+      }),
+      spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
+        structuredLaunches += 1;
+        const settled = store.settleSpawn(input.receipt.launchId, {
+          key: { engine: "claude", sessionId: crypto.randomUUID() },
+          artifactPath: childPath,
+          cwd,
+          accountId: "claude-test",
+          status: "starting",
+          host: null,
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: "spawn",
+        });
+        if (settled.kind !== "settled") throw new Error(settled.code);
+        return {
+          ok: true,
+          target: null,
+          path: childPath,
+          effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default",
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered" as const,
+          state: "settled" as const,
+        };
+      },
+      adoptPipelineAttemptFromSource: async (sourceConversationId: string, conversationRef: unknown) => {
+        adoptions.push({ sourceConversationId, conversationRef });
+        if (adoptions.length === 1) throw new Error("injected pipeline store write failure");
+        return null;
+      },
+    } as SpawnRouteTestDependencies;
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "x-llv-spawn-capability": capability },
+      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
+    }), dependencies);
+
+    expect({ status: response.status, body: await response.clone().json() }).toMatchObject({ status: 202 });
+    await Promise.all(deferred.map((work) => work()));
+    const receipt = Object.values(store.snapshot().receipts).find((candidate) => candidate.clientAttemptId === "pipeline_adoption_20260719")!;
+    expect(store.snapshot().memberships[receipt.conversationId]).toEqual([
+      expect.objectContaining({
+        kind: "pipeline",
+        containerId: "pipeline-adoption",
+        stageId: "build",
+        parentConversationId: source.id,
+        round: null,
+      }),
+    ]);
+
+    const replay = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "x-llv-spawn-capability": capability },
+      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
+    }), dependencies);
+    expect(replay.status).toBe(200);
+    expect(structuredLaunches).toBe(1);
+    expect(adoptions).toEqual([{
+      sourceConversationId: source.id,
+      conversationRef: expect.objectContaining({
+        launchId: expect.any(String),
+        conversationId: expect.stringMatching(/^conversation_/),
+        agentPath: childPath,
+      }),
+    }, {
+      sourceConversationId: source.id,
+      conversationRef: expect.objectContaining({
+        launchId: expect.any(String),
+        conversationId: expect.stringMatching(/^conversation_/),
+        agentPath: childPath,
+      }),
+    }]);
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
 test("a fresh process resolves and refreshes a persisted Claude account before one structured launch", async () => {
   const sandbox = fs.mkdtempSync(path.join(routeSandbox, "production-resolver-reboot-"));
   const stateDir = path.join(sandbox, "state");

@@ -6,12 +6,27 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
-process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-route-"));
+const previousStateDir = process.env.LLV_STATE_DIR;
+const previousCodexHome = process.env.LLV_CODEX_HOME;
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-route-"));
+process.env.LLV_STATE_DIR = path.join(sandbox, "state");
+process.env.LLV_CODEX_HOME = path.join(sandbox, "codex");
+const creatorPath = path.join(process.env.LLV_CODEX_HOME, "sessions", "creator.jsonl");
+fs.mkdirSync(path.dirname(creatorPath), { recursive: true });
+fs.writeFileSync(creatorPath, "{}\n");
 const { GET, POST } = await import("./route");
+const { agentRegistry } = await import("@/lib/agent/registry");
 const { registerPipelineTick } = await import("@/lib/pipelines/controllerSignal");
 const CURRENT_HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: process.cwd(), encoding: "utf8" }).trim();
+agentRegistry().ensureConversation("codex", creatorPath, null);
 
-afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
+afterAll(() => {
+  if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousStateDir;
+  if (previousCodexHome === undefined) delete process.env.LLV_CODEX_HOME;
+  else process.env.LLV_CODEX_HOME = previousCodexHome;
+  fs.rmSync(sandbox, { recursive: true, force: true });
+});
 
 test("pipeline collection route mirrors flow GET and POST shapes", async () => {
   let ticks = 0;
@@ -22,6 +37,7 @@ test("pipeline collection route mirrors flow GET and POST shapes", async () => {
     headers: { host: "127.0.0.1", "content-type": "application/json" },
     body: JSON.stringify({
       task: "ship",
+      src: creatorPath,
       repoDir: process.cwd(),
       baseRef: CURRENT_HEAD,
       stages: [
@@ -53,6 +69,7 @@ test("pipeline POST returns a persisted draft id for autoStart false", async () 
     headers: { host: "127.0.0.1", "content-type": "application/json" },
     body: JSON.stringify({
       task: "review before start",
+      src: creatorPath,
       repoDir: process.cwd(),
       autoStart: false,
       stages: [
@@ -89,7 +106,7 @@ test("pipeline POST returns the stable admission payload without creating a reco
     const response = await POST(new NextRequest("http://127.0.0.1/api/pipelines", {
       method: "POST",
       headers: { host: "127.0.0.1", "content-type": "application/json" },
-      body: JSON.stringify({ task: "blocked", repoDir: plainDir, autoStart: false, stages: [] }),
+      body: JSON.stringify({ task: "blocked", src: creatorPath, repoDir: plainDir, autoStart: false, stages: [] }),
     }));
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({

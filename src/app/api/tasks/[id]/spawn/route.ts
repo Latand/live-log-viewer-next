@@ -17,6 +17,7 @@ import { spawnResponseForReceipt, type SpawnResponse as AgentSpawnResponse } fro
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { projectInfoFromCwd } from "@/lib/scanner/describe";
+import { ensureTaskPipelineForAssignment } from "@/lib/pipelines/engine";
 import { attachmentPath } from "@/lib/tasks/attachments";
 import { applyAssignmentPatches, pinnedAccountId, type AssignmentPatch, type TaskCommandResult } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
@@ -54,6 +55,7 @@ interface TaskSpawnDependencies {
   resolveSpawnAccount(engine: AgentEngine, accountId: string | null): AccountContext;
   spawnAgentWithPrompt: typeof spawnAgentWithPrompt;
   resolveSpawnedTranscriptPath: typeof resolveSpawnedTranscriptPath;
+  ensureTaskPipelineForAssignment?: typeof ensureTaskPipelineForAssignment;
 }
 
 const productionDependencies: TaskSpawnDependencies = {
@@ -63,6 +65,7 @@ const productionDependencies: TaskSpawnDependencies = {
   resolveSpawnAccount: (engine, accountId) => accountManager.resolveSpawn(engine, accountId),
   spawnAgentWithPrompt,
   resolveSpawnedTranscriptPath,
+  ensureTaskPipelineForAssignment,
 };
 
 function cwdFromBody(value: unknown): { cwd?: string; error?: string; status?: number } {
@@ -282,6 +285,22 @@ async function postTaskSpawn(
   }
 
   if (begun.kind === "replay") {
+    if (dependencies.ensureTaskPipelineForAssignment && begun.receipt.artifactPath) {
+      const binding = await dependencies.ensureTaskPipelineForAssignment(task, {
+        repoDir: cwdResult.cwd,
+        engine,
+        model: selectedModel.model,
+        effort: reasoning.effort,
+        srcPath: begun.receipt.artifactPath,
+      });
+      if (!binding.pipeline) {
+        const at = isoNow();
+        const patch = assignmentPatch(begun.receipt, at, account.accountId, engine);
+        return NextResponse.json(taskSpawnResponse(begun.receipt, task, { ...patch, state: "spawning" }, {
+          error: binding.error ?? "could not bind task to a pipeline",
+        }), { status: 202 });
+      }
+    }
     const at = isoNow();
     const patch = assignmentPatch(begun.receipt, at, account.accountId, engine);
     try {
@@ -384,6 +403,20 @@ async function postTaskSpawn(
   const completed = registry.snapshot().receipts[begun.receipt.launchId] ?? begun.receipt;
   const completedAt = isoNow();
   const completedPatch = assignmentPatch(completed, completedAt, account.accountId, engine);
+  if (dependencies.ensureTaskPipelineForAssignment && completed.artifactPath) {
+    const binding = await dependencies.ensureTaskPipelineForAssignment(task, {
+      repoDir: cwdResult.cwd,
+      engine,
+      model: selectedModel.model,
+      effort: reasoning.effort,
+      srcPath: completed.artifactPath,
+    });
+    if (!binding.pipeline) {
+      return NextResponse.json(taskSpawnResponse(completed, admittedTask, { ...completedPatch, state: "spawning" }, {
+        error: binding.error ?? "could not bind task to a pipeline",
+      }), { status: 202 });
+    }
+  }
   try {
     const result = persistAssignment(dependencies, id, completedPatch, completedAt);
     if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });

@@ -45,6 +45,13 @@ function pipelineOriginRejection(req: NextRequest, body: CreatePipelineRequest):
       if (isSpawnDeniedRole(role)) {
         return NextResponse.json({ error: reviewerOriginSpawnGuidance(role), code: "reviewer_origin_spawn" }, { status: 403 });
       }
+      if (typeof body.src !== "string" || !body.src.trim()) {
+        const derivedPath = registry.conversation(caller.conversationId)?.generations.at(-1)?.path ?? null;
+        if (!derivedPath) {
+          return NextResponse.json({ error: "pipeline creator lineage is required; pass src" }, { status: 400 });
+        }
+        body.src = derivedPath;
+      }
     }
     return null;
   }
