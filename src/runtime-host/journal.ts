@@ -460,6 +460,13 @@ export class RuntimeJournal {
       if ((status === "applying" || status === "applied") && command.kind !== "reconfigure") {
         throw new Error("runtime operation transition is invalid");
       }
+      const killBoundary = completing && command.kind === "kill" && status === "delivered"
+        ? this.db.query<{ event_seq: number }, [string]>("SELECT event_seq FROM outbox WHERE id = ?")
+          .get(`effect:${operationId}`)
+        : null;
+      if (completing && command.kind === "kill" && status === "delivered" && !killBoundary) {
+        throw new Error("runtime kill effect is missing");
+      }
       if (beginning && (command.kind === "send" || command.kind === "steer") && details.turnId !== undefined) {
         const effect = this.db.query<{ payload_json: string }, [string]>("SELECT payload_json FROM outbox WHERE id = ?")
           .get(`effect:${operationId}`);
@@ -496,6 +503,26 @@ export class RuntimeJournal {
       if (completing) this.appendCompletionConsequences(command, committed, operationId);
       this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ? WHERE operation_id = ?").run(stableJson(committed), event.seq, operationId);
       if (completing) this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?").run(`effect:${operationId}`);
+      if (killBoundary) {
+        this.db.query(`
+          INSERT INTO outbox(id, kind, payload_json, event_seq, state)
+          VALUES (?, 'runtime.kill-boundary', ?, ?, 'retained')
+          ON CONFLICT(id) DO UPDATE SET
+            kind = excluded.kind,
+            payload_json = excluded.payload_json,
+            event_seq = excluded.event_seq,
+            state = excluded.state
+          WHERE excluded.event_seq > outbox.event_seq
+        `).run(
+          `kill-boundary:${command.conversationId}`,
+          stableJson({
+            operationId,
+            conversationId: command.conversationId,
+            admissionEventSeq: killBoundary.event_seq,
+          }),
+          killBoundary.event_seq,
+        );
+      }
       this.db.exec("COMMIT");
       this.compactIfNeeded();
       this.notifyWaiters();
@@ -939,9 +966,12 @@ export class RuntimeJournal {
   effectBatch(limit = 100, kinds?: readonly string[], afterEventSeq = 0): Array<RuntimeEffect & { eventSeq: number }> {
     if (kinds?.length === 0) return [];
     if (!Number.isSafeInteger(afterEventSeq) || afterEventSeq < 0) throw new Error("runtime effect cursor is invalid");
+    const stateFilter = kinds?.includes("runtime.kill-boundary")
+      ? "(state = 'pending' OR (state = 'retained' AND kind = 'runtime.kill-boundary'))"
+      : "state = 'pending'";
     const kindFilter = kinds ? ` AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
     const rows = this.db.query<{ id: string; kind: string; payload_json: string; event_seq: number }, Array<string | number>>(
-      `SELECT id, kind, payload_json, event_seq FROM outbox WHERE state = 'pending'${kindFilter} AND event_seq > ? ORDER BY event_seq LIMIT ?`,
+      `SELECT id, kind, payload_json, event_seq FROM outbox WHERE ${stateFilter}${kindFilter} AND event_seq > ? ORDER BY event_seq LIMIT ?`,
     ).all(...(kinds ?? []), afterEventSeq, limit);
     return rows.map((row) => {
       const payload = JSON.parse(row.payload_json) as Record<string, unknown>;

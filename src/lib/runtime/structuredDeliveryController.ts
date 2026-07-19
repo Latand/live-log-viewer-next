@@ -15,6 +15,7 @@ import { runtimeImageCapability } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 
 type ObservableEngineHost = EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+type StructuredConversationRecovery = typeof import("./structuredRecovery")["recoverDeadStructuredConversation"];
 export interface StructuredDeliveryHost {
   key: SessionKey;
   host: ObservableEngineHost;
@@ -139,7 +140,11 @@ async function publishHostState(
 
 export async function bindStructuredDeliveryQueue(
   adopted: readonly StructuredDeliveryHost[],
-  dependencies: { registry?: AgentRegistry; client?: RuntimeHostClient | null } = {},
+  dependencies: {
+    registry?: AgentRegistry;
+    client?: RuntimeHostClient | null;
+    recover?: StructuredConversationRecovery;
+  } = {},
 ): Promise<void> {
   state.stopActive();
   state.stopActive = () => {};
@@ -188,9 +193,11 @@ export async function bindStructuredDeliveryQueue(
   }
   const hosts = new Map<string, EngineHost>();
   let scheduleAutomaticRetry = () => {};
+  let requestDrain = () => {};
   const queue = new StructuredDeliveryQueue(
     {
       effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
+      ...(typeof client.events === "function" ? { events: (afterEventSeq: number) => client.events(afterEventSeq) } : {}),
       transition: async (operationId, status, details) => {
         const result = await client.transitionOperation(operationId, status, details);
         if (status !== "delivered" && status !== "failed") return;
@@ -216,6 +223,23 @@ export async function bindStructuredDeliveryQueue(
       return true;
     },
     () => scheduleAutomaticRetry(),
+    async (conversationId) => {
+      if (!conversationId.startsWith("conversation_")) return false;
+      const conversation = registry.conversation(conversationId as `conversation_${string}`);
+      const generation = conversation?.generations.at(-1);
+      if (!conversation || !generation) return false;
+      const recover = dependencies.recover
+        ?? (await import("./structuredRecovery")).recoverDeadStructuredConversation;
+      const recovered = await recover({
+        path: generation.path,
+        conversationId: conversation.id,
+      }, {
+        registry,
+        client,
+        requestDeliveryDrain: requestDrain,
+      });
+      return recovered?.spawned === true;
+    },
     (effect, ownership) => applyStructuredReconfigure(effect, {
       registry,
       ownsOperation: ownership.isCurrent,
@@ -253,7 +277,7 @@ export async function bindStructuredDeliveryQueue(
       );
     }
   };
-  const requestDrain = () => {
+  requestDrain = () => {
     if (state.activeQueue === queue) scheduleDrain();
   };
   scheduleAutomaticRetry = () => {
