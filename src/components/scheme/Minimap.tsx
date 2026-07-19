@@ -5,6 +5,7 @@ import { useRef } from "react";
 import { TASK_TONES } from "@/components/tasks/taskModel";
 import { engineColor } from "@/components/utils";
 import { useLocale } from "@/lib/i18n";
+import type { Pipeline } from "@/lib/pipelines/types";
 
 import type { SchemeLayout, SchemeRect } from "./layout";
 import { TASK_W, taskCardHeight, type PlacedTask } from "./taskGeometry";
@@ -50,6 +51,7 @@ export function Minimap({
   tasks = [],
   textExpandedIds = EMPTY_TEXT_EXPANDED_IDS,
   currentWork = null,
+  pipelineGroups = [],
   stackDots = [],
   cam,
   vp,
@@ -66,6 +68,8 @@ export function Minimap({
   textExpandedIds?: ReadonlySet<string>;
   /** Faint outline of the operator's current-work framing. */
   currentWork?: SchemeRect | null;
+  /** Desktop world-space pipeline containers, already collision-cleared. */
+  pipelineGroups?: readonly { pipeline: Pipeline; rect: SchemeRect }[];
   /** Collapsed worker stacks (issue #136): one dot per origin, shown as a compact
       legend so folded workers read as a handful of dots, never an agent flood. */
   stackDots?: StackDot[];
@@ -145,6 +149,24 @@ export function Minimap({
               strokeWidth={2 / scale}
             >
               <title>{group.label}</title>
+            </rect>
+          ))}
+          {pipelineGroups.map(({ pipeline, rect }) => (
+            <rect
+              key={pipeline.id}
+              data-minimap-pipeline={pipeline.id}
+              x={rect.x}
+              y={rect.y}
+              width={rect.w}
+              height={rect.h}
+              rx={10}
+              fill="var(--color-accent-soft)"
+              stroke={pipeline.state === "draft" ? "var(--color-warning)" : "var(--color-accent)"}
+              strokeDasharray={pipeline.state === "draft" ? `${6 / scale} ${4 / scale}` : undefined}
+              strokeWidth={2 / scale}
+              opacity={0.8}
+            >
+              <title>{pipeline.task}</title>
             </rect>
           ))}
           {layout.nodes.map((node) => (

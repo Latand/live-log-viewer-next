@@ -325,6 +325,17 @@ test("autoStart false persists a draft without provisioning or spawning", async 
   expect(h.calls.some((call) => call.startsWith("spawn:"))).toBe(false);
 });
 
+test("set-position persists a finite world pin without changing pipeline execution state", async () => {
+  const h = harness();
+  const created = await create(h.ports);
+
+  const moved = await patchPipeline(created.id, { action: "set-position", pos: { x: 1337, y: -240 } }, h.ports);
+
+  expect(moved.pipeline).toMatchObject({ id: created.id, state: created.state, pos: { x: 1337, y: -240 } });
+  expect(loadPipelines()[0]).toMatchObject({ pos: { x: 1337, y: -240 } });
+  expect((await patchPipeline(created.id, { action: "set-position", pos: { x: Number.NaN, y: 1 } }, h.ports)).status).toBe(400);
+});
+
 test("an explicit draft base remains pinned when the draft starts", async () => {
   const h = harness();
   savePipelines([]);

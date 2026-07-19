@@ -6,6 +6,7 @@ const pipeline = { id: "pipeline-1" };
 mock.module("@/lib/pipelines/engine", () => ({
   getPipelines: () => ({ pipelines: [pipeline] }),
   createPipelineFromRequest: () => ({ pipeline }),
+  tickPipelines: async () => ({ pipelines: [], changed: false }),
   patchPipeline: async (id: string, body: unknown) => {
     if (id !== pipeline.id) return { error: "pipeline not found", status: 404 };
     if ((body as { repoDir?: string }).repoDir === "/blocked") {
@@ -21,7 +22,7 @@ const { registerPipelineTick } = await import("@/lib/pipelines/controllerSignal"
 test("pipeline PATCH accepts the control actions including override-stage", async () => {
   let ticks = 0;
   const unregister = registerPipelineTick(async () => { ticks += 1; });
-  for (const action of ["start", "update-draft", "add-stage", "remove-stage", "reorder-stage", "pause", "resume", "retry-stage", "skip-stage", "override-stage", "delete", "close"]) {
+  for (const action of ["start", "update-draft", "set-position", "add-stage", "remove-stage", "reorder-stage", "pause", "resume", "retry-stage", "skip-stage", "override-stage", "delete", "close"]) {
     const response = await PATCH(
       new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", { method: "PATCH", headers: { host: "127.0.0.1" }, body: JSON.stringify({ action }) }),
       { params: Promise.resolve({ id: "pipeline-1" }) },

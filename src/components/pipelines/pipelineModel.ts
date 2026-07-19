@@ -319,6 +319,14 @@ export function pipelineLinkedTasks(
   flows: readonly Flow[] = [],
   files: readonly FileEntry[] = [],
 ): BoardTask[] {
+  const taskIds = (pipeline as Pipeline & { taskIds?: readonly string[] }).taskIds;
+  if (taskIds?.length) {
+    const byId = new Map(tasks.map((task) => [task.id, task] as const));
+    return taskIds.flatMap((id) => {
+      const task = byId.get(id);
+      return task ? [task] : [];
+    });
+  }
   const { paths, conversationIds } = pipelineLineage(pipeline, flows, files);
   if (!paths.size && !conversationIds.size) return [];
   return tasks.filter((task) =>
