@@ -499,14 +499,20 @@ export function sensitiveClasses(text: string): Set<FindingClass> {
   if (/(?:api[_-]?(?:key|token)|access[_-]?token|authorization|password|secret)\s*[:=]\s*["']?[A-Za-z0-9_./+:-]{12,}/i.test(searchableText)) {
     findings.add("credential");
   }
-  if (/\b(?:gh[pousr]_|sk-|xox[baprs]-)[A-Za-z0-9_-]{12,}\b/.test(searchableText)) {
+  if (/\b(?:github_pat_|gh[pousr]_|sk-|xox[baprs]-)[A-Za-z0-9_-]{12,}\b/.test(searchableText)) {
     findings.add("credential");
   }
-  const splitTokenPrefix = /(?:g[^a-z0-9\r\n]{1,8}h[^a-z0-9\r\n]{1,8}[pousr]|x[^a-z0-9\r\n]{1,8}o[^a-z0-9\r\n]{1,8}x[^a-z0-9\r\n]{1,8}[baprs]|s[^a-z0-9\r\n]{1,8}k)[^a-z0-9\r\n]{0,8}?[_-][^a-z0-9\r\n]*/gi;
+  const separator = String.raw`[^a-z0-9\r\n]{1,8}`;
+  const splitTokenPrefix = new RegExp([
+    `g${separator}i${separator}t${separator}h${separator}u${separator}b${separator}p${separator}a${separator}t`,
+    `g${separator}h${separator}[pousr]`,
+    `x${separator}o${separator}x${separator}[baprs]`,
+    `s${separator}k`,
+  ].join("|") + String.raw`[^a-z0-9\r\n]{0,8}?[_-][^a-z0-9\r\n]*`, "gi");
   for (const line of searchableText.split(/\r?\n/)) {
     for (const match of line.matchAll(splitTokenPrefix)) {
       const compactTail = compactSensitiveText(line.slice(match.index));
-      if (/^(?:gh[pousr]|xox[baprs]|sk)[a-z0-9]{12,}/i.test(compactTail)) {
+      if (/^(?:githubpat|gh[pousr]|xox[baprs]|sk)[a-z0-9]{12,}/i.test(compactTail)) {
         findings.add("credential");
         break;
       }

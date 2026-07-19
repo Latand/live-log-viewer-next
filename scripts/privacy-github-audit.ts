@@ -164,13 +164,48 @@ async function fetchPages(
   return undefined;
 }
 
-function markdownDestinations(text: string): string[] {
+function markdownImageDestinations(text: string): string[] {
   const destinations: string[] = [];
+  const normalizeLabel = (label: string): string => label.trim().replaceAll(/\s+/g, " ").toLocaleLowerCase("en-US");
+  const definitions = new Map<string, string>();
+  const definitionPattern = /^[ \t]{0,3}\[([^\]\r\n]+)\]:[ \t]*(?:<([^>\r\n]+)>|([^\s\r\n]+))/gm;
+  for (const definition of text.matchAll(definitionPattern)) {
+    definitions.set(normalizeLabel(definition[1]), definition[2] ?? definition[3]);
+  }
   let searchFrom = 0;
   while (searchFrom < text.length) {
-    const opening = text.indexOf("](", searchFrom);
-    if (opening === -1) break;
-    let cursor = opening + 2;
+    const imageStart = text.indexOf("![", searchFrom);
+    if (imageStart === -1) break;
+    let labelEnd = imageStart + 2;
+    let labelDepth = 0;
+    for (; labelEnd < text.length; labelEnd += 1) {
+      if (text[labelEnd] === "\\" && labelEnd + 1 < text.length) {
+        labelEnd += 1;
+        continue;
+      }
+      if (text[labelEnd] === "[") labelDepth += 1;
+      if (text[labelEnd] !== "]") continue;
+      if (labelDepth === 0) break;
+      labelDepth -= 1;
+    }
+    if (labelEnd >= text.length) break;
+    const label = text.slice(imageStart + 2, labelEnd);
+    if (text[labelEnd + 1] !== "(") {
+      let referenceLabel = label;
+      let nextSearchFrom = labelEnd + 1;
+      if (text[labelEnd + 1] === "[") {
+        const referenceEnd = text.indexOf("]", labelEnd + 2);
+        if (referenceEnd !== -1) {
+          referenceLabel = text.slice(labelEnd + 2, referenceEnd) || label;
+          nextSearchFrom = referenceEnd + 1;
+        }
+      }
+      const destination = definitions.get(normalizeLabel(referenceLabel));
+      if (destination) destinations.push(destination);
+      searchFrom = nextSearchFrom;
+      continue;
+    }
+    let cursor = labelEnd + 2;
     while (/\s/.test(text[cursor] ?? "")) cursor += 1;
     if (text[cursor] === "<") {
       const closing = text.indexOf(">", cursor + 1);
@@ -202,23 +237,51 @@ function markdownDestinations(text: string): string[] {
       destination += character;
     }
     if (destination.length > 0) destinations.push(destination);
-    searchFrom = Math.max(opening + 2, cursor + 1);
+    searchFrom = Math.max(imageStart + 2, cursor + 1);
+  }
+  return destinations;
+}
+
+function srcsetDestinations(value: string): string[] {
+  return value
+    .split(",")
+    .map((candidate) => candidate.trim().split(/\s+/, 1)[0])
+    .filter((candidate) => candidate.length > 0);
+}
+
+function htmlMediaDestinations(text: string): string[] {
+  const destinations: string[] = [];
+  const mediaTags = /<(img|source|video)\b([^>]*)>/gi;
+  for (const tag of text.matchAll(mediaTags)) {
+    const tagName = tag[1].toLowerCase();
+    const attributes = tag[2];
+    const mediaAttributes = /\b(src|srcset|poster)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+    for (const attribute of attributes.matchAll(mediaAttributes)) {
+      const name = attribute[1].toLowerCase();
+      const value = attribute[2] ?? attribute[3] ?? attribute[4] ?? "";
+      if ((tagName === "img" && name !== "poster")
+        || (tagName === "source" && name !== "poster")
+        || (tagName === "video" && name !== "srcset")) {
+        destinations.push(...(name === "srcset" ? srcsetDestinations(value) : [value]));
+      }
+    }
   }
   return destinations;
 }
 
 function publishedMediaUrls(text: string, githubBase: URL): URL[] {
   const canonicalText = canonicalSensitiveText(text).text;
-  const candidates = markdownDestinations(canonicalText);
-  const patterns = [
-    /<(?:a|img|source|video)\b[^>]*(?:href|src)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>/gi,
-    /https?:\/\/[^\s<>"'\]]+/gi,
+  const renderedCandidates = [
+    ...markdownImageDestinations(canonicalText),
+    ...htmlMediaDestinations(canonicalText),
   ];
-  for (const pattern of patterns) {
-    for (const match of canonicalText.matchAll(pattern)) candidates.push(match[1] ?? match[2] ?? match[3] ?? match[0]);
-  }
+  const candidates: string[] = [];
+  for (const match of canonicalText.matchAll(/https?:\/\/[^\s<>"'\]]+/gi)) candidates.push(match[0]);
   const urls = new Map<string, URL>();
-  for (const candidate of candidates) {
+  for (const [candidate, rendered] of [
+    ...renderedCandidates.map((value): [string, boolean] => [value, true]),
+    ...candidates.map((value): [string, boolean] => [value, false]),
+  ]) {
     let url: URL;
     try {
       let normalizedCandidate = candidate.replaceAll("&amp;", "&");
@@ -234,7 +297,7 @@ function publishedMediaUrls(text: string, githubBase: URL): URL[] {
     }
     const extension = extname(url.pathname).toLowerCase();
     const githubAsset = url.pathname.includes("/assets/") || url.pathname.includes("/user-attachments/");
-    if (mediaExtensions.has(extension) || githubAsset || url.hostname.includes("user-images.githubusercontent.com")) {
+    if (rendered || mediaExtensions.has(extension) || githubAsset || url.hostname.includes("user-images.githubusercontent.com")) {
       urls.set(url.href, url);
     }
   }

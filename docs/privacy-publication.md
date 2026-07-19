@@ -24,10 +24,11 @@ Text inspection applies bounded fixed-point decoding to nested percent encoding
 and the complete GFM HTML5 named-entity table. It normalizes CommonMark escapes,
 emphasis delimiters, and zero-width separators, then inspects Markdown
 destinations, HTML attributes, credential-bearing forms, URI authentication,
-authorization headers, and split token shapes. Text-like files remain
-inspectable with NUL bytes or UTF-16 encoding. Unsupported binary inputs fail
-closed. Publication inputs and supporting files with symlinks in any path
-component are rejected before their targets are read.
+authorization headers, bare fine-grained GitHub PATs, and split token shapes.
+Fine-grained PAT detection also covers nested encoding and separator-split
+prefixes. Text-like files remain inspectable with NUL bytes or UTF-16 encoding.
+Unsupported binary inputs fail closed. Publication inputs and supporting files
+with symlinks in any path component are rejected before their targets are read.
 
 Media dispatch recognizes PNG, JPEG, GIF, BMP, TIFF, WebP, ISO-BMFF, AVI, and
 Matroska signatures before applying the declared-extension fallback. Renamed
@@ -71,10 +72,12 @@ and the generated catalog.
 The `privacy-tracker-audit` workflow audits the event's issue or pull request
 through GitHub's authenticated API. Coverage includes issue and pull-request
 titles and bodies, issue comments, inline review comments, review bodies,
-Markdown media links, HTML media attributes, and raw GitHub media URLs. Media
-references use the same bounded canonical representation as text scanning.
-Root-relative and scheme-relative references resolve from a fixed repository
-base before the trusted-host policy runs.
+inline and reference-style Markdown images, HTML image/video/source attributes,
+every `srcset` candidate, and raw GitHub media URLs. Rendered media nodes remain
+auditable when their URLs have no file extension. Media references use the same
+bounded canonical representation as text scanning. Relative, root-relative,
+and scheme-relative references resolve from a fixed repository base before the
+trusted-host policy runs.
 
 `pull_request_target` events check out the default branch, so the token-bearing
 audit always executes trusted code. The checkout excludes persisted Git

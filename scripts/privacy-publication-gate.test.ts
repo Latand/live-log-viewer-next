@@ -37,6 +37,10 @@ function pngChunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, typeBytes, data, checksum]);
 }
 
+function syntheticFineGrainedPat(): string {
+  return `${[["git", "hub"].join(""), "pat"].join("_")}_${"A".repeat(82)}`;
+}
+
 function liveCapturePng(): Buffer {
   const header = Buffer.alloc(13);
   header.writeUInt32BE(1, 0);
@@ -442,6 +446,63 @@ describe("privacy publication gate", () => {
     expect(output).not.toContain(syntheticHome);
     expect(output).not.toContain(syntheticAddress);
     expect(output).not.toContain(syntheticCredential);
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("detects a plain fine-grained GitHub PAT without exposing it", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const text = join(directory, "publication.md");
+    const token = syntheticFineGrainedPat();
+    writeFileSync(text, token);
+
+    const result = runGate([text]);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+    expect(output).not.toContain(token);
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("detects a percent-encoded fine-grained GitHub PAT without exposing it", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const text = join(directory, "publication.md");
+    const token = syntheticFineGrainedPat();
+    const encodedToken = [...token]
+      .map((character) => `%${character.charCodeAt(0).toString(16).padStart(2, "0")}`)
+      .join("");
+    writeFileSync(text, encodedToken);
+
+    const result = runGate([text]);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+    expect(output).not.toContain(token);
+    expect(output).not.toContain(encodedToken);
+    expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("detects a separator-split fine-grained GitHub PAT without exposing it", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
+    temporaryDirectories.push(directory);
+    const text = join(directory, "publication.md");
+    const token = syntheticFineGrainedPat();
+    const splitToken = [...token].join(" ");
+    writeFileSync(text, splitToken);
+
+    const result = runGate([text]);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\ncredential: 1\n");
+    expect(output).not.toContain(token);
+    expect(output).not.toContain(splitToken);
     expect(output).not.toContain(directory);
     expect(result.stderr.toString()).toBe("");
   });
@@ -1745,6 +1806,145 @@ describe("privacy publication gate", () => {
 
     expect(output).toBe("PRIVACY GATE: FAIL\nresource_identifier: 1\n");
     expect(output).not.toContain(syntheticIdentifier);
+  });
+
+  test("audits extensionless inline Markdown images", async () => {
+    const originalOcrLanguages = process.env.LLV_PRIVACY_OCR_LANGUAGES;
+    const syntheticHome = ["", "home", "fixture-person", "extensionless-media"].join("/");
+    const media = pngWithCustomMetadata("eXIf", syntheticHome);
+    const mediaUrl = "https://github.com/example/repository/rendered/capture";
+    const requests: string[] = [];
+    const languageResult = Bun.spawnSync({ cmd: ["tesseract", "--list-langs"], stderr: "pipe", stdout: "pipe" });
+    const ocrLanguage = languageResult.stdout.toString().split(/\r?\n/).find((language) => /^[a-z0-9_]+$/i.test(language) && language !== "osd");
+    process.env.LLV_PRIVACY_OCR_LANGUAGES = ocrLanguage ?? "missing-test-language";
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      requests.push(url.href);
+      if (url.href === mediaUrl) {
+        return new Response(Uint8Array.from(media), { headers: { "content-type": "image/png" } });
+      }
+      if (url.pathname.endsWith("/issues/448")) {
+        return Response.json({ body: `![extensionless](${mediaUrl})`, title: "Synthetic issue" });
+      }
+      if (url.pathname.endsWith("/issues/448/comments")) return Response.json([]);
+      return new Response(null, { status: 404 });
+    };
+
+    try {
+      const findings = await auditGithubPublication({
+        apiUrl: "https://api.github.test/",
+        fetcher,
+        number: 448,
+        repo: "example/repository",
+        requireKnownValues: false,
+        token: "synthetic-github-audit-token",
+      });
+      const output = formatPrivacyReport(findings);
+
+      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_missing: 1\n");
+      expect(requests).toHaveLength(3);
+      expect(requests.at(-1)).toBe(mediaUrl);
+      expect(output).not.toContain(syntheticHome);
+    } finally {
+      if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
+      else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;
+    }
+  });
+
+  test("audits every extensionless source srcset candidate", async () => {
+    const originalOcrLanguages = process.env.LLV_PRIVACY_OCR_LANGUAGES;
+    const syntheticHome = ["", "home", "fixture-person", "srcset-media"].join("/");
+    const media = pngWithCustomMetadata("eXIf", syntheticHome);
+    const mediaUrls = [
+      "https://github.com/example/repository/rendered/srcset-one",
+      "https://github.com/example/repository/rendered/srcset-two",
+    ];
+    const requests: string[] = [];
+    const languageResult = Bun.spawnSync({ cmd: ["tesseract", "--list-langs"], stderr: "pipe", stdout: "pipe" });
+    const ocrLanguage = languageResult.stdout.toString().split(/\r?\n/).find((language) => /^[a-z0-9_]+$/i.test(language) && language !== "osd");
+    process.env.LLV_PRIVACY_OCR_LANGUAGES = ocrLanguage ?? "missing-test-language";
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      requests.push(url.href);
+      if (mediaUrls.includes(url.href)) {
+        return new Response(Uint8Array.from(media), { headers: { "content-type": "image/png" } });
+      }
+      if (url.pathname.endsWith("/issues/448")) {
+        return Response.json({
+          body: `<picture><source srcset="${mediaUrls[0]} 1x, ${mediaUrls[1]} 2x"></picture>`,
+          title: "Synthetic issue",
+        });
+      }
+      if (url.pathname.endsWith("/issues/448/comments")) return Response.json([]);
+      return new Response(null, { status: 404 });
+    };
+
+    try {
+      const findings = await auditGithubPublication({
+        apiUrl: "https://api.github.test/",
+        fetcher,
+        number: 448,
+        repo: "example/repository",
+        requireKnownValues: false,
+        token: "synthetic-github-audit-token",
+      });
+      const output = formatPrivacyReport(findings);
+
+      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 2\nprovenance_missing: 2\n");
+      expect(requests).toHaveLength(4);
+      expect(requests.slice(-2).sort()).toEqual(mediaUrls.toSorted());
+      expect(output).not.toContain(syntheticHome);
+    } finally {
+      if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
+      else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;
+    }
+  });
+
+  test("audits relative reference-style Markdown images", async () => {
+    const originalOcrLanguages = process.env.LLV_PRIVACY_OCR_LANGUAGES;
+    const syntheticHome = ["", "home", "fixture-person", "reference-media"].join("/");
+    const media = pngWithCustomMetadata("eXIf", syntheticHome);
+    const relativeMedia = "rendered/reference-capture";
+    const resolvedMedia = `https://github.com/example/repository/${relativeMedia}`;
+    const requests: string[] = [];
+    const languageResult = Bun.spawnSync({ cmd: ["tesseract", "--list-langs"], stderr: "pipe", stdout: "pipe" });
+    const ocrLanguage = languageResult.stdout.toString().split(/\r?\n/).find((language) => /^[a-z0-9_]+$/i.test(language) && language !== "osd");
+    process.env.LLV_PRIVACY_OCR_LANGUAGES = ocrLanguage ?? "missing-test-language";
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      requests.push(url.href);
+      if (url.href === resolvedMedia) {
+        return new Response(Uint8Array.from(media), { headers: { "content-type": "image/png" } });
+      }
+      if (url.pathname.endsWith("/issues/448")) {
+        return Response.json({
+          body: `![reference][capture]\n\n[capture]: ${relativeMedia}`,
+          title: "Synthetic issue",
+        });
+      }
+      if (url.pathname.endsWith("/issues/448/comments")) return Response.json([]);
+      return new Response(null, { status: 404 });
+    };
+
+    try {
+      const findings = await auditGithubPublication({
+        apiUrl: "https://api.github.test/",
+        fetcher,
+        number: 448,
+        repo: "example/repository",
+        requireKnownValues: false,
+        token: "synthetic-github-audit-token",
+      });
+      const output = formatPrivacyReport(findings);
+
+      expect(output).toBe("PRIVACY GATE: FAIL\nhome_path: 1\nprovenance_missing: 1\n");
+      expect(requests).toHaveLength(3);
+      expect(requests.at(-1)).toBe(resolvedMedia);
+      expect(output).not.toContain(syntheticHome);
+    } finally {
+      if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
+      else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;
+    }
   });
 
   test("fetches entity-encoded GitHub media references for inspection", async () => {
