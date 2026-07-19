@@ -760,12 +760,12 @@ export function TmuxComposer({
   // path at all, so the whole composer stands down below (finding 2).
   const { caps, structuredSession } = useAgentCapabilities(file);
   const structuredImageCapability = structuredSession?.session.capabilities?.imageInput;
-  const structuredImagesDisabled = Boolean(structuredSession
-    && (deadHost || !structuredImageCapability?.supported));
+  const structuredImageControl = caps.controls.images;
+  const structuredImagesDisabled = Boolean(structuredSession && structuredImageControl.state !== "enabled");
   const structuredImagesReason = structuredImagesDisabled
-    ? deadHost
-      ? t("deadHost.sendBlocked")
-      : t("composer.structuredImagesProtocol")
+    ? t(structuredImageControl.state === "disabled"
+      ? structuredImageControl.reason
+      : "composer.structuredImagesProtocol")
     : undefined;
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of
@@ -972,6 +972,10 @@ export function TmuxComposer({
        text-only message durably and uses that request to recover its engine host. */
     if (deadHost && !structuredSession) {
       setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
+      return;
+    }
+    if (structuredSession && structuredImagesDisabled && sentImages.length) {
+      setStatus({ kind: "err", text: structuredImagesReason! });
       return;
     }
     /* Host not yet resolved under the runtime plane: block the POST so a

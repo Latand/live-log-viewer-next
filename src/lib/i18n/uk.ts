@@ -265,6 +265,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.structuredImagesUnavailable": "Структуровані розмови поки не підтримують картинки",
   "composer.codexImagesTextOnly": "Обрана модель Codex приймає лише текст.",
   "composer.structuredImagesProtocol": "Цей структурований хост не узгодив підтримку зображень.",
+  "composer.imagesBlockedDuringRecovery": "Зображення залишаться вибраними до відновлення структурованого хоста.",
   "composer.imageCapabilityLoading": "Завантажуємо дані про підтримку зображень.",
   "composer.imageCapabilityError": "Не вдалося завантажити дані про підтримку зображень.",
   "composer.imageCapabilityRetry": "Повторити перевірку зображень",
