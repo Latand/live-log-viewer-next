@@ -63,7 +63,7 @@ export interface HandoffRow extends HandoffRowInput {
   predecessorGeneration: string | null;
   /** Generation that claimed the row; the terminal predecessor -> successor link. */
   successorGeneration: string | null;
-  /** Delivery ids already replayed to a successor; guards restart replay. */
+  /** Delivery ids acknowledged by the successor after idempotent delivery. */
   replayedDeliveryIds: string[];
   interruptionOutcome: HandoffInterruptionOutcome | null;
   lastError: string | null;
@@ -81,20 +81,33 @@ export type ClaimReason = "not-found" | "generation-fence";
 export interface ClaimResult {
   ok: boolean;
   row: HandoffRow | null;
-  /** Deliveries the successor must replay, in durable order. Empty on an
-      idempotent re-claim so a crash retry never duplicates turns. */
+  /** Unacknowledged deliveries the successor must replay in durable order. */
   replay: HandoffDelivery[];
   reason?: ClaimReason;
+}
+
+export interface HandoffQueueStoreState {
+  rows: HandoffRow[];
+  history: HandoffRow[];
+  drainingGenerations: string[];
 }
 
 /** Durable substrate for the queue. Implementations must persist atomically. */
 export interface HandoffQueueStore {
   load(): HandoffRow[];
   save(rows: readonly HandoffRow[]): void;
+  loadHistory?(): HandoffRow[];
+  saveHistory?(rows: readonly HandoffRow[]): void;
+  loadDrainingGenerations?(): string[];
+  saveDrainingGenerations?(generations: readonly string[]): void;
+  /** Runs one read-modify-write cycle while holding the store's durable lock. */
+  transaction?<T>(mutation: (state: HandoffQueueStoreState) => T): T;
 }
 
 export class InMemoryHandoffQueueStore implements HandoffQueueStore {
   private rows: HandoffRow[] = [];
+  private history: HandoffRow[] = [];
+  private drainingGenerations: string[] = [];
 
   load(): HandoffRow[] {
     return this.rows.map((row) => structuredClone(row));
@@ -103,10 +116,51 @@ export class InMemoryHandoffQueueStore implements HandoffQueueStore {
   save(rows: readonly HandoffRow[]): void {
     this.rows = rows.map((row) => structuredClone(row));
   }
+
+  loadHistory(): HandoffRow[] {
+    return this.history.map((row) => structuredClone(row));
+  }
+
+  saveHistory(rows: readonly HandoffRow[]): void {
+    this.history = rows.map((row) => structuredClone(row));
+  }
+
+  loadDrainingGenerations(): string[] {
+    return [...this.drainingGenerations];
+  }
+
+  saveDrainingGenerations(generations: readonly string[]): void {
+    this.drainingGenerations = [...new Set(generations)];
+  }
+
+  transaction<T>(mutation: (state: HandoffQueueStoreState) => T): T {
+    const state = {
+      rows: this.load(),
+      history: this.loadHistory(),
+      drainingGenerations: this.loadDrainingGenerations(),
+    };
+    const result = mutation(state);
+    this.save(state.rows);
+    this.saveHistory(state.history);
+    this.saveDrainingGenerations(state.drainingGenerations);
+    return result;
+  }
 }
 
 function orderedDeliveries(deliveries: readonly HandoffDelivery[]): HandoffDelivery[] {
   return [...deliveries].sort((left, right) => left.seq - right.seq);
+}
+
+function replacementDeliveries(previous: HandoffRow, incoming: readonly HandoffDelivery[]): HandoffDelivery[] {
+  const acknowledgedIds = new Set(previous.replayedDeliveryIds);
+  const pendingIncoming = orderedDeliveries(incoming)
+    .filter((delivery) => !acknowledgedIds.has(delivery.deliveryId));
+  const incomingIds = new Set(pendingIncoming.map((delivery) => delivery.deliveryId));
+  const unacknowledged = orderedDeliveries(previous.pendingDeliveries)
+    .filter((delivery) => !acknowledgedIds.has(delivery.deliveryId))
+    .filter((delivery) => !incomingIds.has(delivery.deliveryId));
+  return [...unacknowledged, ...pendingIncoming]
+    .map((delivery, index) => ({ ...delivery, seq: index + 1 }));
 }
 
 function terminalStatusFor(turnState: HandoffTurnState): HandoffStatus {
@@ -120,29 +174,48 @@ function outcomeFor(turnState: HandoffTurnState): HandoffInterruptionOutcome | n
 }
 
 export class HandoffQueue {
-  private readonly rowsById = new Map<string, HandoffRow>();
-  private readonly drainingGenerations = new Set<string>();
-
   constructor(
     private readonly store: HandoffQueueStore,
     private readonly clock: () => string = () => new Date().toISOString(),
-  ) {
-    for (const row of store.load()) {
-      this.rowsById.set(row.operationId, row);
-      if (row.status === "draining") this.drainingGenerations.add(row.hostGeneration);
-    }
+  ) {}
+
+  private loadState(): HandoffQueueStoreState {
+    return {
+      rows: this.store.load(),
+      history: this.store.loadHistory?.() ?? [],
+      drainingGenerations: this.store.loadDrainingGenerations?.() ?? [],
+    };
   }
 
-  private flush(): void {
-    this.store.save([...this.rowsById.values()]);
+  private mutate<T>(mutation: (rowsById: Map<string, HandoffRow>, state: HandoffQueueStoreState) => T): T {
+    const apply = (state: HandoffQueueStoreState) => {
+      const rowsById = new Map(state.rows.map((row) => [row.operationId, row]));
+      const result = mutation(rowsById, state);
+      state.rows.splice(0, state.rows.length, ...rowsById.values());
+      return result;
+    };
+    if (this.store.transaction) return this.store.transaction(apply);
+    const state = this.loadState();
+    const result = apply(state);
+    this.store.save(state.rows);
+    this.store.saveHistory?.(state.history);
+    this.store.saveDrainingGenerations?.(state.drainingGenerations);
+    return result;
   }
 
   rows(): HandoffRow[] {
-    return [...this.rowsById.values()].map((row) => structuredClone(row));
+    return this.store.load().map((row) => structuredClone(row));
+  }
+
+  /** Completed operation rows retained outside the one-row active lease set. */
+  history(): HandoffRow[] {
+    return (this.store.loadHistory?.() ?? []).map((row) => structuredClone(row));
   }
 
   row(operationId: string): HandoffRow | null {
-    const row = this.rowsById.get(operationId);
+    const state = this.loadState();
+    const row = [...state.rows, ...state.history]
+      .find((candidate) => candidate.operationId === operationId);
     return row ? structuredClone(row) : null;
   }
 
@@ -153,24 +226,33 @@ export class HandoffQueue {
    */
   enqueue(inputs: readonly HandoffRowInput[]): void {
     const now = this.clock();
-    let changed = false;
-    for (const input of inputs) {
-      if (this.rowsById.has(input.operationId)) continue;
-      this.rowsById.set(input.operationId, {
-        ...input,
-        pendingDeliveries: orderedDeliveries(input.pendingDeliveries),
-        status: "pending",
-        predecessorGeneration: null,
-        successorGeneration: null,
-        replayedDeliveryIds: [],
-        interruptionOutcome: null,
-        lastError: null,
-        enqueuedAt: now,
-        updatedAt: now,
-      });
-      changed = true;
-    }
-    if (changed) this.flush();
+    this.mutate((rowsById, state) => {
+      for (const input of inputs) {
+        if (rowsById.has(input.operationId)
+          || state.history.some((row) => row.operationId === input.operationId)) continue;
+        const active = [...rowsById.values()]
+          .find((row) => row.conversationId === input.conversationId);
+        if (active) {
+          if (active.status === "pending" || active.status === "draining") continue;
+          rowsById.delete(active.operationId);
+          state.history.push(structuredClone(active));
+        }
+        rowsById.set(input.operationId, {
+          ...input,
+          pendingDeliveries: active
+            ? replacementDeliveries(active, input.pendingDeliveries)
+            : orderedDeliveries(input.pendingDeliveries),
+          status: "pending",
+          predecessorGeneration: null,
+          successorGeneration: null,
+          replayedDeliveryIds: [],
+          interruptionOutcome: null,
+          lastError: null,
+          enqueuedAt: now,
+          updatedAt: now,
+        });
+      }
+    });
   }
 
   /**
@@ -179,26 +261,24 @@ export class HandoffQueue {
    * admitting new hosts, but new UI messages are still enqueued durably.
    */
   beginDrain(generation: string): void {
-    this.drainingGenerations.add(generation);
     const now = this.clock();
-    let changed = false;
-    for (const row of this.rowsById.values()) {
-      if (row.hostGeneration !== generation) continue;
-      /* Rows this generation owns re-enter draining on every promotion: freshly
-         enqueued `pending` rows and rows this generation `claimed` from a prior
-         handoff. A row it does not own (`terminal`, `failed`, or owned by
-         another generation) is left alone so it never blocks retirement. */
-      if (row.status !== "pending" && row.status !== "claimed") continue;
-      row.status = "draining";
-      row.updatedAt = now;
-      changed = true;
-    }
-    if (changed) this.flush();
+    this.mutate((rowsById, state) => {
+      if (!state.drainingGenerations.includes(generation)) state.drainingGenerations.push(generation);
+      for (const row of rowsById.values()) {
+        if (row.hostGeneration !== generation) continue;
+        /* Rows this generation owns re-enter draining on every promotion: freshly
+           enqueued `pending` rows and rows this generation `claimed` from a prior
+           handoff. Terminal and failed rows stay at their retirement boundary. */
+        if (row.status !== "pending" && row.status !== "claimed") continue;
+        row.status = "draining";
+        row.updatedAt = now;
+      }
+    });
   }
 
   /** A draining generation rejects new host admissions (protocol step 3). */
   isAdmittingNewHosts(generation: string): boolean {
-    return !this.drainingGenerations.has(generation);
+    return !this.loadState().drainingGenerations.includes(generation);
   }
 
   /**
@@ -206,13 +286,28 @@ export class HandoffQueue {
    * while draining so the composer never drops a message during the handoff.
    */
   admitMessage(operationId: string, delivery: HandoffDelivery): boolean {
-    const row = this.rowsById.get(operationId);
-    if (!row || row.status === "terminal") return false;
-    if (row.pendingDeliveries.some((existing) => existing.deliveryId === delivery.deliveryId)) return true;
-    row.pendingDeliveries = orderedDeliveries([...row.pendingDeliveries, delivery]);
-    row.updatedAt = this.clock();
-    this.flush();
-    return true;
+    return this.mutate((rowsById) => {
+      const row = rowsById.get(operationId);
+      if (!row || row.status === "terminal") return false;
+      if (row.pendingDeliveries.some((existing) => existing.deliveryId === delivery.deliveryId)) return true;
+      row.pendingDeliveries = orderedDeliveries([...row.pendingDeliveries, delivery]);
+      row.updatedAt = this.clock();
+      return true;
+    });
+  }
+
+  /** Persist the outgoing host's latest turn boundary under its lease fence. */
+  refreshTurnState(operationId: string, generation: string, turnState: HandoffTurnState): boolean {
+    return this.mutate((rowsById) => {
+      const row = rowsById.get(operationId);
+      if (!row
+        || row.hostGeneration !== generation
+        || (row.status !== "pending" && row.status !== "draining")) return false;
+      if (row.turnState === "terminal" && turnState !== "terminal") return false;
+      row.turnState = turnState;
+      row.updatedAt = this.clock();
+      return true;
+    });
   }
 
   /**
@@ -221,35 +316,54 @@ export class HandoffQueue {
    * the same conversation/session identity, replays queued messages in order,
    * and records a terminal predecessor -> successor link. A busy turn at the
    * drain deadline records an interruption outcome and resumes from the durable
-   * transcript. Re-claiming with the same successor generation (crash retry or
-   * restart) is idempotent: it returns success with no replay so no turn or card
-   * is ever duplicated.
+   * transcript. Re-claiming with the same successor generation preserves its
+   * lease and offers every delivery still awaiting acknowledgement.
    */
   claim(operationId: string, fence: ClaimFence): ClaimResult {
-    const row = this.rowsById.get(operationId);
-    if (!row) return { ok: false, row: null, replay: [], reason: "not-found" };
+    return this.mutate((rowsById) => {
+      const row = rowsById.get(operationId);
+      if (!row) return { ok: false, row: null, replay: [], reason: "not-found" };
 
-    // Idempotent re-claim: the successor already owns this identity.
-    if (row.successorGeneration === fence.toGeneration
-      && (row.status === "claimed" || row.status === "terminal")) {
-      return { ok: true, row: structuredClone(row), replay: [] };
-    }
+      const replay = orderedDeliveries(row.pendingDeliveries)
+        .filter((delivery) => !row.replayedDeliveryIds.includes(delivery.deliveryId));
 
-    if (row.hostGeneration !== fence.fromGeneration) {
-      return { ok: false, row: structuredClone(row), replay: [], reason: "generation-fence" };
-    }
+      // Idempotent re-claim: the successor already owns this identity.
+      if (row.successorGeneration === fence.toGeneration
+        && (row.status === "claimed" || row.status === "terminal")) {
+        return { ok: true, row: structuredClone(row), replay };
+      }
 
-    const replay = orderedDeliveries(row.pendingDeliveries)
-      .filter((delivery) => !row.replayedDeliveryIds.includes(delivery.deliveryId));
-    row.predecessorGeneration = fence.fromGeneration;
-    row.successorGeneration = fence.toGeneration;
-    row.hostGeneration = fence.toGeneration;
-    row.status = terminalStatusFor(row.turnState);
-    row.interruptionOutcome = outcomeFor(row.turnState);
-    row.replayedDeliveryIds = [...row.replayedDeliveryIds, ...replay.map((delivery) => delivery.deliveryId)];
-    row.updatedAt = this.clock();
-    this.flush();
-    return { ok: true, row: structuredClone(row), replay };
+      if (row.hostGeneration !== fence.fromGeneration) {
+        return { ok: false, row: structuredClone(row), replay: [], reason: "generation-fence" };
+      }
+
+      row.predecessorGeneration = fence.fromGeneration;
+      row.successorGeneration = fence.toGeneration;
+      row.hostGeneration = fence.toGeneration;
+      row.status = terminalStatusFor(row.turnState);
+      row.interruptionOutcome = outcomeFor(row.turnState);
+      row.updatedAt = this.clock();
+      return { ok: true, row: structuredClone(row), replay };
+    });
+  }
+
+  /**
+   * Records confirmed idempotent delivery under the successor ownership fence.
+   * A caller may acknowledge one delivery at a time, allowing a restart to
+   * resume at the first delivery whose confirmation was never persisted.
+   */
+  acknowledgeReplay(operationId: string, successorGeneration: string, deliveryIds: readonly string[]): boolean {
+    return this.mutate((rowsById) => {
+      const row = rowsById.get(operationId);
+      if (!row
+        || row.successorGeneration !== successorGeneration
+        || (row.status !== "claimed" && row.status !== "terminal")) return false;
+      const knownIds = new Set(row.pendingDeliveries.map((delivery) => delivery.deliveryId));
+      if (deliveryIds.some((deliveryId) => !knownIds.has(deliveryId))) return false;
+      row.replayedDeliveryIds = [...new Set([...row.replayedDeliveryIds, ...deliveryIds])];
+      row.updatedAt = this.clock();
+      return true;
+    });
   }
 
   /**
@@ -260,20 +374,20 @@ export class HandoffQueue {
    */
   failCandidate(toGeneration: string): void {
     const now = this.clock();
-    let changed = false;
-    for (const row of this.rowsById.values()) {
-      if (row.successorGeneration !== toGeneration) continue;
-      const predecessor = row.predecessorGeneration;
-      row.hostGeneration = predecessor ?? row.hostGeneration;
-      row.status = predecessor && this.drainingGenerations.has(predecessor) ? "draining" : "pending";
-      row.predecessorGeneration = null;
-      row.successorGeneration = null;
-      row.replayedDeliveryIds = [];
-      row.interruptionOutcome = null;
-      row.updatedAt = now;
-      changed = true;
-    }
-    if (changed) this.flush();
+    this.mutate((rowsById, state) => {
+      const drainingGenerations = new Set(state.drainingGenerations);
+      for (const row of rowsById.values()) {
+        if (row.successorGeneration !== toGeneration) continue;
+        const predecessor = row.predecessorGeneration;
+        row.hostGeneration = predecessor ?? row.hostGeneration;
+        row.status = predecessor && drainingGenerations.has(predecessor) ? "draining" : "pending";
+        row.predecessorGeneration = null;
+        row.successorGeneration = null;
+        row.replayedDeliveryIds = [];
+        row.interruptionOutcome = null;
+        row.updatedAt = now;
+      }
+    });
   }
 
   /**
@@ -282,12 +396,13 @@ export class HandoffQueue {
    * transferred. Rollback keeps the outgoing generation available.
    */
   markRetryableFailure(operationId: string, error: string): void {
-    const row = this.rowsById.get(operationId);
-    if (!row) return;
-    row.status = "failed";
-    row.lastError = error;
-    row.updatedAt = this.clock();
-    this.flush();
+    this.mutate((rowsById) => {
+      const row = rowsById.get(operationId);
+      if (!row) return;
+      row.status = "failed";
+      row.lastError = error;
+      row.updatedAt = this.clock();
+    });
   }
 
   /**
@@ -296,7 +411,7 @@ export class HandoffQueue {
    * A row still `pending` or `draining` on the outgoing generation blocks it.
    */
   retirable(outgoingGeneration: string): boolean {
-    for (const row of this.rowsById.values()) {
+    for (const row of this.store.load()) {
       if (row.hostGeneration !== outgoingGeneration) continue;
       if (row.status === "pending" || row.status === "draining") return false;
     }
@@ -315,9 +430,13 @@ export interface HandoffCandidateSnapshot {
       id: string;
       accountId: string | null;
       host: { identity: string; epoch: number } | null;
+      launchProfile?: { parentConversationId?: string | null };
     }>;
   }>;
-  entries: Record<string, { structuredHost: { kind: string } | null; accountId: string | null }>;
+  entries: Record<string, {
+    structuredHost?: { kind: string } | null;
+    accountId: string | null;
+  }>;
   lineageEdges: Record<string, {
     childConversationId: string;
     parentConversationId: string;
@@ -345,9 +464,32 @@ function generationFence(host: { identity: string; epoch: number } | null, sessi
  */
 export function collectHandoffCandidates(snapshot: HandoffCandidateSnapshot): HandoffRowInput[] {
   const engineNativeParents = new Map<string, string>();
+  const lineageChildren = new Set<string>();
   for (const edge of Object.values(snapshot.lineageEdges)) {
+    lineageChildren.add(edge.childConversationId);
     if (edge.source === "engine-native") engineNativeParents.set(edge.childConversationId, edge.parentConversationId);
   }
+  for (const conversation of Object.values(snapshot.conversations)) {
+    if (lineageChildren.has(conversation.id)) continue;
+    const parentConversationId = conversation.generations.at(-1)?.launchProfile?.parentConversationId;
+    if (parentConversationId) engineNativeParents.set(conversation.id, parentConversationId);
+  }
+
+  const hostedOwner = (conversationId: string) => {
+    const seen = new Set<string>();
+    let currentId: string | undefined = conversationId;
+    while (currentId && !seen.has(currentId)) {
+      seen.add(currentId);
+      const current = snapshot.conversations[currentId];
+      const generation = current?.generations.at(-1);
+      if (current && generation) {
+        const entry = snapshot.entries[sessionEntryKey(current.engine, generation.id)];
+        if (entry?.structuredHost) return { generation, entry };
+      }
+      currentId = engineNativeParents.get(currentId);
+    }
+    return null;
+  };
 
   const deliveriesByConversation = new Map<string, HandoffDelivery[]>();
   const orderedHeld = Object.entries(snapshot.heldDeliveries)
@@ -366,11 +508,10 @@ export function collectHandoffCandidates(snapshot: HandoffCandidateSnapshot): Ha
     if (conversation.turn.state === "terminal") continue;
     const generation = conversation.generations.at(-1);
     if (!generation) continue;
-    const entry = snapshot.entries[sessionEntryKey(conversation.engine, generation.id)];
-    if (!entry?.structuredHost) continue;
-
     const parentConversationId = engineNativeParents.get(conversation.id) ?? null;
-    const hostGeneration = generationFence(generation.host, generation.id);
+    const owner = hostedOwner(conversation.id);
+    if (!owner) continue;
+    const hostGeneration = generationFence(owner.generation.host, owner.generation.id);
     rows.push({
       operationId: `handoff_${conversation.id}_${hostGeneration}`,
       conversationId: conversation.id,
@@ -379,7 +520,7 @@ export function collectHandoffCandidates(snapshot: HandoffCandidateSnapshot): Ha
       kind: parentConversationId ? "engine-native-child" : "root",
       parentConversationId,
       hostGeneration,
-      accountId: generation.accountId ?? entry.accountId ?? null,
+      accountId: generation.accountId ?? owner.entry.accountId ?? null,
       turnState: conversation.turn.state,
       pendingDeliveries: deliveriesByConversation.get(conversation.id) ?? [],
     });

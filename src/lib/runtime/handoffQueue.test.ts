@@ -1,4 +1,11 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, test } from "bun:test";
+
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { AgentRegistry } from "@/lib/agent/registry";
 
 import {
   collectHandoffCandidates,
@@ -77,6 +84,23 @@ describe("handoff queue draining (protocol step 3)", () => {
     const admitted = q.admitMessage("handoff_root_1", { deliveryId: "d2", clientMessageId: "c2", seq: 2 });
     expect(admitted).toBe(true);
     expect(q.row("handoff_root_1")!.pendingDeliveries.map((d) => d.deliveryId)).toEqual(["d1", "d2"]);
+  });
+
+  test("persists a fenced busy-to-terminal refresh across restart", () => {
+    const store = new InMemoryHandoffQueueStore();
+    const outgoing = new HandoffQueue(store);
+    outgoing.enqueue([rowInput({ turnState: "busy" })]);
+    outgoing.beginDrain("gen-blue");
+    expect(outgoing.refreshTurnState("handoff_root_1", "gen-stale", "terminal")).toBe(false);
+    expect(outgoing.refreshTurnState("handoff_root_1", "gen-blue", "terminal")).toBe(true);
+
+    const successor = new HandoffQueue(store);
+    const claimed = successor.claim("handoff_root_1", { fromGeneration: "gen-blue", toGeneration: "gen-green" });
+    expect(claimed.row).toMatchObject({
+      turnState: "terminal",
+      status: "terminal",
+      interruptionOutcome: "completed",
+    });
   });
 });
 
@@ -212,7 +236,7 @@ describe("candidate health failure and rollback (protocol step 6)", () => {
 });
 
 describe("crash during lease transfer and idempotent replay", () => {
-  test("re-claiming after a crash with the same successor generation never duplicates deliveries or cards", () => {
+  test("a restart before delivery acknowledgement offers the replay again", () => {
     const store = new InMemoryHandoffQueueStore();
     const first = new HandoffQueue(store);
     first.enqueue([rowInput({ pendingDeliveries: [{ deliveryId: "d1", clientMessageId: "c1", seq: 1 }] })]);
@@ -220,12 +244,46 @@ describe("crash during lease transfer and idempotent replay", () => {
     const initial = first.claim("handoff_root_1", { fromGeneration: "gen-blue", toGeneration: "gen-green" });
     expect(initial.replay.map((d) => d.deliveryId)).toEqual(["d1"]);
 
-    // Simulate a crash mid-transfer: a fresh process reloads the durable store.
+    // The successor crashes after claiming ownership and before delivering d1.
     const successor = new HandoffQueue(store);
     const replayAgain = successor.claim("handoff_root_1", { fromGeneration: "gen-blue", toGeneration: "gen-green" });
     expect(replayAgain.ok).toBe(true);
-    expect(replayAgain.replay).toEqual([]);
+    expect(replayAgain.replay.map((delivery) => delivery.deliveryId)).toEqual(["d1"]);
     expect(successor.rows()).toHaveLength(1);
+  });
+
+  test("a restart midway through a replay offers only deliveries awaiting acknowledgement", () => {
+    const store = new InMemoryHandoffQueueStore();
+    const first = new HandoffQueue(store);
+    first.enqueue([rowInput({ pendingDeliveries: [
+      { deliveryId: "d1", clientMessageId: "c1", seq: 1 },
+      { deliveryId: "d2", clientMessageId: "c2", seq: 2 },
+    ] })]);
+    first.beginDrain("gen-blue");
+    const claimed = first.claim("handoff_root_1", { fromGeneration: "gen-blue", toGeneration: "gen-green" });
+    expect(claimed.replay.map((delivery) => delivery.deliveryId)).toEqual(["d1", "d2"]);
+
+    expect(first.acknowledgeReplay("handoff_root_1", "gen-green", ["d1"])).toBe(true);
+
+    const successor = new HandoffQueue(store);
+    const remaining = successor.claim("handoff_root_1", { fromGeneration: "gen-blue", toGeneration: "gen-green" });
+    expect(remaining.replay.map((delivery) => delivery.deliveryId)).toEqual(["d2"]);
+  });
+
+  test("a restart after delivery acknowledgement keeps the replay complete", () => {
+    const store = new InMemoryHandoffQueueStore();
+    const first = new HandoffQueue(store);
+    first.enqueue([rowInput({
+      pendingDeliveries: [{ deliveryId: "d1", clientMessageId: "c1", seq: 1 }],
+    })]);
+    first.beginDrain("gen-blue");
+    first.claim("handoff_root_1", { fromGeneration: "gen-blue", toGeneration: "gen-green" });
+    expect(first.acknowledgeReplay("handoff_root_1", "gen-stale", ["d1"])).toBe(false);
+    expect(first.acknowledgeReplay("handoff_root_1", "gen-green", ["d1"])).toBe(true);
+
+    const successor = new HandoffQueue(store);
+    const complete = successor.claim("handoff_root_1", { fromGeneration: "gen-blue", toGeneration: "gen-green" });
+    expect(complete.replay).toEqual([]);
   });
 });
 
@@ -236,6 +294,7 @@ describe("repeated deploy/restart without duplicate turns or cards", () => {
     q.enqueue([rowInput({ pendingDeliveries: [{ deliveryId: "d1", clientMessageId: "c1", seq: 1 }] })]);
     q.beginDrain("gen-blue");
     expect(q.claim("handoff_root_1", { fromGeneration: "gen-blue", toGeneration: "gen-green" }).replay.map((d) => d.deliveryId)).toEqual(["d1"]);
+    expect(q.acknowledgeReplay("handoff_root_1", "gen-green", ["d1"])).toBe(true);
 
     // Second deploy: a new user message arrives, then green -> teal promotion.
     q.admitMessage("handoff_root_1", { deliveryId: "d2", clientMessageId: "c2", seq: 2 });
@@ -248,6 +307,65 @@ describe("repeated deploy/restart without duplicate turns or cards", () => {
     expect(second.replay.map((d) => d.deliveryId)).toEqual(["d2"]);
     expect(q.retirable("gen-green")).toBe(true);
     expect(q.rows()).toHaveLength(1);
+  });
+
+  test("collect-claim-collect-claim keeps one active lease and replays only new deliveries", () => {
+    const promotionSnapshot = (identity: string, epoch: number, deliveryId: string): HandoffCandidateSnapshot => ({
+      conversations: {
+        conversation_root: {
+          id: "conversation_root",
+          engine: "codex",
+          supersededBy: null,
+          turn: { state: "idle" },
+          generations: [{
+            id: "session_root",
+            accountId: "acct-a",
+            host: { identity, epoch },
+          }],
+        },
+      },
+      entries: {
+        "codex:session_root": { structuredHost: { kind: "codex-app-server" }, accountId: "acct-a" },
+      },
+      lineageEdges: {},
+      heldDeliveries: {
+        [deliveryId]: { conversationId: "conversation_root", state: "held", createdAt: `2026-01-01T00:00:0${epoch}Z` },
+      },
+    });
+
+    const { q } = queue();
+    const firstInput = collectHandoffCandidates(promotionSnapshot("host-blue", 1, "d1"))[0]!;
+    q.enqueue([firstInput]);
+    q.beginDrain(firstInput.hostGeneration);
+    const first = q.claim(firstInput.operationId, {
+      fromGeneration: firstInput.hostGeneration,
+      toGeneration: "host-green:2",
+    });
+    expect(first.replay.map((delivery) => delivery.deliveryId)).toEqual(["d1"]);
+    expect(q.acknowledgeReplay(firstInput.operationId, "host-green:2", ["d1"])).toBe(true);
+
+    const secondSnapshot = promotionSnapshot("host-green", 2, "d2");
+    secondSnapshot.heldDeliveries.d1 = {
+      conversationId: "conversation_root",
+      state: "held",
+      createdAt: "2026-01-01T00:00:01Z",
+    };
+    const secondInput = collectHandoffCandidates(secondSnapshot)[0]!;
+    q.enqueue([secondInput]);
+    expect(q.rows()).toHaveLength(1);
+    expect(q.history()).toEqual([expect.objectContaining({
+      operationId: firstInput.operationId,
+      predecessorGeneration: firstInput.hostGeneration,
+      successorGeneration: "host-green:2",
+      status: "claimed",
+    })]);
+
+    q.beginDrain(secondInput.hostGeneration);
+    const second = q.claim(secondInput.operationId, {
+      fromGeneration: secondInput.hostGeneration,
+      toGeneration: "host-teal:3",
+    });
+    expect(second.replay.map((delivery) => delivery.deliveryId)).toEqual(["d2"]);
   });
 });
 
@@ -323,6 +441,101 @@ describe("collectHandoffCandidates registry projection", () => {
     const child = byConversation.get("conversation_child")!;
     expect(child.kind).toBe("engine-native-child");
     expect(child.parentConversationId).toBe("conversation_root");
+  });
+
+  test("collects a persisted engine-native child through its hosted ancestor", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-handoff-child-"));
+    const filename = path.join(directory, "agent-registry.json");
+    const registry = new AgentRegistry(filename);
+    const parentSessionId = "11111111-2222-3333-4444-555555555555";
+    const parentPath = `/claude/project/${parentSessionId}.jsonl`;
+    const childPath = `/claude/project/${parentSessionId}/subagents/agent-child.jsonl`;
+    const observation = (artifactPath: string, parentArtifactPath: string | null, state: "busy" | "idle") => ({
+      engine: "claude" as const,
+      path: artifactPath,
+      accountId: "acct-a",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "project" }),
+      turn: { state, source: "assistant" as const, terminalAt: null },
+      observedAt: "2026-07-20T12:00:00.000Z",
+      parentArtifactPath,
+    });
+
+    try {
+      registry.reconcileConversations([
+        observation(childPath, parentPath, "busy"),
+        observation(parentPath, null, "idle"),
+      ]);
+      const parent = registry.conversationForPath(parentPath)!;
+      const child = registry.conversationForPath(childPath)!;
+      const parentGeneration = parent.generations.at(-1)!;
+      registry.upsert({
+        key: { engine: "claude", sessionId: parentGeneration.id },
+        artifactPath: parentGeneration.path,
+        cwd: "/repo",
+        accountId: "acct-a",
+        launchProfile: parentGeneration.launchProfile,
+        status: "live",
+        host: null,
+        structuredHost: {
+          kind: "claude-broker",
+          endpoint: "stdio:parent",
+          process: null,
+          eventCursor: 1,
+          protocolVersion: "1",
+          writerClaimEpoch: 0,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        },
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: null,
+      });
+
+      const restarted = new AgentRegistry(filename);
+      expect(restarted.snapshot().entries[`claude:${child.generations.at(-1)!.id}`]).toBeUndefined();
+      const rows = collectHandoffCandidates(restarted.snapshot());
+      const root = rows.find((row) => row.conversationId === parent.id)!;
+      const collectedChild = rows.find((row) => row.conversationId === child.id)!;
+      expect(collectedChild).toMatchObject({
+        kind: "engine-native-child",
+        parentConversationId: parent.id,
+        engineSessionId: child.generations.at(-1)!.id,
+        accountId: "acct-a",
+        hostGeneration: root.hostGeneration,
+      });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("uses an explicit durable parent binding when lineage has not materialized", () => {
+    const fixture = snapshot();
+    fixture.lineageEdges = {};
+    fixture.conversations.conversation_child!.generations[0]!.launchProfile = {
+      parentConversationId: "conversation_root",
+    };
+    delete fixture.entries["codex:session_child"];
+
+    const child = collectHandoffCandidates(fixture)
+      .find((row) => row.conversationId === "conversation_child");
+    expect(child).toMatchObject({
+      kind: "engine-native-child",
+      parentConversationId: "conversation_root",
+      hostGeneration: "codex-app-server-7:3",
+    });
+  });
+
+  test("keeps viewer-spawn lineage authoritative over an explicit profile parent", () => {
+    const fixture = snapshot();
+    fixture.lineageEdges.e1!.source = "viewer-spawn";
+    fixture.conversations.conversation_child!.generations[0]!.launchProfile = {
+      parentConversationId: "conversation_root",
+    };
+    delete fixture.entries["codex:session_child"];
+
+    expect(collectHandoffCandidates(fixture)
+      .some((row) => row.conversationId === "conversation_child")).toBe(false);
   });
 
   test("produces a deterministic operation id so re-collection is idempotent", () => {
