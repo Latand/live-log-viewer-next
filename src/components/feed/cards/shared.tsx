@@ -10,7 +10,7 @@ export function StatusIcon({ status, className }: { status: ToolStatus; classNam
   const cls = className ?? "h-3.5 w-3.5";
   if (status === "ok") return <Check className={cls} aria-hidden />;
   if (status === "err") return <X className={cls} aria-hidden />;
-  return <Loader2 className={`${cls} animate-spin`} aria-hidden />;
+  return <Loader2 className={`${cls} animate-spin motion-reduce:animate-none`} aria-hidden />;
 }
 
 export function FileRef({ file, line }: { file: string; line?: number }) {

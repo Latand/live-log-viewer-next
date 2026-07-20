@@ -1,7 +1,6 @@
-/* The kick is registered by startup adoption (instrumentation bundle) and
-   fired from route handlers (their own bundle), so it must live on
-   `globalThis` — module-level state does not cross Next standalone bundles. */
-const signalStore = globalThis as typeof globalThis & {
+/* Startup adoption and route handlers can run in separate Next bundle realms.
+   The Node process object carries the kick across those realm boundaries. */
+const signalStore = process as typeof process & {
   __llvStructuredDeliveryKick?: (() => void | Promise<void>) | null;
 };
 

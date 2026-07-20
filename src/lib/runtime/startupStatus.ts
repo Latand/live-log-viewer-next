@@ -1,4 +1,4 @@
-const startupStore = globalThis as typeof globalThis & {
+const startupStore = process as typeof process & {
   __llvStructuredHostStartupFailed?: boolean;
 };
 

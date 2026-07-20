@@ -77,7 +77,9 @@ function textFromContent(content: unknown): string {
   if (typeof content === "string") return content;
   return arr(content)
     .map((part) => {
-      if (part.type === "text") return str(part.text);
+      if (part.type === "text" || part.type === "input_text" || part.type === "output_text") {
+        return str(part.text);
+      }
       if (part.type === "thinking") return str(part.thinking);
       if (part.type === "tool_use") return `${str(part.name)} ${JSON.stringify(rec(part.input))}`.trim();
       if (part.type === "tool_result") {
