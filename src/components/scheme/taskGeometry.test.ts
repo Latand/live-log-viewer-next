@@ -358,6 +358,49 @@ describe("taskWorldBounds", () => {
     expect(world.x).toBeLessThanOrEqual(routeBox.x);
   });
 
+  test("a node placed far right after panning grows the world width, not the height (#263)", () => {
+    const before = taskWorldBounds(1000, 800, []);
+    /* A conversation card the layout drops well past the right edge — the world
+       the camera and minimap read must reach it on the x axis alone. */
+    const after = taskWorldBounds(1000, 800, [{ x: 4000, y: 300, w: TASK_W, h: 120 }]);
+    expect(after.x + after.w).toBe(4000 + TASK_W + TASK_WORLD_MARGIN);
+    expect(after.x + after.w).toBeGreaterThan(before.x + before.w);
+    expect(after.y).toBe(before.y);
+    expect(after.y + after.h).toBe(before.y + before.h);
+  });
+
+  test("a node placed far down after panning grows the world height, not the width (#263)", () => {
+    const before = taskWorldBounds(1000, 800, []);
+    const after = taskWorldBounds(1000, 800, [{ x: 300, y: 5000, w: TASK_W, h: 120 }]);
+    expect(after.y + after.h).toBe(5000 + 120 + TASK_WORLD_MARGIN);
+    expect(after.y + after.h).toBeGreaterThan(before.y + before.h);
+    expect(after.x).toBe(before.x);
+    expect(after.x + after.w).toBe(before.x + before.w);
+  });
+
+  test("a representative large world encloses every scattered node on both axes (#263)", () => {
+    /* Cards spread far right, far down, and left/above the origin at once — the
+       single world box must cover the union of all of them. */
+    const rects: SchemeRect[] = [
+      { x: -600, y: -400, w: TASK_W, h: 120 },
+      { x: 6000, y: 200, w: TASK_W, h: 120 },
+      { x: 400, y: 7000, w: TASK_W, h: 120 },
+      { x: 5200, y: 6400, w: TASK_W, h: 200 },
+    ];
+    const world = taskWorldBounds(1200, 900, rects);
+    expect(world.x).toBe(-600 - TASK_WORLD_MARGIN);
+    expect(world.y).toBe(-400 - TASK_WORLD_MARGIN);
+    expect(world.x + world.w).toBe(6000 + TASK_W + TASK_WORLD_MARGIN);
+    expect(world.y + world.h).toBe(7000 + 120 + TASK_WORLD_MARGIN);
+    /* Every card sits inside the derived world on both axes. */
+    for (const rect of rects) {
+      expect(rect.x).toBeGreaterThanOrEqual(world.x);
+      expect(rect.y).toBeGreaterThanOrEqual(world.y);
+      expect(rect.x + rect.w).toBeLessThanOrEqual(world.x + world.w);
+      expect(rect.y + rect.h).toBeLessThanOrEqual(world.y + world.h);
+    }
+  });
+
   test("routePathsBounds is null with no edges and pads the markers otherwise", () => {
     expect(routePathsBounds([])).toBeNull();
     const box = routePathsBounds([{ d: "M 0 0 C 50 0, 50 100, 100 100", mid: { x: 50, y: 50 }, crosses: false }])!;

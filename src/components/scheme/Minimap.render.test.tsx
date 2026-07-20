@@ -1,11 +1,11 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { directReviewFlows, splitDirectReviewGroups } from "@/components/flows/directReviewGroups";
 import { buildBranchGroups, type BranchGroup } from "@/components/projectModel";
 import type { FileEntry } from "@/lib/types";
 
-import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
+import { Minimap, minimapExtent, stackDotsFor, type Camera, type StackDot } from "./Minimap";
 import { buildSchemeLayout, type SchemeLayout, type SchemeRect } from "./layout";
 import type { WorkerStack } from "./workerCollapse";
 
@@ -150,6 +150,96 @@ test("an expanded task dot follows the full rendered card height", () => {
   const compactCy = Number(compact.match(/cy="([\d.]+)"/)?.[1]);
   const fullCy = Number(full.match(/cy="([\d.]+)"/)?.[1]);
   expect(fullCy).toBeGreaterThan(compactCy);
+});
+
+const containsRect = (outer: SchemeRect, inner: SchemeRect): boolean =>
+  inner.x >= outer.x - 1e-6
+  && inner.y >= outer.y - 1e-6
+  && inner.x + inner.w <= outer.x + outer.w + 1e-6
+  && inner.y + inner.h <= outer.y + outer.h + 1e-6;
+
+/** The viewport rect the Minimap draws, in world coordinates (screen = world·z + cam). */
+const viewportWorldRect = (camera: Camera, viewport: { w: number; h: number }): SchemeRect => ({
+  x: -camera.x / camera.z,
+  y: -camera.y / camera.z,
+  w: viewport.w / camera.z,
+  h: viewport.h / camera.z,
+});
+
+describe("minimapExtent (#263)", () => {
+  test("a viewport already inside the world leaves the world untouched", () => {
+    const w: SchemeRect = { x: 0, y: 0, w: 2000, h: 1600 };
+    expect(minimapExtent(w, { x: -200, y: -150, z: 1 }, { w: 800, h: 600 })).toEqual(w);
+  });
+
+  test("a camera drifted far right of the world grows the extent rightward only", () => {
+    const w: SchemeRect = { x: 0, y: 0, w: 2000, h: 1600 };
+    /* Edge-keep let the view slide so its left edge sits at world x=3000. */
+    const cam: Camera = { x: -3000, y: 0, z: 1 };
+    const extent = minimapExtent(w, cam, { w: 800, h: 600 });
+    expect(extent.x).toBeCloseTo(0);
+    expect(extent.y).toBeCloseTo(0);
+    expect(extent.x + extent.w).toBe(3800); // viewport right edge, past the world's 2000
+    expect(extent.y + extent.h).toBe(1600); // height unchanged
+    expect(containsRect(extent, viewportWorldRect(cam, { w: 800, h: 600 }))).toBe(true);
+    expect(containsRect(extent, w)).toBe(true);
+  });
+
+  test("a camera drifted far below the world grows the extent downward only", () => {
+    const w: SchemeRect = { x: 0, y: 0, w: 2000, h: 1600 };
+    const cam: Camera = { x: 0, y: -4000, z: 1 };
+    const extent = minimapExtent(w, cam, { w: 800, h: 600 });
+    expect(extent.x + extent.w).toBe(2000); // width unchanged
+    expect(extent.y + extent.h).toBe(4600); // viewport bottom, past the world's 1600
+    expect(containsRect(extent, viewportWorldRect(cam, { w: 800, h: 600 }))).toBe(true);
+  });
+
+  test("a viewport zoomed out wider than the world still stays enclosed", () => {
+    const w: SchemeRect = { x: 0, y: 0, w: 600, h: 400 };
+    /* Zoomed far out: the viewport covers far more world than the placed geometry. */
+    const cam: Camera = { x: 0, y: 0, z: 0.12 };
+    const vp = { w: 1400, h: 900 };
+    const extent = minimapExtent(w, cam, vp);
+    expect(containsRect(extent, viewportWorldRect(cam, vp))).toBe(true);
+    expect(containsRect(extent, w)).toBe(true);
+  });
+
+  test("a viewport left of and above a negative-origin world extends the origin", () => {
+    const w: SchemeRect = { x: -300, y: -200, w: 1000, h: 800 };
+    const cam: Camera = { x: 500, y: 400, z: 1 }; // viewport world origin at (-500, -400)
+    const extent = minimapExtent(w, cam, { w: 400, h: 300 });
+    expect(extent.x).toBe(-500);
+    expect(extent.y).toBe(-400);
+    expect(containsRect(extent, viewportWorldRect(cam, { w: 400, h: 300 }))).toBe(true);
+    expect(containsRect(extent, w)).toBe(true);
+  });
+});
+
+test("the drifted viewport frame stays fully inside the fixed map (#263)", () => {
+  /* Camera panned far past the world's right/bottom edge — before #263 the accent
+     frame overflowed the fixed 216×148 map and clipped; now the map scales to the
+     world∪viewport so the whole frame lands inside. */
+  const cam: Camera = { x: -2600, y: -1900, z: 1.4 };
+  const html = renderToStaticMarkup(
+    <Minimap layout={emptyLayout} world={world} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  const mapW = Number(html.match(/<svg width="([\d.]+)"/)?.[1]);
+  const mapH = Number(html.match(/<svg width="[\d.]+" height="([\d.]+)"/)?.[1]);
+  const transform = html.match(/translate\(([-\d.]+) ([-\d.]+)\) scale\(([\d.]+)\)/);
+  const [tx, ty, s] = [Number(transform?.[1]), Number(transform?.[2]), Number(transform?.[3])];
+  /* The accent viewport frame is the rect painted with the translucent fill. */
+  const rect = html.match(/<rect x="([-\d.]+)" y="([-\d.]+)" width="([\d.]+)" height="([\d.]+)" fill="color-mix/);
+  const [rx, ry, rw, rh] = [Number(rect?.[1]), Number(rect?.[2]), Number(rect?.[3]), Number(rect?.[4])];
+  /* World → screen through the g transform. */
+  const left = tx + rx * s;
+  const top = ty + ry * s;
+  const right = left + rw * s;
+  const bottom = top + rh * s;
+  const tol = 2; // 2.5px constant stroke can straddle the edge by ~1.25px
+  expect(left).toBeGreaterThanOrEqual(-tol);
+  expect(top).toBeGreaterThanOrEqual(-tol);
+  expect(right).toBeLessThanOrEqual(mapW + tol);
+  expect(bottom).toBeLessThanOrEqual(mapH + tol);
 });
 
 test("a direct review group's deck shows on the minimap like any managed deck (#325)", () => {

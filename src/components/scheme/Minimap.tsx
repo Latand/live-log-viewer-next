@@ -42,6 +42,29 @@ export function stackDotsFor(stacks: readonly WorkerStack[]): StackDot[] {
 }
 
 /**
+ * World box the minimap actually scales down (issue #263). The camera's
+ * edge-keep clamp lets the viewport drift far past the layout world in any
+ * direction, and the viewport also outruns the world whenever it is zoomed out
+ * wider/taller than the placed geometry. This grows the layout-derived `world`
+ * to also enclose the live viewport rect, so the accent viewport frame is always
+ * fully inside the fixed map — visible, clamped, and correctly scaled — at every
+ * pan/zoom corner. It deliberately stays local to rendering: the camera keeps
+ * clamping and fitting to the tighter `world`, so this display box growing as the
+ * view drifts never re-snaps the camera.
+ */
+export function minimapExtent(world: SchemeRect, cam: Camera, vp: { w: number; h: number }): SchemeRect {
+  const vx = -cam.x / cam.z;
+  const vy = -cam.y / cam.z;
+  const vw = vp.w / cam.z;
+  const vh = vp.h / cam.z;
+  const minX = Math.min(world.x, vx);
+  const minY = Math.min(world.y, vy);
+  const maxX = Math.max(world.x + world.w, vx + vw);
+  const maxY = Math.max(world.y + world.h, vy + vh);
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+/**
  * Scaled-down world in the corner: every node as an engine-colored block,
  * the current viewport as an accent frame. Click or drag to jump the camera.
  */
@@ -80,14 +103,18 @@ export function Minimap({
   const { t } = useLocale();
   const ref = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef(false);
-  const scale = Math.min(MAP_W / world.w, MAP_H / world.h);
-  const ox = (MAP_W - world.w * scale) / 2;
-  const oy = (MAP_H - world.h * scale) / 2;
+  /* Scale to the world grown to swallow the live viewport (issue #263), so the
+     accent viewport frame is always fully inside the map even when the camera
+     has drifted well past the layout edge. */
+  const extent = minimapExtent(world, cam, vp);
+  const scale = Math.min(MAP_W / extent.w, MAP_H / extent.h);
+  const ox = (MAP_W - extent.w * scale) / 2;
+  const oy = (MAP_H - extent.h * scale) / 2;
 
   const jumpTo = (event: React.PointerEvent) => {
     const rect = ref.current?.getBoundingClientRect();
     if (!rect) return;
-    onJump((event.clientX - rect.left - ox) / scale + world.x, (event.clientY - rect.top - oy) / scale + world.y);
+    onJump((event.clientX - rect.left - ox) / scale + extent.x, (event.clientY - rect.top - oy) / scale + extent.y);
   };
 
   return (
@@ -123,7 +150,7 @@ export function Minimap({
       }}
     >
       <svg width={MAP_W} height={MAP_H} aria-hidden>
-        <g transform={`translate(${ox - world.x * scale} ${oy - world.y * scale}) scale(${scale})`}>
+        <g transform={`translate(${ox - extent.x * scale} ${oy - extent.y * scale}) scale(${scale})`}>
           {/* On-canvas quiet-branch stacks: one dot each, so a stack is a single
               mark on the map, never a wall of member cards (issue #136). */}
           {layout.stacks.map((stack) => (
