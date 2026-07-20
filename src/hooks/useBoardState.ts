@@ -57,7 +57,7 @@ export function patchPrefix(outbox: readonly BoardMutationV1[], maxCount = MAX_M
   return prefix;
 }
 
-export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false };
+export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode: null, taskPanelOpen: false };
 
 /* Legacy per-browser keys #38 migrates off of. `llvTaskPanel` is global today;
    it seeds every project's per-project panel state and is left intact so a
@@ -78,7 +78,9 @@ export interface BoardSnapshot {
 }
 
 export function isEmptyPrefs(prefs: BoardPrefs): boolean {
-  return prefs.manual.length === 0 && prefs.hidden.length === 0 && prefs.expanded.length === 0 && prefs.favorites.length === 0 && prefs.viewMode === null && !prefs.taskPanelOpen;
+  return prefs.manual.length === 0 && prefs.hidden.length === 0 && prefs.expanded.length === 0 && prefs.favorites.length === 0
+    && (prefs.foldedEngineChildIds?.length ?? 0) === 0 && (prefs.expandedEngineTrayParentIds?.length ?? 0) === 0
+    && prefs.viewMode === null && !prefs.taskPanelOpen;
 }
 
 /** Worth seeding the server with: anything a user actually arranged. Empty
@@ -111,9 +113,9 @@ export function readLegacyPrefs(project: string, storage: Pick<Storage, "getItem
   const viewMode: BoardViewMode = savedView === "scheme" || savedView === "list" ? savedView : null;
   const taskPanelOpen = storage.getItem(LEGACY_TASK_PANEL_KEY) === "1";
   if (!hadColumns && viewMode === null && !taskPanelOpen) return null;
-  /* Favorites are server-only (issue #185) — no legacy per-browser tier feeds
-     them, so the migration seed always carries an empty list. */
-  return { ...columns, favorites: [], viewMode, taskPanelOpen };
+  /* Favorites and tray pins are server-only (issues #185/#142) — no legacy
+     per-browser tier feeds them, so the migration seed carries empty lists. */
+  return { ...columns, favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode, taskPanelOpen };
 }
 
 /** Coalesce two partial patches: later keys win, so a burst of edits collapses
@@ -592,6 +594,12 @@ export interface BoardState extends BoardSnapshot {
   setTaskPanelOpen(open: boolean): void;
   /** Toggle a durable conversation id in the per-project favorites set (#185). */
   setFavorite(id: string, favorite: boolean): void;
+  /** Durably hand-fold / unfold an engine-native child into its parent tray
+      (#142). `path` is the child's current transcript path — folding clears it
+      from manual/expanded placement so it re-docks into the tray. */
+  setEngineChildFold(id: string, path: string, folded: boolean): void;
+  /** Durably expand / collapse a parent's engine-native subagent tray (#142). */
+  setEngineTrayExpanded(parentId: string, expanded: boolean): void;
 }
 
 /**
@@ -656,6 +664,12 @@ export function useBoardState(project: string | null): BoardState {
     },
     setFavorite(id, favorite) {
       storeRef.current?.mutate([{ kind: "set-favorite", id, favorite }]);
+    },
+    setEngineChildFold(id, path, folded) {
+      storeRef.current?.mutate([{ kind: "set-engine-child-fold", id, path, folded }]);
+    },
+    setEngineTrayExpanded(parentId, expanded) {
+      storeRef.current?.mutate([{ kind: "set-engine-tray-expanded", parentId, expanded }]);
     },
   };
 }

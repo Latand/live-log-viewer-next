@@ -276,8 +276,21 @@ export function descendantCounts(files: FileEntry[]): Map<string, number> {
   return counts;
 }
 
+/** Engine-native subagent placement handed down by the S2 tray projection
+    (issue #142): `promoted` children force a full node even when idle (an
+    attention override), `folded` children are excluded from every node surface
+    because they render as a compact parent-tray row instead. */
+export interface EnginePlacement {
+  promotedEnginePaths?: ReadonlySet<string>;
+  foldedEnginePaths?: ReadonlySet<string>;
+}
+
 /** Descendants that deserve a full transcript column next to the root. */
-function columnWorthy(file: FileEntry, expandedConversationPaths?: ReadonlySet<string>): boolean {
+function columnWorthy(file: FileEntry, expandedConversationPaths?: ReadonlySet<string>, placement?: EnginePlacement): boolean {
+  /* A folded engine child owns exactly one surface — its parent tray — so it is
+     never a column, and a promoted one is a full node regardless of activity. */
+  if (placement?.foldedEnginePaths?.has(file.path)) return false;
+  if (placement?.promotedEnginePaths?.has(file.path)) return true;
   return (
     !isAuxTask(file) &&
     (file.activity === "live" ||
@@ -295,6 +308,7 @@ function assembleGroup(
   root: FileEntry,
   kids: Map<string, FileEntry[]>,
   expandedConversationPaths?: ReadonlySet<string>,
+  placement?: EnginePlacement,
 ): BranchGroup {
   /* Stop traversal at the first foreign owner so a later same-project node
      cannot leak through that foreign branch and appear twice. */
@@ -308,7 +322,8 @@ function assembleGroup(
      group" decision stays activity-based in buildBranchGroups, but once a group
      is open its child conversations are always wired in as nodes. */
   const branches = descendants
-    .filter((file) => isChildConversation(file) || columnWorthy(file, expandedConversationPaths))
+    .filter((file) => !placement?.foldedEnginePaths?.has(file.path)
+      && (isChildConversation(file) || columnWorthy(file, expandedConversationPaths, placement)))
     .sort((a, b) => liveRank(a) - liveRank(b) || tick5(b.mtime) - tick5(a.mtime) || a.path.localeCompare(b.path));
   const liveTasks = descendants
     .filter((file) => isAuxTask(file) && file.activity === "live")
@@ -345,6 +360,8 @@ function assembleGroup(
 export interface BranchGroupOptions {
   /** Quiet conversations promoted into full scheme nodes. */
   expandedConversationPaths?: ReadonlySet<string>;
+  /** Engine-native subagent placement from the S2 tray projection (#142). */
+  enginePlacement?: EnginePlacement;
 }
 
 export function buildBranchGroups(files: FileEntry[], project: string, options: BranchGroupOptions = {}): BranchGroup[] {
@@ -352,7 +369,7 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
   const kids = kidsIndex(files);
   const roots = new Map<string, FileEntry>();
   const orphanTasks = new Map<string, FileEntry>();
-  const { expandedConversationPaths } = options;
+  const { expandedConversationPaths, enginePlacement } = options;
   for (const file of files) {
     if (projectKey(file) !== project) continue;
     /* A cross-project child starts an independently owned visual segment. Keep
@@ -367,6 +384,9 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
       file.activity === "live" ||
       file.proc === "running" ||
       (file.activity === "recent" && isChildConversation(file)) ||
+      /* A promoted engine child (e.g. an idle child holding a pending question)
+         must still open its parent's group so it can render as a full node. */
+      enginePlacement?.promotedEnginePaths?.has(file.path) === true ||
       (expanded && (isConversation(file) || isChildConversation(file)))
     ) {
       const root = rootOf(file, byPath);
@@ -376,7 +396,7 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
     }
     if (file.activity === "recent" && isConversation(file)) roots.set(file.path, file);
   }
-  const groups = [...roots.values()].map((root) => assembleGroup(root, kids, expandedConversationPaths));
+  const groups = [...roots.values()].map((root) => assembleGroup(root, kids, expandedConversationPaths, enginePlacement));
   for (const task of orphanTasks.values()) {
     groups.push({
       key: task.path,

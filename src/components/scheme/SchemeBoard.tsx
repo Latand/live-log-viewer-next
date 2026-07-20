@@ -60,6 +60,7 @@ import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
 import { useSpatialNav } from "./useSpatialNav";
 import { createSubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
+import type { SubagentTrayApi } from "./SubagentTrayView";
 
 /* Below this zoom the big node labels fade in over the unreadable panes. */
 const LABEL_Z = 0.45;
@@ -105,6 +106,9 @@ interface Props {
   ring?: string | null;
   /** «Show only needs me» filter: non-null dims every shell without a queue member. */
   attentionPaths?: ReadonlySet<string> | null;
+  /** Engine-native subagent tray surface (issue #142): trays keyed by durable
+      parent id + folded-child exclusion + durable-intent callbacks. */
+  trayApi?: SubagentTrayApi;
   onSelect: (file: FileEntry) => void;
   /** Optional map-mode node pick handler; receives the selected node key. */
   onNodePick?: (key: string) => void;
@@ -196,6 +200,7 @@ export function SchemeBoard({
   focus,
   ring,
   attentionPaths,
+  trayApi,
   onSelect,
   onNodePick,
   mapFrame,
@@ -1164,6 +1169,7 @@ export function SchemeBoard({
           relatedTasksByPath={relatedTasksByPath}
           deckFocus={deckFocus}
           badgeAnchors={badgeAnchors}
+          trayApi={mapMode ? undefined : trayApi}
           onSelect={stableSelect}
           onClose={stableClose}
           onFocusRound={focusRound}

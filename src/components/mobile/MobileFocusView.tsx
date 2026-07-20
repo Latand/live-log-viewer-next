@@ -32,6 +32,7 @@ import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { MobilePipelineDock } from "./MobilePipelineDock";
 import { MobilePipelineDockSheet, MobilePipelineSummaryButton, MobilePipelineSummaryRow } from "./MobilePipelineDockSheet";
 import { conversationIdentity } from "@/lib/accounts/identity";
+import { SubagentTray, type SubagentTrayApi } from "../scheme/SubagentTrayView";
 import { deckKey } from "@/components/scheme/agentLinks";
 import { buildSchemeLayout } from "@/components/scheme/layout";
 import { SubagentBadges } from "@/components/scheme/SubagentBadges";
@@ -109,6 +110,9 @@ interface Props {
   onActiveChange?: (file: FileEntry | null) => void;
   /** Bumped by the header `+ Task` button to open the sheet's create view. */
   taskSheetNonce?: number;
+  /** Engine-native subagent tray surface (issue #142): the focused parent's
+      folded children render as inline rows inside its pane on the phone. */
+  trayApi?: SubagentTrayApi;
 }
 
 /** The phone consumes the same memberful/shelf partition directly. */
@@ -125,7 +129,7 @@ export function pipelinesToDock(pipelines: readonly Pipeline[], memberfulGroupId
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0, trayApi }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -470,17 +474,34 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
         {activeNode ? (
           /* The handoff control for this pane docks in the footer shelf row
              (issue #177 item 5), so the focus view itself renders only the pane. */
-          <div key={activeNode.file.path} data-testid="mobile-focused-pane" className="flex min-h-0 flex-1">
-            <BranchPane
-              file={activeNode.file}
-              tasks={activeNode.tasks}
-              isRoot={activeNode.isRoot}
-              showFavorite
-              onClose={() => onClose(activeNode.file.path)}
-              dragHandle={swipeHandle}
-              relatedTasks={relatedTasksByPath.get(activeNode.file.path)}
-              onOpenTask={openPipelineTask}
-            />
+          <div key={activeNode.file.path} data-testid="mobile-focused-pane" className="flex min-h-0 min-w-0 flex-1 flex-col gap-1">
+            <div className="flex min-h-0 min-w-0 flex-1">
+              <BranchPane
+                file={activeNode.file}
+                tasks={activeNode.tasks}
+                isRoot={activeNode.isRoot}
+                showFavorite
+                onClose={() => onClose(activeNode.file.path)}
+                dragHandle={swipeHandle}
+                relatedTasks={relatedTasksByPath.get(activeNode.file.path)}
+                onOpenTask={openPipelineTask}
+              />
+            </div>
+            {(() => {
+              const tray = trayApi?.trays.get(conversationIdentity(activeNode.file));
+              /* The focused parent's folded engine children stay inside its pane
+                 on the phone (§S2 mobile): inline rows, 44px targets, read-only
+                 open — never a durable membership change. */
+              return tray ? (
+                <SubagentTray
+                  tray={tray}
+                  variant="inline"
+                  onToggleExpanded={(expanded) => trayApi!.onToggleExpanded(tray.parentConversationId, expanded)}
+                  onOpenMember={trayApi!.onOpenMember}
+                  onUnfold={trayApi!.onUnfold}
+                />
+              ) : null;
+            })()}
           </div>
         ) : activeDeck ? (
           <div key={activeDeck.key} className="relative min-h-0 flex-1">

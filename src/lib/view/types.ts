@@ -112,7 +112,21 @@ export interface BoardProjectStateV1 {
   updatedAt: string;
   pathAliases?: Record<string, string>;
   explicitManual?: string[];
-  prefs: { manual: string[]; hidden: string[]; expanded: string[]; favorites: string[]; viewMode: "scheme" | "list" | null; taskPanelOpen: boolean };
+  prefs: {
+    manual: string[];
+    hidden: string[];
+    expanded: string[];
+    favorites: string[];
+    /* Identity-keyed engine-native subagent tray intent (issue #142 S2). Kept
+       apart from the path-keyed lists so they survive a resume that mints a new
+       transcript path (like `favorites`): the fold pin is a child conversation
+       identity, the tray-disclosure pin a parent conversation identity. Optional
+       because legacy board files omit both; the store defaults them to empty. */
+    foldedEngineChildIds?: string[];
+    expandedEngineTrayParentIds?: string[];
+    viewMode: "scheme" | "list" | null;
+    taskPanelOpen: boolean;
+  };
 }
 
 export interface BoardFileV1 { projects: Record<string, BoardProjectStateV1> }

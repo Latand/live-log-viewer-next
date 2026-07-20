@@ -263,6 +263,19 @@ describe("isCollapseExempt — hard exemptions", () => {
 });
 
 describe("shouldCollapseWorker", () => {
+  test("an engine-native subagent is exempt — the #142 tray projection owns it", () => {
+    /* A quiet, day-idle engine child would otherwise be a spawned-descendant
+       collapse candidate; S2 claims it, so generic collapse must skip it. */
+    const child = entry({
+      path: "/orchestrator/agent-1",
+      parent: "/orchestrator",
+      kind: "subagent",
+      spawnOrigin: "engine",
+      mtime: NOW_SEC - 24 * 3600,
+    });
+    expect(shouldCollapseWorker(child, ctx())).toBe(false);
+  });
+
   test("a finished reviewer round collapses immediately, even while fresh", () => {
     const reviewer = entry({
       path: "/rev",

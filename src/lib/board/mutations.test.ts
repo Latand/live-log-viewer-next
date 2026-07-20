@@ -103,6 +103,36 @@ describe("board mutations", () => {
     expect(applyBoardMutations(off, [{ kind: "set-favorite", id: "conv-1", favorite: false }]).prefs.favorites).toEqual([]);
   });
 
+  test("set-engine-child-fold toggles the durable pin idempotently and clears placement on fold", () => {
+    const seeded = board({ manual: ["/child"], expanded: ["/child"] });
+    const folded = applyBoardMutations(seeded, [{ kind: "set-engine-child-fold", id: "conv-child", path: "/child", folded: true }]);
+    expect(folded.prefs.foldedEngineChildIds).toEqual(["conv-child"]);
+    /* Folding re-docks the child into the tray: its current path leaves manual
+       and expanded placement in the same mutation. */
+    expect(folded.prefs.manual).toEqual([]);
+    expect(folded.prefs.expanded).toEqual([]);
+    // Idempotent add.
+    expect(applyBoardMutations(folded, [{ kind: "set-engine-child-fold", id: "conv-child", path: "/child", folded: true }]).prefs.foldedEngineChildIds).toEqual(["conv-child"]);
+    const unfolded = applyBoardMutations(folded, [{ kind: "set-engine-child-fold", id: "conv-child", path: "/child", folded: false }]);
+    expect(unfolded.prefs.foldedEngineChildIds).toEqual([]);
+  });
+
+  test("a fold pin is a durable id that survives a resume remap and a close", () => {
+    const seeded = applyBoardMutations(board(), [{ kind: "set-engine-child-fold", id: "conv-child", path: "/old", folded: true }]);
+    const remapped = applyBoardMutations(seeded, [{ kind: "remap-paths", pairs: [{ from: "/old", to: "/new" }] }]);
+    expect(remapped.prefs.foldedEngineChildIds).toEqual(["conv-child"]);
+    const closed = applyBoardMutations(remapped, [{ kind: "close", path: "/new" }]);
+    expect(closed.prefs.foldedEngineChildIds).toEqual(["conv-child"]);
+  });
+
+  test("set-engine-tray-expanded toggles the parent disclosure pin idempotently", () => {
+    const on = applyBoardMutations(board(), [{ kind: "set-engine-tray-expanded", parentId: "conv-parent", expanded: true }]);
+    expect(on.prefs.expandedEngineTrayParentIds).toEqual(["conv-parent"]);
+    expect(applyBoardMutations(on, [{ kind: "set-engine-tray-expanded", parentId: "conv-parent", expanded: true }]).prefs.expandedEngineTrayParentIds).toEqual(["conv-parent"]);
+    const off = applyBoardMutations(on, [{ kind: "set-engine-tray-expanded", parentId: "conv-parent", expanded: false }]);
+    expect(off.prefs.expandedEngineTrayParentIds).toEqual([]);
+  });
+
   test("favorites are durable ids kept out of the path alias/hidden machinery", () => {
     /* A favorite keyed on a conversation id must survive a resume that remaps
        the transcript path and a close that hides that path — neither should

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { FileEntry } from "@/lib/types";
+import { useLocale } from "@/lib/i18n";
 
 import type { SchemeRect } from "./layout";
 import type { SubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
@@ -19,6 +20,11 @@ export interface SubagentBadgesProps {
   onNavigate: (path: string) => void;
   onExpandedChange?: (expanded: boolean) => void;
   anchorRegistry?: SubagentBadgeAnchorRegistry;
+  /** Child paths/ids already placed on another surface (the tray) — excluded so
+      a card renders in exactly one place (issue #142). */
+  exclude?: ReadonlySet<string>;
+  /** Hand-fold a promoted child into the parent tray (a durable fold pin). */
+  onFold?: (id: string, path: string) => void;
 }
 
 function seedHue(seed: string): number {
@@ -32,10 +38,12 @@ function initials(title: string): string {
   return (words.length > 1 ? words[0]![0]! + words.at(-1)![0]! : words[0]?.slice(0, 2) || "AI").toUpperCase();
 }
 
-export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, onExpandedChange, anchorRegistry }: SubagentBadgesProps) {
+export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, onExpandedChange, anchorRegistry, exclude, onFold }: SubagentBadgesProps) {
+  const { t } = useLocale();
+  const foldLabel = (name: string) => t("subagentTray.fold", { name });
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const suppressTouchClick = useRef(false);
-  const children = useMemo(() => subagentsOf(conversationId, entries), [conversationId, entries]);
+  const children = useMemo(() => subagentsOf(conversationId, entries, exclude), [conversationId, entries, exclude]);
   const positions = useMemo(() => layoutBadges(children, cardRect), [children, cardRect]);
   const hasExpandedChild = expandedId !== null && children.some((child) => child.id === expandedId);
 
@@ -85,8 +93,24 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
         const hue = seedHue(child.avatarSeed);
         const tooltip = `${child.title} · ${child.engine}${child.model ? ` / ${child.model}` : ""}${unavailable ? " · unavailable" : ""}`;
         return (
+          <span key={child.id} className="contents">
+          {expanded && onFold && !unavailable ? (
+            /* Hand-fold a live child into the parent tray (a durable fold pin) —
+               a sibling control so the badge stays a single button. */
+            <button
+              type="button"
+              data-subagent-fold={child.id}
+              data-scheme-ui
+              aria-label={foldLabel(child.title)}
+              title={foldLabel(child.title)}
+              className="pointer-events-auto absolute z-[71] inline-flex h-5 w-5 items-center justify-center rounded-full border border-border bg-card text-[11px] text-muted shadow-1 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55"
+              style={{ left: position.x - cardRect.x + 202, top: position.y - cardRect.y + 5 }}
+              onClick={() => onFold(child.id, child.path)}
+            >
+              <span aria-hidden>↧</span>
+            </button>
+          ) : null}
           <button
-            key={child.id}
             type="button"
             data-subagent-badge={child.id}
             data-subagent-state={child.state}
@@ -142,6 +166,7 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
               {child.title}
             </span>
           </button>
+          </span>
         );
       })}
     </>

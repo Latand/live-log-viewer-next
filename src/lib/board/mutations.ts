@@ -11,7 +11,14 @@ export type BoardMutationV1 =
      kept apart from the path-keyed membership lists so it never passes through
      `resolvePath`/`pathAliases` — a favorite must survive a resume that mints a
      new transcript path, which the alias graph would otherwise rewrite. */
-  | { kind: "set-favorite"; id: string; favorite: boolean };
+  | { kind: "set-favorite"; id: string; favorite: boolean }
+  /* Engine-native subagent tray intent (issue #142 S2). `id`/`parentId` are
+     durable conversation identities, kept out of `resolvePath`/`pathAliases` so
+     a fold survives a resume that mints a new transcript path. Folding also
+     clears the child's current transcript path from manual/expanded placement in
+     the same mutation, so the child actually re-docks into the tray. */
+  | { kind: "set-engine-child-fold"; id: string; path: string; folded: boolean }
+  | { kind: "set-engine-tray-expanded"; parentId: string; expanded: boolean };
 
 function unique(paths: readonly string[]): string[] {
   return [...new Set(paths)];
@@ -55,7 +62,17 @@ function normalize(board: BoardProjectStateV1, aliases = aliasesOf(board)): Boar
     /* Favorites are durable conversation ids, not transcript paths: dedupe them
        but keep them out of the alias/hidden machinery so favoriting survives a
        resume and a favorited-then-closed card stays favorited. */
-    prefs: { ...board.prefs, manual, hidden, expanded: visible(board.prefs.expanded), favorites: unique(board.prefs.favorites ?? []) },
+    prefs: {
+      ...board.prefs,
+      manual,
+      hidden,
+      expanded: visible(board.prefs.expanded),
+      favorites: unique(board.prefs.favorites ?? []),
+      /* Identity-keyed tray intent (issue #142): dedupe like favorites, kept out
+         of the alias/hidden path machinery so a fold survives a resume. */
+      foldedEngineChildIds: unique(board.prefs.foldedEngineChildIds ?? []),
+      expandedEngineTrayParentIds: unique(board.prefs.expandedEngineTrayParentIds ?? []),
+    },
   };
 }
 
@@ -135,6 +152,35 @@ export function applyBoardMutations(board: BoardProjectStateV1, mutations: reado
         ? unique([...next.prefs.favorites, mutation.id])
         : next.prefs.favorites.filter((item) => item !== mutation.id);
       next = normalize({ ...next, prefs: { ...next.prefs, favorites } });
+      continue;
+    }
+    if (mutation.kind === "set-engine-child-fold") {
+      const currentFolded = next.prefs.foldedEngineChildIds ?? [];
+      const foldedEngineChildIds = mutation.folded
+        ? unique([...currentFolded, mutation.id])
+        : currentFolded.filter((item) => item !== mutation.id);
+      /* Fold clears the child's current path from manual/expanded placement so
+         it actually re-docks into the parent tray instead of staying pinned as a
+         full node; unfolding leaves placement untouched. */
+      const path = resolvePath(mutation.path, aliasesOf(next));
+      next = normalize({
+        ...next,
+        explicitManual: mutation.folded ? (next.explicitManual ?? []).filter((item) => item !== path) : next.explicitManual,
+        prefs: {
+          ...next.prefs,
+          foldedEngineChildIds,
+          manual: mutation.folded ? next.prefs.manual.filter((item) => item !== path) : next.prefs.manual,
+          expanded: mutation.folded ? next.prefs.expanded.filter((item) => item !== path) : next.prefs.expanded,
+        },
+      });
+      continue;
+    }
+    if (mutation.kind === "set-engine-tray-expanded") {
+      const currentExpanded = next.prefs.expandedEngineTrayParentIds ?? [];
+      const expandedEngineTrayParentIds = mutation.expanded
+        ? unique([...currentExpanded, mutation.parentId])
+        : currentExpanded.filter((item) => item !== mutation.parentId);
+      next = normalize({ ...next, prefs: { ...next.prefs, expandedEngineTrayParentIds } });
       continue;
     }
     if (mutation.kind === "set-presentation") {

@@ -939,6 +939,19 @@ export const uk: Record<keyof typeof en, Message> = {
   "roundDeck.groupAria": { one: "Група ревʼю · {count} раунд", few: "Група ревʼю · {count} раунди", many: "Група ревʼю · {count} раундів", other: "Група ревʼю · {count} раундів" },
   "roundDeck.groupAriaNamed": { one: "Група ревʼю для {name} · {count} раунд", few: "Група ревʼю для {name} · {count} раунди", many: "Група ревʼю для {name} · {count} раундів", other: "Група ревʼю для {name} · {count} раундів" },
 
+  // scheme/subagentTray — лоток підагентів рушія (issue #142)
+  "subagentTray.label": { one: "{count} підагент", few: "{count} підагенти", many: "{count} підагентів", other: "{count} підагентів" },
+  "subagentTray.toggle": { one: "Розгорнути лоток підагентів ({count} згорнутий)", few: "Розгорнути лоток підагентів ({count} згорнуті)", many: "Розгорнути лоток підагентів ({count} згорнутих)", other: "Розгорнути лоток підагентів ({count} згорнутих)" },
+  "subagentTray.collapse": { one: "Згорнути лоток підагентів ({count} згорнутий)", few: "Згорнути лоток підагентів ({count} згорнуті)", many: "Згорнути лоток підагентів ({count} згорнутих)", other: "Згорнути лоток підагентів ({count} згорнутих)" },
+  "subagentTray.rows": "Згорнуті підагенти",
+  "subagentTray.open": "Відкрити транскрипт підагента {name}",
+  "subagentTray.fold": "Згорнути {name} у лоток підагентів",
+  "subagentTray.unfold": "Повернути {name} як повну картку",
+  "subagentTray.state.running": "працює",
+  "subagentTray.state.live": "наживо",
+  "subagentTray.state.closed": "простій",
+  "subagentTray.state.dead": "недоступний",
+
   "flowState.waiting_ready": "чекає READY",
   "flowState.spawn_pending": "готовий спавнити ревʼюера",
   "flowState.spawning": "запускаю ревʼюера",

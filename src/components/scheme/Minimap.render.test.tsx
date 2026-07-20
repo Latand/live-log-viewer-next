@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { directReviewFlows, splitDirectReviewGroups } from "@/components/flows/directReviewGroups";
-import type { BranchGroup } from "@/components/projectModel";
+import { buildBranchGroups, type BranchGroup } from "@/components/projectModel";
 import type { FileEntry } from "@/lib/types";
 
 import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
@@ -62,6 +62,33 @@ test("stackDotsFor maps each worker stack to one origin-toned dot (#136)", () =>
     "var(--color-strong)",
   ]);
   expect(dots.map((d) => d.key)).toEqual(stacks.map((s) => s.key));
+});
+
+test("a folded engine child leaves layout.nodes so the minimap drops its rect (#142 regression)", () => {
+  const base = (over: Partial<FileEntry> & { path: string }): FileEntry => ({
+    root: "claude-projects", name: over.path, project: "demo", title: over.path, engine: "claude",
+    kind: "session", fmt: "claude", parent: null, mtime: 1000, size: 10, activity: "idle", proc: null,
+    pid: null, model: null, pendingQuestion: null, waitingInput: null, ...over,
+  });
+  const parent = base({ path: "/root", activity: "live" });
+  const folded = base({ path: "/root/quiet", parent: "/root", kind: "subagent", activity: "idle", spawnOrigin: "engine" });
+  const files = [parent, folded];
+
+  const withoutFold = buildSchemeLayout(buildBranchGroups(files, "demo"), [], files);
+  expect(withoutFold.nodes.map((node) => node.file.path)).toContain("/root/quiet");
+
+  const groups = buildBranchGroups(files, "demo", { enginePlacement: { foldedEnginePaths: new Set(["/root/quiet"]) } });
+  const layout = buildSchemeLayout(groups, [], files);
+  const nodePaths = layout.nodes.map((node) => node.file.path);
+  expect(nodePaths).toContain("/root");
+  expect(nodePaths).not.toContain("/root/quiet");
+
+  /* The minimap draws one rect per layout node, so the folded child yields one
+     fewer node rect — the parent card alone represents the tray on the map. */
+  const html = renderToStaticMarkup(
+    <Minimap layout={layout} world={world} stackDots={[]} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  expect(html).toBeTruthy();
 });
 
 test("no worker stacks → no legend dots", () => {
