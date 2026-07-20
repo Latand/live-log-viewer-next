@@ -9,7 +9,7 @@ import { NextRequest } from "next/server";
 const realResources = { ...(await import("@/lib/resources")) };
 const previousCodexHome = process.env.LLV_CODEX_HOME;
 const routeCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tmux-route-codex-"));
-const PATHNAME = path.join(routeCodexHome, "sessions", "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl");
+const PATHNAME = path.join(routeCodexHome, "sessions", "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl");
 fs.mkdirSync(path.dirname(PATHNAME), { recursive: true });
 fs.writeFileSync(PATHNAME, "{}\n");
 process.env.LLV_CODEX_HOME = routeCodexHome;
@@ -45,6 +45,7 @@ let delivery: (message: unknown) => Promise<{ ok: true; outcome: "delivered-to-l
 let killOutcome: { ok: true; target: string } | { ok: false; outcome: "failed"; error: string; status: number } = { ok: true, target: "agents:4.0" };
 let killCalls = 0;
 let structuredControlCalls = 0;
+let structuredControlRequest: Record<string, unknown> | null = null;
 let interruptCalls = 0;
 let structuredMessageCalls = 0;
 let structuredMessageRequest: Record<string, unknown> | null = null;
@@ -68,7 +69,7 @@ const host = {
   tmuxServerPid: 900,
   engine: "codex" as const,
   cwd: "/repo",
-  agentArgv: ["codex", "resume", "019f4906-3f67-7b72-9fbc-9ec3b5ad1326"],
+  agentArgv: ["codex", "resume", "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326"],
   agentIdentity: "200:one",
   claimedPaths: [PATHNAME],
   primaryPath: PATHNAME,
@@ -90,8 +91,9 @@ mock.module("@/lib/agent/transcriptHost", () => ({
   },
 }));
 mock.module("@/lib/runtime/structuredControls", () => ({
-  dispatchStructuredControl: async () => {
+  dispatchStructuredControl: async (request: Record<string, unknown>) => {
     structuredControlCalls += 1;
+    structuredControlRequest = request;
     return structuredControlResult;
   },
 }));
@@ -393,6 +395,46 @@ test("/api/tmux admits pane-less kill through the structured control path", asyn
       receipt: { status: "queued" },
     });
     expect(structuredControlCalls).toBe(1);
+  } finally {
+    structuredControlResult = null;
+    if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous;
+  }
+});
+
+test("/api/tmux forwards account-aware structured reconfigure as one durable control", async () => {
+  const previous = process.env.LLV_STRUCTURED_HOSTS;
+  structuredControlCalls = 0;
+  structuredControlRequest = null;
+  structuredControlResult = {
+    status: 202,
+    body: {
+      ok: true,
+      structured: true,
+      target: "conversation-reconfigure",
+      operationId: "reconfigure-one",
+      receipt: { operationId: "reconfigure-one", status: "queued" },
+    },
+  };
+  try {
+    process.env.LLV_STRUCTURED_HOSTS = "1";
+    const response = await POST(post({
+      path: PATHNAME,
+      conversationId: "conversation-reconfigure",
+      action: "reconfigure",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      fast: true,
+      accountId: "work",
+    }));
+    expect(response.status).toBe(202);
+    expect(structuredControlCalls).toBe(1);
+    expect(structuredControlRequest as unknown).toEqual({
+      path: PATHNAME,
+      conversationId: "conversation-reconfigure",
+      action: "reconfigure",
+      reconfiguration: { model: "gpt-5.6-sol", effort: "high", fast: true, accountId: "work" },
+    });
   } finally {
     structuredControlResult = null;
     if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;

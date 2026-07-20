@@ -9,6 +9,25 @@ import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 import { configuredReviewerFallback, FLOWS_SCHEMA_VERSION, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, reconcileFlowConversationOwnershipCooperatively, saveFlows, seededPresetsFromRoles } from "./store";
 import type { Flow, FlowPreset } from "./types";
 
+function commitTestSuccessor(
+  registry: AgentRegistry,
+  conversationId: Parameters<AgentRegistry["conversation"]>[0],
+  successor: Parameters<AgentRegistry["commitSuccessor"]>[1],
+  revision: number,
+): void {
+  let migration = registry.conversation(conversationId)!.migration!;
+  const receipt = {
+    operationId: migration.operationId,
+    nativeId: successor.id,
+    path: successor.path,
+    continuityPaths: [],
+    historyHash: `history-${successor.id}`,
+    host: { kind: "codex-app-server" as const, identity: successor.id, epoch: 1, verifiedAt: "2026-07-20T12:00:00.000Z" },
+  };
+  migration = registry.transitionConversationMigration(conversationId, revision, ["verifying"], { providerReceipt: receipt }).migration!;
+  registry.commitSuccessor(conversationId, successor, revision, migration.operationId, receipt);
+}
+
 const LEGACY_DEFAULT: FlowPreset = {
   name: "Codex high → Fable",
   implementer: { engine: "codex", model: null, effort: "high" },
@@ -140,10 +159,10 @@ test("flow bindings follow active conversation generations", () => {
     const registry = new AgentRegistry(path.join(sandbox, "registry.json"));
     const implementer = registry.ensureConversation("codex", "/implementer-a.jsonl", "a");
     registry.setConversationMigration(implementer.id, { intentId: "impl", phase: "verifying", targetId: "b", revision: 1, error: null, updatedAt: "now" });
-    registry.commitSuccessor(implementer.id, { id: "implementer-b", path: "/implementer-b.jsonl", accountId: "b" }, 1);
+    commitTestSuccessor(registry, implementer.id, { id: "implementer-b", path: "/implementer-b.jsonl", accountId: "b" }, 1);
     const reviewer = registry.ensureConversation("codex", "/reviewer-a.jsonl", "a");
     registry.setConversationMigration(reviewer.id, { intentId: "review", phase: "verifying", targetId: "b", revision: 1, error: null, updatedAt: "now" });
-    registry.commitSuccessor(reviewer.id, { id: "reviewer-b", path: "/reviewer-b.jsonl", accountId: "b" }, 1);
+    commitTestSuccessor(registry, reviewer.id, { id: "reviewer-b", path: "/reviewer-b.jsonl", accountId: "b" }, 1);
     const flow = {
       id: "owner-flow",
       template: "implement-review-loop",
@@ -187,9 +206,9 @@ test("a path-only flow resolves every resume generation in one reconciliation", 
   try {
     const registry = new AgentRegistry(path.join(sandbox, "registry.json"));
     const paths = [
-      "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
-      "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl",
-      "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1328.jsonl",
+      "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327.jsonl",
+      "/sessions/rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1328.jsonl",
     ];
     const conversation = registry.ensureConversation("codex", paths[0]!, "a");
     for (const pathname of paths.slice(1)) {
@@ -255,7 +274,7 @@ test("cooperative ownership reconciliation preserves a flow closed during a yiel
     const registry = new AgentRegistry(path.join(sandbox, "registry.json"));
     const owner = registry.ensureConversation("codex", "/implementer-a.jsonl", "a");
     registry.setConversationMigration(owner.id, { intentId: "impl", phase: "verifying", targetId: "b", revision: 1, error: null, updatedAt: "now" });
-    registry.commitSuccessor(owner.id, { id: "implementer-b", path: "/implementer-b.jsonl", accountId: "b" }, 1);
+    commitTestSuccessor(registry, owner.id, { id: "implementer-b", path: "/implementer-b.jsonl", accountId: "b" }, 1);
     const flows = Array.from({ length: 17 }, (_, index): Flow => ({
       id: `ownership-race-${index}`,
       template: "implement-review-loop",

@@ -17,7 +17,7 @@ export function humanReason(t: TFunction, reason: string | null | undefined): st
 /** Badge tone per receipt status. Text carries the meaning; color reinforces. */
 function tone(status: ReceiptStatus): BadgeTone {
   if (status === "rejected" || status === "failed") return "danger";
-  if (status === "delivered" || status === "answered") return "success";
+  if (status === "delivered" || status === "applied" || status === "answered") return "success";
   if (status === "uncertain") return "warning";
   return "neutral";
 }

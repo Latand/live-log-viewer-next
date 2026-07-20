@@ -283,6 +283,34 @@ export type SpawnSettlement =
 
 export type SupersedenceReason = "stage-retry" | "recovery-spawn" | "manual";
 
+export type ConversationReconfigureProfile = Pick<LaunchProfile, "model" | "effort" | "fast">;
+
+export interface ConversationReconfigureState {
+  operationId: string;
+  revision: number;
+  status: "applying" | "applied" | "failed";
+  profile: ConversationReconfigureProfile;
+  previousProfile: ConversationReconfigureProfile;
+  accountId: string | null;
+  error: string | null;
+}
+
+export interface ConversationReconfigureClaim {
+  operationId: string;
+  revision: number;
+  profile: ConversationReconfigureProfile;
+  previousProfile?: ConversationReconfigureProfile;
+  accountId?: string;
+}
+
+export type ConversationReconfigureClaimResult =
+  | { kind: "claimed" | "replayed"; state: ConversationReconfigureState; conversation: RegistryConversation }
+  | { kind: "stale"; state: ConversationReconfigureState | null; conversation: RegistryConversation };
+
+export type ConversationReconfigureSettlement =
+  | { kind: "settled" | "replayed"; state: ConversationReconfigureState; conversation: RegistryConversation }
+  | { kind: "stale"; state: ConversationReconfigureState | null; conversation: RegistryConversation };
+
 /** Terminal cross-conversation supersedence edge (issue #383): a recovery
     spawn or a stage retry replaced this conversation with a successor. Edges
     form chains (out-degree ≤ 1, acyclic) and are projection-only — identity is
@@ -327,6 +355,8 @@ export interface RegistryConversation {
       cwd-attributed conversations; projections then fall back to canonical
       cwd, the launch-profile hint, and the scanner slug in that order. */
   projectOwnership: ConversationProjectOwnership | null;
+  /** Durable compare-and-set owner for live structured profile changes. */
+  reconfigure?: ConversationReconfigureState | null;
   migration: ConversationMigration | null;
   /** Explicit Stop/Keep decision for one target at one routing revision. */
   migrationOptOut: { targetId: string; updatedAt: string } | null;
@@ -700,6 +730,75 @@ function queueAbandonedMigrationCleanup(
   };
 }
 
+function reconfigureMigrationRequestId(owner: { operationId: string; revision: number }): string {
+  return `reconfigure:${owner.operationId}:${owner.revision}`;
+}
+
+function retireReconfigureOwnedMigration(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  owner: ConversationReconfigureState,
+): void {
+  const migration = conversation.migration;
+  if (!migration || ["committed", "rolled-back", "failed-recoverable"].includes(migration.phase)) return;
+  const intent = file.migrationIntents[migration.intentId];
+  const requestId = reconfigureMigrationRequestId(owner);
+  if (intent?.scope !== "conversation" || !intent.requestIds.includes(requestId)) return;
+
+  const changedAt = now();
+  const paths = new Set([conversation.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+  const signature = migrationReadinessSignature(file, conversation.engine, paths);
+  if (intent.state !== "stopped") {
+    intent.state = "stopped";
+    intent.stoppedAt = changedAt;
+    intent.updatedAt = changedAt;
+  }
+  queueAbandonedMigrationCleanup(file, conversation, changedAt);
+  abandonPendingContinuityPaths(conversation);
+  const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
+    ?? conversation.generations.at(-1);
+  if (!source) throw new Error("conversation has no source generation");
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.conversationId !== conversation.id
+      || delivery.state === "delivered"
+      || delivery.state === "delivery-uncertain") continue;
+    delivery.state = "assigned";
+    delivery.generationId = source.id;
+    delivery.assignedAt = changedAt;
+    delivery.error = null;
+    syncDeliveryOperationOwnerState(file, delivery);
+  }
+  conversation.migration = {
+    ...migration,
+    phase: "rolled-back",
+    pendingContinuityPaths: [],
+    error: null,
+    errorCode: null,
+    updatedAt: changedAt,
+  };
+  conversation.updatedAt = changedAt;
+  advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+}
+
+function transferReconfigureOwnedMigration(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  owner: Pick<ConversationReconfigureState, "operationId" | "revision">,
+  successor: Pick<ConversationReconfigureClaim, "operationId" | "revision">,
+): void {
+  const migration = conversation.migration;
+  if (!migration || ["committed", "rolled-back", "failed-recoverable"].includes(migration.phase)) return;
+  const intent = file.migrationIntents[migration.intentId];
+  if (intent?.scope !== "conversation"
+    || !intent.requestIds.includes(reconfigureMigrationRequestId(owner))) return;
+  intent.requestIds = [
+    ...intent.requestIds.filter((candidate) => !candidate.startsWith("reconfigure:")),
+    reconfigureMigrationRequestId(successor),
+  ];
+  intent.updatedAt = now();
+  conversation.updatedAt = intent.updatedAt;
+}
+
 export class MigrationRevisionError extends Error {
   constructor(readonly expected: number, readonly actual: number) {
     super("migration preview is stale");
@@ -959,6 +1058,34 @@ function normalizeProviderReceipt(value: ProviderReceipt | null | undefined): Pr
   };
 }
 
+function normalizeConversationReconfigure(value: unknown): ConversationReconfigureState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<ConversationReconfigureState>;
+  const profile = (input: unknown): ConversationReconfigureProfile | null => {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+    const item = input as Partial<ConversationReconfigureProfile>;
+    if ((item.model !== null && typeof item.model !== "string")
+      || (item.effort !== null && typeof item.effort !== "string")
+      || (item.fast !== null && typeof item.fast !== "boolean")) return null;
+    return { model: item.model ?? null, effort: item.effort ?? null, fast: item.fast ?? null };
+  };
+  const current = profile(candidate.profile);
+  const previous = profile(candidate.previousProfile);
+  if (!current || !previous
+    || typeof candidate.operationId !== "string" || !candidate.operationId
+    || !Number.isSafeInteger(candidate.revision) || candidate.revision! < 0
+    || (candidate.status !== "applying" && candidate.status !== "applied" && candidate.status !== "failed")) return null;
+  return {
+    operationId: candidate.operationId,
+    revision: candidate.revision!,
+    status: candidate.status,
+    profile: current,
+    previousProfile: previous,
+    accountId: typeof candidate.accountId === "string" ? candidate.accountId : null,
+    error: typeof candidate.error === "string" ? candidate.error : null,
+  };
+}
+
 function normalizeConversation(value: RegistryConversation): RegistryConversation {
   const generations = Array.isArray(value.generations) ? value.generations.map(normalizeGeneration) : [];
   const current = generations.at(-1);
@@ -1015,6 +1142,7 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
     continuityPaths,
     abandonedContinuityPaths,
     projectOwnership: normalizeProjectOwnership((value as Partial<RegistryConversation>).projectOwnership),
+    reconfigure: normalizeConversationReconfigure((value as Partial<RegistryConversation>).reconfigure),
     migration,
     migrationOptOut,
     supersededBy,
@@ -1036,6 +1164,21 @@ function normalizePolicy(value: AutoBalancePolicy | undefined): AutoBalancePolic
     lastOutcome: value.lastOutcome && typeof value.lastOutcome === "object" ? value.lastOutcome : null,
     sustain: value.sustain && typeof value.sustain === "object" ? value.sustain : null,
   };
+}
+
+function writeConversationLaunchProfile(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  generation: NativeGeneration,
+  patch: ConversationReconfigureProfile,
+): void {
+  generation.launchProfile = emptyLaunchProfile({ ...generation.launchProfile, ...patch });
+  const entry = file.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+  if (entry) {
+    entry.launchProfile = emptyLaunchProfile({ ...(entry.launchProfile ?? generation.launchProfile), ...patch });
+    entry.updatedAt = now();
+  }
+  conversation.updatedAt = now();
 }
 
 function canonicalHeldDeliveryCommand(
@@ -1299,6 +1442,24 @@ function addConversationContinuityPath(conversation: RegistryConversation, pathn
   if (conversation.migration && conversation.migration.phase !== "committed"
     && !conversation.migration.pendingContinuityPaths.includes(pathname)) {
     conversation.migration.pendingContinuityPaths.push(pathname);
+  }
+}
+
+function addAbandonedConversationContinuityPath(conversation: RegistryConversation, pathname: string): void {
+  if (conversation.generations.some((generation) => generation.path === pathname)) return;
+  if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
+  if (!conversation.abandonedContinuityPaths.includes(pathname)) conversation.abandonedContinuityPaths.push(pathname);
+}
+
+function adoptContinuityPathProvenance(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  pathname: string,
+): void {
+  const provisionalOwner = Object.values(file.conversations).find((candidate) =>
+    candidate.id !== conversation.id && candidate.engine === conversation.engine && conversationOwnsPath(candidate, pathname));
+  if (provisionalOwner && !adoptProvisionalOwner(file, provisionalOwner, conversation, pathname)) {
+    throw new Error("migration continuity path has another durable owner");
   }
 }
 
@@ -4032,6 +4193,108 @@ export class AgentRegistry {
     return receipt ? clone(receipt.launchProfile) : null;
   }
 
+  updateConversationLaunchProfile(
+    id: ViewerConversationId,
+    patch: Pick<LaunchProfile, "model" | "effort" | "fast">,
+  ): RegistryConversation {
+    return this.mutate((file) => {
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
+      const generation = conversation?.generations.at(-1);
+      if (!conversation || !generation) throw new Error("viewer conversation is unknown");
+      writeConversationLaunchProfile(file, conversation, generation, patch);
+      return clone(conversation);
+    });
+  }
+
+  claimConversationReconfigure(
+    id: ViewerConversationId,
+    claim: ConversationReconfigureClaim,
+  ): ConversationReconfigureClaimResult {
+    if (!claim.operationId || !Number.isSafeInteger(claim.revision) || claim.revision < 0) {
+      throw new Error("conversation reconfigure ownership is invalid");
+    }
+    return this.mutate((file) => {
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
+      const generation = conversation?.generations.at(-1);
+      if (!conversation || !generation) throw new Error("viewer conversation is unknown");
+      const current = conversation.reconfigure ?? null;
+      if (current && (current.revision > claim.revision
+        || (current.revision === claim.revision && current.operationId !== claim.operationId))) {
+        return { kind: "stale" as const, state: clone(current), conversation: clone(conversation) };
+      }
+      if (current?.operationId === claim.operationId && current.revision === claim.revision) {
+        if (JSON.stringify(current.profile) !== JSON.stringify(claim.profile)
+          || current.accountId !== (claim.accountId ?? null)) {
+          throw new Error("conversation reconfigure replay conflicts with durable ownership");
+        }
+        return { kind: "replayed" as const, state: clone(current), conversation: clone(conversation) };
+      }
+      const returnsToMigrationSource = claim.accountId !== undefined
+        && claim.accountId === generation.accountId
+        && conversation.migration?.targetId !== claim.accountId;
+      const continuesMigrationTarget = claim.accountId !== undefined
+        && conversation.migration?.targetId === claim.accountId;
+      if (current?.status === "applying" && current.accountId !== null) {
+        if (continuesMigrationTarget && !returnsToMigrationSource) {
+          transferReconfigureOwnedMigration(file, conversation, current, claim);
+        } else {
+          retireReconfigureOwnedMigration(file, conversation, current);
+        }
+      }
+      const previousProfile = current?.status === "applying"
+        ? current.previousProfile
+        : claim.previousProfile ?? {
+          model: generation.launchProfile.model,
+          effort: generation.launchProfile.effort,
+          fast: generation.launchProfile.fast,
+        };
+      const state: ConversationReconfigureState = {
+        operationId: claim.operationId,
+        revision: claim.revision,
+        status: "applying",
+        profile: clone(claim.profile),
+        previousProfile: clone(previousProfile),
+        accountId: claim.accountId ?? null,
+        error: null,
+      };
+      writeConversationLaunchProfile(file, conversation, generation, state.profile);
+      conversation.reconfigure = state;
+      return { kind: "claimed" as const, state: clone(state), conversation: clone(conversation) };
+    });
+  }
+
+  settleConversationReconfigure(
+    id: ViewerConversationId,
+    operationId: string,
+    revision: number,
+    status: "applied" | "failed",
+    error: string | null = null,
+  ): ConversationReconfigureSettlement {
+    return this.mutate((file) => {
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
+      const generation = conversation?.generations.at(-1);
+      if (!conversation || !generation) throw new Error("viewer conversation is unknown");
+      const current = conversation.reconfigure ?? null;
+      if (!current || current.operationId !== operationId || current.revision !== revision) {
+        return { kind: "stale" as const, state: current ? clone(current) : null, conversation: clone(conversation) };
+      }
+      if (current.status === status) {
+        return { kind: "replayed" as const, state: clone(current), conversation: clone(conversation) };
+      }
+      if (current.status !== "applying") {
+        return { kind: "stale" as const, state: clone(current), conversation: clone(conversation) };
+      }
+      if (status === "failed") {
+        retireReconfigureOwnedMigration(file, conversation, current);
+        writeConversationLaunchProfile(file, conversation, generation, current.previousProfile);
+      }
+      current.status = status;
+      current.error = status === "failed" ? error : null;
+      conversation.updatedAt = now();
+      return { kind: "settled" as const, state: clone(current), conversation: clone(conversation) };
+    });
+  }
+
   canonicalPath(artifactPath: string): string {
     const conversation = this.conversationForPath(artifactPath);
     return conversation?.generations.at(-1)?.path ?? artifactPath;
@@ -4247,27 +4510,64 @@ export class AgentRegistry {
       moves, engine routing for future spawns stays with the Accounts panel
       (issue #40), new spawns are never adopted into the drain, and the single
       engine-wide drain intent (if any) is neither reused nor retargeted. */
-  requestConversationReseat(id: ViewerConversationId, targetId: string): RegistryConversation {
+  requestConversationReseat(
+    id: ViewerConversationId,
+    targetId: string,
+    reconfigureOwner?: { operationId: string; revision: number },
+  ): RegistryConversation {
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, id);
       const conversation = file.conversations[canonicalId];
       if (!conversation) throw new Error("viewer conversation is unknown");
+      if (reconfigureOwner
+        && (conversation.reconfigure?.operationId !== reconfigureOwner.operationId
+          || conversation.reconfigure.revision !== reconfigureOwner.revision
+          || conversation.reconfigure.status !== "applying")) {
+        throw new Error("conversation reconfigure is superseded");
+      }
       const source = conversation.generations.at(-1);
       if (!source || source.accountId === null || source.accountId === targetId) return clone(conversation);
       if (conversation.migration
         && !["committed", "rolled-back", "failed-recoverable"].includes(conversation.migration.phase)) {
-        return clone(conversation);
+        if (!reconfigureOwner) return clone(conversation);
+        if (conversation.migration.targetId === targetId) {
+          const intent = file.migrationIntents[conversation.migration.intentId];
+          if (intent?.scope === "conversation") {
+            const requestId = reconfigureMigrationRequestId(reconfigureOwner);
+            intent.requestIds = [
+              ...intent.requestIds.filter((candidate) => !candidate.startsWith("reconfigure:")),
+              requestId,
+            ];
+            intent.updatedAt = now();
+            conversation.updatedAt = intent.updatedAt;
+          }
+          return clone(conversation);
+        }
+        const changedAt = now();
+        const priorIntent = file.migrationIntents[conversation.migration.intentId];
+        if (priorIntent?.scope === "conversation" && priorIntent.state !== "stopped") {
+          priorIntent.state = "stopped";
+          priorIntent.stoppedAt = changedAt;
+          priorIntent.updatedAt = changedAt;
+        }
+        abandonPendingContinuityPaths(conversation);
+        queueAbandonedMigrationCleanup(file, conversation, changedAt);
+        conversation.migration = { ...conversation.migration, pendingContinuityPaths: [] };
       }
 
       const changedAt = now();
       if (conversation.migrationOptOut?.targetId === targetId) conversation.migrationOptOut = null;
-      const requestId = `reseat:${canonicalId}:${source.id}`;
+      const requestId = reconfigureOwner
+        ? reconfigureMigrationRequestId(reconfigureOwner)
+        : `reseat:${canonicalId}:${source.id}`;
       let intent = Object.values(file.migrationIntents)
         .filter((candidate) => candidate.scope === "conversation"
           && candidate.engine === conversation.engine
           && candidate.targetId === targetId
           && candidate.state !== "stopped"
-          && candidate.requestIds.some((request) => request.startsWith(`reseat:${canonicalId}:`)))
+          && (reconfigureOwner
+            ? candidate.requestIds.includes(requestId)
+            : candidate.requestIds.some((request) => request.startsWith(`reseat:${canonicalId}:`))))
         .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
       if (!intent) {
         intent = {
@@ -4399,14 +4699,31 @@ export class AgentRegistry {
       const canonicalId = resolveConversationAlias(file, id);
       const conversation = file.conversations[canonicalId];
       if (!conversation) throw new Error("viewer conversation is unknown");
-      const provisionalOwner = Object.values(file.conversations).find((candidate) =>
-        candidate.id !== canonicalId && candidate.engine === conversation.engine && conversationOwnsPath(candidate, pathname));
-      if (provisionalOwner) {
-        if (!adoptProvisionalOwner(file, provisionalOwner, conversation, pathname)) {
-          throw new Error("migration continuity path has another durable owner");
-        }
-      }
+      adoptContinuityPathProvenance(file, conversation, pathname);
       addConversationContinuityPath(conversation, pathname);
+      conversation.updatedAt = now();
+      return clone(conversation);
+    });
+  }
+
+  recordMigrationContinuityPath(
+    id: ViewerConversationId,
+    pathname: string,
+    owner: { operationId: string; revision: number },
+  ): RegistryConversation {
+    return this.mutate((file) => {
+      const canonicalId = resolveConversationAlias(file, id);
+      const conversation = file.conversations[canonicalId];
+      if (!conversation) throw new Error("viewer conversation is unknown");
+      adoptContinuityPathProvenance(file, conversation, pathname);
+      const migration = conversation.migration;
+      if (migration?.phase === "successor-starting"
+        && migration.operationId === owner.operationId
+        && migration.revision === owner.revision) {
+        addConversationContinuityPath(conversation, pathname);
+      } else {
+        addAbandonedConversationContinuityPath(conversation, pathname);
+      }
       conversation.updatedAt = now();
       return clone(conversation);
     });
@@ -4479,16 +4796,39 @@ export class AgentRegistry {
     });
   }
 
-  commitSuccessor(id: ViewerConversationId, successor: SuccessorGenerationInput, expectedRevision: number): RegistryConversation {
+  commitSuccessor(
+    id: ViewerConversationId,
+    successor: SuccessorGenerationInput,
+    expectedRevision: number,
+    expectedOperationId: string,
+    expectedReceipt: ProviderReceipt,
+  ): RegistryConversation {
     return this.mutate((file) => {
       const conversation = file.conversations[resolveConversationAlias(file, id)];
-      if (!conversation?.migration || conversation.migration.revision !== expectedRevision) throw new Error("migration revision is stale");
-      if (conversation.migration.phase === "committed") {
+      const migration = conversation?.migration;
+      const successorMatchesReceipt = expectedReceipt.operationId === expectedOperationId
+        && expectedReceipt.nativeId === successor.id
+        && expectedReceipt.path === successor.path
+        && (successor.historyHash === undefined || expectedReceipt.historyHash === successor.historyHash)
+        && (successor.host === undefined || isDeepStrictEqual(expectedReceipt.host, successor.host));
+      const durableReceiptMatches = migration?.providerReceipt !== null
+        && migration?.providerReceipt !== undefined
+        && sameProviderReceiptOutcome(migration.providerReceipt, expectedReceipt);
+      if (!conversation
+        || !migration
+        || migration.revision !== expectedRevision
+        || migration.operationId !== expectedOperationId
+        || migration.targetId !== successor.accountId
+        || !durableReceiptMatches
+        || !successorMatchesReceipt) {
+        throw new Error("migration succession ownership is stale");
+      }
+      if (migration.phase === "committed") {
         const current = conversation.generations.at(-1);
         if (current?.id === successor.id && current.path === successor.path) return clone(conversation);
         throw new Error("migration succession is already committed");
       }
-      if (conversation.migration.phase !== "verifying") throw new Error("migration succession is not ready to commit");
+      if (migration.phase !== "verifying") throw new Error("migration succession is not ready to commit");
       const predecessor = conversation.generations.at(-1);
       if (!predecessor) throw new Error("viewer conversation has no native generation");
       const committedAt = now();
@@ -4503,11 +4843,11 @@ export class AgentRegistry {
       };
       conversation.generations.push(generation);
       conversation.continuityPaths = conversation.continuityPaths.filter((pathname) => pathname !== generation.path);
-      const committedContinuityPaths = new Set(conversation.migration.pendingContinuityPaths);
+      const committedContinuityPaths = new Set(migration.pendingContinuityPaths);
       conversation.abandonedContinuityPaths = conversation.abandonedContinuityPaths.filter(
         (pathname) => !committedContinuityPaths.has(pathname),
       );
-      conversation.migration = { ...conversation.migration, phase: "committed", updatedAt: now() };
+      conversation.migration = { ...migration, phase: "committed", updatedAt: now() };
       conversation.updatedAt = now();
       for (const delivery of Object.values(file.heldDeliveries)) {
         if (delivery.conversationId !== id || delivery.state !== "held") continue;
