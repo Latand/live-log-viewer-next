@@ -126,7 +126,7 @@ test("late receipt-free legacy success settles live-pane and resume generations 
       if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
       const body = JSON.parse(String(init?.body)) as { clientMessageId: string; text: string };
       attempts.push({ key: body.clientMessageId, text: body.text });
-      await sleep(18);
+      await sleep(75);
       return {
         ok: true,
         status: 200,
@@ -153,7 +153,14 @@ test("late receipt-free legacy success settles live-pane and resume generations 
       flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
       await sleep(10);
       flushSync(() => textareaProps.onChange({ target: { value: later } }));
-      await sleep(20);
+      await sleep(50);
+      expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(1);
+      for (let attempt = 0; attempt < 50 && sessionStorage.getItem(`llvPendingSend:${conversationId}`); attempt += 1) {
+        await sleep(3);
+      }
+      for (let attempt = 0; attempt < 50 && host.querySelectorAll('[data-receipt-status="uncertain"]').length; attempt += 1) {
+        await sleep(3);
+      }
 
       expect(attempts).toEqual([{ key: attempts[0]!.key, text: original }]);
       expect(textarea.value).toBe(later);

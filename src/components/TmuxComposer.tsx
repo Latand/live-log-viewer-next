@@ -1027,6 +1027,14 @@ export function TmuxComposer({
     displayedRuntimeReceiptsRef.current = displayedRuntimeReceipts;
   }, [displayedRuntimeReceipts]);
   const receiptReconciliations = useRef<Map<string, AbortController>>(new Map());
+  const legacyResponseEpoch = useRef<{ cardId: string; active: boolean }>({ cardId, active: true });
+  useEffect(() => {
+    const epoch = { cardId, active: true };
+    legacyResponseEpoch.current = epoch;
+    return () => {
+      epoch.active = false;
+    };
+  }, [cardId]);
   const dismissedReceipts = new Set(dismissedReceiptIds);
   const dismissReceipts = (operationIds: string[]) => {
     if (!operationIds.length) return;
@@ -1412,6 +1420,9 @@ export function TmuxComposer({
       persistSent([...prior, entry].slice(-SENT_LIMIT));
       const attempt = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
       persistPendingDeliveries(pendingDeliveries.current.filter((candidate) => candidate.key !== clientMessageId));
+      setImmediateRuntimeReceipts((current) => current.filter((candidate) =>
+        candidate.idempotencyKey !== clientMessageId
+        && candidate.operationId !== unconfirmedReceiptOperationId(clientMessageId)));
       if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
       settleGeneration(payloadText, attempt?.images ?? sentImages);
       setStatus({
@@ -1426,6 +1437,7 @@ export function TmuxComposer({
       });
       inputRef.current?.focus();
     };
+    const responseEpoch = legacyResponseEpoch.current;
     let admissionRequest: Promise<ComposerSendResult> | null = null;
     try {
       admissionRequest = Promise.resolve(structuredSession
@@ -1565,10 +1577,10 @@ export function TmuxComposer({
                 : receipt;
             }
             if (!result.ok || result.structured) return null;
+            if (!responseEpoch.active || legacyResponseEpoch.current !== responseEpoch) return null;
             const controller = receiptReconciliations.current.get(clientMessageId);
-            if (!controller || controller.signal.aborted) return null;
             settleLegacySuccess(result);
-            controller.abort();
+            controller?.abort();
             receiptReconciliations.current.delete(clientMessageId);
             setReconcilingSend(receiptReconciliations.current.size > 0);
             return null;
