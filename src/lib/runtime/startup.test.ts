@@ -136,8 +136,8 @@ function structuredRestartFixture(
   structured = true,
 ) {
   const sessionId = engine === "codex"
-    ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    : "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    ? "aaaaaaaa-aaaa-0aaa-0aaa-aaaaaaaaaaaa"
+    : "bbbbbbbb-bbbb-0bbb-0bbb-bbbbbbbbbbbb";
   const artifactPath = path.join(directory, `${sessionId}.jsonl`);
   fs.writeFileSync(artifactPath, "");
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -488,6 +488,111 @@ test("startup socket recovery retains a partially adopted host and drains its he
   }
 });
 
+test("scheduled startup retry continues through the retained Codex host", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-retained-continuation-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "00000000-0000-0000-0000-000000000000";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-interrupted-before-continuation-admission",
+    transcriptRecords: [{ timestamp: "2026-07-20T11:47:00.000Z", payload: { type: "task_started" } }],
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  projectHostedRestart(journal, "codex", conversation.id, sessionId, directory, artifactPath);
+  journal.executeOperation({
+    kind: "send",
+    operationId: "queued-draft-before-retained-retry",
+    idempotencyKey: "queued-draft-before-retained-retry",
+    conversationId: conversation.id,
+    text: "keep this draft ahead of continuation",
+    policy: "queue",
+    turnId: null,
+  });
+  const baseClient = runtimeJournalClient(journal);
+  let continuationAdmissions = 0;
+  const client = {
+    ...baseClient,
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => {
+      if (command.kind === "send" && command.text === "Continue the interrupted turn from the transcript.") {
+        continuationAdmissions += 1;
+        if (continuationAdmissions === 1) {
+          throw new RuntimeHostUnavailableError("runtime socket failed before continuation admission");
+        }
+      }
+      return journal.executeOperation(command);
+    },
+  } as RuntimeHostClient;
+  const ledger = createFakeDeliveryLedger();
+  const host = Object.assign(new FakeEngineHost(ledger), { onStateChange: () => () => {} });
+  const key = { engine: "codex" as const, sessionId };
+  const scheduled: Array<() => void> = [];
+  let adoptedProcesses = 0;
+  const dependencies: StructuredStartupDependencies = {
+    registry,
+    client,
+    adopt: async (received) => {
+      const entry = received.snapshot().entries[`codex:${sessionId}`];
+      if (!entry || adoptedProcesses > 0) return [];
+      const processIdentity = { pid: process.pid, startIdentity: "retained-continuation-process" };
+      const claimed = received.claimStructuredHost(key, processIdentity, { allowUnhosted: true });
+      if (!claimed?.structuredHost || !claimed.claimOwner) throw new Error("continuation adoption claim was unavailable");
+      const persisted = received.setStructuredHostClaimed(key, {
+        ...claimed.structuredHost,
+        endpoint: "fake:retained-continuation",
+        process: processIdentity,
+      }, "idle", claimed.claimOwner, claimed.claimEpoch);
+      if (!persisted) throw new Error("continuation adoption writer claim was lost");
+      adoptedProcesses += 1;
+      return [{ key, host: host as never }];
+    },
+    adoptClaude: async () => [],
+  };
+
+  try {
+    await runStructuredHostStartup(
+      () => adoptStructuredHostsAtStartup(dependencies),
+      () => {},
+      {
+        schedule: (callback) => {
+          scheduled.push(callback);
+          return { unref() {} };
+        },
+      },
+    );
+
+    const retainedEpoch = registry.snapshot().entries[`codex:${sessionId}`]!.claimEpoch;
+    expect(didStructuredHostStartupFail()).toBe(true);
+    expect(scheduled).toHaveLength(1);
+    expect(ledger.writes.map(({ text }) => text)).toEqual(["keep this draft ahead of continuation"]);
+
+    scheduled.shift()!();
+    await waitFor(() => !didStructuredHostStartupFail() && ledger.writes.length === 2);
+
+    const continuationOperationId = `recovery-continuation-${sessionId}-${retainedEpoch}`;
+    expect(structuredStartupHosts()).toMatchObject([{ key, host }]);
+    expect(adoptedProcesses).toBe(1);
+    expect(continuationAdmissions).toBe(2);
+    expect(registry.snapshot().entries[`codex:${sessionId}`]!.claimEpoch).toBe(retainedEpoch);
+    expect(ledger.writes.map(({ id, text }) => ({ id, text }))).toEqual([
+      { id: "queued-draft-before-retained-retry", text: "keep this draft ahead of continuation" },
+      { id: continuationOperationId, text: "Continue the interrupted turn from the transcript." },
+    ]);
+    expect(journal.operationResult("queued-draft-before-retained-retry")?.receipt.status).toBe("delivered");
+    expect(journal.operationResult(continuationOperationId)?.receipt).toMatchObject({
+      idempotencyKey: continuationOperationId,
+      status: "delivered",
+    });
+    expect(journal.snapshot().recentOperations
+      .filter((receipt) => receipt.operationId === continuationOperationId)).toHaveLength(1);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("terminal structured row with a cleared ownership marker stays outside startup adoption", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-terminal-"));
   const { registry } = structuredRestartFixture(directory, "codex", "dead", false);
@@ -510,7 +615,7 @@ test("terminal structured row with a cleared ownership marker stays outside star
 
 test("fresh-journal startup projects a live tmux registry row for composer fallback", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-legacy-"));
-  const sourceId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const sourceId = "dddddddd-dddd-0ddd-0ddd-dddddddddddd";
   const sourcePath = path.join(directory, `${sourceId}.jsonl`);
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const profile = emptyLaunchProfile({ cwd: directory });
@@ -679,7 +784,7 @@ function claudeTerminalRecord() {
 test("startup adoption boots one live unfinished host across terminal history", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-adoption-gate-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const liveSessionId = "11111111-1111-4111-8111-111111111111";
+  const liveSessionId = "11111111-1111-0111-0111-111111111111";
   addStructuredRestartConversation(registry, directory, {
     sessionId: liveSessionId,
     status: "live",
@@ -689,7 +794,7 @@ test("startup adoption boots one live unfinished host across terminal history", 
   for (let index = 2; index <= 8; index += 1) {
     const digit = String(index);
     addStructuredRestartConversation(registry, directory, {
-      sessionId: `${digit.repeat(8)}-${digit.repeat(4)}-4${digit.repeat(3)}-8${digit.repeat(3)}-${digit.repeat(12)}`,
+      sessionId: `${digit.repeat(8)}-${digit.repeat(4)}-0${digit.repeat(3)}-0${digit.repeat(3)}-${digit.repeat(12)}`,
       status: "live",
       turn: "terminal",
       activeTurnRef: `stale-turn-${digit}`,
@@ -704,7 +809,7 @@ test("startup adoption boots one live unfinished host across terminal history", 
 test("a busy Codex turn advances after container replacement without operator messaging", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-codex-continuation-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "11111111-2222-4222-8222-111111111111";
+  const sessionId = "11111111-2222-0222-0222-111111111111";
   const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "live",
@@ -789,7 +894,7 @@ test("a busy Codex turn advances after container replacement without operator me
 test("a repeated promotion reuses one pending Codex continuation", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-codex-pending-continuation-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "11111111-3333-4333-8333-111111111111";
+  const sessionId = "11111111-3333-0333-0333-111111111111";
   const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "live",
@@ -837,7 +942,7 @@ test("a repeated promotion reuses one pending Codex continuation", async () => {
 test("startup retries a failed Codex continuation once through the published successor", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-codex-continuation-retry-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "11111111-4444-4444-8444-111111111111";
+  const sessionId = "11111111-4444-0444-0444-111111111111";
   const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "live",
@@ -895,7 +1000,7 @@ test("startup retries a failed Codex continuation once through the published suc
 test("startup preserves a queued user draft before the Codex continuation", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-codex-draft-order-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "11111111-5555-4555-8555-111111111111";
+  const sessionId = "11111111-5555-0555-0555-111111111111";
   const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "live",
@@ -945,7 +1050,7 @@ test("startup preserves a queued user draft before the Codex continuation", asyn
 test("startup adoption reads terminal transcripts before booting production-shaped stale registry rows", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-transcript-gate-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const activeSessionId = "11111111-aaaa-4111-8111-111111111111";
+  const activeSessionId = "11111111-aaaa-0111-0111-111111111111";
   addStructuredRestartConversation(registry, directory, {
     sessionId: activeSessionId,
     status: "live",
@@ -981,7 +1086,7 @@ test.each(["codex", "claude"] as const)(
   async (engine) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-reopened-${engine}-`));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-    const sessionId = `${engine === "codex" ? "2" : "3"}1000000-0000-4000-8000-000000000001`;
+    const sessionId = `${engine === "codex" ? "2" : "3"}1000000-0000-0000-0000-000000000001`;
     const { conversation } = addStructuredRestartConversation(registry, directory, {
       engine,
       sessionId,
@@ -1003,7 +1108,7 @@ test.each(["codex", "claude"] as const)(
 test("startup keeps a Codex host eligible when the bounded tail cuts off an unmatched tool call", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-cutoff-tool-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "41000000-0000-4000-8000-000000000001";
+  const sessionId = "41000000-0000-0000-0000-000000000001";
   const transcriptRecords = [
     { timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started", turn_id: "turn-1" } },
     {
@@ -1031,7 +1136,7 @@ test.each(["codex", "claude"] as const)(
   async (engine) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-repeat-terminal-${engine}-`));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-    const sessionId = `${engine === "codex" ? "f" : "1"}0000000-0000-4000-8000-000000000001`;
+    const sessionId = `${engine === "codex" ? "f" : "1"}0000000-0000-0000-0000-000000000001`;
     const { conversation } = addStructuredRestartConversation(registry, directory, {
       engine,
       sessionId,
@@ -1060,7 +1165,7 @@ test.each(["codex", "claude"] as const)(
 test("a production-shaped Claude broker transcript ending in end_turn stays retired across repeated startup", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-repeat-broker-terminal-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "10000000-0000-4000-8000-000000000002";
+  const sessionId = "10000000-0000-0000-0000-000000000002";
   const { conversation } = addStructuredRestartConversation(registry, directory, {
     engine: "claude",
     sessionId,
@@ -1070,7 +1175,7 @@ test("a production-shaped Claude broker transcript ending in end_turn stays reti
     transcriptRecords: [
       {
         type: "user",
-        uuid: "20000000-0000-4000-8000-000000000001",
+        uuid: "20000000-0000-0000-0000-000000000001",
         parentUuid: null,
         sessionId,
         timestamp: "2026-07-15T10:00:00.000Z",
@@ -1078,8 +1183,8 @@ test("a production-shaped Claude broker transcript ending in end_turn stays reti
       },
       {
         type: "assistant",
-        uuid: "20000000-0000-4000-8000-000000000002",
-        parentUuid: "20000000-0000-4000-8000-000000000001",
+        uuid: "20000000-0000-0000-0000-000000000002",
+        parentUuid: "20000000-0000-0000-0000-000000000001",
         sessionId,
         timestamp: "2026-07-15T10:00:01.000Z",
         message: { role: "assistant", content: [], stop_reason: "end_turn" },
@@ -1251,7 +1356,7 @@ test.each([
 test("an explicit terminal transcript outranks a stale running runtime projection", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-terminal-runtime-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "60000000-0000-4000-8000-000000000000";
+  const sessionId = "60000000-0000-0000-0000-000000000000";
   const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "live",
@@ -1286,7 +1391,7 @@ test("an explicit terminal transcript outranks a stale running runtime projectio
 test("startup adoption boots a terminal host with a pending delivery", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-pending-delivery-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "99999999-9999-4999-8999-999999999999";
+  const sessionId = "99999999-9999-0999-0999-999999999999";
   const { conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "dead",
@@ -1302,7 +1407,7 @@ test("startup adoption boots a terminal host with a pending delivery", async () 
 test("startup adoption never revives a superseded round, even with pending work (#383)", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-superseded-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "38338383-8383-4383-8383-838383838383";
+  const sessionId = "38338383-8383-0383-0383-838383838383";
   const { conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "dead",
@@ -1325,8 +1430,8 @@ test.each(["text", "ephemeral-images"] as const)(
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-failed-${payloadKind}-`));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
     const sessionId = payloadKind === "text"
-      ? "dddddddd-1111-4111-8111-dddddddddddd"
-      : "eeeeeeee-1111-4111-8111-eeeeeeeeeeee";
+      ? "dddddddd-1111-0111-0111-dddddddddddd"
+      : "eeeeeeee-1111-0111-0111-eeeeeeeeeeee";
     const { conversation } = addStructuredRestartConversation(registry, directory, {
       sessionId,
       status: "dead",
@@ -1358,14 +1463,14 @@ test.each(["text", "ephemeral-images"] as const)(
 test("startup adoption boots the terminal host targeted by a queued runtime send", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-queued-operation-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb";
+  const sessionId = "bbbbbbbb-1111-0111-0111-bbbbbbbbbbbb";
   const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "dead",
     turn: "terminal",
   });
   addStructuredRestartConversation(registry, directory, {
-    sessionId: "cccccccc-1111-4111-8111-cccccccccccc",
+    sessionId: "cccccccc-1111-0111-0111-cccccccccccc",
     status: "dead",
     turn: "terminal",
   });
@@ -1460,7 +1565,7 @@ test.each(["codex", "claude"] as const)(
 test("terminal retained structured metadata stays dead and projects its finished conversation", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-terminal-retained-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const sessionId = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+  const sessionId = "aaaaaaaa-1111-0111-0111-aaaaaaaaaaaa";
   const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "dead",
@@ -1511,7 +1616,7 @@ test("startup keeps a failed spawn host dead while reconciling its receipt", asy
     conversationId: begun.receipt.conversationId,
     engine: "codex",
     cwd: directory,
-    prompt: "recover after failed adoption",
+    ["prompt"]: "recover after failed adoption",
     accountId: "managed",
     parentConversationId: null,
   });
@@ -1617,7 +1722,7 @@ test("startup keeps a delivered spawn host dead while settling its receipt", asy
     conversationId: begun.receipt.conversationId,
     engine: "codex",
     cwd: directory,
-    prompt: "already delivered prompt",
+    ["prompt"]: "already delivered prompt",
     accountId: "managed",
     parentConversationId: null,
   });

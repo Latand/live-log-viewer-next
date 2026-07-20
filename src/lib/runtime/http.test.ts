@@ -276,7 +276,7 @@ test("answer and interrupt commands kick their queued host controls", async () =
 
 test("direct runtime send and steer stay held while their conversation migrates", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-http-migration-"));
-  const sourceId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const sourceId = "cccccccc-cccc-0ccc-0ccc-cccccccccccc";
   const sourcePath = path.join(directory, `${sourceId}.jsonl`);
   const registry = new AgentRegistry(path.join(directory, "registry.json"));
   const profile = emptyLaunchProfile({ cwd: directory });

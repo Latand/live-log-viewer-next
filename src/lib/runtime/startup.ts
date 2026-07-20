@@ -322,7 +322,10 @@ export async function adoptStructuredHostsAtStartup(
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   const signals = await structuredStartupSignals(registry, client);
   const shouldAdopt = structuredStartupAdoptionFilter(registry, signals);
-  const interruptedCodex = interruptedCodexConversations(registry, shouldAdopt);
+  const retainedHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
+  const shouldRetainOrAdopt: StructuredHostAdoptionFilter = (entry) =>
+    retainedHostKeys.has(sessionKeyId(entry.key)) || shouldAdopt(entry);
+  const interruptedCodex = interruptedCodexConversations(registry, shouldRetainOrAdopt);
   const resolveCodexOwner = dependencies.resolveCodexOwner ?? ((entry: AgentRegistryEntry) =>
     accountManager.resolveTranscriptOwner("codex", entry.artifactPath));
   const resolveClaudeOwner = dependencies.resolveClaudeOwner ?? ((entry: AgentRegistryEntry) =>
@@ -371,16 +374,19 @@ export async function adoptStructuredHostsAtStartup(
   );
   nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, claude);
   retryAdoptedHosts = nextAdoptedHosts;
+  const availableCodexHosts = nextAdoptedHosts.filter(
+    (item): item is AdoptedCodexHost => item.key.engine === "codex",
+  );
   const previousCodexContinuations = client
-    ? await previousInterruptedCodexContinuations(registry, client, codex, interruptedCodex)
+    ? await previousInterruptedCodexContinuations(registry, client, availableCodexHosts, interruptedCodex)
     : new Map<string, RuntimeOperationResult>();
-  await demoteSkippedStructuredRegistryHosts(registry, shouldAdopt);
+  await demoteSkippedStructuredRegistryHosts(registry, shouldRetainOrAdopt);
   await bindStructuredDeliveryQueue(nextAdoptedHosts, { registry: dependencies.registry, client });
   if (client) {
     await enqueueInterruptedCodexContinuations(
       registry,
       client,
-      codex,
+      availableCodexHosts,
       interruptedCodex,
       previousCodexContinuations,
       signals.pendingCodexContinuationConversationIds,
