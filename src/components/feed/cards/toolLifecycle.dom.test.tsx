@@ -5,8 +5,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
+import { translate } from "@/lib/i18n";
+
 import { activeGroup, activeFailureGroup, settledGroup, nestedGroup } from "../__fixtures__/readableTools";
 import { CmdGroupCard } from "./CmdGroupCard";
+
+const en = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -150,8 +154,10 @@ test("nested wait/stdin follow-ups stay owned by their exec inside the live aggr
   // Two top-level blocks; the follow-ups render inside the first, inline.
   expect(list.querySelectorAll(":scope > li").length).toBe(2);
   const firstBlock = list.querySelector("li")!;
+  // The output-bearing wait keeps its readable row; the empty poll collapses to
+  // the compact counted row rather than a full stdin card (issue #497).
   expect(firstBlock.textContent).toContain("wait");
-  expect(firstBlock.textContent).toContain("stdin");
+  expect(firstBlock.textContent).toContain(en("tools.pollRun", { count: 1 }));
   // Still no nested disclosure: the aggregate details is the only one.
   expect(h.querySelectorAll("details").length).toBe(1);
 });

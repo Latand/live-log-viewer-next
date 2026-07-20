@@ -785,6 +785,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "tools.noOutputTip": "повний вивід зберігається в сесії rollout",
   "tools.stdin": "stdin",
   "tools.stdinPoll": "опитування",
+  "tools.pollRun": { one: "{count} опитування", few: "{count} опитування", many: "{count} опитувань", other: "{count} опитувань" },
   "tools.wait": "очікування",
   "tools.session": "сесія",
   "tools.waitingSeconds": "очікування {n} с",

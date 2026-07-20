@@ -46,7 +46,7 @@ test("compaction lineage proof reads a bounded predecessor tail", async () => {
   const slug = "-repo-bounded-compaction";
   const predecessorPath = path.join(SANDBOX, "predecessor.jsonl");
   const successorPath = path.join(SANDBOX, "successor.jsonl");
-  const logicalParentUuid = "11111111-2222-4333-8444-555555555555";
+  const logicalParentUuid = "11111111-2222-0333-0444-555555555555";
   fs.writeFileSync(predecessorPath, Buffer.concat([
     Buffer.from(`${JSON.stringify({ type: "user", uuid: "head" })}\n`),
     Buffer.alloc(8 * 1024 * 1024, 0x20),
@@ -89,6 +89,59 @@ test("compaction lineage proof reads a bounded predecessor tail", async () => {
 
   expect(predecessor.parent).toBe(successor.path);
   expect(bytesRead).toBeLessThanOrEqual(1024 * 1024);
+});
+
+test("many compaction probes share one bounded tail read for a growing candidate", async () => {
+  const slug = "-repo-shared-compaction-tail";
+  const candidatePath = path.join(SANDBOX, "shared-growing-candidate.jsonl");
+  fs.writeFileSync(candidatePath, Buffer.concat([
+    Buffer.from(`${JSON.stringify({ type: "user", uuid: "head" })}\n`),
+    Buffer.alloc(8 * 1024 * 1024, 0x20),
+    Buffer.from(`\n${JSON.stringify({ type: "assistant", uuid: "aaaaaaaa-bbbb-0ccc-0ddd-eeeeeeeeeeee" })}\n`),
+  ]));
+  const candidate = entry(candidatePath, `${slug}/candidate.jsonl`, 1);
+  const successors = Array.from({ length: 32 }, (_, index) => {
+    const logicalParentUuid = `11111111-2222-0333-0444-${String(index).padStart(12, "0")}`;
+    const successorPath = path.join(SANDBOX, `shared-successor-${index}.jsonl`);
+    fs.writeFileSync(successorPath, `${JSON.stringify({
+      type: "system",
+      subtype: "compact_boundary",
+      logicalParentUuid,
+    })}\n`);
+    return entry(successorPath, `${slug}/successor-${index}.jsonl`, index + 2);
+  });
+
+  const originalOpen = fs.openSync;
+  const originalRead = fs.readSync;
+  const originalClose = fs.closeSync;
+  const tracked = new Set<number>();
+  let bytesRead = 0;
+  fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    const fd = originalOpen(filename, flags, mode);
+    if (path.resolve(String(filename)) === candidatePath) tracked.add(fd);
+    return fd;
+  }) as typeof fs.openSync;
+  fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+    const read = originalRead(fd, buffer, offset, length, position);
+    if (tracked.has(fd)) bytesRead += read;
+    return read;
+  }) as typeof fs.readSync;
+  fs.closeSync = ((fd: number) => {
+    tracked.delete(fd);
+    return originalClose(fd);
+  }) as typeof fs.closeSync;
+
+  try {
+    await linkEntries([candidate, ...successors], { persist: false });
+  } finally {
+    fs.openSync = originalOpen;
+    fs.readSync = originalRead;
+    fs.closeSync = originalClose;
+  }
+
+  /* The candidate also pays the independent 512 KiB compact-marker discovery
+     read once. All 32 UUID lineage probes share the remaining 1 MiB tail read. */
+  expect(bytesRead).toBeLessThanOrEqual(1536 * 1024);
 });
 
 test("background command recovery advances within one bounded read budget", async () => {
@@ -314,7 +367,7 @@ test("a snapshot heuristic edge cannot outrank a provable compaction predecessor
   const successorPath = path.join(SANDBOX, "heuristic-successor.jsonl");
   const provenPath = path.join(SANDBOX, "heuristic-proven.jsonl");
   const strayPath = path.join(SANDBOX, "heuristic-stray.jsonl");
-  const logicalParentUuid = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+  const logicalParentUuid = "bbbbbbbb-cccc-0ddd-0eee-ffffffffffff";
   fs.writeFileSync(successorPath, `${JSON.stringify({
     type: "system",
     subtype: "compact_boundary",
@@ -345,7 +398,7 @@ test("proven compaction chains survive restart after predecessor growth", async 
   const slug = "-repo-restart-compaction";
   const predecessorPath = path.join(SANDBOX, "restart-predecessor.jsonl");
   const successorPath = path.join(SANDBOX, "restart-successor.jsonl");
-  const logicalParentUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+  const logicalParentUuid = "66666666-7777-0888-0999-aaaaaaaaaaaa";
   fs.writeFileSync(predecessorPath, Buffer.concat([
     Buffer.alloc(2 * 1024 * 1024, 0x20),
     Buffer.from(`\n${JSON.stringify({ type: "assistant", uuid: logicalParentUuid })}\n`),
