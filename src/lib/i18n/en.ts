@@ -826,6 +826,23 @@ export const en = {
   "tools.copyDiff": "Copy diff",
   "tools.copyOutput": "Copy output",
   "tools.source": "source",
+  // Readable expanded tool block (issue #475)
+  "tools.action": "action {index}",
+  "tools.cwd": "cwd",
+  "tools.copyCwd": "copy cwd",
+  "tools.copyCommand": "Copy command",
+  "tools.stdout": "stdout",
+  "tools.stderr": "stderr",
+  "tools.copyStderr": "Copy stderr",
+  "tools.showStderr": "show all stderr",
+  "tools.noStderr": "no stderr captured",
+  "tools.exitOk": "exit 0",
+  "tools.exitCode": "exit {code}",
+  "tools.durationSec": "{n}s",
+  "tools.durationMin": "{m}m {s}s",
+  "tools.durationMs": "{n}ms",
+  "tools.ranAt": "{start}–{end}",
+  "tools.nestedWaits": { one: "{count} follow-up", other: "{count} follow-ups" },
 
   // ScheduleWakeup card + board timer chip (issue #161)
   "wakeup.card": "scheduled wakeup",

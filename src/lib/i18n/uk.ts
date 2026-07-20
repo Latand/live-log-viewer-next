@@ -800,6 +800,23 @@ export const uk: Record<keyof typeof en, Message> = {
   "tools.copyDiff": "Копіювати diff",
   "tools.copyOutput": "Копіювати вивід",
   "tools.source": "джерело",
+  // Readable expanded tool block (issue #475)
+  "tools.action": "дія {index}",
+  "tools.cwd": "cwd",
+  "tools.copyCwd": "копіювати cwd",
+  "tools.copyCommand": "Копіювати команду",
+  "tools.stdout": "stdout",
+  "tools.stderr": "stderr",
+  "tools.copyStderr": "Копіювати stderr",
+  "tools.showStderr": "показати весь stderr",
+  "tools.noStderr": "stderr не збережено",
+  "tools.exitOk": "код виходу 0",
+  "tools.exitCode": "код виходу {code}",
+  "tools.durationSec": "{n} с",
+  "tools.durationMin": "{m} хв {s} с",
+  "tools.durationMs": "{n} мс",
+  "tools.ranAt": "{start}–{end}",
+  "tools.nestedWaits": { one: "{count} додатковий", few: "{count} додаткові", many: "{count} додаткових", other: "{count} додаткових" },
 
   // ScheduleWakeup card + board timer chip (issue #161)
   "wakeup.card": "заплановане пробудження",
