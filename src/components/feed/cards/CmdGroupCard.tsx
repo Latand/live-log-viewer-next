@@ -5,9 +5,9 @@ import { useState } from "react";
 import { ChevronRight } from "../../icons";
 import { hhmm } from "../../utils";
 import { tr, type CmdGroupItem } from "../parse";
-import { groupNestedCalls } from "../toolBlocks";
+import { coalesceFollowUps, groupNestedCalls } from "../toolBlocks";
 import { StatusIcon } from "./shared";
-import { ToolBlockRow } from "./ToolCard";
+import { PollRow, ToolBlockRow } from "./ToolCard";
 
 /* A run of ≥2 consecutive tool events folded into one quiet ToolLine header
    (design doc §3.4): `▸ N дій · Tool ×a · Tool ×b · t0–t1`.
@@ -98,18 +98,28 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
           tool_use), so the id alone is not a unique key. */}
       {open ? (
         <ol className="mb-1 mt-1 space-y-0.5">
-          {blocks.map((block, bi) => (
-            <li key={`${block.parent.id}:${bi}`} className="min-w-0">
-              <ToolBlockRow event={block.parent} index={bi + 1} />
-              {block.children.length ? (
-                <div className="ml-4 border-l border-border pl-2">
-                  {block.children.map((child, ci) => (
-                    <ToolBlockRow key={`${child.id}:${ci}`} event={child} nested />
-                  ))}
-                </div>
-              ) : null}
-            </li>
-          ))}
+          {blocks.map((block, bi) => {
+            /* Consecutive empty polls coalesce into one compact counted row; a
+               keystroke write_stdin or an output-bearing wait stays a full
+               readable follow-up (issue #497). */
+            const children = coalesceFollowUps(block.children);
+            return (
+              <li key={`${block.parent.id}:${bi}`} className="min-w-0">
+                <ToolBlockRow event={block.parent} index={bi + 1} />
+                {children.length ? (
+                  <div className="ml-4 border-l border-border pl-2">
+                    {children.map((child, ci) =>
+                      child.kind === "polls" ? (
+                        <PollRow key={`poll:${ci}`} events={child.events} session={child.session} elapsedMs={child.elapsedMs} />
+                      ) : (
+                        <ToolBlockRow key={`${child.event.id}:${ci}`} event={child.event} nested />
+                      ),
+                    )}
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
         </ol>
       ) : null}
     </details>

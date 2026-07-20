@@ -948,7 +948,7 @@ describe("Codex functions.exec orchestration", () => {
     expect(JSON.stringify(event)).not.toContain("SECRETLEAK99");
   });
 
-  test("unwraps metadata-passthrough exec calls and preserves nested stdin poll details", () => {
+  test("normalizes a concrete metadata-wrapped stdin poll into its interactive event", () => {
     const lines = [
       JSON.stringify({
         type: "response_item",
@@ -977,12 +977,32 @@ describe("Codex functions.exec orchestration", () => {
 
     const event = buildFeed(codexFile, lines, false, "").items.find((item) => item.kind === "tool");
     if (event?.kind !== "tool") throw new Error("expected metadata-wrapped exec tool");
-    expect(event.orchestration?.calls).toHaveLength(2);
-    expect(event.orchestration?.calls[0]?.tool).toBe("write_stdin");
-    expect(event.orchestration?.calls[0]?.summary).toContain("73");
-    expect(event.orchestration?.calls[0]?.summary.toLowerCase()).toContain("poll");
+    expect(event.tool).toBe("write_stdin");
+    expect(event.session).toBe("73");
+    expect(event.poll).toBe(true);
+    expect(event.orchestration).toBeUndefined();
+    expect(event.summary).toContain("73");
+    expect(event.summary.toLowerCase()).toContain("poll");
     expect(event.outputPreview).toContain("process is still running");
     expect(event.outputPreview).not.toContain("Script completed");
+  });
+
+  test("metadata-wrapped empty polls group under the exec session that owns them", () => {
+    const lines = [
+      orch('const r = await tools.exec_command({cmd:"docker ps"}); text(r.output);', "exec", "t1"),
+      orchOutput("exec", "Script running with session ID 27292\nWall time 1.0 seconds\nOutput:\nfaststream_app"),
+      orch('const r = await tools.write_stdin({session_id:27292, chars:""}); text(r.output);', "poll-1", "t2"),
+      orchOutput("poll-1", "Script running with cell ID 27292\nWall time 5.0 seconds\nOutput:\n"),
+      orch('const r = await tools.write_stdin({session_id:27292, chars:""}); text(r.output);', "poll-2", "t3"),
+      orchOutput("poll-2", "Script running with cell ID 27292\nWall time 5.0 seconds\nOutput:\n"),
+    ];
+    const item = buildFeed(codexFile, lines, false, "").items[0];
+    if (item?.kind !== "cmd-group") throw new Error("expected grouped interactive run");
+    const blocks = groupNestedCalls(item.calls);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].parent.session).toBe("27292");
+    expect(blocks[0].children.map((event) => event.tool)).toEqual(["write_stdin", "write_stdin"]);
+    expect(blocks[0].children.every((event) => event.poll === true && event.orchestration === undefined)).toBe(true);
   });
 
   test("keeps runtime stdin argument expressions visible in nested summaries", () => {

@@ -11,13 +11,17 @@ import {
   largeStdout,
   longCommand,
   nestedGroup,
+  pollHeavyGroup,
   toolEvent,
   truncatedOutput,
   unknownFallback,
   withStderr,
 } from "../__fixtures__/readableTools";
+import { translate } from "@/lib/i18n";
 import { CmdGroupCard } from "./CmdGroupCard";
 import { ToolCard } from "./ToolCard";
+
+const en = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -127,10 +131,31 @@ test("a cmd-group nests wait/stdin follow-ups under an ordered exec block", () =
   expect(list!.querySelectorAll(":scope > li").length).toBe(2);
   // The ordinal marker renders for the first block.
   expect(host.textContent).toContain("1.");
-  // The nested follow-ups sit inside the first block, not as their own rows.
+  // The output-bearing wait keeps its own readable follow-up row.
   const firstBlock = list!.querySelector("li")!;
   expect(firstBlock.textContent).toContain("wait");
-  expect(firstBlock.textContent).toContain("stdin");
+  // The empty poll collapses to the compact counted row.
+  expect(firstBlock.textContent).toContain(en("tools.pollRun", { count: 1 }));
+});
+
+test("a poll-dominated run collapses its empty polls into one counted row", () => {
+  const host = mount(<CmdGroupCard item={pollHeavyGroup()} />);
+  open(host.querySelector("details")!);
+  const firstBlock = host.querySelector("ol > li")!;
+  // Six empty polls fold into a single compact row that states the count...
+  expect(firstBlock.textContent).toContain(en("tools.pollRun", { count: 6 }));
+  // ...carries the shared session identity...
+  expect(firstBlock.textContent).toContain("8479");
+  // The row shows the summed elapsed wall-time (6 × 5s = 30s).
+  expect(firstBlock.textContent).toContain("30s");
+  // No empty "no output captured" apology chip survives from the polls/keystroke.
+  expect(host.textContent).not.toContain(en("tools.noOutput"));
+  // Only the parent exec keeps a raw-record toggle; the 6 polls and the empty
+  // keystroke contribute none (pre-#497 they each mounted their own).
+  const rawToggles = [...host.querySelectorAll("button")].filter((b) => (b.textContent ?? "") === en("tools.rawRecord"));
+  expect(rawToggles).toHaveLength(1);
+  // The trailing keystroke write_stdin stays readable.
+  expect(host.textContent).toContain("y⏎");
 });
 
 test("reduced motion: animated chrome opts out under prefers-reduced-motion", () => {

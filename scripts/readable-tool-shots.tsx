@@ -44,8 +44,14 @@ function group(calls: ToolEvent[], hasErr: boolean, active = false): CmdGroupIte
 const ts = "2100-01-02T12:00:00Z";
 const gitStatus = toolEvent({ ...execSuccess, ts, id: "g1", cwd: "/workspace/app", endTs: "2100-01-02T12:00:00.240Z" });
 const npmDev = toolEvent({ id: "e2", tool: "exec_command", ts, summary: "npm run dev", command: "npm run dev", cwd: "/workspace/app", outputPreview: "starting dev server on :3000" });
-const wait = toolEvent({ id: "w2", tool: "wait", ts, summary: "wait · 8479", statusLabel: "waiting 10s", durationMs: 10_000, outputPreview: "compiled successfully" });
-const poll = toolEvent({ id: "s2", tool: "write_stdin", ts, summary: "stdin → 8479 · poll", statusLabel: "waiting 5s", durationMs: 5_000, outputPreview: "" });
+const wait = toolEvent({ id: "w2", tool: "wait", ts, summary: "wait · 8479", statusLabel: "waiting 10s", session: "8479", poll: true, durationMs: 10_000, outputPreview: "compiled successfully" });
+// A run of empty polls (issue #497): each is a bare poll with no output; the
+// group must coalesce them into one compact counted row.
+const polls = Array.from({ length: 5 }, (_, i) =>
+  toolEvent({ id: `s${i}`, tool: "write_stdin", ts, summary: "stdin → 8479 · poll", statusLabel: "waiting 5s", session: "8479", poll: true, durationMs: 5_000, outputPreview: "" }),
+);
+// A keystroke write_stdin keeps its readable row.
+const keystroke = toolEvent({ id: "k2", tool: "write_stdin", ts, summary: "stdin → 8479 · y⏎", session: "8479", outputPreview: "accepted" });
 const bunTest = toolEvent({
   id: "e3", tool: "exec_command", ts, summary: "bun test", command: "bun test ./src/components/feed", cwd: "/workspace/app",
   status: "err", statusLabel: "exit 1", exitCode: 1, durationMs: 1830, endTs: "2100-01-02T12:00:01.830Z", open: true,
@@ -53,8 +59,8 @@ const bunTest = toolEvent({
   stderr: "error: expected true to be false\n  at feed.test.ts:88", stderrTruncated: false,
 });
 
-const okCalls = [gitStatus, npmDev, wait, poll, toolEvent({ id: "r1", tool: "Read", family: "read", icon: "file", ts, summary: "Read config.ts" })];
-const errCalls = [gitStatus, npmDev, wait, poll, bunTest];
+const okCalls = [gitStatus, npmDev, wait, ...polls, keystroke, toolEvent({ id: "r1", tool: "Read", family: "read", icon: "file", ts, summary: "Read config.ts" })];
+const errCalls = [gitStatus, npmDev, wait, ...polls, keystroke, bunTest];
 
 function page(): string {
   const collapsed = renderToStaticMarkup(<CmdGroupCard item={group(okCalls, false)} />);
