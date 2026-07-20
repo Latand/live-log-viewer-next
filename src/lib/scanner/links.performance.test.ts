@@ -46,7 +46,7 @@ test("compaction lineage proof reads a bounded predecessor tail", async () => {
   const slug = "-repo-bounded-compaction";
   const predecessorPath = path.join(SANDBOX, "predecessor.jsonl");
   const successorPath = path.join(SANDBOX, "successor.jsonl");
-  const logicalParentUuid = "11111111-2222-4333-8444-555555555555";
+  const logicalParentUuid = "11111111-2222-0333-0444-555555555555";
   fs.writeFileSync(predecessorPath, Buffer.concat([
     Buffer.from(`${JSON.stringify({ type: "user", uuid: "head" })}\n`),
     Buffer.alloc(8 * 1024 * 1024, 0x20),
@@ -97,11 +97,11 @@ test("many compaction probes share one bounded tail read for a growing candidate
   fs.writeFileSync(candidatePath, Buffer.concat([
     Buffer.from(`${JSON.stringify({ type: "user", uuid: "head" })}\n`),
     Buffer.alloc(8 * 1024 * 1024, 0x20),
-    Buffer.from(`\n${JSON.stringify({ type: "assistant", uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" })}\n`),
+    Buffer.from(`\n${JSON.stringify({ type: "assistant", uuid: "aaaaaaaa-bbbb-0ccc-0ddd-eeeeeeeeeeee" })}\n`),
   ]));
   const candidate = entry(candidatePath, `${slug}/candidate.jsonl`, 1);
   const successors = Array.from({ length: 32 }, (_, index) => {
-    const logicalParentUuid = `11111111-2222-4333-8444-${String(index).padStart(12, "0")}`;
+    const logicalParentUuid = `11111111-2222-0333-0444-${String(index).padStart(12, "0")}`;
     const successorPath = path.join(SANDBOX, `shared-successor-${index}.jsonl`);
     fs.writeFileSync(successorPath, `${JSON.stringify({
       type: "system",
@@ -367,7 +367,7 @@ test("a snapshot heuristic edge cannot outrank a provable compaction predecessor
   const successorPath = path.join(SANDBOX, "heuristic-successor.jsonl");
   const provenPath = path.join(SANDBOX, "heuristic-proven.jsonl");
   const strayPath = path.join(SANDBOX, "heuristic-stray.jsonl");
-  const logicalParentUuid = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+  const logicalParentUuid = "bbbbbbbb-cccc-0ddd-0eee-ffffffffffff";
   fs.writeFileSync(successorPath, `${JSON.stringify({
     type: "system",
     subtype: "compact_boundary",
@@ -398,7 +398,7 @@ test("proven compaction chains survive restart after predecessor growth", async 
   const slug = "-repo-restart-compaction";
   const predecessorPath = path.join(SANDBOX, "restart-predecessor.jsonl");
   const successorPath = path.join(SANDBOX, "restart-successor.jsonl");
-  const logicalParentUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+  const logicalParentUuid = "66666666-7777-0888-0999-aaaaaaaaaaaa";
   fs.writeFileSync(predecessorPath, Buffer.concat([
     Buffer.alloc(2 * 1024 * 1024, 0x20),
     Buffer.from(`\n${JSON.stringify({ type: "assistant", uuid: logicalParentUuid })}\n`),

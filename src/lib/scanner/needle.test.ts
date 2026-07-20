@@ -13,8 +13,8 @@ afterAll(() => {
 
 test("a same-size transcript rewrite replaces the cached UUID generation", () => {
   const pathname = path.join(SANDBOX, "rewritten.jsonl");
-  const first = "11111111-2222-4333-8444-555555555555";
-  const second = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const first = "11111111-2222-0333-0444-555555555555";
+  const second = "aaaaaaaa-bbbb-0ccc-0ddd-eeeeeeeeeeee";
   fs.writeFileSync(pathname, `${JSON.stringify({ uuid: first })}\n`);
 
   expect(fileTailHasNeedle(first, pathname)).toBe(true);
