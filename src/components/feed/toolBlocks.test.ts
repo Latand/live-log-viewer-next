@@ -118,3 +118,13 @@ test("formatDuration scales from ms to seconds to minutes", () => {
   expect(formatDuration(62_000)).toBe("1m 2s");
   expect(formatDuration(-5)).toBe("");
 });
+
+test("formatDuration rounds total seconds before minute rollover", () => {
+  const coalesced = coalesceFollowUps([
+    emptyPoll("p1", { durationMs: 59_750 }),
+    emptyPoll("p2", { durationMs: 59_750 }),
+  ]);
+  if (coalesced[0]?.kind !== "polls") throw new Error("expected a polls run");
+  expect(formatDuration(coalesced[0].elapsedMs ?? 0)).toBe("2m 0s");
+  expect(formatDuration(179_500)).toBe("3m 0s");
+});
