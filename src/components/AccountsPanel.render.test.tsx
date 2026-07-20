@@ -74,14 +74,14 @@ test("shows account ids and auth health when labels collide", () => {
   const html = render(base({
     engine: "claude",
     accounts: [
-      { id: "botfatherdev-2", label: "botfatherdev", kind: "managed", authPresent: true, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null },
-      { id: "botfatherdev-3", label: "botfatherdev", kind: "managed", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null },
+      { id: "managed-two", label: "Managed two", kind: "managed", authPresent: true, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null },
+      { id: "managed-three", label: "Managed three", kind: "managed", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null },
     ],
-    active: "botfatherdev-3",
+    active: "managed-three",
   }));
 
-  expect(html).toContain("botfatherdev-2");
-  expect(html).toContain("botfatherdev-3");
+  expect(html).toContain("managed-two");
+  expect(html).toContain("managed-three");
   expect(html).toContain("Signed out");
   expect(html).toContain("Authenticated");
   expect(html).toContain("bg-danger-soft text-danger");
