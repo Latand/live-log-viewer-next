@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { resolveBinary } from "@/lib/agent/cli";
 import { statePath } from "@/lib/configDir";
+import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 import { AccountMutationBusyError, withAccountMutationLock, withAccountMutationLockAsync } from "./accountMutation";
 
 import type { LoginOperationSummary, LoginPhase, LoginResult } from "./contracts";
@@ -98,9 +99,9 @@ export function isSupervisedClaudeHome(home: string): boolean {
 /** Status reads target the exact account home with inherited provider auth
     variables cleared, so a legacy or managed check reflects the OAuth
     credentials at that home rather than an ambient API key. An unrecognized
-    home keeps the plain process environment. */
+    home receives a credential-isolated environment copy. */
 export function claudeStatusEnvironment(home: string): NodeJS.ProcessEnv {
-  return isSupervisedClaudeHome(home) ? claudeManagedEnvironment(home) : process.env;
+  return isSupervisedClaudeHome(home) ? claudeManagedEnvironment(home) : withoutWakatimeCredential(process.env);
 }
 
 async function structuredStatus(home: string): Promise<{ loggedIn: boolean; method: string | null; email: string | null; plan: string | null }> {

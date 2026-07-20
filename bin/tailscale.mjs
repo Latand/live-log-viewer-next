@@ -5,6 +5,8 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
+import { viewerChildProcessOptions } from "./server-runtime.mjs";
+
 /* Dependency-free localization, mirroring bin/cli.mjs: English by default,
    Ukrainian when LLV_LANG=uk or the locale is a uk_* / uk.* variant. */
 function detectLang() {
@@ -162,9 +164,9 @@ export async function detectTailscale() {
 
 function runJson(command, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = spawn(command, args, viewerChildProcessOptions({
       stdio: ["ignore", "pipe", "pipe"],
-    });
+    }));
 
     let stdout = "";
     let stderr = "";
@@ -216,9 +218,9 @@ export async function readStatus(tailscalePath) {
 }
 
 export function serve(tailscalePath, port) {
-  const child = spawn(tailscalePath, ["serve", String(port)], {
+  const child = spawn(tailscalePath, ["serve", String(port)], viewerChildProcessOptions({
     stdio: ["ignore", "ignore", "pipe"],
-  });
+  }));
 
   const state = {
     stopping: false,

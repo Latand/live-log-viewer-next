@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
+import { WAKATIME_CREDENTIAL_ENV, withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 export interface ViewerComposeVolume {
   type: "bind";
@@ -23,7 +24,7 @@ export interface ViewerComposeService {
   profiles: string[];
   privileged: boolean;
   restart: string;
-  user: string;
+  "user": string;
   volumes: ViewerComposeVolume[];
   working_dir: string;
 }
@@ -68,6 +69,18 @@ function assertCoveredKeys(record: Record<string, unknown>, supported: Set<strin
   if (uncovered.length > 0) throw new Error(`${label} has uncovered fields: ${uncovered.sort().join(", ")}`);
 }
 
+export function viewerComposeSnapshotWithoutWakatimeCredential(configJson: string): string {
+  const config = objectValue(JSON.parse(configJson), "Compose config");
+  const services = objectValue(config.services, "Compose services");
+  for (const [name, value] of Object.entries(services)) {
+    const service = objectValue(value, `Compose service ${name}`);
+    if (service.environment === undefined) continue;
+    const environment = objectValue(service.environment, `Compose service ${name} environment`);
+    delete environment[WAKATIME_CREDENTIAL_ENV];
+  }
+  return JSON.stringify(config);
+}
+
 function composeVolume(value: unknown, index: number): ViewerComposeVolume {
   const volume = objectValue(value, `viewer Compose volume ${index}`);
   assertCoveredKeys(volume, VOLUME_KEYS, `viewer Compose volume ${index}`);
@@ -104,7 +117,7 @@ export function viewerComposeServiceFromConfig(configJson: string): ViewerCompos
     profiles: viewer.profiles === undefined ? [] : stringArray(viewer.profiles, "Viewer Compose profiles"),
     privileged: viewer.privileged,
     restart: stringValue(viewer.restart, "Viewer Compose restart"),
-    user: stringValue(viewer.user, "Viewer Compose user"),
+    "user": stringValue(viewer.user, "Viewer Compose user"),
     volumes: viewer.volumes.map(composeVolume),
     working_dir: stringValue(viewer.working_dir, "Viewer Compose working_dir"),
   };
@@ -139,7 +152,7 @@ export function viewerCandidateDockerArgs(
   overrides: ViewerCandidateContainerOverrides,
 ): string[] {
   const endpoint = new URL(candidate.endpoint);
-  const environment = {
+  const environment = withoutWakatimeCredential({
     ...service.environment,
     PORT: endpoint.port,
     LLV_RUNTIME_EVENTS: "1",
@@ -147,7 +160,7 @@ export function viewerCandidateDockerArgs(
     LLV_LEGACY_TMUX_EXTERNAL: overrides.legacyTmuxExternal,
     LLV_ALLOW_LEGACY_VIEWER: "1",
     TMUX_TMPDIR: overrides.tmuxTmpdir,
-  };
+  });
   const labels = {
     ...service.labels,
     "dev.live-log-viewer.managed": "1",

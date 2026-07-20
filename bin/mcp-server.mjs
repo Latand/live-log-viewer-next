@@ -5,14 +5,20 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { viewerServerBunRuntime } from "./server-runtime.mjs";
+import {
+  discardWakatimeEnvironmentCredential,
+  viewerChildProcessOptions,
+  viewerServerBunRuntime,
+} from "./server-runtime.mjs";
+
+discardWakatimeEnvironmentCredential();
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const bundled = join(packageRoot, "dist", "mcp-server.mjs");
 const source = join(packageRoot, "src", "lib", "mcp", "entry.ts");
 
 async function runChild(runtime, entry) {
-  const child = spawn(runtime, [entry], { cwd: packageRoot, env: process.env, stdio: "inherit" });
+  const child = spawn(runtime, [entry], viewerChildProcessOptions({ cwd: packageRoot, stdio: "inherit" }));
   let childExited = false;
   const forwardInterrupt = () => {
     if (!childExited) child.kill("SIGINT");

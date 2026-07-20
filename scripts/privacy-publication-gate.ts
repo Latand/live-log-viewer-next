@@ -7,6 +7,8 @@ import { inflateSync } from "node:zlib";
 
 import { decodeHTMLStrict } from "entities";
 
+import { withoutWakatimeCredential } from "../src/lib/wakatime/credential";
+
 export type FindingClass =
   | "configuration_error"
   | "credential"
@@ -219,7 +221,12 @@ function argumentValue(arguments_: string[], flag: string): string | undefined {
 }
 
 function gitPaths(repository: string, arguments_: string[]): { error: boolean; paths: string[] } {
-  const result = Bun.spawnSync({ cmd: ["git", "-C", repository, ...arguments_], stderr: "pipe", stdout: "pipe" });
+  const result = Bun.spawnSync({
+    cmd: ["git", "-C", repository, ...arguments_],
+    env: withoutWakatimeCredential(process.env),
+    stderr: "pipe",
+    stdout: "pipe",
+  });
   if (result.exitCode !== 0) return { error: true, paths: [] };
   return {
     error: false,
@@ -676,6 +683,7 @@ function inspectRaster(path: string, kind: MediaKind | undefined): Set<FindingCl
   if (!languages) return new Set(["configuration_error"]);
   const result = Bun.spawnSync({
     cmd: ["tesseract", path, "stdout", "-l", languages],
+    env: withoutWakatimeCredential(process.env),
     stderr: "pipe",
     stdout: "pipe",
   });
@@ -704,6 +712,7 @@ function inspectAnimated(path: string, kind: MediaKind | undefined): Set<Finding
       "json",
       path,
     ],
+    env: withoutWakatimeCredential(process.env),
     stderr: "pipe",
     stdout: "pipe",
   });
@@ -771,6 +780,7 @@ function inspectAnimated(path: string, kind: MediaKind | undefined): Set<Finding
           "png",
           "pipe:1",
         ],
+        env: withoutWakatimeCredential(process.env),
         stderr: "pipe",
         stdout: "pipe",
       });
@@ -780,6 +790,7 @@ function inspectAnimated(path: string, kind: MediaKind | undefined): Set<Finding
       }
       const ocr = Bun.spawnSync({
         cmd: ["tesseract", "stdin", "stdout", "-l", languages],
+        env: withoutWakatimeCredential(process.env),
         stdin: frame.stdout,
         stderr: "pipe",
         stdout: "pipe",
@@ -865,6 +876,7 @@ function reproduceTrustedGenerator(generatorBytes: Buffer): Map<string, Reproduc
     const generation = Bun.spawnSync({
       cmd: [process.execPath, isolatedGenerator],
       cwd: temporaryRoot,
+      env: withoutWakatimeCredential(process.env),
       stderr: "pipe",
       stdout: "pipe",
     });
@@ -918,6 +930,7 @@ function assetExistsInTrustedBase(
   }
   const result = Bun.spawnSync({
     cmd: ["git", "-C", inspectionRoot, "show", `${trustedBase}:${relativeManifest.split(sep).join("/")}`],
+    env: withoutWakatimeCredential(process.env),
     stderr: "pipe",
     stdout: "pipe",
   });
@@ -936,7 +949,12 @@ function assetExistsInTrustedBase(
 }
 
 function currentRepositoryRoot(): string | undefined {
-  const result = Bun.spawnSync({ cmd: ["git", "rev-parse", "--show-toplevel"], stderr: "pipe", stdout: "pipe" });
+  const result = Bun.spawnSync({
+    cmd: ["git", "rev-parse", "--show-toplevel"],
+    env: withoutWakatimeCredential(process.env),
+    stderr: "pipe",
+    stdout: "pipe",
+  });
   if (result.exitCode !== 0) return undefined;
   const root = result.stdout.toString().trim();
   return root.length > 0 ? resolve(root) : undefined;

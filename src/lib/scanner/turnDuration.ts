@@ -1,5 +1,4 @@
 import type { FileEntry, TurnBoundary } from "../types";
-import { turnStateFromRecords as structuredTurnStateFromRecords } from "@/lib/accounts/migration/turnState";
 import { isClaudeTurnWindowMeta } from "@/lib/claudeProtocolUser";
 import { tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
@@ -10,6 +9,13 @@ type RecordLike = Record<string, unknown>;
 // v5: meta/command user records no longer open windows (issue #406) — persisted
 // v4 boundaries could start before the real initiating prompt.
 const turnBoundaryCache = globalCache<[number, number, TurnBoundary | null]>("last-turn-v5");
+const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>("recent-turn-windows-v1");
+
+export interface RecentTurnWindows {
+  windows: TurnBoundary[];
+  prefixTruncated: boolean;
+  complete: boolean;
+}
 
 function parseMillis(value: unknown): number | null {
   if (typeof value !== "string") return null;
@@ -98,18 +104,21 @@ function isTurnFailure(record: RecordLike, codex: boolean): boolean {
     authoritative failure evidence. While the agent is still working `endedAt`
     stays null so the UI can tick live elapsed. Returns null when no opening
     prompt survives in the tail window. Pure for testability. */
-export function lastTurnFromRecords(records: RecordLike[], codex: boolean): TurnBoundary | null {
+export function recentTurnWindowsFromRecords(records: RecordLike[], codex: boolean): TurnBoundary[] {
+  const windows: TurnBoundary[] = [];
   let startedAt: number | null = null;
   let open = false;
-  let failed = false;
-  let failedAt: number | null = null;
+  let failedWindow: TurnBoundary | null = null;
+  let latestTimestamp: number | null = null;
   for (const record of records) {
+    latestTimestamp = parseMillis(record.timestamp) ?? latestTimestamp;
     // Failure evidence outranks the prompt shape: the interrupt sentinel is a
     // user record with real text and would otherwise register as a prompt.
     if (isTurnFailure(record, codex)) {
-      if (open) {
-        failed = true;
-        failedAt = parseMillis(record.timestamp) ?? failedAt;
+      if (open && startedAt !== null) {
+        const endedAt = Math.max(parseMillis(record.timestamp) ?? latestTimestamp ?? startedAt, startedAt);
+        failedWindow = { startedAt, endedAt };
+        windows.push(failedWindow);
       }
       open = false;
       continue;
@@ -119,57 +128,53 @@ export function lastTurnFromRecords(records: RecordLike[], codex: boolean): Turn
       // own timestamp failed to parse — it never moves a valid boundary.
       if (!open || startedAt === null) {
         startedAt = parseMillis(record.timestamp);
-        failed = false;
-        failedAt = null;
+        failedWindow = null;
       }
       open = true;
       continue;
     }
     if (isTurnClose(record, codex)) {
+      if (open && startedAt !== null) {
+        const endedAt = Math.max(parseMillis(record.timestamp) ?? latestTimestamp ?? startedAt, startedAt);
+        windows.push({ startedAt, endedAt });
+      }
       open = false;
-      failed = false;
-      failedAt = null;
+      failedWindow = null;
       continue;
     }
     // Assistant output after failure evidence proves the run survived it (a
     // retried API error): reopen so later prompts keep steering, not resetting.
-    if (failed && record.type === "assistant") {
-      failed = false;
-      failedAt = null;
+    if (failedWindow && record.type === "assistant") {
+      if (windows.at(-1) === failedWindow) windows.pop();
+      failedWindow = null;
       open = true;
     }
   }
-  if (startedAt === null) return null;
+  if (open && startedAt !== null) windows.push({ startedAt, endedAt: null });
+  return windows;
+}
 
-  // Journaled metadata is invisible to the terminal-state check too: a
-  // trailing notification or command echo after `end_turn` must not flip a
-  // finished turn back to busy and restart a dead timer (issue #406). Tool
-  // results and genuine prompts — typed, SDK, peer — pass through untouched.
-  const stateRecords = codex ? records : records.filter((record) => record.type !== "user" || !isClaudeTurnWindowMeta(record));
-  const state = structuredTurnStateFromRecords(stateRecords, codex);
-  // The turn is complete on a terminal lifecycle record, or — when none was
-  // ever written — on authoritative failure evidence (interrupt sentinel,
-  // API-error crash): the window closes there so the elapsed timer cannot run
-  // forever on a dead turn (issue #268 review).
-  const terminal = state.state === "terminal";
-  if (!terminal && !failed) return { startedAt, endedAt: null };
+export function lastTurnFromRecords(records: RecordLike[], codex: boolean): TurnBoundary | null {
+  return recentTurnWindowsFromRecords(records, codex).at(-1) ?? null;
+}
 
-  // A completed turn ends at the terminal lifecycle record's timestamp (the
-  // last assistant/tool output) or, failure-closed, at the failure record's.
-  // Fall back to the newest parseable timestamp in the slice if that record
-  // carried none, and never let a clock skew push the end before the start.
-  let endedAt = terminal ? parseMillis(state.terminalAt) : failedAt;
-  if (endedAt === null) {
-    for (let index = records.length - 1; index >= 0; index -= 1) {
-      const millis = parseMillis(records[index]!.timestamp);
-      if (millis !== null) {
-        endedAt = millis;
-        break;
-      }
-    }
+/** Every visible turn window for a conversation transcript tail. */
+export function recentTurnWindowsFor(entry: FileEntry): RecentTurnWindows {
+  const conversationRoot = entry.root === "claude-projects" || entry.root === "codex-sessions";
+  if (!conversationRoot || !entry.path.endsWith(".jsonl")) {
+    return { windows: [], prefixTruncated: false, complete: true };
   }
-  if (endedAt === null) return { startedAt, endedAt: null };
-  return { startedAt, endedAt: Math.max(endedAt, startedAt) };
+  const mtimeMs = entry.mtime * 1000;
+  const cached = recentTurnWindowsCache.get(entry.path);
+  if (cached?.[0] === entry.size && cached[1] === mtimeMs) return structuredClone(cached[2]);
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
+  const result: RecentTurnWindows = {
+    windows: recentTurnWindowsFromRecords(tail.records, entry.root === "codex-sessions"),
+    prefixTruncated: tail.prefixTruncated,
+    complete: tail.complete,
+  };
+  if (tail.complete) recentTurnWindowsCache.set(entry.path, [entry.size, mtimeMs, result]);
+  return structuredClone(result);
 }
 
 /** Last-turn boundaries for a transcript entry, cached by file identity like the sibling
@@ -181,8 +186,8 @@ export function lastTurnFor(entry: FileEntry): TurnBoundary | null {
   const mtimeMs = entry.mtime * 1000;
   const cached = turnBoundaryCache.get(entry.path);
   if (cached?.[0] === entry.size && cached[1] === mtimeMs) return cached[2];
-  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
-  const boundary = lastTurnFromRecords(tail.records, entry.root === "codex-sessions");
-  if (tail.complete) turnBoundaryCache.set(entry.path, [entry.size, mtimeMs, boundary]);
+  const recent = recentTurnWindowsFor(entry);
+  const boundary = recent.windows.at(-1) ?? null;
+  if (recent.complete) turnBoundaryCache.set(entry.path, [entry.size, mtimeMs, boundary]);
   return boundary;
 }
