@@ -53,6 +53,12 @@ const placeholders: Placeholder[] = [
   { path: "docs/media/issue-353/edges-onestage-desktop.png", width: 1920, height: 1080, description: "Redacted placeholder for the single-stage desktop edge evidence." },
   { path: "docs/acceptance/pr-441/pr-441-desktop-badges.png", width: 1040, height: 600, description: "Redacted placeholder retaining the desktop subagent badge anchor viewport." },
   { path: "docs/acceptance/pr-441/pr-441-mobile-390.png", width: 390, height: 844, description: "Redacted placeholder retaining the 390-pixel mobile subagent badge viewport." },
+  { path: "docs/issue-440/desktop-1440x1000-0-images.png", width: 1440, height: 1000, description: "Redacted placeholder for the desktop focused-chat state without staged images." },
+  { path: "docs/issue-440/desktop-1440x1000-1-image.png", width: 1440, height: 1000, description: "Redacted placeholder for the desktop focused-chat state with one staged image." },
+  { path: "docs/issue-440/desktop-1440x1000-multiple-images.png", width: 1440, height: 1000, description: "Redacted placeholder for the desktop focused-chat state with multiple staged images." },
+  { path: "docs/issue-440/mobile-390x844-0-images.png", width: 390, height: 844, description: "Redacted placeholder for the 390-pixel focused-chat state without staged images." },
+  { path: "docs/issue-440/mobile-390x844-1-image.png", width: 390, height: 844, description: "Redacted placeholder for the 390-pixel focused-chat state with one staged image." },
+  { path: "docs/issue-440/mobile-390x844-multiple-images.png", width: 390, height: 844, description: "Redacted placeholder for the 390-pixel focused-chat state with multiple staged images." },
 ];
 
 const sourceDigests: Record<string, string> = {
@@ -95,6 +101,12 @@ const sourceDigests: Record<string, string> = {
   "docs/media/issue-353/edges-onestage-desktop.png": "eed6170341efdbefe837fefa4d284a8680f8c29122a4a8bee49693659df83944",
   "docs/acceptance/pr-441/pr-441-desktop-badges.png": "1ade5a95002485fc4085c03f28cb931a309c18c264b884db43c5d55dfab10131",
   "docs/acceptance/pr-441/pr-441-mobile-390.png": "c41651872641bc8dcf44e48c2c4a0f183153283e18ffc837db54954146b1038f",
+  "docs/issue-440/desktop-1440x1000-0-images.png": "0f8a4e25191447a99312f4b3970964c47db29992c962e553c1fcbf471828459f",
+  "docs/issue-440/desktop-1440x1000-1-image.png": "0e0e4c8cb127673eeca896ce13f487e44f69379f7995be0a021d588e52ed80ed",
+  "docs/issue-440/desktop-1440x1000-multiple-images.png": "afeb53939c2de98ec84b1aef339b406d0200f80a44135a311ea4faa7efb816e4",
+  "docs/issue-440/mobile-390x844-0-images.png": "8718ea3f40922a6de8fb4b4f23ff99f48afac9528277a8228ffb1536ce6a2271",
+  "docs/issue-440/mobile-390x844-1-image.png": "acab37f4364d4f30747f059e172ed03c1a280038babbc6484ecf072b211a18e6",
+  "docs/issue-440/mobile-390x844-multiple-images.png": "fe7c6da0ea52de3acf668287b27615f4481c17d1c5b8eaa8854336c792efedea",
 };
 
 const root = resolve(import.meta.dir, "..");
