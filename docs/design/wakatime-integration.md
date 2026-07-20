@@ -404,11 +404,13 @@ exists for deterministic tests and module replacement during development.
 |---|---|
 | `LLV_WAKATIME_ENABLED=1` | Process-start opt-in. Any other value leaves the module unloaded. |
 | `WAKATIME_API_KEY` | Highest-priority credential, synchronously captured into integration-owned memory and removed from the ambient environment. |
-| `~/.config/agent-log-viewer/wakatime-api-key` | File fallback through `configFilePath("wakatime-api-key")`; the legacy app config path remains available through the existing resolver. |
+| `~/.config/agent-log-viewer/wakatime-api-key` | File fallback through `configFilePath("wakatime-api-key")`; reads require a directly opened regular file with exact mode `0600`, and the legacy app config path remains available through the existing resolver. |
 
-The key file is read at delivery time, so a drop-in or replacement can recover
-an auth circuit without restarting the viewer. A replacement environment value
-installed in the running server is captured and removed on the next tick.
+The key file is read at delivery time, so a secure drop-in or replacement can
+recover an auth circuit without restarting the viewer. Environment credentials
+are captured once during Node instrumentation bootstrap. Runtime-host scrubs
+the shared service environment before loading deployment or child-process
+modules. Rotation through the environment requires a Viewer restart.
 
 The implementation never reads `~/.wakatime.cfg`. That file belongs to
 WakaTime's CLI and editor plugins. The MVP also has a fixed HTTPS origin.

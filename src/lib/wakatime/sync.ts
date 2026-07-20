@@ -8,7 +8,7 @@ import { currentFileScan } from "@/lib/scanner/scanCache";
 import { recentTurnWindowsFor, type RecentTurnWindows } from "@/lib/scanner/turnDuration";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry, TurnBoundary } from "@/lib/types";
-import { takeWakatimeEnvironmentCredential } from "./credential";
+import { wakatimeEnvironmentCredentialStore } from "./credential";
 
 const ENDPOINT = "https://api.wakatime.com/api/v1/users/current/heartbeats.bulk";
 const SAMPLE_INTERVAL_MS = 120_000;
@@ -756,23 +756,26 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
   };
 }
 
-let environmentCredential = takeWakatimeEnvironmentCredential();
-let environmentCredentialGeneration = environmentCredential ? 1 : 0;
-
 function productionCredential(): WakatimeCredential | null {
-  const replacement = takeWakatimeEnvironmentCredential();
-  if (replacement && replacement !== environmentCredential) {
-    environmentCredential = replacement;
-    environmentCredentialGeneration += 1;
-  }
-  if (environmentCredential) return { value: environmentCredential, sourceStamp: `environment:${environmentCredentialGeneration}` };
-  const filename = configFilePath("wakatime-api-key");
+  const environmentCredential = wakatimeEnvironmentCredentialStore.read();
+  if (environmentCredential) return environmentCredential;
+  return readWakatimeCredentialFile(configFilePath("wakatime-api-key"));
+}
+
+/** Opens the configured key without following symlinks and verifies its mode
+    before reading credential bytes into integration-owned memory. */
+export function readWakatimeCredentialFile(filename: string): WakatimeCredential | null {
+  let descriptor: number | null = null;
   try {
-    const stat = fs.statSync(filename);
-    const value = fs.readFileSync(filename, "utf8").trim();
+    descriptor = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) return null;
+    const value = fs.readFileSync(descriptor, "utf8").trim();
     return value ? { value, sourceStamp: `file:${stat.size}:${stat.mtimeMs}` } : null;
   } catch {
     return null;
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
   }
 }
 

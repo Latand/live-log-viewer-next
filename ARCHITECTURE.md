@@ -76,7 +76,7 @@ Both the `Host` header and any `Origin` header must resolve to that allowlist.
 | `LLV_TS_URL` | CLI when `--tailscale` is used | Full tailnet URL (with `?k=` token) returned by `GET /api/access` for the in-app QR button. Absent means the button shows the "start with --tailscale" hint. |
 | `LLV_STANDALONE` | `scripts/prepack.mjs` | Enables `output: "standalone"` during publish packaging only. |
 | `LLV_WAKATIME_ENABLED` | Operator | Exact value `1` starts the traffic-owning server's WakaTime scheduler. Other values leave the module unloaded. |
-| `WAKATIME_API_KEY` | Operator secret manager | Supplies the server-only WakaTime API key. It takes precedence over `${XDG_CONFIG_HOME:-~/.config}/agent-log-viewer/wakatime-api-key`; startup captures and deletes it from the ambient child-process environment. |
+| `WAKATIME_API_KEY` | Operator secret manager | Supplies the server-only WakaTime API key. It takes precedence over `${XDG_CONFIG_HOME:-~/.config}/agent-log-viewer/wakatime-api-key`; Viewer and runtime-host bootstraps capture and delete it before loading child-capable runtime modules. The key file requires exact mode `0600`. |
 
 ## File tree and ownership
 

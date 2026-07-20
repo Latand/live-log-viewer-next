@@ -17,6 +17,8 @@ import { operatorSpawnCapabilityPath } from "@/lib/agent/operatorCapability";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { didStructuredHostStartupFail, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
+import { WAKATIME_CREDENTIAL_ENV } from "@/lib/wakatime/credential";
+import { registerNodeViewerRuntime } from "./instrumentation";
 
 test("account controller delay defaults to immediate startup and retains the explicit escape hatch", () => {
   expect(accountControllerDelayMs({})).toBe(0);
@@ -44,6 +46,34 @@ test("WakaTime startup failure stays local and secret-safe", async () => {
     (...args) => { logs.push(args); },
   );
   expect(logs).toEqual([["[wakatime] startup_failed", {}]]);
+});
+
+test("node bootstrap scrubs WakaTime credentials before runtime imports can snapshot or spawn", async () => {
+  const previous = process.env[WAKATIME_CREDENTIAL_ENV];
+  const placeholder = ["bootstrap", "fixture", "value"].join("-");
+  let snapshot: NodeJS.ProcessEnv = { NODE_ENV: "test" };
+  let childExit = -1;
+  process.env[WAKATIME_CREDENTIAL_ENV] = placeholder;
+
+  try {
+    await registerNodeViewerRuntime(async () => {
+      snapshot = { ...process.env };
+      const child = Bun.spawn([
+        process.execPath,
+        "-e",
+        `process.exit(process.env[${JSON.stringify(WAKATIME_CREDENTIAL_ENV)}] ? 17 : 0)`,
+      ], { stdout: "ignore", stderr: "ignore" });
+      childExit = await child.exited;
+      return { registerViewerRuntime: async () => undefined };
+    });
+
+    expect(snapshot[WAKATIME_CREDENTIAL_ENV]).toBeUndefined();
+    expect(Object.values(snapshot).some((value) => value?.includes(placeholder))).toBe(false);
+    expect(childExit).toBe(0);
+  } finally {
+    if (previous === undefined) delete process.env[WAKATIME_CREDENTIAL_ENV];
+    else process.env[WAKATIME_CREDENTIAL_ENV] = previous;
+  }
 });
 
 test("deployment candidates stay passive until their endpoint owns the durable release target", () => {
@@ -282,4 +312,16 @@ test("the instrumentation shim keeps node: imports out of its static graph (dev 
   expect(source).not.toMatch(/^\s*import\s[^(]*viewerInstrumentation/m);
   expect(source).not.toMatch(/^\s*export\s.*\sfrom\s/m);
   expect(source).toMatch(/NEXT_RUNTIME === "nodejs"/);
+});
+
+test("runtime-host scrubs the shared service environment before loading child-capable modules", () => {
+  const source = fs.readFileSync(new URL("./runtime-host/main.ts", import.meta.url), "utf8");
+  const captureAt = source.indexOf("wakatimeEnvironmentCredentialStore.capture()");
+  const runtimeImportAt = source.indexOf('await import("@/lib/configDir")');
+
+  expect(captureAt).toBeGreaterThanOrEqual(0);
+  expect(runtimeImportAt).toBeGreaterThan(captureAt);
+  expect(source.match(/^import .* from .*;$/gm)).toEqual([
+    'import { wakatimeEnvironmentCredentialStore } from "@/lib/wakatime/credential";',
+  ]);
 });

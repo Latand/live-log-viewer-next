@@ -19,6 +19,10 @@ unset LLV_WAKATIME_KEY_INPUT
 chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/agent-log-viewer/wakatime-api-key"
 ```
 
+The Viewer accepts this path only when it resolves directly to a regular file
+with exact mode `0600`. Symlinks and files with group or other permission bits
+are treated as unavailable, and their contents remain unread.
+
 Set `LLV_WAKATIME_ENABLED=1` in the environment that starts Agent Log Viewer,
 then restart the Viewer. `WAKATIME_API_KEY` can supply the key from a secret
 manager and takes precedence over the key file.
@@ -28,8 +32,10 @@ HTTPS `Authorization` header for `api.wakatime.com`. Browser payloads, local
 state, request bodies, URLs, diagnostics, and transcripts exclude it. At
 startup the Viewer moves `WAKATIME_API_KEY` into integration-owned memory and
 deletes it from the ambient process environment before any agent, reviewer, or
-tmux pane starts. Replacing the environment value in a long-running server or
-replacing the key file is detected on the next delivery tick.
+tmux pane starts. The runtime-host performs the same scrub before loading its
+deployment and child-process modules. Environment-based rotation requires a
+Viewer restart. A secure replacement key file is detected on the next delivery
+tick.
 
 ## Activity mapping
 

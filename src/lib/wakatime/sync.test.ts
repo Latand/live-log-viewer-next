@@ -1,9 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import type { RegistryFile } from "@/lib/agent/registry";
 import type { FileEntry } from "@/lib/types";
-import { createWakatimeSync, startWakatimeSync, type WakatimeStateV1, type WakatimeSyncDependencies } from "./sync";
-import { takeWakatimeEnvironmentCredential, WAKATIME_CREDENTIAL_ENV } from "./credential";
+import {
+  createWakatimeSync,
+  readWakatimeCredentialFile,
+  startWakatimeSync,
+  type WakatimeStateV1,
+  type WakatimeSyncDependencies,
+} from "./sync";
+import { createWakatimeEnvironmentCredentialStore, WAKATIME_CREDENTIAL_ENV } from "./credential";
 
 const NOW = Date.parse("2026-07-20T12:00:00.000Z");
 const TURN_START = NOW + 1_000;
@@ -133,13 +142,49 @@ function harness(overrides: Partial<WakatimeSyncDependencies> = {}) {
 }
 
 describe("WakaTime activity sync", () => {
-  test("environment credential capture removes the secret from the ambient server environment", () => {
+  test("startup capture keeps ambient snapshots and ordinarily inherited child environments credential-free", async () => {
     const placeholder = ["fixture", "value"].join("-");
-    const environment: NodeJS.ProcessEnv = { NODE_ENV: "test", [WAKATIME_CREDENTIAL_ENV]: `  ${placeholder}  ` };
+    const previous = process.env[WAKATIME_CREDENTIAL_ENV];
+    const credentials = createWakatimeEnvironmentCredentialStore();
+    process.env[WAKATIME_CREDENTIAL_ENV] = `  ${placeholder}  `;
 
-    expect(takeWakatimeEnvironmentCredential(environment)).toBe(placeholder);
-    expect(environment[WAKATIME_CREDENTIAL_ENV]).toBeUndefined();
-    expect(JSON.stringify(environment)).not.toContain(placeholder);
+    try {
+      credentials.capture(process.env);
+      const snapshot = { ...process.env };
+      const child = Bun.spawn([
+        process.execPath,
+        "-e",
+        `process.exit(process.env[${JSON.stringify(WAKATIME_CREDENTIAL_ENV)}] ? 17 : 0)`,
+      ], { stdout: "ignore", stderr: "ignore" });
+
+      expect(credentials.read()?.value).toBe(placeholder);
+      expect(snapshot[WAKATIME_CREDENTIAL_ENV]).toBeUndefined();
+      expect(Object.values(snapshot).some((value) => value?.includes(placeholder))).toBe(false);
+      expect(await child.exited).toBe(0);
+    } finally {
+      if (previous === undefined) delete process.env[WAKATIME_CREDENTIAL_ENV];
+      else process.env[WAKATIME_CREDENTIAL_ENV] = previous;
+    }
+  });
+
+  test("key-file delivery requires an exact 0600 regular file", () => {
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-key-test-"));
+    const filename = path.join(sandbox, "wakatime-api-key");
+    const symlink = path.join(sandbox, "linked-api-key");
+    const placeholder = ["file", "fixture", "value"].join("-");
+    try {
+      fs.writeFileSync(filename, `${placeholder}\n`, { mode: 0o644 });
+      fs.chmodSync(filename, 0o644);
+      expect(readWakatimeCredentialFile(filename)).toBeNull();
+
+      fs.chmodSync(filename, 0o600);
+      expect(readWakatimeCredentialFile(filename)?.value).toBe(placeholder);
+
+      fs.symlinkSync(filename, symlink);
+      expect(readWakatimeCredentialFile(symlink)).toBeNull();
+    } finally {
+      fs.rmSync(sandbox, { recursive: true, force: true });
+    }
   });
 
   test("missing credentials keep newly observed work in the durable outbox", async () => {
