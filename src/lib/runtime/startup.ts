@@ -2,7 +2,7 @@ import { accountManager } from "@/lib/accounts/manager";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
 import { turnStateFromRecords } from "@/lib/accounts/migration/turnState";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
-import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type RegistryFile } from "@/lib/agent/registry";
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 import { VIEWER_SPAWN_CAPABILITY_ENV } from "@/lib/agent/spawnPolicy";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
@@ -18,7 +18,9 @@ import {
   type StructuredHostAdoptionFilter,
 } from "./registry";
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
+import type { RuntimeOperationResult } from "./contracts";
 import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
+import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { recoverPendingStructuredSpawns } from "./structuredSpawn";
 
 type AdoptedStructuredHost = AdoptedCodexHost | AdoptedClaudeHost;
@@ -37,6 +39,34 @@ function retainAdoptedHosts(
   return [...hosts.values()];
 }
 
+function retainedStartupHostIsCurrent(
+  snapshot: RegistryFile,
+  item: AdoptedStructuredHost,
+): boolean {
+  const key = sessionKeyId(item.key);
+  const entry = snapshot.entries[key];
+  if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") return false;
+  const conversation = Object.values(snapshot.conversations).find((candidate) =>
+    candidate.engine === item.key.engine
+      && candidate.generations.at(-1)?.id === item.key.sessionId);
+  return Boolean(conversation
+    && conversation.turn.state !== "terminal"
+    && !conversation.supersededBy);
+}
+
+async function revalidateRetainedStartupHosts(
+  registry: AgentRegistry,
+  retained: readonly AdoptedStructuredHost[],
+  snapshot: RegistryFile = registry.snapshot(),
+): Promise<AdoptedStructuredHost[]> {
+  const current: AdoptedStructuredHost[] = [];
+  for (const item of retained) {
+    if (retainedStartupHostIsCurrent(snapshot, item)) current.push(item);
+    else await item.host.release();
+  }
+  return current;
+}
+
 const RUNTIME_EFFECT_PAGE_SIZE = 100;
 const STRUCTURED_HOST_OPERATION_EFFECT_KINDS = [
   "runtime.send",
@@ -50,9 +80,109 @@ const STRUCTURED_HOST_OPERATION_EFFECT_KINDS = [
 interface StructuredStartupSignals {
   hostedRunningConversationIds: ReadonlySet<string>;
   pendingOperationConversationIds: ReadonlySet<string>;
+  pendingCodexContinuationConversationIds: ReadonlySet<string>;
 }
 
 const TRANSCRIPT_REFRESH_CONCURRENCY = 16;
+const INTERRUPTED_CODEX_CONTINUATION_OPERATION_PREFIX = "recovery-continuation";
+const INTERRUPTED_CODEX_CONTINUATION_TEXT = "Continue the interrupted turn from the transcript.";
+
+function interruptedCodexContinuationOperationId(sessionId: string, claimEpoch: number): string {
+  return `${INTERRUPTED_CODEX_CONTINUATION_OPERATION_PREFIX}-${sessionId}-${claimEpoch}`;
+}
+
+function interruptedCodexConversations(
+  registry: AgentRegistry,
+  shouldAdopt: StructuredHostAdoptionFilter,
+  runtimeRunningConversationIds: ReadonlySet<string>,
+  snapshot: RegistryFile = registry.snapshot(),
+): ReadonlyMap<string, ViewerConversationId> {
+  return new Map(Object.values(snapshot.conversations).flatMap((conversation) => {
+    const generation = conversation.generations.at(-1);
+    if (conversation.engine !== "codex" || !generation) return [];
+    const key = { engine: "codex" as const, sessionId: generation.id };
+    const entry = snapshot.entries[sessionKeyId(key)];
+    const interrupted = conversation.turn.state === "busy"
+      || (conversation.turn.state === "unknown"
+        && (Boolean(entry?.structuredHost?.activeTurnRef)
+          || runtimeRunningConversationIds.has(registry.canonicalConversationId(conversation.id))));
+    return interrupted && entry?.structuredHost && shouldAdopt(entry)
+      ? [[sessionKeyId(key), conversation.id] as const]
+      : [];
+  }));
+}
+
+async function enqueueInterruptedCodexContinuations(
+  registry: AgentRegistry,
+  client: RuntimeHostClient,
+  adopted: readonly AdoptedCodexHost[],
+  interrupted: ReadonlyMap<string, ViewerConversationId>,
+  existingByKey: ReadonlyMap<string, RuntimeOperationResult>,
+  pendingContinuationConversationIds: ReadonlySet<string>,
+): Promise<void> {
+  for (const item of adopted) {
+    const key = sessionKeyId(item.key);
+    const conversationId = interrupted.get(key);
+    if (!conversationId) continue;
+    if (pendingContinuationConversationIds.has(conversationId)) continue;
+    const entry = registry.snapshot().entries[key];
+    if (!entry) throw new Error(`adopted Codex registry row disappeared: ${key}`);
+    const operationId = interruptedCodexContinuationOperationId(item.key.sessionId, entry.claimEpoch);
+    const existing = existingByKey.get(key);
+    if (existing) {
+      if (existing.receipt.status === "failed" || existing.receipt.status === "rejected") {
+        if (!existing.receipt.retryOfOperationId) {
+          await client.retryOperation(
+            existing.operationId,
+            `${existing.receipt.idempotencyKey}-retry-1`,
+            { requireHostedConversationId: conversationId },
+          );
+        }
+        continue;
+      }
+      if (existing.operationId === operationId
+        || existing.receipt.status !== "delivered"
+        || existing.receipt.retryOfOperationId) continue;
+    }
+    await client.command({
+      kind: "send",
+      operationId,
+      idempotencyKey: operationId,
+      conversationId,
+      text: INTERRUPTED_CODEX_CONTINUATION_TEXT,
+      policy: "queue",
+      turnId: null,
+    });
+  }
+}
+
+async function interruptedCodexContinuations(
+  registry: AgentRegistry,
+  client: RuntimeHostClient,
+  adopted: readonly AdoptedCodexHost[],
+): Promise<ReadonlyMap<string, RuntimeOperationResult>> {
+  const existingByKey = new Map<string, RuntimeOperationResult>();
+  for (const item of adopted) {
+    const key = sessionKeyId(item.key);
+    const entry = registry.snapshot().entries[key];
+    if (!entry) continue;
+    const current = await client.operationStatus(
+      interruptedCodexContinuationOperationId(item.key.sessionId, entry.claimEpoch),
+      { currentRetryLeaf: true },
+    );
+    if (current) {
+      existingByKey.set(key, current);
+      continue;
+    }
+    if (entry.claimEpoch <= 0) continue;
+    const previous = await client.operationStatus(
+      interruptedCodexContinuationOperationId(item.key.sessionId, entry.claimEpoch - 1),
+      { currentRetryLeaf: true },
+    );
+    if (previous) existingByKey.set(key, previous);
+  }
+  return existingByKey;
+}
 
 function persistedTurnState(
   records: Record<string, unknown>[],
@@ -129,6 +259,7 @@ async function structuredStartupSignals(
     return {
       hostedRunningConversationIds: new Set(),
       pendingOperationConversationIds: new Set(),
+      pendingCodexContinuationConversationIds: new Set(),
     };
   }
   const runtime = await client.snapshot();
@@ -143,13 +274,20 @@ async function structuredStartupSignals(
       || receipt.status === "applying")
     .filter((receipt) => receipt.kind !== "kill")
     .map((receipt) => canonicalConversationId(registry, receipt.conversationId)));
+  const pendingCodexContinuationConversationIds = new Set<string>();
   let afterEventSeq = 0;
   while (true) {
     const batch = await client.effectBatch(STRUCTURED_HOST_OPERATION_EFFECT_KINDS, afterEventSeq);
     for (const effect of batch) {
       const conversationId = effect.payload.conversationId;
       if (typeof conversationId === "string") {
-        pendingOperationConversationIds.add(canonicalConversationId(registry, conversationId));
+        const canonicalId = canonicalConversationId(registry, conversationId);
+        pendingOperationConversationIds.add(canonicalId);
+        if (effect.kind === "runtime.send"
+          && typeof effect.payload.operationId === "string"
+          && effect.payload.operationId.startsWith(`${INTERRUPTED_CODEX_CONTINUATION_OPERATION_PREFIX}-`)) {
+          pendingCodexContinuationConversationIds.add(canonicalId);
+        }
       }
     }
     if (batch.length < RUNTIME_EFFECT_PAGE_SIZE) break;
@@ -159,14 +297,18 @@ async function structuredStartupSignals(
     }
     afterEventSeq = next;
   }
-  return { hostedRunningConversationIds, pendingOperationConversationIds };
+  return {
+    hostedRunningConversationIds,
+    pendingOperationConversationIds,
+    pendingCodexContinuationConversationIds,
+  };
 }
 
 function structuredStartupAdoptionFilter(
   registry: AgentRegistry,
   signals: StructuredStartupSignals,
+  snapshot: RegistryFile = registry.snapshot(),
 ): StructuredHostAdoptionFilter {
-  const snapshot = registry.snapshot();
   const conversationsByCurrentEntry = new Map(Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
     return generation
@@ -217,9 +359,10 @@ export async function adoptStructuredHostsAtStartup(
   dependencies: StructuredStartupDependencies = {},
 ): Promise<AdoptedStructuredHost[]> {
   assertDarwinStructuredRuntime();
-  let nextAdoptedHosts = retryAdoptedHosts;
   const registry = dependencies.registry ?? agentRegistry();
   await refreshStructuredTranscriptState(registry);
+  let nextAdoptedHosts = await revalidateRetainedStartupHosts(registry, retryAdoptedHosts);
+  retryAdoptedHosts = nextAdoptedHosts;
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   const signals = await structuredStartupSignals(registry, client);
   const shouldAdopt = structuredStartupAdoptionFilter(registry, signals);
@@ -274,8 +417,44 @@ export async function adoptStructuredHostsAtStartup(
   );
   nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, claude);
   retryAdoptedHosts = nextAdoptedHosts;
-  await demoteSkippedStructuredRegistryHosts(registry, shouldAdopt);
+  const candidateHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
+  const shouldRetainCandidateOrAdopt: StructuredHostAdoptionFilter = (entry) =>
+    candidateHostKeys.has(sessionKeyId(entry.key)) || shouldAdopt(entry);
+  const candidateCodexHosts = nextAdoptedHosts.filter(
+    (item): item is AdoptedCodexHost => item.key.engine === "codex",
+  );
+  const existingCodexContinuations = client
+    ? await interruptedCodexContinuations(registry, client, candidateCodexHosts)
+    : new Map<string, RuntimeOperationResult>();
+  await demoteSkippedStructuredRegistryHosts(registry, shouldRetainCandidateOrAdopt);
+  const publicationSnapshot = registry.snapshot();
+  nextAdoptedHosts = await revalidateRetainedStartupHosts(registry, nextAdoptedHosts, publicationSnapshot);
+  retryAdoptedHosts = nextAdoptedHosts;
+  const finalShouldAdopt = structuredStartupAdoptionFilter(registry, signals, publicationSnapshot);
+  const finalHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
+  const shouldPublish: StructuredHostAdoptionFilter = (entry) =>
+    finalHostKeys.has(sessionKeyId(entry.key)) || finalShouldAdopt(entry);
+  const interruptedCodex = interruptedCodexConversations(
+    registry,
+    shouldPublish,
+    signals.hostedRunningConversationIds,
+    publicationSnapshot,
+  );
+  const finalCodexHosts = nextAdoptedHosts.filter(
+    (item): item is AdoptedCodexHost => item.key.engine === "codex",
+  );
   await bindStructuredDeliveryQueue(nextAdoptedHosts, { registry: dependencies.registry, client });
+  if (client) {
+    await enqueueInterruptedCodexContinuations(
+      registry,
+      client,
+      finalCodexHosts,
+      interruptedCodex,
+      existingCodexContinuations,
+      signals.pendingCodexContinuationConversationIds,
+    );
+    await kickStructuredDeliveryQueue();
+  }
   if (client) await recoverPendingStructuredSpawns(registry, client);
   adoptedHosts = nextAdoptedHosts;
   retryAdoptedHosts = [];

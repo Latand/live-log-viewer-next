@@ -60,7 +60,7 @@ function structuredConversation(
   return { registry, path: pathname, conversationId: begun.receipt.conversationId };
 }
 
-test.each(["compact", "dialog-key", "resume"])(
+test.each(["compact", "dialog-key"])(
   "structured ownership fences the %s control before legacy routing",
   async (action) => {
     const fixture = structuredConversation();
@@ -207,15 +207,30 @@ test("a failed structured restart keeps reconfigure routing during host recovery
   expect(commands).toHaveLength(1);
 });
 
-test("structured ownership resolves from conversation identity", async () => {
+test("resume converges on and republishes an already live structured successor", async () => {
   const fixture = structuredConversation();
+  const republished: unknown[] = [];
   const result = await dispatchStructuredControl({ path: "", conversationId: fixture.conversationId, action: "resume" }, {
     registry: fixture.registry,
     client: null,
     enabled: () => true,
+    republish: async (key) => {
+      republished.push(key);
+      return true;
+    },
   });
 
-  expect(result).toEqual({ status: 409, body: { error: "structured host does not support the resume control" } });
+  expect(republished).toEqual([{ engine: "codex", sessionId: expect.any(String) }]);
+  expect(result).toEqual({
+    status: 200,
+    body: {
+      ok: true,
+      structured: true,
+      target: fixture.conversationId,
+      outcome: "resumed",
+      spawned: false,
+    },
+  });
 });
 
 test("stale-live Codex resume recovers the production conversation identity", async () => {
