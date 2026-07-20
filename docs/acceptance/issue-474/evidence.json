@@ -1,12 +1,12 @@
 {
   "issue": 474,
-  "capturedAt": "2026-07-20T08:32:23.203Z",
+  "capturedAt": "2026-07-20T15:04:20.834Z",
   "viewer": "production next start",
   "viewport": {
     "desktop": "1440x900",
     "mobile": "390x844"
   },
-  "interactionSuite": "src/components/scheme/EdgeChips.hover.dom.test.tsx (9 tests: continuous surface, reserved control box, bounded progressive reveal, keyboard full-reveal, reduced motion, click fit, coarse-pointer removal)",
+  "interactionSuite": "src/components/scheme/EdgeChips.hover.dom.test.tsx (10 tests: continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, click fit, coarse-pointer removal) + src/components/scheme/offscreenClusters.test.ts (reserves the fully-revealed width in collision geometry)",
   "checks": [
     {
       "id": "desktop-nav-cannot-block-content",
@@ -30,19 +30,71 @@
     },
     {
       "id": "desktop-offscreen-labels",
-      "detail": "every off-screen entry carries its conversation label ([\"Reasoning-effort meter reserved slot across eve…\",\"Deterministic capture pipeline — stage two buil…\"])"
+      "detail": "every off-screen entry carries its conversation label ([\"Reasoning effort meter reserved slot on every s…\",\"Deterministic capture pipeline for stage two bu…\"])"
     },
     {
       "id": "desktop-disclosure-expands",
       "detail": "the disclosure reports aria-expanded=true once opened"
     },
     {
-      "id": "mobile-chips-removed",
-      "detail": "no edge chip renders on the 390px shell (found 0)"
+      "id": "desktop-visible-chip-isolated",
+      "detail": "panned the board until a single long-titled chip surfaced on an edge, clear of every conversation pane"
     },
     {
-      "id": "mobile-nav-removed",
-      "detail": "the off-screen navigation landmark is absent on the phone width"
+      "id": "desktop-chip-resting-truncated",
+      "detail": "the resting chip label \"In-place login recovery for accounts stuck in e…\" (48 chars) overflows its resting width — data-reveal 0"
+    },
+    {
+      "id": "desktop-chip-control-reserved",
+      "detail": "the direction control sits in its own reserved box before the title — never over the label"
+    },
+    {
+      "id": "desktop-chip-resting-in-viewport",
+      "detail": "the resting pill (width 177px) stays inside the 1440px viewport"
+    },
+    {
+      "id": "desktop-chip-resting-clear",
+      "detail": "the resting chip does not overlap any open conversation pane"
+    },
+    {
+      "id": "desktop-chip-progressive-reveal",
+      "detail": "repeated pointer progression unfurls further segments (data-reveal steps [\"1\",\"2\",\"2\",\"2\"])"
+    },
+    {
+      "id": "desktop-chip-progress-in-viewport",
+      "detail": "the progressively-revealed chip stays inside the viewport (right 1418px ≤ 1440px)"
+    },
+    {
+      "id": "desktop-chip-focus-full",
+      "detail": "keyboard focus sets the title to its full reveal (data-reveal full)"
+    },
+    {
+      "id": "desktop-chip-fully-revealed",
+      "detail": "the whole 48-char label \"In-place login recovery for accounts stuck in e…\" is visible with no ellipsis once revealed"
+    },
+    {
+      "id": "desktop-chip-revealed-in-viewport",
+      "detail": "the fully-revealed pill (width 291px) stays inside the 1440px viewport"
+    },
+    {
+      "id": "desktop-chip-revealed-clear",
+      "detail": "the fully-revealed chip still does not overlap any open conversation pane"
+    },
+    {
+      "id": "mobile-conversation-open",
+      "detail": "a real fixture conversation is open in the phone focus view (pane 6–384px)"
+    },
+    {
+      "id": "mobile-chips-removed",
+      "detail": "every edge chip and the off-screen navigation landmark are removed on the 390px shell (chips 0, nav false)"
+    },
+    {
+      "id": "mobile-conversation-contained",
+      "detail": "the open conversation pane is horizontally contained inside 390px (left 6px, right 384px)"
+    },
+    {
+      "id": "mobile-content-unobstructed",
+      "detail": "the conversation content introduces no horizontal overflow and no edge chip overlays it (pane scroll overflow 0px, spill 0px)"
     }
   ]
 }

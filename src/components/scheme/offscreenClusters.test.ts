@@ -79,11 +79,22 @@ describe("pane-overlap folding (issue #292: navigation chips never cover chat co
   });
 
   test("a pane elsewhere on screen leaves a non-overlapping chip visible", () => {
-    /* Pane in the right half; the left-edge chip band stays free. */
-    const rightPane = { x: 500, y: 0, w: 500, h: 700 };
+    /* Pane clear of the left-edge chip's fully-revealed band (CHIP_MAX_W wide
+       from x≈22): the left chip stays visible. */
+    const rightPane = { x: 560, y: 0, w: 440, h: 700 };
     const chips = offscreenClusterChips([cluster("left-task", -700, 300)], cam, vp, 4, [rightPane]);
     expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["left-task"]);
     expect(chips.overflow).toHaveLength(0);
+  });
+
+  test("reserves the fully-revealed width: a chip whose unfurled label would cover a pane folds, even though its resting pill would clear it", () => {
+    /* Obstacle sits past the resting pill but inside the reveal budget: a chip
+       that looks clear at rest would paint its unfurled label over the pane, so
+       collision geometry must reserve the revealed width and fold it (#474). */
+    const paneInRevealBand = { x: 300, y: 330, w: 120, h: 40 };
+    const chips = offscreenClusterChips([cluster("left-task", -700, 300)], cam, vp, 4, [paneInRevealBand]);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["left-task"]);
   });
 
   test("folding respects the camera projection of the obstacle", () => {

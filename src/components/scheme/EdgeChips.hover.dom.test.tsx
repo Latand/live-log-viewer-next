@@ -4,7 +4,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { EdgeChips } from "./EdgeChips";
-import type { BoardCluster } from "./offscreenClusters";
+import { CHIP_MAX_W, type BoardCluster } from "./offscreenClusters";
 
 const dom = new Window();
 
@@ -161,6 +161,31 @@ test("progressive reveal advances one segment when the pointer reaches the trunc
   button.dispatchEvent(new PointerEvent("pointermove", { clientX: 20, bubbles: true }));
   await settle();
   expect(title.getAttribute("data-reveal")).toBe("2");
+});
+
+test("repeated pointer progression unfurls the whole title without ever exceeding the viewport-bounded chip width", async () => {
+  const host = mount();
+  const button = chip(host);
+  const title = button.querySelector("[data-edge-chip-title]") as HTMLElement;
+  /* The right-edge fixture on a 1000px viewport has room for the full reveal
+     budget, so the pill can grow up to CHIP_MAX_W and no further. */
+  stubTitle(title, { scrollWidth: 900, clientWidth: 120, right: 200 });
+  let previous = Number.parseFloat(title.style.maxWidth);
+  for (let reveal = 1; reveal <= 6; reveal += 1) {
+    button.dispatchEvent(new PointerEvent("pointermove", { clientX: 199, bubbles: true }));
+    await settle();
+    expect(title.getAttribute("data-reveal")).toBe(String(reveal));
+    const width = Number.parseFloat(title.style.maxWidth);
+    /* Monotonic reveal that is always clamped to the viewport-safe budget. */
+    expect(width).toBeGreaterThanOrEqual(previous);
+    expect(width).toBeLessThanOrEqual(CHIP_MAX_W);
+    previous = width;
+  }
+  /* Once the label fits inside the revealed width, progression settles. */
+  stubTitle(title, { scrollWidth: 400, clientWidth: CHIP_MAX_W, right: 500 });
+  button.dispatchEvent(new PointerEvent("pointermove", { clientX: 499, bubbles: true }));
+  await settle();
+  expect(title.getAttribute("data-reveal")).toBe("6");
 });
 
 test("a fully visible title stops revealing — no runaway growth", async () => {

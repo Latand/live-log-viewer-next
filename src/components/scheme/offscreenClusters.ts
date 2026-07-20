@@ -32,16 +32,40 @@ export interface ClusterChipPartition {
 const intersects = (a: SchemeRect, b: SchemeRect): boolean =>
   a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
-/* The rendered pill's outer bounds (max-w-[240px], min-h-11) resolved from the
-   per-edge CSS transform in EdgeChips, in screen space. Conservative: a shorter
-   label yields a narrower pill inside this box. */
-const CHIP_W = 240;
+/** Screen-space padding between a chip's anchored edge and the viewport border;
+    mirrors the ray-cast anchor pad below so the reveal budget matches placement. */
+export const CHIP_EDGE_PAD = 22;
+/** Fully-revealed / focused outer width of a chip pill: wide enough for a
+    completely unfurled 48–60 character label (the longest current-work titles)
+    plus the reserved control box and padding. The label never grows past this,
+    so collision geometry can reserve it up front. */
+export const CHIP_MAX_W = 520;
 const CHIP_H = 44;
-function chipBox(chip: Omit<ClusterChip, "cluster">): SchemeRect {
-  if (chip.edge === "left") return { x: chip.x, y: chip.y - CHIP_H / 2, w: CHIP_W, h: CHIP_H };
-  if (chip.edge === "right") return { x: chip.x - CHIP_W, y: chip.y - CHIP_H / 2, w: CHIP_W, h: CHIP_H };
-  if (chip.edge === "top") return { x: chip.x - CHIP_W / 2, y: chip.y, w: CHIP_W, h: CHIP_H };
-  return { x: chip.x - CHIP_W / 2, y: chip.y - CHIP_H, w: CHIP_W, h: CHIP_H };
+
+/** The widest a chip can ever paint at this anchor: the fully-revealed width,
+    clamped so a revealed/focused label can never spill past a viewport edge.
+    Used both to reserve collision space (so a chip that *could* unfurl over a
+    conversation folds into «+N» before it ever reveals) and to cap the live
+    reveal in {@link EdgeChips}. Left/right chips grow one way from their edge;
+    top/bottom chips are centered, so they grow both ways. */
+export function chipRevealWidth(edge: ChipEdge, x: number, vp: { w: number; h: number }): number {
+  const room =
+    edge === "right" ? x - CHIP_EDGE_PAD
+    : edge === "left" ? vp.w - CHIP_EDGE_PAD - x
+    : 2 * Math.min(x - CHIP_EDGE_PAD, vp.w - CHIP_EDGE_PAD - x);
+  return Math.max(0, Math.min(CHIP_MAX_W, room));
+}
+
+/* The rendered pill's outer bounds resolved from the per-edge CSS transform in
+   EdgeChips, in screen space. Reserves the *fully-revealed* width (not the
+   resting pill) so a chip whose unfurled label would paint over a conversation
+   surface folds into the edge disclosure before it can reveal (issue #474). */
+function chipBox(chip: Omit<ClusterChip, "cluster">, vp: { w: number; h: number }): SchemeRect {
+  const w = chipRevealWidth(chip.edge, chip.x, vp);
+  if (chip.edge === "left") return { x: chip.x, y: chip.y - CHIP_H / 2, w, h: CHIP_H };
+  if (chip.edge === "right") return { x: chip.x - w, y: chip.y - CHIP_H / 2, w, h: CHIP_H };
+  if (chip.edge === "top") return { x: chip.x - w / 2, y: chip.y, w, h: CHIP_H };
+  return { x: chip.x - w / 2, y: chip.y - CHIP_H, w, h: CHIP_H };
 }
 
 function chipAnchor(rect: SchemeRect, cam: Camera, vp: { w: number; h: number }): Omit<ClusterChip, "cluster"> {
@@ -53,7 +77,7 @@ function chipAnchor(rect: SchemeRect, cam: Camera, vp: { w: number; h: number })
   const dy = cy - vy;
   const tx = dx === 0 ? Infinity : (vp.w / 2) / Math.abs(dx);
   const ty = dy === 0 ? Infinity : (vp.h / 2) / Math.abs(dy);
-  const pad = 22;
+  const pad = CHIP_EDGE_PAD;
   if (tx <= ty) {
     const edge: ChipEdge = dx >= 0 ? "right" : "left";
     return { edge, x: edge === "right" ? vp.w - pad : pad, y: Math.max(pad, Math.min(vp.h - pad, vy + dy * tx)) };
@@ -84,7 +108,7 @@ export function offscreenClusterChips(
   for (const cluster of sorted) {
     const chip = { cluster, ...chipAnchor(cluster.rect, cam, vp) };
     const count = counts.get(chip.edge) ?? 0;
-    const box = chipBox(chip);
+    const box = chipBox(chip, vp);
     if (count < perEdgeCap && !obstacles.some((obstacle) => intersects(box, obstacle))) {
       visible.push(chip);
       counts.set(chip.edge, count + 1);

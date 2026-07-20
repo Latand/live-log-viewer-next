@@ -13,28 +13,25 @@
  *
  * Fixture (created fresh under $TMPDIR/llv-issue-474-fixture on every run):
  *  - Five live claude conversations in project "atlas", each with a long,
- *    descriptive first user message so its chip label overflows the resting
- *    width. All mtimes are ~30s old so every conversation is current work and
- *    therefore an edge-navigation cluster.
+ *    descriptive (48–60 char) first user message so its chip label overflows
+ *    the resting width. All mtimes are ~30s old so every conversation is
+ *    current work and therefore an edge-navigation cluster.
  *
  * What the stills prove, in the real production build:
- *  - Desktop (1440×900): the operator is reading one conversation while the
- *    other current-work clusters sit off-screen. They surface in the
- *    "Off-screen work" navigation landmark, folded into a compact «+N» edge
- *    disclosure — the anti-overlap contract (issue #292): navigation chips
- *    never paint over open chat content. Expanding the disclosure reveals the
- *    labelled, click-to-fit list of off-screen conversations.
- *  - Mobile (390×844): the phone shell drops the scheme entirely, so no edge
- *    chip or navigation landmark renders.
- *
- * The reserved control box, continuous hover/focus surface, bounded
- * progressive reveal, keyboard full-reveal, and reduced-motion behaviour of an
- * individual *visible* chip are exercised deterministically by the DOM
- * interaction suite (src/components/scheme/EdgeChips.hover.dom.test.tsx, nine
- * tests): the demo board's auto-layout re-packs current-work clusters into a
- * compact row and clamps pan/zoom, so a single hovered visible chip cannot be
- * isolated in a headless still — the folded «+N» surface is what the real
- * board deterministically shows for off-screen work.
+ *  - Desktop (1440×900), folded: reading conversations while others sit
+ *    off-screen behind them — crowded clusters fold into a compact «+N» edge
+ *    disclosure so navigation chips never paint over open chat content (the
+ *    issue #292 anti-overlap contract). Expanding it reveals a labelled,
+ *    click-to-fit list.
+ *  - Desktop (1440×900), a real *visible* long chip: the board is panned until a
+ *    single long-titled off-screen cluster surfaces as an on-edge chip clear of
+ *    every pane. Captured at rest (title truncated behind a reserved control
+ *    box) and fully revealed (keyboard focus unfurls the whole 48–60 char label
+ *    inside the same button, still inside the viewport, still clear of content).
+ *  - Mobile (390×844): a real conversation is open in the phone focus view; every
+ *    edge chip / off-screen landmark is gone (the wayfinding adds zero horizontal
+ *    overflow), the conversation pane is horizontally contained inside 390px, and
+ *    its transcript introduces no horizontal spill.
  *
  * Every assertion is mirrored to evidence.json; a failed assertion fails the run.
  */
@@ -58,13 +55,16 @@ function jsonl(records: unknown[]): string {
 
 /* Titles only: a fresh session id is minted per run (randomUUID) so no
    identifier literal lives in this published harness — the disposable fixture
-   home under $TMPDIR is the only place a concrete id is ever written. */
+   home under $TMPDIR is the only place a concrete id is ever written. Each
+   title is a generic 48–60 character engineering phrase (the length band of a
+   real current-work label) so its chip overflows the resting width and the
+   full reveal has something long to unfurl. */
 const CONVERSATION_TITLES = [
-  "Deterministic capture pipeline — stage two builder verification pass",
-  "Reasoning-effort meter reserved slot across every switchboard surface",
-  "Off-screen edge navigation chips with bounded progressive hover reveal",
-  "Minimap full world extent and viewport rectangle framing correctness",
-  "In-place Claude login recovery for accounts stuck in the error state",
+  "Deterministic capture pipeline for stage two builder",
+  "Reasoning effort meter reserved slot on every surface",
+  "Off-screen edge navigation with bounded progressive reveal",
+  "Minimap full world extent and viewport rectangle framing",
+  "In-place login recovery for accounts stuck in error state",
 ];
 
 function buildFixtureHome(): string {
@@ -164,6 +164,37 @@ async function placeConversations(page: any): Promise<void> {
   }
 }
 
+/* Pan the board (plain wheel = pan; hand tool so a wheel over a pane never
+   scrolls it) until one long-titled off-screen cluster surfaces as an on-edge
+   chip whose reserved reveal band is clear of every conversation pane. Returns a
+   stable `[data-edge-chip="…"]` selector for it, or null if none can be
+   isolated. The collision geometry only shows a chip whose *fully-revealed*
+   width clears content, so a surfaced chip is always safe to unfurl. */
+async function surfaceLongVisibleChip(page: any): Promise<string | null> {
+  await page.mouse.move(720, 450);
+  await page.keyboard.press("h"); // hand tool: every wheel pans, none scroll a feed
+  const directions = [{ x: 320, y: 0 }, { x: -320, y: 0 }, { x: 0, y: 320 }, { x: 0, y: -320 }];
+  for (const dir of directions) {
+    for (let step = 0; step < 26; step += 1) {
+      const key = await page.evaluate(() => {
+        for (const chip of Array.from(document.querySelectorAll("[data-edge-chip]"))) {
+          const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement | null;
+          const rect = (chip as HTMLElement).getBoundingClientRect();
+          const overflowing = title ? title.scrollWidth - title.clientWidth > 1 : false;
+          const inBounds = rect.width > 0 && rect.left >= -0.5 && rect.right <= window.innerWidth + 0.5 && rect.top >= 0 && rect.bottom <= window.innerHeight;
+          if (overflowing && inBounds) return chip.getAttribute("data-edge-chip");
+        }
+        return null;
+      });
+      if (key) return `[data-edge-chip="${key}"]`;
+      await page.mouse.move(720, 450);
+      await page.mouse.wheel({ deltaX: dir.x, deltaY: dir.y });
+      await Bun.sleep(90);
+    }
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
   const home = buildFixtureHome();
   console.log(`fixture home: ${home}`);
@@ -185,8 +216,8 @@ async function main(): Promise<void> {
     const base = `http://127.0.0.1:${PORT}/`;
     const noAnim = `*, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; }`;
 
-    /* 1) Desktop: read one conversation while the rest sit off-screen and fold
-          into the "Off-screen work" navigation landmark. */
+    /* 1) Desktop: read conversations while the rest sit off-screen and fold into
+          the "Off-screen work" navigation landmark. */
     {
       const page = await browser.newPage();
       await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
@@ -199,14 +230,12 @@ async function main(): Promise<void> {
       const nav = await page.evaluate(() => {
         const el = document.querySelector('nav[aria-label="Off-screen work"]') as HTMLElement;
         const triggers = Array.from(el.querySelectorAll("button")).filter((b) => /^\+\d+$/.test((b.textContent || "").trim()));
-        const visible = document.querySelectorAll("[data-edge-chip]").length;
         return {
           pointerEvents: getComputedStyle(el).pointerEvents,
           triggerCount: triggers.length,
           firstTrigger: triggers[0]?.textContent?.trim() ?? null,
           firstTriggerAria: triggers[0]?.getAttribute("aria-label") ?? null,
           firstTriggerExpanded: triggers[0]?.getAttribute("aria-expanded") ?? null,
-          visible,
           offscreen: triggers.reduce((sum, t) => sum + Number((t.textContent || "+0").replace("+", "")), 0),
         };
       });
@@ -238,25 +267,154 @@ async function main(): Promise<void> {
       check(list.expanded, "desktop-disclosure-expands", "the disclosure reports aria-expanded=true once opened");
       await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-offscreen-edge-nav-expanded.png") });
       console.log("  shot desktop-1440-offscreen-edge-nav-expanded.png");
+
+      /* Close the disclosure, then pan until one long chip is isolated on an
+         edge with a clear reveal band. */
+      await page.keyboard.press("Escape");
+      await Bun.sleep(150);
+      const sel = await surfaceLongVisibleChip(page);
+      check(Boolean(sel), "desktop-visible-chip-isolated", "panned the board until a single long-titled chip surfaced on an edge, clear of every conversation pane");
+
+      // Resting: title truncated, direction control reserved beside it, in-viewport.
+      const resting = await page.evaluate((selector: string) => {
+        const chip = document.querySelector(selector) as HTMLElement;
+        const control = chip.querySelector("[data-edge-chip-control]") as HTMLElement;
+        const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
+        const cr = control.getBoundingClientRect();
+        const tr = title.getBoundingClientRect();
+        const br = chip.getBoundingClientRect();
+        const panes = Array.from(document.querySelectorAll("header.reasoning-host")).map((p) => p.getBoundingClientRect());
+        const overlapsPane = panes.some((p) => br.left < p.right && br.right > p.left && br.top < p.bottom && br.bottom > p.top);
+        return {
+          label: title.textContent || "",
+          reveal: title.getAttribute("data-reveal"),
+          truncated: title.scrollWidth - title.clientWidth > 1,
+          controlBeforeTitle: cr.right <= tr.left + 1,
+          inViewport: br.left >= -0.5 && br.right <= window.innerWidth + 0.5,
+          width: Math.round(br.width),
+          overlapsPane,
+        };
+      }, sel);
+      check(resting.truncated, "desktop-chip-resting-truncated", `the resting chip label "${resting.label}" (${resting.label.length} chars) overflows its resting width — data-reveal ${resting.reveal}`);
+      check(resting.controlBeforeTitle, "desktop-chip-control-reserved", "the direction control sits in its own reserved box before the title — never over the label");
+      check(resting.inViewport, "desktop-chip-resting-in-viewport", `the resting pill (width ${resting.width}px) stays inside the 1440px viewport`);
+      check(!resting.overlapsPane, "desktop-chip-resting-clear", "the resting chip does not overlap any open conversation pane");
+      await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-edge-chip-resting.png") });
+      console.log("  shot desktop-1440-edge-chip-resting.png");
+
+      /* Progressive pointer reveal: repeated moves that reach the truncated end
+         unfurl further segments (bounded, within the viewport). */
+      const progressed = await page.evaluate(async (selector: string) => {
+        const chip = document.querySelector(selector) as HTMLElement;
+        const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
+        const settle = () => new Promise((r) => setTimeout(r, 30));
+        chip.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+        await settle();
+        const reveals: string[] = [];
+        for (let i = 0; i < 4; i += 1) {
+          const end = title.getBoundingClientRect().right;
+          chip.dispatchEvent(new PointerEvent("pointermove", { clientX: end - 4, clientY: title.getBoundingClientRect().top + 4, bubbles: true }));
+          await settle();
+          reveals.push(title.getAttribute("data-reveal") || "?");
+        }
+        return { reveals, maxRight: chip.getBoundingClientRect().right, viewport: window.innerWidth };
+      }, sel);
+      const advanced = progressed.reveals.some((r: string, i: number) => i > 0 && Number(r) > Number(progressed.reveals[0] ?? "0")) || progressed.reveals.includes("1");
+      check(advanced, "desktop-chip-progressive-reveal", `repeated pointer progression unfurls further segments (data-reveal steps ${JSON.stringify(progressed.reveals)})`);
+      check(progressed.maxRight <= progressed.viewport + 0.5, "desktop-chip-progress-in-viewport", `the progressively-revealed chip stays inside the viewport (right ${Math.round(progressed.maxRight)}px ≤ ${progressed.viewport}px)`);
+
+      // Keyboard focus → the whole label unfurls inside the same button, still bounded.
+      await page.evaluate((selector: string) => (document.querySelector(selector) as HTMLElement).focus(), sel);
+      await Bun.sleep(200);
+      const revealed = await page.evaluate((selector: string) => {
+        const chip = document.querySelector(selector) as HTMLElement;
+        const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
+        const br = chip.getBoundingClientRect();
+        const panes = Array.from(document.querySelectorAll("header.reasoning-host")).map((p) => p.getBoundingClientRect());
+        const overlapsPane = panes.some((p) => br.left < p.right && br.right > p.left && br.top < p.bottom && br.bottom > p.top);
+        return {
+          reveal: title.getAttribute("data-reveal"),
+          fullyShown: title.scrollWidth - title.clientWidth <= 1,
+          label: title.textContent || "",
+          inViewport: br.left >= -0.5 && br.right <= window.innerWidth + 0.5,
+          width: Math.round(br.width),
+          overlapsPane,
+        };
+      }, sel);
+      check(revealed.reveal === "full", "desktop-chip-focus-full", `keyboard focus sets the title to its full reveal (data-reveal ${revealed.reveal})`);
+      check(revealed.fullyShown, "desktop-chip-fully-revealed", `the whole ${revealed.label.length}-char label "${revealed.label}" is visible with no ellipsis once revealed`);
+      check(revealed.inViewport, "desktop-chip-revealed-in-viewport", `the fully-revealed pill (width ${revealed.width}px) stays inside the 1440px viewport`);
+      check(!revealed.overlapsPane, "desktop-chip-revealed-clear", "the fully-revealed chip still does not overlap any open conversation pane");
+      await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-edge-chip-revealed.png") });
+      console.log("  shot desktop-1440-edge-chip-revealed.png");
       await page.close();
     }
 
-    /* 2) 390px: the phone shell drops the scheme, so no edge chip or landmark. */
+    /* 2) 390px: a real conversation is open in the phone focus view; every edge
+          chip is gone, the conversation pane is contained inside 390px, and its
+          transcript introduces no horizontal spill. */
     {
+      /* Deep-link straight to a real fixture conversation (#c=<id> / #f=<path>):
+         the phone shell opens it in the focus view — the same code path a tap on
+         a conversation row takes, but deterministic. */
+      const catalog = await (await fetch(`http://127.0.0.1:${PORT}/api/files`)).json();
+      const atlas = (catalog.files as any[]).filter((f) => (f.cwd || f.projectRoot || "").includes("atlas") && String(f.path).endsWith(".jsonl"));
+      const target = atlas[0];
+      if (!target) throw new Error("no fixture conversation found in /api/files");
+      const hash = target.conversationId ? `#c=${encodeURIComponent(target.conversationId)}` : `#f=${encodeURIComponent(target.path)}`;
+
       const page = await browser.newPage();
       await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1 });
       await page.emulateTimezone("UTC");
-      await page.goto(`${base}#p=atlas`, { waitUntil: "networkidle2", timeout: 60_000 });
+      await page.goto(`${base}${hash}`, { waitUntil: "networkidle2", timeout: 60_000 });
       await page.addStyleTag({ content: noAnim });
-      await Bun.sleep(800);
-      const mobile = await page.evaluate(() => ({
-        chips: document.querySelectorAll("[data-edge-chip]").length,
-        nav: Boolean(document.querySelector('nav[aria-label="Off-screen work"]')),
-      }));
-      check(mobile.chips === 0, "mobile-chips-removed", `no edge chip renders on the 390px shell (found ${mobile.chips})`);
-      check(!mobile.nav, "mobile-nav-removed", "the off-screen navigation landmark is absent on the phone width");
-      await page.screenshot({ path: path.join(OUT_DIR, "mobile-390-no-edge-chips.png") });
-      console.log("  shot mobile-390-no-edge-chips.png");
+      await page.waitForFunction(() => document.querySelectorAll("header.reasoning-host").length > 0, { timeout: 30_000 });
+      await Bun.sleep(500);
+      const mobile = await page.evaluate(() => {
+        const vw = window.innerWidth;
+        const host = document.querySelector("header.reasoning-host") as HTMLElement | null;
+        /* The conversation pane: the nearest ancestor of the transcript header
+           that clips its own overflow (the phone focus column). Its containment
+           is what "the open conversation is contained" means. */
+        const clipsX = (el: HTMLElement) => ["hidden", "auto", "scroll", "clip"].includes(getComputedStyle(el).overflowX);
+        let pane: HTMLElement | null = host;
+        for (let el = host?.parentElement ?? null; el && el !== document.body; el = el.parentElement) {
+          if (clipsX(el)) { pane = el; break; }
+        }
+        const paneRect = pane?.getBoundingClientRect() ?? null;
+        /* Any element inside the conversation pane that visibly spills past the
+           viewport without being clipped by a contained scroll container. */
+        let paneOverflowRight = 0;
+        if (pane) {
+          const clipped = (el: HTMLElement) => {
+            for (let p = el.parentElement; p && p !== pane!.parentElement; p = p.parentElement) {
+              if (clipsX(p) && p.getBoundingClientRect().right <= vw + 1) return true;
+            }
+            return false;
+          };
+          for (const el of Array.from(pane.querySelectorAll("*")) as HTMLElement[]) {
+            const r = el.getBoundingClientRect();
+            if (r.width > 0 && r.right > vw + 1 && !clipped(el)) paneOverflowRight = Math.max(paneOverflowRight, Math.round(r.right));
+          }
+        }
+        const chips = document.querySelectorAll("[data-edge-chip]");
+        return {
+          chips: chips.length,
+          nav: Boolean(document.querySelector('nav[aria-label="Off-screen work"]')),
+          conversationOpen: Boolean(host),
+          paneLeft: paneRect ? Math.round(paneRect.left) : 0,
+          paneRight: paneRect ? Math.round(paneRect.right) : 0,
+          paneScrollOverflow: pane ? pane.scrollWidth - pane.clientWidth : 0,
+          paneOverflowRight,
+          innerWidth: vw,
+        };
+      });
+      check(mobile.conversationOpen, "mobile-conversation-open", `a real fixture conversation is open in the phone focus view (pane ${mobile.paneLeft}–${mobile.paneRight}px)`);
+      check(mobile.chips === 0 && !mobile.nav, "mobile-chips-removed", `every edge chip and the off-screen navigation landmark are removed on the 390px shell (chips ${mobile.chips}, nav ${mobile.nav})`);
+      check(mobile.paneLeft >= -1 && mobile.paneRight <= mobile.innerWidth + 1, "mobile-conversation-contained", `the open conversation pane is horizontally contained inside 390px (left ${mobile.paneLeft}px, right ${mobile.paneRight}px)`);
+      check(mobile.paneScrollOverflow <= 1 && mobile.paneOverflowRight === 0, "mobile-content-unobstructed", `the conversation content introduces no horizontal overflow and no edge chip overlays it (pane scroll overflow ${mobile.paneScrollOverflow}px, spill ${mobile.paneOverflowRight}px)`);
+      await page.screenshot({ path: path.join(OUT_DIR, "mobile-390-conversation-contained.png") });
+      console.log("  shot mobile-390-conversation-contained.png");
       await page.close();
     }
 
@@ -267,7 +425,7 @@ async function main(): Promise<void> {
         capturedAt: new Date().toISOString(),
         viewer: "production next start",
         viewport: { desktop: "1440x900", mobile: "390x844" },
-        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (9 tests: continuous surface, reserved control box, bounded progressive reveal, keyboard full-reveal, reduced motion, click fit, coarse-pointer removal)",
+        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (10 tests: continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, click fit, coarse-pointer removal) + src/components/scheme/offscreenClusters.test.ts (reserves the fully-revealed width in collision geometry)",
         checks,
       }, null, 2) + "\n",
     );
