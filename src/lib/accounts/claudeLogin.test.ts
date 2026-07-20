@@ -14,7 +14,7 @@ type ClaudeLoginPorts = import("./claudeLogin").ClaudeLoginPorts;
 
 class FakeChild extends EventEmitter { pid = 4242; stdout = new EventEmitter(); stderr = new EventEmitter(); writes: string[] = []; stdin = { write: (text: string) => { this.writes.push(text); return true; }, end: () => undefined }; }
 let child: FakeChild; let signals: string[]; let inheritedChildAlive: boolean;
-function ports(): ClaudeLoginPorts { return { spawn: () => child as never, kill: (_pid, signal) => { signals.push(signal); if (signal === "SIGKILL") inheritedChildAlive = false; }, pidStartToken: () => inheritedChildAlive ? "start-1" : null, isExpectedClaude: () => true, waitForExit: async () => undefined, status: async () => ({ loggedIn: true, method: "oauth", email: "a@example.test", plan: "max" }), now: () => 1_000, setTimeout: (fn, ms) => { if (ms <= 2_000) fn(); return {} as NodeJS.Timeout; }, clearTimeout: () => undefined }; }
+function ports(): ClaudeLoginPorts { return { spawn: () => child as never, kill: (_pid, signal) => { signals.push(signal); if (signal === "SIGKILL") inheritedChildAlive = false; }, pidStartToken: () => inheritedChildAlive ? "start-1" : null, isExpectedClaude: () => true, waitForExit: async () => undefined, status: async () => ({ loggedIn: true, method: "oauth", email: "a@example.com", plan: "max" }), now: () => 1_000, setTimeout: (fn, ms) => { if (ms <= 2_000) fn(); return {} as NodeJS.Timeout; }, clearTimeout: () => undefined }; }
 beforeEach(() => { fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }); child = new FakeChild(); signals = []; inheritedChildAlive = true; });
 afterAll(() => { if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR; else process.env.LLV_STATE_DIR = OLD_STATE; if (OLD_HOME === undefined) delete process.env.LLV_CLAUDE_HOME; else process.env.LLV_CLAUDE_HOME = OLD_HOME; fs.rmSync(SANDBOX, { recursive: true, force: true }); });
 
@@ -50,6 +50,42 @@ test("a clean environment starts the Claude CLI login protocol without activatio
 
   expect(operation).toEqual(expect.objectContaining({ phase: "awaiting_browser" }));
   expect(calls).toEqual([{ command: expect.any(String), args: ["auth", "login", "--claudeai"] }]);
+});
+
+test("legacy Main reauthenticates in place at its exact home with provider auth cleared (issue #470)", () => {
+  process.env.ANTHROPIC_API_KEY = "present";
+  const calls: Array<{ env: NodeJS.ProcessEnv | undefined }> = [];
+  const supervisor = new ClaudeLoginSupervisor({
+    ...ports(),
+    spawn: (_command, _args, options) => {
+      calls.push({ env: options?.env as NodeJS.ProcessEnv | undefined });
+      return child as never;
+    },
+  });
+
+  // The legacy Main account id is "default"; no managed home is created for it.
+  const operation = supervisor.start("default");
+
+  expect(operation).toEqual(expect.objectContaining({ phase: "awaiting_browser" }));
+  expect(calls[0].env?.CLAUDE_CONFIG_DIR).toBe(process.env.LLV_CLAUDE_HOME!);
+  expect(calls[0].env?.ANTHROPIC_API_KEY).toBeUndefined();
+  expect(calls[0].env?.UMASK).toBe("077");
+  delete process.env.ANTHROPIC_API_KEY;
+});
+
+test("a managed account still erroring with a safe credential file can retry in place (issue #470)", () => {
+  const account = createManagedClaudeAccount("Erroring");
+  fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
+  const calls: Array<{ env: NodeJS.ProcessEnv | undefined }> = [];
+  const supervisor = new ClaudeLoginSupervisor({
+    ...ports(),
+    spawn: (_command, _args, options) => { calls.push({ env: options?.env as NodeJS.ProcessEnv | undefined }); return child as never; },
+  });
+
+  const operation = supervisor.start(account.id);
+
+  expect(operation).toEqual(expect.objectContaining({ phase: "awaiting_browser" }));
+  expect(calls[0].env?.CLAUDE_CONFIG_DIR).toBe(account.home);
 });
 
 test("an unfenced child is rejected before it can accept a login code", () => {
@@ -155,11 +191,11 @@ test("input is admitted only after the browser prompt and persists verification 
 test("restart reconciliation rejects PID reuse and preserves only an interrupted safe DTO", async () => {
   const file = path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json");
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify([{ operationId: "00000000-0000-4000-8000-000000000001", accountId: "work", phase: "awaiting_browser", pid: 4242, startToken: "old-start", generation: 3, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
+  fs.writeFileSync(file, JSON.stringify([{ operationId: "operation-restart-one", accountId: "work", phase: "awaiting_browser", pid: 4242, startToken: "old-start", generation: 3, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
   const supervisor = new ClaudeLoginSupervisor({ ...ports(), pidStartToken: () => "new-process" });
   await supervisor.whenRecovered();
   expect(signals).toEqual([]);
-  expect(supervisor.get("00000000-0000-4000-8000-000000000001")).toEqual(expect.objectContaining({ phase: "interrupted", loginUrl: null, acceptsCode: false }));
+  expect(supervisor.get("operation-restart-one")).toEqual(expect.objectContaining({ phase: "interrupted", loginUrl: null, acceptsCode: false }));
 });
 
 test("malformed persisted operations are discarded so recovery cannot block a fresh login", () => {
@@ -307,7 +343,7 @@ test("a delayed auth status cannot overwrite a completed cancellation", async ()
   await Promise.resolve();
 
   const canceled = await supervisor.cancel(operation.operationId);
-  resolveStatus({ loggedIn: true, method: "oauth", email: "a@example.test", plan: "max" });
+  resolveStatus({ loggedIn: true, method: "oauth", email: "a@example.com", plan: "max" });
   await Promise.resolve();
 
   expect(canceled.phase).toBe("canceled");
@@ -360,7 +396,7 @@ test("restart sends TERM and KILL, awaits the resistant child exit, then verifie
   fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
   const file = path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json");
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify([{ operationId: "00000000-0000-4000-8000-000000000002", accountId: account.id, phase: "awaiting_browser", pid: 4242, startToken: "start-1", generation: 3, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
+  fs.writeFileSync(file, JSON.stringify([{ operationId: "operation-restart-two", accountId: account.id, phase: "awaiting_browser", pid: 4242, startToken: "start-1", generation: 3, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
   const calls: string[] = [];
   const supervisor = new ClaudeLoginSupervisor({
     ...ports(),
@@ -372,13 +408,13 @@ test("restart sends TERM and KILL, awaits the resistant child exit, then verifie
     waitForExit: async () => { calls.push("wait"); },
     status: async () => {
       calls.push("status");
-      return { loggedIn: true, method: "oauth", email: "a@example.test", plan: "max" };
+      return { loggedIn: true, method: "oauth", email: "a@example.com", plan: "max" };
     },
   });
   await supervisor.whenRecovered();
   expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
   expect(calls).toEqual(["kill:SIGTERM", "wait", "kill:SIGKILL", "wait", "status"]);
-  expect(supervisor.get("00000000-0000-4000-8000-000000000002")).toEqual(expect.objectContaining({ phase: "authenticated" }));
+  expect(supervisor.get("operation-restart-two")).toEqual(expect.objectContaining({ phase: "authenticated" }));
 });
 
 test("a restart with a safe credential file remains interrupted when Claude status is logged out", async () => {
@@ -386,7 +422,7 @@ test("a restart with a safe credential file remains interrupted when Claude stat
   fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
   const file = path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json");
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify([{ operationId: "00000000-0000-4000-8000-000000000012", accountId: account.id, phase: "verifying", pid: 4242, startToken: "start-1", generation: 12, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
+  fs.writeFileSync(file, JSON.stringify([{ operationId: "operation-restart-twelve", accountId: account.id, phase: "verifying", pid: 4242, startToken: "start-1", generation: 12, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
   const statusHomes: string[] = [];
   const restarted = new ClaudeLoginSupervisor({
     ...ports(),
@@ -399,14 +435,14 @@ test("a restart with a safe credential file remains interrupted when Claude stat
   await restarted.whenRecovered();
 
   expect(statusHomes).toEqual([account.home]);
-  expect(restarted.get("00000000-0000-4000-8000-000000000012")).toEqual(expect.objectContaining({ phase: "interrupted", result: expect.objectContaining({ code: "interrupted" }) }));
+  expect(restarted.get("operation-restart-twelve")).toEqual(expect.objectContaining({ phase: "interrupted", result: expect.objectContaining({ code: "interrupted" }) }));
 });
 
 test("a retry after recovery supersedes the recovered operation", async () => {
   const account = createManagedClaudeAccount("Recovered retry");
   const file = path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json");
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify([{ operationId: "00000000-0000-4000-8000-000000000009", accountId: account.id, phase: "awaiting_browser", pid: 4242, startToken: "old-start", generation: 9, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
+  fs.writeFileSync(file, JSON.stringify([{ operationId: "operation-restart-nine", accountId: account.id, phase: "awaiting_browser", pid: 4242, startToken: "old-start", generation: 9, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
   const restarted = new ClaudeLoginSupervisor(ports());
   await restarted.whenRecovered();
 
@@ -427,10 +463,10 @@ test("a successful login requires a safe credential file and survives restart as
   const credentials = path.join(account.home, ".credentials.json");
   fs.writeFileSync(credentials, "{}", { mode: 0o600 });
   const file = path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json");
-  fs.writeFileSync(file, JSON.stringify([{ operationId: "00000000-0000-4000-8000-000000000003", accountId: account.id, phase: "verifying", pid: 4242, startToken: "start-1", generation: 9, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
+  fs.writeFileSync(file, JSON.stringify([{ operationId: "operation-restart-three", accountId: account.id, phase: "verifying", pid: 4242, startToken: "start-1", generation: 9, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
   const restarted = new ClaudeLoginSupervisor(ports());
   await restarted.whenRecovered();
-  expect(restarted.get("00000000-0000-4000-8000-000000000003")).toEqual(expect.objectContaining({ phase: "authenticated" }));
+  expect(restarted.get("operation-restart-three")).toEqual(expect.objectContaining({ phase: "authenticated" }));
 });
 
 test("timeout records its terminal outcome after killing a TERM-resistant child", async () => {
@@ -442,8 +478,16 @@ test("timeout records its terminal outcome after killing a TERM-resistant child"
   expect(supervisor.get(operation.operationId)).toEqual(expect.objectContaining({ phase: "timed_out" }));
 });
 
-test("legacy Main status keeps the normal process environment", () => {
-  expect(claudeStatusEnvironment(process.env.LLV_CLAUDE_HOME!)).toBe(process.env);
+test("legacy Main status targets its exact home with inherited provider auth cleared", () => {
+  const env = claudeStatusEnvironment(process.env.LLV_CLAUDE_HOME!);
+  expect(env).not.toBe(process.env);
+  expect(env.CLAUDE_CONFIG_DIR).toBe(process.env.LLV_CLAUDE_HOME!);
+  expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+});
+
+test("an unrecognized home keeps the plain process environment for status", () => {
+  expect(claudeStatusEnvironment("/tmp/not-a-claude-home")).toBe(process.env);
 });
 
 test("a reservation blocks a second account creation before filesystem mutation", () => {

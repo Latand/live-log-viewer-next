@@ -262,6 +262,38 @@ test("Claude provider reauthentication projects stored credentials as signed out
   }));
 });
 
+test("legacy Main projects a fresh failed auth check as an error while keeping its credentials (issue #470)", async () => {
+  fs.mkdirSync(process.env.LLV_CLAUDE_HOME!, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(process.env.LLV_CLAUDE_HOME!, ".credentials.json"), "{}", { mode: 0o600 });
+  const observedAt = new Date().toISOString();
+  agentRegistry().recordQuotaEvaluation({
+    engine: "claude",
+    observations: [{
+      engine: "claude",
+      accountId: "default",
+      authenticated: false,
+      authCheckedAt: observedAt,
+      limits: null,
+      provenance: { source: "unavailable", reason: "quota-probe-failed", staleSince: null },
+      observedAt,
+      bootId: "legacy-main-error-route-test",
+    }],
+    signature: null,
+    bootId: "legacy-main-error-route-test",
+    now: observedAt,
+    minimumGapMs: 60_000,
+  });
+
+  const body = await (await GET()).json() as {
+    claude: { accounts: Array<{ id: string; kind: string; authPresent: boolean; auth: { state: string } }> };
+  };
+  expect(body.claude.accounts.find((item) => item.id === "default")).toEqual(expect.objectContaining({
+    kind: "legacy",
+    authPresent: true,
+    auth: expect.objectContaining({ state: "error" }),
+  }));
+});
+
 test("future quota and auth observations remain ineligible", async () => {
   const account = createManagedCodexAccount("Future");
   setCodexAccountLoginPane(account.id, { paneId: "%future", windowName: "codex-login", startedAt: 0 });

@@ -33,8 +33,10 @@ export async function POST(req: NextRequest) {
       if (body.action === "retry") {
         if (typeof body.id !== "string") return failure(400, "invalid_account", "Account id must be a string");
         try {
+          // Legacy Main and managed accounts alike can reauthenticate in place;
+          // the supervisor fences the login to that account's safe home.
           const account = listClaudeAccounts().find((candidate) => candidate.id === body.id);
-          if (!account || account.kind !== "managed") throw new UnknownClaudeAccountError(body.id);
+          if (!account) throw new UnknownClaudeAccountError(body.id);
           const login = claudeLoginSupervisor.start(account.id);
           if (login.phase === "failed") return failure(503, login.result?.code ?? "start_failed", login.result?.message ?? "Claude login could not start");
           return accountResponse(account, login);

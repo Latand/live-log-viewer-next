@@ -232,9 +232,10 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled, f
 
 /** The Claude sign-in slice for one account row (issue #61). Renders the live
     login phase (browser link + bounded code entry, Cancel), a sanitized failure
-    with Retry, or a Sign in affordance for a managed unauthenticated account —
-    and never removes the account. Codex rows never mount this (device login owns
-    its own inline affordance in AccountRow). */
+    with Retry, or a Sign in / Retry affordance for any account stranded in
+    signed_out or error — legacy Main included (issue #470) — and never removes
+    the account. Codex rows never mount this (device login owns its own inline
+    affordance in AccountRow). */
 function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption; state: EngineAccountsState; loginBusy: boolean }) {
   const { t } = useLocale();
   const login = account.login ?? null;
@@ -373,9 +374,13 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
     );
   }
 
-  // Managed account with no auth and no live op (covers canceled and the broken
-  // production account): a Sign in affordance that restarts login in place.
-  if (account.kind === "managed" && (!account.authPresent || authHealth(account) === "signed_out")) {
+  // Any Claude account stranded in signed_out or error with no live op — legacy
+  // Main included (issue #470) — gets an in-place recovery affordance that never
+  // removes the account: Sign in when signed out, Retry when a credentialed
+  // account is erroring. This also covers a canceled managed sign-in.
+  const health = authHealth(account);
+  if (health === "signed_out" || health === "error" || !account.authPresent) {
+    const label = health === "error" ? t("accounts.retry") : t("accounts.claudeLogin.signIn");
     return (
       <div ref={rowRef} tabIndex={-1} className="flex items-center gap-2 px-3 pb-2 pl-[26px] focus-visible:outline-none">
         <button
@@ -384,7 +389,7 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
           disabled={busy || loginBusy}
           className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-border bg-canvas px-2.5 py-0.5 text-[11px] font-semibold hover:bg-sunken disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
         >
-          {t("accounts.claudeLogin.signIn")}
+          {label}
         </button>
       </div>
     );

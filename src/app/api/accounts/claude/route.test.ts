@@ -98,6 +98,72 @@ test("one login is admitted at a time, then cancel and retry create a fresh oper
   expect(retryBody.login.operationId).not.toBe(firstBody.login.operationId);
 });
 
+test("retry reauthenticates legacy Main in place through the supervised flow (issue #470)", async () => {
+  const retry = await POST(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ action: "retry", id: "default" }),
+  }));
+
+  expect(retry.status).toBe(202);
+  const body = await retry.json() as { account: { id: string; kind: string }; login: { phase: string }; target: string };
+  expect(body.account).toEqual(expect.objectContaining({ id: "default", kind: "legacy" }));
+  expect(body.login.phase).toBe("awaiting_browser");
+  expect(body.target).toBe("claude-auth-login");
+});
+
+test("a managed account erroring with credentials present retries in place, keeping its identity (issue #470)", async () => {
+  const created = await POST(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ label: "Erroring managed" }),
+  }));
+  const createdBody = await created.json() as { account: { id: string }; login: { operationId: string } };
+  // Cancel the create's live op, then write a safe credential file — the account
+  // now looks like production's error case: credentials present but reauth needed.
+  await DELETE(new NextRequest(`http://127.0.0.1/api/accounts/claude/login/${createdBody.login.operationId}`, {
+    method: "DELETE", headers: { host: "127.0.0.1" },
+  }), { params: Promise.resolve({ operationId: createdBody.login.operationId }) });
+  fs.writeFileSync(path.join(sandbox, "accounts", "claude", createdBody.account.id, ".credentials.json"), "{}", { mode: 0o600 });
+
+  const retry = await POST(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ action: "retry", id: createdBody.account.id }),
+  }));
+
+  expect(retry.status).toBe(202);
+  const retryBody = await retry.json() as { account: { id: string; kind: string }; login: { phase: string; operationId: string } };
+  expect(retryBody.account).toEqual(expect.objectContaining({ id: createdBody.account.id, kind: "managed" }));
+  expect(retryBody.login.phase).toBe("awaiting_browser");
+  expect(retryBody.login.operationId).not.toBe(createdBody.login.operationId);
+});
+
+test("a failed legacy retry returns a sanitized, retryable error and never leaks detail (issue #470)", async () => {
+  setClaudeLoginSupervisorForTests(new ClaudeLoginSupervisor({
+    spawn: () => child as never,
+    kill: () => undefined,
+    pidStartToken: () => null, // fails the launch fence
+    isExpectedClaude: () => true,
+    waitForExit: async () => undefined,
+    status: async () => ({ loggedIn: false, method: null, email: null, plan: null }),
+    now: () => 1_000,
+    setTimeout: (callback, ms) => { if (ms <= 2_000) callback(); return {} as NodeJS.Timeout; },
+    clearTimeout: () => undefined,
+  }));
+
+  const retry = await POST(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ action: "retry", id: "default" }),
+  }));
+
+  expect(retry.status).toBe(503);
+  const body = await retry.json() as { error: string; code: string };
+  expect(body.code).toBe("launch_unfenced");
+  expect(JSON.stringify(body)).not.toContain("/proc/");
+});
+
 test("the authorization code is accepted through stdin and never appears in the response", async () => {
   const created = await POST(new NextRequest("http://127.0.0.1/api/accounts/claude", {
     method: "POST",
