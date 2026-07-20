@@ -99,10 +99,10 @@ export type ToolEvent = {
   /** stderr split from the combined result, rendered in its own disclosure. */
   stderr?: string;
   stderrTruncated?: boolean;
-  /** Redacted, bounded interactive-shell session/cell this call owns: an exec
-      reports it in its result preamble, a wait/write_stdin follow-up names it in
-      its args. Lets the readable group fold each follow-up under the exec that
-      actually owns its session, even when several sessions interleave (#475). */
+  /** Redacted, bounded interactive-shell session/cell display label. An exec
+      reports it in its result preamble, and a wait/write_stdin follow-up names
+      it in its args. Grouping uses a separate parser-private ownership token so
+      display redaction or truncation cannot cross-attach sessions (#502). */
   session?: string;
   /** A bare interactive poll: a `wait`, or a `write_stdin` that sent no
       keystrokes. Empty consecutive polls collapse into one compact counted row
@@ -116,6 +116,30 @@ export type ToolEvent = {
   /** Structured Viewer MCP attribution recovered from engine-owned metadata. */
   mcp?: ViewerMcpCall;
 };
+
+/* Session ownership stays outside the serializable ToolEvent surface. The
+   parser assigns an opaque per-feed token while the UI receives only the
+   redacted display label carried by `event.session`. */
+type SessionOwner = object;
+const sessionOwnership = new WeakMap<ToolEvent, SessionOwner>();
+
+/** Compare the private ownership tokens produced by the parser. Synthetic and
+    legacy events without tokens retain display-label matching for fixtures and
+    older callers. A token on either side requires an exact private match. */
+export function hasSameSessionOwner(left: ToolEvent, right: ToolEvent): boolean {
+  const leftOwner = sessionOwnership.get(left);
+  const rightOwner = sessionOwnership.get(right);
+  if (leftOwner !== undefined || rightOwner !== undefined) {
+    return leftOwner !== undefined && leftOwner === rightOwner;
+  }
+  return left.session !== undefined && left.session === right.session;
+}
+
+function retainSessionOwner(event: ToolEvent, owner: SessionOwner | undefined): ToolEvent {
+  if (owner !== undefined) sessionOwnership.set(event, owner);
+  return event;
+}
+
 export type CitationEntry = {
   target: string;
   line?: string;
@@ -433,6 +457,28 @@ function toolOutputText(value: unknown): string {
   return value === undefined || value === null ? "" : redactTranscriptText(JSON.stringify(value));
 }
 
+/* Read the interactive session identifier from the original output envelope
+   before toolOutputText redacts its display copy. The value feeds only the
+   parser-private ownership map. */
+function toolOutputSession(value: unknown): string | undefined {
+  const matchText = (text: string) => text.match(SESSION_RESULT_RE)?.[1];
+  if (typeof value === "string") return matchText(value);
+  if (!Array.isArray(value)) return undefined;
+  for (const part of value) {
+    if (typeof part === "string") {
+      const session = matchText(part);
+      if (session !== undefined) return session;
+      continue;
+    }
+    if (!part || typeof part !== "object" || Array.isArray(part)) continue;
+    const block = rec(part);
+    const text = textPart(block.text) || textPart(block.input_text) || textPart(block.output_text);
+    const session = matchText(text);
+    if (session !== undefined) return session;
+  }
+  return undefined;
+}
+
 function toolOutputFailed(text: string): boolean {
   return /^Script failed\b/im.test(text) || /\b(?:exit|exited with) code [1-9]\d*\b/i.test(text);
 }
@@ -566,19 +612,18 @@ const SESSION_ID_MAX = 120;
    (both engines/wrappers, issue #141). */
 const SESSION_RESULT_RE = /\brunning with (?:cell|session) ID\s+(\S+)/i;
 
-/* The redacted, bounded session/cell key a shell call owns. A follow-up names it
-   in its args (numeric in write_stdin, string in wait — see objFieldScalar); an
-   exec reports it in its result preamble. Passed through the shared redaction/cap
-   funnel so the readable block never surfaces a raw or unbounded value (#475). */
-function sessionKey(value: unknown): string | undefined {
+/* Normalize the private session/cell identifier before assigning an opaque
+   ownership token. Numeric and string forms of the same identifier converge. */
+function rawSessionId(value: unknown): string | undefined {
   const raw = typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
-  if (!raw.trim()) return undefined;
-  const safe = redactSecrets(raw).trim().slice(0, SESSION_ID_MAX);
-  return safe || undefined;
+  return raw.trim() || undefined;
 }
 
-function sessionFromArgs(args: Record<string, unknown>): string | undefined {
-  return sessionKey(args.session_id ?? args.cell_id);
+/* The bounded label is the only session identity available to serialization
+   and renderers. Private matching uses the token retained in sessionOwnership. */
+function sessionLabel(raw: string): string | undefined {
+  const safe = redactSecrets(raw).trim().slice(0, SESSION_ID_MAX);
+  return safe || undefined;
 }
 
 /* Grouping bucket key: the verbatim tool name, falling back to the family for
@@ -1056,6 +1101,18 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
 
   const entries: StoredEntry[] = [];
   const calls = new Map<string, CallRec>();
+  const sessionOwners = new Map<string, SessionOwner>();
+  const sessionIdentity = (value: unknown): { label?: string; owner: SessionOwner } | undefined => {
+    const raw = rawSessionId(value);
+    if (raw === undefined) return undefined;
+    let owner = sessionOwners.get(raw);
+    if (owner === undefined) {
+      owner = {};
+      sessionOwners.set(raw, owner);
+    }
+    return { label: sessionLabel(raw), owner };
+  };
+  const sessionFromArgs = (args: Record<string, unknown>) => sessionIdentity(args.session_id ?? args.cell_id);
   /* Outgoing teammate messages awaiting their delivery echo, by tool_use id;
      the reverse map exists only so window-slide eviction can prune. */
   const tmsgSeqs = new Map<string, number>();
@@ -1243,7 +1300,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     /* A bare poll carries no keystrokes: every `wait`, and a `write_stdin` whose
        `chars` payload is the deliberately empty string (issue #497 / #141). */
     const poll = opts.tool === "wait" || (opts.tool === "write_stdin" && !(typeof args.chars === "string" && args.chars.length > 0));
-    return {
+    const session = s.family === "shell" ? sessionFromArgs(args) : undefined;
+    const event: ToolEvent = {
       kind: "tool",
       id: opts.id,
       ts: opts.ts,
@@ -1262,8 +1320,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       outputTruncated: false,
       ...(s.family === "shell" ? (() => {
         const cwd = cwdOf(args, command);
-        const session = sessionFromArgs(args);
-        return { ...(cwd ? { cwd } : {}), ...(session !== undefined ? { session } : {}) };
+        return { ...(cwd ? { cwd } : {}), ...(session?.label !== undefined ? { session: session.label } : {}) };
       })() : {}),
       ...(poll ? { poll: true } : {}),
       /* An edit/write card opens its structured diff inline by default — a
@@ -1277,6 +1334,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         result: opts.mcp.result ? boundedMcpRecord(opts.mcp.result) : null,
       } } : {}),
     };
+    return retainSessionOwner(event, session?.owner);
   };
   const registerCall = (event: ToolEvent): CallRec => {
     const seq = push(event);
@@ -1358,13 +1416,15 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const orch = parseOrchestration(input);
     const direct = orch?.directInteractive;
     const base = newToolEvent({ ts, id, tool: direct?.tool ?? name, args: direct?.args ?? { input }, engine: "codex", diff: orch?.diff });
-    const event = orch ? { ...base, ...orch.overlay, ...(orch.body ? { orchestration: orch.body } : {}) } : base;
+    const event = orch
+      ? retainSessionOwner({ ...base, ...orch.overlay, ...(orch.body ? { orchestration: orch.body } : {}) }, sessionOwnership.get(base))
+      : base;
     registerCall(event);
     return event;
   };
   /* Attaches a result copy-on-write: the record gets a fresh ToolEvent and the
      owning entry a fresh item, so exactly one row changes identity. */
-  const attach = (callRec: CallRec | undefined, output: string, errFlag?: boolean) => {
+  const attach = (callRec: CallRec | undefined, output: string, errFlag?: boolean, rawSession?: string) => {
     if (!callRec) return null;
     const code = output.match(/exited with code (\d+)/)?.[1];
     /* Codex interactive-shell wall time, read before the preamble is stripped, so
@@ -1420,7 +1480,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const durationMs = wallSeconds !== undefined ? Math.round(Number(wallSeconds) * 1000) : prev.durationMs;
     /* The exec that opened the session reports it in its result preamble; a
        follow-up already carries its session from its args, so keep that. */
-    const session = prev.session ?? (prev.family === "shell" ? sessionKey(output.match(SESSION_RESULT_RE)?.[1]) : undefined);
+    const detectedSession = prev.family === "shell" ? sessionIdentity(rawSession ?? output.match(SESSION_RESULT_RE)?.[1]) : undefined;
+    const session = prev.session ?? detectedSession?.label;
+    const sessionOwner = sessionOwnership.get(prev) ?? detectedSession?.owner;
     const startMs = typeof prev.ts === "string" || typeof prev.ts === "number" ? Date.parse(String(prev.ts)) : NaN;
     const endTs = durationMs !== undefined && Number.isFinite(startMs) ? new Date(startMs + durationMs).toISOString() : prev.endTs;
     /* A wakeup's result carries the RESOLVED schedule (issue #161): on success
@@ -1441,7 +1503,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         wakeup = { ...refined, superseded: wakeup.superseded, failed: false };
       }
     }
-    const event: ToolEvent = {
+    const event = retainSessionOwner({
       ...prev,
       status: isErr ? "err" : "ok",
       statusLabel: isErr
@@ -1461,7 +1523,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       ...(session !== undefined ? { session } : {}),
       ...(wakeup ? { wakeup } : {}),
       ...(mcp ? { mcp } : {}),
-    };
+    }, sessionOwner);
     callRec.event = event;
     const idx = entryIndex(callRec.seq);
     if (idx >= 0 && idx < entries.length) {
@@ -1476,7 +1538,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (wakeup && wakeup.failed) recomputeWakeupStates();
     return event;
   };
-  const addOutput = (callId: string | undefined, output: string, err?: boolean) => {
+  const addOutput = (callId: string | undefined, output: string, err?: boolean, rawSession?: string) => {
     if (!callId) return;
     const tseq = tmsgSeqs.get(callId);
     if (tseq !== undefined) {
@@ -1493,7 +1555,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       }
       return;
     }
-    const event = attach(calls.get(callId), output, err);
+    const event = attach(calls.get(callId), output, err, rawSession);
     if (!event && output && showSvc) push({ kind: "svc", text: "output: " + redactSecrets(output).slice(0, 200) });
   };
   const addSvc = (text: string) => {
@@ -1727,8 +1789,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         return void registerCall(newToolEvent({ ts, id: textPart(p.call_id) || "plain-" + pushSeq + "-" + String(ts ?? ""), tool: name, args, engine: "codex" }));
       }
       if (p.type === "function_call_output") {
+        const rawSession = toolOutputSession(p.output);
         const output = toolOutputText(p.output);
-        return addOutput(textPart(p.call_id), output, toolOutputFailed(output));
+        return addOutput(textPart(p.call_id), output, toolOutputFailed(output), rawSession);
       }
       /* Fresh rollouts wrap apply_patch as a "custom_tool_call": `input` is the
          raw patch text directly (unlike function_call, whose `arguments` is a
@@ -1743,8 +1806,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         return void emitCustomTool(ts, name, input, id);
       }
       if (p.type === "custom_tool_call_output") {
+        const rawSession = toolOutputSession(p.output);
         const output = toolOutputText(p.output);
-        return addOutput(textPart(p.call_id), output, toolOutputFailed(output));
+        return addOutput(textPart(p.call_id), output, toolOutputFailed(output), rawSession);
       }
       if (p.type === "reasoning" || p.type === "agent_message") return addSvc(textPart(p.type));
       return addRecord(ts, textPart(p.type) || "item", p);
@@ -1947,6 +2011,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const reset = () => {
     entries.length = 0;
     calls.clear();
+    sessionOwners.clear();
     tmsgSeqs.clear();
     tmsgKeyBySeq.clear();
     hiddenSvcBySrc.clear();
