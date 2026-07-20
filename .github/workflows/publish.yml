@@ -38,6 +38,15 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      # actions/checkout above uses fetch-depth: 1 (depth-one). The issue-499
+      # capture-evidence suite (docs/screenshots/issue-499/evidence.test.ts, run
+      # by `bun test` below) validates the committed evidence against the capture
+      # manifest's ancestor sourceRevision — its git tree and committed harness
+      # bytes — which are absent from a depth-one checkout. Deepen history to it
+      # first; depth-one-evidence.test.ts runs this same script as its regression.
+      - name: Deepen history to the issue-499 capture-evidence source revision
+        run: bash docs/screenshots/issue-499/deepen-to-evidence-revision.sh
+
       - run: bun test
 
       - run: npm publish
