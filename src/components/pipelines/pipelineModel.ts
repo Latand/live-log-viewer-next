@@ -226,17 +226,28 @@ export function pipelinePlaceholderStages(pipeline: Pipeline): PipelineStage[] {
 }
 
 /**
- * Transcript artifacts already represented by a stage card's compact history.
+ * Transcript artifacts represented by compact, navigable stage history rather
+ * than a full conversation pane (#353 review round 2).
  *
- * Every launched stage in an open pipeline keeps one real conversation pane:
- * its latest materialized attempt. Earlier retries and superseded reviewer
- * bindings fold into that stage's history. This preserves the stage-card
- * invariant used by the pipeline canvas: five declared stages always project
- * five cards, with launched stages represented by real panes and future stages
- * represented by conversation-shaped placeholders.
+ * Each declared stage projects into exactly ONE surface. Only the pipeline's
+ * current live stage — the cursor's latest attempt — keeps a full conversation
+ * pane. Every terminal or prior stage (a passed/failed/skipped attempt, an
+ * all-historical stage, or an earlier retry) folds into compact navigable
+ * history that stays out of the world scene (and so out of the minimap / Fit All
+ * bounds) until it is opened; its verdict, duration, model, and every retry
+ * transcript remain reachable through the stage's evidence controls. Future
+ * stages hold conversation-shaped placeholders. Keeping only the cursor pane
+ * full-size is what lets the halo read as one live conversation plus its
+ * placeholders instead of a wall of equal cards.
  *
- * Completed and closed pipelines may fold their full transcript chain because
- * they no longer have future-stage placeholders or an active canvas workflow.
+ * For a live review-loop cursor the retained pane is the reviewer transcript
+ * itself (`attempt.agentPath`) — the pipeline folds its flow's round deck out of
+ * the layout via compactPipelineLayoutFlows, so the reviewer renders as an
+ * ordinary board card. A review cursor that has not spawned its reviewer yet
+ * falls back to its flow implementer so the loop still shows a live pane.
+ *
+ * Completed and closed pipelines fold their full transcript chain — they have no
+ * live stage and no future placeholders.
  */
 export function compactPipelineArtifactPaths(
   pipelines: readonly Pipeline[],
@@ -247,10 +258,32 @@ export function compactPipelineArtifactPaths(
   const fullPanePaths = new Set<string>();
 
   for (const pipeline of pipelines) {
-    if (pipeline.state === "completed" || pipeline.state === "closed") continue;
-    for (const stage of pipeline.stages) {
-      const attempt = latestAttempt(pipeline, stage.id);
-      if (attempt?.agentPath) fullPanePaths.add(attempt.agentPath);
+    if (!pipeline.cursor || pipeline.state === "completed" || pipeline.state === "closed" || pipeline.state === "draft") continue;
+    const stage = pipeline.stages.find((candidate) => candidate.id === pipeline.cursor!.stageId);
+    const attempt = stage ? latestAttempt(pipeline, stage.id) : null;
+    if (!stage || !attempt) continue;
+    if (attempt.agentPath) {
+      /* The cursor stage's own transcript — a run's session or the live
+         reviewer's transcript — is the single full pane. */
+      fullPanePaths.add(attempt.agentPath);
+    } else if (stage.kind === "review-loop") {
+      /* A review cursor that has not spawned its reviewer yet keeps the
+         implementer it reviews as the live pane: the flow's implementer, or the
+         most recent preceding passed run. */
+      const stageIndex = pipeline.stages.findIndex((candidate) => candidate.id === stage.id);
+      const priorRunPath = pipeline.stages
+        .slice(0, stageIndex)
+        .reverse()
+        .find((candidate) => {
+          const prior = latestAttempt(pipeline, candidate.id);
+          return candidate.kind === "run" && prior?.state === "passed" && prior.agentPath;
+        });
+      const implementerPath = attempt.flowId
+        ? flowsById.get(attempt.flowId)?.implementerPath
+        : priorRunPath
+          ? latestAttempt(pipeline, priorRunPath.id)?.agentPath
+          : null;
+      if (implementerPath) fullPanePaths.add(implementerPath);
     }
   }
 

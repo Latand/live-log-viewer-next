@@ -259,7 +259,7 @@ describe("pipelineCursorActive", () => {
 describe("compactPipelineArtifactPaths", () => {
   const stages = [stage("architect"), stage("builder"), stage("review", "review-loop")];
 
-  test("keeps one real pane per launched stage and compacts only prior retries", () => {
+  test("keeps only the cursor stage's live pane; every terminal stage and prior retry compacts (#353 R2)", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
@@ -275,10 +275,12 @@ describe("compactPipelineArtifactPaths", () => {
       ],
     });
 
-    expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/builder-attempt-1"]);
+    /* The live builder attempt is the sole full pane; the passed architect (a
+       terminal stage) and the failed builder retry fold into compact history. */
+    expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/architect", "/builder-attempt-1"]);
   });
 
-  test("keeps the latest review conversation as the review stage card", () => {
+  test("keeps the live reviewer transcript as the pane and compacts the implementer it reviews (#353 R2)", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -289,10 +291,12 @@ describe("compactPipelineArtifactPaths", () => {
     });
     const flows = [{ id: "f1", implementerPath: "/builder", rounds: [{ reviewerPath: "/reviewer" }] }] as unknown as Flow[];
 
-    expect([...compactPipelineArtifactPaths([p], flows)]).toEqual([]);
+    /* The reviewer is the current live pane (its flow deck is folded out in
+       production), so the passed builder it reviews compacts. */
+    expect(compactPipelineArtifactPaths([p], flows)).toEqual(new Set(["/builder"]));
   });
 
-  test("compacts every durable binding from a retried logical review round", () => {
+  test("compacts the reviewed implementer and every durable binding from a retried review round", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -315,10 +319,10 @@ describe("compactPipelineArtifactPaths", () => {
       { path: "/review-current", conversationId: "conversation-current", durableLineage: { memberships: [membership("reviewer:1:binding-b")] } },
     ] as unknown as FileEntry[];
 
-    expect(compactPipelineArtifactPaths([p], flows, files)).toEqual(new Set(["/review-prior"]));
+    expect(compactPipelineArtifactPaths([p], flows, files)).toEqual(new Set(["/builder", "/review-prior"]));
   });
 
-  test("keeps every launched run pane while a review flow is materializing", () => {
+  test("a review cursor with no reviewer yet keeps the implementer pane and compacts earlier stages", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -329,7 +333,10 @@ describe("compactPipelineArtifactPaths", () => {
       ],
     });
 
-    expect([...compactPipelineArtifactPaths([p], [])]).toEqual([]);
+    /* The reviewer transcript has not materialized, so the implementer it reviews
+       (the latest preceding passed run, /builder) is the live pane; the earlier
+       architect compacts. */
+    expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/architect"]);
   });
 
   test("a completed pipeline represents every transcript through compact history", () => {

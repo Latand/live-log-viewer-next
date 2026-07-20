@@ -1,13 +1,15 @@
 # #353 — restore the colored pipeline halo with real conversation cards
 
-The colored `SchemeGroup` halo is the **sole** desktop pipeline region. It encloses
-every materialized `BranchPane` conversation plus `StagePlaceholderPane` cards for
-the future stages, at their real stage positions. A single compact header (title,
-progress, lifecycle, disclosure) is attached to the halo. The latest attempt of
-every launched stage stays a real conversation card; earlier retries live in that
-stage's compact history. Pass/fail edges route inside the halo. The
-detached `PipelineGroup` body, the duplicate stage graph, the tall draft form, and
-the large white empty panel are gone.
+The colored `SchemeGroup` halo is the **sole** desktop pipeline region. Every
+declared stage projects into exactly one surface: the current live stage keeps a
+full `BranchPane` conversation, terminal/prior stages fold into compact navigable
+history (off the minimap / Fit All bounds until opened), and future stages hold
+`StagePlaceholderPane` shells. A single compact header (title, progress,
+lifecycle, disclosure) is attached to the halo. A live review-loop reviewer keeps
+its own conversation card (the pipeline folds its flow deck out of the layout),
+and pass/fail/loop edges route inside the halo between the real cards and the
+placeholders. The detached `PipelineGroup` body, the duplicate stage graph, the
+tall draft form, and the large white empty panel are gone.
 
 ## Evidence
 
@@ -20,9 +22,9 @@ composition and deterministic DOM evidence.
 
 | Artifact | Shows |
 | --- | --- |
-| `halo-composition-desktop.svg` | Privacy-safe public composition of one colored halo owning its materialized conversation cards and future-stage placeholders. |
-| `/tmp/llv-pr353-halo/halo-composition-desktop.png` | Private 1360×860 capture visually reviewed by the agent on 2026-07-20 without OCR: five declared stages produce five marked stage cards — `architect`, `builder`, and `verify` are real conversation panes; `polish` and `review` are future conversation shells with prompt previews. The `3/5` header and handoff rails are visible; cards do not overlap. |
-| `/tmp/llv-pr353-halo/halo-composition-390.png` | Private 390×820 capture visually reviewed on 2026-07-20: chat remains the primary surface, pipeline chrome stays compact above it, the composer remains visible, and the capture assertion proves `scrollWidth === innerWidth === 390`. |
+| `halo-composition-desktop.svg` | Privacy-safe public composition of one colored halo owning its live conversation pane and future-stage placeholders. |
+| `/tmp/llv-pr353-halo/halo-composition-desktop.png` | Private 1360×860 capture visually reviewed by the agent without OCR: of the five declared stages only the live `verify` stage is a full conversation pane; the passed `architect`/`builder` stages are compact history off the scene (the capture asserts their panes are absent), and `polish`/`review` are future conversation shells with prompt previews. Exactly three marked stage surfaces (`verify`, `polish`, `review`), the `3/5` header, and the handoff rails are visible; cards do not overlap. |
+| `/tmp/llv-pr353-halo/halo-composition-390.png` | Private 390×820 capture visually reviewed without OCR: chat remains the primary surface, pipeline chrome stays compact above it, the composer remains visible, and the capture assertion proves `scrollWidth === innerWidth === 390`. |
 
 To regenerate (needs the cached Chromium and a short tmux socket dir on a deep
 checkout):
@@ -34,21 +36,27 @@ LLV_DEMO_TMUX_TMPDIR=/tmp/halo-tmux bun scripts/capture-pr-353-halo.ts
 The composition is *also* asserted deterministically against the **shipped
 components** by:
 
-- `src/components/scheme/SchemeBoard.pipelineComposition.dom.test.tsx` — renders the
-  real `SchemeBoard` with a five-stage running pipeline (three materialized stages
-  + two future stages) and asserts exactly five unique
-  `data-pipeline-stage-card` surfaces inside one `data-scheme-group="pipeline"`
-  halo: the real `/arch`, `/build`, and `/verify` conversations plus the
-  `slot::pipe-1::polish` and `slot::pipe-1::review` shells. It also checks the
-  absence of any detached body (`data-pipeline-group-body`), control card
-  (`data-pipeline-group`), or duplicate graph (`data-scheme-group-strip`,
-  `data-pipeline-stage-graph`).
+- `src/components/scheme/SchemeBoard.pipelineComposition.dom.test.tsx` — assembles
+  the production scene for a five-stage running pipeline (via
+  `compactPipelineArtifactPaths` + `excludeCompactPipelineArtifacts`) and asserts
+  only the live `/verify` pane survives inside one `data-scheme-group="pipeline"`
+  halo — the passed `/arch` and `/build` stages are compacted off the scene — plus
+  the `slot::pipe-1::polish` and `slot::pipe-1::review` shells, for exactly three
+  `data-pipeline-stage-card` surfaces. It also checks the absence of any detached
+  body (`data-pipeline-group-body`), control card (`data-pipeline-group`), or
+  duplicate graph (`data-scheme-group-strip`, `data-pipeline-stage-graph`).
+- `src/components/pipelines/pipelineModel.test.ts` — `compactPipelineArtifactPaths`
+  keeps only the cursor stage's live pane; every terminal stage and prior retry
+  compacts, and a live reviewer keeps its transcript pane while the implementer it
+  reviews compacts.
 - `src/components/scheme/layout.test.ts` — the halo geometry encloses both the
   materialized node and its future-stage placeholders, and a materialized stage's
   pass edge routes a pipeline rail into the next stage's placeholder slot.
 - `src/components/scheme/agentLinks.test.ts` — `derivePipelineLinks` routes
-  pass/fail/loop edges into a future stage's placeholder slot (the
-  materialized-to-placeholder edges).
+  pass/fail/loop edges into a future stage's placeholder slot, and a materialized
+  review-loop reviewer resolves through its own `agentPath` card (builder→reviewer
+  and reviewer→placeholder edges, one hub, reviewer a direct halo member) with the
+  folded-deck and future-slot fallbacks preserved.
 - `src/components/scheme/GroupsLayer.render.test.tsx` — the halo carries only its
   compact header (title, progress `k/n`, lifecycle, disclosure) and no stage graph.
 - `src/components/scheme/SchemeBoard.builderReveal.dom.test.tsx` — targeting a fresh

@@ -326,6 +326,53 @@ describe("derivePipelineLinks review-loop vertices (no duplicate hub on the flow
   });
 });
 
+describe("derivePipelineLinks materialized review-loop reviewer as a real card (#353 R2)", () => {
+  /* builder (run, passed) → review (review-loop, live) → polish (future), with a
+     fail loop review→builder. In production the pipeline folds its flow's round
+     deck out of the layout (compactPipelineLayoutFlows), so the reviewer
+     transcript renders as an ordinary board card: its own agentPath — not the
+     implementer — is the review stage vertex. */
+  const reviewPipeline = {
+    id: "p-real",
+    state: "running",
+    cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
+    stages: [
+      { id: "builder", kind: "run", next: "review" },
+      { id: "review", kind: "review-loop", next: "polish", onFail: { to: "builder", maxRounds: 5 } },
+      { id: "polish", kind: "run", next: null },
+    ],
+    runs: [
+      { stageId: "builder", attempts: [{ agentPath: "/build", state: "passed" }] },
+      { stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "f-rev", state: "reviewing" }] },
+    ],
+  } as unknown as Pipeline;
+  const polishSlot = stageSlotKey("p-real", "polish");
+  /* No deck is placed: the reviewer resolves to its own real card. */
+  const anchor = (key: string) => (["/build", "/reviewer", polishSlot].includes(key) ? key : null);
+  const flowImpl = (flowId: string) => (flowId === "f-rev" ? "/build" : null);
+
+  test("builder→reviewer routes between the real cards, reviewer→placeholder is drawn, and the fail loop stays amber", () => {
+    const links = derivePipelineLinks([reviewPipeline], anchor, flowImpl);
+    const builderToReview = links.find((link) => link.pipeline!.fromStageId === "builder" && link.pipeline!.toStageId === "review");
+    expect(builderToReview).toMatchObject({ from: "/build", to: "/reviewer" });
+    const reviewToPolish = links.find((link) => link.pipeline!.fromStageId === "review" && link.pipeline!.toStageId === "polish" && link.pipeline!.edge === "pass");
+    expect(reviewToPolish).toMatchObject({ from: "/reviewer", to: polishSlot });
+    const failLoop = links.find((link) => link.pipeline!.edge === "fail");
+    expect(failLoop).toMatchObject({ from: "/reviewer", to: "/build", pipeline: { tone: "amber" } });
+    /* No endpoint is ever the folded deck, and exactly one hub is placed. */
+    expect(links.some((link) => link.from === deckKey("f-rev") || link.to === deckKey("f-rev"))).toBe(false);
+    expect(links.filter((link) => link.pipeline!.hub)).toHaveLength(1);
+  });
+
+  test("the reviewer card is a direct member of the pipeline halo", () => {
+    const specs = deriveGroups([], [reviewPipeline], anchor, flowImpl);
+    const halo = specs.find((spec) => spec.kind === "pipeline" && spec.id === "p-real");
+    expect(halo).toBeTruthy();
+    expect(halo!.members).toContain("/reviewer");
+    expect(halo!.members).toContain("/build");
+  });
+});
+
 describe("pipelineRailSegment", () => {
   const from: SchemeRect = { x: 0, y: 0, w: 100, h: 60 };
   const to: SchemeRect = { x: 300, y: 0, w: 100, h: 60 };

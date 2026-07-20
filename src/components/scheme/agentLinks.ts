@@ -332,6 +332,14 @@ export function deriveGroups(
          semantics — this is membership only. */
       for (const attempt of pipeline.runs.find((run) => run.stageId === stage.id)?.attempts ?? []) {
         if (stage.kind === "review-loop") {
+          /* The reviewer transcript is a direct halo member: an ordinary board
+             card when the flow deck is folded out (production), else the round
+             deck it claims. Its implementer node joins too so the pair is one
+             enclosed region (#353 R2). */
+          if (attempt.agentPath) {
+            const at = anchorOf(attempt.agentPath);
+            if (at) members.add(at);
+          }
           const implPath = attempt.flowId ? flowImplementerPath(attempt.flowId) : null;
           const impl = implPath ? anchorOf(implPath) : null;
           if (impl) members.add(impl);
@@ -411,23 +419,29 @@ export function derivePipelineLinks(
     /* An edge pair resolved to the same board node (a review-loop folding
        into its implementer), so a real edge was intended but suppressed. */
     let collapsed = false;
-    /* Resolve a stage to the board key its edges attach to. A materialized run
-       resolves to its agent node; a review-loop stage's agentPath is the
-       reviewer transcript, which the board folds into the flow's round deck —
-       anchoring a rail there would draw an implementer→deck→next chain and drop a
-       PipelineHub on top of the FlowHub, so it resolves to its flow's implementer
-       node instead (the preceding run's edge then collapses, from === to, and is
-       suppressed below). A not-yet-launched stage has no materialized node, so it
-       resolves to its planned-stage placeholder slot: the pass/fail/loop edge into
-       (or out of) a future stage stays drawn inside the halo instead of stopping
-       at the last materialized card (#353). */
+    /* Resolve a stage to the board key its edges attach to.
+       1. A materialized stage resolves through its REAL agentPath anchor first.
+          For a review-loop whose reviewer transcript is an ordinary board card —
+          the production case, where compactPipelineLayoutFlows folds the flow's
+          round deck out of the layout so the reviewer renders as a node — this is
+          the reviewer card, so builder→reviewer draws a real edge (#353 R2). A
+          `deck::` anchor means the reviewer is folded into a rendered round deck,
+          so it is skipped here and handled by the fallback below.
+       2. Folded-deck fallback: resolve the review-loop to its flow's implementer
+          node, so the preceding run's edge collapses (from === to) and is
+          suppressed, keeping the PipelineHub off the FlowHub.
+       3. A not-yet-launched stage resolves to its planned-stage placeholder slot,
+          so the pass/fail/loop edge into (or out of) a future stage stays drawn
+          inside the halo instead of stopping at the last materialized card. */
     const vertexKeyOf = (stage: Pipeline["stages"][number]): string | null => {
       const attempt = latestAttempt(pipeline, stage.id);
-      const materializedPath = stage.kind === "review-loop"
-        ? (attempt?.flowId ? flowImplementerPath(attempt.flowId) : null)
-        : attempt?.agentPath ?? null;
-      if (materializedPath) {
-        const at = anchorOf(materializedPath);
+      if (attempt?.agentPath) {
+        const at = anchorOf(attempt.agentPath);
+        if (at && !at.startsWith("deck::")) return at;
+      }
+      if (stage.kind === "review-loop" && attempt?.flowId) {
+        const impl = flowImplementerPath(attempt.flowId);
+        const at = impl ? anchorOf(impl) : null;
         if (at) return at;
       }
       return anchorOf(stageSlotKey(pipeline.id, stage.id));
