@@ -3724,7 +3724,7 @@ export class AgentRegistry {
   claimStructuredHost(
     key: SessionKey,
     owner: ProcessIdentity,
-    options: { allowUnhosted?: boolean } = {},
+    options: { allowUnhosted?: boolean; reclaimUnverifiedOwner?: boolean } = {},
   ): AgentRegistryEntry | null {
     return this.mutate((file) => {
       const entry = file.entries[sessionKeyId(key)];
@@ -3735,7 +3735,11 @@ export class AgentRegistry {
       const requestedOwner = structuredClaimOwner(owner);
       if (entry.claimOwner) {
         const priorOwner = structuredClaimIdentity(entry.claimOwner);
-        if (!priorOwner || this.ownerAlive(priorOwner)) return null;
+        const reclaimUnverifiedOwner = options.reclaimUnverifiedOwner === true
+          && entry.structuredHost.process === null
+          && priorOwner?.startIdentity === null
+          && owner.startIdentity !== null;
+        if (!priorOwner || (this.ownerAlive(priorOwner) && !reclaimUnverifiedOwner)) return null;
       }
       entry.claimOwner = requestedOwner;
       entry.claimEpoch += 1;
