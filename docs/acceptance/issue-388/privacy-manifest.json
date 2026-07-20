@@ -9,7 +9,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "48feae049382008d409ed92c7ed8f0c2b63d2c4702c593422a33b591ae0b0354"
       ],
@@ -23,7 +23,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "da1a4c5f6ac85201a814ed9198ced35ca6bafe81209b2c5f770ea5207d58427e"
       ],
@@ -37,7 +37,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "8a20e0f407b5114f6ddad4c3d6e799bb562d341b9f1f1d4f97e5f1be93854139"
       ],
@@ -51,7 +51,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "90c4d3c7e02c845cb87173d85774adb5526b0bd1f04ac196fa40a85a44c65dfb"
       ],
@@ -65,7 +65,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
       "sourceDigests": [
         "395ddf2f81be9ea3906655b906ef44427f6c8dc776bf0182ff1bd34b9726a47e"
       ],
