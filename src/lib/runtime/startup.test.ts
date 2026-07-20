@@ -331,12 +331,24 @@ test.each(["codex", "claude"] as const)("successful %s restart adoption publishe
   const ledger = createFakeDeliveryLedger();
   const host = Object.assign(new FakeEngineHost(ledger), { onStateChange: () => () => {} });
   const key = { engine, sessionId } as const;
+  const adoptHost = (received: AgentRegistry) => {
+    const processIdentity = { pid: process.pid, startIdentity: `hosted-${engine}-process` };
+    const claimed = received.claimStructuredHost(key, processIdentity, { allowUnhosted: true });
+    if (!claimed?.structuredHost || !claimed.claimOwner) throw new Error("hosted restart claim was unavailable");
+    const persisted = received.setStructuredHostClaimed(key, {
+      ...claimed.structuredHost,
+      endpoint: `fake:hosted-${engine}`,
+      process: processIdentity,
+    }, "live", claimed.claimOwner, claimed.claimEpoch);
+    if (!persisted) throw new Error("hosted restart claim was lost");
+    return [{ key, host: host as never }];
+  };
 
   await adoptStructuredHostsAtStartup({
     registry,
     client,
-    adopt: async () => engine === "codex" ? [{ key, host: host as never }] : [],
-    adoptClaude: async () => engine === "claude" ? [{ key, host: host as never }] : [],
+    adopt: async (received) => engine === "codex" ? adoptHost(received) as never : [],
+    adoptClaude: async (received) => engine === "claude" ? adoptHost(received) as never : [],
   });
 
   expect(journal.snapshot().sessions).toMatchObject([{
@@ -594,7 +606,7 @@ test("scheduled startup retry continues through the retained Codex host", async 
   }
 });
 
-test.each(["terminal", "demoted-superseded", "new-generation"] as const)(
+test.each(["terminal", "demoted-superseded", "new-generation", "superseded-during-signals"] as const)(
   "scheduled startup retry releases a %s retained host",
   async (condition) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-discarded-retained-host-"));
@@ -605,12 +617,17 @@ test.each(["terminal", "demoted-superseded", "new-generation"] as const)(
     status: "live",
     turn: "busy",
     activeTurnRef: "turn-interrupted-before-supersedence",
-    transcriptRecords: [{ timestamp: "2026-07-20T11:47:00.000Z", payload: { type: "task_started" } }],
+    transcriptRecords: [{
+      timestamp: "2026-07-20T11:47:00.000Z",
+      payload: { type: "task_started", turn_id: "turn-interrupted-before-supersedence" },
+    }],
   });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const baseClient = runtimeJournalClient(journal);
   let continuationAdmissions = 0;
   let failStartupSignalsAfterDiscard = false;
+  let supersedeDuringEffectBatch = false;
+  let supersedenceDuringSignals = 0;
   const client = {
     ...baseClient,
     snapshot: async () => {
@@ -619,6 +636,19 @@ test.each(["terminal", "demoted-superseded", "new-generation"] as const)(
         throw new RuntimeHostUnavailableError("runtime socket failed after retained host discard");
       }
       return baseClient.snapshot();
+    },
+    effectBatch: async (...args: Parameters<RuntimeHostClient["effectBatch"]>) => {
+      const batch = await baseClient.effectBatch(...args);
+      if (supersedeDuringEffectBatch) {
+        supersedeDuringEffectBatch = false;
+        supersedenceDuringSignals += 1;
+        const staleEntry = registry.snapshot().entries[`codex:${sessionId}`]!;
+        await demoteSkippedStructuredRegistryHosts(registry, () => false);
+        const successor = registry.ensureConversation("codex", path.join(directory, "signal-successor.jsonl"), null);
+        registry.recordSupersedence(conversation.id, successor.id, "recovery-spawn");
+        registry.upsert({ ...staleEntry, status: "live" });
+      }
+      return batch;
     },
     command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => {
       if (command.kind === "send" && command.text === "Continue the interrupted turn from the transcript.") {
@@ -652,7 +682,7 @@ test.each(["terminal", "demoted-superseded", "new-generation"] as const)(
         ...claimed.structuredHost,
         endpoint: "fake:discarded-retained",
         process: processIdentity,
-      }, "idle", claimed.claimOwner, claimed.claimEpoch);
+      }, "live", claimed.claimOwner, claimed.claimEpoch);
       if (!persisted) throw new Error("discarded host writer claim was lost");
       adoptedProcesses += 1;
       return [{ key, host: host as never }];
@@ -677,7 +707,7 @@ test.each(["terminal", "demoted-superseded", "new-generation"] as const)(
     expect(ledger.writes).toEqual([]);
 
     if (condition === "terminal") {
-      fs.appendFileSync(artifactPath, `${JSON.stringify({
+      fs.appendFileSync(artifactPath, `\n${JSON.stringify({
         timestamp: "2026-07-20T11:48:00.000Z",
         payload: { type: "task_complete", turn_id: "turn-interrupted-before-supersedence" },
       })}\n`);
@@ -686,7 +716,7 @@ test.each(["terminal", "demoted-superseded", "new-generation"] as const)(
       const successor = registry.ensureConversation("codex", path.join(directory, "successor.jsonl"), null);
       registry.recordSupersedence(conversation.id, successor.id, "recovery-spawn");
       failStartupSignalsAfterDiscard = true;
-    } else {
+    } else if (condition === "new-generation") {
       const successorId = "synthetic-current-generation";
       const successorPath = path.join(directory, "current-generation.jsonl");
       fs.writeFileSync(successorPath, "");
@@ -719,6 +749,8 @@ test.each(["terminal", "demoted-superseded", "new-generation"] as const)(
         path: successorPath,
         accountId: "successor-account",
       }, 1, operationId, receipt);
+    } else {
+      supersedeDuringEffectBatch = true;
     }
 
     scheduled.shift()!();
@@ -736,6 +768,16 @@ test.each(["terminal", "demoted-superseded", "new-generation"] as const)(
     expect(releaseCalls).toBe(1);
     expect(journal.snapshot().recentOperations.filter((receipt) =>
       receipt.operationId.startsWith(`recovery-continuation-${sessionId}-`))).toEqual([]);
+
+    if (condition === "superseded-during-signals") {
+      expect(supersedenceDuringSignals).toBe(1);
+      await adoptStructuredHostsAtStartup(dependencies);
+      expect(structuredStartupHosts()).toEqual([]);
+      expect(ledger.writes).toEqual([]);
+      expect(releaseCalls).toBe(1);
+      expect(journal.snapshot().recentOperations.filter((receipt) =>
+        receipt.operationId.startsWith(`recovery-continuation-${sessionId}-`))).toEqual([]);
+    }
   } finally {
     await bindStructuredDeliveryQueue([], { registry, client: null });
     journal.close();
