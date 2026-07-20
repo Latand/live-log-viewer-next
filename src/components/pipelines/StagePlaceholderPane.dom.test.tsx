@@ -33,8 +33,7 @@ function stage(over: Partial<PipelineStage> = {}): PipelineStage {
   return {
     id: "architect",
     kind: "run",
-    role: { roleId: "architect" },
-    prompt: "Plan the work",
+    role: { roleId: "architect" }, prompt: "Plan the work",
     next: "builder",
     effectiveRole: { roleId: "architect", engine: "claude", model: "fable", effort: "high", access: "read-only", promptScaffold: null },
     ...over,
@@ -65,7 +64,7 @@ function slot(over: { pipeline?: Partial<Pipeline>; stage?: Partial<PipelineStag
     closedAt: null,
     ...over.pipeline,
   } as Pipeline;
-  return { key: `slot::p1::${theStage.id}`, pipeline, stage: theStage, index: 0, total: 3, x: 0, y: 0, w: 600, h: 460 };
+  return { key: `slot::p1::${theStage.id}`, pipeline, stage: theStage, index: 0, total: 3, presentation: "placeholder", x: 0, y: 0, w: 600, h: 460 };
 }
 
 function mount(node: React.ReactNode): { host: HTMLElement; root: Root } {
@@ -78,21 +77,28 @@ function mount(node: React.ReactNode): { host: HTMLElement; root: Root } {
   return { host, root };
 }
 
-test("a placeholder IS the draft-agent window recipe: engine radiogroup, role select, shared model+effort pickers, prompt editor", () => {
+function openConfig(host: HTMLElement): void {
+  const button = host.querySelector('button[aria-label="Update stage"]') as HTMLButtonElement;
+  flushSync(() => button.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+}
+
+test("a future stage defaults to a conversation preview and discloses the full stage editor in place", () => {
   const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
-  /* Role display names localize (issue #221 §1); the stored id stays raw. */
   expect(host.textContent).toContain("Architect");
   expect(host.textContent).toContain("stage 1/3");
-  /* Same window anatomy as DraftAgentPane: engine radiogroup in the header… */
+  expect(host.querySelector('[data-pipeline-stage-card="p1::architect"]')).toBeTruthy();
+  expect(host.textContent).toContain("Plan the work");
+  expect(host.textContent).toContain("Pinned task:");
+  expect(host.textContent).toContain("Ship it");
+  expect(host.querySelectorAll("select")).toHaveLength(0);
+  expect(host.querySelector("textarea")).toBeNull();
+
+  openConfig(host);
   expect(host.querySelector('[role="radiogroup"]')).toBeTruthy();
-  /* …a role select (pipeline-allowed roles), then the SAME ReasoningControls
-     model + effort selects seeded from the stage's resolved runtime… */
   const selects = [...host.querySelectorAll("select")] as HTMLSelectElement[];
   expect(selects.length).toBe(3);
   expect(selects[1]!.value).toBe("fable");
   expect(selects[2]!.value).toBe("high");
-  /* …a plain-language wiring caption instead of raw {{task}} plumbing, and the
-     ADDITIONAL prompt as the editable footer (issue #221 §5). */
   expect(host.textContent).toContain("Automatically receives: the task text");
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   expect(textarea.value).toBe("Plan the work");
@@ -110,6 +116,7 @@ test("editing the effort + Apply PATCHes override-stage with ONLY the changed fi
   }) as unknown as typeof fetch;
 
   const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
+  openConfig(host);
   const effortSelect = [...host.querySelectorAll("select")].at(-1) as HTMLSelectElement;
   flushSync(() => {
     Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!.call(effortSelect, "max");
@@ -138,6 +145,7 @@ test("editing the prompt saves on blur with ONLY the prompt", async () => {
   }) as unknown as typeof fetch;
 
   const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
+  openConfig(host);
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   /* happy-dom input events don't reach React's synthetic onChange in this
      harness, so type + blur through the element's React props directly. */
@@ -158,6 +166,7 @@ test("editing the prompt saves on blur with ONLY the prompt", async () => {
 test("a stage that already ran is frozen: pickers disabled, no PATCH from a change attempt", () => {
   const ran = slot({ pipeline: { state: "running", runs: [{ stageId: "architect", attempts: [{ n: 1, state: "passed" } as never] }] } });
   const { host, root } = mount(<StagePlaceholderPane slot={ran} interactive />);
+  openConfig(host);
   const selects = [...host.querySelectorAll("select")] as HTMLSelectElement[];
   for (const select of selects) expect(select.disabled).toBe(true);
   expect(host.textContent).toContain("configuration is locked");
@@ -167,6 +176,7 @@ test("a stage that already ran is frozen: pickers disabled, no PATCH from a chan
 
 test("placeholder runtime controls stay usable at 390px: the row wraps and every control carries a 44px target (#405)", () => {
   const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
+  openConfig(host);
   /* No pixel browser in CI — acceptance is structural: the classes that carry
      the 390px contract (wrap + max-md 44px inflation, design rule 8) must be
      on the real controls. */

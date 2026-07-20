@@ -8,12 +8,18 @@ export type PipelineRepoPreflightErrorCode =
   | "repo_unreadable"
   | "repo_untraversable"
   | "not_git"
+  /** A Git probe could not reach a verdict — a spawn/exec failure, a timeout, or
+      a transient non-zero exit that is not the definitive "not a git repository"
+      message. Kept distinct so a hiccup never masquerades as not_git (#353 AC3). */
+  | "probe_failed"
   | "git_metadata_unwritable"
   | "worktree_parent_unwritable";
 
 export type PipelineRepoPreflight =
   | { ok: true; repoDir: string; gitCommonDir: string; worktreeParent: string }
-  | { ok: false; code: PipelineRepoPreflightErrorCode; path: string };
+  /** `detail` carries the underlying stderr/reason for a probe_failed transient so
+      the failure preserves fidelity instead of collapsing to a generic code. */
+  | { ok: false; code: PipelineRepoPreflightErrorCode; path: string; detail?: string };
 
 export type PipelineRoleId =
   | "orchestrator"
@@ -232,6 +238,9 @@ export type PatchPipelineRequest = {
   engine?: FlowEngine;
   model?: string | null;
   effort?: string | null;
+  /** for override-stage: the not-yet-started run stage's access. Review-loop
+      stages stay read-only (the resolver rejects read-write there). */
+  access?: PipelineAccess;
   prompt?: string;
   task?: string;
   spec?: string;

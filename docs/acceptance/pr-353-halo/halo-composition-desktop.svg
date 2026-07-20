@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="620" viewBox="0 0 1240 620" font-family="ui-sans-serif, system-ui, sans-serif">
+  <rect width="1240" height="620" fill="#f6f7f9"/>
+  <text x="24" y="34" font-size="15" font-weight="700" fill="#20242b">#353 — desktop: the colored SchemeGroup halo is the sole pipeline region</text>
+  <text x="24" y="54" font-size="12" fill="#5b626d">2 materialized stage conversations + 1 future placeholder inside one halo; compact header on the halo; pass edges inside; no detached body / duplicate graph / white slab.</text>
+
+  <!-- The colored dashed halo: the single pipeline region -->
+  <rect x="40" y="96" width="1160" height="486" rx="20" fill="hsl(24 62% 42% / 0.055)" stroke="hsl(24 62% 42%)" stroke-width="2" stroke-dasharray="8 6"/>
+
+  <!-- Compact header attached to the halo top edge: title · progress · lifecycle · disclosure -->
+  <g>
+    <rect x="70" y="82" width="360" height="28" rx="14" fill="#ffffff" stroke="hsl(24 62% 42%)" stroke-width="2"/>
+    <text x="84" y="100" font-size="13" font-weight="700" fill="hsl(24 62% 42%)">⇢ Restore the colored halo</text>
+    <rect x="300" y="88" width="40" height="16" rx="8" fill="hsl(24 62% 42% / 0.10)"/>
+    <text x="308" y="100" font-size="11" font-weight="700" fill="hsl(24 62% 42%)">2/3</text>
+    <text x="348" y="100" font-size="11" fill="hsl(24 62% 42%)">running</text>
+    <text x="414" y="101" font-size="12" fill="hsl(24 62% 42%)">▾</text>
+  </g>
+
+  <!-- Stage 1: architect — completed attempt, compact at its stage position -->
+  <g>
+    <rect x="80" y="150" width="300" height="150" rx="12" fill="#ffffff" stroke="#dfe3e8" stroke-width="1.5"/>
+    <rect x="80" y="150" width="300" height="30" rx="12" fill="#eef7ef"/>
+    <circle cx="98" cy="165" r="5" fill="#2e9e5b"/>
+    <text x="112" y="169" font-size="12" font-weight="700" fill="#20242b">architect · passed ✓</text>
+    <text x="96" y="205" font-size="11" fill="#5b626d">codex · read-write · round 1</text>
+    <text x="96" y="228" font-size="11" fill="#8a929c">compact completed round — transcript navigable</text>
+    <text x="96" y="270" font-size="10" fill="#b7bec7">▾ open history</text>
+  </g>
+
+  <!-- Stage 2: builder — the live conversation, ordinary full BranchPane card -->
+  <g>
+    <rect x="450" y="150" width="330" height="392" rx="12" fill="#ffffff" stroke="#c9ced6" stroke-width="1.5"/>
+    <rect x="450" y="150" width="330" height="34" rx="12" fill="#eaf1fb"/>
+    <circle cx="470" cy="167" r="5" fill="#2f6fed"/>
+    <text x="484" y="171" font-size="12" font-weight="700" fill="#20242b">builder · running</text>
+    <text x="466" y="210" font-size="11" fill="#5b626d">codex · read-write</text>
+    <rect x="466" y="226" width="298" height="40" rx="8" fill="#f4f6f9"/>
+    <text x="478" y="250" font-size="11" fill="#3a4048">Restore the placeholders inside the halo…</text>
+    <rect x="466" y="276" width="298" height="60" rx="8" fill="#eef2f7"/>
+    <text x="478" y="300" font-size="11" fill="#3a4048">Materialized stage conversation keeps its</text>
+    <text x="478" y="316" font-size="11" fill="#3a4048">transcript, composer, status and controls.</text>
+    <rect x="466" y="470" width="298" height="52" rx="10" fill="#ffffff" stroke="#dfe3e8"/>
+    <text x="478" y="500" font-size="11" fill="#8a929c">Message the builder…</text>
+  </g>
+
+  <!-- Stage 3: review — future StagePlaceholderPane, conversation-shaped, queued -->
+  <g>
+    <rect x="850" y="150" width="300" height="392" rx="12" fill="#ffffff" stroke="hsl(24 62% 42%)" stroke-width="1.5" stroke-dasharray="7 5"/>
+    <rect x="850" y="150" width="300" height="34" rx="12" fill="hsl(24 62% 42% / 0.07)"/>
+    <text x="866" y="171" font-size="12" font-weight="700" fill="hsl(24 62% 42%)">⟳ review · queued</text>
+    <text x="866" y="212" font-size="11" fill="#5b626d">codex · read-only</text>
+    <text x="866" y="250" font-size="11" fill="#8a929c">Conversation-shaped placeholder for the</text>
+    <text x="866" y="266" font-size="11" fill="#8a929c">future stage — editable before launch.</text>
+    <rect x="866" y="300" width="120" height="26" rx="13" fill="#ffffff" stroke="#dfe3e8"/>
+    <text x="878" y="317" font-size="10" fill="#5b626d">＋ configure</text>
+  </g>
+
+  <!-- Directed pass edges inside the halo -->
+  <g stroke="#2e9e5b" stroke-width="2" fill="none" marker-end="url(#arrow)">
+    <path d="M382 225 L448 225"/>
+    <path d="M782 260 L848 260"/>
+  </g>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="#2e9e5b"/>
+    </marker>
+  </defs>
+  <text x="392" y="218" font-size="10" fill="#2e9e5b">pass</text>
+  <text x="792" y="253" font-size="10" fill="#2e9e5b">pass</text>
+</svg>

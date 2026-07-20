@@ -17,6 +17,8 @@ type PreflightFailure = ApiError & {
   code: Extract<PipelineRepoPreflight, { ok: false }>["code"];
   field: "repoDir";
   path: string;
+  /** The underlying transient reason for a probe_failed (#353 AC3 fidelity). */
+  detail?: string;
 };
 
 type Dependencies = { preflight: typeof preflightPipelineRepo };
@@ -43,10 +45,18 @@ async function postPreflight(
     return NextResponse.json({ error: "repository directory is required", code: "missing", field: "repoDir", path: "" }, { status: 400 });
   }
 
-  const result = dependencies.preflight(repoDir);
+  // The picker's validation warms the short-TTL success cache so the follow-up
+  // creation request reuses this probe instead of re-running git (#353 AC2).
+  const result = dependencies.preflight(repoDir, undefined, { cache: true });
   if (result.ok) return NextResponse.json(result);
   return NextResponse.json(
-    { error: pipelineRepoPreflightError(result), code: result.code, field: "repoDir", path: result.path },
+    {
+      error: pipelineRepoPreflightError(result),
+      code: result.code,
+      field: "repoDir",
+      path: result.path,
+      ...(result.detail ? { detail: result.detail } : {}),
+    },
     { status: pipelineRepoPreflightStatus(result.code) },
   );
 }
