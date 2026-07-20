@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useCoarsePointer } from "@/hooks/useCoarsePointer";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 
 import type { SchemeRect } from "./layout";
@@ -15,19 +17,79 @@ const transformFor = (edge: ChipEdge): string => {
   return "translate(-50%, 0)";
 };
 
+const arrowFor = (edge: ChipEdge): string =>
+  edge === "right" ? "→" : edge === "left" ? "←" : edge === "bottom" ? "↓" : "↑";
+
+/* Resting title width and the width added per reveal segment. The direction
+   control lives in its own reserved, non-shrinking box, so the label starts
+   truncated at REVEAL_BASE_PX and grows in bounded steps — never sliding under
+   the arrow and never jumping the chip out from under the pointer. */
+const REVEAL_BASE_PX = 120;
+const REVEAL_STEP_PX = 72;
+/* How close (px) the pointer must come to the title's truncated end to unfurl
+   the next segment. */
+const END_THRESHOLD_PX = 18;
+/* Safety ceiling so a mis-measured overflow can never spin the reveal forever;
+   a 48-char label needs far fewer steps than this to finish. */
+const MAX_STEP = 24;
+
+const prefersReducedMotion = (): boolean =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* Desktop chip with a progressive hover reveal. The chip button is the whole
+   hover/focus surface — the label unfurls inside it, so moving from the arrow
+   onto freshly revealed text never crosses a gap that would drop hover. Each
+   pointer move that reaches the current truncated end lets one more segment
+   through until the full title shows; keyboard focus reveals it all at once
+   (a keyboard can't "reach the end"), and reduced motion swaps the animated
+   stepping for a single settled reveal on hover. */
 function ChipButton({ chip, onFit }: { chip: ClusterChip; onFit: (rect: SchemeRect) => void }) {
+  const titleRef = useRef<HTMLSpanElement | null>(null);
+  const [step, setStep] = useState(0);
+  const [focused, setFocused] = useState(false);
+  const [motionReveal, setMotionReveal] = useState(false);
+  const full = focused || motionReveal;
+
+  const advanceOnMove = (clientX: number) => {
+    if (full || prefersReducedMotion()) return;
+    const el = titleRef.current;
+    if (!el) return;
+    const overflowing = el.scrollWidth - el.clientWidth > 1;
+    if (!overflowing) return;
+    if (clientX >= el.getBoundingClientRect().right - END_THRESHOLD_PX) {
+      setStep((current) => Math.min(current + 1, MAX_STEP));
+    }
+  };
+
   return (
     <button
       type="button"
       data-edge-chip={chip.cluster.key}
-      className="pointer-events-auto absolute inline-flex min-h-11 max-w-[240px] items-center gap-1.5 rounded-full border border-border bg-card/95 px-3 text-[11px] font-bold text-primary shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      className="pointer-events-auto absolute inline-flex min-h-11 max-w-[440px] items-center gap-1.5 rounded-full border border-border bg-card/95 px-3 text-[11px] font-bold text-primary shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       style={{ left: chip.x, top: chip.y, transform: transformFor(chip.edge) }}
       title={chip.cluster.label}
       onClick={() => onFit(chip.cluster.rect)}
+      onPointerEnter={() => { if (prefersReducedMotion()) setMotionReveal(true); }}
+      onPointerMove={(event) => advanceOnMove(event.clientX)}
+      onPointerLeave={() => { setStep(0); setMotionReveal(false); }}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
     >
-      <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: chip.cluster.color }} aria-hidden />
-      <span aria-hidden>{chip.edge === "right" ? "→" : chip.edge === "left" ? "←" : chip.edge === "bottom" ? "↓" : "↑"}</span>
-      <span className="truncate">{chip.cluster.label}</span>
+      <span data-edge-chip-control className="flex shrink-0 items-center gap-1.5" aria-hidden>
+        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: chip.cluster.color }} />
+        <span>{arrowFor(chip.edge)}</span>
+      </span>
+      <span
+        ref={titleRef}
+        data-edge-chip-title
+        data-reveal={full ? "full" : String(step)}
+        className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap transition-[max-width] duration-150 ease-out motion-reduce:transition-none"
+        style={{ maxWidth: full ? undefined : `${REVEAL_BASE_PX + step * REVEAL_STEP_PX}px` }}
+      >
+        {chip.cluster.label}
+      </span>
     </button>
   );
 }
@@ -121,9 +183,14 @@ export function EdgeChips({ clusters, cam, vp, hidden, obstacles = [], onFit }: 
   onFit: (rect: SchemeRect) => void;
 }) {
   const { t } = useLocale();
+  const coarse = useCoarsePointer();
+  const mobile = useIsMobile();
   const partition = useMemo(() => offscreenClusterChips(clusters, cam, vp, 4, obstacles), [clusters, cam, vp, obstacles]);
   const [openEdge, setOpenEdge] = useState<ChipEdge | null>(null);
-  if (hidden || (!partition.visible.length && !partition.overflow.length)) return null;
+  /* Touch-first and phone-width canvases fold this wayfinding into the minimap
+     and mobile map instead: floating edge chips fight the finger for chat
+     content and can bleed past a 390px viewport. */
+  if (hidden || coarse || mobile || (!partition.visible.length && !partition.overflow.length)) return null;
 
   const overflowByEdge = new Map<ChipEdge, ClusterChip[]>();
   for (const chip of partition.overflow) {
