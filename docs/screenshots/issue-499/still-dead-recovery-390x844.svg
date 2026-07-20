@@ -1,30 +1,32 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844" role="img" aria-label="Issue 499 acceptance state Dead host — recovery">
-  <metadata id="provenance">{"classification":"synthetic","source":"deterministic-generator","generator":"docs/screenshots/issue-499/generate-stills.ts","sourceRevision":"3a5c11045eeb9b7731343f7509c5161c7339c59f","sourceCaptureSha256":"c78b711e72424dc8b1f6d9fdc1c9640fb57ea4876d9ae28836e6504c8d83eabf"}</metadata>
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844" role="img" aria-label="Issue 499 acceptance state Dead host — recovery (en)">
+  <metadata id="provenance">{"classification":"synthetic","source":"deterministic-generator","generator":"docs/screenshots/issue-499/generate-stills.ts","sourceRevision":"a13d5c277bae65fbe09704d50f00b59819660685","capture":"dead-390-en-light","sourceCaptureSha256":"851ed1e542bfd95aaf20b1b9c600e506b641eb8df91f3a0e4e45b54b8c53bde3","viewport":{"width":390,"height":844},"capabilities":{"surface":"dead","send":"enabled","runtime":"hidden","images":"disabled:composer.imagesBlockedDuringRecovery"}}</metadata>
   <rect x="0" y="0" width="390" height="844" fill="#f3f4f6"/>
   <text x="16" y="26" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#1f2937">Issue 499 — Dead host — recovery</text>
-  <text x="16" y="44" font-family="ui-monospace, monospace" font-size="11" font-weight="500" fill="#8c95a3">390×844 · synthetic fixture · rev 3a5c11045eeb</text>
-  <rect x="10" y="426" width="370" height="404" fill="#dee2e9" rx="12"/>
-  <rect x="12" y="428" width="366" height="400" fill="#ffffff" rx="10"/>
-  <text x="28" y="452" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="500" fill="#8c95a3">…transcript…</text>
-  <rect x="12" y="558" width="366" height="2" fill="#dee2e9"/>
-  <rect x="12" y="560" width="366" height="138" fill="#fce7e7"/>
-  <text x="28" y="584" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="700" fill="#cd3030">Agent host died · 5m ago</text>
-  <text x="28" y="604" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">Messages can't be delivered. Pending approvals expired.</text>
-  <rect x="28" y="616" width="200" height="30" fill="#6d5ef6" rx="8"/>
-  <text x="42" y="636" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#ffffff">Respawn conversation</text>
-  <rect x="28" y="654" width="150" height="30" fill="#ffffff" rx="8" stroke="#dee2e9" stroke-width="2"/>
-  <text x="42" y="674" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="600" fill="#1f2937">Open in terminal</text>
-  <rect x="188" y="654" width="92" height="30" fill="#ffffff" rx="8" stroke="#dee2e9" stroke-width="2"/>
-  <text x="202" y="674" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="600" fill="#1f2937">Re-check</text>
-  <rect x="26" y="710" width="338" height="48" fill="#dee2e9" rx="10"/>
-  <rect x="28" y="712" width="334" height="44" fill="#eef1f5" rx="9"/>
-  <text x="42" y="739" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="500" fill="#1f2937">Recover and continue this task.</text>
-  <rect x="310" y="718" width="32" height="32" fill="#6d5ef6" rx="8"/>
-  <path d="M 321 726 L 333 734 L 321 742 Z" fill="#ffffff"/>
-  <rect x="288" y="726" width="10" height="16" fill="#8c95a3" rx="5"/>
-  <rect x="264" y="728" width="14" height="3" fill="#8c95a3"/>
-  <rect x="264" y="736" width="14" height="3" fill="#8c95a3"/>
-  <path d="M 36 770 L 30 780 L 35 780 L 29 790 L 41 777 L 36 777 L 40 770 Z" fill="#6d5ef6"/>
-  <text x="50" y="784" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2937">5.6-Sol · High ⌄</text>
-  <text x="28" y="818" font-family="ui-monospace, monospace" font-size="10" font-weight="500" fill="#8c95a3">synthetic · rev 3a5c11045eeb</text>
+  <text x="16" y="44" font-family="ui-monospace, monospace" font-size="11" font-weight="500" fill="#8c95a3">390×844 · synthetic fixture · rev a13d5c277bae</text>
+  <rect x="10" y="482" width="370" height="348" fill="#dee2e9" rx="12"/>
+  <rect x="12" y="484" width="366" height="344" fill="#ffffff" rx="10"/>
+  <text x="28" y="508" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="500" fill="#8c95a3">…transcript…</text>
+  <rect x="12" y="520" width="366" height="180" fill="#fce7e7"/>
+  <text x="28" y="542" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="700" fill="#cd3030">Agent host died · 5m ago</text>
+  <text x="28" y="562" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">Text you send now is saved durably and delivered after</text>
+  <text x="28" y="577" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">the host recovers. Images can't be attached until then.</text>
+  <text x="28" y="592" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">Pending approvals expired — recover with the controls</text>
+  <text x="28" y="607" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">below.</text>
+  <rect x="28" y="623" width="156" height="30" fill="#6d5ef6" rx="8"/>
+  <text x="40" y="643" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#ffffff">Respawn conversation</text>
+  <rect x="28" y="661" width="130" height="30" fill="#ffffff" rx="8" stroke="#dee2e9" stroke-width="2"/>
+  <text x="40" y="681" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="600" fill="#1f2937">Open in terminal</text>
+  <rect x="168" y="661" width="77" height="30" fill="#ffffff" rx="8" stroke="#dee2e9" stroke-width="2"/>
+  <text x="180" y="681" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="600" fill="#1f2937">Re-check</text>
+  <rect x="26" y="704" width="338" height="48" fill="#dee2e9" rx="10"/>
+  <rect x="28" y="706" width="334" height="44" fill="#eef1f5" rx="9"/>
+  <text x="42" y="733" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="500" fill="#1f2937">Recover and continue this task.</text>
+  <rect x="310" y="712" width="32" height="32" fill="#6d5ef6" rx="8"/>
+  <path d="M 321 720 L 333 728 L 321 736 Z" fill="#ffffff"/>
+  <rect x="288" y="720" width="10" height="16" fill="#8c95a3" rx="5"/>
+  <rect x="264" y="722" width="14" height="3" fill="#8c95a3"/>
+  <rect x="264" y="730" width="14" height="3" fill="#8c95a3"/>
+  <text x="28" y="768" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="600" fill="#8c95a3">Images can't be attached while the host is down — staged ones</text>
+  <text x="28" y="782" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="600" fill="#8c95a3">stay selected and are delivered after recovery.</text>
+  <text x="28" y="818" font-family="ui-monospace, monospace" font-size="10" font-weight="500" fill="#8c95a3">synthetic · rev a13d5c277bae</text>
 </svg>

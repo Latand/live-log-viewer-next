@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="600" viewBox="0 0 390 600" role="img" aria-label="Issue 499 acceptance state Dead host — recovery (uk)">
+  <metadata id="provenance">{"classification":"synthetic","source":"deterministic-generator","generator":"docs/screenshots/issue-499/generate-stills.ts","sourceRevision":"a13d5c277bae65fbe09704d50f00b59819660685","capture":"dead-390x600-uk-light","sourceCaptureSha256":"92c58e94b70c9e86ef66b1e80492e94649c65f9d412b983817a3e8330447d4c1","viewport":{"width":390,"height":600},"capabilities":{"surface":"dead","send":"enabled","runtime":"hidden","images":"disabled:composer.imagesBlockedDuringRecovery"}}</metadata>
+  <rect x="0" y="0" width="390" height="600" fill="#f3f4f6"/>
+  <text x="16" y="26" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#1f2937">Issue 499 — Dead host — recovery</text>
+  <text x="16" y="44" font-family="ui-monospace, monospace" font-size="11" font-weight="500" fill="#8c95a3">390×600 · synthetic fixture · rev a13d5c277bae</text>
+  <rect x="10" y="223" width="370" height="363" fill="#dee2e9" rx="12"/>
+  <rect x="12" y="225" width="366" height="359" fill="#ffffff" rx="10"/>
+  <text x="28" y="249" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="500" fill="#8c95a3">…transcript…</text>
+  <rect x="12" y="261" width="366" height="195" fill="#fce7e7"/>
+  <text x="28" y="283" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="700" fill="#cd3030">Хост агента помер · 5 хв тому</text>
+  <text x="28" y="303" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">Текст, надісланий зараз, надійно зберігається і буде</text>
+  <text x="28" y="318" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">доставлений після відновлення хоста. Зображення не</text>
+  <text x="28" y="333" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">можна додати, доки хост не повернеться. Очікувані</text>
+  <text x="28" y="348" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">підтвердження застаріли — відновіть роботу елементами</text>
+  <text x="28" y="363" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">керування нижче.</text>
+  <rect x="28" y="379" width="136" height="30" fill="#6d5ef6" rx="8"/>
+  <text x="40" y="399" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#ffffff">Відновити розмову</text>
+  <rect x="28" y="417" width="156" height="30" fill="#ffffff" rx="8" stroke="#dee2e9" stroke-width="2"/>
+  <text x="40" y="437" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="600" fill="#1f2937">Відкрити в терміналі</text>
+  <rect x="194" y="417" width="130" height="30" fill="#ffffff" rx="8" stroke="#dee2e9" stroke-width="2"/>
+  <text x="206" y="437" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="600" fill="#1f2937">Перевірити знову</text>
+  <rect x="26" y="460" width="338" height="48" fill="#dee2e9" rx="10"/>
+  <rect x="28" y="462" width="334" height="44" fill="#eef1f5" rx="9"/>
+  <text x="42" y="489" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="500" fill="#1f2937">Recover and continue this task.</text>
+  <rect x="310" y="468" width="32" height="32" fill="#6d5ef6" rx="8"/>
+  <path d="M 321 476 L 333 484 L 321 492 Z" fill="#ffffff"/>
+  <rect x="288" y="476" width="10" height="16" fill="#8c95a3" rx="5"/>
+  <rect x="264" y="478" width="14" height="3" fill="#8c95a3"/>
+  <rect x="264" y="486" width="14" height="3" fill="#8c95a3"/>
+  <text x="28" y="524" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="600" fill="#8c95a3">Зображення не можна додати, доки хост не працює — вже додані</text>
+  <text x="28" y="538" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="600" fill="#8c95a3">залишаться вибраними й будуть доставлені після відновлення.</text>
+  <text x="28" y="574" font-family="ui-monospace, monospace" font-size="10" font-weight="500" fill="#8c95a3">synthetic · rev a13d5c277bae</text>
+</svg>

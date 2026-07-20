@@ -1,0 +1,222 @@
+{
+  "classification": "synthetic",
+  "generator": "docs/screenshots/issue-499/capture.sh",
+  "sourceRevision": "a13d5c277bae65fbe09704d50f00b59819660685",
+  "deviceScaleFactor": 2,
+  "harness": {
+    "harness.tsx": "a87ae35fe364bb7708d50db4da74d14a54715c1793376cd278e41c3a8767fca1",
+    "capture.sh": "0835e67dcb1777d2f0c0d207a851bcf56caa40f0bb79557e0266eb6867840011"
+  },
+  "captures": {
+    "blocked-390-en-light": {
+      "view": "blocked",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "png": {
+        "width": 780,
+        "height": 1688,
+        "sha256": "18dee490ce0d223bc479635ba259a850f0417722f04406a4827d873d16a2ac21"
+      }
+    },
+    "blocked-390-uk-light": {
+      "view": "blocked",
+      "lang": "uk",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "png": {
+        "width": 780,
+        "height": 1688,
+        "sha256": "5b1b856b11fddcc81614370bac7dd93a3e3f595b89b6aa9ab59e2e98e94a5d7e"
+      }
+    },
+    "dead-390-en-light": {
+      "view": "dead",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "png": {
+        "width": 780,
+        "height": 1688,
+        "sha256": "851ed1e542bfd95aaf20b1b9c600e506b641eb8df91f3a0e4e45b54b8c53bde3"
+      }
+    },
+    "dead-390-uk-light": {
+      "view": "dead",
+      "lang": "uk",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "png": {
+        "width": 780,
+        "height": 1688,
+        "sha256": "41387fc0fde52b1e9c9075cbf70be0500074dfe32da5fbb7031da2914c7416de"
+      }
+    },
+    "dead-390x600-en-light": {
+      "view": "dead",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 600
+      },
+      "png": {
+        "width": 780,
+        "height": 1200,
+        "sha256": "0fa2cd46708f83dbd8b3940198060c63e2439183879ac1bd4477737fe4aceecf"
+      }
+    },
+    "dead-390x600-uk-light": {
+      "view": "dead",
+      "lang": "uk",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 600
+      },
+      "png": {
+        "width": 780,
+        "height": 1200,
+        "sha256": "92c58e94b70c9e86ef66b1e80492e94649c65f9d412b983817a3e8330447d4c1"
+      }
+    },
+    "images-390-en-light": {
+      "view": "images",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "png": {
+        "width": 780,
+        "height": 1688,
+        "sha256": "d2d3f18aa6b45554b1818857edcc3dbc3877b65fac393cdbc812d207cbef1910"
+      }
+    },
+    "popover-desktop-en-light": {
+      "view": "popover",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "png": {
+        "width": 2880,
+        "height": 1800,
+        "sha256": "8af4764e9bd46cc82f84130daa2f420dab3a3f701493237840566a1912d65d98"
+      }
+    },
+    "receipt-390-en-light": {
+      "view": "receipt",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "png": {
+        "width": 780,
+        "height": 1688,
+        "sha256": "51e8bd06ae6d63082821d236ba6602cd0ca119e0c363192809425941e6a64c9f"
+      }
+    },
+    "rest-390-en-light": {
+      "view": "rest",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "png": {
+        "width": 780,
+        "height": 1688,
+        "sha256": "4086a25e9b4903fed9298d6510cee6bfca8f13ec48772186f0d1aa1701860894"
+      }
+    },
+    "rest-390-uk-dark": {
+      "view": "rest",
+      "lang": "uk",
+      "theme": "dark",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "png": {
+        "width": 780,
+        "height": 1688,
+        "sha256": "a78cc9b784631ad28c432e078e4fcd463a91b4bd2e331d7a6642bd8a4e25e00e"
+      }
+    },
+    "rest-390x600-en-light": {
+      "view": "rest",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 600
+      },
+      "png": {
+        "width": 780,
+        "height": 1200,
+        "sha256": "2d2b4057310ed8e1d27f5209373aea60ab4db43233435e21da7313db753f5cff"
+      }
+    },
+    "rest-desktop-en-light": {
+      "view": "rest",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "png": {
+        "width": 2880,
+        "height": 1800,
+        "sha256": "2eafe805f6ad62a9dbca57e5c4822a8807db98cefa5ba9f041c39514232ac18e"
+      }
+    },
+    "sheet-390-en-light": {
+      "view": "sheet",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "png": {
+        "width": 780,
+        "height": 1688,
+        "sha256": "6712168da55cd099ec86b42a36509cc06cab60d7acace33611ce819778619b46"
+      }
+    },
+    "typed-390-en-light": {
+      "view": "typed",
+      "lang": "en",
+      "theme": "light",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "png": {
+        "width": 780,
+        "height": 1688,
+        "sha256": "fc15e57547b14d8bcc885eca3f6365a4a944ff0311443311ece85c0110c70aee"
+      }
+    }
+  }
+}
