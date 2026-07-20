@@ -26,6 +26,7 @@ interface StructuredHostPublicationInput {
   target: AccountContext;
   profile: LaunchProfile;
   registry: AgentRegistry;
+  ownsOperation?: () => Promise<boolean>;
 }
 
 export interface ProviderDependencies {
@@ -193,12 +194,8 @@ function assertProviderLockOwned(filename: string, token: string): void {
   throw new Error("Codex provider operation lease was lost");
 }
 
-async function publishCodexSuccessorHost(input: {
-  receipt: ProviderReceipt;
-  target: AccountContext;
-  profile: LaunchProfile;
-  registry: AgentRegistry;
-}): Promise<() => Promise<void>> {
+async function publishCodexSuccessorHost(input: StructuredHostPublicationInput): Promise<() => Promise<void>> {
+  if (input.ownsOperation && !await input.ownsOperation()) return async () => {};
   if (!structuredHostsEnabled()) return async () => {};
   const key = sessionKey("codex", input.receipt.nativeId);
   if (!key) throw new Error("successor Codex thread identity is invalid");
@@ -264,7 +261,7 @@ async function publishCodexSuccessorHost(input: {
       claimed.claimOwner,
       claimed.claimEpoch,
     );
-    unregister = await publishStructuredDeliveryHost({ key, host });
+    unregister = await publishStructuredDeliveryHost({ key, host }, input.ownsOperation);
   } catch (error) {
     if (!host && error instanceof StructuredHostAdoptionCleanupError
       && error.host instanceof CodexAppServerHost) {
@@ -300,6 +297,7 @@ async function publishClaudeSuccessorHost(
     cancelClaude: NonNullable<ProviderDependencies["cancelClaude"]>;
   },
 ): Promise<() => Promise<void>> {
+  if (input.ownsOperation && !await input.ownsOperation()) return async () => {};
   if (!structuredHostsEnabled()) return async () => {};
   const key = sessionKey("claude", input.receipt.nativeId);
   if (!key) throw new Error("successor Claude session identity is invalid");
@@ -364,7 +362,7 @@ async function publishClaudeSuccessorHost(
       claimed.claimOwner,
       claimed.claimEpoch,
     );
-    unregister = await publishStructuredDeliveryHost({ key, host });
+    unregister = await publishStructuredDeliveryHost({ key, host }, input.ownsOperation);
   } catch (error) {
     if (!host && error instanceof StructuredHostAdoptionCleanupError
       && error.host instanceof ClaudeStreamBrokerHost) {
@@ -697,6 +695,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     receipt: ProviderReceipt,
     input: Parameters<NonNullable<SuccessorProviderPort["publishHost"]>>[1],
   ): Promise<void> {
+    if (input.ownsOperation && !await input.ownsOperation()) return;
     const injectedPublisher = input.engine === "codex"
       ? this.dependencies.publishCodexHost
       : this.dependencies.publishClaudeHost;
@@ -724,6 +723,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
         target,
         profile: input.launchProfile,
         registry: this.dependencies.registry ?? agentRegistry(),
+        ownsOperation: input.ownsOperation,
       };
       let cleanup: () => Promise<void>;
       if (input.engine === "codex") {
@@ -735,6 +735,10 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
           ...publicationInput,
           cancelClaude: this.dependencies.cancelClaude ?? defaultDependencies.cancelClaude!,
         });
+      }
+      if (input.ownsOperation && !await input.ownsOperation()) {
+        await cleanup();
+        return;
       }
       this.publishedHosts.set(receipt.operationId, {
         nativeId: receipt.nativeId,

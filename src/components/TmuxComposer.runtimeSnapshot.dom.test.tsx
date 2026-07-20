@@ -66,6 +66,7 @@ const structuredView: RuntimeSessionView = {
     hostKind: "codex-app-server",
     host: "hosted",
     capabilities: { imageInput: { supported: true }, runtimeSettings: { perTurnEffort: true, perTurnModel: false } },
+    recentReceipts: [],
   },
   uiState: {},
   attentions: [],

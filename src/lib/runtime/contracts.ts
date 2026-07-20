@@ -39,14 +39,16 @@ export interface RuntimeSessionAxes {
 
 export type RuntimeAttentionKind = "approval" | "permission" | "question" | "waiting_heuristic";
 export type RuntimeAttentionState = "open" | "resolving" | "resolved" | "expired-confirmed" | "cancelled" | "resolution-unknown";
-export type RuntimeOperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn";
+export type RuntimeOperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure";
 export type RuntimeReceiptStatus =
   | "pending"
   | "delivering"
+  | "applying"
   | "turn-started"
   | "steered"
   | "queued"
   | "delivered"
+  | "applied"
   | "interrupted"
   | "answered"
   | "rejected"
@@ -132,13 +134,13 @@ export interface RuntimeAttentionRequest {
   detail?: string;
   question?: {
     header?: string;
-    prompt: string;
+    "prompt": string;
     options?: Array<{ label: string; description?: string; recommended?: boolean }>;
     multiSelect?: boolean;
   };
   questions?: Array<{
     header?: string;
-    prompt: string;
+    "prompt": string;
     options?: Array<{ label: string; description?: string; recommended?: boolean }>;
     multiSelect?: boolean;
   }>;
@@ -260,6 +262,20 @@ export interface RuntimeKillCommand extends RuntimeCommandBase {
   sessionKey: { engine: RuntimeEngine; sessionId: string };
 }
 
+export interface RuntimeReconfigureCommand extends RuntimeCommandBase {
+  kind: "reconfigure";
+  sessionKey?: { engine: RuntimeEngine; sessionId: string };
+  model: string;
+  effort: string;
+  fast: boolean | null;
+  accountId?: string;
+  previousProfile?: { model: string | null; effort: string | null; fast: boolean | null };
+}
+
+export type RuntimePendingReconfigure = Omit<RuntimeReconfigureCommand, "kind" | "operationId" | "conversationId" | "idempotencyKey" | "previousProfile"> & {
+  operationId: string;
+};
+
 export interface RuntimeAnswerCommand extends RuntimeCommandBase {
   kind: "answer";
   attentionId: string;
@@ -270,7 +286,7 @@ export interface RuntimeSpawnCommand extends RuntimeCommandBase {
   kind: "spawn";
   engine: RuntimeEngine;
   cwd: string;
-  prompt: string;
+  "prompt": string;
   images?: StructuredImageRef[];
   contentDigest?: string;
   accountId?: string | null;
@@ -278,7 +294,7 @@ export interface RuntimeSpawnCommand extends RuntimeCommandBase {
   sessionId?: string | null;
 }
 
-export type RuntimeOperationCommand = RuntimeSendCommand | RuntimeInterruptCommand | RuntimeAnswerCommand | RuntimeKillCommand | RuntimeSpawnCommand;
+export type RuntimeOperationCommand = RuntimeSendCommand | RuntimeInterruptCommand | RuntimeAnswerCommand | RuntimeKillCommand | RuntimeSpawnCommand | RuntimeReconfigureCommand;
 
 export interface RuntimeOperationResult {
   operationId: string;
@@ -328,6 +344,7 @@ export interface RuntimeSession {
   artifactPath: string | null;
   capabilities: { steer: boolean; structuredAttention: boolean; imageInput?: RuntimeImageCapability; runtimeSettings?: RuntimeSettingsCapability };
   activeTurnId: string | null;
+  pendingReconfigure?: RuntimePendingReconfigure | null;
   drift?: RuntimeDrift | null;
 }
 

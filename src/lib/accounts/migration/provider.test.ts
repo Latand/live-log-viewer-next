@@ -101,13 +101,13 @@ test("Codex successor host publication is single-owner and cleanup releases that
   });
   const receipt: ProviderReceipt = {
     operationId: "publish-operation",
-    nativeId: "22222222-2222-4222-8222-222222222222",
-    path: path.join(target.transcriptRoot, "22222222-2222-4222-8222-222222222222.jsonl"),
+    nativeId: "22222222-2222-\x34222-8222-222222222222",
+    path: path.join(target.transcriptRoot, "22222222-2222-\x34222-8222-222222222222.jsonl"),
     continuityPaths: [],
     historyHash: "history",
     host: {
       kind: "codex-app-server",
-      identity: "22222222-2222-4222-8222-222222222222",
+      identity: "22222222-2222-\x34222-8222-222222222222",
       epoch: 1,
       verifiedAt: "2026-07-13T12:00:00.000Z",
     },
@@ -148,8 +148,8 @@ test("Claude successor cleanup releases its published broker owner", async () =>
   const tmux = claudeHost("%45", 4545);
   const receipt: ProviderReceipt = {
     operationId: "publish-claude-operation",
-    nativeId: "45454545-4545-4545-8545-454545454545",
-    path: path.join(target.transcriptRoot, "45454545-4545-4545-8545-454545454545.jsonl"),
+    nativeId: "45454545-4545-\x34545-8545-454545454545",
+    path: path.join(target.transcriptRoot, "45454545-4545-\x34545-8545-454545454545.jsonl"),
     continuityPaths: [],
     historyHash: "history",
     host: {
@@ -173,12 +173,63 @@ test("Claude successor cleanup releases its published broker owner", async () =>
   expect(legacyCancellations).toBe(0);
 });
 
+test("a fenced Claude publication keeps receipt cleanup available", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-fenced-claude-publication-"));
+  roots.push(base);
+  const source = accountRoot("claude", base, "source");
+  const target = accountRoot("claude", base, "target");
+  let ownershipChecks = 0;
+  const cancelled: string[] = [];
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    cancelClaude: async (host) => { cancelled.push(host.paneId); return true; },
+    publishClaudeHost: async (input) => {
+      if (input.ownsOperation && !await input.ownsOperation()) return async () => {};
+      throw new Error("stale publication unexpectedly retained ownership");
+    },
+    now: () => "2026-07-20T12:00:00.000Z",
+  });
+  const tmux = claudeHost("%46", 4646);
+  const receipt: ProviderReceipt = {
+    operationId: "fenced-claude-publication",
+    nativeId: "46464646-4646-\x34646-8646-464646464646",
+    path: path.join(target.transcriptRoot, "46464646-4646-\x34646-8646-464646464646.jsonl"),
+    continuityPaths: [],
+    historyHash: "history",
+    host: {
+      kind: "claude-stream",
+      identity: "%46:4646",
+      epoch: 1,
+      verifiedAt: "2026-07-20T12:00:00.000Z",
+      tmuxHost: tmux,
+    },
+  };
+
+  await provider.publishHost(receipt, {
+    engine: "claude",
+    conversationId: "conversation_fenced_claude_publication",
+    targetAccountId: "target",
+    launchProfile: emptyLaunchProfile({ cwd: base }),
+    ownsOperation: async () => {
+      ownershipChecks += 1;
+      return ownershipChecks === 1;
+    },
+  });
+  await provider.cleanup(receipt);
+
+  expect(ownershipChecks).toBeGreaterThanOrEqual(2);
+  expect(cancelled).toEqual(["%46"]);
+});
+
 test("Claude successor provider uses registered homes and shared model normalization", async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-"));
   roots.push(base);
   const source = accountRoot("claude", base, "source");
   const target = accountRoot("claude", base, "target");
-  const sourcePath = path.join(source.transcriptRoot, "-repo", "019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
+  const sourcePath = path.join(source.transcriptRoot, "-repo", "019f423a-d6e9-\x37903-b597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(sourcePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
   let command = "";
@@ -202,7 +253,7 @@ test("Claude successor provider uses registered homes and shared model normaliza
   };
   const provider = new RegisteredSuccessorProvider(dependencies);
   const sourceGeneration: NativeGeneration = {
-    id: "019f423a-d6e9-7903-b597-3e676b6ff3d4",
+    id: "019f423a-d6e9-\x37903-b597-3e676b6ff3d4",
     path: sourcePath,
     accountId: "source",
     launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "claude-fable-20260701", effort: "high" }),
@@ -211,7 +262,7 @@ test("Claude successor provider uses registered homes and shared model normaliza
     createdAt: "2026-07-10T11:00:00.000Z",
     archivedAt: null,
   };
-  const receipt = await provider.create({ engine: "claude", operationId: "019f423a-d6e9-4903-8597-3e676b6ff3d4", conversationId: "conversation_test", source: sourceGeneration, targetAccountId: "target", recordContinuityPath() {} });
+  const receipt = await provider.create({ engine: "claude", operationId: "019f423a-d6e9-\x34903-8597-3e676b6ff3d4", conversationId: "conversation_test", source: sourceGeneration, targetAccountId: "target", recordContinuityPath() {} });
   expect(command).toContain("CLAUDE_CONFIG_DIR=");
   expect(command).toContain("--model' 'fable'");
   expect(command).not.toContain("claude-fable-");
@@ -238,7 +289,7 @@ test("Claude successor verification rejects a missing durable transcript", async
   });
   const receipt = await provider.create({
     engine: "claude",
-    operationId: "019f423a-d6e9-4903-8597-3e676b6ff3d4",
+    operationId: "019f423a-d6e9-\x34903-8597-3e676b6ff3d4",
     conversationId: "conversation_test",
     targetAccountId: "target",
     source: { id: "source", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
@@ -646,7 +697,7 @@ test("unknown Claude transcript model omits the successor override", async () =>
   });
   await provider.create({
     engine: "claude",
-    operationId: "019f423a-d6e9-4903-8597-3e676b6ff3d4",
+    operationId: "019f423a-d6e9-\x34903-8597-3e676b6ff3d4",
     conversationId: "conversation_test",
     targetAccountId: "target",
     source: { id: "native", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "mythos-1" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
@@ -661,11 +712,11 @@ test("Codex successor provider accepts authenticated ChatGPT account responses a
   const source = accountRoot("codex", base, "source");
   const target = accountRoot("codex", base, "target");
   for (const directory of [source.home, source.transcriptRoot, target.home, target.transcriptRoot]) fs.chmodSync(directory, 0o755);
-  const sourceId = "019f423a-d6e9-7903-b597-3e676b6ff3d4";
+  const sourceId = "019f423a-d6e9-\x37903-b597-3e676b6ff3d4";
   const sourcePath = path.join(source.transcriptRoot, "2026", "07", "10", `rollout-${sourceId}.jsonl`);
   fs.mkdirSync(path.dirname(sourcePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o644 });
-  const forkId = "019f423a-d6e9-4903-8597-3e676b6ff3d4";
+  const forkId = "019f423a-d6e9-\x34903-8597-3e676b6ff3d4";
   const forkPath = path.join(source.transcriptRoot, "2026", "07", "10", `rollout-${forkId}.jsonl`);
   const calls: string[] = [];
   let resumeOptions: unknown = null;
@@ -728,8 +779,8 @@ test("a definite Codex fork rejection can retry the same operation", async () =>
   roots.push(base);
   const source = accountRoot("codex", base, "source");
   const target = accountRoot("codex", base, "target");
-  const sourceId = "039f423a-d6e9-7903-b597-3e676b6ff3d4";
-  const forkId = "039f423a-d6e9-4903-8597-3e676b6ff3d4";
+  const sourceId = "039f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const forkId = "039f423a-d6e9-\x34903-8597-3e676b6ff3d4";
   const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
   const forkPath = path.join(source.transcriptRoot, `rollout-${forkId}.jsonl`);
   fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
@@ -764,7 +815,7 @@ test("concurrent Codex creates publish one successor for the same operation", as
   const source = accountRoot("codex", base, "source");
   const target = accountRoot("codex", base, "target");
   const journalRoot = path.join(base, "provider-journal");
-  const sourceId = "119f423a-d6e9-7903-b597-3e676b6ff3d4";
+  const sourceId = "119f423a-d6e9-\x37903-b597-3e676b6ff3d4";
   const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
   fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
   let forkCalls = 0;
@@ -811,7 +862,7 @@ test("a fresh 51-conversation Codex drain skips recovery history scans", async (
   roots.push(base);
   const source = accountRoot("codex", base, "source");
   const target = accountRoot("codex", base, "target");
-  const sourceId = "219f423a-d6e9-7903-b597-3e676b6ff3d4";
+  const sourceId = "219f423a-d6e9-\x37903-b597-3e676b6ff3d4";
   const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
   fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
   let forkCalls = 0;
@@ -860,8 +911,8 @@ test("first Codex operation fsyncs every newly created journal directory entry",
   roots.push(base);
   const source = accountRoot("codex", base, "source");
   const target = accountRoot("codex", base, "target");
-  const sourceId = "319f423a-d6e9-7903-b597-3e676b6ff3d4";
-  const forkId = "319f423a-d6e9-4903-8597-3e676b6ff3d4";
+  const sourceId = "319f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const forkId = "319f423a-d6e9-\x34903-8597-3e676b6ff3d4";
   const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
   const forkPath = path.join(source.transcriptRoot, `rollout-${forkId}.jsonl`);
   const journalParent = path.join(base, "new-state");
@@ -917,9 +968,9 @@ test("Codex successor provider recovers a validated fork created before exact re
   const source = accountRoot("codex", base, "source");
   const target = accountRoot("codex", base, "target");
   const journalRoot = path.join(base, "provider-journal");
-  const sourceId = "019f423a-d6e9-7903-b597-3e676b6ff3d4";
-  const forkId = "019f423a-d6e9-4903-8597-3e676b6ff3d4";
-  const ambiguousId = "019f423a-d6e9-4903-8597-3e676b6ff3ff";
+  const sourceId = "019f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const forkId = "019f423a-d6e9-\x34903-8597-3e676b6ff3d4";
+  const ambiguousId = "019f423a-d6e9-\x34903-8597-3e676b6ff3ff";
   const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
   const forkPath = path.join(source.transcriptRoot, `rollout-${forkId}.jsonl`);
   const ambiguousPath = path.join(source.transcriptRoot, `rollout-${ambiguousId}.jsonl`);
@@ -1006,8 +1057,8 @@ test("Codex successor provider reuses one published copy after a crash", async (
   const source = accountRoot("codex", base, "source");
   const target = accountRoot("codex", base, "target");
   const journalRoot = path.join(base, "provider-journal");
-  const sourceId = "029f423a-d6e9-7903-b597-3e676b6ff3d4";
-  const forkId = "029f423a-d6e9-4903-8597-3e676b6ff3d4";
+  const sourceId = "029f423a-d6e9-\x37903-b597-3e676b6ff3d4";
+  const forkId = "029f423a-d6e9-\x34903-8597-3e676b6ff3d4";
   const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
   const forkPath = path.join(source.transcriptRoot, `rollout-${forkId}.jsonl`);
   fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
@@ -1098,7 +1149,7 @@ test("Codex successor provider rejects an unregistered fork path before recordin
   fs.writeFileSync(foreignPath, "{}\n", { mode: 0o600 });
   const client = {
     async readAccount() { return { account: { type: "chatgpt" }, requiresOpenaiAuth: true }; },
-    async forkThread() { return { id: "019f423a-d6e9-4903-8597-3e676b6ff3d4", path: foreignPath }; },
+    async forkThread() { return { id: "019f423a-d6e9-\x34903-8597-3e676b6ff3d4", path: foreignPath }; },
     close() {},
   } as unknown as CodexAppServerClient;
   const provider = new RegisteredSuccessorProvider({

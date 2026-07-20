@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -8,6 +8,8 @@ import type { RuntimeSettingsCapability } from "@/lib/runtime/contracts";
 import type { FileEntry } from "@/lib/types";
 
 import { RuntimePill } from "./RuntimePill";
+import type { RuntimeSession } from "./runtime/runtimeModel";
+import { sendRuntimeFrom } from "./runtimeProfile";
 
 const dom = new Window();
 installActEnv();
@@ -19,6 +21,16 @@ Object.assign(globalThis, {
   localStorage: dom.localStorage, sessionStorage: dom.sessionStorage,
 });
 let mobile = false;
+const requests: Array<Record<string, unknown>> = [];
+globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+  requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+  return new Response(JSON.stringify({
+    ok: true,
+    structured: true,
+    operationId: "reconfigure-ui",
+    receipt: { operationId: "reconfigure-ui", status: "queued" },
+  }), { status: 202, headers: { "content-type": "application/json" } });
+}) as typeof fetch;
 (dom as unknown as { matchMedia(query: string): unknown }).matchMedia = (query: string) => ({
   matches: mobile,
   media: query,
@@ -41,6 +53,42 @@ const key = "llvAgentRuntime:conversation_runtime";
 
 const CODEX_STRUCTURED: RuntimeSettingsCapability = { perTurnEffort: true, perTurnModel: false };
 const CLAUDE_STRUCTURED: RuntimeSettingsCapability = { perTurnEffort: false, perTurnModel: false };
+
+function structuredSession(
+  status: "applied" | "failed",
+  reason: string | null = null,
+): RuntimeSession {
+  return {
+    conversationId: "conversation_runtime",
+    sessionKey: { engine: "codex", sessionId: "thread-runtime" },
+    hostKind: "codex-app-server",
+    host: "hosted",
+    turn: "idle",
+    provenance: "structured",
+    revision: 2,
+    attentionIds: [],
+    recentReceipts: [{
+      operationId: "reconfigure-ui",
+      idempotencyKey: "reconfigure-ui",
+      conversationId: "conversation_runtime",
+      kind: "reconfigure",
+      status,
+      reason,
+      at: "2026-07-19T12:00:00.000Z",
+      revision: 2,
+    }],
+    accountId: "source",
+    parentConversationId: null,
+    flowId: null,
+    workflowId: null,
+    cwd: "/repo",
+    artifactPath: codexFile.path,
+    capabilities: { steer: true, structuredAttention: true, runtimeSettings: CODEX_STRUCTURED },
+    activeTurnId: null,
+    pendingReconfigure: null,
+    drift: null,
+  };
+}
 
 async function renderPill(node: React.ReactElement): Promise<{ host: HTMLElement; root: Root }> {
   const host = document.createElement("div");
@@ -71,6 +119,7 @@ afterEach(() => {
   mobile = false;
   document.body.replaceChildren();
   localStorage.clear();
+  requests.length = 0;
 });
 
 test("the pill face reads shortLabel · tier and opens a menu with the active tier checked", async () => {
@@ -114,10 +163,237 @@ test("selecting a tier persists the sparse profile, announces, and closes (auto-
   expect(pill.textContent).toContain("5.6-Sol · Ultra");
   const status = host.querySelector("[data-runtime-pill-status]")!;
   expect(status.textContent).toBe("Next message: GPT-5.6-Sol · Ultra");
+  expect(host.querySelector("[data-runtime-switch-pending]")?.textContent).toBe("switch pending");
+  expect(requests.at(-1)).toMatchObject({ action: "reconfigure", model: "gpt-5.6-sol", effort: "ultra", fast: false });
   await act(async () => root.unmount());
 });
 
-test("the model drill-down swaps panels in place with a back row; codex per-turn model rows are honestly disabled", async () => {
+test("Strict Mode emits one structured reconfigure request for one selection", async () => {
+  const { host, root } = await renderPill(
+    <StrictMode>
+      <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />
+    </StrictMode>,
+  );
+  await click(host.querySelector("[data-runtime-pill]")!);
+  const ultra = [...host.querySelectorAll('[data-runtime-row="tier"]')]
+    .find((row) => row.textContent === "Ultra")!;
+  await click(ultra);
+
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toMatchObject({ action: "reconfigure", effort: "ultra" });
+  await act(async () => root.unmount());
+});
+
+test("a failed structured reconfigure restores the browser profile before future sends and remount", async () => {
+  const mounted = await renderPill(
+    <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
+  );
+  await click(mounted.host.querySelector("[data-runtime-pill]")!);
+  const ultra = [...mounted.host.querySelectorAll('[data-runtime-row="tier"]')]
+    .find((row) => row.textContent === "Ultra")!;
+  await click(ultra);
+  expect(sendRuntimeFrom(codexFile)).toEqual({ effort: "ultra" });
+
+  await act(async () => {
+    mounted.root.render(
+      <RuntimePill
+        file={codexFile}
+        surface="structured"
+        runtimeSettings={CODEX_STRUCTURED}
+        runtimeSession={structuredSession("failed", "replacement host failed")}
+      />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(sendRuntimeFrom(codexFile)).toBeUndefined();
+  expect(JSON.parse(localStorage.getItem(key)!)).toEqual({ model: "gpt-5.6-sol", effort: "high", fast: false });
+  await act(async () => mounted.root.unmount());
+
+  const remounted = await renderPill(
+    <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
+  );
+  expect(remounted.host.querySelector("[data-runtime-pill]")?.textContent).toContain("5.6-Sol · High");
+  await act(async () => remounted.root.unmount());
+});
+
+test("a failed newest selection restores the last confirmed browser profile", async () => {
+  localStorage.setItem(key, JSON.stringify({ model: "gpt-5.6-sol", effort: "medium", fast: false }));
+  localStorage.setItem(key + ":profile", JSON.stringify({ effort: "medium" }));
+  const mounted = await renderPill(
+    <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
+  );
+  await click(mounted.host.querySelector("[data-runtime-pill]")!);
+  const ultra = [...mounted.host.querySelectorAll('[data-runtime-row="tier"]')]
+    .find((row) => row.textContent === "Ultra")!;
+  await click(ultra);
+  await click(mounted.host.querySelector("[data-runtime-pill]")!);
+  const max = [...mounted.host.querySelectorAll('[data-runtime-row="tier"]')]
+    .find((row) => row.textContent === "Max")!;
+  await click(max);
+
+  await act(async () => {
+    mounted.root.render(
+      <RuntimePill
+        file={codexFile}
+        surface="structured"
+        runtimeSettings={CODEX_STRUCTURED}
+        runtimeSession={structuredSession("failed", "newest replacement failed")}
+      />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(sendRuntimeFrom(codexFile)).toEqual({ effort: "medium" });
+  expect(JSON.parse(localStorage.getItem(key)!)).toEqual({ model: "gpt-5.6-sol", effort: "medium", fast: false });
+  await act(async () => mounted.root.unmount());
+});
+
+test("remount transfers rollback ownership from pending A to durable B before B fails", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestCount = 0;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    requestCount += 1;
+    if (requestCount === 1) {
+      return new Response(JSON.stringify({
+        ok: true,
+        structured: true,
+        operationId: "reconfigure-a",
+        receipt: { operationId: "reconfigure-a", status: "queued" },
+      }), { status: 202, headers: { "content-type": "application/json" } });
+    }
+    return await new Promise<Response>(() => {});
+  }) as typeof fetch;
+
+  try {
+    const mounted = await renderPill(
+      <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
+    );
+    await click(mounted.host.querySelector("[data-runtime-pill]")!);
+    const ultra = [...mounted.host.querySelectorAll('[data-runtime-row="tier"]')]
+      .find((row) => row.textContent === "Ultra")!;
+    await click(ultra);
+
+    const pendingA = structuredSession("applied");
+    pendingA.revision = 2;
+    pendingA.recentReceipts = [];
+    pendingA.pendingReconfigure = {
+      operationId: "reconfigure-a",
+      model: "gpt-5.6-sol",
+      effort: "ultra",
+      fast: false,
+    };
+    await act(async () => {
+      mounted.root.render(
+        <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={pendingA} />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await click(mounted.host.querySelector("[data-runtime-pill]")!);
+    const max = [...mounted.host.querySelectorAll('[data-runtime-row="tier"]')]
+      .find((row) => row.textContent === "Max")!;
+    await click(max);
+    expect(requests).toHaveLength(2);
+    const stalePendingA = { ...pendingA, revision: 3 };
+    await act(async () => {
+      mounted.root.render(
+        <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={stalePendingA} />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(JSON.parse(localStorage.getItem(key + ":phase:rollback")!)).toMatchObject({
+      operationId: null,
+      supersededOperationId: "reconfigure-a",
+      runtimeRevision: 2,
+    });
+    await act(async () => mounted.root.unmount());
+
+    const pendingB = structuredSession("applied");
+    pendingB.revision = 4;
+    pendingB.recentReceipts = [];
+    pendingB.pendingReconfigure = {
+      operationId: "reconfigure-b",
+      model: "gpt-5.6-sol",
+      effort: "max",
+      fast: false,
+    };
+    const remounted = await renderPill(
+      <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={pendingB} />,
+    );
+    expect(JSON.parse(localStorage.getItem(key + ":phase:rollback")!).operationId).toBe("reconfigure-b");
+
+    const failedB = structuredSession("failed", "replacement B failed");
+    failedB.revision = 5;
+    failedB.recentReceipts[0]!.operationId = "reconfigure-b";
+    await act(async () => {
+      remounted.root.render(
+        <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={failedB} />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(sendRuntimeFrom(codexFile)).toBeUndefined();
+    expect(JSON.parse(localStorage.getItem(key)!)).toEqual({ model: "gpt-5.6-sol", effort: "high", fast: false });
+    await act(async () => remounted.root.unmount());
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+for (const terminal of ["applied", "failed"] as const) {
+  test(`a remounted pill clears a persisted pending phase after a durable ${terminal} receipt`, async () => {
+    localStorage.setItem(key + ":phase", "pending");
+    localStorage.setItem(key + ":phase:operation", "reconfigure-ui");
+    const { host, root } = await renderPill(
+      <RuntimePill
+        file={codexFile}
+        surface="structured"
+        runtimeSettings={CODEX_STRUCTURED}
+        runtimeSession={structuredSession(terminal, terminal === "failed" ? "replacement host failed" : null)}
+      />,
+    );
+
+    expect(localStorage.getItem(key + ":phase")).toBeNull();
+    expect(localStorage.getItem(key + ":phase:operation")).toBeNull();
+    expect(host.querySelector("[data-runtime-switch-pending]")).toBeNull();
+    if (terminal === "failed") expect(host.textContent).toContain("replacement host failed");
+    await act(async () => root.unmount());
+  });
+}
+
+test("a remounted pill adopts durable pending ownership before its terminal receipt", async () => {
+  const pending = structuredSession("applied");
+  pending.recentReceipts = [];
+  pending.pendingReconfigure = {
+    operationId: "reconfigure-pending",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+  };
+  const { host, root } = await renderPill(
+    <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={pending} />,
+  );
+  expect(localStorage.getItem(key + ":phase:operation")).toBe("reconfigure-pending");
+  expect(host.querySelector("[data-runtime-switch-pending]")).not.toBeNull();
+
+  const failed = structuredSession("failed", "pending replacement failed");
+  failed.recentReceipts[0]!.operationId = "reconfigure-pending";
+  await act(async () => {
+    root.render(
+      <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} runtimeSession={failed} />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(localStorage.getItem(key + ":phase:operation")).toBeNull();
+  expect(host.querySelector("[data-runtime-switch-pending]")).toBeNull();
+  expect(host.textContent).toContain("pending replacement failed");
+  await act(async () => root.unmount());
+});
+
+test("the model drill-down keeps model rows available for turn-boundary reconfigure", async () => {
   const { host, root } = await renderPill(
     <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
   );
@@ -129,9 +405,7 @@ test("the model drill-down swaps panels in place with a back row; codex per-turn
   const modelRows = [...host.querySelectorAll('[data-runtime-row="model"]')];
   expect(modelRows.map((row) => row.textContent)).toEqual(["GPT-5.6-Sol", "GPT-5.6-Terra"]);
   expect(modelRows[0]!.getAttribute("aria-checked")).toBe("true");
-  // perTurnModel is false: disabled with the reason in the accessible name.
-  expect(modelRows[1]!.hasAttribute("disabled")).toBe(true);
-  expect(modelRows[1]!.getAttribute("aria-label")).toContain("applies when the conversation is next resumed");
+  expect(modelRows[1]!.hasAttribute("disabled")).toBe(false);
   // The back row returns to the root panel; its accessible name is the wired
   // composer.backTo copy, distinct from the submenu row's "Model" (#405).
   const backRow = host.querySelector('[data-runtime-row="back"]')!;
@@ -141,7 +415,7 @@ test("the model drill-down swaps panels in place with a back row; codex per-turn
   await act(async () => root.unmount());
 });
 
-test("speed rows exist only for codex and lock on the structured surface (service tier is thread-level)", async () => {
+test("speed rows exist only for codex and remain available on the structured surface", async () => {
   const codex = await renderPill(
     <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
   );
@@ -151,7 +425,7 @@ test("speed rows exist only for codex and lock on the structured surface (servic
   await click(speed);
   const speedRows = [...codex.host.querySelectorAll('[data-runtime-row="speed"]')];
   expect(speedRows.map((row) => row.textContent)).toEqual(["Standard", "Fast — priority tier"]);
-  expect(speedRows.every((row) => row.hasAttribute("disabled"))).toBe(true);
+  expect(speedRows.every((row) => !row.hasAttribute("disabled"))).toBe(true);
   await act(async () => codex.root.unmount());
 
   // Claude has no speed concept anywhere in the popover.
@@ -165,18 +439,17 @@ test("speed rows exist only for codex and lock on the structured surface (servic
   await act(async () => claude.root.unmount());
 });
 
-test("a claude-broker structured conversation disables the reasoning rows with the next-resume reason (phase 1)", async () => {
+test("a claude-broker queues a reasoning change at the active turn boundary", async () => {
   const { host, root } = await renderPill(
     <RuntimePill file={claudeFile} surface="structured" runtimeSettings={CLAUDE_STRUCTURED} />,
   );
   await click(host.querySelector("[data-runtime-pill]")!);
   const tiers = [...host.querySelectorAll('[data-runtime-row="tier"]')];
   expect(tiers).toHaveLength(5); // claude scale: low…max
-  expect(tiers.every((row) => row.hasAttribute("disabled"))).toBe(true);
-  expect(tiers[0]!.getAttribute("title")).toBe("applies when the conversation is next resumed");
-  // A disabled row never commits.
+  expect(tiers.every((row) => !row.hasAttribute("disabled"))).toBe(true);
   await click(tiers[0]!);
-  expect(localStorage.getItem("llvAgentRuntime:conversation_claude:profile")).toBeNull();
+  expect(JSON.parse(localStorage.getItem("llvAgentRuntime:conversation_claude:profile")!)).toEqual({ effort: "low" });
+  expect(requests.at(-1)).toMatchObject({ action: "reconfigure", effort: "low" });
   await act(async () => root.unmount());
 });
 

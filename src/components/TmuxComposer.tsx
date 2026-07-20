@@ -1403,6 +1403,7 @@ export function TmuxComposer({
               file={file}
               surface={caps.surface}
               runtimeSettings={structuredSession?.session.capabilities?.runtimeSettings ?? null}
+              runtimeSession={structuredSession?.session ?? null}
             />
           ) : null
         }

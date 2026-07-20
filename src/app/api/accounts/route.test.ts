@@ -501,7 +501,9 @@ test("GET retains the latest completed intent with recoverable failures for bulk
     launchProfile: emptyLaunchProfile(),
     historyHash: "recovered",
     host: { kind: "codex-app-server", identity: "recovered", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
-  }, revision);
+  }, revision,
+  agentRegistry().conversation(conversation.id)!.migration!.operationId,
+  agentRegistry().conversation(conversation.id)!.migration!.providerReceipt!);
   agentRegistry().setMigrationIntentState(intent.id, "complete");
 
   const afterRetry = await (await GET()).json() as { codex: { migration: unknown } };
