@@ -259,7 +259,7 @@ describe("pipelineCursorActive", () => {
 describe("compactPipelineArtifactPaths", () => {
   const stages = [stage("architect"), stage("builder"), stage("review", "review-loop")];
 
-  test("keeps one current run pane and compacts passed stages plus prior retries", () => {
+  test("keeps one real pane per launched stage and compacts only prior retries", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
@@ -275,10 +275,10 @@ describe("compactPipelineArtifactPaths", () => {
       ],
     });
 
-    expect([...compactPipelineArtifactPaths([p], [])].sort()).toEqual(["/architect", "/builder-attempt-1"]);
+    expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/builder-attempt-1"]);
   });
 
-  test("keeps the review target pane while folding review transcripts into compact evidence", () => {
+  test("keeps the latest review conversation as the review stage card", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -289,7 +289,7 @@ describe("compactPipelineArtifactPaths", () => {
     });
     const flows = [{ id: "f1", implementerPath: "/builder", rounds: [{ reviewerPath: "/reviewer" }] }] as unknown as Flow[];
 
-    expect([...compactPipelineArtifactPaths([p], flows)]).toEqual(["/reviewer"]);
+    expect([...compactPipelineArtifactPaths([p], flows)]).toEqual([]);
   });
 
   test("compacts every durable binding from a retried logical review round", () => {
@@ -315,10 +315,10 @@ describe("compactPipelineArtifactPaths", () => {
       { path: "/review-current", conversationId: "conversation-current", durableLineage: { memberships: [membership("reviewer:1:binding-b")] } },
     ] as unknown as FileEntry[];
 
-    expect(compactPipelineArtifactPaths([p], flows, files)).toEqual(new Set(["/review-prior", "/review-current"]));
+    expect(compactPipelineArtifactPaths([p], flows, files)).toEqual(new Set(["/review-prior"]));
   });
 
-  test("keeps the latest passed run pane while a review flow is materializing", () => {
+  test("keeps every launched run pane while a review flow is materializing", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -329,7 +329,7 @@ describe("compactPipelineArtifactPaths", () => {
       ],
     });
 
-    expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/architect"]);
+    expect([...compactPipelineArtifactPaths([p], [])]).toEqual([]);
   });
 
   test("a completed pipeline represents every transcript through compact history", () => {

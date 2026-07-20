@@ -55,24 +55,27 @@ function entry(over: Partial<FileEntry> & { path: string }): FileEntry {
 const stageRole = (access: "read-write" | "read-only") =>
   ({ roleId: null, engine: "codex" as const, model: null, effort: null, access, promptScaffold: null });
 
-/* A running pipeline with TWO materialized stage conversations (architect passed,
-   builder running) and a still-future review stage. */
+/* Five declared stages: three materialized conversations and two future shells. */
 const architect = entry({ path: "/arch", conversationId: "c-arch" });
 const builder = entry({ path: "/build", conversationId: "c-build" });
+const verify = entry({ path: "/verify", conversationId: "c-verify" });
 
 const pipeline = {
   id: "pipe-1", task: "Restore the colored halo", project: "demo", repoDir: "/r", worktreeDir: "/w",
   branch: "b", baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
   stages: [
     { id: "architect", kind: "run", prompt: "", next: "builder", effectiveRole: stageRole("read-write") },
-    { id: "builder", kind: "run", prompt: "", next: "review", effectiveRole: stageRole("read-write") },
+    { id: "builder", kind: "run", prompt: "", next: "verify", effectiveRole: stageRole("read-write") },
+    { id: "verify", kind: "run", prompt: "", next: "polish", effectiveRole: stageRole("read-write") },
+    { id: "polish", kind: "run", prompt: "{{prev.output}}", next: "review", effectiveRole: stageRole("read-write") },
     { id: "review", kind: "review-loop", prompt: "", next: null, effectiveRole: stageRole("read-only") },
   ],
   runs: [
     { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] },
-    { stageId: "builder", attempts: [{ n: 1, state: "running", agentPath: "/build", flowId: null }] },
+    { stageId: "builder", attempts: [{ n: 1, state: "passed", agentPath: "/build", flowId: null }] },
+    { stageId: "verify", attempts: [{ n: 1, state: "running", agentPath: "/verify", flowId: null }] },
   ],
-  cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
+  cursor: { stageId: "verify", state: "running", input: null, activatedBy: null },
   state: "running", pausedState: null, stateDetail: null,
   srcPath: null, srcConversationId: null, createdAt: new Date(0).toISOString(), closedAt: null,
 } as unknown as Pipeline;
@@ -82,8 +85,8 @@ const settle = async () => {
   flushSync(() => undefined);
 };
 
-test("a running pipeline is one colored halo owning its real cards and future placeholder — no detached body or duplicate graph (#353)", async () => {
-  const files = [architect, builder];
+test("five declared stages render as three real conversations plus two future conversation shells inside one halo (#353)", async () => {
+  const files = [architect, builder, verify];
   const groups = buildBranchGroups(files, "demo");
   const host = document.createElement("div");
   document.body.append(host);
@@ -113,12 +116,23 @@ test("a running pipeline is one colored halo owning its real cards and future pl
   expect(host.querySelectorAll('[data-scheme-group="pipeline"]')).toHaveLength(1);
   expect(host.querySelector('[data-pipeline-group-header="pipe-1"]')).toBeTruthy();
 
-  /* The two materialized stage conversations are ordinary full cards on the board. */
+  /* The three launched stages keep ordinary full conversation cards. */
   expect(host.querySelector('[data-scheme-node="/arch"]')).toBeTruthy();
   expect(host.querySelector('[data-scheme-node="/build"]')).toBeTruthy();
+  expect(host.querySelector('[data-scheme-node="/verify"]')).toBeTruthy();
 
-  /* The future review stage renders as a conversation-shaped placeholder card. */
+  /* Both future stages render conversation-shaped shells. */
+  expect(host.querySelector('[data-scheme-node="slot::pipe-1::polish"]')).toBeTruthy();
   expect(host.querySelector('[data-scheme-node="slot::pipe-1::review"]')).toBeTruthy();
+  const stageCards = [...host.querySelectorAll('[data-pipeline-stage-card^="pipe-1::"]')];
+  expect(stageCards).toHaveLength(5);
+  expect(stageCards.map((card) => card.getAttribute("data-pipeline-stage-card"))).toEqual([
+    "pipe-1::polish",
+    "pipe-1::review",
+    "pipe-1::architect",
+    "pipe-1::builder",
+    "pipe-1::verify",
+  ]);
 
   /* No detached PipelineGroup body, duplicate stage graph, or empty white slab. */
   expect(host.querySelector("[data-pipeline-group-body]")).toBeNull();

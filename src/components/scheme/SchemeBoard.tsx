@@ -791,9 +791,12 @@ export function SchemeBoard({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires only on a new `+ Task` press
   }, [newTaskNonce]);
 
-  /* A fresh draft glides to its colored halo and opens its config on arrival. The
-     halo materializes from the draft's placeholder members once the POST → refetch
-     → relayout round-trip lands, so the reveal waits for that group to appear. */
+  /* A fresh draft glides to its compact colored halo and keeps the tall draft
+     editor closed (#353 review). Configuration opens through the halo header's
+     explicit disclosure, so a new draft lands the operator on the region. The halo
+     materializes from the draft's placeholder members once the POST → refetch →
+     relayout round-trip lands, so the reveal waits for that group to appear, then
+     consumes the request. */
   const builderRevealed = useRef<string | null>(null);
   useEffect(() => {
     if (!activeBuilderPipelineId || mapMode) return;
@@ -805,6 +808,7 @@ export function SchemeBoard({
     clearSession();
     setMode("select");
     centerOn(group, 0.75);
+    handleBuilderOpened();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires when the new draft's halo first renders
   }, [activeBuilderPipelineId, layout.groups]);
 
@@ -1081,7 +1085,7 @@ export function SchemeBoard({
       >
         {/* Group halos sit behind every edge and card so a running flow/pipeline
             reads as one framed region; the label chip stays live off the map. */}
-        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} autoOpenGroupId={activeBuilderPipelineId} onAutoOpen={handleBuilderOpened} />
+        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} />
         <EdgesLayer edges={layout.edges} badgeAnchors={badgeAnchors} badgeAnchorRevision={badgeAnchorRevision} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
@@ -1102,6 +1106,7 @@ export function SchemeBoard({
           attentionPaths={attentionPaths ?? null}
           flowsByImpl={flowsByImpl}
           flows={flows}
+          pipelines={pipelines}
           pipelineStrips={mapMode ? pipelineStrips : EMPTY_PIPELINE_STRIPS}
           linkedTasksByPipeline={linkedTasksByPipeline}
           relatedTasksByPath={relatedTasksByPath}

@@ -15,6 +15,7 @@ import {
   derivePipelineLinks,
   groupRect,
   hueFromId,
+  stageSlotKey,
   type AgentLink,
   type SchemeGroupSpec,
 } from "./agentLinks";
@@ -719,7 +720,7 @@ export function buildSchemeLayout(
            gap (a materialized stage between them) breaks the visual chain. */
         const adjacent = previous !== null && pipeline.stages[index - 1]?.id === previous.id;
         const slot: StageSlot = {
-          key: `slot::${pipeline.id}::${stage.id}`,
+          key: stageSlotKey(pipeline.id, stage.id),
           pipeline,
           stage,
           index,
@@ -751,6 +752,10 @@ export function buildSchemeLayout(
     decks.map((deck) => ({ key: deck.key, flow: deck.flow })),
     stacks.map((stack) => ({ key: stack.key, paths: stack.items.map((item) => item.file.path) })),
   );
+  /* Planned-stage placeholder slots self-resolve, so a pipeline's pass/fail/loop
+     edge can route into (or out of) a future stage that has no materialized node
+     yet — the rail stays continuous inside the halo (#353). */
+  for (const slot of slots) anchors.set(slot.key, slot.key);
   const byPath = new Map<string, SchemeRect>([
     ...nodes.map((node) => [node.file.path, node] as const),
     ...drafts.map((draft) => [draft.key, draft] as const),

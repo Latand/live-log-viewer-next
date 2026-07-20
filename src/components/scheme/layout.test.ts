@@ -12,7 +12,7 @@ import { planRootReconciliation } from "@/components/projectBoardMutations";
 import { applyBoardMutations } from "@/lib/board/mutations";
 import { autoTaskSlotPosition } from "@/lib/tasks/lattice";
 
-import { deckKey, flowLinkKey } from "./agentLinks";
+import { deckKey, flowLinkKey, stageSlotKey } from "./agentLinks";
 import { REST_BAND_MAX_W, buildSchemeLayout } from "./layout";
 import { TASK_W, taskWorldBounds } from "./taskGeometry";
 
@@ -371,6 +371,32 @@ describe("planned-stage pipelines grow a placeholder halo (#353 desktop ownershi
     const layout = buildSchemeLayout([group], [], [root], [], [], [withNode], [withNode]);
     const halos = layout.groups.filter((g) => g.kind === "pipeline" && g.id === "p1");
     expect(halos).toHaveLength(1);
+  });
+
+  test("a materialized stage's pass edge routes a pipeline rail into the next stage's placeholder slot (#353)", () => {
+    /* build ran (a real /build node); review has not launched, so it lives only as
+       its planned-stage placeholder slot inside the halo. The build→review pass
+       edge must route a rail from the materialized node straight into that
+       placeholder, so the conversation graph stays continuous inside the region
+       instead of stopping at the last live card. */
+    const root = entry({ path: "/build" });
+    const group: BranchGroup = { key: "/build", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
+    const twoStage = pipeline({
+      stages: [
+        { id: "build", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "review-loop", prompt: "", next: null },
+      ],
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      state: "running",
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/build", flowId: null } as unknown as Record<string, unknown>] }],
+    });
+    const layout = buildSchemeLayout([group], [], [root], [], [], [twoStage], [twoStage]);
+    const slotKey = stageSlotKey("p1", "review");
+    expect(layout.slots.map((slot) => slot.key)).toContain(slotKey);
+    const edge = layout.links.find((link) => link.kind === "pipeline" && link.to === slotKey);
+    expect(edge).toBeTruthy();
+    expect(edge!.from).toBe("/build");
+    expect(edge!.pipeline!.edge).toBe("pass");
   });
 });
 

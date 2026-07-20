@@ -48,6 +48,20 @@ test("a failed or folded attempt is navigable history, never a placeholder", () 
   expect(pipelinePlaceholderStages(failed).map((stage) => stage.id)).toEqual(["review"]);
 });
 
+test("a stage whose attempts have all folded into history stays navigable, never a resurrected placeholder", () => {
+  /* The builder ran and its every attempt is now `historical` (folded into the
+     compact prior-attempt evidence). The stage still ran, so it must keep its
+     compact history at its stage position — reading only the operational attempt
+     would report it empty and grow a duplicate empty shell over that history. */
+  const folded = pipeline({
+    runs: [
+      { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] },
+      { stageId: "builder", attempts: [{ n: 1, state: "passed", agentPath: "/build", flowId: null, historical: true }] },
+    ],
+  } as unknown as Partial<Pipeline>);
+  expect(pipelinePlaceholderStages(folded).map((stage) => stage.id)).toEqual(["review"]);
+});
+
 test("a completed or closed pipeline grows no placeholders", () => {
   for (const state of ["completed", "closed"] as const) {
     expect(pipelinePlaceholderStages(pipeline({ state }))).toEqual([]);

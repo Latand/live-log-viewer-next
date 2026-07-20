@@ -6,7 +6,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { resolvePipelineMemberPaths } from "@/components/pipelines/pipelineModel";
 
-import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, deriveGroups, derivePipelineLinks, flowLinkKey, flowLinkPhase, groupRect, hueFromId, pipelineRailSegment } from "./agentLinks";
+import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, deriveGroups, derivePipelineLinks, flowLinkKey, flowLinkPhase, groupRect, hueFromId, pipelineRailSegment, stageSlotKey } from "./agentLinks";
 import type { SchemeRect } from "./layout";
 
 const roleConfig = { engine: "claude" as const, model: null, effort: null };
@@ -186,6 +186,57 @@ describe("derivePipelineLinks tones and hub", () => {
       ],
     } as unknown as Partial<Pipeline>);
     expect(derivePipelineLinks([partial], anchor)).toEqual([]);
+  });
+});
+
+describe("derivePipelineLinks materialized→placeholder edges (#353)", () => {
+  /* plan (passed) → build (running) → review (future placeholder). review has no
+     attempt yet, so it lives on the board only as its planned-stage placeholder
+     slot inside the halo; the pass edge into it must still route there so the
+     conversation graph stays continuous instead of stopping at build. build also
+     loops back to plan on fail. */
+  const placeholderPipeline = {
+    id: "pipe-ph",
+    state: "running",
+    cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+    stages: [
+      { id: "plan", kind: "run", next: "build" },
+      { id: "build", kind: "run", next: "review", onFail: { to: "plan", maxRounds: 5 } },
+      { id: "review", kind: "review-loop", next: null },
+    ],
+    runs: [
+      { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed" }] },
+      { stageId: "build", attempts: [{ agentPath: "/build", state: "running" }] },
+    ],
+  } as unknown as Pipeline;
+
+  const reviewSlot = stageSlotKey("pipe-ph", "review");
+  /* The board placed /plan, /build and the future review stage's placeholder. */
+  const anchor = (key: string) =>
+    key === "/plan" || key === "/build" || key === reviewSlot ? key : null;
+
+  test("a pass edge routes into a future stage's placeholder slot", () => {
+    const links = derivePipelineLinks([placeholderPipeline], anchor);
+    const passReview = links.find((link) => link.pipeline!.toStageId === "review" && link.pipeline!.edge === "pass");
+    expect(passReview).toBeTruthy();
+    expect(passReview!.from).toBe("/build");
+    expect(passReview!.to).toBe(reviewSlot);
+    /* build is the active cursor stage, so its outgoing pass edge into the
+       placeholder is the one that runs next. */
+    expect(passReview!.pipeline!.isNext).toBe(true);
+  });
+
+  test("a fail (loop) edge still routes between the materialized stages, amber", () => {
+    const links = derivePipelineLinks([placeholderPipeline], anchor);
+    const failLoop = links.find((link) => link.pipeline!.edge === "fail");
+    expect(failLoop).toMatchObject({ from: "/build", to: "/plan", pipeline: { tone: "amber" } });
+  });
+
+  test("without a placed placeholder the edge into the future stage is dropped (no dangling rail)", () => {
+    /* The board hasn't placed the review slot (a memberless foreign draft, say),
+       so the pass edge into it has no vertex and stays undrawn. */
+    const links = derivePipelineLinks([placeholderPipeline], (key) => (key === "/plan" || key === "/build" ? key : null));
+    expect(links.some((link) => link.pipeline!.toStageId === "review")).toBe(false);
   });
 });
 

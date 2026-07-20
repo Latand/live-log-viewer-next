@@ -211,21 +211,32 @@ export const PIPELINE_PLACEHOLDER_STATES: ReadonlySet<PipelineState> = new Set([
 ]);
 
 /** The stages of a pipeline that render as conversation-shaped placeholder cards
-    (#353): the yet-to-launch (future) stages — those with no operational attempt
-    at all. A stage that already ran keeps its real card (materialized) or its
-    navigable folded history, never a placeholder, so a failed/folded attempt does
-    not resurrect a big empty shell. Only placeholder-state pipelines grow any. */
+    (#353): the yet-to-launch (future) stages — those that have never launched an
+    attempt at all. A stage that already ran keeps its real card (materialized) or
+    its navigable compact history at its stage position, never a placeholder, so a
+    failed/folded attempt does not resurrect a big empty shell. Membership reads
+    every recorded attempt, not just the operational one: a stage whose attempts
+    have ALL folded into history (`historical`) still ran, so `latestAttempt`
+    (operational-only) would wrongly report it empty and grow a duplicate
+    placeholder over its compact prior-attempt evidence. Only placeholder-state
+    pipelines grow any. */
 export function pipelinePlaceholderStages(pipeline: Pipeline): PipelineStage[] {
   if (!PIPELINE_PLACEHOLDER_STATES.has(pipeline.state)) return [];
-  return pipeline.stages.filter((stage) => !latestAttempt(pipeline, stage.id));
+  return pipeline.stages.filter((stage) => stageAttempts(pipeline, stage.id).length === 0);
 }
 
 /**
- * Transcript artifacts already represented by the compact pipeline rail.
- * The current run keeps its latest agent pane. During a review loop the flow's
- * implementer stays as the single full conversation pane while reviewer
- * transcripts remain reachable through the review evidence row. Completed
- * pipelines have no live pane, so their entire transcript chain is compact.
+ * Transcript artifacts already represented by a stage card's compact history.
+ *
+ * Every launched stage in an open pipeline keeps one real conversation pane:
+ * its latest materialized attempt. Earlier retries and superseded reviewer
+ * bindings fold into that stage's history. This preserves the stage-card
+ * invariant used by the pipeline canvas: five declared stages always project
+ * five cards, with launched stages represented by real panes and future stages
+ * represented by conversation-shaped placeholders.
+ *
+ * Completed and closed pipelines may fold their full transcript chain because
+ * they no longer have future-stage placeholders or an active canvas workflow.
  */
 export function compactPipelineArtifactPaths(
   pipelines: readonly Pipeline[],
@@ -236,27 +247,10 @@ export function compactPipelineArtifactPaths(
   const fullPanePaths = new Set<string>();
 
   for (const pipeline of pipelines) {
-    if (!pipeline.cursor || pipeline.state === "completed" || pipeline.state === "closed" || pipeline.state === "draft") continue;
-    const stage = pipeline.stages.find((candidate) => candidate.id === pipeline.cursor!.stageId);
-    const attempt = stage ? latestAttempt(pipeline, stage.id) : null;
-    if (!stage || !attempt) continue;
-    if (stage.kind === "review-loop") {
-      const stageIndex = pipeline.stages.findIndex((candidate) => candidate.id === stage.id);
-      const priorRunPath = pipeline.stages
-        .slice(0, stageIndex)
-        .reverse()
-        .find((candidate) => {
-          const prior = latestAttempt(pipeline, candidate.id);
-          return candidate.kind === "run" && prior?.state === "passed" && prior.agentPath;
-        });
-      const implementerPath = attempt.flowId
-        ? flowsById.get(attempt.flowId)?.implementerPath
-        : priorRunPath
-          ? latestAttempt(pipeline, priorRunPath.id)?.agentPath
-          : null;
-      if (implementerPath) fullPanePaths.add(implementerPath);
-    } else if (attempt.agentPath) {
-      fullPanePaths.add(attempt.agentPath);
+    if (pipeline.state === "completed" || pipeline.state === "closed") continue;
+    for (const stage of pipeline.stages) {
+      const attempt = latestAttempt(pipeline, stage.id);
+      if (attempt?.agentPath) fullPanePaths.add(attempt.agentPath);
     }
   }
 

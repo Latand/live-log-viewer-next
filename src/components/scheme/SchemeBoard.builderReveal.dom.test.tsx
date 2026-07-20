@@ -90,7 +90,7 @@ const settle = async () => {
   flushSync(() => undefined);
 };
 
-test("the builder reveal ends an active selection session and opens the world-group editor", async () => {
+test("targeting a fresh draft reveals its halo but never auto-opens the tall editor — config discloses only on an explicit header tap (#353)", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -113,8 +113,17 @@ test("the builder reveal ends an active selection session and opens the world-gr
   /* No detached pipeline control card exists on the board (#353). */
   expect(host.querySelector('[data-pipeline-group="d1"]')).toBeNull();
 
-  /* Targeting this draft clears the world session and opens its config in place. */
+  /* Targeting this draft clears the world session and centers the camera on the
+     compact halo — but the tall draft editor stays CLOSED (#353 review): a fresh
+     draft never lands the operator in a config modal. */
   flushSync(() => root.render(board("d1")));
+  await settle();
+  expect(host.querySelector("[data-group-override]")).toBeNull();
+  const header = host.querySelector('[data-pipeline-group-header="d1"]') as HTMLButtonElement | null;
+  expect(header).toBeTruthy();
+
+  /* Configuration opens only through the header's explicit compact disclosure. */
+  flushSync(() => header!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   await settle();
   expect(host.querySelector("[data-group-override]")).toBeTruthy();
 });
