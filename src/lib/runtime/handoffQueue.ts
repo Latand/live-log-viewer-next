@@ -63,7 +63,7 @@ export interface HandoffRow extends HandoffRowInput {
   predecessorGeneration: string | null;
   /** Generation that claimed the row; the terminal predecessor -> successor link. */
   successorGeneration: string | null;
-  /** Delivery ids acknowledged by the successor after idempotent delivery. */
+  /** Delivery ids acknowledged by every successor in the promotion chain. */
   replayedDeliveryIds: string[];
   interruptionOutcome: HandoffInterruptionOutcome | null;
   lastError: string | null;
@@ -163,6 +163,15 @@ function replacementDeliveries(previous: HandoffRow, incoming: readonly HandoffD
     .map((delivery, index) => ({ ...delivery, seq: index + 1 }));
 }
 
+function acknowledgedDeliveryIds(
+  history: readonly HandoffRow[],
+  conversationId: string,
+): string[] {
+  return [...new Set(history
+    .filter((row) => row.conversationId === conversationId)
+    .flatMap((row) => row.replayedDeliveryIds))];
+}
+
 function terminalStatusFor(turnState: HandoffTurnState): HandoffStatus {
   return turnState === "terminal" ? "terminal" : "claimed";
 }
@@ -245,7 +254,7 @@ export class HandoffQueue {
           status: "pending",
           predecessorGeneration: null,
           successorGeneration: null,
-          replayedDeliveryIds: [],
+          replayedDeliveryIds: acknowledgedDeliveryIds(state.history, input.conversationId),
           interruptionOutcome: null,
           lastError: null,
           enqueuedAt: now,
@@ -383,7 +392,7 @@ export class HandoffQueue {
         row.status = predecessor && drainingGenerations.has(predecessor) ? "draining" : "pending";
         row.predecessorGeneration = null;
         row.successorGeneration = null;
-        row.replayedDeliveryIds = [];
+        row.replayedDeliveryIds = acknowledgedDeliveryIds(state.history, row.conversationId);
         row.interruptionOutcome = null;
         row.updatedAt = now;
       }
