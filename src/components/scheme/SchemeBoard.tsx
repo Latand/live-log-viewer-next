@@ -34,7 +34,7 @@ import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest }
 import { currentWorkRect, currentWorkRects, rectUnion } from "./currentWork";
 import { buildSchemeLayout } from "./layout";
 import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
-import { boardClusters } from "./offscreenClusters";
+import { boardClusters, screenKeepoutObstacles } from "./offscreenClusters";
 import type { WorkerStack } from "./workerCollapse";
 import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus, type PipelineGroupControls } from "./nodes";
 import type { TaskCardHandlers } from "./TaskCard";
@@ -792,18 +792,71 @@ export function SchemeBoard({
     onFit: announceFit,
   });
 
+  /* Screen-space boxes of fixed board chrome an edge chip must never paint over
+     — the subagent avatar/round stack and the composer/input, tagged
+     `data-chip-keepout` — measured in the chip layer's local space. An
+     off-screen card's avatar column pokes into the viewport at an edge where a
+     chip would otherwise reveal over it (operator overlap report, issue #474);
+     reserving these folds the chip into «+N» instead. Re-measured whenever the
+     camera, viewport, or board content changes, and on any DOM mutation that
+     adds/moves that chrome (badges appearing, the composer opening). */
+  const [keepoutObstacles, setKeepoutObstacles] = useState<SchemeRect[]>([]);
+  const measureKeepouts = useCallback(() => {
+    const host = viewportRef.current;
+    if (!host) return;
+    const base = host.getBoundingClientRect();
+    const rects = Array.from(document.querySelectorAll<HTMLElement>("[data-chip-keepout]"), (el) => el.getBoundingClientRect());
+    const next = screenKeepoutObstacles(base, rects, { w: base.width, h: base.height });
+    setKeepoutObstacles((prev) =>
+      prev.length === next.length && prev.every((box, i) => box.x === next[i]!.x && box.y === next[i]!.y && box.w === next[i]!.w && box.h === next[i]!.h)
+        ? prev
+        : next,
+    );
+  }, [viewportRef]);
+  /* Re-measure after any commit that repositions the camera, viewport, or board
+     content (subagent columns move with the pan, the composer docks in a fresh
+     slot). */
+  useEffect(() => { measureKeepouts(); }, [measureKeepouts, cam, vp, layout]);
+  /* Stable observers (set up once) catch the chrome appearing/resizing between
+     those commits — a badge stack rendering in, the composer opening, a hover
+     expanding an avatar — coalesced to one measurement per frame. */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let frame = 0;
+    const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (cb: FrameRequestCallback) => window.setTimeout(() => cb(0), 16) as unknown as number;
+    const caf = typeof cancelAnimationFrame === "function" ? cancelAnimationFrame : (id: number) => window.clearTimeout(id);
+    const schedule = () => {
+      if (frame) return;
+      frame = raf(() => { frame = 0; measureKeepouts(); });
+    };
+    const observer = typeof MutationObserver === "function" ? new MutationObserver(schedule) : null;
+    observer?.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["style", "class", "data-chip-keepout"] });
+    const resize = typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : null;
+    if (resize && viewportRef.current) resize.observe(viewportRef.current);
+    window.addEventListener("resize", schedule);
+    return () => {
+      if (frame) caf(frame);
+      observer?.disconnect();
+      resize?.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
+  }, [measureKeepouts, viewportRef]);
+
   /* Screen-space boxes of every rendered conversation surface (panes + review
-     decks): an edge-navigation chip that would paint over one folds into the
-     «+N» disclosure instead of covering chat content (issue #292 rejection). */
+     decks) plus the fixed keep-out chrome above: an edge-navigation chip that
+     would paint over one folds into the «+N» disclosure instead of covering
+     chat content (issue #292 rejection) or the agent stack / composer (#474). */
   const chipObstacles = useMemo(
-    () =>
-      [...layout.nodes, ...layout.decks].map((surface) => ({
+    () => [
+      ...[...layout.nodes, ...layout.decks].map((surface) => ({
         x: surface.x * cam.z + cam.x,
         y: surface.y * cam.z + cam.y,
         w: surface.w * cam.z,
         h: surface.h * cam.z,
       })),
-    [layout, cam],
+      ...keepoutObstacles,
+    ],
+    [layout, cam, keepoutObstacles],
   );
 
   /* The fit functions change identity on every poll-driven relayout (useFiles

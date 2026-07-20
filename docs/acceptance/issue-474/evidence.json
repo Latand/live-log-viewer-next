@@ -1,13 +1,21 @@
 {
   "issue": 474,
-  "capturedAt": "2026-07-20T15:04:20.834Z",
+  "capturedAt": "2026-07-20T19:29:39.398Z",
   "viewer": "production next start",
   "viewport": {
     "desktop": "1440x900",
     "mobile": "390x844"
   },
-  "interactionSuite": "src/components/scheme/EdgeChips.hover.dom.test.tsx (10 tests: continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, click fit, coarse-pointer removal) + src/components/scheme/offscreenClusters.test.ts (reserves the fully-revealed width in collision geometry)",
+  "interactionSuite": "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/offscreenClusters.test.ts (reserves the fully-revealed width in collision geometry; top/bottom chips pinned into a corner fold into «+N» instead of reserving a sub-minimal reveal band; every admitted chip reserves at least the minimum collision-safe width; a chip whose revealed band overlaps the subagent avatar/round stack or the composer/input keep-out folds instead of painting over it)",
   "checks": [
+    {
+      "id": "fixture-exact-title-lengths",
+      "detail": "every fixture title is exactly 48 or 60 characters ([48,60,48,60,48])"
+    },
+    {
+      "id": "fixture-covers-48-and-60",
+      "detail": "the fixture exercises both an exact 48- and an exact 60-character current-work title"
+    },
     {
       "id": "desktop-nav-cannot-block-content",
       "detail": "the off-screen navigation landmark is pointer-events:none — only its chips take pointer input, never covering chat content (issue #292)"
@@ -30,7 +38,7 @@
     },
     {
       "id": "desktop-offscreen-labels",
-      "detail": "every off-screen entry carries its conversation label ([\"Reasoning effort meter reserved slot on every s…\",\"Deterministic capture pipeline for stage two bu…\"])"
+      "detail": "every off-screen entry carries its WHOLE cleaned title, never a truncation ([\"Deterministic capture pipeline for stage builder\",\"Off-screen edge navigation with a bounded progressive reveal\"])"
     },
     {
       "id": "desktop-disclosure-expands",
@@ -42,7 +50,11 @@
     },
     {
       "id": "desktop-chip-resting-truncated",
-      "detail": "the resting chip label \"In-place login recovery for accounts stuck in e…\" (48 chars) overflows its resting width — data-reveal 0"
+      "detail": "the resting chip label \"Bounded off-screen edge chip progressive reveals\" (48 chars) overflows its resting width — data-reveal 0"
+    },
+    {
+      "id": "desktop-chip-exact-length",
+      "detail": "the surfaced chip carries an exact 48-character current-work title"
     },
     {
       "id": "desktop-chip-control-reserved",
@@ -70,15 +82,39 @@
     },
     {
       "id": "desktop-chip-fully-revealed",
-      "detail": "the whole 48-char label \"In-place login recovery for accounts stuck in e…\" is visible with no ellipsis once revealed"
+      "detail": "the whole 48-char label \"Bounded off-screen edge chip progressive reveals\" is visible with no ellipsis — its scrollWidth is contained within the pill once revealed"
     },
     {
       "id": "desktop-chip-revealed-in-viewport",
-      "detail": "the fully-revealed pill (width 291px) stays inside the 1440px viewport"
+      "detail": "the fully-revealed pill (width 303px) stays inside the 1440px viewport"
     },
     {
       "id": "desktop-chip-revealed-clear",
       "detail": "the fully-revealed chip still does not overlap any open conversation pane"
+    },
+    {
+      "id": "desktop-chip-reduced-motion-hover",
+      "detail": "reduced-motion hover reveals the whole label at once (data-reveal full)"
+    },
+    {
+      "id": "desktop-chip-reduced-motion-contained",
+      "detail": "under reduced motion the 48-char label shows in full with its scrollWidth contained inside the pill (no ellipsis)"
+    },
+    {
+      "id": "desktop-chip-reduced-motion-in-viewport",
+      "detail": "the reduced-motion reveal stays inside the 1440px viewport"
+    },
+    {
+      "id": "desktop-keepout-precondition",
+      "detail": "a chip was on the board before the keep-out band was placed (3 chip(s))"
+    },
+    {
+      "id": "desktop-chip-folds-off-agent-stack",
+      "detail": "a chip whose reveal band overlaps the agent-avatar/round keep-out folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-keepout",
+      "detail": "no visible edge chip overlaps the agent-avatar/round stack or the composer/input keep-out surfaces"
     },
     {
       "id": "mobile-conversation-open",

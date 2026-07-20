@@ -76,6 +76,7 @@ export function TaskStickyComposer({
   return (
     <div
       data-scheme-task="new"
+      data-chip-keepout
       className="absolute z-30"
       style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, width: TASK_W }}
     >

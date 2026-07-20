@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { FileEntry } from "@/lib/types";
 
 import type { SchemeLayout } from "./layout";
-import { boardClusters, offscreenClusterChips, type BoardCluster } from "./offscreenClusters";
+import { boardClusters, CHIP_MIN_W, chipRevealWidth, offscreenClusterChips, screenKeepoutObstacles, type BoardCluster } from "./offscreenClusters";
 
 const cam = { x: 0, y: 0, z: 1 };
 const vp = { w: 1_000, h: 700 };
@@ -84,6 +84,49 @@ describe("offscreen cluster chips", () => {
   });
 });
 
+describe("corner reveal geometry (issue #474: a positive, collision-safe reveal width or fold)", () => {
+  /* A top/bottom chip is centered on its anchor, so near a viewport corner its
+     reveal band has ~0 horizontal room: it can never paint a usable pill, and a
+     zero-width reserved box also slips past every obstacle. Such a chip must
+     fold into the edge «+N» aggregate, never reserve a sub-minimal sliver. */
+  test("a top chip pinned into a corner folds into overflow instead of reserving a sliver", () => {
+    /* Off-screen up-left: its center-to-corner ray crosses the *top* edge at
+       x≈CHIP_EDGE_PAD (the left corner), where chipRevealWidth is ~0. */
+    const chips = offscreenClusterChips([cluster("top-corner", -643, -500)], cam, vp);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["top-corner"]);
+  });
+
+  test("a bottom chip pinned into a corner also folds", () => {
+    const chips = offscreenClusterChips([cluster("bottom-corner", -643, 1_100)], cam, vp);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["bottom-corner"]);
+  });
+
+  test("a top chip clear of both corners keeps its full reveal band and stays visible", () => {
+    const chips = offscreenClusterChips([cluster("top-center", 450, -700)], cam, vp);
+    expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["top-center"]);
+    const { edge, x } = chips.visible[0]!;
+    expect(chipRevealWidth(edge, x, vp)).toBeGreaterThanOrEqual(CHIP_MIN_W);
+  });
+
+  test("every admitted chip around every edge and both corners reserves at least the minimum collision-safe reveal width", () => {
+    /* A dense ring of off-screen clusters aimed at every edge and both corners:
+       whichever survive as visible must each reserve a positive, at-least-
+       minimum band — the corner-pinned ones fold instead. */
+    const ring: BoardCluster[] = [];
+    for (let angle = 0; angle < 360; angle += 12) {
+      const rad = (angle * Math.PI) / 180;
+      ring.push(cluster(`ring-${angle}`, Math.round(500 + Math.cos(rad) * 4_000), Math.round(350 + Math.sin(rad) * 4_000)));
+    }
+    const chips = offscreenClusterChips(ring, cam, vp, 99);
+    expect(chips.visible.length).toBeGreaterThan(0);
+    for (const chip of chips.visible) {
+      expect(chipRevealWidth(chip.edge, chip.x, vp)).toBeGreaterThanOrEqual(CHIP_MIN_W);
+    }
+  });
+});
+
 describe("pane-overlap folding (issue #292: navigation chips never cover chat content)", () => {
   test("a chip whose pill would paint over a conversation pane folds into the edge overflow", () => {
     /* A focused pane fills the whole viewport — production shape from the
@@ -126,5 +169,50 @@ describe("pane-overlap folding (issue #292: navigation chips never cover chat co
     );
     expect(chips.visible).toHaveLength(0);
     expect(chips.overflow).toHaveLength(1);
+  });
+});
+
+describe("fixed-chrome keep-out (issue #474: chips never paint over the subagent avatar/round stack or the composer)", () => {
+  test("screenKeepoutObstacles translates viewport rects into chip-local space", () => {
+    /* Board container's screen origin is (200, 80); a subagent avatar at screen
+       (210, 300) lands at chip-local (10, 220). */
+    const local = screenKeepoutObstacles({ left: 200, top: 80 }, [{ left: 210, top: 300, width: 30, height: 120 }], vp);
+    expect(local).toEqual([{ x: 10, y: 220, w: 30, h: 120 }]);
+  });
+
+  test("screenKeepoutObstacles drops zero-area and fully off-viewport chrome", () => {
+    const local = screenKeepoutObstacles({ left: 200, top: 80 }, [
+      { left: 210, top: 300, width: 0, height: 120 }, // collapsed
+      { left: 100, top: 80, width: 40, height: 100 }, // entirely left of the board (x+w ≤ 0)
+      { left: 210, top: 300, width: 30, height: 120 }, // real
+    ], vp);
+    expect(local).toEqual([{ x: 10, y: 220, w: 30, h: 120 }]);
+  });
+
+  test("a left chip whose revealed band overlaps the subagent avatar rail folds into overflow", () => {
+    /* The off-screen card's avatar/round stack pokes into the viewport at the
+       left edge (a screen-space keep-out, x≈8–46). The left chip's reserved
+       reveal band starts at x≈22 and would paint over it, so it folds. */
+    const rail = screenKeepoutObstacles({ left: 0, top: 0 }, [{ left: 8, top: 280, width: 38, height: 160 }], vp);
+    const chips = offscreenClusterChips([cluster("left-task", -700, 300)], cam, vp, 4, rail);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["left-task"]);
+  });
+
+  test("a low left chip whose band overlaps the composer/input folds into overflow", () => {
+    /* Composer docked at the bottom-left; a left-edge chip anchored low would
+       paint its revealed band over it, so it folds. */
+    const composer = screenKeepoutObstacles({ left: 0, top: 0 }, [{ left: 0, top: 620, width: 340, height: 70 }], vp);
+    const chips = offscreenClusterChips([cluster("left-low-task", -350, 796)], cam, vp, 4, composer);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["left-low-task"]);
+  });
+
+  test("a chip clear of the avatar rail and composer stays visible", () => {
+    /* Keep-out chrome sits in the bottom-left; a right-edge chip is untouched. */
+    const keepout = screenKeepoutObstacles({ left: 0, top: 0 }, [{ left: 8, top: 280, width: 38, height: 160 }], vp);
+    const chips = offscreenClusterChips([cluster("right-task", 1_700, 300)], cam, vp, 4, keepout);
+    expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["right-task"]);
+    expect(chips.overflow).toHaveLength(0);
   });
 });

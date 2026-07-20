@@ -32,6 +32,36 @@ export interface ClusterChipPartition {
 const intersects = (a: SchemeRect, b: SchemeRect): boolean =>
   a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
+/** A viewport-space rectangle as a browser {@link DOMRect} reports it. */
+export interface ScreenRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** Translate fixed board chrome — the subagent avatar/round stack and the
+    composer/input area — from viewport space into the chip layer's local space
+    (origin `base`, the board container's screen top-left) and keep only the
+    parts that actually fall inside the chip viewport. Feeding these to
+    {@link offscreenClusterChips} as obstacles makes an edge chip whose revealed
+    band would paint over one fold into its «+N» disclosure instead of covering
+    the avatars or the composer (operator overlap report, issue #474). */
+export function screenKeepoutObstacles(
+  base: { left: number; top: number },
+  rects: readonly ScreenRect[],
+  vp: { w: number; h: number },
+): SchemeRect[] {
+  const out: SchemeRect[] = [];
+  for (const rect of rects) {
+    if (rect.width < 1 || rect.height < 1) continue;
+    const box: SchemeRect = { x: rect.left - base.left, y: rect.top - base.top, w: rect.width, h: rect.height };
+    if (box.x + box.w <= 0 || box.y + box.h <= 0 || box.x >= vp.w || box.y >= vp.h) continue;
+    out.push(box);
+  }
+  return out;
+}
+
 /** Screen-space padding between a chip's anchored edge and the viewport border;
     mirrors the ray-cast anchor pad below so the reveal budget matches placement. */
 export const CHIP_EDGE_PAD = 22;
@@ -40,6 +70,15 @@ export const CHIP_EDGE_PAD = 22;
     plus the reserved control box and padding. The label never grows past this,
     so collision geometry can reserve it up front. */
 export const CHIP_MAX_W = 520;
+/** Smallest outer width a chip needs to render its resting state without
+    clipping: the reserved direction-control box, the base (unrevealed) label
+    segment (REVEAL_BASE_PX in {@link EdgeChips}), and the pill's horizontal
+    padding. A top/bottom chip anchored so near a corner that its viewport-
+    clamped reveal budget drops below this can never paint a usable pill — and a
+    near-zero reserved box would also slip past every obstacle — so it folds
+    into the edge «+N» disclosure instead of reserving a sub-minimal, unreadable
+    sliver (issue #474 corner reveal). */
+export const CHIP_MIN_W = 180;
 const CHIP_H = 44;
 
 /** The widest a chip can ever paint at this anchor: the fully-revealed width,
@@ -60,8 +99,7 @@ export function chipRevealWidth(edge: ChipEdge, x: number, vp: { w: number; h: n
    EdgeChips, in screen space. Reserves the *fully-revealed* width (not the
    resting pill) so a chip whose unfurled label would paint over a conversation
    surface folds into the edge disclosure before it can reveal (issue #474). */
-function chipBox(chip: Omit<ClusterChip, "cluster">, vp: { w: number; h: number }): SchemeRect {
-  const w = chipRevealWidth(chip.edge, chip.x, vp);
+function chipBox(chip: Omit<ClusterChip, "cluster">, w: number): SchemeRect {
   if (chip.edge === "left") return { x: chip.x, y: chip.y - CHIP_H / 2, w, h: CHIP_H };
   if (chip.edge === "right") return { x: chip.x - w, y: chip.y - CHIP_H / 2, w, h: CHIP_H };
   if (chip.edge === "top") return { x: chip.x - w / 2, y: chip.y, w, h: CHIP_H };
@@ -108,8 +146,13 @@ export function offscreenClusterChips(
   for (const cluster of sorted) {
     const chip = { cluster, ...chipAnchor(cluster.rect, cam, vp) };
     const count = counts.get(chip.edge) ?? 0;
-    const box = chipBox(chip, vp);
-    if (count < perEdgeCap && !obstacles.some((obstacle) => intersects(box, obstacle))) {
+    const width = chipRevealWidth(chip.edge, chip.x, vp);
+    const box = chipBox(chip, width);
+    /* A chip is admitted only when its edge still has a slot, its viewport-
+       clamped reveal band is at least CHIP_MIN_W (positive and wide enough to
+       render — corner-pinned top/bottom chips fail here), and that reserved
+       band clears every conversation surface. Otherwise it folds into «+N». */
+    if (count < perEdgeCap && width >= CHIP_MIN_W && !obstacles.some((obstacle) => intersects(box, obstacle))) {
       visible.push(chip);
       counts.set(chip.edge, count + 1);
     } else {

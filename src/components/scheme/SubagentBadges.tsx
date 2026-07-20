@@ -75,6 +75,7 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
             <span
               key="overflow"
               data-subagent-overflow
+              data-chip-keepout
               data-scheme-ui
               className="pointer-events-auto absolute z-[6] inline-flex w-[30px] items-center justify-center rounded-full border border-border bg-card text-[10px] font-bold tabular-nums text-muted shadow-1"
               style={relativeStyle}
@@ -114,6 +115,10 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
             type="button"
             data-subagent-badge={child.id}
             data-subagent-state={child.state}
+            /* An edge-navigation chip reserves a clear band around this
+               avatar/round stack (issue #474): its screen box is a chip
+               keep-out so a revealed chip folds rather than paint over it. */
+            data-chip-keepout
             /* data-scheme-ui exempts the badge from the camera's pan/tap capture
                so a coarse-pointer default hand board still delivers the tap;
                pointer-events-auto re-enables it inside the hand-mode

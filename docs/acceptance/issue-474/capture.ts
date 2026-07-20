@@ -12,10 +12,12 @@
  *     bun docs/acceptance/issue-474/capture.ts
  *
  * Fixture (created fresh under $TMPDIR/llv-issue-474-fixture on every run):
- *  - Five live claude conversations in project "atlas", each with a long,
- *    descriptive (48–60 char) first user message so its chip label overflows
- *    the resting width. All mtimes are ~30s old so every conversation is
- *    current work and therefore an edge-navigation cluster.
+ *  - Five live claude conversations in project "atlas", each with a descriptive
+ *    first user message of *exactly* 48 or 60 characters (both lengths present)
+ *    so its chip label overflows the resting width and whichever chip surfaces
+ *    proves an exact 48- or 60-character reveal. All mtimes are ~30s old so
+ *    every conversation is current work and therefore an edge-navigation
+ *    cluster.
  *
  * What the stills prove, in the real production build:
  *  - Desktop (1440×900), folded: reading conversations while others sit
@@ -26,8 +28,13 @@
  *  - Desktop (1440×900), a real *visible* long chip: the board is panned until a
  *    single long-titled off-screen cluster surfaces as an on-edge chip clear of
  *    every pane. Captured at rest (title truncated behind a reserved control
- *    box) and fully revealed (keyboard focus unfurls the whole 48–60 char label
- *    inside the same button, still inside the viewport, still clear of content).
+ *    box) and fully revealed through keyboard focus, repeated pointer
+ *    progression, and reduced-motion hover — each unfurls the whole exact 48- or
+ *    60-char label inside the same button with its scrollWidth contained (no
+ *    ellipsis), still inside the viewport, still clear of content. A keep-out
+ *    band dropped over the chip's reveal band (standing in for the vertical
+ *    agent-avatar/round stack or the composer/input) folds it into «+N» instead
+ *    of letting it paint over that surface (operator overlap report).
  *  - Mobile (390×844): a real conversation is open in the phone focus view; every
  *    edge chip / off-screen landmark is gone (the wayfinding adds zero horizontal
  *    overflow), the conversation pane is horizontally contained inside 390px, and
@@ -56,15 +63,17 @@ function jsonl(records: unknown[]): string {
 /* Titles only: a fresh session id is minted per run (randomUUID) so no
    identifier literal lives in this published harness — the disposable fixture
    home under $TMPDIR is the only place a concrete id is ever written. Each
-   title is a generic 48–60 character engineering phrase (the length band of a
-   real current-work label) so its chip overflows the resting width and the
-   full reveal has something long to unfurl. */
+   title is a generic engineering phrase of *exactly* 48 or 60 characters — the
+   two ends of a real current-work label's length band — so whichever chip the
+   board surfaces overflows its resting width and its full reveal proves an
+   exact 48- or 60-character title rendering end to end. Both exact lengths are
+   present, so the harness exercises each. */
 const CONVERSATION_TITLES = [
-  "Deterministic capture pipeline for stage two builder",
-  "Reasoning effort meter reserved slot on every surface",
-  "Off-screen edge navigation with bounded progressive reveal",
-  "Minimap full world extent and viewport rectangle framing",
-  "In-place login recovery for accounts stuck in error state",
+  "Deterministic capture pipeline for stage builder", // 48
+  "Off-screen edge navigation with a bounded progressive reveal", // 60
+  "Reserved reasoning effort meter on every surface", // 48
+  "In-place login recovery for accounts stuck in an error state", // 60
+  "Bounded off-screen edge chip progressive reveals", // 48
 ];
 
 function buildFixtureHome(): string {
@@ -199,6 +208,12 @@ async function main(): Promise<void> {
   const home = buildFixtureHome();
   console.log(`fixture home: ${home}`);
 
+  /* The reveal proof is only meaningful if the fixture really carries exact
+     48- and 60-character titles: pin that before booting anything. */
+  const titleLengths = CONVERSATION_TITLES.map((title) => title.length);
+  check(titleLengths.every((n) => n === 48 || n === 60), "fixture-exact-title-lengths", `every fixture title is exactly 48 or 60 characters (${JSON.stringify(titleLengths)})`);
+  check(titleLengths.includes(48) && titleLengths.includes(60), "fixture-covers-48-and-60", "the fixture exercises both an exact 48- and an exact 60-character current-work title");
+
   const server = spawn("bunx", ["next", "start", "--hostname", "127.0.0.1", "--port", String(PORT)], {
     cwd: REPO_ROOT,
     env: serverEnv(home),
@@ -263,13 +278,19 @@ async function main(): Promise<void> {
         };
       });
       check(list.count >= 1 && list.allButtons, "desktop-offscreen-list", `expanding reveals ${list.count} click-to-fit off-screen conversation button(s)`);
-      check(list.labels.every((l: string) => l.length > 0), "desktop-offscreen-labels", `every off-screen entry carries its conversation label (${JSON.stringify(list.labels)})`);
+      check(
+        list.labels.every((l: string) => CONVERSATION_TITLES.includes(l)),
+        "desktop-offscreen-labels",
+        `every off-screen entry carries its WHOLE cleaned title, never a truncation (${JSON.stringify(list.labels)})`,
+      );
       check(list.expanded, "desktop-disclosure-expands", "the disclosure reports aria-expanded=true once opened");
       await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-offscreen-edge-nav-expanded.png") });
       console.log("  shot desktop-1440-offscreen-edge-nav-expanded.png");
 
       /* Close the disclosure, then pan until one long chip is isolated on an
-         edge with a clear reveal band. */
+         edge with a clear reveal band. Every fixture title is exactly 48 or 60
+         chars, so whichever chip surfaces proves an exact-length reveal end to
+         end. */
       await page.keyboard.press("Escape");
       await Bun.sleep(150);
       const sel = await surfaceLongVisibleChip(page);
@@ -296,6 +317,7 @@ async function main(): Promise<void> {
         };
       }, sel);
       check(resting.truncated, "desktop-chip-resting-truncated", `the resting chip label "${resting.label}" (${resting.label.length} chars) overflows its resting width — data-reveal ${resting.reveal}`);
+      check(resting.label.length === 48 || resting.label.length === 60, "desktop-chip-exact-length", `the surfaced chip carries an exact ${resting.label.length}-character current-work title`);
       check(resting.controlBeforeTitle, "desktop-chip-control-reserved", "the direction control sits in its own reserved box before the title — never over the label");
       check(resting.inViewport, "desktop-chip-resting-in-viewport", `the resting pill (width ${resting.width}px) stays inside the 1440px viewport`);
       check(!resting.overlapsPane, "desktop-chip-resting-clear", "the resting chip does not overlap any open conversation pane");
@@ -342,11 +364,78 @@ async function main(): Promise<void> {
         };
       }, sel);
       check(revealed.reveal === "full", "desktop-chip-focus-full", `keyboard focus sets the title to its full reveal (data-reveal ${revealed.reveal})`);
-      check(revealed.fullyShown, "desktop-chip-fully-revealed", `the whole ${revealed.label.length}-char label "${revealed.label}" is visible with no ellipsis once revealed`);
+      check(revealed.fullyShown, "desktop-chip-fully-revealed", `the whole ${revealed.label.length}-char label "${revealed.label}" is visible with no ellipsis — its scrollWidth is contained within the pill once revealed`);
       check(revealed.inViewport, "desktop-chip-revealed-in-viewport", `the fully-revealed pill (width ${revealed.width}px) stays inside the 1440px viewport`);
       check(!revealed.overlapsPane, "desktop-chip-revealed-clear", "the fully-revealed chip still does not overlap any open conversation pane");
       await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-edge-chip-revealed.png") });
       console.log("  shot desktop-1440-edge-chip-revealed.png");
+
+      /* Reduced motion: a hover (no keyboard, no stepping) settles the whole
+         label at once — still fully contained (scrollWidth ≤ pill) and inside
+         the viewport. Blur first so the reveal comes from the hover alone. */
+      await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+      await page.evaluate((selector: string) => (document.querySelector(selector) as HTMLElement).blur(), sel);
+      await Bun.sleep(100);
+      const reduced = await page.evaluate(async (selector: string) => {
+        const chip = document.querySelector(selector) as HTMLElement;
+        const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
+        const settle = () => new Promise((r) => setTimeout(r, 60));
+        chip.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+        await settle();
+        const br = chip.getBoundingClientRect();
+        return {
+          reveal: title.getAttribute("data-reveal"),
+          fullyShown: title.scrollWidth - title.clientWidth <= 1,
+          label: title.textContent || "",
+          inViewport: br.left >= -0.5 && br.right <= window.innerWidth + 0.5,
+        };
+      }, sel);
+      check(reduced.reveal === "full", "desktop-chip-reduced-motion-hover", `reduced-motion hover reveals the whole label at once (data-reveal ${reduced.reveal})`);
+      check(reduced.fullyShown, "desktop-chip-reduced-motion-contained", `under reduced motion the ${reduced.label.length}-char label shows in full with its scrollWidth contained inside the pill (no ellipsis)`);
+      check(reduced.inViewport, "desktop-chip-reduced-motion-in-viewport", "the reduced-motion reveal stays inside the 1440px viewport");
+      await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "no-preference" }]);
+
+      /* Overlap regression (operator report): the revealed chip/title/direction
+         control must clear the vertical agent-avatar/round stack and never paint
+         over the composer/input. Those surfaces are tagged `data-chip-keepout`
+         and reserved as collision obstacles. Drop a keep-out band exactly over
+         the surfaced chip's reveal band — standing in for a subagent avatar
+         column poking in at the edge — and the board must fold the chip into its
+         «+N» disclosure rather than reveal across the band. */
+      const beforeFold = await page.evaluate((selector: string) => {
+        const chip = document.querySelector(selector) as HTMLElement;
+        const r = chip.getBoundingClientRect();
+        const rail = document.createElement("div");
+        rail.setAttribute("data-chip-keepout", "");
+        rail.id = "llv-474-keepout-probe";
+        Object.assign(rail.style, {
+          position: "fixed", left: `${Math.round(r.left)}px`, top: `${Math.round(r.top - 12)}px`,
+          width: "44px", height: `${Math.round(r.height + 44)}px`, zIndex: "5", pointerEvents: "none",
+        });
+        document.body.appendChild(rail);
+        return Array.from(document.querySelectorAll("[data-edge-chip]")).length;
+      }, sel);
+      await Bun.sleep(500); // MutationObserver → re-measure → re-render
+      const afterFold = await page.evaluate((selector: string) => {
+        const overlaps = (a: DOMRect, b: DOMRect) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+        const rail = document.getElementById("llv-474-keepout-probe")!.getBoundingClientRect();
+        const chips = Array.from(document.querySelectorAll("[data-edge-chip]")) as HTMLElement[];
+        const railOverlap = chips.some((c) => { const r = c.getBoundingClientRect(); return r.width > 0 && overlaps(r, rail); });
+        // Overlap check against EVERY real keep-out surface currently on screen.
+        const keepouts = Array.from(document.querySelectorAll("[data-chip-keepout]")) as HTMLElement[];
+        const anyKeepoutOverlap = chips.some((c) => {
+          const r = c.getBoundingClientRect();
+          if (r.width <= 0) return false;
+          return keepouts.some((k) => { const kr = k.getBoundingClientRect(); return kr.width > 0 && kr.height > 0 && overlaps(r, kr); });
+        });
+        document.getElementById("llv-474-keepout-probe")?.remove();
+        return { chipGone: !document.querySelector(selector), railOverlap, anyKeepoutOverlap };
+      }, sel);
+      check(beforeFold >= 1, "desktop-keepout-precondition", `a chip was on the board before the keep-out band was placed (${beforeFold} chip(s))`);
+      check(afterFold.chipGone, "desktop-chip-folds-off-agent-stack", "a chip whose reveal band overlaps the agent-avatar/round keep-out folds into its «+N» disclosure instead of painting over it");
+      check(!afterFold.railOverlap && !afterFold.anyKeepoutOverlap, "desktop-chip-clears-keepout", "no visible edge chip overlaps the agent-avatar/round stack or the composer/input keep-out surfaces");
+      await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-edge-chip-keepout-clear.png") });
+      console.log("  shot desktop-1440-edge-chip-keepout-clear.png");
       await page.close();
     }
 
@@ -425,7 +514,7 @@ async function main(): Promise<void> {
         capturedAt: new Date().toISOString(),
         viewer: "production next start",
         viewport: { desktop: "1440x900", mobile: "390x844" },
-        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (10 tests: continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, click fit, coarse-pointer removal) + src/components/scheme/offscreenClusters.test.ts (reserves the fully-revealed width in collision geometry)",
+        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/offscreenClusters.test.ts (reserves the fully-revealed width in collision geometry; top/bottom chips pinned into a corner fold into «+N» instead of reserving a sub-minimal reveal band; every admitted chip reserves at least the minimum collision-safe width; a chip whose revealed band overlaps the subagent avatar/round stack or the composer/input keep-out folds instead of painting over it)",
         checks,
       }, null, 2) + "\n",
     );

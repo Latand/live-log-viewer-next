@@ -75,13 +75,17 @@ const clusters: BoardCluster[] = [{
 }];
 
 function mount(onFit: (rect: { x: number; y: number }) => void = () => {}) {
+  return mountClusters(clusters, onFit);
+}
+
+function mountClusters(input: BoardCluster[], onFit: (rect: { x: number; y: number }) => void = () => {}) {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
   roots.add(root);
   flushSync(() => root.render(
     <EdgeChips
-      clusters={clusters}
+      clusters={input}
       cam={{ x: 0, y: 0, z: 1 }}
       vp={{ w: 1_000, h: 700 }}
       hidden={false}
@@ -89,6 +93,13 @@ function mount(onFit: (rect: { x: number; y: number }) => void = () => {}) {
     />,
   ));
   return host;
+}
+
+/* A single right-anchored cluster whose label is exactly `label`. The right
+   edge on a 1000px viewport reserves the full CHIP_MAX_W reveal budget, so the
+   whole title can unfurl. */
+function labelCluster(label: string): BoardCluster[] {
+  return [{ key: "exact", label, rect: { x: 4_000, y: 300, w: 100, h: 100 }, priority: 10, color: "red" }];
 }
 
 function chip(host: HTMLElement): HTMLButtonElement {
@@ -239,6 +250,56 @@ test("reduced motion reveals fully on hover instead of animating segments", asyn
   await settle();
   expect(title.getAttribute("data-reveal")).toBe("full");
 });
+
+/* The full 48/60-char band a real current-work title occupies — the reveal
+   paths must render each length completely, never a truncated remnant. */
+const EXACT_TITLES: Record<number, string> = {
+  48: "Deterministic capture pipeline for stage builder",
+  60: "In-place login recovery for accounts stuck in an error state",
+};
+
+for (const length of [48, 60] as const) {
+  test(`an exactly ${length}-character title unfurls fully through focus, repeated pointer progression, and reduced-motion hover — always inside the viewport budget`, async () => {
+    const label = EXACT_TITLES[length]!;
+    expect(label.length).toBe(length);
+    const host = mountClusters(labelCluster(label));
+    const button = chip(host);
+    const title = button.querySelector("[data-edge-chip-title]") as HTMLElement;
+    /* The complete cleaned title is present in the DOM (nothing pre-truncated),
+       so every reveal path has the whole label to unfurl. */
+    expect(title.textContent).toBe(label);
+
+    /* Keyboard focus reveals the whole label at once and drops the width cap so
+       the browser sizes the label to contain its full scrollWidth. */
+    button.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    await settle();
+    expect(title.getAttribute("data-reveal")).toBe("full");
+    expect(title.style.maxWidth === "" || title.style.maxWidth === "none").toBe(true);
+    button.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    await settle();
+    expect(title.getAttribute("data-reveal")).toBe("0");
+
+    /* Repeated pointer progression steps the reveal segment by segment, each
+       step clamped to the viewport-safe CHIP_MAX_W budget. */
+    stubTitle(title, { scrollWidth: 12 * length + 400, clientWidth: 120, right: 200 });
+    for (let reveal = 1; reveal <= 6; reveal += 1) {
+      button.dispatchEvent(new PointerEvent("pointermove", { clientX: 199, bubbles: true }));
+      await settle();
+      expect(title.getAttribute("data-reveal")).toBe(String(reveal));
+      expect(Number.parseFloat(title.style.maxWidth)).toBeLessThanOrEqual(CHIP_MAX_W);
+    }
+    button.dispatchEvent(new PointerEvent("pointerout", { bubbles: true }));
+    await settle();
+    expect(title.getAttribute("data-reveal")).toBe("0");
+
+    /* Reduced motion settles the full reveal on hover instead of stepping. */
+    mediaState.reducedMotion = true;
+    button.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    await settle();
+    expect(title.getAttribute("data-reveal")).toBe("full");
+    expect(title.style.maxWidth === "" || title.style.maxWidth === "none").toBe(true);
+  });
+}
 
 test("clicking the chip still fits its cluster", () => {
   const fitted: string[] = [];

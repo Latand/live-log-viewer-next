@@ -1617,7 +1617,7 @@ export function ProjectDashboard({
             {/* The create button floats in the bottom-left corner of the board —
                 away from the fixed attention pill in the top-right, above the
                 residual strip. On the phone the header keeps this button. */}
-            <div className="pointer-events-none absolute bottom-4 left-4 z-30 flex items-center gap-2">
+            <div data-chip-keepout className="pointer-events-none absolute bottom-4 left-4 z-30 flex items-center gap-2">
               <button
                 type="button"
                 onClick={addDraft}
