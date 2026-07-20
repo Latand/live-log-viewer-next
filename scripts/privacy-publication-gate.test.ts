@@ -1303,6 +1303,15 @@ describe("privacy publication gate", () => {
     expect(workflow).toContain('--base "$PRIVACY_BASE_SHA"');
   });
 
+  test("scopes issue-comment audits to the triggering comment", () => {
+    const workflow = readFileSync(join(import.meta.dir, "..", ".github", "workflows", "privacy-tracker-audit.yml"), "utf8");
+
+    expect(workflow).toContain(
+      "PUBLICATION_ISSUE_COMMENT_ID: ${{ github.event_name == 'issue_comment' && github.event.comment.id || '' }}",
+    );
+    expect(workflow).toContain('--issue-comment "$PUBLICATION_ISSUE_COMMENT_ID"');
+  });
+
   test("uses trusted scanner and fingerprints when every candidate gate surface is tampered", () => {
     const root = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(root);
@@ -1929,6 +1938,57 @@ describe("privacy publication gate", () => {
       if (originalOcrLanguages === undefined) delete process.env.LLV_PRIVACY_OCR_LANGUAGES;
       else process.env.LLV_PRIVACY_OCR_LANGUAGES = originalOcrLanguages;
     }
+  });
+
+  test("audits only the triggering issue comment when a surface is selected", async () => {
+    const syntheticHome = ["", "home", "fixture-person", "historical-issue"].join("/");
+    const requests: string[] = [];
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      requests.push(url.pathname);
+      if (url.pathname.endsWith("/issues/421")) return Response.json({ body: syntheticHome, title: "Historical issue" });
+      if (url.pathname.endsWith("/issues/421/comments")) return Response.json([{ body: "Clean historical comment" }]);
+      if (url.pathname.endsWith("/issues/comments/999")) return Response.json({ body: "Clean current status" });
+      return new Response(null, { status: 404 });
+    };
+
+    const findings = await auditGithubPublication({
+      apiUrl: "https://api.github.test/",
+      fetcher,
+      number: 421,
+      repo: "example/repository",
+      requireKnownValues: false,
+      surface: { id: 999, kind: "issue_comment" },
+      token: "synthetic-github-audit-token",
+    });
+
+    expect(formatPrivacyReport(findings)).toBe("PRIVACY GATE: PASS\n");
+    expect(requests).toEqual(["/repos/example/repository/issues/comments/999"]);
+  });
+
+  test("keeps triggering issue-comment audits fail closed with class-only diagnostics", async () => {
+    const syntheticIdentifier = ["12345678", "1234", "4abc", "8def", "123456789abc"].join("-");
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = new URL(input);
+      if (url.pathname.endsWith("/issues/comments/999")) {
+        return Response.json({ body: `Sensitive resource ${syntheticIdentifier}` });
+      }
+      return new Response(null, { status: 404 });
+    };
+
+    const findings = await auditGithubPublication({
+      apiUrl: "https://api.github.test/",
+      fetcher,
+      number: 421,
+      repo: "example/repository",
+      requireKnownValues: false,
+      surface: { id: 999, kind: "issue_comment" },
+      token: "synthetic-github-audit-token",
+    });
+    const output = formatPrivacyReport(findings);
+
+    expect(output).toBe("PRIVACY GATE: FAIL\nresource_identifier: 1\n");
+    expect(output).not.toContain(syntheticIdentifier);
   });
 
   test("audits issue titles with class-only diagnostics", async () => {
