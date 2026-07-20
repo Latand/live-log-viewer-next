@@ -218,6 +218,7 @@ describe("WakaTime activity sync", () => {
     const filename = path.join(directory, "wakatime-api-key");
     try {
       fs.writeFileSync(filename, `${TEST_CREDENTIAL}\n`, { mode: 0o644 });
+      fs.chmodSync(filename, 0o644);
 
       expect(readWakatimeCredentialFile(filename)).toBeNull();
     } finally {
