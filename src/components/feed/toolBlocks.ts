@@ -1,6 +1,6 @@
 import { getLocale, translate } from "@/lib/i18n";
 
-import type { ToolEvent } from "./parse";
+import { hasSameSessionOwner, type ToolEvent } from "./parse";
 
 /* Pure helpers behind the readable expanded tool block (issue #475): the
    parent/child nesting of Codex interactive-shell follow-ups, and the duration
@@ -27,7 +27,7 @@ export function isFollowUpCall(event: ToolEvent): boolean {
 function ownerBlock(blocks: readonly ToolBlock[], followUp: ToolEvent): ToolBlock | undefined {
   if (followUp.session !== undefined) {
     for (let i = blocks.length - 1; i >= 0; i -= 1) {
-      if (blocks[i].parent.session === followUp.session) return blocks[i];
+      if (hasSameSessionOwner(blocks[i].parent, followUp)) return blocks[i];
     }
     return undefined;
   }
@@ -109,7 +109,8 @@ export function formatDuration(ms: number): string {
     const n = totalSec < 10 ? Math.round(totalSec * 10) / 10 : Math.round(totalSec);
     return t("tools.durationSec", { n });
   }
-  const m = Math.floor(totalSec / 60);
-  const s = Math.round(totalSec % 60);
-  return t("tools.durationMin", { m, s: s === 60 ? 0 : s });
+  const roundedSec = Math.round(totalSec);
+  const m = Math.floor(roundedSec / 60);
+  const s = roundedSec % 60;
+  return t("tools.durationMin", { m, s });
 }
