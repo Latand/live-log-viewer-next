@@ -198,12 +198,121 @@ export function stageAttempts(pipeline: Pipeline, stageId: string): PipelineStag
   return pipeline.runs.find((run) => run.stageId === stageId)?.attempts ?? [];
 }
 
+/** Pipeline lifecycle states that still project planned-stage placeholders on the
+    board: a draft/provisioning/running/blocked pipeline shows its yet-to-launch
+    stages as conversation-shaped placeholders inside its colored halo (#353).
+    A completed/closed pipeline has no future stages, so it grows no placeholder. */
+export const PIPELINE_PLACEHOLDER_STATES: ReadonlySet<PipelineState> = new Set([
+  "draft",
+  "provisioning",
+  "running",
+  "needs_decision",
+  "paused",
+]);
+
+/** Attempt states that are still in flight — the engine created the attempt and it
+    has not yet settled on a verdict. These are exactly the states an attempt passes
+    through while its surface travels from a bare cursor to a placed board rect
+    (pending → spawning → running/reviewing/committing). A settled attempt
+    (passed/failed/skipped/needs_decision) is terminal evidence, folded into compact
+    navigable history rather than a live placeholder. */
+export const LIVE_ATTEMPT_STATES: ReadonlySet<PipelineAttemptState> = new Set([
+  "pending", "spawning", "running", "reviewing", "committing",
+]);
+
+/** The stages of a pipeline that render as conversation-shaped placeholder cards
+    (#353): a stage that has no PLACED board surface for its current work. That
+    covers the yet-to-launch (future) stages AND the live cursor stage across its
+    whole materialization arc — pending/spawning (no `agentPath`/`flowId` yet),
+    then artifact path/flow publication, then scan discovery, right up until its
+    transcript is actually a placed board rect. Reading the stored `agentPath`/
+    `flowId` alone (the pre-R4 predicate) dropped the placeholder the instant the
+    path appeared — before the scanned conversation had a placed rect — leaving the
+    stage with zero pane, zero placeholder, zero halo through the whole publish →
+    scan → place gap (#353 R4). Keying off actual board placement instead keeps
+    exactly one surface continuously: the placeholder is retained until
+    `stageHasBoardPresence` is true, then dissolves the instant the real pane lands
+    (the live pane owns the slot) — so there is never a duplicate placeholder + pane
+    once placement exists. The cursor stage keeps its placeholder until board
+    presence even when its attempt has already SETTLED — a cursor parked in
+    needs_decision (pathless, or with a published-yet-unplaced artifact) is
+    excluded from compact history by layout, so its placeholder is the only surface
+    that keeps the stage and its incident pass/fail/loop rails alive until a real
+    board rect lands (#353 R5). A NON-cursor stage that has already materialized a
+    transcript/flow but has no placed rect is compact navigable history folded out
+    of the scene (compactPipelineArtifactPaths), never a placeholder — so a
+    failed/folded/terminal attempt does not resurrect a big empty shell. Only
+    placeholder-state pipelines grow any. `placedPaths`/`placedFlowIds` are the
+    board's currently-placed node paths and review-deck flow ids; called without
+    them (no placement knowledge) the predicate conservatively assumes nothing is
+    placed yet and keeps the live stage's placeholder. */
+export function pipelinePlaceholderStages(
+  pipeline: Pipeline,
+  placedPaths: ReadonlySet<string> = new Set(),
+  placedFlowIds: ReadonlySet<string> = new Set(),
+): PipelineStage[] {
+  if (!PIPELINE_PLACEHOLDER_STATES.has(pipeline.state)) return [];
+  return pipeline.stages.filter((stage) => {
+    const attempt = latestAttempt(pipeline, stage.id);
+    /* No operational attempt: a never-launched stage is a placeholder; an
+       all-historical stage is compact navigable history, not a placeholder. */
+    if (!attempt) return stageAttempts(pipeline, stage.id).length === 0;
+    /* The attempt already owns a placed board rect (its transcript is a placed
+       node, or its review deck is laid out): the live pane owns the slot, so no
+       placeholder — this is what prevents a duplicate placeholder + pane. */
+    if (stageHasBoardPresence(pipeline, stage, placedPaths, placedFlowIds)) return false;
+    /* No placed rect yet. The CURRENT CURSOR stage of a pipeline PARKED in
+       needs_decision keeps exactly one placeholder even though its attempt has
+       settled: layout folds every terminal NON-cursor stage into compact navigable
+       history but explicitly excludes the cursor stage from that history (a
+       cursor's quiet history shelves, not an anchor — layout §slotStages). So a
+       cursor attempt that parks in needs_decision before its transcript is a placed
+       board rect — whether it is still pathless (agentPath/flowId null) or has
+       published an artifact that has not yet been placed — has nowhere else to
+       surface: without a placeholder it falls to zero pane / zero placeholder /
+       zero halo and drops every incident pass/fail/loop rail (#353 R5). Keeping the
+       placeholder until board presence lands (dissolved the instant the pane
+       appears above) preserves the single continuous cursor surface across the
+       park. This is gated on the parked (needs_decision) pipeline state — mirroring
+       stageHasEvidence — so a merely quiet cursor whose failed transcript is a
+       reachable folded under-deck still shelves (#343) rather than resurrecting an
+       empty shell. */
+    if (pipeline.state === "needs_decision" && pipeline.cursor?.stageId === stage.id) return true;
+    /* A NON-cursor stage without a placed rect. A settled attempt
+       (passed/failed/skipped/needs_decision) is terminal evidence — compact
+       navigable history folded out of the scene (a failed attempt folded into an
+       under-deck, a passed prior stage), never a placeholder, so it does not
+       resurrect a big empty shell. Only an in-flight attempt keeps a placeholder:
+       across pending → spawning → path/flow publication → scan → placement its
+       live surface has no placed rect yet, so the stage would otherwise fall to
+       zero pane / zero placeholder (the R4 materialization gap). */
+    return LIVE_ATTEMPT_STATES.has(attempt.state);
+  });
+}
+
 /**
- * Transcript artifacts already represented by the compact pipeline rail.
- * The current run keeps its latest agent pane. During a review loop the flow's
- * implementer stays as the single full conversation pane while reviewer
- * transcripts remain reachable through the review evidence row. Completed
- * pipelines have no live pane, so their entire transcript chain is compact.
+ * Transcript artifacts represented by compact, navigable stage history rather
+ * than a full conversation pane (#353 review round 2).
+ *
+ * Each declared stage projects into exactly ONE surface. Only the pipeline's
+ * current live stage — the cursor's latest attempt — keeps a full conversation
+ * pane. Every terminal or prior stage (a passed/failed/skipped attempt, an
+ * all-historical stage, or an earlier retry) folds into compact navigable
+ * history that stays out of the world scene (and so out of the minimap / Fit All
+ * bounds) until it is opened; its verdict, duration, model, and every retry
+ * transcript remain reachable through the stage's evidence controls. Future
+ * stages hold conversation-shaped placeholders. Keeping only the cursor pane
+ * full-size is what lets the halo read as one live conversation plus its
+ * placeholders instead of a wall of equal cards.
+ *
+ * For a live review-loop cursor the retained pane is the reviewer transcript
+ * itself (`attempt.agentPath`) — the pipeline folds its flow's round deck out of
+ * the layout via compactPipelineLayoutFlows, so the reviewer renders as an
+ * ordinary board card. A review cursor that has not spawned its reviewer yet
+ * falls back to its flow implementer so the loop still shows a live pane.
+ *
+ * Completed and closed pipelines fold their full transcript chain — they have no
+ * live stage and no future placeholders.
  */
 export function compactPipelineArtifactPaths(
   pipelines: readonly Pipeline[],
@@ -218,7 +327,14 @@ export function compactPipelineArtifactPaths(
     const stage = pipeline.stages.find((candidate) => candidate.id === pipeline.cursor!.stageId);
     const attempt = stage ? latestAttempt(pipeline, stage.id) : null;
     if (!stage || !attempt) continue;
-    if (stage.kind === "review-loop") {
+    if (attempt.agentPath) {
+      /* The cursor stage's own transcript — a run's session or the live
+         reviewer's transcript — is the single full pane. */
+      fullPanePaths.add(attempt.agentPath);
+    } else if (stage.kind === "review-loop") {
+      /* A review cursor that has not spawned its reviewer yet keeps the
+         implementer it reviews as the live pane: the flow's implementer, or the
+         most recent preceding passed run. */
       const stageIndex = pipeline.stages.findIndex((candidate) => candidate.id === stage.id);
       const priorRunPath = pipeline.stages
         .slice(0, stageIndex)
@@ -233,8 +349,6 @@ export function compactPipelineArtifactPaths(
           ? latestAttempt(pipeline, priorRunPath.id)?.agentPath
           : null;
       if (implementerPath) fullPanePaths.add(implementerPath);
-    } else if (attempt.agentPath) {
-      fullPanePaths.add(attempt.agentPath);
     }
   }
 
@@ -611,9 +725,9 @@ export function stageChipLabel(t: TFunction, stage: PipelineStage): string {
   return stage.id;
 }
 
-const CURSORLESS_LIVE_STATES: ReadonlySet<PipelineAttemptState> = new Set([
-  "pending", "spawning", "running", "reviewing", "committing",
-]);
+/* A cursorless pipeline rests on its last in-flight stage; the live attempt states
+   that mark it are exactly {@link LIVE_ATTEMPT_STATES}. */
+const CURSORLESS_LIVE_STATES = LIVE_ATTEMPT_STATES;
 
 /**
  * The 1-based array position of the stage a cursorless pipeline rests on (#353).

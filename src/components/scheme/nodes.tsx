@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Layers } from "lucide-react";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -22,8 +22,8 @@ import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
-import { PipelineStageGraph, PipelineStageGraphFlowsProvider } from "@/components/scheme/PipelineStageGraph";
-import { STAGE_TONES, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState, type StageNavTarget } from "@/components/pipelines/pipelineModel";
+import { StageHistoryCard } from "@/components/pipelines/StageHistoryCard";
+import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, latestAttempt, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -375,60 +375,25 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
  * Flow/pipeline GROUP overlay (issue #118): draws each running flow/pipeline as
  * one tinted, dashed region enclosing all of its board occupants, with a colored
  * label chip naming it. The chip is the on-canvas entry point to the stage
- * override controls (GroupOverridePanel). The region itself is inert
- * (pointer-events-none) so it never blocks the cards it frames; only the chip
- * (and its open panel) take pointer events. The label sizes off `--inv-z` so it
- * stays readable when the board is zoomed out to the map. A group appears only
- * while its flow/pipeline is open, so it dissolves on close with no extra state.
+ * override controls (GroupOverridePanel), disclosed on an explicit tap. A fresh
+ * draft reveals its halo while the tall editor stays closed (#353).
+ * The region itself is inert (pointer-events-none) so it never blocks the cards
+ * it frames; only the chip (and its open panel) take pointer events. The label
+ * sizes off `--inv-z` so it stays readable when the board is zoomed out to the
+ * map. A group appears only while its flow/pipeline is open, so it dissolves on
+ * close with no extra state.
  */
-/** Navigation seam for the stage graph mounted in an interactive pipeline group. */
-export interface PipelineGroupControls {
-  flows: readonly Flow[];
-  onOpenAttempt: (target: StageNavTarget) => void;
-}
-
 export const GroupsLayer = memo(function GroupsLayer({
   groups,
   interactive,
-  pipelineControls,
-  autoOpenGroupId,
-  onAutoOpen,
 }: {
   groups: SchemeGroup[];
   /** Passive on the hand-tool, during a selection session and on the lite map:
-      the halos still render, but the label chip stops opening the panel. */
+      the halos still render, but the header chip stops opening the panel. */
   interactive: boolean;
-  /** Interactive groups render the complete declared stage graph through this seam. */
-  pipelineControls?: PipelineGroupControls | null;
-  /** A group id whose override/builder panel should open on its own as soon as it
-      arrives — the canvas builder lands the operator straight in a fresh draft's
-      panel (#136). `onAutoOpen` fires once consumed so the caller clears it. */
-  autoOpenGroupId?: string | null;
-  onAutoOpen?: () => void;
 }) {
+  const { t } = useLocale();
   const [openId, setOpenId] = useState<string | null>(null);
-  /* Open the requested group once it appears (the draft POST → refetch → layout
-     round-trip means its halo may not exist on the render that first receives the
-     id). Adjusted render-phase — React's endorsed idiom, no setState-in-effect
-     cascade — and guarded by a ref so it fires a single time per distinct id even
-     while the prop lingers. Only while interactive, so the map/hand-tool never
-     force a panel open. */
-  const [autoOpened, setAutoOpened] = useState<string | null>(null);
-  if (
-    autoOpenGroupId &&
-    interactive &&
-    autoOpenGroupId !== autoOpened &&
-    groups.some((group) => group.id === autoOpenGroupId)
-  ) {
-    setAutoOpened(autoOpenGroupId);
-    setOpenId(autoOpenGroupId);
-  }
-  /* Tell the caller it can drop the request. This effect only calls the parent
-     callback and runs no local setState, so it stays off the cascading-render path
-     the lint rule guards. */
-  useEffect(() => {
-    if (autoOpenGroupId && autoOpenGroupId === autoOpened) onAutoOpen?.();
-  }, [autoOpenGroupId, autoOpened, onAutoOpen]);
   if (!groups.length) return null;
   const openGroup = interactive ? groups.find((group) => group.id === openId) ?? null : null;
   return (
@@ -462,23 +427,14 @@ export const GroupsLayer = memo(function GroupsLayer({
                 ...(draft ? { backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--color-warning) 7%, transparent) 12px 14px)" } : {}),
               }}
             />
-            {/* Every declared stage stays visible here from pipeline creation. */}
-            {group.pipeline && pipelineControls ? (
-              <div
-                data-scheme-group-strip
-                className={`absolute left-4 right-4 top-3 z-[7] ${interactive ? "pointer-events-auto" : "pointer-events-none"}`}
-              >
-                <PipelineStageGraphFlowsProvider flows={pipelineControls.flows}>
-                  <PipelineStageGraph
-                    pipeline={group.pipeline}
-                    onOpenAttempt={pipelineControls.onOpenAttempt}
-                  />
-                </PipelineStageGraphFlowsProvider>
-              </div>
-            ) : null}
+            {/* One compact header attached to the halo (#353): title, progress,
+                lifecycle, and the disclosure control — no second stage graph and
+                no white body below. The real stage conversations and planned
+                placeholders live inside the region itself. */}
             <button
               data-scheme-ui
-              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[22em] items-center gap-[0.4em] rounded-full bg-card px-[0.7em] py-[0.15em] font-bold shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
+              data-pipeline-group-header={group.pipeline ? group.id : undefined}
+              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[26em] items-center gap-[0.4em] rounded-full bg-card px-[0.7em] py-[0.15em] font-bold shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
                 interactive ? "pointer-events-auto" : ""
               }`}
               /* Font fully counter-scaled (constant on-screen at any zoom); border
@@ -489,11 +445,23 @@ export const GroupsLayer = memo(function GroupsLayer({
               disabled={!interactive}
               onClick={() => setOpenId((value) => (value === group.id ? null : group.id))}
             >
-              {/* Title only — the draft status badge lives on the strip below
-                  (one title, one badge; issue #221 §2). The dashed warning
-                  border already reads as "draft" at a glance. */}
               <span aria-hidden>{group.kind === "pipeline" ? "⇢" : "⟳"}</span>
               <span className="truncate">{group.label}</span>
+              {group.pipeline ? (
+                <>
+                  <span
+                    data-pipeline-progress
+                    className="shrink-0 rounded-full px-[0.5em] py-[0.02em] tabular-nums opacity-90"
+                    style={{ backgroundColor: soft }}
+                  >
+                    {(() => { const p = pipelineStagePosition(group.pipeline!); return `${p.k}/${p.n}`; })()}
+                  </span>
+                  <span data-pipeline-lifecycle className="shrink-0 truncate opacity-80">
+                    {pipelineStateLabel(t, group.pipeline.state)}
+                  </span>
+                </>
+              ) : null}
+              <span aria-hidden className="shrink-0 opacity-70">▾</span>
             </button>
           </div>
         );
@@ -789,6 +757,7 @@ function NodeShell({
   dormant,
   flow,
   pipeline,
+  pipelineStage,
   flows,
   files,
   renderablePaths,
@@ -824,6 +793,8 @@ function NodeShell({
       current run stage (§2.2). Null when none, or the current stage is a
       review-loop (the FlowStrip owns that slot). */
   pipeline: Pipeline | null;
+  /** The exact pipeline stage represented by this real conversation pane. */
+  pipelineStage: { pipeline: Pipeline; stage: Pipeline["stages"][number]; index: number; total: number } | null;
   /** All flows, for the strip's review-loop round counters + open-review. */
   flows: Flow[];
   files: readonly FileEntry[];
@@ -868,6 +839,8 @@ function NodeShell({
   return (
     <div
       data-scheme-node={node.file.path}
+      data-pipeline-stage-card={pipelineStage ? `${pipelineStage.pipeline.id}::${pipelineStage.stage.id}` : undefined}
+      data-pipeline-stage-state={pipelineStage ? stageChipState(pipelineStage.pipeline, pipelineStage.stage) : undefined}
       data-lasso-selected={marked ? "true" : undefined}
       className={`scheme-enter absolute ${badgesExpanded ? "z-[60]" : underOpen || flowOpen ? "z-20" : ""}${dimClass(dimmed)}`}
       style={{ transform: `translate(${node.x}px, ${node.y}px)`, width: node.w, height: node.h, transition: MOVE_TRANSITION }}
@@ -880,6 +853,15 @@ function NodeShell({
           {/* The promised member tint: readable at far zoom, panes stay legible. */}
           <div aria-hidden className="pointer-events-none absolute inset-0 z-[4] rounded-[10px] bg-accent/[0.06]" />
         </>
+      ) : null}
+      {pipelineStage ? (
+        <span
+          className="pointer-events-none absolute -top-3 right-3 z-[7] inline-flex h-6 max-w-[78%] items-center gap-1.5 rounded-full border border-accent/35 bg-card px-2 text-[10.5px] font-bold text-accent shadow-1"
+          title={stageChipLabel(t, pipelineStage.stage)}
+        >
+          <span className="truncate">{stageChipLabel(t, pipelineStage.stage)}</span>
+          <span className="shrink-0 text-muted">{pipelineStage.index + 1}/{pipelineStage.total}</span>
+        </span>
       ) : null}
       {/* The loop's shared header hovers above the implementer↔reviewer pair. */}
       {flow ? (
@@ -1075,11 +1057,35 @@ function DraftShell({
  * wraps. Every add is an optimistic add-stage PATCH on the same draft
  * contract, applied locally first (issue #221 §3).
  */
-function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean; dimmed: boolean }) {
+function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSlot; lite: boolean; dimmed: boolean; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
   const { t } = useLocale();
   const [busy, setBusy] = useState(false);
   const tone = STAGE_TONES[stageChipState(slot.pipeline, slot.stage)];
   const { pipeline } = slot;
+  /* A terminal stage folded out of the scene renders as a compact navigable
+     history anchor rather than the full-size placeholder pane (#353 R3). */
+  if (slot.presentation === "history") {
+    const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
+    const file = target ? resolveStageNavFile(target, files) : null;
+    return (
+      <div
+        data-scheme-node={slot.key}
+        className={`scheme-enter absolute${dimClass(dimmed)}`}
+        style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+      >
+        {slot.incoming ? (
+          <span
+            aria-hidden
+            className="absolute top-[24px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
+            style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
+          >
+            {slot.incoming === "review-loop" ? "⟳" : "→"}
+          </span>
+        ) : null}
+        <StageHistoryCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} />
+      </div>
+    );
+  }
   const draft = pipeline.state === "draft";
   const last = slot.index === slot.total - 1;
   const kinds = pipeline.stages.map((item) => item.kind);
@@ -1198,6 +1204,7 @@ export const NodesLayer = memo(function NodesLayer({
   attentionPaths,
   flowsByImpl,
   flows,
+  pipelines = [],
   pipelineStrips,
   linkedTasksByPipeline,
   relatedTasksByPath,
@@ -1235,6 +1242,7 @@ export const NodesLayer = memo(function NodesLayer({
   flowsByImpl: Map<string, Flow>;
   /** All flows, for a pipeline strip's review-loop round counters + open-review. */
   flows: Flow[];
+  pipelines?: Pipeline[];
   /** Node path → the pipeline whose compact strip mounts over it (§2.2). */
   pipelineStrips: Map<string, Pipeline>;
   linkedTasksByPipeline: ReadonlyMap<string, BoardTask[]>;
@@ -1283,6 +1291,19 @@ export const NodesLayer = memo(function NodesLayer({
   /* Paths still in the scan; a run stage action is disabled once its transcript
      leaves the file set (AC4). */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
+  const pipelineStageByPath = useMemo(() => {
+    const map = new Map<string, { pipeline: Pipeline; stage: Pipeline["stages"][number]; index: number; total: number }>();
+    for (const pipeline of pipelines) {
+      if (pipeline.state === "closed") continue;
+      for (let index = 0; index < pipeline.stages.length; index += 1) {
+        const stage = pipeline.stages[index]!;
+        const attempt = latestAttempt(pipeline, stage.id);
+        if (!attempt?.agentPath) continue;
+        map.set(attempt.agentPath, { pipeline, stage, index, total: pipeline.stages.length });
+      }
+    }
+    return map;
+  }, [pipelines]);
   /* Activity ranking reaches the screen through each host's x/y transform.
      Stable sibling order keeps React from moving stateful hosts in the DOM,
      preserving scroll, focus, selection, and draft/deck state. */
@@ -1337,7 +1358,7 @@ export const NodesLayer = memo(function NodesLayer({
       {/* Placeholder windows for planned pipeline stages (issue #196): dashed
           chat-window shells the live stage windows replace in place. */}
       {slotsInDomOrder.map((slot) => (
-        <StageSlotShell key={slot.key} slot={slot} lite={lite} dimmed={attentionPaths !== null} />
+        <StageSlotShell key={slot.key} slot={slot} lite={lite} dimmed={attentionPaths !== null} files={files} onSelect={onSelect} />
       ))}
       {draftsInDomOrder.map((draft) =>
         lite ? (
@@ -1381,6 +1402,7 @@ export const NodesLayer = memo(function NodesLayer({
             dormant={dormant}
             flow={flowsByImpl.get(node.file.path) ?? null}
             pipeline={pipeline}
+            pipelineStage={pipelineStageByPath.get(node.file.path) ?? null}
             linkedTasks={pipeline ? linkedTasksByPipeline.get(pipeline.id) ?? [] : []}
             relatedTasks={relatedTasksByPath?.get(node.file.path) ?? EMPTY_RELATIONS}
             flows={flows}

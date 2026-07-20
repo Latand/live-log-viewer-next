@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Loader2 } from "lucide-react";
+import { Check, Loader2, SlidersHorizontal } from "lucide-react";
 import { useState } from "react";
 
 import { RuntimeControlsView, type RuntimeApplyState, type RuntimeDraft } from "@/components/AgentRuntimeControls";
@@ -14,6 +14,7 @@ import { ENGINE_MODELS } from "@/lib/agent/models";
 import type { FlowEngine } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { PatchPipelineRequest, PipelineRoleId } from "@/lib/pipelines/types";
+import { renderStagePrompt } from "@/lib/pipelines/prompts";
 
 import {
   PIPELINE_ROLE_OPTIONS,
@@ -91,6 +92,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
 
   /* Server echoes (the PATCH round-trips through the poll) re-seed the controls
      in place. Render-phase adjustments — no remount, so an in-progress prompt
@@ -211,10 +213,14 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
   const observedModelLabel = (ENGINE_MODELS[engine].find((option) => option.id === effectiveModel)?.label ?? effectiveModel) || t("draft.modelDefault");
   const observedEffort = effectiveEffort ? effortTierLabel(t, effectiveEffort) : t("groupOverride.effortDefault");
   const runtimePending = runtime.model !== effectiveModel || runtime.effort !== effectiveEffort;
+  const previewPreviousOutput = "[The previous stage output will be inserted here]";
+  const promptPreview = renderStagePrompt(pipeline, stage, stage.effectiveRole, previewPreviousOutput);
 
   return (
     <section
       data-pan-ignore
+      data-pipeline-stage-card={`${pipeline.id}::${stage.id}`}
+      data-pipeline-stage-state={state}
       aria-label={t("pipelineSlot.paneAria", { role: label })}
       className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-control border-2 border-dashed bg-card shadow-1"
       style={{ borderColor: active ? tone.color : "var(--border-strong)" }}
@@ -226,13 +232,30 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
           style={{ backgroundColor: tone.color }}
           title={t(`pipelineChipState.${state}`)}
         />
-        <EngineRadioGroup engine={engine as "claude" | "codex"} disabled={!editable || busy} onChange={changeEngine} />
+        {configOpen ? (
+          <EngineRadioGroup engine={engine as "claude" | "codex"} disabled={!editable || busy} onChange={changeEngine} />
+        ) : (
+          <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold capitalize text-muted">
+            {engine}
+          </span>
+        )}
         <span className="min-w-0 flex-1 truncate text-ui font-semibold text-muted" title={label}>
           {label} · {t("pipelineSlot.stageOf", { k: slot.index + 1, n: slot.total })}
         </span>
         <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold uppercase tracking-wide text-muted">
           {review ? `⟳ ${t("groupOverride.reviewKind")}` : t("groupOverride.runKind")}
         </span>
+        {interactive ? (
+          <button
+            type="button"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-control border border-border bg-card/80 text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            aria-label={t("groupOverride.applyStage")}
+            aria-expanded={configOpen}
+            onClick={() => setConfigOpen((value) => !value)}
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
+          </button>
+        ) : null}
         {canRemove ? (
           <button
             className="inline-flex shrink-0 items-center rounded-control border border-border bg-canvas px-1.5 py-0.5 text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
@@ -245,7 +268,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
         ) : null}
       </header>
 
-      {interactive ? (
+      {interactive && configOpen ? (
         <RoleSection
           idPrefix={slot.key}
           roles={roles}
@@ -261,7 +284,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
 
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border bg-sunken px-2.5 py-1.5">
         <span className="shrink-0 text-caption font-semibold text-muted">{t("draft.reasoning")}</span>
-        {interactive ? (
+        {interactive && configOpen ? (
           <>
             <RuntimeControlsView
               engine={engine as "claude" | "codex"}
@@ -290,26 +313,35 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
           </span>
         )}
       </div>
-      {error ? (
+      {configOpen && error ? (
         <div className="shrink-0 px-2.5 py-1 text-label font-semibold text-danger" role="alert">
           {error}
         </div>
       ) : null}
-      {interactive && !editable ? (
+      {interactive && configOpen && !editable ? (
         <div className="shrink-0 px-2.5 py-1 text-label font-semibold text-muted">{t("pipelineSlot.frozen")}</div>
       ) : null}
-      {interactive && pipeline.stages.length > 1 ? (
+      {interactive && configOpen && pipeline.stages.length > 1 ? (
         <StageEdgeControls pipeline={pipeline} stage={stage} disabled={busy} />
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 overflow-y-auto px-4 py-3 text-center">
-        <span className="rounded-full px-3 py-1 text-body font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
-          {label}
-        </span>
-        <span className="max-w-[380px] text-ui leading-5 text-muted">{hint}</span>
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <span className="rounded-full px-3 py-1 text-body font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
+            {t(`pipelineChipState.${state}`)}
+          </span>
+          <span className="truncate text-label font-semibold text-muted">
+            {observedModelLabel}{effectiveEffort ? ` · ${effortTierLabel(t, effectiveEffort)}` : ""}
+          </span>
+        </div>
+        <div className="ml-auto max-w-[88%] rounded-[14px] rounded-br-[4px] bg-accent/10 px-3 py-2.5 text-ui leading-5 text-primary shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_18%,transparent)]">
+          <p className="mb-1 text-caption font-bold uppercase tracking-wide text-accent">{t("pipelineSlot.promptLabel")}</p>
+          <p className="whitespace-pre-wrap break-words">{promptPreview}</p>
+        </div>
+        <div className="mt-auto pt-3 text-center text-ui leading-5 text-muted">{hint}</div>
       </div>
 
-      {interactive ? (
+      {interactive && configOpen ? (
         <form
           onSubmit={(event) => {
             event.preventDefault();

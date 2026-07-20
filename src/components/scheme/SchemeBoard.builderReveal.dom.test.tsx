@@ -45,14 +45,20 @@ afterEach(() => {
   dom.sessionStorage.clear();
 });
 
-/* A fresh draft with no linked task or stage pane uses the free-space grid. */
+/* A fresh draft materializes its declared stages as placeholder cards inside one
+   colored halo (#353); the halo is the draft's world-space region. */
 const draft: Pipeline = {
   id: "d1", task: "New pipeline", taskIds: [], project: "demo", repoDir: "/r",
   worktreeDir: "/r-pipeline-d1", branch: "pipeline/new-pipeline-d1",
-  baseBranch: "", baseRef: "", lastPassedCommit: "", stages: [], runs: [],
+  baseBranch: "", baseRef: "", lastPassedCommit: "",
+  stages: [
+    { id: "build", kind: "run", prompt: "", next: "review", effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } },
+    { id: "review", kind: "review-loop", prompt: "", next: null, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-only", promptScaffold: null } },
+  ],
+  runs: [],
   cursor: null, state: "draft", pausedState: null, stateDetail: null,
   srcPath: null, srcConversationId: null, createdAt: new Date(0).toISOString(), closedAt: null,
-} as Pipeline;
+} as unknown as Pipeline;
 
 function board(builderPipelineId: string | null, value: Pipeline = draft, tasks: BoardTask[] = []) {
   return (
@@ -84,7 +90,7 @@ const settle = async () => {
   flushSync(() => undefined);
 };
 
-test("the builder reveal ends an active selection session and opens the world-group editor", async () => {
+test("targeting a fresh draft reveals its halo but never auto-opens the tall editor — config discloses only on an explicit header tap (#353)", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -100,20 +106,29 @@ test("the builder reveal ends an active selection session and opens the world-gr
   flushSync(() => lasso.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   await settle();
 
-  /* The draft owns one deterministic world-space container during selection. */
+  /* The draft owns one colored halo (its sole world-space region), config closed. */
   expect(host.querySelector("[data-group-override]")).toBeNull();
-  const group = host.querySelector('[data-pipeline-group="d1"]') as HTMLElement;
-  expect(group).toBeTruthy();
-  expect(group.style.transform).toMatch(/^translate\([1-9]\d*px, \d+px\)$/);
-  expect(host.querySelector("[data-pipeline-shelf]")).toBeNull();
+  expect(host.querySelector('[data-scheme-group="pipeline"]')).toBeTruthy();
+  expect(host.querySelector('[data-pipeline-group-header="d1"]')).toBeTruthy();
+  /* No detached pipeline control card exists on the board (#353). */
+  expect(host.querySelector('[data-pipeline-group="d1"]')).toBeNull();
 
-  /* Targeting this draft clears the world session and opens its editor in place. */
+  /* Targeting this draft clears the world session and centers the camera on the
+     compact halo — but the tall draft editor stays CLOSED (#353 review): a fresh
+     draft never lands the operator in a config modal. */
   flushSync(() => root.render(board("d1")));
+  await settle();
+  expect(host.querySelector("[data-group-override]")).toBeNull();
+  const header = host.querySelector('[data-pipeline-group-header="d1"]') as HTMLButtonElement | null;
+  expect(header).toBeTruthy();
+
+  /* Configuration opens only through the header's explicit compact disclosure. */
+  flushSync(() => header!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   await settle();
   expect(host.querySelector("[data-group-override]")).toBeTruthy();
 });
 
-test("a pipeline with taskIds renders beside its first placed task", async () => {
+test("a linked pipeline renders as one colored halo with no detached control card", async () => {
   const task: BoardTask = {
     id: "task-linked",
     project: "demo",
@@ -134,7 +149,8 @@ test("a pipeline with taskIds renders beside its first placed task", async () =>
   flushSync(() => root.render(board(null, linked, [task])));
   await settle();
 
-  const group = host.querySelector('[data-pipeline-group="linked"]') as HTMLElement;
-  expect(group).toBeTruthy();
-  expect(group.style.transform).toBe("translate(712px, 180px)");
+  /* Exactly one visual owner: the colored halo. No detached PipelineGroup card. */
+  expect(host.querySelector('[data-pipeline-group-header="linked"]')).toBeTruthy();
+  expect(host.querySelectorAll('[data-scheme-group="pipeline"]')).toHaveLength(1);
+  expect(host.querySelector('[data-pipeline-group="linked"]')).toBeNull();
 });

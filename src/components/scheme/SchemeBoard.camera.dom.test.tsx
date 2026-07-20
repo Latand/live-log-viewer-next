@@ -129,63 +129,38 @@ test("hand, Space-pan, and lasso own pipeline header gestures without position P
     const world = Array.from(viewport.children).find((child) =>
       (child as HTMLElement).style.transform.includes("scale("),
     ) as HTMLElement;
+    /* The colored pipeline halos are the sole pipeline regions; no detached,
+       draggable PipelineGroup control card exists to intercept a tool gesture or
+       emit a set-position PATCH (#353). */
+    expect(host.querySelector("[data-pipeline-group-drag]")).toBeNull();
+    expect(host.querySelectorAll('[data-scheme-group="pipeline"]').length).toBeGreaterThan(0);
+
     const hand = Array.from(host.querySelectorAll("button")).find((button) => button.title.startsWith("Hand")) as HTMLButtonElement;
     flushSync(() => hand.click());
     await settle();
+    /* Under the hand tool the halo header is inert (disabled): it can neither open
+       config nor mutate the pipeline. */
+    const header = host.querySelector("[data-pipeline-group-header]") as HTMLButtonElement;
+    expect(header).toBeTruthy();
+    expect(header.disabled).toBe(true);
+
     const before = world.style.transform;
-    const header = host.querySelector("[data-pipeline-group-drag]") as HTMLElement;
-    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerdown", {
+    flushSync(() => viewport.dispatchEvent(new dom.PointerEvent("pointerdown", {
       bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 500, clientY: 300,
     }) as unknown as Event));
-    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointermove", {
+    flushSync(() => viewport.dispatchEvent(new dom.PointerEvent("pointermove", {
       bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 420, clientY: 300,
     }) as unknown as Event));
-    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerup", {
+    flushSync(() => viewport.dispatchEvent(new dom.PointerEvent("pointerup", {
       bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 420, clientY: 300,
     }) as unknown as Event));
     await settle();
 
+    /* The hand-tool drag pans the world and never mutates a pipeline (no
+       set-position PATCH — there is no draggable pipeline card anymore). A benign
+       GET for the placeholder role picker is unrelated. */
     expect(world.style.transform).not.toBe(before);
-    expect(requests).toEqual([]);
-
-    const select = Array.from(host.querySelectorAll("button")).find((button) => button.title.startsWith("Select")) as HTMLButtonElement;
-    flushSync(() => select.click());
-    flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "1", bubbles: true }) as unknown as Event));
-    await settle();
-    flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: " ", bubbles: true }) as unknown as Event));
-    await settle();
-    const beforeSpacePan = world.style.transform;
-    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerdown", {
-      bubbles: true, isPrimary: true, pointerId: 42, pointerType: "mouse", button: 0, clientX: 420, clientY: 300,
-    }) as unknown as Event));
-    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointermove", {
-      bubbles: true, isPrimary: true, pointerId: 42, pointerType: "mouse", button: 0, clientX: 500, clientY: 300,
-    }) as unknown as Event));
-    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerup", {
-      bubbles: true, isPrimary: true, pointerId: 42, pointerType: "mouse", button: 0, clientX: 500, clientY: 300,
-    }) as unknown as Event));
-    flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keyup", { key: " ", bubbles: true }) as unknown as Event));
-    await settle();
-    expect(world.style.transform).not.toBe(beforeSpacePan);
-    expect(requests).toEqual([]);
-
-    const lasso = Array.from(host.querySelectorAll("button")).find((button) => button.title.startsWith("Multi-select")) as HTMLButtonElement;
-    flushSync(() => lasso.click());
-    await settle();
-    const group = host.querySelector('[data-pipeline-group="camera-pipeline-0"]') as HTMLElement;
-    const beforeLasso = group.style.transform;
-    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerdown", {
-      bubbles: true, isPrimary: true, pointerId: 43, pointerType: "mouse", button: 0, clientX: 500, clientY: 300,
-    }) as unknown as Event));
-    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointermove", {
-      bubbles: true, isPrimary: true, pointerId: 43, pointerType: "mouse", button: 0, clientX: 560, clientY: 340,
-    }) as unknown as Event));
-    flushSync(() => header.dispatchEvent(new dom.PointerEvent("pointerup", {
-      bubbles: true, isPrimary: true, pointerId: 43, pointerType: "mouse", button: 0, clientX: 560, clientY: 340,
-    }) as unknown as Event));
-    await settle();
-    expect(group.style.transform).toBe(beforeLasso);
-    expect(requests).toEqual([]);
+    expect(requests.filter((url) => url.includes("/api/pipelines"))).toEqual([]);
   } finally {
     globalThis.fetch = previousFetch;
   }
