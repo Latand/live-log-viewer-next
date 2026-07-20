@@ -88,6 +88,17 @@ export type ToolEvent = {
   statusLabel: string;
   outputPreview: string;
   outputTruncated: boolean;
+  /** Working directory recovered from the call args or a `cd … &&` prefix. */
+  cwd?: string;
+  /** Numeric exit code recovered from a `exited with code N` result line. */
+  exitCode?: number;
+  /** Wall-clock duration in ms, from a Codex `Wall time` preamble. */
+  durationMs?: number;
+  /** Result timestamp, once the tool result attaches (end of the run). */
+  endTs?: unknown;
+  /** stderr split from the combined result, rendered in its own disclosure. */
+  stderr?: string;
+  stderrTruncated?: boolean;
   open: boolean;
   orchestration?: Orchestration;
   /** Present on a `ScheduleWakeup` call: drives the dedicated wakeup card. */
@@ -502,6 +513,11 @@ const CMD_GROUP_MIN = 2;
 const OUTPUT_OK_MAX = 12_000;
 const OUTPUT_ERR_MAX = 60_000;
 const COMMAND_MAX = 8_000;
+/* An explicit stderr delimiter a payload may carry so the readable block can
+   split the two streams into their own bounded disclosures (issue #475). Only an
+   explicit marker splits — an undelimited body stays entirely stdout, so the
+   parser never guesses which lines were errors. */
+const STDERR_MARKER = /^[ \t]*(?:\[stderr\]|-{2,}\s*stderr\s*-{2,}|stderr:)[ \t]*$/im;
 /* Wakeup reason/prompt are redacted and bounded before they reach the card, the
    same safety funnel every other tool field passes through (issue #161 review).
    The reason is a one-line summary; the prompt is the longer wake plan. */
@@ -511,9 +527,22 @@ const WAKEUP_PROMPT_MAX = 4_000;
    known variants). Used to strip the contiguous leading metadata block. */
 const PREAMBLE_LINE = /^(?:Chunk ID:|Wall time\b|Original token count:|Output:[ \t]*$|Script completed\b|Script running with (?:cell|session) ID\b|Process running with (?:cell|session) ID\b|Process exited with code\b)/;
 const CODE_EXT_RE = /\.([A-Za-z0-9]{1,10})$/;
+const CWD_MAX = 400;
 
 function extLang(path: string): string | null {
   return path.match(CODE_EXT_RE)?.[1]?.toLowerCase() ?? null;
+}
+
+/* The working directory a shell call ran in: an explicit `cwd`/`workdir` arg
+   (Codex `exec_command`, orchestrated `tools.exec_command`) wins; otherwise the
+   leading `cd <path> &&` of the command reveals it. Redacted and bounded here so
+   the readable block (issue #475) never surfaces a raw or unbounded path. */
+function cwdOf(args: Record<string, unknown>, command?: string): string | undefined {
+  const explicit = args.cwd ?? args.workdir ?? args.working_directory ?? args.cd;
+  const raw = typeof explicit === "string" && explicit.trim() ? explicit.trim() : command?.match(/^\s*cd\s+('([^']+)'|"([^"]+)"|(\S+))\s*&&/)?.slice(2).find(Boolean);
+  if (!raw) return undefined;
+  const safe = redactSecrets(raw).trim().slice(0, CWD_MAX);
+  return safe || undefined;
 }
 
 /* Grouping bucket key: the verbatim tool name, falling back to the family for
@@ -1157,6 +1186,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       statusLabel: tr("render.executing"),
       outputPreview: "",
       outputTruncated: false,
+      ...(family === "shell" ? (() => {
+        const cwd = cwdOf(args, command);
+        return cwd ? { cwd } : {};
+      })() : {}),
       /* An edit/write card opens its structured diff inline by default — a
          compact preview of the first lines, with a toggle for the rest — so the
          change is visible without a click (issue #90). */
@@ -1225,10 +1258,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   };
   /* A shell command from any engine. `callId` is absent for plain job logs, so
      a synthetic id keeps the row addressable (and the last one attachable). */
-  const addShell = (ts: unknown, command: string, callId?: string, tool = "Bash"): ToolEvent => {
+  const addShell = (ts: unknown, command: string, callId?: string, tool = "Bash", extraArgs?: Record<string, unknown>): ToolEvent => {
     const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
     const engine = cfg.engine === "codex" ? "codex" : "claude";
-    const event = newToolEvent({ ts, id, tool, args: { command }, engine, command });
+    const event = newToolEvent({ ts, id, tool, args: { ...extraArgs, command }, engine, command });
     const rec = registerCall(event);
     if (!callId) lastPlainCall = rec;
     return event;
@@ -1280,14 +1313,36 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     /* An empty codex wait/stdin chunk collapses to "waiting Ns" rather than an
        "ok" with a signal-free block (issue #141 §4). */
     const idleWait = !body && (prev.tool === "wait" || prev.tool === "write_stdin") && wallSeconds !== undefined;
+    /* Split an explicitly delimited stderr tail off the stdout head so the two
+       streams get their own disclosures (issue #475). No marker → all stdout. */
+    let stdoutBody = body;
+    let stderrBody = "";
+    /* Only a shell exec has a stderr stream; a Read/Edit result is file text, so
+       a `stderr:` line inside it must never be mistaken for a delimiter. */
+    const mark = prev.family === "shell" ? body.match(STDERR_MARKER) : null;
+    if (mark && mark.index !== undefined) {
+      stdoutBody = body.slice(0, mark.index).replace(/\n+$/, "");
+      stderrBody = body.slice(mark.index + mark[0].length).replace(/^\n+/, "");
+    }
     let outputPreview = prev.outputPreview;
     let outputTruncated = prev.outputTruncated;
-    if (body) {
+    if (stdoutBody) {
       const limit = isErr ? OUTPUT_ERR_MAX : OUTPUT_OK_MAX;
-      const combined = (prev.outputPreview + "\n" + redactSecrets(body)).trim();
+      const combined = (prev.outputPreview + "\n" + redactSecrets(stdoutBody)).trim();
       outputTruncated = prev.outputTruncated || combined.length > limit;
       outputPreview = combined.slice(-limit);
     }
+    let stderr = prev.stderr;
+    let stderrTruncated = prev.stderrTruncated;
+    if (stderrBody) {
+      const combined = ((prev.stderr ?? "") + "\n" + redactSecrets(stderrBody)).trim();
+      stderrTruncated = (prev.stderrTruncated ?? false) || combined.length > OUTPUT_ERR_MAX;
+      stderr = combined.slice(-OUTPUT_ERR_MAX);
+    }
+    const exitCode = code !== undefined ? Number(code) : prev.exitCode;
+    const durationMs = wallSeconds !== undefined ? Math.round(Number(wallSeconds) * 1000) : prev.durationMs;
+    const startMs = typeof prev.ts === "string" || typeof prev.ts === "number" ? Date.parse(String(prev.ts)) : NaN;
+    const endTs = durationMs !== undefined && Number.isFinite(startMs) ? new Date(startMs + durationMs).toISOString() : prev.endTs;
     /* A wakeup's result carries the RESOLVED schedule (issue #161): on success
        refine the fire time from it (it overrides the requested delay); on error
        the call is rejected — mark it failed so it never counts down and never
@@ -1318,6 +1373,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       srcResult: curSrc,
       outputPreview,
       outputTruncated,
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(endTs !== undefined ? { endTs } : {}),
+      ...(stderr !== undefined ? { stderr } : {}),
+      ...(stderrTruncated !== undefined ? { stderrTruncated } : {}),
       ...(wakeup ? { wakeup } : {}),
       ...(mcp ? { mcp } : {}),
     };
@@ -1573,7 +1633,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         const name = textPart(p.name);
         if (name === "exec_command" || name === "shell") {
           const cmd = String(args.cmd ?? args.command ?? "").replace(/^\/usr\/bin\/zsh -lc /, "");
-          return void addShell(ts, cmd, textPart(p.call_id), name);
+          return void addShell(ts, cmd, textPart(p.call_id), name, args);
         }
         if (name === "apply_patch") {
           return void addPatch(ts, String(args.input ?? ""), textPart(p.call_id));
