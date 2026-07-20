@@ -43,8 +43,8 @@ function readWindow(fd: number, start: number, length: number): { bytes: Buffer;
  * Index every UUID in a transcript tail with one positional read per observed
  * file generation. Compaction lineage probes ask the same growing transcript
  * about many different UUIDs; sharing this index prevents one 1 MiB read for
- * every successor. UUIDs already observed on the same append-only inode remain
- * available when later writes push their records beyond the bounded tail.
+ * every successor. Proven predecessor links are persisted by the caller, so a
+ * changed generation can discard its old UUID set and keep memory bounded.
  */
 function addUuids(uuids: Set<string>, bytes: Buffer): void {
   for (const uuid of bytes.toString("utf8").match(UUIDS_IN_TEXT) ?? []) uuids.add(uuid.toLowerCase());
@@ -76,9 +76,7 @@ function fileTailHasUuid(needle: string, pathname: string, stat: fs.Stats): bool
     }
   }
 
-  const sameAppendOnlyFile = cached?.dev === stat.dev && cached.ino === stat.ino && stat.size >= cached.size;
-  const uuids = sameAppendOnlyFile ? new Set(cached.uuids) : new Set<string>();
-  if (uuids.has(normalizedNeedle)) return true;
+  const uuids = new Set<string>();
 
   const initialLength = Math.min(stat.size, INITIAL_TAIL_BYTES);
   let fd: number | null = null;
