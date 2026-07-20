@@ -1781,6 +1781,10 @@ export function TmuxComposer({
           : reconcilingSend
             ? t("composer.admissionTimedOut")
             : sendBlockedReason ?? undefined}
+        /* Every blocked state keeps one recovery route (issue #499): Re-check
+           forces a fresh runtime snapshot, which resolves an unresolved host,
+           surfaces a recovered one, and reconciles a timed-out admission. */
+        onSendBlockedRecover={() => void refreshRuntime()}
         receipts={
           displayedRuntimeReceipts.length
             ? <RuntimeComposerReceipts

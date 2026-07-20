@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   MIN_TRANSCRIPT_SHARE,
+  PERSISTENT_CHROME,
   SECONDARY_CHROME,
   chatBudget,
   type SecondaryKey,
@@ -17,6 +18,13 @@ import {
  */
 
 const ALL_SECONDARY = Object.keys(SECONDARY_CHROME) as SecondaryKey[];
+
+test("the always-visible composer runtime pill row is budgeted persistent chrome (issue #499)", () => {
+  /* The one obvious 44px mobile model/reasoning pill is persistent — it must
+     be counted against the transcript's 60% guarantee, and the guarantee must
+     still hold with it on screen. */
+  expect(PERSISTENT_CHROME.composerRuntimePill).toBe(44);
+});
 
 test("collapsed, the transcript clears 60% at 390×844 including the home indicator", () => {
   const budget = chatBudget({ height: 844, safeBottom: 34 });

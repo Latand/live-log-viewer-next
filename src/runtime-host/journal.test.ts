@@ -242,6 +242,59 @@ test("send operations converge by idempotency key and persist one receipt and ef
   journal.close();
 });
 
+test("send receipt echoes the per-turn runtime settings snapshot (issue #499)", () => {
+  const dir = sandbox("operation-runtime-echo");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true, maxEvents: 100, now: () => 100 });
+  journal.append({
+    scope: runtimeScope("session", "conv-rt"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-rt",
+      sessionKey: { engine: "codex", sessionId: "thread-rt" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+  const runtime = { model: "gpt-5.6-sol", effort: "xhigh", fast: true };
+  const command = {
+    kind: "send" as const,
+    operationId: "op-send-rt",
+    idempotencyKey: "send-key-rt",
+    conversationId: "conv-rt",
+    text: "carry my selection",
+    policy: "queue" as const,
+    runtime,
+  };
+
+  const first = journal.executeOperation(command);
+  const replay = journal.executeOperation(command);
+
+  /* The receipt is the audit record the composer and the acceptance flow read:
+     it must carry exactly the settings the send was admitted with, and a
+     replayed key must return the identical echo. */
+  expect(first.receipt.runtime).toEqual(runtime);
+  expect(replay.receipt.runtime).toEqual(runtime);
+  /* The durable effect delivers the same snapshot to the provider host. */
+  const effects = journal.effectBatch();
+  expect(effects).toHaveLength(1);
+  expect((effects[0]!.payload as { runtime?: unknown }).runtime).toEqual(runtime);
+  /* A send without a selection stays byte-identical to today's format. */
+  const bare = journal.executeOperation({
+    kind: "send",
+    operationId: "op-send-bare",
+    idempotencyKey: "send-key-bare",
+    conversationId: "conv-rt",
+    text: "no selection",
+    policy: "queue",
+  });
+  expect("runtime" in bare.receipt).toBe(false);
+  journal.close();
+});
+
 test("reconfigure admission durably replaces the session pending switch", () => {
   const dir = sandbox("reconfigure-last-write-wins");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true, now: () => 100 });

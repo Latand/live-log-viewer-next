@@ -53,8 +53,14 @@ export interface ComposerBarProps {
   imageDisabled?: boolean;
   imageDisabledReason?: string;
   /** When set, Send is disabled with this tooltip and no submit is attempted
-      (issue #247 §5: a dead host blocks sends so no rejected receipts stack). */
+      (issue #247 §5: a dead host blocks sends so no rejected receipts stack).
+      The reason also renders as inline status text (issue #499): a phone has
+      no hover, so a tooltip-only explanation leaves the blocked action mute. */
   sendDisabledReason?: string;
+  /** Recovery route for a blocked Send (issue #499): rendered as a Re-check
+      action beside the inline reason (e.g. force a runtime snapshot refresh
+      while the host is unresolved/offline). */
+  onSendBlockedRecover?: () => void;
   /** A caller-owned immutable generation can supply the payload while the
       editable textarea and image tray are empty. */
   sendPayloadAvailable?: boolean;
@@ -142,6 +148,7 @@ export function ComposerBar({
   imageDisabled = false,
   imageDisabledReason,
   sendDisabledReason,
+  onSendBlockedRecover,
   sendPayloadAvailable = false,
   receipts,
 }: ComposerBarProps) {
@@ -166,16 +173,21 @@ export function ComposerBar({
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
-  /* Chat-first mobile composer (issue #419 reopened): the model/reasoning +
-     attachment second row folds behind a compact primary-row action on the
-     phone so the collapsed composer reserves a single input row (zero secondary
-     height). Desktop always renders the row inline, so the flag only gates the
-     phone. Paste/drop attachment behavior lives on the textarea and is
-     unaffected by the fold. */
+  /* Chat-first mobile composer (issue #419, revised by #499): on the phone the
+     model/reasoning pill is the one obvious runtime control — it rides an
+     always-visible 44px row directly under the input and never folds. Only the
+     attachment picker keeps the on-demand fold behind a compact primary-row
+     action, so collapsed the composer reserves exactly the input row plus the
+     quiet pill row (budgeted in mobile/chatBudget). Desktop always renders the
+     single inline second row, so the flags only gate the phone. Paste/drop
+     attachment behavior lives on the textarea and is unaffected by the fold. */
   const [optionsOpen, setOptionsOpen] = useState(false);
   const optionsRowId = useId();
   const hasSecondaryRow = Boolean(leftSlot) || showImage;
-  const showSecondaryRow = !isMobile || optionsOpen;
+  /* The phone fold now holds only the attachment picker; with images hidden
+     there is nothing to disclose and the toggle disappears entirely. */
+  const mobileFoldAvailable = showImage;
+  const showSecondaryRow = isMobile ? optionsOpen && mobileFoldAvailable : hasSecondaryRow;
   const hasSendMenu = sendMenuActions.length > 0;
   const imageSendBlocked = imageDisabled && attachments.images.length > 0;
   /* An attachment still decoding (or one that failed to read) blocks Send with a
@@ -202,11 +214,11 @@ export function ComposerBar({
      the controls sit inline at the field's right edge as before. */
   const controls = (
     <>
-      {/* The compact primary-row disclosure for the folded model/reasoning +
-          attachment row (issue #419 reopened). Phone only, and hidden while
-          recording (the input flips to a column and the secondary row has no
-          room); desktop keeps the row inline and never renders this. */}
-      {isMobile && hasSecondaryRow && !dictationRecording ? (
+      {/* The compact primary-row disclosure for the folded attachment row
+          (issue #419, attachments only since #499). Phone only, and hidden
+          while recording (the input flips to a column and the secondary row
+          has no room); desktop keeps the row inline and never renders this. */}
+      {isMobile && mobileFoldAvailable && !dictationRecording ? (
         <Hint label={optionsOpen ? t("composer.optionsHide") : t("composer.optionsShow")} align="right">
           <button
             type="button"
@@ -361,14 +373,23 @@ export function ComposerBar({
           controls
         )}
       </div>
-      {/* Secondary controls (mode chip, interrupt/compact, images): one quiet
-          borderless row under the input. On the phone it folds behind the
-          primary-row disclosure above (issue #419 reopened), so collapsed it is
-          absent from the DOM entirely — zero reserved height. Desktop always
-          renders it inline. */}
+      {/* The one obvious mobile runtime control (issue #499): the model/
+          reasoning pill rides a quiet always-visible 44px row directly under
+          the input — never behind a disclosure a phone user has to discover.
+          Desktop keeps the pill in the inline options row below instead. */}
+      {isMobile && leftSlot ? (
+        <div data-testid="composer-runtime-row" className="flex min-h-11 min-w-0 items-center gap-1.5">
+          {leftSlot}
+        </div>
+      ) : null}
+      {/* Secondary controls: one quiet borderless row under the input. On the
+          phone only the attachment picker lives here, folded behind the
+          primary-row disclosure above (issue #419, revised by #499) — collapsed
+          it is absent from the DOM entirely, zero reserved height. Desktop
+          always renders it inline with the pill and the picker together. */}
       {hasSecondaryRow && showSecondaryRow ? (
         <div id={optionsRowId} data-testid="composer-options-row" className="flex items-center justify-between gap-1.5">
-          <div className="flex min-w-0 items-center gap-1.5">{leftSlot}</div>
+          <div className="flex min-w-0 items-center gap-1.5">{isMobile ? null : leftSlot}</div>
           {showImage ? (
             <Hint label={imageAriaLabel}>
               <ImagePickerButton
@@ -391,6 +412,28 @@ export function ComposerBar({
           onRetry={attachments.retry}
           onClearAll={attachments.clearAll}
         />
+      ) : null}
+      {/* A blocked Send explains itself inline (issue #499): the tooltip is
+          unreachable on a phone, so the reason renders as visible status text
+          with the caller's recovery route beside it. */}
+      {sendBlocked ? (
+        <span
+          data-testid="composer-send-blocked"
+          role="status"
+          aria-live="polite"
+          className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption font-semibold text-warning"
+        >
+          <span className="min-w-0">{sendDisabledReason}</span>
+          {onSendBlockedRecover ? (
+            <button
+              type="button"
+              onClick={onSendBlockedRecover}
+              className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-control border border-border bg-card px-2 text-caption font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              {t("deadHost.recheck")}
+            </button>
+          ) : null}
+        </span>
       ) : null}
       {/* A decoding/failed attachment blocks Send — say why, and never silently
           drop the image (issue #419). Suppressed while a host-death reason
