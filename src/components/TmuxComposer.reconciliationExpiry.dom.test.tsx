@@ -113,13 +113,15 @@ test("no receipt within the local window recovers the composer for an exactly-on
   const conversationId = "conv-expiry-recover";
   const prompt = "confirm the deploy went out";
   const sentKeys: string[] = [];
+  const sentRuntimes: { model?: string; effort?: string; fast?: boolean }[] = [];
   globalThis.fetch = (async (input, init) => {
     if (String(input) === "/api/tmux/targets") {
       return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
     }
     if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
-    const body = JSON.parse(String(init?.body)) as { clientMessageId: string };
+    const body = JSON.parse(String(init?.body)) as { clientMessageId: string; model?: string; effort?: string; fast?: boolean };
     sentKeys.push(body.clientMessageId);
+    sentRuntimes.push({ model: body.model, effort: body.effort, fast: body.fast });
     if (sentKeys.length === 1) throw new ComposerAdmissionTimeoutError();
     /* The explicit retry replays the SAME key and this time is admitted. */
     return {
@@ -144,13 +146,17 @@ test("no receipt within the local window recovers the composer for an exactly-on
   refreshRuntimeImpl = async () => false;
 
   sessionStorage.setItem(`llvDraft:${conversationId}`, prompt);
+  localStorage.setItem(`llvAgentRuntime:${conversationId}:resume`, JSON.stringify({
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: false,
+  }));
   const host = document.createElement("div");
   document.body.append(host);
-  const root = createRoot(host);
+  let root = createRoot(host);
   flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
-  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
-  const form = textarea.closest("form")!;
-
+  let textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  let form = textarea.closest("form")!;
   try {
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
     /* The window expires with no receipt; the composer must NOT stay disabled. */
@@ -168,10 +174,27 @@ test("no receipt within the local window recovers the composer for an exactly-on
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toContain(sentKeys[0]!);
 
     /* The operator explicitly retries: the ORIGINAL key replays idempotently. */
+    flushSync(() => {
+      const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+      const props = (textarea as unknown as Record<string, { onChange(event: unknown): void }>)[propsKey]!;
+      props.onChange({ target: { value: "" } });
+    });
+    flushSync(() => root.unmount());
+    root = createRoot(host);
+    flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+    await untilSendEnabled(host);
+    textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+    localStorage.setItem(`llvAgentRuntime:${conversationId}:resume`, JSON.stringify({
+      model: "gpt-5.6-sol",
+      effort: "low",
+      fast: true,
+    }));
+    form = textarea.closest("form")!;
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
     await sleep(0);
     expect(sentKeys).toHaveLength(2);
     expect(sentKeys[1]).toBe(sentKeys[0]);
+    expect(sentRuntimes[1]).toEqual(sentRuntimes[0]);
     expect(textarea.value).toBe("");
     expect(host.querySelectorAll('[data-receipt-status="queued"]')).toHaveLength(1);
   } finally {
@@ -179,6 +202,7 @@ test("no receipt within the local window recovers the composer for an exactly-on
     publishReceipts([]);
     refreshRuntimeImpl = async () => false;
     sessionStorage.clear();
+    localStorage.clear();
     host.remove();
   }
 });
@@ -408,7 +432,10 @@ test("an image-bearing generation restores exact bytes across a remount on deskt
     let textarea = host.querySelector("textarea") as HTMLTextAreaElement;
     let form = textarea.closest("form")!;
     const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
-    const textareaProps = (textarea as unknown as Record<string, { onPaste(event: unknown): void }>)[propsKey]!;
+    const textareaProps = (textarea as unknown as Record<string, {
+      onPaste(event: unknown): void;
+      onChange(event: unknown): void;
+    }>)[propsKey]!;
     const image = new TextEncoder().encode(`remount-image-${width}`);
 
     try {
@@ -425,6 +452,18 @@ test("an image-bearing generation restores exact bytes across a remount on deskt
       await untilSendEnabled(host);
       expect(attempts[0]?.images).toHaveLength(1);
 
+      flushSync(() => textareaProps.onChange({ target: { value: `later draft ${width}` } }));
+      flushSync(() => (host.querySelector('[data-testid="attachment-tile"] button') as HTMLButtonElement).click());
+      textareaProps.onPaste({
+        clipboardData: { items: [{ type: "image/png", getAsFile: () => new dom.File([`later-${width}`], `later-${width}.png`, { type: "image/png" }) }] },
+        preventDefault() {},
+      });
+      for (let attempt = 0; attempt < 50 && host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]').length !== 1; attempt += 1) {
+        await sleep(2);
+      }
+      const laterPreview = (host.querySelector('[data-testid="attachment-tile"] img') as HTMLImageElement).src;
+      await sleep(0);
+
       flushSync(() => root.unmount());
       root = createRoot(host);
       flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
@@ -440,7 +479,9 @@ test("an image-bearing generation restores exact bytes across a remount on deskt
 
       expect(attempts).toHaveLength(2);
       expect(attempts[1]).toEqual(attempts[0]);
-      expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(0);
+      expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe(`later draft ${width}`);
+      expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(1);
+      expect((host.querySelector('[data-testid="attachment-tile"] img') as HTMLImageElement).src).toBe(laterPreview);
       if (mobile) expect(form.getAttribute("data-testid")).toBe("bounded-mobile-composer");
     } finally {
       flushSync(() => root.unmount());
@@ -520,6 +561,25 @@ test("a terminal failure after the window exposes Retry and re-enables the compo
     if (String(input) === "/api/tmux/targets") {
       return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
     }
+    if (String(input) === "/api/runtime/operations/op-expiry-terminal") {
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({
+          receipt: {
+            operationId: "op-expiry-terminal-retry",
+            idempotencyKey: "key-expiry-terminal-retry",
+            retryOfOperationId: "op-expiry-terminal",
+            conversationId,
+            kind: "send",
+            status: "queued",
+            text: prompt,
+            at: "2026-07-20T09:03:30.000Z",
+            revision: 1,
+          },
+        }),
+      } as Response;
+    }
     if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
     const body = JSON.parse(String(init?.body)) as { clientMessageId: string };
     sentKeys.push(body.clientMessageId);
@@ -530,10 +590,12 @@ test("a terminal failure after the window exposes Retry and re-enables the compo
   sessionStorage.setItem(`llvDraft:${conversationId}`, prompt);
   const host = document.createElement("div");
   document.body.append(host);
-  const root = createRoot(host);
+  let root = createRoot(host);
   flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   const form = textarea.closest("form")!;
+  const terminalPropsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const terminalTextareaProps = (textarea as unknown as Record<string, { onChange(event: unknown): void }>)[terminalPropsKey]!;
   const retries = () => [...host.querySelectorAll("button")]
     .filter((button) => button.textContent === translate("en", "runtime.receipt.retry"));
 
@@ -563,6 +625,18 @@ test("a terminal failure after the window exposes Retry and re-enables the compo
     expect(retries()).toHaveLength(1);
     expect(textarea.value).toBe(prompt);
     expect(sentKeys).toHaveLength(1);
+
+    flushSync(() => terminalTextareaProps.onChange({ target: { value: `${prompt}\nlater turn` } }));
+    flushSync(() => (retries()[0] as HTMLButtonElement).click());
+    for (let attempt = 0; attempt < 50 && textarea.value !== "later turn"; attempt += 1) await sleep(2);
+    expect(textarea.value).toBe("later turn");
+    expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBeNull();
+
+    flushSync(() => root.unmount());
+    root = createRoot(host);
+    flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("later turn");
+    expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBeNull();
   } finally {
     flushSync(() => root.unmount());
     publishReceipts([]);
@@ -570,6 +644,75 @@ test("a terminal failure after the window exposes Retry and re-enables the compo
     sessionStorage.clear();
     host.remove();
   }
+});
+
+test("an incomplete quota snapshot stays fenced through remount until authoritative settlement", async () => {
+  setLocale("en");
+  for (const [width, mobile] of [[1440, false], [390, true]] as const) {
+    mobileViewport = mobile;
+    Object.defineProperty(dom, "innerWidth", { configurable: true, value: width });
+    const conversationId = `conv-expiry-quota-${width}`;
+    const original = `original quota payload ${width}`;
+    const later = `later safe payload ${width}`;
+    const sent: { key: string; text: string }[] = [];
+    globalThis.fetch = (async (input, init) => {
+      if (String(input) === "/api/tmux/targets") {
+        return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+      }
+      if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+      const body = JSON.parse(String(init?.body)) as { clientMessageId: string; text: string };
+      sent.push({ key: body.clientMessageId, text: body.text });
+      return { ok: true, status: 200, json: async () => ({ ok: true, outcome: "delivered-to-live" }) } as Response;
+    }) as typeof fetch;
+    refreshRuntimeImpl = async () => false;
+    sessionStorage.setItem(`llvDraft:${conversationId}`, later);
+    sessionStorage.setItem(`llvPendingSend:${conversationId}`, JSON.stringify([{
+      key: `key-quota-${width}`,
+      text: original,
+      images: [],
+      payloadComplete: false,
+      reconciling: true,
+    }]));
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+    const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+    const form = textarea.closest("form")!;
+    try {
+      await sleep(70);
+      expect(submitButton(host).disabled).toBe(true);
+      expect(sent).toEqual([]);
+
+      flushSync(() => publishReceipts([{
+        operationId: `op-quota-${width}`,
+        idempotencyKey: `key-quota-${width}`,
+        conversationId,
+        kind: "send",
+        status: "queued",
+        text: original,
+        at: "2026-07-20T09:04:00.000Z",
+        revision: 1,
+      }]));
+      await untilSendEnabled(host);
+      expect(textarea.value).toBe(later);
+      expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBeNull();
+
+      flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+      await sleep(0);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.text).toBe(later);
+      expect(sent[0]?.key).not.toBe(`key-quota-${width}`);
+    } finally {
+      flushSync(() => root.unmount());
+      publishReceipts([]);
+      refreshRuntimeImpl = async () => false;
+      sessionStorage.clear();
+      host.remove();
+    }
+  }
+  mobileViewport = false;
 });
 
 test("an edited image tray retries the immutable images and preserves later attachments on desktop and 390px", async () => {

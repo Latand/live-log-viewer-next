@@ -327,7 +327,7 @@ test("a bounded receipt summary keeps retry while withholding lossy edit", () =>
 /* ── Exact draft clearing on accepted delivery ──────────────────────────── */
 
 import type { PendingImage } from "./imageAttachments";
-import { adoptComposerState, attachmentsAfterDelivery, draftAfterDelivery, readPendingDeliveries, settlePendingDeliveries, writePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
+import { adoptComposerState, attachmentsAfterDelivery, draftAfterDelivery, readPendingDeliveries, rebindPendingOperations, settlePendingDeliveries, writePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
 
 function deliveredReceipt(key: string, status: RuntimeReceipt["status"] = "delivered", text?: string): RuntimeReceipt {
   return {
@@ -478,6 +478,27 @@ test("settlePendingDeliveries is idempotent across repeated admission receipts",
   expect(second.remaining).toEqual([]);
 });
 
+test("a retry leaf takes ownership and settles the original generation once", () => {
+  const pending: PendingDelivery[] = [{
+    key: "key-original",
+    operationId: "op-original",
+    text: "original ask",
+    images: [pendingImage("original")],
+  }];
+  const retryLeaf = {
+    ...deliveredReceipt("key-retry", "queued"),
+    operationId: "op-retry",
+    retryOfOperationId: "op-original",
+  };
+  const rebound = rebindPendingOperations(pending, [retryLeaf]);
+  expect(rebound[0]?.operationId).toBe("op-retry");
+  const first = settlePendingDeliveries(rebound, [retryLeaf]);
+  const second = settlePendingDeliveries(first.remaining, [retryLeaf]);
+  expect(first.settled).toEqual([{ entry: rebound[0]!, text: "original ask" }]);
+  expect(first.remaining).toEqual([]);
+  expect(second.settled).toEqual([]);
+});
+
 test("pending generations persist immutable image snapshots per conversation and reload bounded", () => {
   /* A remount or refresh must retain the exact generation bytes needed for an
      idempotent retry. Preview URLs are rebuilt from the persisted image body. */
@@ -497,6 +518,7 @@ test("pending generations persist immutable image snapshots per conversation and
       ...(index === 0 ? {
         runtime: { model: "gpt-5.6-sol", effort: "high", fast: true },
         runtimeCaptured: true as const,
+        operationId: "op-key-0",
       } : {}),
     }));
     writePendingDeliveries("conv-persist", entries);
@@ -512,6 +534,7 @@ test("pending generations persist immutable image snapshots per conversation and
       }],
       runtime: { model: "gpt-5.6-sol", effort: "high", fast: true },
       runtimeCaptured: true,
+      operationId: "op-key-0",
     });
     writePendingDeliveries("conv-persist", []);
     expect(readPendingDeliveries("conv-persist")).toEqual([]);
@@ -543,6 +566,7 @@ test("quota fallback preserves settlement metadata and marks the replay payload 
       images: [{ base64: "A".repeat(2_000), mime: "image/png", preview: "blob:preview" }],
       runtime: { model: "gpt-5.6-sol", effort: "xhigh" },
       runtimeCaptured: true,
+      operationId: "op-image",
       reconciling: true,
     }]);
     expect(readPendingDeliveries("conv-quota")).toEqual([{
@@ -551,6 +575,7 @@ test("quota fallback preserves settlement metadata and marks the replay payload 
       images: [],
       runtime: { model: "gpt-5.6-sol", effort: "xhigh" },
       runtimeCaptured: true,
+      operationId: "op-image",
       reconciling: true,
       payloadComplete: false,
     }]);
