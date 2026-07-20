@@ -10,6 +10,7 @@ import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient 
 import { parseRuntimeCommand } from "./commands";
 import { runtimePresentationReceipt, type RuntimeOperationKind } from "./contracts";
 import { runtimeEventsEnabled } from "./flags";
+import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
@@ -38,12 +39,22 @@ const DEFAULT_DEPENDENCIES: RuntimeHttpDependencies = {
 export interface RuntimeRetryHttpDependencies extends RuntimeHttpDependencies {
   kick(): void;
   recover?: typeof recoverDeadStructuredConversation;
+  republish?(conversationId: string): Promise<boolean>;
+}
+
+async function republishStructuredConversation(conversationId: string): Promise<boolean> {
+  if (!conversationId.startsWith("conversation_")) return false;
+  const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
+  const generation = conversation?.generations.at(-1);
+  if (!conversation || !generation) return false;
+  return republishStructuredDeliveryHost({ engine: conversation.engine, sessionId: generation.id });
 }
 
 const DEFAULT_RETRY_DEPENDENCIES: RuntimeRetryHttpDependencies = {
   enabled: () => process.env.LLV_STRUCTURED_HOSTS === "1",
   client: runtimeHostClient,
   kick: kickStructuredDeliveryQueue,
+  republish: republishStructuredConversation,
 };
 
 function terminalRetryIdempotencyKey(operationId: string): string {
@@ -196,7 +207,8 @@ export async function handleRuntimeRetry(
       return NextResponse.json({ error: "only terminal failed runtime operations can start a new attempt" }, { status: 409 });
     }
     nextIdempotencyKey ??= terminalRetryIdempotencyKey(previous.operationId);
-    const recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)(
+    const recover = dependencies.recover ?? recoverDeadStructuredConversation;
+    const recovered = await recover(
       { path: "", conversationId: previous.receipt.conversationId },
       { client },
     );
@@ -206,9 +218,26 @@ export async function handleRuntimeRetry(
         retryable: true,
       }, { status: 503 });
     }
-    const result = await client.retryOperation(previous.operationId, nextIdempotencyKey, {
+    await dependencies.republish?.(previous.receipt.conversationId);
+    const retry = () => client.retryOperation(previous.operationId, nextIdempotencyKey, {
       requireHostedConversationId: previous.receipt.conversationId,
     });
+    let result: Awaited<ReturnType<typeof retry>>;
+    try {
+      result = await retry();
+    } catch (error) {
+      if (!(error instanceof Error)
+        || error.message !== "structured recovery ownership changed before retry admission") throw error;
+      const converged = await recover(
+        { path: "", conversationId: previous.receipt.conversationId },
+        { client },
+      );
+      if (!converged || converged.conversationId !== previous.receipt.conversationId) {
+        throw new Error("structured recovery ownership is unavailable");
+      }
+      await dependencies.republish?.(previous.receipt.conversationId);
+      result = await retry();
+    }
     dependencies.kick();
     return NextResponse.json({
       operationId: result.operationId,
