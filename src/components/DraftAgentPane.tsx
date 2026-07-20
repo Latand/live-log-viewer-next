@@ -773,7 +773,7 @@ export function DraftAgentPane({
       effort,
       fast: engine === "codex" && speed ? speed === "fast" : null,
       accountId: spawnAccountId,
-      prompt: payloadText,
+      "prompt": payloadText,
       images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
       src,
       ...(parentConversationId ? { parentConversationId } : {}),
