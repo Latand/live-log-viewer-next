@@ -296,6 +296,13 @@ test("the controller republishes a live host into a restarted runtime journal", 
     await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
     expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.host).toBe("hosted");
 
+    /* A route bundle can have a different realm global from instrumentation.
+       Removing the realm-local legacy slot must leave the process controller
+       available to the route-side publication API. */
+    delete (globalThis as typeof globalThis & { __llvStructuredDeliveryController?: unknown })
+      .__llvStructuredDeliveryController;
+    expect(await republishStructuredDeliveryHost(key)).toBeTrue();
+
     journal.close();
     journal = new RuntimeJournal(path.join(directory, "runtime-after.sqlite"), { structuredHosts: true });
     expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toBeUndefined();
