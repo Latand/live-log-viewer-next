@@ -7,6 +7,8 @@ import type { FileEntry } from "@/lib/types";
 
 import { Minimap, minimapExtent, stackDotsFor, type Camera, type StackDot } from "./Minimap";
 import { buildSchemeLayout, type SchemeLayout, type SchemeRect } from "./layout";
+import { taskRect, taskWorldBounds, type PlacedTask } from "./taskGeometry";
+import { fitCameraToRect } from "./useSchemeCamera";
 import type { WorkerStack } from "./workerCollapse";
 
 const emptyLayout: SchemeLayout = {
@@ -240,6 +242,87 @@ test("the drifted viewport frame stays fully inside the fixed map (#263)", () =>
   expect(top).toBeGreaterThanOrEqual(-tol);
   expect(right).toBeLessThanOrEqual(mapW + tol);
   expect(bottom).toBeLessThanOrEqual(mapH + tol);
+});
+
+test("successive real layouts append far nodes: the minimap rescales to enclose every node on both axes while the camera framing is unaffected (#263)", () => {
+  const node = (over: Partial<FileEntry> & { path: string }): FileEntry => ({
+    root: "claude-projects", name: over.path, project: "demo", title: over.path, engine: "claude",
+    kind: "session", fmt: "claude", parent: null, mtime: 1000, size: 10, activity: "idle", proc: null,
+    pid: null, model: null, pendingQuestion: null, waitingInput: null, ...over,
+  });
+  /* A real conversation tree — root plus two children a generation below —
+     yields a genuine 1512×1930 layout world, not a hand-picked rectangle. */
+  const files = [
+    node({ path: "/root", activity: "live" }),
+    node({ path: "/root/a", parent: "/root", kind: "subagent" }),
+    node({ path: "/root/b", parent: "/root", kind: "subagent" }),
+  ];
+  const layout = buildSchemeLayout(buildBranchGroups(files, "demo"), [], files);
+  expect(layout.nodes.length).toBe(3);
+
+  const card = (id: string, x: number, y: number): PlacedTask => ({
+    id, project: "demo", status: "assigned", placement: "pinned", text: "card", pos: { x, y },
+    assignments: [], createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z",
+  } as unknown as PlacedTask);
+  /* The board derives its world exactly this way — the layout box grown to
+     enclose every placed card (issue #17). */
+  const boardWorld = (cards: PlacedTask[]): SchemeRect =>
+    taskWorldBounds(layout.width, layout.height, cards.map((c) => taskRect(c)));
+
+  const w0 = boardWorld([]);
+  /* A node that appears far to the right after the operator has panned away
+     (margins keep it clear of the top/bottom, isolating the x axis). */
+  const rightCard = card("right", 9000, 500);
+  const wRight = boardWorld([rightCard]);
+  expect(wRight.x + wRight.w).toBeGreaterThan(w0.x + w0.w); // width grew rightward
+  expect(wRight.y).toBe(w0.y);
+  expect(wRight.y + wRight.h).toBe(w0.y + w0.h); // height untouched
+
+  /* A node that appears far below (kept clear of the left/right edges). */
+  const downCard = card("down", 500, 9000);
+  const wDown = boardWorld([downCard]);
+  expect(wDown.y + wDown.h).toBeGreaterThan(w0.y + w0.h); // height grew downward
+  expect(wDown.x).toBe(w0.x);
+  expect(wDown.x + wDown.w).toBe(w0.x + w0.w); // width untouched
+
+  /* Representative large world: far right, far down, and left/above the origin
+     all at once — the single world box must enclose every board node and card. */
+  const leftUpCard = card("leftup", -800, -600);
+  const cards = [rightCard, downCard, leftUpCard];
+  const wBig = boardWorld(cards);
+  for (const n of layout.nodes) expect(containsRect(wBig, n)).toBe(true);
+  for (const c of cards) expect(containsRect(wBig, taskRect(c))).toBe(true);
+  expect(wBig.x + wBig.w).toBeGreaterThanOrEqual(wRight.x + wRight.w);
+  expect(wBig.y + wBig.h).toBeGreaterThanOrEqual(wDown.y + wDown.h);
+
+  /* Render the minimap for that grown world and confirm it rescales so EVERY
+     node and card lands inside the fixed map — none clipped out. */
+  const cam = fitCameraToRect(wBig, vp);
+  const html = renderToStaticMarkup(
+    <Minimap layout={layout} world={wBig} tasks={cards} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  const mapW = Number(html.match(/<svg width="([\d.]+)"/)?.[1]);
+  const mapH = Number(html.match(/<svg width="[\d.]+" height="([\d.]+)"/)?.[1]);
+  const transform = html.match(/translate\(([-\d.]+) ([-\d.]+)\) scale\(([\d.e-]+)\)/);
+  const [tx, ty, s] = [Number(transform?.[1]), Number(transform?.[2]), Number(transform?.[3])];
+  const withinMap = (r: SchemeRect) => {
+    const left = tx + r.x * s;
+    const top = ty + r.y * s;
+    expect(left).toBeGreaterThanOrEqual(-1);
+    expect(top).toBeGreaterThanOrEqual(-1);
+    expect(left + r.w * s).toBeLessThanOrEqual(mapW + 1);
+    expect(top + r.h * s).toBeLessThanOrEqual(mapH + 1);
+  };
+  for (const n of layout.nodes) withinMap(n);
+  for (const c of cards) withinMap(taskRect(c));
+
+  /* Camera preserved: the board's world (what the camera clamps and fits to) is
+     computed WITHOUT the camera, so panning — which does grow the minimap's own
+     display extent — never feeds back into the camera and re-snaps it. */
+  expect(boardWorld(cards)).toEqual(wBig); // world is camera-independent
+  const drifted: Camera = { z: cam.z, x: cam.x - 6000, y: cam.y - 4000 };
+  expect(minimapExtent(wBig, drifted, vp)).not.toEqual(wBig); // the map grows for the drift
+  expect(fitCameraToRect(wBig, vp)).toEqual(cam); // the camera framing is unchanged
 });
 
 test("a direct review group's deck shows on the minimap like any managed deck (#325)", () => {

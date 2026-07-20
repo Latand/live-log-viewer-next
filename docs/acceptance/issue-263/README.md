@@ -21,7 +21,7 @@ placed card, so a node added far right/down after panning is always enclosed:
 | --- | --- | --- | --- |
 | node at `x=4000` | right edge `1000` | right edge `4000 + TASK_W + 140` | width only |
 | node at `y=5000` | bottom edge `800` | bottom edge `5000 + 120 + 140` | height only |
-| scattered large world | — | `x∈[-740, 6260]`, `y∈[-540, 7260]` | both |
+| scattered large world | — | `x∈[-740, 6400]`, `y∈[-540, 7260]` | both |
 
 ## Viewport indicator stays inside the map
 
