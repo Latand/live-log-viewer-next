@@ -35,6 +35,11 @@ test("mobile dock surfaces the full plan + 44px controls for a memberless pipeli
   expect(html).toContain("Waiting");
   expect(html).not.toContain('data-stage-compact="true"');
   expect(html).toContain('data-pipeline-stage="plan"');
+  /* The phone keeps chat primary and uses the compact rail: the large desktop
+     board graph (PipelineStageGraph) must never mount in the mobile dock (#353
+     operator correction — mobile). */
+  expect(html).not.toContain("data-pipeline-stage-graph");
+  expect(html).not.toContain("data-stage-graph-node");
 });
 
 test("pipelinesToDock consumes memberful and shelf partitions directly (#388)", () => {

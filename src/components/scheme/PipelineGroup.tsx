@@ -191,12 +191,15 @@ export const PipelineGroup = memo(function PipelineGroup({
         {expanded && rect.body ? (
           <div
             data-pipeline-group-body
+            /* Sizes to its actual card content: the reserved layout height is the
+               MAX, not a fixed slab, so a short pipeline never leaves an empty
+               white panel below its cards (#353 operator correction). */
             className={`absolute overflow-y-auto rounded-[10px] border bg-card/96 px-3 py-3 shadow-2 ${draft ? "border-dashed border-warning/70" : "border-border"}`}
             style={{
               left: rect.body.x - rect.header.x,
               top: rect.body.y - rect.header.y,
               width: rect.body.w,
-              height: rect.body.h,
+              maxHeight: rect.body.h,
             }}
           >
             {typeof children === "function" ? children({ collapse }) : children}

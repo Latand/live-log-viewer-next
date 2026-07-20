@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, Compass, Eraser, Hammer, Network, Plus, RefreshCw, Search, ShieldCheck, Upload, X, type LucideIcon } from "lucide-react";
+import { CheckCircle2, Compass, Eraser, Hammer, Network, Plus, RefreshCw, Search, ShieldCheck, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { createContext, useContext, useState, type ReactNode } from "react";
 
 import { effortTierLabel, roleNameById } from "@/components/builderCopy";
@@ -14,6 +14,7 @@ import {
   buildStagePrompt,
   defaultStageWiring,
   optimisticAddStage,
+  optimisticRemoveStage,
   patchPipeline,
   pipelineCursorActive,
   pipelineStagePosition,
@@ -248,6 +249,12 @@ function InlineStageSettings({
      for byte, so an unrelated role/model change never rewrites the wiring (#221 §5). */
   const promptForSubmit = () =>
     extra.trim() === stagePromptExtra(stage.prompt) ? stage.prompt : buildStagePrompt(stage.prompt, extra, index);
+  /* Removal is a draft-only, on-canvas action (#353 AC7): the last stage can be
+     reconfigured but never removed (no empty shell can re-form), and a removal
+     that would orphan a review-loop is withheld — mirroring the server guards so
+     the control never fires a PATCH the engine rejects. */
+  const removable = pipeline.state === "draft" && pipeline.stages.length > 1
+    && reviewLoopChainValid(pipeline.stages.filter((item) => item.id !== stage.id).map((item) => item.kind));
 
   const save = async () => {
     if (busy) return;
@@ -266,6 +273,21 @@ function InlineStageSettings({
       onError(failure);
     }
     else onSaved();
+  };
+
+  const remove = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    const failure = await patchPipeline(pipeline.id, "remove-stage", { stageId: stage.id }, optimisticRemoveStage(pipeline, stage.id));
+    setBusy(false);
+    if (failure) {
+      setError(failure);
+      onError(failure);
+    }
+    /* On success the optimistic echo drops this stage, so the node unmounts; no
+       separate close is needed, and a lingering "saved" toast would misdescribe a
+       deletion. */
   };
 
   return (
@@ -324,6 +346,18 @@ function InlineStageSettings({
       </label>
       {error ? <p role="alert" className="text-caption font-semibold text-danger">{error}</p> : null}
       <div className="flex items-center justify-end gap-1.5">
+        {removable ? (
+          <button
+            type="button"
+            data-remove-stage
+            onClick={() => void remove()}
+            disabled={busy}
+            aria-label={t("groupOverride.removeStage")}
+            className="mr-auto inline-flex h-7 items-center gap-1 rounded-control border border-border px-2 text-caption font-bold text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+          >
+            <Trash2 className="h-3 w-3" aria-hidden /> {t("groupOverride.removeStage")}
+          </button>
+        ) : null}
         <button type="button" onClick={onCancel} className="h-7 rounded-control border border-border px-2 text-caption font-bold text-muted">{t("common.cancel")}</button>
         <button data-save-stage-settings type="button" onClick={() => void save()} disabled={busy} className="h-7 rounded-control bg-accent px-2.5 text-caption font-bold text-white disabled:opacity-50">
           {t("groupOverride.applyStage")}

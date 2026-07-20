@@ -543,6 +543,52 @@ test("a running pipeline graph shows no on-canvas add controls (#353 AC7)", () =
   expect(host.querySelector("[data-stage-graph-actions]")).toBeNull();
 });
 
+test("a draft node popover removes its conversation node directly on the canvas (#353 AC7)", async () => {
+  const value = pipeline([runStage("build", "polish"), runStage("polish", null)], {});
+  value.state = "draft";
+  value.cursor = { stageId: "build", state: "pending", input: null, activatedBy: null };
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+    return new Response(JSON.stringify({ pipeline: value }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const host = mount(value);
+    flushSync(() => (host.querySelector('[data-stage-graph-node="build"] button[data-open-stage]') as HTMLButtonElement).click());
+    const remove = host.querySelector('[data-stage-settings="build"] [data-remove-stage]') as HTMLButtonElement;
+    expect(remove).not.toBeNull();
+    remove.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toEqual(expect.objectContaining({ action: "remove-stage", stageId: "build" }));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a lone draft stage popover hides the remove control so no empty shell can form (#353 AC7)", () => {
+  const value = pipeline([runStage("build", null)], {});
+  value.state = "draft";
+  value.cursor = { stageId: "build", state: "pending", input: null, activatedBy: null };
+  const host = mount(value);
+  flushSync(() => (host.querySelector('[data-stage-graph-node="build"] button[data-open-stage]') as HTMLButtonElement).click());
+  expect(host.querySelector('[data-stage-settings="build"] [data-remove-stage]')).toBeNull();
+});
+
+test("a running pipeline popover never exposes a remove control (#353 AC7)", () => {
+  // A started stage cannot open its editor, and a running pipeline is not a draft,
+  // so removal — a draft-only, canvas-only action — must never be reachable here.
+  const stages = [runStage("build", "review"), reviewStage("review", null)];
+  const value = pipeline(stages, {});
+  value.cursor = { stageId: "build", state: "pending", input: null, activatedBy: null };
+  const host = mount(value);
+  flushSync(() => (host.querySelector('[data-stage-graph-node="build"] button[data-open-stage]') as HTMLButtonElement).click());
+  expect(host.querySelector('[data-stage-settings="build"] [data-remove-stage]')).toBeNull();
+});
+
 test("a path-only primary node stays clickable and opens its transcript by path (PR #439)", () => {
   const build = runStage("build", null);
   const opened: string[] = [];

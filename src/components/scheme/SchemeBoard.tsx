@@ -24,8 +24,6 @@ import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
 import { compactPipelineLayoutFlows, compactPipelineOpenTarget, patchPipeline, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds, resolveStageNavFile, type StageNavTarget } from "@/components/pipelines/pipelineModel";
-import { PipelineEditor } from "@/components/pipelines/PipelineEditor";
-import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { BulkActionBar } from "./BulkActionBar";
 import { EdgeChips } from "./EdgeChips";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
@@ -36,7 +34,7 @@ import { buildSchemeLayout } from "./layout";
 import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
 import { boardClusters } from "./offscreenClusters";
 import type { WorkerStack } from "./workerCollapse";
-import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus, type PipelineGroupControls } from "./nodes";
+import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
@@ -55,6 +53,7 @@ import {
 } from "./taskGeometry";
 import { resolveTaskPlacements } from "./taskPlacement";
 import { PipelineGroup } from "./PipelineGroup";
+import { PipelineGroupBody } from "./PipelineGroupBody";
 import { PIPELINE_GROUP_EXPANDED_H, layoutPipelineGroups, type PipelinePane } from "./pipelineAnchor";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
@@ -488,10 +487,6 @@ export function SchemeBoard({
     }
     return byTask;
   }, [pipelines, linkedTasksByPipeline, flows, renderableGroupFlows, renderablePipelinePaths, files]);
-  const pipelineControls = useMemo<PipelineGroupControls>(
-    () => ({ flows, onOpenAttempt: openPipelineAttempt }),
-    [flows, openPipelineAttempt],
-  );
   const pinPipeline = useCallback(
     (pipeline: Pipeline, pos: { x: number; y: number }) =>
       patchPipeline(pipeline.id, "set-position", { pos }, { ...pipeline, pos }),
@@ -1143,7 +1138,7 @@ export function SchemeBoard({
       >
         {/* Group halos sit behind every edge and card so a running flow/pipeline
             reads as one framed region; the label chip stays live off the map. */}
-        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} pipelineControls={mapMode ? undefined : pipelineControls} autoOpenGroupId={activeBuilderPipelineId} onAutoOpen={handleBuilderOpened} />
+        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} autoOpenGroupId={activeBuilderPipelineId} onAutoOpen={handleBuilderOpened} />
         <EdgesLayer edges={layout.edges} badgeAnchors={badgeAnchors} badgeAnchorRevision={badgeAnchorRevision} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
@@ -1214,22 +1209,12 @@ export function SchemeBoard({
               autoOpen={activeBuilderPipelineId === pipeline.id}
               onAutoOpen={handleBuilderOpened}
             >
-              {({ collapse }) => pipeline.state === "draft" ? (
-                <PipelineEditor pipeline={pipeline} onClose={collapse} />
-              ) : (
-                <PipelineStrip
+              {({ collapse }) => (
+                <PipelineGroupBody
                   pipeline={pipeline}
                   flows={flows}
-                  files={files}
-                  renderablePaths={renderablePipelinePaths}
-                  renderableFlows={renderableGroupFlows}
-                  materializedPaths={placedNodePaths}
-                  materializedFlows={renderableGroupFlows}
-                  linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []}
-                  compact
-                  onOpenPath={openPipelinePath}
-                  onOpenFlow={openPipelineFlow}
-                  onOpenTask={stableOpenTask}
+                  onOpenAttempt={openPipelineAttempt}
+                  onClose={collapse}
                 />
               )}
             </PipelineGroup>

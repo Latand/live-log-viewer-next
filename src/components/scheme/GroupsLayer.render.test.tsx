@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { GroupsLayer, groupLabelScreenPx, groupLabelFontSize, type PipelineGroupControls } from "./nodes";
+import { GroupsLayer, groupLabelScreenPx, groupLabelFontSize } from "./nodes";
 import type { SchemeGroup } from "./layout";
 import type { Pipeline } from "@/lib/pipelines/types";
 
@@ -17,11 +17,6 @@ const planPipeline = {
   runs: [], cursor: null, state: "provisioning", pausedState: null, stateDetail: null,
   srcPath: null, srcConversationId: null, createdAt: new Date(0).toISOString(), closedAt: null,
 } as unknown as Pipeline;
-
-const controls: PipelineGroupControls = {
-  flows: [],
-  onOpenAttempt: () => {},
-};
 
 const flowGroup: SchemeGroup = {
   key: "group::flow::f1",
@@ -96,37 +91,28 @@ test("no groups renders nothing", () => {
   expect(render([], true)).toBe("");
 });
 
-test("a pipeline group carries its full declared stage graph", () => {
+test("a pipeline group frames its members with a label chip but no detached stage strip (#353)", () => {
   const group: SchemeGroup = { ...pipelineGroup, pipeline: planPipeline };
-  /* Every planned stage, including the pending review, renders on the halo. */
-  const withControls = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
-  expect(withControls).toContain("data-scheme-group-strip");
-  expect(withControls).toContain("build");
-  expect(withControls).toContain("review");
-  expect(withControls.match(/data-stage-graph-node=/g)).toHaveLength(2);
-  expect(withControls.match(/data-stage-graph-edge=/g)).toHaveLength(1);
-  /* Without controls (e.g. the lite map) the halo keeps only its label chip. */
-  const noControls = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive />);
-  expect(noControls).not.toContain("data-scheme-group-strip");
+  /* The conversation-card stage graph now mounts inside the compact PipelineGroup
+     body, NOT on the halo — the halo carries only its region and title chip, so
+     no large detached graph panel floats over the board (#353 operator correction). */
+  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive />);
+  expect(html).toContain('data-scheme-group="pipeline"');
+  expect(html).toContain("Refactor the scheme");
+  expect(html).not.toContain("data-scheme-group-strip");
+  expect(html).not.toContain("data-pipeline-stage-graph");
+  expect(html.match(/data-stage-graph-node=/g)).toBeNull();
 });
 
-test("group keeps the graph when the current stage node is hidden", () => {
-  const hiddenCurrent = { ...planPipeline, cursor: { stageId: "build", state: "running", input: null, activatedBy: null } } as unknown as Pipeline;
-  const group: SchemeGroup = { ...pipelineGroup, pipeline: hiddenCurrent };
-  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
-  expect(html).toContain("data-pipeline-stage-graph");
-});
-
-test("a draft pipeline has a scheme-only draft treatment and its complete stage plan", () => {
+test("a draft pipeline keeps its scheme-only dashed draft treatment and single title (#353)", () => {
   const draft = { ...planPipeline, state: "draft" } as Pipeline;
   const group: SchemeGroup = { ...pipelineGroup, pipeline: draft };
-  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
+  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive />);
 
   expect(html).toContain('data-pipeline-draft="true"');
   /* The group chip remains the single pipeline title. */
   expect(html).not.toContain("DRAFT");
   expect(html.split(">Refactor the scheme<").length - 1).toBe(1); // visible title: the chip only (aria-labels aside)
-  expect(html).toContain("build");
-  expect(html).toContain("review");
-  expect(html).toContain("data-pipeline-stage-graph");
+  /* No detached stage graph surface floats on the draft halo. */
+  expect(html).not.toContain("data-pipeline-stage-graph");
 });
