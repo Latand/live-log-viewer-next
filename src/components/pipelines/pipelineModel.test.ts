@@ -41,6 +41,8 @@ import {
   attemptNavTarget,
   resolveStageNavFile,
   partitionPipelineSurfaces,
+  pipelineBoardProjection,
+  pipelinePlaceholderStages,
   pipelineStagePresentation,
   stageOverrideBody,
   templateStageInputs,
@@ -259,7 +261,7 @@ describe("pipelineCursorActive", () => {
 describe("compactPipelineArtifactPaths", () => {
   const stages = [stage("architect"), stage("builder"), stage("review", "review-loop")];
 
-  test("keeps one current run pane and compacts passed stages plus prior retries", () => {
+  test("keeps only the cursor stage's live pane; every terminal stage and prior retry compacts (#353 R2)", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
@@ -275,10 +277,12 @@ describe("compactPipelineArtifactPaths", () => {
       ],
     });
 
-    expect([...compactPipelineArtifactPaths([p], [])].sort()).toEqual(["/architect", "/builder-attempt-1"]);
+    /* The live builder attempt is the sole full pane; the passed architect (a
+       terminal stage) and the failed builder retry fold into compact history. */
+    expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/architect", "/builder-attempt-1"]);
   });
 
-  test("keeps the review target pane while folding review transcripts into compact evidence", () => {
+  test("keeps the live reviewer transcript as the pane and compacts the implementer it reviews (#353 R2)", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -289,10 +293,12 @@ describe("compactPipelineArtifactPaths", () => {
     });
     const flows = [{ id: "f1", implementerPath: "/builder", rounds: [{ reviewerPath: "/reviewer" }] }] as unknown as Flow[];
 
-    expect([...compactPipelineArtifactPaths([p], flows)]).toEqual(["/reviewer"]);
+    /* The reviewer is the current live pane (its flow deck is folded out in
+       production), so the passed builder it reviews compacts. */
+    expect(compactPipelineArtifactPaths([p], flows)).toEqual(new Set(["/builder"]));
   });
 
-  test("compacts every durable binding from a retried logical review round", () => {
+  test("compacts the reviewed implementer and every durable binding from a retried review round", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -315,10 +321,10 @@ describe("compactPipelineArtifactPaths", () => {
       { path: "/review-current", conversationId: "conversation-current", durableLineage: { memberships: [membership("reviewer:1:binding-b")] } },
     ] as unknown as FileEntry[];
 
-    expect(compactPipelineArtifactPaths([p], flows, files)).toEqual(new Set(["/review-prior", "/review-current"]));
+    expect(compactPipelineArtifactPaths([p], flows, files)).toEqual(new Set(["/builder", "/review-prior"]));
   });
 
-  test("keeps the latest passed run pane while a review flow is materializing", () => {
+  test("a review cursor with no reviewer yet keeps the implementer pane and compacts earlier stages", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -329,6 +335,9 @@ describe("compactPipelineArtifactPaths", () => {
       ],
     });
 
+    /* The reviewer transcript has not materialized, so the implementer it reviews
+       (the latest preceding passed run, /builder) is the live pane; the earlier
+       architect compacts. */
     expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/architect"]);
   });
 
@@ -1219,6 +1228,122 @@ describe("pipelineStagePresentation", () => {
     });
     expect(pipelineStagePresentation(review, stages[2]!, new Set(), new Set(["flow-1"]))).toBe("materialized");
     expect(pipelineStagePresentation(pipeline({ state: "draft", stages }), stages[0]!, new Set(), new Set())).toBe("waiting");
+  });
+});
+
+describe("continuous exactly-one stage-surface ownership across the materialization arc (#353 R4)", () => {
+  const stages = [stage("plan"), stage("build"), stage("review", "review-loop")];
+
+  /* Each step of the build stage's arc: from a bare pending cursor, through spawning
+     and the path publication + scan gap, to the placed board rect. `placed` is the
+     set of node paths the board has actually laid out at that step. */
+  const arc: Array<{ label: string; attempt: Record<string, unknown>; cursorState: "pending" | "spawning" | "running"; placed: Set<string> }> = [
+    { label: "pending (no path)", attempt: { n: 1, state: "pending", agentPath: null, flowId: null }, cursorState: "pending", placed: new Set() },
+    { label: "spawning (no path)", attempt: { n: 1, state: "spawning", agentPath: null, flowId: null }, cursorState: "spawning", placed: new Set() },
+    { label: "running, path published, not yet scanned", attempt: { n: 1, state: "running", agentPath: "/build", flowId: null }, cursorState: "running", placed: new Set() },
+    { label: "running, scanned but not yet placed", attempt: { n: 1, state: "running", agentPath: "/build", flowId: null }, cursorState: "running", placed: new Set(["/plan"]) },
+    { label: "running, placed board rect", attempt: { n: 1, state: "running", agentPath: "/build", flowId: null }, cursorState: "running", placed: new Set(["/plan", "/build"]) },
+  ];
+
+  test("the build stage owns exactly one surface — placeholder XOR materialized pane — at every step", () => {
+    for (const step of arc) {
+      const p = pipeline({
+        state: "running",
+        stages,
+        cursor: { stageId: "build", state: step.cursorState, input: null, activatedBy: null },
+        runs: [
+          { stageId: "plan", attempts: [{ n: 1, state: "passed", agentPath: "/plan", flowId: null } as never] },
+          { stageId: "build", attempts: [step.attempt as never] },
+        ],
+      });
+      const isPlaceholder = pipelinePlaceholderStages(p, step.placed, new Set())
+        .some((candidate) => candidate.id === "build");
+      const presentation = pipelineStagePresentation(p, stages[1]!, step.placed, new Set());
+      const materialized = presentation === "materialized";
+      /* Exactly one surface: the stage is a placeholder while its pane is unplaced,
+         and a materialized pane the instant a board rect exists — never both (a
+         duplicate) and never neither (a zero-surface hole). */
+      expect(isPlaceholder, `${step.label}: placeholder`).toBe(!materialized);
+      expect(isPlaceholder !== materialized, `${step.label}: exactly one`).toBe(true);
+    }
+  });
+
+  test("the projection edge list stays intact — every pass/fail/loop edge survives the whole arc", () => {
+    for (const step of arc) {
+      const p = pipeline({
+        state: "running",
+        stages: [
+          { ...stage("plan"), next: "build" },
+          { ...stage("build"), next: "review" },
+          { ...stage("review", "review-loop"), next: null, onFail: { to: "build", maxRounds: 5 } },
+        ],
+        cursor: { stageId: "build", state: step.cursorState, input: null, activatedBy: null },
+        runs: [
+          { stageId: "plan", attempts: [{ n: 1, state: "passed", agentPath: "/plan", flowId: null } as never] },
+          { stageId: "build", attempts: [step.attempt as never] },
+        ],
+      });
+      const projection = pipelineBoardProjection(p, [], [], step.placed, new Set());
+      const edgeKeys = projection.edges.map((edge) => `${edge.from}->${edge.to}:${edge.kind}`);
+      /* plan→build pass, build→review pass, review→null (none), review→build fail
+         all persist regardless of how far build has materialized. */
+      expect(edgeKeys.sort()).toEqual(["build->review:pass", "plan->build:pass", "review->build:fail"]);
+      /* The whole plan stays a board surface throughout. */
+      expect(projection.onBoard).toBe(true);
+      expect(projection.members).toHaveLength(3);
+    }
+  });
+});
+
+describe("a current cursor parked in needs_decision retains its surface and rails (#353 R5)", () => {
+  const parkedStages = [
+    { ...stage("plan"), next: "build" },
+    { ...stage("build"), next: "review" },
+    { ...stage("review", "review-loop"), next: null, onFail: { to: "build", maxRounds: 5 } as never },
+  ];
+
+  /* The build cursor parks in needs_decision at three points on its arc: pathless
+     (no artifact ever published), published-yet-unplaced (artifact published but
+     not laid out as a board rect), and placed (a real board rect exists). */
+  const parks: Array<{ label: string; buildAttempt: Record<string, unknown>; placed: Set<string> }> = [
+    { label: "pathless parked", buildAttempt: { n: 1, state: "needs_decision", agentPath: null, flowId: null }, placed: new Set() },
+    { label: "published-yet-unplaced parked", buildAttempt: { n: 1, state: "needs_decision", agentPath: "/build", flowId: null }, placed: new Set(["/plan"]) },
+    { label: "placed board rect", buildAttempt: { n: 1, state: "needs_decision", agentPath: "/build", flowId: null }, placed: new Set(["/plan", "/build"]) },
+  ];
+
+  const parked = (park: (typeof parks)[number]) => pipeline({
+    state: "needs_decision",
+    stages: parkedStages,
+    cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+    runs: [
+      { stageId: "plan", attempts: [{ n: 1, state: "passed", agentPath: "/plan", flowId: null } as never] },
+      { stageId: "build", attempts: [park.buildAttempt as never] },
+    ],
+  });
+
+  test("the parked cursor owns exactly one surface — a placeholder until a board rect is placed, then the live pane, never neither", () => {
+    for (const park of parks) {
+      const p = parked(park);
+      const isPlaceholder = pipelinePlaceholderStages(p, park.placed, new Set())
+        .some((candidate) => candidate.id === "build");
+      const materialized = park.placed.has("/build");
+      /* Pathless + published-yet-unplaced keep the placeholder; the placed rect
+         dissolves it (the live pane owns the slot) with no duplicate. */
+      expect(isPlaceholder, `${park.label}: placeholder XOR pane`).toBe(!materialized);
+      expect(isPlaceholder !== materialized, `${park.label}: exactly one`).toBe(true);
+    }
+  });
+
+  test("every incident pass/fail/loop edge survives the whole park — no rail is dropped", () => {
+    for (const park of parks) {
+      const projection = pipelineBoardProjection(parked(park), [], [], park.placed, new Set());
+      const edgeKeys = projection.edges.map((edge) => `${edge.from}->${edge.to}:${edge.kind}`);
+      /* plan→build pass, build→review pass, review→build fail loop all persist
+         regardless of whether the parked build has a placed rect yet. */
+      expect(edgeKeys.sort(), park.label).toEqual(["build->review:pass", "plan->build:pass", "review->build:fail"]);
+      expect(projection.onBoard, park.label).toBe(true);
+      expect(projection.members, park.label).toHaveLength(3);
+    }
   });
 });
 

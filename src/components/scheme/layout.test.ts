@@ -6,13 +6,13 @@ import type { FileEntry } from "@/lib/types";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 
 import { directReviewFlows } from "@/components/flows/directReviewGroups";
-import { compactPipelineLayoutFlows } from "@/components/pipelines/pipelineModel";
+import { compactPipelineArtifactPaths, compactPipelineLayoutFlows, excludeCompactPipelineArtifacts } from "@/components/pipelines/pipelineModel";
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
 import { planRootReconciliation } from "@/components/projectBoardMutations";
 import { applyBoardMutations } from "@/lib/board/mutations";
 import { autoTaskSlotPosition } from "@/lib/tasks/lattice";
 
-import { deckKey, flowLinkKey } from "./agentLinks";
+import { deckKey, flowLinkKey, stageSlotKey } from "./agentLinks";
 import { REST_BAND_MAX_W, buildSchemeLayout } from "./layout";
 import { TASK_W, taskWorldBounds } from "./taskGeometry";
 
@@ -335,7 +335,7 @@ describe("buildSchemeLayout byPath", () => {
   });
 });
 
-describe("memberless pipelines stay outside world geometry (#388)", () => {
+describe("planned-stage pipelines grow a placeholder halo (#353 desktop ownership)", () => {
   const pipeline = (over: Record<string, unknown>): Pipeline =>
     ({
       id: "p1", task: "Ship it", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main",
@@ -344,14 +344,23 @@ describe("memberless pipelines stay outside world geometry (#388)", () => {
       srcConversationId: null, createdAt: "1970", closedAt: null, ...over,
     }) as unknown as Pipeline;
 
-  test("1, 3, and 10 memberless pipelines add zero groups, slots, or world bounds", () => {
-    const empty = buildSchemeLayout([], [], []);
+  test("each planned surface pipeline grows one placeholder slot inside one colored halo", () => {
+    /* The colored SchemeGroup halo is the sole pipeline region (#353): a planned
+       stage with no live window yet renders as a conversation-shaped placeholder
+       INSIDE that halo, not as a detached rail. One stage ⇒ one slot ⇒ one halo. */
     for (const count of [1, 3, 10]) {
       const rows = Array.from({ length: count }, (_, index) => pipeline({ id: `p${index + 1}` }));
       const layout = buildSchemeLayout([], [], [], [], [], rows, rows);
-      expect(layout.groups, String(count)).toEqual([]);
-      expect(layout.slots, String(count)).toEqual([]);
-      expect({ width: layout.width, height: layout.height }, String(count)).toEqual({ width: empty.width, height: empty.height });
+      const pipelineGroups = layout.groups.filter((group) => group.kind === "pipeline");
+      expect(pipelineGroups, String(count)).toHaveLength(count);
+      expect(layout.slots, String(count)).toHaveLength(count);
+      /* Every placeholder sits within its own pipeline halo. */
+      for (const slot of layout.slots) {
+        const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === slot.pipeline.id)!;
+        expect(slot.x).toBeGreaterThanOrEqual(halo.x);
+        expect(slot.x + slot.w).toBeLessThanOrEqual(halo.x + halo.w);
+        expect(slot.y + slot.h).toBeLessThanOrEqual(halo.y + halo.h);
+      }
     }
   });
 
@@ -362,6 +371,204 @@ describe("memberless pipelines stay outside world geometry (#388)", () => {
     const layout = buildSchemeLayout([group], [], [root], [], [], [withNode], [withNode]);
     const halos = layout.groups.filter((g) => g.kind === "pipeline" && g.id === "p1");
     expect(halos).toHaveLength(1);
+  });
+
+  test("the cursor stage keeps exactly one placeholder surface through the materialization gap (#353 R4)", () => {
+    /* The build attempt has published agentPath="/build", but the scanner has not
+       yet surfaced that transcript, so /build is absent from the scene and never
+       gets a placed node. Between path publication and board placement the cursor
+       stage must keep exactly one conversation-shaped placeholder — never zero
+       surface. Reading the stored agentPath alone (the pre-R4 predicate) dropped
+       the placeholder the instant the path appeared, leaving the stage with no
+       pane and no placeholder until the scan caught up. */
+    const gap = pipeline({
+      stages: [
+        { id: "build", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "review-loop", prompt: "", next: null },
+      ],
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      state: "running",
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/build", flowId: null } as unknown as Record<string, unknown>] }],
+    });
+    /* No scene node for /build: the transcript is published but not yet scanned. */
+    const layout = buildSchemeLayout([], [], [], [], [], [gap], [gap]);
+    const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+    expect(slotByStage.get("build")?.presentation).toBe("placeholder");
+    expect(slotByStage.get("review")?.presentation).toBe("placeholder");
+    /* Exactly one surface for the whole plan: two placeholders, no live node. */
+    expect(layout.nodes).toHaveLength(0);
+    expect(layout.slots).toHaveLength(2);
+  });
+
+  test("once the cursor stage's transcript is scanned and placed, its placeholder dissolves without a duplicate (#353 R4)", () => {
+    /* Same pipeline, now /build has been scanned and placed as a node. The live
+       pane owns build's slot; only the future review stage remains a placeholder —
+       no lingering placeholder over the materialized pane. */
+    const root = entry({ path: "/build" });
+    const group: BranchGroup = { key: "/build", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
+    const placed = pipeline({
+      stages: [
+        { id: "build", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "review-loop", prompt: "", next: null },
+      ],
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      state: "running",
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/build", flowId: null } as unknown as Record<string, unknown>] }],
+    });
+    const layout = buildSchemeLayout([group], [], [root], [], [], [placed], [placed]);
+    const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+    expect(layout.nodes.map((node) => node.file.path)).toContain("/build");
+    expect(slotByStage.has("build")).toBe(false);
+    expect(slotByStage.get("review")?.presentation).toBe("placeholder");
+  });
+
+  test("a current cursor parked in needs_decision keeps its placeholder surface and every incident rail — pathless, published-unplaced, then dissolves (#353 R5)", () => {
+    /* build is the live cursor and it PARKS in needs_decision before its transcript
+       is a placed board rect. Layout excludes the cursor stage from compact
+       navigable history, so without a placeholder the stage falls to zero surface
+       and its incident rails (plan→build pass, build→review pass, review→build
+       fail loop) lose their build endpoint and vanish. build must keep exactly one
+       placeholder across pathless + published-yet-unplaced, dissolving only once a
+       real board rect lands — with no duplicate placeholder over the live pane. */
+    const buildStages = [
+      { id: "plan", kind: "run", prompt: "", next: "build" },
+      { id: "build", kind: "run", prompt: "", next: "review" },
+      { id: "review", kind: "review-loop", prompt: "", next: null, onFail: { to: "build", maxRounds: 5 } },
+    ];
+    const parkedPipeline = (buildAttempt: Record<string, unknown>) => pipeline({
+      stages: buildStages,
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      state: "needs_decision",
+      runs: [
+        { stageId: "plan", attempts: [{ n: 1, state: "passed", agentPath: "/plan", flowId: null } as unknown as Record<string, unknown>] },
+        { stageId: "build", attempts: [buildAttempt] },
+      ],
+    });
+    const planRoot = entry({ path: "/plan" });
+    const planGroup: BranchGroup = { key: "/plan", columns: [{ file: planRoot, tasks: [] }], returnable: [], finished: [], smt: planRoot.mtime, orphanTask: false };
+
+    /* The build slot's incident rails: pass in from plan, pass out to review, and
+       the review→build fail loop back in. All three must survive the park. */
+    const buildSlot = stageSlotKey("p1", "build");
+    const railsInto = (layout: ReturnType<typeof buildSchemeLayout>) => ({
+      passIn: layout.links.some((l) => l.kind === "pipeline" && l.to === buildSlot && l.pipeline!.edge === "pass"),
+      passOut: layout.links.some((l) => l.kind === "pipeline" && l.from === buildSlot && l.pipeline!.edge === "pass"),
+      failLoop: layout.links.some((l) => l.kind === "pipeline" && l.to === buildSlot && l.pipeline!.edge === "fail"),
+    });
+
+    for (const buildAttempt of [
+      /* Pathless parked: no artifact ever published. */
+      { n: 1, state: "needs_decision", agentPath: null, flowId: null } as unknown as Record<string, unknown>,
+      /* Published-yet-unplaced parked: artifact published, no scene node placed. */
+      { n: 1, state: "needs_decision", agentPath: "/build", flowId: null } as unknown as Record<string, unknown>,
+    ]) {
+      const p = parkedPipeline(buildAttempt);
+      /* Only /plan is a placed scene node; /build is never in the scene. */
+      const layout = buildSchemeLayout([planGroup], [], [planRoot], [], [], [p], [p]);
+      const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+      expect(slotByStage.get("build")?.presentation).toBe("placeholder");
+      expect(slotByStage.get("review")?.presentation).toBe("placeholder");
+      const rails = railsInto(layout);
+      expect(rails.passIn).toBe(true);
+      expect(rails.passOut).toBe(true);
+      expect(rails.failLoop).toBe(true);
+    }
+
+    /* Placed board rect: /build is scanned and laid out. The live pane owns build's
+       slot; the placeholder dissolves with no duplicate — only review remains. */
+    const buildRoot = entry({ path: "/build" });
+    const buildGroup: BranchGroup = { key: "/build", columns: [{ file: buildRoot, tasks: [] }], returnable: [], finished: [], smt: buildRoot.mtime, orphanTask: false };
+    const placedPipeline = parkedPipeline({ n: 1, state: "needs_decision", agentPath: "/build", flowId: null } as unknown as Record<string, unknown>);
+    const placedLayout = buildSchemeLayout([planGroup, buildGroup], [], [planRoot, buildRoot], [], [], [placedPipeline], [placedPipeline]);
+    const placedSlots = new Map(placedLayout.slots.map((slot) => [slot.stage.id, slot]));
+    expect(placedLayout.nodes.map((node) => node.file.path)).toContain("/build");
+    expect(placedSlots.has("build")).toBe(false);
+    expect(placedSlots.get("review")?.presentation).toBe("placeholder");
+  });
+
+  test("a materialized stage's pass edge routes a pipeline rail into the next stage's placeholder slot (#353)", () => {
+    /* build ran (a real /build node); review has not launched, so it lives only as
+       its planned-stage placeholder slot inside the halo. The build→review pass
+       edge must route a rail from the materialized node straight into that
+       placeholder, so the conversation graph stays continuous inside the region
+       instead of stopping at the last live card. */
+    const root = entry({ path: "/build" });
+    const group: BranchGroup = { key: "/build", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
+    const twoStage = pipeline({
+      stages: [
+        { id: "build", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "review-loop", prompt: "", next: null },
+      ],
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      state: "running",
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/build", flowId: null } as unknown as Record<string, unknown>] }],
+    });
+    const layout = buildSchemeLayout([group], [], [root], [], [], [twoStage], [twoStage]);
+    const slotKey = stageSlotKey("p1", "review");
+    expect(layout.slots.map((slot) => slot.key)).toContain(slotKey);
+    const edge = layout.links.find((link) => link.kind === "pipeline" && link.to === slotKey);
+    expect(edge).toBeTruthy();
+    expect(edge!.from).toBe("/build");
+    expect(edge!.pipeline!.edge).toBe("pass");
+  });
+});
+
+describe("compact-history anchors keep terminal-stage edges under production compaction (#353 R3)", () => {
+  test("full production scene yields builder→reviewer, reviewer→future, reviewer→builder fail-loop, one hub, and direct reviewer halo membership", () => {
+    /* builder (run, passed) → reviewer (review-loop, live cursor) → future (run),
+       with reviewer→builder on fail. In production compactPipelineArtifactPaths
+       keeps only the live reviewer pane full-size and folds /build out of the
+       scene; without a compact-history anchor for builder its edges would vanish. */
+    const reviewer = entry({ path: "/reviewer", conversationId: "c-rev", activity: "live" });
+    const builderFile = entry({ path: "/build", conversationId: "c-build" });
+    const p = ({
+      id: "p", task: "Halo", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b",
+      baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
+      stages: [
+        { id: "builder", kind: "run", prompt: "", next: "reviewer" },
+        { id: "reviewer", kind: "review-loop", prompt: "", next: "future", onFail: { to: "builder", maxRounds: 5 } },
+        { id: "future", kind: "run", prompt: "", next: null },
+      ],
+      runs: [
+        { stageId: "builder", attempts: [{ n: 1, state: "passed", agentPath: "/build", flowId: null }] },
+        { stageId: "reviewer", attempts: [{ n: 1, state: "reviewing", agentPath: "/reviewer", flowId: "f1" }] },
+      ],
+      cursor: { stageId: "reviewer", state: "reviewing", input: null, activatedBy: null },
+      state: "running", pausedState: null, stateDetail: null,
+      srcPath: null, srcConversationId: null, createdAt: "1970", closedAt: null,
+    }) as unknown as Pipeline;
+
+    /* Assemble the production scene exactly as ProjectDashboard does. */
+    const allFiles = [builderFile, reviewer];
+    const layoutFlows = compactPipelineLayoutFlows([p], []); // folds the pipeline's flow deck out
+    const compactPaths = compactPipelineArtifactPaths([p], layoutFlows, allFiles);
+    expect([...compactPaths]).toContain("/build");
+    expect([...compactPaths]).not.toContain("/reviewer");
+    const sceneFiles = excludeCompactPipelineArtifacts(allFiles, compactPaths);
+    const groups = buildBranchGroups(sceneFiles, "demo");
+    const layout = buildSchemeLayout(groups, [], sceneFiles, layoutFlows, [], [p], [p]);
+
+    /* The reviewer is the live pane; builder is a compact-history anchor; future a
+       placeholder. */
+    expect(layout.nodes.map((node) => node.file.path)).toContain("/reviewer");
+    expect(layout.nodes.map((node) => node.file.path)).not.toContain("/build");
+    const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+    expect(slotByStage.get("builder")?.presentation).toBe("history");
+    expect(slotByStage.get("future")?.presentation).toBe("placeholder");
+
+    const builderSlot = stageSlotKey("p", "builder");
+    const futureSlot = stageSlotKey("p", "future");
+    const pipeLinks = layout.links.filter((link) => link.kind === "pipeline");
+    const edge = (from: string, to: string) => pipeLinks.find((link) => link.pipeline!.fromStageId === from && link.pipeline!.toStageId === to);
+    expect(edge("builder", "reviewer")).toMatchObject({ from: builderSlot, to: "/reviewer", pipeline: { edge: "pass" } });
+    expect(edge("reviewer", "future")).toMatchObject({ from: "/reviewer", to: futureSlot, pipeline: { edge: "pass" } });
+    expect(edge("reviewer", "builder")).toMatchObject({ from: "/reviewer", to: builderSlot, pipeline: { edge: "fail" } });
+    expect(pipeLinks.filter((link) => link.pipeline!.hub)).toHaveLength(1);
+
+    const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p");
+    expect(halo).toBeTruthy();
+    expect(halo!.members).toContain("/reviewer");
+    expect(halo!.members).toContain(builderSlot);
   });
 });
 
@@ -423,16 +630,35 @@ describe("pipeline world ownership (#353/#388)", () => {
       srcConversationId: null, createdAt: "1970", closedAt: null, ...over,
     }) as unknown as Pipeline;
 
-  test("a template draft stays out of world geometry", () => {
+  test("a template draft renders every stage as a placeholder inside its halo", () => {
+    /* An optimistic draft shell appears on the canvas immediately (#353): each of
+       its three declared stages is a conversation-shaped placeholder, enclosed by
+       one colored pipeline halo — the draft is a real region, not an empty shell. */
     const pipeline = staged({});
-    const empty = buildSchemeLayout([], [], []);
     const layout = buildSchemeLayout([], [], [], [], [], [pipeline], [pipeline]);
+    expect(layout.slots).toHaveLength(3);
+    expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["architect", "builder", "review"]);
+    const halos = layout.groups.filter((group) => group.kind === "pipeline" && group.id === "p9");
+    expect(halos).toHaveLength(1);
+    const halo = halos[0]!;
+    for (const slot of layout.slots) {
+      expect(slot.x).toBeGreaterThanOrEqual(halo.x);
+      expect(slot.x + slot.w).toBeLessThanOrEqual(halo.x + halo.w);
+    }
+  });
+
+  test("a zero-stage draft shell stays out of world geometry", () => {
+    /* Empty pipeline shells stay out of the board projection (#340): no stages ⇒
+       no placeholders ⇒ no halo, no world bounds. */
+    const empty = buildSchemeLayout([], [], []);
+    const shell = staged({ stages: [] });
+    const layout = buildSchemeLayout([], [], [], [], [], [shell], [shell]);
     expect(layout.slots).toHaveLength(0);
     expect(layout.groups.filter((group) => group.kind === "pipeline")).toHaveLength(0);
     expect({ width: layout.width, height: layout.height }).toEqual({ width: empty.width, height: empty.height });
   });
 
-  test("a materialized current stage stays as the group's single full pane", () => {
+  test("a materialized current stage keeps its full pane and future stages become placeholders", () => {
     const root = entry({ path: "/arch", activity: "live" });
     const group: BranchGroup = { key: "/arch", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
     const running = staged({
@@ -441,7 +667,9 @@ describe("pipeline world ownership (#353/#388)", () => {
       runs: [{ stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] }],
     });
     const layout = buildSchemeLayout([group], [], [root], [], [], [running], [running]);
-    expect(layout.slots).toHaveLength(0);
+    /* architect materialized (a full pane); builder + review are future stages
+       (no attempt yet) ⇒ two placeholders, both inside the same halo. */
+    expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["builder", "review"]);
     const node = layout.nodes.find((candidate) => candidate.file.path === "/arch")!;
     const halos = layout.groups.filter((candidate) => candidate.kind === "pipeline" && candidate.id === "p9");
     expect(halos).toHaveLength(1);
@@ -449,6 +677,12 @@ describe("pipeline world ownership (#353/#388)", () => {
     expect(node.x).toBeGreaterThanOrEqual(halo.x);
     expect(node.x + node.w).toBeLessThanOrEqual(halo.x + halo.w);
     expect(node.y + node.h).toBeLessThanOrEqual(halo.y + halo.h);
+    /* The materialized pane stays the single full window for its stage. */
+    expect(layout.nodes.map((candidate) => candidate.file.path)).toEqual(["/arch"]);
+    for (const slot of layout.slots) {
+      expect(slot.x).toBeGreaterThanOrEqual(halo.x);
+      expect(slot.y + slot.h).toBeLessThanOrEqual(halo.y + halo.h);
+    }
   });
 
   test("an active review stage keeps one conversation pane and folds its review deck", () => {
@@ -495,28 +729,27 @@ describe("pipeline world ownership (#353/#388)", () => {
 
   test("a foreign project's memberless draft never grows slots or a halo on this canvas (round-1 finding 2)", () => {
     /* Global list carries another project's draft; the project-scoped surface
-       list does not include it — nothing of it may render here. */
+       list does not include it — a foreign draft with no placed member may not
+       drop its placeholders or halo on this canvas. */
     const foreign = staged({ id: "px", project: "other" });
     const layout = buildSchemeLayout([], [], [], [], [], [foreign], []);
     expect(layout.slots).toHaveLength(0);
     expect(layout.groups.filter((group) => group.kind === "pipeline")).toHaveLength(0);
-    /* Project-scoped surface membership is owned by the screen-space shelf. */
-    const local = buildSchemeLayout([], [], [], [], [], [foreign], [foreign]);
-    expect(local.slots).toHaveLength(0);
-    expect(local.groups.filter((group) => group.kind === "pipeline")).toHaveLength(0);
   });
 
   for (const count of [1, 3, 10]) {
-    test(`${count} memberless pipeline${count === 1 ? "" : "s"} leave every zoom and Fit All unchanged`, () => {
+    test(`${count} planned surface pipeline${count === 1 ? "" : "s"} grow one bounded placeholder halo each`, () => {
+      /* Placeholders are current work: they belong to the active pipeline cluster
+         and stay bounded to their own halos — one halo per pipeline, three stage
+         placeholders inside each. */
       const pipelines = Array.from({ length: count }, (_, index) => staged({ id: `p${index}` }));
-      const empty = buildSchemeLayout([], [], []);
       const layout = buildSchemeLayout([], [], [], [], [], pipelines, pipelines);
       const pipelineGroups = layout.groups.filter((group) => group.kind === "pipeline");
-      expect(pipelineGroups).toHaveLength(0);
-      expect(layout.nodes).toHaveLength(0);
-      expect(layout.slots).toHaveLength(0);
-      expect({ width: layout.width, height: layout.height }).toEqual({ width: empty.width, height: empty.height });
-      expect(layout.byPath.size).toBe(0);
+      expect(pipelineGroups).toHaveLength(count);
+      expect(layout.slots).toHaveLength(count * 3);
+      /* No detached duplicate: exactly one halo owns each pipeline id. */
+      const ids = pipelineGroups.map((group) => group.id);
+      expect(new Set(ids).size).toBe(ids.length);
     });
   }
 });

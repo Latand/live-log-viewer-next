@@ -134,6 +134,15 @@ export function deckKey(flowId: string): string {
   return "deck::" + flowId;
 }
 
+/** Board key of a pipeline stage's planned-stage placeholder card (#353). The
+    layout draws one per future stage inside the halo and registers it in the
+    anchor index, so pass/fail/loop edges can route into a not-yet-launched stage
+    exactly like they route into a materialized one. Kept here so the layout key
+    and the link derivation cannot drift apart. */
+export function stageSlotKey(pipelineId: string, stageId: string): string {
+  return `slot::${pipelineId}::${stageId}`;
+}
+
 export function flowLinkKey(flowId: string): string {
   return "flowlink::" + flowId;
 }
@@ -323,6 +332,14 @@ export function deriveGroups(
          semantics — this is membership only. */
       for (const attempt of pipeline.runs.find((run) => run.stageId === stage.id)?.attempts ?? []) {
         if (stage.kind === "review-loop") {
+          /* The reviewer transcript is a direct halo member: an ordinary board
+             card when the flow deck is folded out (production), else the round
+             deck it claims. Its implementer node joins too so the pair is one
+             enclosed region (#353 R2). */
+          if (attempt.agentPath) {
+            const at = anchorOf(attempt.agentPath);
+            if (at) members.add(at);
+          }
           const implPath = attempt.flowId ? flowImplementerPath(attempt.flowId) : null;
           const impl = implPath ? anchorOf(implPath) : null;
           if (impl) members.add(impl);
@@ -395,29 +412,45 @@ export function derivePipelineLinks(
     const cursorStageId = pipeline.cursor?.stageId ?? pipeline.stages.at(-1)?.id ?? null;
     const cursorActive = pipelineCursorActive(pipeline);
     const own: AgentLink[] = [];
-    /* Every materialized stage's resolved board vertex, kept so a pipeline whose
-       edges all collapse still has a node to anchor its control hub on. */
-    const vertices: Array<{ stageId: string; index: number; path: string }> = [];
+    /* Every stage's resolved board vertex (a materialized node or a future
+       stage's placeholder slot), kept so a pipeline whose edges all collapse
+       still has a node to anchor its control hub on. */
+    const vertices: Array<{ stageId: string; index: number; key: string }> = [];
     /* An edge pair resolved to the same board node (a review-loop folding
        into its implementer), so a real edge was intended but suppressed. */
     let collapsed = false;
-    /* A review-loop stage's agentPath is the reviewer transcript, which the
-       board folds into the flow's round deck — anchoring a rail there would
-       draw an implementer→deck→next chain and drop a PipelineHub on top of the
-       FlowHub. Resolve the stage to its flow's implementer node instead; the
-       resulting edge from the preceding run collapses (from === to) and is
-       suppressed below, leaving the loop's own grammar to represent it. */
-    const vertexPathOf = (stage: Pipeline["stages"][number]): string | null => {
+    /* Resolve a stage to the board key its edges attach to.
+       1. A materialized stage resolves through its REAL agentPath anchor first.
+          For a review-loop whose reviewer transcript is an ordinary board card —
+          the production case, where compactPipelineLayoutFlows folds the flow's
+          round deck out of the layout so the reviewer renders as a node — this is
+          the reviewer card, so builder→reviewer draws a real edge (#353 R2). A
+          `deck::` anchor means the reviewer is folded into a rendered round deck,
+          so it is skipped here and handled by the fallback below.
+       2. Folded-deck fallback: resolve the review-loop to its flow's implementer
+          node, so the preceding run's edge collapses (from === to) and is
+          suppressed, keeping the PipelineHub off the FlowHub.
+       3. A not-yet-launched stage resolves to its planned-stage placeholder slot,
+          so the pass/fail/loop edge into (or out of) a future stage stays drawn
+          inside the halo instead of stopping at the last materialized card. */
+    const vertexKeyOf = (stage: Pipeline["stages"][number]): string | null => {
       const attempt = latestAttempt(pipeline, stage.id);
-      return stage.kind === "review-loop"
-        ? (attempt?.flowId ? flowImplementerPath(attempt.flowId) : null)
-        : attempt?.agentPath ?? null;
+      if (attempt?.agentPath) {
+        const at = anchorOf(attempt.agentPath);
+        if (at && !at.startsWith("deck::")) return at;
+      }
+      if (stage.kind === "review-loop" && attempt?.flowId) {
+        const impl = flowImplementerPath(attempt.flowId);
+        const at = impl ? anchorOf(impl) : null;
+        if (at) return at;
+      }
+      return anchorOf(stageSlotKey(pipeline.id, stage.id));
     };
     const stageIndex = new Map(pipeline.stages.map((stage, index) => [stage.id, index] as const));
     for (let index = 0; index < pipeline.stages.length; index += 1) {
       const stage = pipeline.stages[index]!;
-      const vertexPath = vertexPathOf(stage);
-      if (vertexPath) vertices.push({ stageId: stage.id, index, path: vertexPath });
+      const vertexKey = vertexKeyOf(stage);
+      if (vertexKey) vertices.push({ stageId: stage.id, index, key: vertexKey });
     }
     const vertexByStage = new Map(vertices.map((vertex) => [vertex.stageId, vertex] as const));
     for (const stage of pipeline.stages) {
@@ -430,10 +463,9 @@ export function derivePipelineLinks(
       for (const graphEdge of graphEdges) {
         const toVertex = vertexByStage.get(graphEdge.toStageId);
         if (!toVertex) continue;
-        const from = anchorOf(fromVertex.path);
-        const to = anchorOf(toVertex.path);
-        if (from && to && from === to) collapsed = true;
-        if (!from || !to || from === to) continue;
+        const from = fromVertex.key;
+        const to = toVertex.key;
+        if (from === to) { collapsed = true; continue; }
         own.push({
           key: `pipelinelink::${pipeline.id}::${stage.id}::${graphEdge.toStageId}::${graphEdge.edge}`,
           kind: "pipeline",
@@ -472,7 +504,7 @@ export function derivePipelineLinks(
        collapse and draws nothing, as before. */
     if (own.length || !collapsed) continue;
     const anchor = vertices.find((vertex) => vertex.stageId === cursorStageId) ?? vertices.at(-1);
-    const at = anchor ? anchorOf(anchor.path) : null;
+    const at = anchor ? anchor.key : null;
     if (anchor && at) {
       links.push({
         key: `pipelinehub::${pipeline.id}`,

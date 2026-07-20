@@ -1,5 +1,5 @@
 import type { Flow } from "@/lib/flows/types";
-import type { Pipeline, PipelineStage } from "@/lib/pipelines/types";
+import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import type { DeckRound } from "@/components/flows/RoundDeck";
@@ -14,9 +14,12 @@ import {
   deriveGroups,
   derivePipelineLinks,
   groupRect,
+  hueFromId,
+  stageSlotKey,
   type AgentLink,
   type SchemeGroupSpec,
 } from "./agentLinks";
+import { PIPELINE_PLACEHOLDER_STATES, latestAttempt, pipelinePlaceholderStages, stageAttempts } from "@/components/pipelines/pipelineModel";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex, projectDescendantsOf } from "@/components/projectModel";
 import { cleanTitle, engineColor } from "@/components/utils";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -64,6 +67,10 @@ export const GROUP_SIBLING_GAP = GROUP_PAD * 2 + GAP_X;
 export const SLOT_W = NODE_W;
 export const SLOT_H = 620;
 export const SLOT_GAP = 72;
+/* Compact-history stage cards (#353 R3): a terminal stage whose full pane is
+   folded out of the scene keeps a short navigable anchor card at its stage
+   position so its pass/fail edges and halo membership survive compaction. */
+export const HISTORY_H = 168;
 /* Quiet-branch mini cards stacked under their parent pane. */
 const MINI_W = 360;
 const MINI_H = 52;
@@ -158,6 +165,13 @@ export interface StageSlot extends SchemeRect {
   /** 0-based position of this stage within the pipeline's full chain. */
   index: number;
   total: number;
+  /** How this stage renders (#353 R3): `placeholder` = a future or still-forming
+      (pending/spawning) stage as a conversation-shaped shell; `history` = a
+      terminal stage whose full pane is folded out of the scene, standing in as a
+      compact navigable anchor so its edges and halo membership survive. */
+  presentation: "placeholder" | "history";
+  /** History slots: the terminal attempt whose transcript the compact card opens. */
+  attempt?: PipelineStageAttempt;
   /** Render an incoming handoff badge on this slot's left edge: set when the
       previous stage's slot sits directly beside it in the same row. */
   incoming?: "run" | "review-loop";
@@ -237,7 +251,6 @@ export function buildSchemeLayout(
       chain remains represented by the pipeline evidence rail. */
   isolatedManualPaths: ReadonlySet<string> = new Set(),
 ): SchemeLayout {
-  void surfacePipelines;
   const byAll = new Map(files.map((file) => [file.path, file]));
   const kids = kidsIndex(files);
   const nodes: SchemeNode[] = [];
@@ -633,11 +646,142 @@ export function buildSchemeLayout(
     });
   }
 
-  /* Planned stages live in the compact group rail (#353). Configuration opens
-     on demand from that rail, so planned stages contribute no world-space
-     windows, obstacles, minimap blocks, or Fit All bounds. The legacy StageSlot
-     type stays as the shared input for the configuration pane. */
+  /* Planned stages render as conversation-shaped placeholder cards INSIDE the
+     pipeline's colored halo, at their real stage positions (#353 desktop
+     ownership): the halo is the sole pipeline region, so every yet-to-launch
+     stage sits beside the materialized conversations it hands off to — never a
+     detached rail or a duplicate stage graph. A slot dissolves the instant its
+     stage materializes a live window (the solid card takes its position). */
+  const rectsIntersect = (a: SchemeRect, b: SchemeRect) =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
   const slots: StageSlot[] = [];
+  const slotKeysByPipeline = new Map<string, string[]>();
+  {
+    const nodeRectByPath = new Map<string, SchemeRect>(nodes.map((node) => [node.file.path, node]));
+    /* What this pass actually placed, so the placeholder predicate keys off real
+       board presence (a placed transcript node / a laid-out review deck) rather
+       than the stored agentPath/flowId. That retains the live stage's placeholder
+       continuously through the publish → scan → place gap and dissolves it exactly
+       when the node/deck lands — no zero-surface hole, no duplicate (#353 R4). */
+    const placedNodePaths = new Set(nodeRectByPath.keys());
+    const placedDeckFlowIds = new Set(decks.map((deck) => deck.flow.id));
+    /* Only THIS project's pipelines may grow memberless slot rows — the global
+       list serves cross-project stage membership, so without this fence a
+       foreign draft would drop its slots + halo on every project's canvas. A
+       global pipeline still gets slots once it has a placed member here. */
+    const surfaceIds = new Set(surfacePipelines.map((pipeline) => pipeline.id));
+    const seen = new Set<string>();
+    const pool = [...surfacePipelines, ...pipelines].filter((pipeline) => {
+      if (pipeline.state === "closed" || seen.has(pipeline.id)) return false;
+      seen.add(pipeline.id);
+      return true;
+    });
+    let slotDockY = restTop;
+    for (const pipeline of pool) {
+      /* Classify every declared stage into exactly one surface (#353 R3): a live
+         full pane (its transcript is a placed node), a compact history card (a
+         terminal stage whose full pane was folded out of the scene by
+         compactPipelineArtifactPaths), or a placeholder (a future or still-forming
+         pending/spawning stage). Only the live stage keeps a full pane; the others
+         become slots so their edges and halo membership survive compaction. */
+      const placeholderIds = new Set(pipelinePlaceholderStages(pipeline, placedNodePaths, placedDeckFlowIds).map((stage) => stage.id));
+      /* Compact history anchors only grow on an active pipeline, and never for the
+         cursor stage itself: a cursor stage whose only transcript is quiet history
+         (folded into an under-deck) has no live pane and shelves (#343), rather
+         than resurfacing as an anchor. */
+      const growsHistory = PIPELINE_PLACEHOLDER_STATES.has(pipeline.state);
+      type SlotStage = { stage: PipelineStage; index: number; presentation: "placeholder" | "history"; attempt?: PipelineStageAttempt };
+      const slotStages: SlotStage[] = [];
+      const memberPaths = new Set<string>();
+      /* The chain's tip: the LAST stage (in chain order) whose live pane is a
+         placed node. The slot row anchors as its child. */
+      let tip: SchemeRect | null = null;
+      for (let index = 0; index < pipeline.stages.length; index += 1) {
+        const stage = pipeline.stages[index]!;
+        const attempt = latestAttempt(pipeline, stage.id);
+        /* The stage's own live transcript — a run session or the live reviewer. */
+        const livePath = attempt?.agentPath ?? null;
+        const liveRect = livePath ? nodeRectByPath.get(livePath) : undefined;
+        if (liveRect && livePath) {
+          memberPaths.add(livePath);
+          tip = liveRect;
+          continue;
+        }
+        /* A folded review-loop resolves to its flow implementer node (deck laid
+           out): still a live pane, not a slot. */
+        const implPath = stage.kind === "review-loop" && attempt?.flowId ? implOfFlow(attempt.flowId) : null;
+        const implRect = implPath ? nodeRectByPath.get(implPath) : undefined;
+        if (implRect && implPath) {
+          memberPaths.add(implPath);
+          tip = implRect;
+          continue;
+        }
+        if (placeholderIds.has(stage.id)) {
+          slotStages.push({ stage, index, presentation: "placeholder" });
+          continue;
+        }
+        /* Any materialized attempt (the operational latest or a folded historical
+           one) on a NON-cursor stage makes this a terminal stage folded out of the
+           scene: a compact history anchor. */
+        if (!growsHistory || stage.id === pipeline.cursor?.stageId) continue;
+        const materialized = stageAttempts(pipeline, stage.id).findLast((candidate) => candidate.agentPath || candidate.flowId);
+        if (materialized) {
+          slotStages.push({ stage, index, presentation: "history", attempt: materialized });
+        }
+      }
+      if (!surfaceIds.has(pipeline.id) && !memberPaths.size) continue;
+      if (!slotStages.length) continue;
+      const rowW = slotStages.length * SLOT_W + (slotStages.length - 1) * SLOT_GAP;
+      let sx: number;
+      let sy: number;
+      if (tip) {
+        /* The tree indents a child one INDENT right of its parent and one
+           generation (GAP_Y) below — anchoring the first slot exactly there makes
+           the hand-off positionally exact: the live window the tree places for the
+           next stage lands on the placeholder's own coordinates. */
+        sx = tip.x + INDENT;
+        sy = tip.y + tip.h + GAP_Y;
+        /* Step below any unrelated card the row would cover — bounded, so a
+           pathological board can never loop forever. */
+        const row = (): SchemeRect => ({ x: sx, y: sy, w: rowW, h: SLOT_H });
+        const blocked = () =>
+          nodes.some((node) => !memberPaths.has(node.file.path) && rectsIntersect(node, row())) ||
+          stacks.some((stack) => rectsIntersect(stack, row())) ||
+          decks.some((deck) => rectsIntersect(deck, row()));
+        for (let guard = 0; guard < 40 && blocked(); guard += 1) sy += SLOT_H / 2;
+      } else {
+        sx = cursor;
+        sy = slotDockY;
+        slotDockY += SLOT_H + GROUP_GAP;
+        cursor += rowW + GROUP_GAP;
+      }
+      const keys: string[] = [];
+      slotStages.forEach((entry, i) => {
+        const { stage, index, presentation, attempt } = entry;
+        const previous = i > 0 ? slotStages[i - 1]! : null;
+        /* The handoff badge renders only between chain-adjacent slots — a gap (a
+           live pane between them) breaks the visual chain. */
+        const adjacent = previous !== null && pipeline.stages[index - 1]?.id === previous.stage.id;
+        const slot: StageSlot = {
+          key: stageSlotKey(pipeline.id, stage.id),
+          pipeline,
+          stage,
+          index,
+          total: pipeline.stages.length,
+          presentation,
+          ...(attempt ? { attempt } : {}),
+          ...(adjacent ? { incoming: stage.kind } : {}),
+          x: sx + i * (SLOT_W + SLOT_GAP),
+          y: sy,
+          w: SLOT_W,
+          h: presentation === "history" ? HISTORY_H : SLOT_H,
+        };
+        slots.push(slot);
+        keys.push(slot.key);
+      });
+      slotKeysByPipeline.set(pipeline.id, keys);
+    }
+  }
 
   let bottom = 0;
   let right = 0;
@@ -645,6 +789,7 @@ export function buildSchemeLayout(
   for (const stack of stacks) { bottom = Math.max(bottom, stack.y + stack.h); right = Math.max(right, stack.x + stack.w); }
   for (const deck of decks) { bottom = Math.max(bottom, deck.y + deck.h); right = Math.max(right, deck.x + deck.w); }
   for (const draft of drafts) { bottom = Math.max(bottom, draft.y + draft.h); right = Math.max(right, draft.x + draft.w); }
+  for (const slot of slots) { bottom = Math.max(bottom, slot.y + slot.h); right = Math.max(right, slot.x + slot.w); }
   /* Links resolve against what this pass actually placed, so geometry and
      link endpoints can never disagree. */
   const anchors = buildAnchorIndex(
@@ -652,6 +797,10 @@ export function buildSchemeLayout(
     decks.map((deck) => ({ key: deck.key, flow: deck.flow })),
     stacks.map((stack) => ({ key: stack.key, paths: stack.items.map((item) => item.file.path) })),
   );
+  /* Planned-stage placeholder slots self-resolve, so a pipeline's pass/fail/loop
+     edge can route into (or out of) a future stage that has no materialized node
+     yet — the rail stays continuous inside the halo (#353). */
+  for (const slot of slots) anchors.set(slot.key, slot.key);
   const byPath = new Map<string, SchemeRect>([
     ...nodes.map((node) => [node.file.path, node] as const),
     ...drafts.map((draft) => [draft.key, draft] as const),
@@ -683,12 +832,39 @@ export function buildSchemeLayout(
     if (spec.flow) return cleanTitle(byAll.get(spec.flow.implementerPath)?.title ?? spec.flow.project, 60);
     return spec.key;
   };
+  /* Every planned stage's placeholder is a member of its pipeline halo, so the
+     colored region grows to enclose the future stages that sit beside the live
+     conversations (#353). A draft with no materialized window yet is still a
+     region: its halo is derived from its placeholder members alone. */
+  const specs = deriveGroups(actionableFlows, pipelines, (key) => anchors.get(key) ?? null, flowImplementerPath);
+  const pipelineSpecById = new Map(specs.filter((spec) => spec.pipeline).map((spec) => [spec.pipeline!.id, spec] as const));
+  const pipelineById = new Map<string, Pipeline>();
+  for (const pipeline of [...surfacePipelines, ...pipelines]) if (!pipelineById.has(pipeline.id)) pipelineById.set(pipeline.id, pipeline);
+  for (const [pipelineId, keys] of slotKeysByPipeline) {
+    const existing = pipelineSpecById.get(pipelineId);
+    if (existing) {
+      existing.members = [...existing.members, ...keys];
+      continue;
+    }
+    const pipeline = pipelineById.get(pipelineId);
+    if (!pipeline) continue;
+    const spec: SchemeGroupSpec = {
+      key: `group::pipeline::${pipeline.id}`,
+      kind: "pipeline",
+      id: pipeline.id,
+      hue: hueFromId(pipeline.id),
+      members: keys,
+      pipeline,
+    };
+    specs.push(spec);
+    pipelineSpecById.set(pipelineId, spec);
+  }
   const groupHalos: SchemeGroup[] = [];
-  for (const spec of deriveGroups(actionableFlows, pipelines, (key) => anchors.get(key) ?? null, flowImplementerPath)) {
+  for (const spec of specs) {
     const members = spec.kind === "pipeline" ? expandMembers(spec.members) : spec.members;
     const rect = groupRect(members, (key) => byPath.get(key) ?? null, GROUP_PAD);
     if (!rect) continue;
-    /* Lift the top edge to enclose the hovering control strip; bottom stays put,
+    /* Lift the top edge to enclose the hovering compact header; bottom stays put,
        so the y shrinks up and h grows by the same amount (issue #136). */
     const framed = { x: rect.x, y: rect.y - GROUP_STRIP_HEADROOM, w: rect.w, h: rect.h + GROUP_STRIP_HEADROOM };
     groupHalos.push({ ...spec, ...framed, label: groupLabel(spec) });

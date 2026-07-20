@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="720" viewBox="0 0 390 720" font-family="ui-sans-serif, system-ui, sans-serif">
+  <rect width="390" height="720" fill="#ffffff"/>
+  <!-- Document root at 390px CSS width: overflow-x-clip + max-w-[100dvw] ⇒ no
+       horizontal scroll (scrollWidth === innerWidth). -->
+  <rect x="0.5" y="0.5" width="389" height="719" fill="none" stroke="#e6e9ee" stroke-width="1"/>
+  <text x="16" y="26" font-size="12" font-weight="700" fill="#20242b">#353 — mobile 390px: chat-first, compact dock, no horizontal overflow</text>
+
+  <!-- Compact conversation header -->
+  <g>
+    <rect x="0" y="40" width="390" height="44" fill="#f7f9fb"/>
+    <circle cx="24" cy="62" r="5" fill="#2f6fed"/>
+    <text x="38" y="66" font-size="13" font-weight="700" fill="#20242b">builder · running</text>
+    <text x="300" y="66" font-size="12" fill="#5b626d">2/3</text>
+  </g>
+
+  <!-- Chat owns the viewport: the transcript keeps ≥60% of the height -->
+  <g>
+    <rect x="12" y="96" width="300" height="52" rx="10" fill="#eef2f7"/>
+    <text x="24" y="118" font-size="12" fill="#3a4048">Restore the placeholders inside the</text>
+    <text x="24" y="136" font-size="12" fill="#3a4048">colored halo on desktop.</text>
+
+    <rect x="78" y="160" width="300" height="52" rx="10" fill="#eaf1fb"/>
+    <text x="90" y="182" font-size="12" fill="#20242b">Done — the halo is the sole region;</text>
+    <text x="90" y="200" font-size="12" fill="#20242b">the phone keeps a compact dock.</text>
+
+    <rect x="12" y="224" width="300" height="34" rx="10" fill="#eef2f7"/>
+    <text x="24" y="245" font-size="12" fill="#3a4048">Verify no document horizontal scroll.</text>
+
+    <rect x="120" y="270" width="258" height="34" rx="10" fill="#eaf1fb"/>
+    <text x="132" y="291" font-size="12" fill="#20242b">scrollWidth === innerWidth ✓</text>
+  </g>
+
+  <!-- Composer keeps the width -->
+  <rect x="12" y="560" width="366" height="44" rx="12" fill="#ffffff" stroke="#dfe3e8"/>
+  <text x="26" y="587" font-size="12" fill="#8a929c">Message the builder…</text>
+
+  <!-- Compact pipeline dock / sheet disclosure (NOT the desktop graph) -->
+  <g>
+    <rect x="0" y="620" width="390" height="100" fill="#f7f9fb" stroke="#e6e9ee" stroke-width="1"/>
+    <rect x="12" y="632" width="366" height="34" rx="10" fill="#ffffff" stroke="#dfe3e8"/>
+    <text x="26" y="653" font-size="12" font-weight="700" fill="#20242b">⇢ Restore the colored halo</text>
+    <text x="300" y="653" font-size="11" fill="#5b626d">stage 2/3</text>
+    <text x="352" y="654" font-size="12" fill="#5b626d">▾</text>
+
+    <rect x="12" y="674" width="116" height="34" rx="8" fill="#eef7ef"/>
+    <text x="24" y="695" font-size="11" fill="#2e9e5b">architect ✓</text>
+    <rect x="136" y="674" width="116" height="34" rx="8" fill="#eaf1fb"/>
+    <text x="148" y="695" font-size="11" fill="#2f6fed">builder ●</text>
+    <rect x="260" y="674" width="118" height="34" rx="8" fill="#ffffff" stroke="#dfe3e8" stroke-dasharray="5 4"/>
+    <text x="272" y="695" font-size="11" fill="#8a929c">review ○</text>
+  </g>
+</svg>

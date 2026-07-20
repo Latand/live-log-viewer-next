@@ -564,21 +564,21 @@ export function ProjectDashboard({
     () => new Set([...board.explicitManual, ...prefs.expanded]),
     [board.explicitManual, prefs.expanded],
   );
-  /* Fold every claimed reviewer transcript out of branch groups. Active
-     non-pipeline flows represent them in round decks; pipeline rounds use the
-     compact evidence rail. Reviewers with no retained surface that must stay
-     visible are recovered by protectedReviewerNodes (issue #112). */
-  const groupFiles = useMemo(() => foldClaimedReviewers(files, deckFlows), [files, deckFlows]);
-  /* Passed stages and prior retries are represented by the pipeline's compact
-     evidence rail. Remove those transcripts from the world scene immediately;
-     explicit history navigation can still materialize one on demand below. */
-  const compactPipelinePaths = useMemo(
-    () => compactPipelineArtifactPaths(pipelines, deckFlows, files),
-    [pipelines, deckFlows, files],
-  );
+  /* Pipeline review stages remain real conversation cards inside their colored
+     stage group. Standalone flow reviewers still fold into their round decks. */
   const compactLayoutFlows = useMemo(
     () => compactPipelineLayoutFlows(pipelines, deckFlows),
     [pipelines, deckFlows],
+  );
+  const groupFiles = useMemo(
+    () => foldClaimedReviewers(files, compactLayoutFlows),
+    [files, compactLayoutFlows],
+  );
+  /* Earlier retries and superseded bindings live in the stage's compact
+     history. The latest attempt of every launched stage stays in the scene. */
+  const compactPipelinePaths = useMemo(
+    () => compactPipelineArtifactPaths(pipelines, deckFlows, files),
+    [pipelines, deckFlows, files],
   );
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
@@ -1617,7 +1617,7 @@ export function ProjectDashboard({
             {/* The create button floats in the bottom-left corner of the board —
                 away from the fixed attention pill in the top-right, above the
                 residual strip. On the phone the header keeps this button. */}
-            <div className="pointer-events-none absolute bottom-4 left-4 z-30 flex items-center gap-2">
+            <div data-chip-keepout className="pointer-events-none absolute bottom-4 left-4 z-30 flex items-center gap-2">
               <button
                 type="button"
                 onClick={addDraft}

@@ -1079,6 +1079,9 @@ export const uk: Record<keyof typeof en, Message> = {
 
   // плейсхолдери етапів пайплайна + вибір шаблону (#196)
   "pipelineSlot.paneAria": "Запланований етап {role}",
+  "pipelineSlot.historyAria": "Завершений етап {role} — компактна історія",
+  "pipelineSlot.historyFolded": "Повний транскрипт згорнуто — відкрийте для перегляду",
+  "pipelineSlot.openHistory": "Відкрити історію",
   "pipelineSlot.stageOf": "етап {k}/{n}",
   "pipelineSlot.promptLabel": "Додатковий промпт (необов'язково)",
   "pipelineSlot.noPrompt": "Додатковий контекст для агента — все вище підключається автоматично.",
@@ -1123,6 +1126,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelinePreflight.repo_unreadable": "Репозиторій недоступний для читання: {path}",
   "pipelinePreflight.repo_untraversable": "Репозиторій неможливо відкрити: {path}",
   "pipelinePreflight.not_git": "Обери Git-репозиторій: {path}",
+  "pipelinePreflight.probe_failed": "Перевірку репозиторію не завершено — повтори: {path}",
   "pipelinePreflight.git_metadata_unwritable": "Метадані Git доступні лише для читання: {path}",
   "pipelinePreflight.worktree_parent_unwritable": "Поруч із цим репозиторієм неможливо створити робочу копію пайплайна: {path}",
 

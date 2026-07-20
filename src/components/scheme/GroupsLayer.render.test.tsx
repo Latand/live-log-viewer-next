@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { GroupsLayer, groupLabelScreenPx, groupLabelFontSize, type PipelineGroupControls } from "./nodes";
+import { GroupsLayer, groupLabelScreenPx, groupLabelFontSize } from "./nodes";
 import type { SchemeGroup } from "./layout";
 import type { Pipeline } from "@/lib/pipelines/types";
 
 /* A provisioning pipeline whose current stage has NOT materialized a run-stage
-   session, so it has no per-node strip — the group halo must carry the plan. */
+   session. Its planned stages render as placeholder cards inside the halo (via
+   NodesLayer); the halo itself carries only its compact header. */
 const planPipeline = {
   id: "p1", task: "Refactor the scheme", project: "proj", repoDir: "/r", worktreeDir: "/w",
   branch: "b", baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
@@ -17,11 +18,6 @@ const planPipeline = {
   runs: [], cursor: null, state: "provisioning", pausedState: null, stateDetail: null,
   srcPath: null, srcConversationId: null, createdAt: new Date(0).toISOString(), closedAt: null,
 } as unknown as Pipeline;
-
-const controls: PipelineGroupControls = {
-  flows: [],
-  onOpenAttempt: () => {},
-};
 
 const flowGroup: SchemeGroup = {
   key: "group::flow::f1",
@@ -96,37 +92,35 @@ test("no groups renders nothing", () => {
   expect(render([], true)).toBe("");
 });
 
-test("a pipeline group carries its full declared stage graph", () => {
+test("a pipeline halo carries only its compact header — no detached stage graph (#353)", () => {
   const group: SchemeGroup = { ...pipelineGroup, pipeline: planPipeline };
-  /* Every planned stage, including the pending review, renders on the halo. */
-  const withControls = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
-  expect(withControls).toContain("data-scheme-group-strip");
-  expect(withControls).toContain("build");
-  expect(withControls).toContain("review");
-  expect(withControls.match(/data-stage-graph-node=/g)).toHaveLength(2);
-  expect(withControls.match(/data-stage-graph-edge=/g)).toHaveLength(1);
-  /* Without controls (e.g. the lite map) the halo keeps only its label chip. */
-  const noControls = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive />);
-  expect(noControls).not.toContain("data-scheme-group-strip");
+  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive />);
+  /* The halo is the sole region: no duplicate stage graph or strip lives on it. */
+  expect(html).not.toContain("data-scheme-group-strip");
+  expect(html).not.toContain("data-pipeline-stage-graph");
+  expect(html).not.toContain("data-stage-graph-node");
+  /* The compact header exposes title, progress, lifecycle, and a disclosure. */
+  expect(html).toContain('data-pipeline-group-header="p1"');
+  expect(html).toContain("Refactor the scheme");
+  expect(html).toContain("data-pipeline-progress");
+  expect(html).toContain("data-pipeline-lifecycle");
 });
 
-test("group keeps the graph when the current stage node is hidden", () => {
-  const hiddenCurrent = { ...planPipeline, cursor: { stageId: "build", state: "running", input: null, activatedBy: null } } as unknown as Pipeline;
-  const group: SchemeGroup = { ...pipelineGroup, pipeline: hiddenCurrent };
-  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
-  expect(html).toContain("data-pipeline-stage-graph");
+test("the pipeline header shows stage progress k/n over the two declared stages", () => {
+  const group: SchemeGroup = { ...pipelineGroup, pipeline: planPipeline };
+  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive />);
+  /* Two declared stages ⇒ the counter denominator is 2. */
+  expect(html).toMatch(/data-pipeline-progress[^>]*>[^<]*\/2</);
 });
 
-test("a draft pipeline has a scheme-only draft treatment and its complete stage plan", () => {
+test("a draft pipeline keeps a scheme-only draft treatment and one compact header", () => {
   const draft = { ...planPipeline, state: "draft" } as Pipeline;
   const group: SchemeGroup = { ...pipelineGroup, pipeline: draft };
-  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
+  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive />);
 
   expect(html).toContain('data-pipeline-draft="true"');
-  /* The group chip remains the single pipeline title. */
   expect(html).not.toContain("DRAFT");
-  expect(html.split(">Refactor the scheme<").length - 1).toBe(1); // visible title: the chip only (aria-labels aside)
-  expect(html).toContain("build");
-  expect(html).toContain("review");
-  expect(html).toContain("data-pipeline-stage-graph");
+  /* The compact header is the single pipeline title on the halo. */
+  expect(html.split(">Refactor the scheme<").length - 1).toBe(1);
+  expect(html).toContain('data-pipeline-group-header="p1"');
 });

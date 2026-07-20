@@ -1,0 +1,360 @@
+{
+  "issue": 474,
+  "capturedAt": "2026-07-20T22:45:43.161Z",
+  "viewer": "production next start",
+  "viewport": {
+    "desktop": "1440x900",
+    "mobile": "390x844"
+  },
+  "interactionSuite": "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/EdgeChips.dom.test.tsx (a fully blocked edge re-homes the «+N» aggregate to a clear border, keeping it a keyboard-reachable disclosure; the opened «+N» list opens inward from its edge, width-constrained and clamped fully inside the viewport so every keyboard-focused row stays on-board) + src/components/scheme/offscreenClusters.test.ts (measured admission: a chip is admitted only when its *measured* rendered width fits at its anchor, so a wide-glyph exact 48/60-char title folds while a title that fits is admitted with exactly its measured band reserved; a top/bottom chip pinned near a corner folds into «+N» rather than render a permanently-truncated sliver; a chip whose measured reveal band overlaps a pane / the subagent avatar/round stack / the composer/input keep-out folds instead of painting over it; chipObstacleRects projects live panes, review decks AND draft conversation panes — each draft rect spanning its whole shell incl. its composer — into screen space, so a chip that would paint over an open draft or its composer folds; a RED-first below-header regression pins that a left-edge chip whose reveal band lands on a draft's composer folds ONLY when the draft is projected as a full-shell obstacle, and is re-admitted over the composer the instant draft inclusion or the shell's below-header height is dropped; overflowListStyle opens the disclosure list inward per resolved edge, width-constrained to the room left and cross-axis-clamped so every focused row stays inside the viewport for all four edges and re-homed anchors; overflowAnchor returns null when an edge is fully blocked and resolveOverflowPlacement re-homes the «+N» aggregate to the nearest clear border, suppressing only when the whole viewport border is blocked). Production harness proves the repaired draft-pane path end to end against a REAL DraftAgentPane: it opens an actual draft conversation pane through the board's «+ Agent» control, measures its complete shell and composer, verifies the draft's projected board obstacle spans the whole shell (composer included), forces a real below-header collision by panning the composer band onto a docking edge, and asserts resting / progressive / focused / «+N» aggregate clearance of that below-header band.",
+  "checks": [
+    {
+      "id": "fixture-exact-title-lengths",
+      "detail": "every fixture title is exactly 48 or 60 characters ([48,60,48,60,48])"
+    },
+    {
+      "id": "fixture-covers-48-and-60",
+      "detail": "the fixture exercises both an exact 48- and an exact 60-character current-work title"
+    },
+    {
+      "id": "desktop-nav-cannot-block-content",
+      "detail": "the off-screen navigation landmark is pointer-events:none — only its chips take pointer input, never covering chat content (issue #292)"
+    },
+    {
+      "id": "desktop-offscreen-disclosure",
+      "detail": "1 «+N» edge disclosure(s) present for 2 off-screen current-work cluster(s)"
+    },
+    {
+      "id": "desktop-disclosure-count",
+      "detail": "the edge disclosure shows its folded count \"+2\""
+    },
+    {
+      "id": "desktop-disclosure-a11y",
+      "detail": "the disclosure is a collapsed, labelled control (aria-label \"Show 2 more off-screen clusters\", aria-expanded false)"
+    },
+    {
+      "id": "desktop-offscreen-list",
+      "detail": "expanding reveals 2 click-to-fit off-screen conversation button(s)"
+    },
+    {
+      "id": "desktop-offscreen-labels",
+      "detail": "every off-screen entry carries its WHOLE cleaned title, never a truncation ([\"Off-screen edge navigation with a bounded progressive reveal\",\"Deterministic capture pipeline for stage builder\"])"
+    },
+    {
+      "id": "desktop-disclosure-expands",
+      "detail": "the disclosure reports aria-expanded=true once opened"
+    },
+    {
+      "id": "desktop-visible-chip-isolated-48",
+      "detail": "panned the board until an exact 48-character chip surfaced on an edge, clear of every conversation pane"
+    },
+    {
+      "id": "desktop-chip-exact-length-48",
+      "detail": "the surfaced chip carries an exact 48-character current-work title"
+    },
+    {
+      "id": "desktop-chip-resting-truncated-48",
+      "detail": "the resting 48-char chip label \"Reserved reasoning effort meter on every surface\" overflows its resting width — data-reveal 0"
+    },
+    {
+      "id": "desktop-chip-control-reserved-48",
+      "detail": "the direction control sits in its own reserved box before the title — never over the label"
+    },
+    {
+      "id": "desktop-chip-resting-in-viewport-48",
+      "detail": "the resting pill (width 177px) stays inside the 1440px viewport"
+    },
+    {
+      "id": "desktop-chip-resting-clear-48",
+      "detail": "the resting chip does not overlap any open conversation pane's complete shell (header, body, and composer)"
+    },
+    {
+      "id": "desktop-chip-progressive-reveal-48",
+      "detail": "repeated pointer progression unfurls further segments (data-reveal steps [\"1\",\"2\",\"2\",\"2\"])"
+    },
+    {
+      "id": "desktop-chip-progress-in-viewport-48",
+      "detail": "the progressively-revealed 48-char chip stays inside the viewport (right 1418px ≤ 1440px)"
+    },
+    {
+      "id": "desktop-chip-focus-full-48",
+      "detail": "keyboard focus sets the 48-char title to its full reveal (data-reveal full)"
+    },
+    {
+      "id": "desktop-chip-fully-revealed-48",
+      "detail": "the whole 48-char label \"Reserved reasoning effort meter on every surface\" is visible with no ellipsis — its scrollWidth is contained within the pill once revealed"
+    },
+    {
+      "id": "desktop-chip-revealed-in-viewport-48",
+      "detail": "the fully-revealed pill (width 301px) stays inside the 1440px viewport"
+    },
+    {
+      "id": "desktop-chip-revealed-clear-48",
+      "detail": "the fully-revealed chip still does not overlap any open conversation pane's complete shell (header, body, and composer)"
+    },
+    {
+      "id": "desktop-chip-reduced-motion-hover-48",
+      "detail": "reduced-motion hover reveals the whole 48-char label at once (data-reveal full)"
+    },
+    {
+      "id": "desktop-chip-reduced-motion-contained-48",
+      "detail": "under reduced motion the 48-char label shows in full with its scrollWidth contained inside the pill (no ellipsis)"
+    },
+    {
+      "id": "desktop-chip-reduced-motion-in-viewport-48",
+      "detail": "the reduced-motion reveal stays inside the 1440px viewport"
+    },
+    {
+      "id": "desktop-visible-chip-isolated-60",
+      "detail": "panned the board until an exact 60-character chip surfaced on an edge, clear of every conversation pane"
+    },
+    {
+      "id": "desktop-chip-exact-length-60",
+      "detail": "the surfaced chip carries an exact 60-character current-work title"
+    },
+    {
+      "id": "desktop-chip-resting-truncated-60",
+      "detail": "the resting 60-char chip label \"In-place login recovery for accounts stuck in an error state\" overflows its resting width — data-reveal 0"
+    },
+    {
+      "id": "desktop-chip-control-reserved-60",
+      "detail": "the direction control sits in its own reserved box before the title — never over the label"
+    },
+    {
+      "id": "desktop-chip-resting-in-viewport-60",
+      "detail": "the resting pill (width 177px) stays inside the 1440px viewport"
+    },
+    {
+      "id": "desktop-chip-resting-clear-60",
+      "detail": "the resting chip does not overlap any open conversation pane's complete shell (header, body, and composer)"
+    },
+    {
+      "id": "desktop-chip-progressive-reveal-60",
+      "detail": "repeated pointer progression unfurls further segments (data-reveal steps [\"1\",\"2\",\"3\",\"3\"])"
+    },
+    {
+      "id": "desktop-chip-progress-in-viewport-60",
+      "detail": "the progressively-revealed 60-char chip stays inside the viewport (right 1418px ≤ 1440px)"
+    },
+    {
+      "id": "desktop-chip-focus-full-60",
+      "detail": "keyboard focus sets the 60-char title to its full reveal (data-reveal full)"
+    },
+    {
+      "id": "desktop-chip-fully-revealed-60",
+      "detail": "the whole 60-char label \"In-place login recovery for accounts stuck in an error state\" is visible with no ellipsis — its scrollWidth is contained within the pill once revealed"
+    },
+    {
+      "id": "desktop-chip-revealed-in-viewport-60",
+      "detail": "the fully-revealed pill (width 343px) stays inside the 1440px viewport"
+    },
+    {
+      "id": "desktop-chip-revealed-clear-60",
+      "detail": "the fully-revealed chip still does not overlap any open conversation pane's complete shell (header, body, and composer)"
+    },
+    {
+      "id": "desktop-chip-reduced-motion-hover-60",
+      "detail": "reduced-motion hover reveals the whole 60-char label at once (data-reveal full)"
+    },
+    {
+      "id": "desktop-chip-reduced-motion-contained-60",
+      "detail": "under reduced motion the 60-char label shows in full with its scrollWidth contained inside the pill (no ellipsis)"
+    },
+    {
+      "id": "desktop-chip-reduced-motion-in-viewport-60",
+      "detail": "the reduced-motion reveal stays inside the 1440px viewport"
+    },
+    {
+      "id": "desktop-shell-has-below-header-region",
+      "detail": "at least one complete pane shell extends below its header (5 shell(s) with a transcript/composer band) — the region a header-only measurement misses"
+    },
+    {
+      "id": "desktop-chip-clears-below-header",
+      "detail": "no edge chip (3) overlaps any pane's below-header body/composer band — proven against the COMPLETE shell, not just the header"
+    },
+    {
+      "id": "desktop-aggregate-clears-below-header",
+      "detail": "no «+N» aggregate trigger (1) overlaps any pane's below-header body/composer band"
+    },
+    {
+      "id": "desktop-keepout-precondition-avatar-rail",
+      "detail": "a surfaced chip is present before the avatar-rail keep-out is placed (a subagent avatar/round column poking in at the chip's edge)"
+    },
+    {
+      "id": "desktop-chip-folds-off-avatar-rail",
+      "detail": "a chip whose reserved reveal band meets a subagent avatar/round column poking in at the chip's edge folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-avatar-rail",
+      "detail": "no visible edge chip overlaps the avatar-rail keep-out surface"
+    },
+    {
+      "id": "desktop-aggregate-clears-avatar-rail",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the avatar-rail keep-out"
+    },
+    {
+      "id": "desktop-keepout-precondition-round-badge",
+      "detail": "a surfaced chip is present before the round-badge keep-out is placed (a round/reasoning badge landing on the chip)"
+    },
+    {
+      "id": "desktop-chip-folds-off-round-badge",
+      "detail": "a chip whose reserved reveal band meets a round/reasoning badge landing on the chip folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-round-badge",
+      "detail": "no visible edge chip overlaps the round-badge keep-out surface"
+    },
+    {
+      "id": "desktop-aggregate-clears-round-badge",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the round-badge keep-out"
+    },
+    {
+      "id": "desktop-keepout-precondition-composer",
+      "detail": "a surfaced chip is present before the composer keep-out is placed (the composer/input band overlapping the chip)"
+    },
+    {
+      "id": "desktop-chip-folds-off-composer",
+      "detail": "a chip whose reserved reveal band meets the composer/input band overlapping the chip folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-composer",
+      "detail": "no visible edge chip overlaps the composer keep-out surface"
+    },
+    {
+      "id": "desktop-aggregate-clears-composer",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the composer keep-out"
+    },
+    {
+      "id": "desktop-keepout-precondition-pane",
+      "detail": "a surfaced chip is present before the pane keep-out is placed (an open conversation pane overlapping the chip's reveal band)"
+    },
+    {
+      "id": "desktop-chip-folds-off-pane",
+      "detail": "a chip whose reserved reveal band meets an open conversation pane overlapping the chip's reveal band folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-pane",
+      "detail": "no visible edge chip overlaps the pane keep-out surface"
+    },
+    {
+      "id": "desktop-aggregate-clears-pane",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the pane keep-out"
+    },
+    {
+      "id": "desktop-keepout-precondition-below-header",
+      "detail": "a surfaced chip is present before the below-header keep-out is placed (a pane's transcript body/composer band (below its header) over the chip's reveal band)"
+    },
+    {
+      "id": "desktop-chip-folds-off-below-header",
+      "detail": "a chip whose reserved reveal band meets a pane's transcript body/composer band (below its header) over the chip's reveal band folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-below-header",
+      "detail": "no visible edge chip overlaps the below-header keep-out surface"
+    },
+    {
+      "id": "desktop-aggregate-clears-below-header",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the below-header keep-out"
+    },
+    {
+      "id": "desktop-keepout-precondition-blocked-edge",
+      "detail": "a surfaced chip is present before the blocked-edge keep-out is placed (the whole edge walled — the aggregate must re-home or suppress)"
+    },
+    {
+      "id": "desktop-chip-folds-off-blocked-edge",
+      "detail": "a chip whose reserved reveal band meets the whole edge walled — the aggregate must re-home or suppress folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-blocked-edge",
+      "detail": "no visible edge chip overlaps the blocked-edge keep-out surface"
+    },
+    {
+      "id": "desktop-aggregate-clears-blocked-edge",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the blocked-edge keep-out"
+    },
+    {
+      "id": "desktop-aggregate-rehomes-off-blocked-edge",
+      "detail": "with the bottom edge fully walled the «+N» aggregate re-homes to a clear border and stays a keyboard-reachable disclosure (1 trigger(s), all clear of the wall)"
+    },
+    {
+      "id": "desktop-draft-pane-rendered",
+      "detail": "a real draft conversation pane (DraftAgentPane) is rendered on the production board"
+    },
+    {
+      "id": "desktop-draft-has-composer",
+      "detail": "the draft pane renders its composer/input at the foot of its shell (54px tall)"
+    },
+    {
+      "id": "desktop-draft-has-below-header-region",
+      "detail": "the draft shell extends a real transcript/composer band below its header (404px) — the region a header-only measurement misses"
+    },
+    {
+      "id": "desktop-draft-composer-below-header",
+      "detail": "the measured composer sits strictly BELOW the draft header, inside the below-header band"
+    },
+    {
+      "id": "desktop-draft-obstacle-spans-composer",
+      "detail": "the draft's projected board obstacle spans its whole shell — the composer included — so the chip layer reserves the composer band, not just the header"
+    },
+    {
+      "id": "desktop-draft-resting-chip-clear",
+      "detail": "no visible edge chip overlaps the draft's below-header body/composer band at rest (0 chip(s))"
+    },
+    {
+      "id": "desktop-draft-resting-aggregate-clear",
+      "detail": "no «+N» aggregate trigger overlaps the draft's below-header band at rest (1 trigger(s))"
+    },
+    {
+      "id": "desktop-draft-chip-surfaced",
+      "detail": "a long edge chip surfaces alongside the open draft pane, clear of every pane"
+    },
+    {
+      "id": "desktop-draft-chip-resting-clears-band",
+      "detail": "the resting surfaced chip clears the draft's below-header/composer band"
+    },
+    {
+      "id": "desktop-draft-chip-progressive-clears-band",
+      "detail": "every progressively-revealed chip step clears the draft's below-header/composer band"
+    },
+    {
+      "id": "desktop-draft-chip-focus-full",
+      "detail": "keyboard focus fully reveals the chip beside the open draft (data-reveal full)"
+    },
+    {
+      "id": "desktop-draft-chip-focused-clears-band",
+      "detail": "the fully-revealed (focused) chip still clears the draft's below-header/composer band"
+    },
+    {
+      "id": "desktop-draft-chip-reduced-motion-clears-band",
+      "detail": "the reduced-motion full reveal clears the draft's below-header/composer band"
+    },
+    {
+      "id": "desktop-draft-forced-collision-chip-clear",
+      "detail": "with the draft's below-header band forced onto a docking edge, no edge chip paints over it (3 chip(s), 1 «+N»)"
+    },
+    {
+      "id": "desktop-draft-forced-collision-aggregate-clear",
+      "detail": "with the draft's below-header band forced onto a docking edge, the «+N» aggregate re-homes/slides clear of it"
+    },
+    {
+      "id": "desktop-draft-below-header-collision-forced",
+      "detail": "forced a real below-header collision: the draft's composer band met the right docking edge with off-screen work present, and every chip + «+N» aggregate stayed clear"
+    },
+    {
+      "id": "mobile-conversation-open",
+      "detail": "a real fixture conversation is open in the phone focus view (pane 6–384px)"
+    },
+    {
+      "id": "mobile-chips-removed",
+      "detail": "every edge chip and the off-screen navigation landmark are removed on the 390px shell (chips 0, nav false)"
+    },
+    {
+      "id": "mobile-conversation-contained",
+      "detail": "the open conversation pane is horizontally contained inside 390px (left 6px, right 384px)"
+    },
+    {
+      "id": "mobile-content-unobstructed",
+      "detail": "the conversation content introduces no horizontal overflow and no edge chip overlays it (pane scroll overflow 0px, spill 0px)"
+    }
+  ]
+}
