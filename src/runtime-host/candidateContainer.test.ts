@@ -120,6 +120,7 @@ test("promoted candidate derives its runtime contract from Compose", () => {
   expect(valuesAfter(args, "--mount")).toEqual([
     "type=bind,source=/home/user,target=/home/user",
     "type=bind,source=/tmp/tmux-1000,target=/tmp/tmux-1000",
+    "type=bind,source=/run/user/1000/agent-log-viewer,target=/run/user/1000/agent-log-viewer",
   ]);
   expect(args[args.indexOf("--restart") + 1]).toBe("unless-stopped");
   expect(args[args.indexOf("--network") + 1]).toBe("host");
@@ -183,7 +184,11 @@ test("actual Viewer Compose keys remain covered by the candidate generator", () 
   expect(Object.keys(environment).sort()).toEqual([
     ...new Set([...Object.keys(service.environment), "LLV_RUNTIME_EVENTS", "LLV_RUNTIME_HOST_SOCKET"]),
   ].sort());
-  expect(valuesAfter(args, "--mount")).toHaveLength(service.volumes.length);
+  const mounts = valuesAfter(args, "--mount");
+  const externalTmpdir = "/run/user/1000/agent-log-viewer";
+  const composeAlreadyMountsSupervisor = service.volumes.some((volume) => volume.target === externalTmpdir);
+  expect(mounts).toHaveLength(service.volumes.length + (composeAlreadyMountsSupervisor ? 0 : 1));
+  expect(mounts).toContain(`type=bind,source=${externalTmpdir},target=${externalTmpdir}`);
   expect(args[args.indexOf("--restart") + 1]).toBe(service.restart);
   expect(environment.LLV_ALLOW_LEGACY_VIEWER).toBe("1");
   expect(args.slice(args.indexOf(candidate.image) + 1)).toEqual(
@@ -257,6 +262,26 @@ test("candidate tmux environment follows the durable migration marker", () => {
   expect(checked).toEqual(["/state/legacy-tmux-migration-complete"]);
 
   expect(viewerCandidateTmuxEnvironment("/state", "1000", configured, () => false)).toEqual(configured);
+});
+
+test("candidate reuses an existing external tmux supervisor mount", () => {
+  const externalTmpdir = "/run/user/1000/agent-log-viewer";
+  const service = {
+    ...composeService,
+    volumes: [
+      ...composeService.volumes,
+      { type: "bind", source: externalTmpdir, target: externalTmpdir, bind: {} },
+    ],
+  } satisfies ViewerComposeService;
+  const args = viewerCandidateDockerArgs(candidate, service, {
+    runtimeSocket: "/state/runtime-host.sock",
+    legacyTmuxExternal: "1",
+    tmuxTmpdir: externalTmpdir,
+  });
+
+  expect(valuesAfter(args, "--mount").filter((mount) => mount.includes(externalTmpdir))).toEqual([
+    `type=bind,source=${externalTmpdir},target=${externalTmpdir}`,
+  ]);
 });
 
 test("container retention keeps the serving and immediate rollback releases", () => {
