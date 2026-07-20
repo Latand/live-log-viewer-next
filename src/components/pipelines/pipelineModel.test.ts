@@ -562,6 +562,28 @@ describe("structural draft edits preserve custom edges (#353)", () => {
   });
 });
 
+describe("stageOverrideBody access + prompt (#353 AC6)", () => {
+  const base = { roleId: "", engine: "codex" as const, model: "", effort: "" };
+
+  test("sends access only when it changes from the stage's current access", () => {
+    const run = stage("build"); // effectiveRole.access = read-write
+    expect(stageOverrideBody(run, { ...base, prompt: run.prompt, access: "read-write" })).not.toHaveProperty("access");
+    expect(stageOverrideBody(run, { ...base, prompt: run.prompt, access: "read-only" })).toMatchObject({ access: "read-only" });
+  });
+
+  test("omits access entirely when the form does not carry it (review cycle path)", () => {
+    const run = stage("build");
+    expect(stageOverrideBody(run, { ...base, prompt: run.prompt })).not.toHaveProperty("access");
+  });
+
+  test("reassembles the edited prompt and leaves an untouched one alone", () => {
+    const run = { ...stage("build"), prompt: "{{task}}" } as PipelineStage;
+    expect(stageOverrideBody(run, { ...base, prompt: run.prompt })).not.toHaveProperty("prompt");
+    const edited = stageOverrideBody(run, { ...base, prompt: "{{task}}\n\nFocus on the parser" });
+    expect(String((edited as { prompt?: string }).prompt)).toContain("Focus on the parser");
+  });
+});
+
 describe("normalizeStageOrder", () => {
   const d = (over: Partial<DraftStage>): DraftStage => ({ key: "k", kind: "run", roleId: "", engine: "codex", model: "", effort: "", access: "read-write", prompt: "p", roleParams: {}, ...over });
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, Compass, Eraser, Hammer, Network, RefreshCw, Search, ShieldCheck, Upload, X, type LucideIcon } from "lucide-react";
+import { CheckCircle2, Compass, Eraser, Hammer, Network, Plus, RefreshCw, Search, ShieldCheck, Upload, X, type LucideIcon } from "lucide-react";
 import { createContext, useContext, useState, type ReactNode } from "react";
 
 import { effortTierLabel, roleNameById } from "@/components/builderCopy";
@@ -11,11 +11,17 @@ import {
   STAGE_GLYPH,
   STAGE_TONES,
   attemptNavTarget,
+  buildStagePrompt,
+  defaultStageWiring,
+  optimisticAddStage,
   patchPipeline,
   pipelineCursorActive,
   pipelineStagePosition,
+  reviewLoopChainValid,
   stageChipState,
   stageOverrideBody,
+  stagePromptExtra,
+  stageReceivesPrevOutput,
   type StageNavTarget,
 } from "@/components/pipelines/pipelineModel";
 import { Select } from "@/components/ui/Select";
@@ -23,7 +29,8 @@ import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
 import { ENGINE_MODELS } from "@/lib/agent/models";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
-import type { Pipeline, PipelineStage } from "@/lib/pipelines/types";
+import { MAX_PIPELINE_STAGES } from "@/lib/pipelines/limits";
+import type { Pipeline, PipelineAccess, PipelineStage, PipelineStageKind } from "@/lib/pipelines/types";
 
 import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
 import { layoutStageGraph, type StageGraphEdge, type StageGraphNode } from "./stageGraphLayout";
@@ -137,7 +144,7 @@ function StageNode({
         left: node.x,
         top: node.y,
         width: settingsOpen ? Math.max(280, node.width) : node.width,
-        height: settingsOpen ? (pipeline.state === "draft" ? 430 : 276) : node.height,
+        height: settingsOpen ? (pipeline.state === "draft" ? 524 : 372) : node.height,
         borderColor: ghost ? undefined : tone.color,
         zIndex: settingsOpen ? 30 : 10,
       }}
@@ -226,13 +233,21 @@ function InlineStageSettings({
 }) {
   const { t } = useLocale();
   const engine = stage.effectiveRole.engine;
+  const index = Math.max(0, pipeline.stages.findIndex((item) => item.id === stage.id));
+  const isReview = stage.kind === "review-loop";
   const [roleId, setRoleId] = useState(stage.role?.roleId ?? "");
   const [model, setModel] = useState(stage.effectiveRole.model ?? "");
   const [effort, setEffort] = useState(stage.effectiveRole.effort ?? "");
+  const [access, setAccess] = useState<PipelineAccess>(stage.effectiveRole.access ?? (isReview ? "read-only" : "read-write"));
+  const [extra, setExtra] = useState(() => stagePromptExtra(stage.prompt));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const knownModels = ENGINE_MODELS[engine];
   const modelKnown = !model || knownModels.some((option) => option.id === model);
+  /* Only send an edited prompt: an untouched extra keeps the stored prompt byte
+     for byte, so an unrelated role/model change never rewrites the wiring (#221 §5). */
+  const promptForSubmit = () =>
+    extra.trim() === stagePromptExtra(stage.prompt) ? stage.prompt : buildStagePrompt(stage.prompt, extra, index);
 
   const save = async () => {
     if (busy) return;
@@ -241,7 +256,9 @@ function InlineStageSettings({
     const failure = await patchPipeline(
       pipeline.id,
       "override-stage",
-      stageOverrideBody(stage, { roleId, engine, model, effort, prompt: stage.prompt }),
+      /* Review-loop access is fixed read-only (the resolver rejects read-write),
+         so only run stages surface — and submit — the access field (#353 AC6). */
+      stageOverrideBody(stage, { roleId, engine, model, effort, prompt: promptForSubmit(), ...(isReview ? {} : { access }) }),
     );
     setBusy(false);
     if (failure) {
@@ -272,13 +289,38 @@ function InlineStageSettings({
           </Select>
         </label>
       </div>
+      <div className={`grid gap-2 ${isReview ? "grid-cols-1" : "grid-cols-[1.6fr_1fr]"}`}>
+        <label className="flex min-w-0 flex-col gap-1 text-caption font-semibold text-muted">
+          {t("groupOverride.model")}
+          <Select data-stage-setting="model" value={model} onChange={(event) => setModel(event.target.value)}>
+            <option value="">{t("groupOverride.modelPlaceholder")}</option>
+            {!modelKnown ? <option value={model}>{model}</option> : null}
+            {knownModels.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+          </Select>
+        </label>
+        {!isReview ? (
+          <label className="flex min-w-0 flex-col gap-1 text-caption font-semibold text-muted">
+            {t("stageGraph.access")}
+            <Select data-stage-setting="access" value={access} onChange={(event) => setAccess(event.target.value as PipelineAccess)}>
+              <option value="read-write">{t("pipelineStrip.readWrite")}</option>
+              <option value="read-only">{t("pipelineStrip.readOnly")}</option>
+            </Select>
+          </label>
+        ) : null}
+      </div>
       <label className="flex min-w-0 flex-col gap-1 text-caption font-semibold text-muted">
-        {t("groupOverride.model")}
-        <Select data-stage-setting="model" value={model} onChange={(event) => setModel(event.target.value)}>
-          <option value="">{t("groupOverride.modelPlaceholder")}</option>
-          {!modelKnown ? <option value={model}>{model}</option> : null}
-          {knownModels.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-        </Select>
+        {t("groupOverride.stagePrompt")}
+        <span className="text-[10px] font-medium text-muted/90">
+          {t(isReview ? "pipelineSlot.reviewHint" : index > 0 && stageReceivesPrevOutput(stage.prompt) ? "pipelineSlot.wiringPrev" : "pipelineSlot.wiringTask")}
+        </span>
+        <textarea
+          data-stage-setting="prompt"
+          rows={2}
+          className="max-h-[76px] min-h-[44px] w-full resize-none overflow-y-auto rounded-control border border-border bg-canvas px-2 py-1 text-caption font-semibold text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          value={extra}
+          placeholder={t("pipelineSlot.noPrompt")}
+          onChange={(event) => setExtra(event.target.value)}
+        />
       </label>
       {error ? <p role="alert" className="text-caption font-semibold text-danger">{error}</p> : null}
       <div className="flex items-center justify-end gap-1.5">
@@ -427,7 +469,7 @@ function ReviewCycle({
       aria-hidden={!expanded}
       inert={!expanded}
       className={`absolute z-20 rounded-[14px] border border-border bg-canvas p-3 shadow-2 transition-[transform,opacity] duration-300 [transform-origin:top_left] [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${expanded ? "pointer-events-auto scale-100 opacity-100" : "pointer-events-none scale-[0.96] opacity-0"}`}
-      style={{ left: owner.x, top: owner.y, width: 480, minHeight: settingsOpen ? 390 : 244 }}
+      style={{ left: owner.x, top: owner.y, width: 480, minHeight: settingsOpen ? 470 : 244 }}
     >
       <div className="flex items-center justify-between gap-3">
         <span className="text-caption font-bold text-muted">
@@ -582,6 +624,58 @@ function ReviewCluster({
   );
 }
 
+/** Compact on-canvas draft controls (#353 AC7): add a conversation node or a
+    review cycle straight from the canvas — no tall side form. New nodes splice
+    onto the end of the chain and their placeholder window appears immediately
+    through the optimistic echo. */
+function DraftGraphActions({ pipeline }: { pipeline: Pipeline }) {
+  const { t } = useLocale();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const stages = pipeline.stages;
+  const atCeiling = stages.length >= MAX_PIPELINE_STAGES;
+  const canAddReview = !atCeiling && stages.some((stage) => stage.kind === "run")
+    && reviewLoopChainValid([...stages.map((stage) => stage.kind), "review-loop"]);
+
+  const addStage = async (kind: PipelineStageKind) => {
+    if (busy) return;
+    const ids = new Set(stages.map((stage) => stage.id));
+    let n = stages.length + 1;
+    while (ids.has(`stage-${n}`)) n += 1;
+    const index = stages.length;
+    const stage = { id: `stage-${n}`, kind, prompt: defaultStageWiring(index), next: null };
+    setBusy(true);
+    setError(null);
+    const failure = await patchPipeline(pipeline.id, "add-stage", { index, stage }, optimisticAddStage(pipeline, stage, index));
+    setBusy(false);
+    if (failure) setError(failure);
+  };
+
+  return (
+    <div data-stage-graph-actions className="flex flex-wrap items-center gap-1.5 border-b border-border/70 px-2 py-1.5">
+      <button
+        type="button"
+        data-add-conversation
+        disabled={busy || atCeiling}
+        onClick={() => void addStage("run")}
+        className="inline-flex min-h-8 items-center gap-1 rounded-full border border-border bg-card px-2.5 text-caption font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+      >
+        <Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addRunStage")}
+      </button>
+      <button
+        type="button"
+        data-add-review
+        disabled={busy || !canAddReview}
+        onClick={() => void addStage("review-loop")}
+        className="inline-flex min-h-8 items-center gap-1 rounded-full border border-border bg-card px-2.5 text-caption font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+      >
+        <Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addReviewStage")}
+      </button>
+      {error ? <span role="alert" className="text-caption font-semibold text-danger">{error}</span> : null}
+    </div>
+  );
+}
+
 export function PipelineStageGraph({
   pipeline,
   onOpenAttempt,
@@ -596,6 +690,7 @@ export function PipelineStageGraph({
 
   return (
     <div data-pipeline-stage-graph className="max-h-[360px] w-full overflow-x-auto overflow-y-auto overscroll-contain rounded-control border border-border/70 bg-canvas/80">
+      {pipeline.state === "draft" ? <DraftGraphActions pipeline={pipeline} /> : null}
       <div className="relative min-w-full" style={{ width: graph.size.width, height: graph.size.height }}>
         <svg width={graph.size.width} height={graph.size.height} className="pointer-events-none absolute inset-0" aria-hidden>
           {graph.edges.map((edge) => {

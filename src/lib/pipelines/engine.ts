@@ -246,7 +246,9 @@ export function defaultPipelinePorts(): PipelinePorts {
   let runtimeSnapshot: ReturnType<NonNullable<ReturnType<typeof runtimeHostClient>>["snapshot"]> | null = null;
   return {
     exec: realExec,
-    preflightRepo: preflightPipelineRepo,
+    /* Reuse the picker's recent successful probe so creation never repeats the
+       same Git rev-parse chain for an unchanged repository (#353 AC2). */
+    preflightRepo: (repoDir) => preflightPipelineRepo(repoDir, undefined, { cache: true }),
     roleLookup: pipelineRoleLookup,
     spawnAgent: spawnPipelineAgent,
     spawnReceipt: (launchId) => {
@@ -1910,8 +1912,9 @@ export async function patchPipeline(
          has not started; editing a stage mid-attempt would silently no-op. */
       const run = pipeline.runs.find((item) => item.stageId === target.id);
       if (run && run.attempts.length > 0) return { error: "stage has already started", status: 409 };
-      const changesRoleOrRuntime = req.role !== undefined || req.engine !== undefined || req.model !== undefined || req.effort !== undefined;
+      const changesRoleOrRuntime = req.role !== undefined || req.engine !== undefined || req.model !== undefined || req.effort !== undefined || req.access !== undefined;
       if (!changesRoleOrRuntime && req.prompt === undefined) return { error: "override-stage needs at least one field to change", status: 400 };
+      if (req.access !== undefined && req.access !== "read-only" && req.access !== "read-write") return { error: "access must be read-only or read-write", status: 400 };
       /* Validate the runtime types up front: resolvePipelineRole treats a
          non-string, non-null model/effort as absent and silently uses the
          fallback, so a raw `model: 123` / `effort: false` would 200 with the old
@@ -1953,7 +1956,11 @@ export async function patchPipeline(
             engine: req.engine !== undefined ? req.engine : resetRuntime ? undefined : target.engine,
             model: req.model !== undefined ? req.model : resetRuntime ? undefined : target.model,
             effort: req.effort !== undefined ? req.effort : resetRuntime ? undefined : target.effort,
-            access: target.access,
+            /* Access is a durable stage capability, not an unpinned runtime, so a
+               role swap keeps the operator's prior choice; an explicit access in
+               the request still wins. The resolver rejects read-write on a
+               review-loop, so that invariant is enforced canonically (#353 AC6). */
+            access: req.access !== undefined ? req.access : target.access,
           },
           target.kind,
           ports.roleLookup,

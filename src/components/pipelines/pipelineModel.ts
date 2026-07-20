@@ -39,8 +39,12 @@ export const PIPELINE_ROLE_OPTIONS: readonly PipelineRoleId[] = (
   ["orchestrator", "reviewer", "verifier", "builder", "architect", "cleaner", "prod-auditor", "deployer"] as const
 ).filter((roleId) => !PIPELINE_DISALLOWED_ROLE_IDS.includes(roleId));
 
-/** The stage-override form's raw values (issue #118 on-canvas controls). */
-export type StageOverrideForm = { roleId: string; engine: FlowEngine; model: string; effort: string; prompt: string };
+/** The stage-override form's raw values (issue #118 on-canvas controls). Access
+    is optional: callers that do not expose it (the review cycle, which is always
+    read-only) omit it, so no unchanged access is ever sent (#353 AC6). */
+export type StageOverrideForm = {
+  roleId: string; engine: FlowEngine; model: string; effort: string; prompt: string; access?: PipelineAccess;
+};
 
 /**
  * Builds an override-stage PATCH body that carries ONLY the fields the operator
@@ -59,6 +63,7 @@ export function stageOverrideBody(stage: PipelineStage, form: StageOverrideForm)
   if (form.engine !== stage.effectiveRole.engine) body.engine = form.engine;
   if (form.model.trim() !== (stage.effectiveRole.model ?? "")) body.model = form.model.trim() || null;
   if (form.effort !== (stage.effectiveRole.effort ?? "")) body.effort = form.effort || null;
+  if (form.access !== undefined && form.access !== stage.effectiveRole.access) body.access = form.access;
   return body;
 }
 

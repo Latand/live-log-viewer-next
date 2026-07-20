@@ -2261,6 +2261,49 @@ test("override-stage re-configures an unstarted stage and rejects a started one 
   expect((await patchPipeline(started.id, { action: "override-stage", stageId: "build", prompt: "x" }, ports)).status).toBe(409);
 });
 
+test("override-stage flips an unstarted run stage's access and preserves it across a role swap (#353 AC6)", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Access edit",
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, ports);
+
+  const flipped = await patchPipeline(created.pipeline!.id, { action: "override-stage", stageId: "build", access: "read-only" }, ports);
+  expect(flipped.error).toBeUndefined();
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!.effectiveRole.access).toBe("read-only");
+
+  /* Access is a durable capability, not an unpinned runtime: swapping the role
+     keeps the operator's read-only choice rather than resetting to the default. */
+  const swapped = await patchPipeline(created.pipeline!.id, { action: "override-stage", stageId: "build", role: { roleId: "architect" } }, ports);
+  expect(swapped.error).toBeUndefined();
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!.effectiveRole.access).toBe("read-only");
+
+  /* A bad access value is rejected up front. */
+  const bad = await patchPipeline(created.pipeline!.id, { action: "override-stage", stageId: "build", access: "write-only" as never }, ports);
+  expect(bad.status).toBe(400);
+});
+
+test("override-stage rejects read-write access on a review-loop stage (#353 AC6)", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Review access",
+    repoDir: "/repo",
+    stages: [
+      { id: "build", kind: "run", role: { roleId: "builder" }, access: "read-write", prompt: "{{task}}", next: "review" },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "{{task}}", next: null },
+    ] as never,
+    autoStart: false,
+  }, ports);
+
+  const rejected = await patchPipeline(created.pipeline!.id, { action: "override-stage", stageId: "review", access: "read-write" }, ports);
+  expect(rejected.status).toBe(400);
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "review")!.effectiveRole.access).toBe("read-only");
+});
+
 test("a stage spawn uses the model and effort saved by override-stage", async () => {
   const h = harness();
   const created = await create(h.ports);
