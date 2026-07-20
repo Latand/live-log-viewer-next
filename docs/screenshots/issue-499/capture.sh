@@ -21,7 +21,9 @@ OUT="docs/screenshots/issue-499"
 CSS="$(ls .next/static/css/*.css | head -1)"
 SHELL_BIN="$(ls -d "$HOME"/.cache/puppeteer/chrome-headless-shell/*/chrome-headless-shell-linux64/chrome-headless-shell | tail -1)"
 LIST="$OUT/captures.list"
+GEOM="$OUT/geometry.list"
 : > "$LIST"
+: > "$GEOM"
 
 bun build "$OUT/harness.tsx" --outfile "$OUT/bundle.js" --target browser \
   --define "process.env.NODE_ENV=\"production\"" \
@@ -75,6 +77,20 @@ verify() { # name width height query expectations...
   echo "verified $name"
 }
 
+# Geometry gate: re-run a picker-open view, dump the DOM, and hand the harness's
+# #capture-geometry record to collect-geometry.ts, which REFUSES any control
+# (Send, the model/reasoning pill, the opened reasoning + model picker surfaces)
+# that is not nonzero and fully in-viewport. Same execution path as the shot.
+geometry() { # name width height query
+  local name="$1" width="$2" height="$3" query="$4"
+  "$SHELL_BIN" --headless --disable-gpu --no-sandbox \
+    --virtual-time-budget=6000 \
+    --window-size="$width,$height" \
+    --dump-dom \
+    "file://$PWD/$OUT/harness.html?$query" 2>/dev/null \
+    | bun "$OUT/collect-geometry.ts" "$name" "$width" "$height"
+}
+
 # 1. Rest: the one obvious pill on the phone, no disclosure needed; desktop row.
 shot rest-390-en-light      390 844  rest en light
 shot rest-390-uk-dark       390 844  rest uk dark
@@ -82,13 +98,20 @@ shot rest-desktop-en-light  1440 900 rest en light
 verify rest 390 844 "view=rest&lang=en&theme=light" \
   '"pillVisible":true'
 
-# 2. Picker open: 390 bottom sheet and desktop popover.
+# 2. Picker open: 390 bottom sheet (tall + keyboard-open heights) and desktop
+#    popover. Each records the getBoundingClientRect geometry of Send, the
+#    model/reasoning pill, and the opened reasoning + model picker surfaces,
+#    asserted nonzero and fully in-viewport at 1440×900, 390×844 and 390×600.
 shot sheet-390-en-light     390 844  sheet en light
+shot sheet-390x600-en-light 390 600  sheet en light
 shot popover-desktop-en-light 1440 900 popover en light
 verify sheet 390 844 "view=sheet&lang=en&theme=light" \
   '"pickerOpen":true'
 verify popover 1440 900 "view=popover&lang=en&theme=light" \
   '"pickerOpen":true'
+geometry sheet-390-en-light     390 844  "view=sheet&lang=en&theme=light"
+geometry sheet-390x600-en-light 390 600  "view=sheet&lang=en&theme=light"
+geometry popover-desktop-en-light 1440 900 "view=popover&lang=en&theme=light"
 
 # 3. Typing non-empty text enables Send within one frame on the live host.
 shot typed-390-en-light     390 844  typed en light
@@ -162,8 +185,8 @@ verify rest-600 390 600 "view=rest&lang=en&theme=light" \
 # Record the run: digest + geometry-verify every capture into the committed
 # manifest, then regenerate the committed vector stills from it so the
 # immutable evidence can never drift from this harness execution.
-bun "$OUT/build-manifest.ts" "$LIST"
+bun "$OUT/build-manifest.ts" "$LIST" "$GEOM"
 bun "$OUT/generate-stills.ts"
 
-rm -f "$OUT/bundle.js" "$OUT/app.css" "$OUT/harness.html" "$LIST"
+rm -f "$OUT/bundle.js" "$OUT/app.css" "$OUT/harness.html" "$LIST" "$GEOM"
 echo "issue #499 acceptance capture + verification complete"

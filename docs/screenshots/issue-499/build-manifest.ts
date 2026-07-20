@@ -7,20 +7,25 @@
  *  - parses the PNG IHDR and REFUSES a capture whose pixel geometry is not
  *    exactly viewport × deviceScaleFactor (the mechanical viewport check);
  *  - records the capture's SHA-256.
- * It also digests the harness inputs (harness.tsx, capture.sh) and stamps the
- * git revision, so `evidence.test.ts` can prove the committed stills bind to
- * these exact captures and this exact harness.
+ * It also digests the harness inputs (harness.tsx, capture.sh), stamps the git
+ * revision AND its source-tree object, and attaches the geometry list's
+ * getBoundingClientRect records to the picker-open captures. Each capture row
+ * is then sealed with a SHA-256 over its canonical record (`captureDigest`),
+ * so `evidence.test.ts` — and CI — can recompute every capture digest from the
+ * committed manifest alone and prove the stills bind to these exact captures,
+ * this exact harness, and the reviewed source-tree revision.
  *
- *   bun docs/screenshots/issue-499/build-manifest.ts <captures.list>
+ *   bun docs/screenshots/issue-499/build-manifest.ts <captures.list> <geometry.list>
  *
- * where each list line is: `name view lang theme width height`.
+ * where each captures.list line is: `name view lang theme width height`, and
+ * each geometry.list line is a JSON `{ name, geometry }` record.
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { CaptureEntry, CaptureManifest } from "./generate-stills";
+import { captureDigest, type CaptureEntry, type CaptureGeometry, type CaptureManifest } from "./generate-stills";
 
 const DIR = dirname(new URL(import.meta.url).pathname);
 const DEVICE_SCALE_FACTOR = 2;
@@ -38,7 +43,18 @@ function pngGeometry(bytes: Uint8Array, name: string): { width: number; height: 
 }
 
 const listPath = process.argv[2];
-if (!listPath) throw new Error("usage: bun build-manifest.ts <captures.list>");
+const geometryPath = process.argv[3];
+if (!listPath || !geometryPath) throw new Error("usage: bun build-manifest.ts <captures.list> <geometry.list>");
+
+/** getBoundingClientRect records the geometry gate already collected, by name. */
+const geometryByName = new Map<string, CaptureGeometry>();
+const geometryRaw = readFileSync(geometryPath, "utf8").trim();
+if (geometryRaw) {
+  for (const line of geometryRaw.split("\n")) {
+    const { name, geometry } = JSON.parse(line) as { name: string; geometry: CaptureGeometry };
+    geometryByName.set(name, geometry);
+  }
+}
 
 const captures: Record<string, CaptureEntry> = {};
 const lines = readFileSync(listPath, "utf8").trim().split("\n");
@@ -52,13 +68,19 @@ for (const line of lines) {
   if (pixels.width !== expected.width || pixels.height !== expected.height) {
     throw new Error(`${name}: captured ${pixels.width}×${pixels.height}, expected ${expected.width}×${expected.height} for a ${viewport.width}×${viewport.height} viewport at scale ${DEVICE_SCALE_FACTOR}`);
   }
-  captures[name] = { view, lang, theme, viewport, png: { ...pixels, sha256: sha256(bytes) } };
+  const geometry = geometryByName.get(name);
+  const record = { view, lang, theme, viewport, png: { ...pixels, sha256: sha256(bytes) }, ...(geometry ? { geometry } : {}) };
+  // Seal the canonical record so CI can recompute this exact digest from the
+  // committed manifest bytes alone.
+  captures[name] = { ...record, sha256: captureDigest(record) };
 }
 
+const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: DIR }).toString().trim();
 const manifest: CaptureManifest = {
   classification: "synthetic",
   generator: "docs/screenshots/issue-499/capture.sh",
-  sourceRevision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: DIR }).toString().trim(),
+  sourceRevision: revision,
+  sourceTree: execFileSync("git", ["rev-parse", `${revision}^{tree}`], { cwd: DIR }).toString().trim(),
   deviceScaleFactor: DEVICE_SCALE_FACTOR,
   harness: Object.fromEntries(
     ["harness.tsx", "capture.sh"].map((name) => [name, sha256(readFileSync(join(DIR, name)))]),
@@ -67,4 +89,6 @@ const manifest: CaptureManifest = {
 };
 
 writeFileSync(join(DIR, "capture-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-process.stdout.write(`capture-manifest.json: ${lines.length} captures digested and geometry-verified.\n`);
+process.stdout.write(
+  `capture-manifest.json: ${lines.length} captures digested and geometry-verified (${geometryByName.size} with control geometry).\n`,
+);

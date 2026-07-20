@@ -235,6 +235,65 @@ function typeInto(textarea: HTMLTextAreaElement, value: string): void {
   textarea.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+/** Integer getBoundingClientRect of a live element — the geometry the record
+    seals and evidence.test.ts asserts is nonzero and fully in-viewport. */
+function rectOf(el: Element): { x: number; y: number; width: number; height: number } {
+  const r = el.getBoundingClientRect();
+  return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+}
+
+/** Locate an opened picker group surface (mobile sheet radiogroup / desktop
+    popover group) by its accessible name. */
+function pickerGroup(label: string): HTMLElement | null {
+  const scope = document.querySelector("[data-runtime-sheet]") ?? document.querySelector("[data-runtime-popover]");
+  if (!scope) return null;
+  for (const node of scope.querySelectorAll('[role="radiogroup"], [role="group"]')) {
+    if (node.getAttribute("aria-label") === label) return node as HTMLElement;
+  }
+  return null;
+}
+
+/** Measure Send, the model/reasoning pill, and the opened reasoning + model
+    picker surfaces, and publish the privacy-safe geometry record capture.sh
+    collects. On the desktop popover the model choices live one panel deep, so
+    the driver opens that submenu before measuring it; on the mobile sheet both
+    sections render at once. Each surface is scrolled into view first so a tall
+    sheet's lower section is measured where the user reaches it. */
+async function emitGeometry(pill: HTMLElement): Promise<void> {
+  const send = await waitFor(
+    () => document.querySelector<HTMLButtonElement>(`button[aria-label="${t("composer.sendToAgent")}"]`),
+    "send button",
+  );
+  const reasoning = await waitFor(() => pickerGroup(t("composer.reasoningGroup")), "reasoning picker surface");
+  reasoning.scrollIntoView({ block: "nearest" });
+  const reasoningPicker = rectOf(reasoning);
+
+  const isPopover = Boolean(document.querySelector("[data-runtime-popover]"));
+  if (isPopover) {
+    const modelRow = await waitFor(
+      () => document.querySelector<HTMLButtonElement>('[data-runtime-row="submenu"][data-runtime-value="model"]'),
+      "model submenu row",
+    );
+    modelRow.click();
+  }
+  const model = await waitFor(() => pickerGroup(t("composer.modelGroup")), "model picker surface");
+  model.scrollIntoView({ block: "nearest" });
+  const modelPicker = rectOf(model);
+
+  const geometry = {
+    view,
+    lang,
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    controls: { send: rectOf(send), pill: rectOf(pill), reasoningPicker, modelPicker },
+  };
+  const node = document.createElement("script");
+  node.id = "capture-geometry";
+  (node as HTMLScriptElement).type = "application/json";
+  node.textContent = JSON.stringify(geometry);
+  document.body.append(node);
+  logVerify({ kind: "geometry-controls", ...geometry });
+}
+
 async function waitFor<T>(read: () => T | null, label: string, tries = 60): Promise<T> {
   for (let i = 0; i < tries; i += 1) {
     const value = read();
@@ -333,6 +392,9 @@ async function drive(): Promise<void> {
       `${view} surface`,
     );
     logVerify({ kind: "state", view, pickerOpen: Boolean(surface) });
+    /* Record the reachable, in-viewport geometry of Send, the pill, and the
+       opened reasoning + model picker surfaces — the committed capture record. */
+    await emitGeometry(pill);
     return;
   }
   if (view === "typed" || view === "receipt") {

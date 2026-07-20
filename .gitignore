@@ -59,3 +59,4 @@ prod.log
 # issue-499 evidence: raw chrome captures stay local (digests live in capture-manifest.json)
 docs/screenshots/issue-499/*.png
 docs/screenshots/issue-499/captures.list
+docs/screenshots/issue-499/geometry.list

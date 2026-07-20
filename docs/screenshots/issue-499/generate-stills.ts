@@ -28,6 +28,7 @@
  * Re-running against the same manifest always emits identical bytes. All data
  * is synthetic.
  */
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -49,23 +50,105 @@ export interface StillSpec {
   lang: StillLocale;
 }
 
+/** Integer getBoundingClientRect of a control, as measured in the real page. */
+export interface ControlRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The nonzero, in-viewport control geometry the browser harness measured with
+    getBoundingClientRect at the capture's viewport: Send, the model/reasoning
+    pill, and the opened reasoning and model picker surfaces. */
+export interface CaptureGeometry {
+  send: ControlRect;
+  pill: ControlRect;
+  reasoningPicker: ControlRect;
+  modelPicker: ControlRect;
+}
+
 export interface CaptureEntry {
   view: string;
   lang: string;
   theme: string;
   viewport: { width: number; height: number };
   png: { width: number; height: number; sha256: string };
+  /** Present on the picker-open captures at each viewport. */
+  geometry?: CaptureGeometry;
+  /** SHA-256 sealing the canonical capture record above — recomputable by CI
+      from the committed manifest bytes alone (see `captureDigest`). */
+  sha256: string;
 }
 
 export interface CaptureManifest {
   classification: string;
   generator: string;
+  /** Full 40-hex commit the harness ran against; `evidence.test.ts` proves the
+      committed harness bytes are exactly this revision's tree. */
   sourceRevision: string;
+  /** Git tree object of `sourceRevision` — binds the manifest to the exact
+      reviewed source-tree revision, recomputably (`git rev-parse <rev>^{tree}`). */
+  sourceTree: string;
   deviceScaleFactor: number;
   /** SHA-256 of the harness inputs at capture time, keyed by basename. */
   harness: Record<string, string>;
   captures: Record<string, CaptureEntry>;
 }
+
+const CONTROL_KEYS = ["send", "pill", "reasoningPicker", "modelPicker"] as const;
+
+/** A control rect in fixed key order — determinism for the sealing digest. */
+function canonicalRect(rect: ControlRect): ControlRect {
+  return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+}
+
+function canonicalGeometry(geometry: CaptureGeometry): CaptureGeometry {
+  return {
+    send: canonicalRect(geometry.send),
+    pill: canonicalRect(geometry.pill),
+    reasoningPicker: canonicalRect(geometry.reasoningPicker),
+    modelPicker: canonicalRect(geometry.modelPicker),
+  };
+}
+
+/**
+ * The canonical, deterministic serialization of one capture's committed
+ * record: the same bytes whether emitted by `build-manifest.ts` or recomputed
+ * by `evidence.test.ts`, independent of the on-disk key order. The record
+ * commits to the captured pixel digest AND the measured control geometry, so
+ * sealing it lets CI recompute every capture digest from the committed manifest
+ * alone — the privacy-safe canonical capture payload the raw PNGs cannot be.
+ */
+export function canonicalCaptureRecord(capture: Omit<CaptureEntry, "sha256">): string {
+  const record: Record<string, unknown> = {
+    view: capture.view,
+    lang: capture.lang,
+    theme: capture.theme,
+    viewport: { width: capture.viewport.width, height: capture.viewport.height },
+    png: { width: capture.png.width, height: capture.png.height, sha256: capture.png.sha256 },
+  };
+  if (capture.geometry) record.geometry = canonicalGeometry(capture.geometry);
+  return JSON.stringify(record);
+}
+
+export function captureDigest(capture: Omit<CaptureEntry, "sha256">): string {
+  return createHash("sha256").update(canonicalCaptureRecord(capture)).digest("hex");
+}
+
+/** A rect is a real, nonzero box lying fully inside the CSS viewport. */
+export function rectInViewport(rect: ControlRect, viewport: { width: number; height: number }): boolean {
+  return (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    rect.x >= 0 &&
+    rect.y >= 0 &&
+    rect.x + rect.width <= viewport.width &&
+    rect.y + rect.height <= viewport.height
+  );
+}
+
+export const GEOMETRY_CONTROLS = CONTROL_KEYS;
 
 const DIR = dirname(new URL(import.meta.url).pathname);
 

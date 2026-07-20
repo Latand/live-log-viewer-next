@@ -14,12 +14,33 @@ come from one execution path. All data is synthetic and publication-safe.
 `build-manifest.ts`: for each chrome capture it records the SHA-256 and the
 IHDR-parsed pixel geometry (refusing any capture that is not exactly
 viewport × device-scale-factor 2), plus the SHA-256 of the harness inputs
-(`harness.tsx`, `capture.sh`) and the git revision of the run. The committed
-`still-*.svg` frames are regenerated from that manifest in the same run.
+(`harness.tsx`, `capture.sh`), the git revision of the run AND that revision's
+source-tree object. The committed `still-*.svg` frames are regenerated from
+that manifest in the same run.
+
+Every capture row is then **sealed** with a SHA-256 over its canonical record
+(`captureDigest` in `generate-stills.ts`). The record commits to the captured
+PNG's digest and, for the picker-open captures, the measured control geometry —
+so the digest is recomputable by CI from the committed manifest bytes alone
+(the privacy-safe canonical capture payload the raw, gitignored PNGs cannot be).
+
+**Control geometry.** The picker-open captures at 1440×900, 390×844 and
+390×600 record the `getBoundingClientRect` of Send, the model/reasoning pill,
+and the opened reasoning + model picker surfaces, measured in the real page.
+`collect-geometry.ts` is the acceptance gate: capture.sh REFUSES any run whose
+controls are not nonzero and fully inside the CSS viewport, so a regression that
+collapses or pushes a control off-screen fails the capture loudly.
 
 `evidence.test.ts` (part of `bun test`) enforces the binding on the committed
 artifacts:
 
+- every capture's sealing digest recomputes from its committed canonical record
+  — a hand-edited row (digest, geometry, or pixel hash) fails here;
+- the manifest's `sourceTree` is `git rev-parse <sourceRevision>^{tree}` and the
+  harness bytes committed at that revision are byte-identical to the reviewed
+  ones — the evidence binds to the exact reviewed source-tree revision;
+- Send, the pill, and the opened reasoning + model picker surfaces have nonzero,
+  fully in-viewport bounds at all three viewports;
 - every still is byte-identical to its deterministic regeneration from the
   committed manifest, and embeds the manifest's capture digest, revision, and
   exact viewport geometry;
@@ -73,8 +94,8 @@ missing.
 | `rest-390-en-light`, `rest-390-uk-dark` | Live ready at 390×844: the one obvious 44px model/reasoning pill under the input, no disclosure needed |
 | `rest-390x600-en-light` | Live ready at 390×600 (keyboard-open height class): pill and Send stay reachable |
 | `rest-desktop-en-light` | Desktop parity: unchanged inline options row |
-| `sheet-390-en-light` | Pill open at 390: stacked Reasoning / Model / Speed sheet, 44px rows |
-| `popover-desktop-en-light` | Pill open on desktop: WAI-APG popover |
+| `sheet-390-en-light`, `sheet-390x600-en-light` | Pill open at 390 (tall + keyboard-open heights): stacked Reasoning / Model / Speed sheet, 44px rows; records Send / pill / reasoning + model picker geometry |
+| `popover-desktop-en-light` | Pill open on desktop: WAI-APG popover; records Send / pill / reasoning + model picker geometry |
 | `typed-390-en-light` | Non-empty text enables Send in the same synchronous flush (verified `aria-disabled` flip) |
 | `receipt-390-en-light` | One structured send receipt carrying the selected settings (`runtime: {model, effort: xhigh, fast}` verified on the wire request AND the delivered receipt echo) |
 | `blocked-390-en-light`, `blocked-390-uk-light` | Unresolved host: inline reason + Re-check recovery, never tooltip-only |

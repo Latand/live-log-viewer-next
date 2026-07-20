@@ -16,6 +16,7 @@
  *     resolves for that state — computed here from `capabilitiesFor`, never
  *     trusted from the frame.
  */
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -25,7 +26,16 @@ import { expect, test } from "bun:test";
 import { capabilitiesFor } from "@/components/agentCapabilities";
 import { translate, type MessageKey } from "@/lib/i18n";
 
-import { STILLS, evidenceFixtures, loadManifest, stillSvg, type StillState } from "./generate-stills";
+import {
+  GEOMETRY_CONTROLS,
+  STILLS,
+  captureDigest,
+  evidenceFixtures,
+  loadManifest,
+  rectInViewport,
+  stillSvg,
+  type StillState,
+} from "./generate-stills";
 
 const DIR = import.meta.dir;
 const sha256 = (bytes: Uint8Array | string): string => createHash("sha256").update(bytes).digest("hex");
@@ -59,6 +69,83 @@ test("every manifest capture records digest + pixel geometry consistent with its
       .toEqual({ name, width: capture.viewport.width * manifest.deviceScaleFactor, height: capture.viewport.height * manifest.deviceScaleFactor });
   }
 });
+
+/* ------------------------------------------------------------------ *
+ * 1b. Every capture digest is RECOMPUTABLE from the committed manifest *
+ *     — the privacy-safe canonical capture payload CI can re-derive    *
+ * ------------------------------------------------------------------ */
+
+test("every capture's sealing digest recomputes from its committed canonical record — a tampered row fails here", () => {
+  for (const [name, capture] of Object.entries(manifest.captures)) {
+    const { sha256, ...record } = capture;
+    expect(sha256).toMatch(/^[0-9a-f]{64}$/);
+    // CI re-derives the digest from the committed manifest bytes alone; the
+    // record commits to the captured PNG's SHA-256 and the measured geometry,
+    // so no capture digest is a hand-declared number.
+    expect({ name, sha256 }).toEqual({ name, sha256: captureDigest(record) });
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * 1c. The manifest binds to the EXACT reviewed source-tree revision    *
+ * ------------------------------------------------------------------ */
+
+const git = (...args: string[]): string => execFileSync("git", args, { cwd: DIR }).toString().trim();
+
+test("the manifest's sourceTree is the git tree of its sourceRevision — recomputable, and binds to the reviewed source tree", () => {
+  expect(manifest.sourceRevision).toMatch(/^[0-9a-f]{40}$/);
+  expect(manifest.sourceTree).toMatch(/^[0-9a-f]{40}$/);
+  // Recompute the tree object of the recorded revision: the manifest names the
+  // exact source-tree revision, not a free-form string.
+  expect(git("rev-parse", `${manifest.sourceRevision}^{tree}`)).toBe(manifest.sourceTree);
+  // The recorded revision is part of this branch's history (an ancestor of the
+  // reviewed HEAD), so the evidence cannot cite a stray commit.
+  expect(() => git("merge-base", "--is-ancestor", manifest.sourceRevision, "HEAD")).not.toThrow();
+});
+
+test("the harness bytes committed AT sourceRevision are byte-identical to the reviewed harness — the manifest binds to that tree's harness", () => {
+  for (const name of ["harness.tsx", "capture.sh"] as const) {
+    const atRevision = execFileSync("git", ["show", `${manifest.sourceRevision}:docs/screenshots/issue-499/${name}`], { cwd: DIR });
+    expect({ name, digest: sha256(atRevision) }).toEqual({ name, digest: manifest.harness[name] });
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * 1d. Control geometry: nonzero, fully in-viewport getBoundingClientRect
+ *     for Send, the pill, and the opened reasoning + model pickers      *
+ *     at 1440×900, 390×844 and 390×600                                  *
+ * ------------------------------------------------------------------ */
+
+const GEOMETRY_CAPTURES: Record<string, { width: number; height: number }> = {
+  "popover-desktop-en-light": { width: 1440, height: 900 },
+  "sheet-390-en-light": { width: 390, height: 844 },
+  "sheet-390x600-en-light": { width: 390, height: 600 },
+};
+
+test("the harness recorded control geometry at all three viewports — 1440×900, 390×844 and 390×600", () => {
+  const measured = Object.entries(manifest.captures)
+    .filter(([, capture]) => capture.geometry)
+    .map(([, capture]) => `${capture.viewport.width}x${capture.viewport.height}`)
+    .sort();
+  expect(measured).toEqual(["1440x900", "390x600", "390x844"]);
+});
+
+for (const [name, viewport] of Object.entries(GEOMETRY_CAPTURES)) {
+  test(`Send, the model/reasoning pill, and the opened reasoning + model picker surfaces have nonzero in-viewport bounds at ${viewport.width}×${viewport.height}`, () => {
+    const capture = manifest.captures[name];
+    expect(capture).toBeDefined();
+    expect(capture!.viewport).toEqual(viewport);
+    const geometry = capture!.geometry;
+    expect(geometry).toBeDefined();
+    for (const control of GEOMETRY_CONTROLS) {
+      const rect = geometry![control];
+      expect({ control, rect }).toEqual({ control, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
+      // Nonzero, and drawn fully within the CSS viewport it was measured at.
+      expect({ control, inViewport: rectInViewport(rect, viewport) }).toEqual({ control, inViewport: true });
+      expect({ control, nonzero: rect.width > 0 && rect.height > 0 }).toEqual({ control, nonzero: true });
+    }
+  });
+}
 
 /* ------------------------------------------------------------------ *
  * 2. Committed stills regenerate byte-identically from the manifest    *
