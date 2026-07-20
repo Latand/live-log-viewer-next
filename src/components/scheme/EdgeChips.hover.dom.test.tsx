@@ -39,6 +39,7 @@ Object.assign(globalThis, {
   KeyboardEvent: dom.KeyboardEvent,
   MouseEvent: dom.MouseEvent,
   PointerEvent: dom.PointerEvent,
+  FocusEvent: dom.FocusEvent,
   Event: dom.Event,
 });
 
@@ -53,6 +54,15 @@ afterEach(() => {
   roots.clear();
   document.body.replaceChildren();
 });
+
+/* React 19 dispatches hover/enter/leave as *continuous* priority: the state
+   update they schedule commits on a later macrotask, not synchronously inside
+   the dispatching flushSync. Real pointer moves re-render fine; a test just has
+   to let React's scheduler drain before asserting. */
+const settle = async () => {
+  for (let index = 0; index < 3; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  flushSync(() => undefined);
+};
 
 /* One long-titled cluster far off the right edge → a single right-anchored
    chip whose label overflows its resting width. */
@@ -111,11 +121,12 @@ test("resting chip reserves a control zone before the title so the arrow never o
   expect(control).toBeTruthy();
   expect(title).toBeTruthy();
   /* Control leads the title in document order and owns the direction glyph, so
-     the reserved control box is a layout sibling of the label — never over it. */
+     the reserved control box is a layout sibling of the label — never over it.
+     The fixture cluster sits far off the *right* edge, so its glyph is "→". */
   expect(control.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(control.textContent).toContain("←");
+  expect(control.textContent).toContain("→");
   expect(title.textContent).toBe(clusters[0]!.label);
-  expect(title.textContent).not.toContain("←");
+  expect(title.textContent).not.toContain("→");
 });
 
 test("the chip and its revealed title are one continuous surface — the title lives inside the chip button", () => {
@@ -127,7 +138,7 @@ test("the chip and its revealed title are one continuous surface — the title l
   expect(host.querySelector('[role="tooltip"]')).toBeNull();
 });
 
-test("progressive reveal advances one segment when the pointer reaches the truncated end", () => {
+test("progressive reveal advances one segment when the pointer reaches the truncated end", async () => {
   const host = mount();
   const button = chip(host);
   const title = button.querySelector("[data-edge-chip-title]") as HTMLElement;
@@ -136,58 +147,71 @@ test("progressive reveal advances one segment when the pointer reaches the trunc
   expect(base).toBeGreaterThan(0);
 
   stubTitle(title, { scrollWidth: 500, clientWidth: 120, right: 200 });
-  flushSync(() => button.dispatchEvent(new dom.PointerEvent("pointermove", { clientX: 199, bubbles: true })));
+  button.dispatchEvent(new PointerEvent("pointermove", { clientX: 199, bubbles: true }));
+  await settle();
   expect(title.getAttribute("data-reveal")).toBe("1");
   const grown = Number.parseFloat(title.style.maxWidth);
   expect(grown).toBeGreaterThan(base);
 
-  flushSync(() => button.dispatchEvent(new dom.PointerEvent("pointermove", { clientX: 199, bubbles: true })));
+  button.dispatchEvent(new PointerEvent("pointermove", { clientX: 199, bubbles: true }));
+  await settle();
   expect(title.getAttribute("data-reveal")).toBe("2");
 
   /* A move away from the truncated end does not advance the reveal. */
-  flushSync(() => button.dispatchEvent(new dom.PointerEvent("pointermove", { clientX: 20, bubbles: true })));
+  button.dispatchEvent(new PointerEvent("pointermove", { clientX: 20, bubbles: true }));
+  await settle();
   expect(title.getAttribute("data-reveal")).toBe("2");
 });
 
-test("a fully visible title stops revealing — no runaway growth", () => {
+test("a fully visible title stops revealing — no runaway growth", async () => {
   const host = mount();
   const button = chip(host);
   const title = button.querySelector("[data-edge-chip-title]") as HTMLElement;
   /* Not overflowing: content fits inside the current width. */
   stubTitle(title, { scrollWidth: 118, clientWidth: 120, right: 200 });
-  flushSync(() => button.dispatchEvent(new dom.PointerEvent("pointermove", { clientX: 199, bubbles: true })));
+  button.dispatchEvent(new PointerEvent("pointermove", { clientX: 199, bubbles: true }));
+  await settle();
   expect(title.getAttribute("data-reveal")).toBe("0");
 });
 
-test("leaving the chip collapses the reveal back to its resting segment", () => {
+test("leaving the chip collapses the reveal back to its resting segment", async () => {
   const host = mount();
   const button = chip(host);
   const title = button.querySelector("[data-edge-chip-title]") as HTMLElement;
   stubTitle(title, { scrollWidth: 500, clientWidth: 120, right: 200 });
-  flushSync(() => button.dispatchEvent(new dom.PointerEvent("pointermove", { clientX: 199, bubbles: true })));
+  button.dispatchEvent(new PointerEvent("pointermove", { clientX: 199, bubbles: true }));
+  await settle();
   expect(title.getAttribute("data-reveal")).toBe("1");
-  flushSync(() => button.dispatchEvent(new dom.PointerEvent("pointerleave", { bubbles: true })));
+  /* React synthesizes onPointerLeave from a native pointerout with no
+     related target — dispatch that, not a raw (non-bubbling) pointerleave. */
+  button.dispatchEvent(new PointerEvent("pointerout", { bubbles: true }));
+  await settle();
   expect(title.getAttribute("data-reveal")).toBe("0");
 });
 
-test("keyboard focus reveals the full title without a pointer", () => {
+test("keyboard focus reveals the full title without a pointer", async () => {
   const host = mount();
   const button = chip(host);
   const title = button.querySelector("[data-edge-chip-title]") as HTMLElement;
-  flushSync(() => button.dispatchEvent(new dom.Event("focus", { bubbles: true })));
+  /* React delegates onFocus/onBlur to the bubbling focusin/focusout events. */
+  button.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+  await settle();
   expect(title.getAttribute("data-reveal")).toBe("full");
   /* Full reveal drops the width cap so the whole title shows. */
   expect(title.style.maxWidth === "" || title.style.maxWidth === "none").toBe(true);
-  flushSync(() => button.dispatchEvent(new dom.Event("blur", { bubbles: true })));
+  button.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  await settle();
   expect(title.getAttribute("data-reveal")).toBe("0");
 });
 
-test("reduced motion reveals fully on hover instead of animating segments", () => {
+test("reduced motion reveals fully on hover instead of animating segments", async () => {
   mediaState.reducedMotion = true;
   const host = mount();
   const button = chip(host);
   const title = button.querySelector("[data-edge-chip-title]") as HTMLElement;
-  flushSync(() => button.dispatchEvent(new dom.PointerEvent("pointerenter", { bubbles: true })));
+  /* React synthesizes onPointerEnter from a native pointerover. */
+  button.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+  await settle();
   expect(title.getAttribute("data-reveal")).toBe("full");
 });
 
