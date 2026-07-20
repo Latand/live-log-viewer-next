@@ -14,6 +14,7 @@ import type { Flow, FlowMergeEvidence } from "@/lib/flows/types";
 import { reconcileMigrationInventory } from "@/lib/accounts/migration/coordinator";
 import { procBackend } from "@/lib/proc";
 import { runtimeHostClient } from "@/lib/runtime/client";
+import { reconcileTerminalSpawnsHeldByLiveOwners } from "@/lib/runtime/staleSpawnOwner";
 import { terminalizeStaleStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { listFiles } from "@/lib/scanner";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
@@ -766,6 +767,7 @@ export interface ReaperActuationOverrides {
   saveFlows?: typeof saveFlows;
   now?: () => number;
   runtimeClient?: typeof runtimeHostClient;
+  reconcileTerminalOwnerSpawns?: typeof reconcileTerminalSpawnsHeldByLiveOwners;
   terminalizeStaleSpawns?: typeof terminalizeStaleStructuredSpawns;
 }
 
@@ -785,6 +787,8 @@ export async function runReaperCycle(options: {
   const runtimeClientForSpawns = (options.actuation?.runtimeClient ?? runtimeHostClient)();
   if (runtimeClientForSpawns) {
     try {
+      await (options.actuation?.reconcileTerminalOwnerSpawns
+        ?? reconcileTerminalSpawnsHeldByLiveOwners)(registry, runtimeClientForSpawns);
       await (options.actuation?.terminalizeStaleSpawns ?? terminalizeStaleStructuredSpawns)(registry, runtimeClientForSpawns);
     } catch (error) {
       console.error("[reaper] stale structured spawn convergence failed", error);
