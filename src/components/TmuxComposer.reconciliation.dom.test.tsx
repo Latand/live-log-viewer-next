@@ -8,6 +8,8 @@ import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import { setLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
+import { ComposerAdmissionTimeoutError } from "./composerAdmissionDeadline";
+
 const dom = new Window();
 Object.assign(globalThis, {
   window: dom,
@@ -26,8 +28,9 @@ Object.assign(globalThis, {
   localStorage: dom.localStorage,
   sessionStorage: dom.sessionStorage,
 });
+let mobileViewport = false;
 (dom as unknown as { matchMedia: (query: string) => unknown }).matchMedia = (query: string) => ({
-  matches: false,
+  matches: mobileViewport && query.includes("max-width"),
   media: query,
   addEventListener() {},
   removeEventListener() {},
@@ -41,6 +44,7 @@ Object.assign(globalThis, {
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const receiptListeners = new Set<() => void>();
 let busReceipts: RuntimeReceipt[] = [];
+let refreshRuntimeImpl: () => Promise<boolean> = async () => false;
 function publishReceipts(next: RuntimeReceipt[]): void {
   busReceipts = next;
   for (const listener of receiptListeners) listener();
@@ -48,6 +52,7 @@ function publishReceipts(next: RuntimeReceipt[]): void {
 mock.module("@/hooks/useRuntime", () => ({
   ...actualRuntimeHooks,
   useRuntimeSession: () => null,
+  refreshRuntime: () => refreshRuntimeImpl(),
   useRuntimeReceiptsForArtifact: () => useSyncExternalStore(
     (listener) => {
       receiptListeners.add(listener);
@@ -149,7 +154,7 @@ test("a mid-flight queued admission settles the generation and the stale timeout
     expect(previews()).toHaveLength(count);
   };
   const admission = (status: RuntimeReceipt["status"], revision: number): RuntimeReceipt => ({
-    operationId: "ac0223c0-2bef-46dd-a26e-143b758f66dc",
+    operationId: "op-remount-admitted",
     idempotencyKey: sentKeys[0]!,
     conversationId: "conversation_bus-session",
     kind: "send",
@@ -257,7 +262,7 @@ test("a queued admission after remount still clears the persisted generation exa
     flushSync(() => appendComposerDraft(conversationId, "after refresh typing"));
     /* The refresh snapshot already carries the durable queued admission. */
     publishReceipts([{
-      operationId: "ac0223c0-2bef-46dd-a26e-143b758f66dc",
+      operationId: "op-remount-admitted",
       idempotencyKey: sentKeys[0]!,
       conversationId: "conversation_bus-session",
       kind: "send",
@@ -282,6 +287,279 @@ test("a queued admission after remount still clears the persisted generation exa
   } finally {
     flushSync(() => root.unmount());
     publishReceipts([]);
+    sessionStorage.clear();
+    host.remove();
+  }
+});
+
+test("a refresh resumes a timed-out generation without another send", async () => {
+  setLocale("en");
+  mobileViewport = false;
+  const conversationId = "conv-timeout-refresh";
+  const prompt = "preserve this generation across refresh";
+  const sentKeys: string[] = [];
+  let refreshCalls = 0;
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/tmux/targets") {
+      return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+    }
+    if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+    const body = JSON.parse(String(init?.body)) as { clientMessageId: string };
+    sentKeys.push(body.clientMessageId);
+    throw new ComposerAdmissionTimeoutError();
+  }) as typeof fetch;
+  refreshRuntimeImpl = () => {
+    refreshCalls += 1;
+    return new Promise<boolean>(() => {});
+  };
+
+  sessionStorage.setItem(`llvDraft:${conversationId}`, prompt);
+  const host = document.createElement("div");
+  document.body.append(host);
+  let root = createRoot(host);
+  flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+  let textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+
+  try {
+    flushSync(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    for (let attempt = 0; attempt < 50 && refreshCalls === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    expect(sentKeys).toHaveLength(1);
+    expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toContain('"reconciling":true');
+
+    flushSync(() => root.unmount());
+    let releaseRefresh: (() => void) | null = null;
+    refreshRuntimeImpl = () => new Promise<boolean>((resolve) => {
+      refreshCalls += 1;
+      releaseRefresh = () => {
+        publishReceipts([{
+          operationId: "op-timeout-refresh",
+          idempotencyKey: sentKeys[0]!,
+          conversationId,
+          kind: "send",
+          status: "queued",
+          text: prompt,
+          at: "2026-07-20T08:01:00.000Z",
+          revision: 1,
+        }]);
+        resolve(true);
+      };
+    });
+    root = createRoot(host);
+    flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+    for (let attempt = 0; attempt < 50 && releaseRefresh === null; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    expect(releaseRefresh).not.toBeNull();
+    expect(sentKeys).toHaveLength(1);
+
+    textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+    const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+    const textareaProps = (textarea as unknown as Record<string, { onChange(event: unknown): void }>)[propsKey]!;
+    flushSync(() => textareaProps.onChange({ target: { value: `${prompt}\nafter refresh typing` } }));
+    flushSync(() => releaseRefresh!());
+    for (let attempt = 0; attempt < 50 && textarea.value !== "after refresh typing"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+
+    expect(textarea.value).toBe("after refresh typing");
+    expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBeNull();
+    expect(host.querySelectorAll('[data-receipt-status="queued"]')).toHaveLength(1);
+  } finally {
+    flushSync(() => root.unmount());
+    publishReceipts([]);
+    refreshRuntimeImpl = async () => false;
+    sessionStorage.clear();
+    host.remove();
+  }
+});
+
+test("a delayed receipt reconciles one text-plus-images generation on desktop and 390px", async () => {
+  setLocale("en");
+  for (const [width, mobile] of [[1440, false], [390, true]] as const) {
+    mobileViewport = mobile;
+    Object.defineProperty(dom, "innerWidth", { configurable: true, value: width });
+    const conversationId = `conv-delayed-${width}`;
+    const prompt = `inspect both screenshots at ${width}`;
+    const nextDraft = `continue typing at ${width}`;
+    const sentKeys: string[] = [];
+    let releaseRefresh: (() => void) | null = null;
+    globalThis.fetch = (async (input, init) => {
+      if (String(input) === "/api/tmux/targets") {
+        return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+      }
+      if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+      const body = JSON.parse(String(init?.body)) as { clientMessageId: string };
+      sentKeys.push(body.clientMessageId);
+      throw new ComposerAdmissionTimeoutError();
+    }) as typeof fetch;
+    refreshRuntimeImpl = () => new Promise<boolean>((resolve) => {
+      releaseRefresh = () => {
+        publishReceipts([{
+          operationId: `op-delayed-${width}`,
+          idempotencyKey: sentKeys[0]!,
+          conversationId,
+          kind: "send",
+          status: "queued",
+          text: prompt,
+          at: "2026-07-20T08:00:00.000Z",
+          revision: 1,
+        }]);
+        resolve(true);
+      };
+    });
+
+    sessionStorage.setItem(`llvDraft:${conversationId}`, prompt);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+    const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+    const form = textarea.closest("form")!;
+    const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+    const textareaProps = (textarea as unknown as Record<string, {
+      onChange(event: unknown): void;
+      onPaste(event: unknown): void;
+    }>)[propsKey]!;
+    const previews = () => [...host.querySelectorAll("img")].map((image) => image.getAttribute("src"));
+    const pasteImage = (tag: string) => {
+      const bytes = new TextEncoder().encode(`png-${tag}`);
+      textareaProps.onPaste({
+        clipboardData: { items: [{ type: "image/png", getAsFile: () => new dom.File([bytes], `${tag}.png`, { type: "image/png" }) }] },
+        preventDefault() {},
+      });
+    };
+    const untilPreviews = async (count: number) => {
+      for (let attempt = 0; attempt < 50 && previews().length !== count; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      expect(previews()).toHaveLength(count);
+    };
+
+    try {
+      pasteImage(`first-${width}`);
+      pasteImage(`second-${width}`);
+      await untilPreviews(2);
+      flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+      for (let attempt = 0; attempt < 50 && releaseRefresh === null; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      expect(releaseRefresh).not.toBeNull();
+      expect(sentKeys).toHaveLength(1);
+
+      flushSync(() => textareaProps.onChange({ target: { value: `${prompt}\n${nextDraft}` } }));
+      pasteImage(`third-${width}`);
+      await untilPreviews(3);
+      const nextPreview = previews()[2];
+      flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(sentKeys).toHaveLength(1);
+
+      flushSync(() => releaseRefresh!());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(textarea.value).toBe(nextDraft);
+      expect(previews()).toEqual([nextPreview]);
+      expect(new Set(sentKeys)).toEqual(new Set([sentKeys[0]!]));
+      expect(host.querySelectorAll('[data-receipt-status="queued"]')).toHaveLength(1);
+      expect(host.querySelector(`[aria-label="${translate("en", "runtime.receipt.retry")}"]`)).toBeNull();
+      if (mobile) {
+        expect(form.getAttribute("data-testid")).toBe("bounded-mobile-composer");
+      } else {
+        expect(form.getAttribute("data-testid")).toBeNull();
+      }
+    } finally {
+      flushSync(() => root.unmount());
+      publishReceipts([]);
+      refreshRuntimeImpl = async () => false;
+      sessionStorage.clear();
+      host.remove();
+    }
+  }
+  mobileViewport = false;
+});
+
+test("only a confirmed retryable failure exposes Retry after a timeout", async () => {
+  setLocale("en");
+  mobileViewport = false;
+  const conversationId = "conv-timeout-terminal";
+  const prompt = "keep this failed generation exact";
+  const sentKeys: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/tmux/targets") {
+      return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+    }
+    if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+    const body = JSON.parse(String(init?.body)) as { clientMessageId: string };
+    sentKeys.push(body.clientMessageId);
+    throw new ComposerAdmissionTimeoutError();
+  }) as typeof fetch;
+  refreshRuntimeImpl = () => new Promise<boolean>(() => {});
+  sessionStorage.setItem(`llvDraft:${conversationId}`, prompt);
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const form = textarea.closest("form")!;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const textareaProps = (textarea as unknown as Record<string, { onPaste(event: unknown): void }>)[propsKey]!;
+  const pasteImage = (tag: string) => textareaProps.onPaste({
+    clipboardData: {
+      items: [{
+        type: "image/png",
+        getAsFile: () => new dom.File([new TextEncoder().encode(tag)], `${tag}.png`, { type: "image/png" }),
+      }],
+    },
+    preventDefault() {},
+  });
+  const untilImages = async (count: number) => {
+    for (let attempt = 0; attempt < 50 && host.querySelectorAll("img").length !== count; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    expect(host.querySelectorAll("img")).toHaveLength(count);
+  };
+  const terminalReceipt = (status: RuntimeReceipt["status"], revision: number): RuntimeReceipt => ({
+    operationId: "op-timeout-terminal",
+    idempotencyKey: sentKeys[0]!,
+    conversationId,
+    kind: "send",
+    status,
+    text: prompt,
+    reason: "dead-host",
+    at: "2026-07-20T08:02:00.000Z",
+    revision,
+  });
+  const retries = () => [...host.querySelectorAll("button")]
+    .filter((button) => button.textContent === translate("en", "runtime.receipt.retry"));
+
+  try {
+    pasteImage("failure-first");
+    pasteImage("failure-second");
+    await untilImages(2);
+    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sentKeys).toHaveLength(1);
+
+    flushSync(() => publishReceipts([terminalReceipt("uncertain", 1)]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((host.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(retries()).toHaveLength(0);
+    expect(textarea.value).toBe(prompt);
+    expect(host.querySelectorAll("img")).toHaveLength(2);
+
+    flushSync(() => publishReceipts([terminalReceipt("failed", 2)]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((host.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(false);
+    expect(retries()).toHaveLength(1);
+    expect(host.querySelectorAll("[data-receipt-message]")).toHaveLength(1);
+    expect(textarea.value).toBe(prompt);
+    expect(host.querySelectorAll("img")).toHaveLength(2);
+  } finally {
+    flushSync(() => root.unmount());
+    publishReceipts([]);
+    refreshRuntimeImpl = async () => false;
     sessionStorage.clear();
     host.remove();
   }
