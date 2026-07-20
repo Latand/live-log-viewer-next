@@ -1,0 +1,3 @@
+# Real captures are never committed (privacy). The harness regenerates these
+# stills locally; the durable evidence is capture.ts + evidence.json.
+*.png
