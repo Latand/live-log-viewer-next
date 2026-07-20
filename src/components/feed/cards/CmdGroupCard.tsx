@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ChevronRight } from "../../icons";
 import { hhmm } from "../../utils";
 import { tr, type CmdGroupItem } from "../parse";
+import { groupNestedCalls } from "../toolBlocks";
 import { StatusIcon } from "./shared";
 import { ToolLine } from "./ToolCard";
 
@@ -25,6 +26,9 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
   const t0 = hhmm(item.t0);
   const t1 = hhmm(item.t1);
   const range = t0 && t1 && t0 !== t1 ? `${t0}–${t1}` : t0 || t1;
+  /* One ordered block per top-level call, with any trailing wait/stdin polls
+     nested under the exec that owns them (issue #475). */
+  const blocks = groupNestedCalls(item.calls);
   return (
     <details
       className="group/grp ml-9"
@@ -38,7 +42,7 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
           item.hasErr ? "text-danger" : "text-muted"
         }`}
       >
-        <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-open/grp:rotate-90" aria-hidden />
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform motion-reduce:transition-none group-open/grp:rotate-90" aria-hidden />
         <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-secondary">
           {tr("render.actions", { count: item.calls.length })}
           {tools ? " · " + tools : ""}
@@ -52,16 +56,26 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
         {range ? <span className="ml-auto shrink-0 text-caption tabular-nums text-muted">{range}</span> : null}
       </summary>
       {/* Each grouped call reuses the shared ToolLine, so an expanded call shows
-          the same chips + raw record a standalone line does. The time is dropped
-          here — the range lives in the group header above. */}
+          the same readable block a standalone line does. Blocks are an ordered
+          list; a wait/stdin follow-up renders nested under its parent exec while
+          keeping its own state. The time is dropped — the range lives in the
+          header above. A transcript can carry the same tool id twice (a resume
+          re-emits the tool_use), so the id alone is not a unique key. */}
       {mounted ? (
-        <div className="mb-1 mt-1 space-y-0.5">
-          {item.calls.map((event, idx) => (
-            /* A transcript can carry the same tool id twice (a resume re-emits the
-               tool_use), so the id alone is not a unique key. */
-            <ToolLine key={`${item.ids[idx]}:${idx}`} event={event} showTime={false} />
+        <ol className="mb-1 mt-1 space-y-0.5">
+          {blocks.map((block, bi) => (
+            <li key={`${block.parent.id}:${bi}`} className="min-w-0">
+              <ToolLine event={block.parent} showTime={false} index={bi + 1} />
+              {block.children.length ? (
+                <div className="ml-4 border-l border-border pl-2">
+                  {block.children.map((child, ci) => (
+                    <ToolLine key={`${child.id}:${ci}`} event={child} showTime={false} nested />
+                  ))}
+                </div>
+              ) : null}
+            </li>
           ))}
-        </div>
+        </ol>
       ) : null}
     </details>
   );
