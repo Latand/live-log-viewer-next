@@ -96,7 +96,9 @@ verify receipt 390 844 "view=receipt&lang=en&theme=light" \
 shot blocked-390-en-light   390 844  "view=blocked&lang=en&theme=light"
 shot blocked-390-uk-light   390 844  "view=blocked&lang=uk&theme=light"
 verify blocked 390 844 "view=blocked&lang=en&theme=light" \
-  '"blockedInline":true'
+  '"blockedInline":true' \
+  '"placeholder":"message the agent — reconnecting to its session…"' \
+  '"launchAdvertised":false'
 
 # 6. Dead structured host: the recovery banner owns Respawn/Attach/Re-check
 #    while Send keeps admitting text durably — never a mute blocked composer.

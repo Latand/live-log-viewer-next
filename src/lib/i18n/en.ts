@@ -261,6 +261,7 @@ export const en = {
   "composer.failedInterrupt": "couldn't interrupt",
   "composer.escapeSent": "sent Escape — agent interrupted",
   "composer.spawnAria": "Launch an agent with a prompt in tmux",
+  "composer.resolvingAria": "Message the existing agent — delivery starts after its host is resolved",
   "composer.sendAria": "Send a message to the agent in tmux {target}",
   "composer.sendStructuredAria": "Send a message through the structured runtime host",
   "composer.queueAria": "Queue of sent messages",
@@ -296,6 +297,7 @@ export const en = {
   "composer.retrySend": "Retry send",
   "composer.placeholderRelay": "type — I'll relay through the root session…",
   "composer.placeholderSpawn": "prompt — the agent will start in tmux…",
+  "composer.placeholderResolving": "message the agent — reconnecting to its session…",
   "composer.placeholderSend": "message the agent…",
   "composer.textAria": "Text for the agent",
   /* Chat-first mobile composer (issue #419 reopened): the model/reasoning +

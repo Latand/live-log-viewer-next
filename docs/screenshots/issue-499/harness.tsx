@@ -213,10 +213,11 @@ function Shell() {
       {/* BranchPane composition for a dead structured host: the banner owns
           recovery while the composer's durable admission stays available. */}
       {view === "dead" ? <DeadHostBanner file={viewerFile} /> : null}
+      {/* The blocked view passes NO prop: the composer derives the unresolved
+          block itself (issue #499 round 2) from the plane-on/no-session state. */}
       <TmuxComposer
         file={viewerFile}
         {...(view === "dead" ? { deadHost: true } : {})}
-        {...(view === "blocked" ? { sendBlockedReason: t("strip.resolving") } : {})}
       />
     </div>
   );
@@ -253,7 +254,18 @@ async function drive(): Promise<void> {
   if (view === "blocked") {
     const blocked = await waitFor(() => document.querySelector('[data-testid="composer-send-blocked"]'), "inline blocked reason");
     const recover = blocked.querySelector("button");
-    logVerify({ kind: "state", view, blockedInline: true, recoverAction: Boolean(recover), reason: blocked.textContent?.trim() ?? "" });
+    const textarea = document.querySelector("textarea");
+    logVerify({
+      kind: "state",
+      view,
+      blockedInline: true,
+      recoverAction: Boolean(recover),
+      reason: blocked.textContent?.trim() ?? "",
+      /* Round 2: the unresolved surface describes messaging the EXISTING
+         agent and never advertises a fresh tmux launch. */
+      placeholder: textarea?.getAttribute("placeholder") ?? null,
+      launchAdvertised: Boolean(document.querySelector(`button[aria-label="${t("composer.launchAgent")}"]`)),
+    });
     return;
   }
   if (view === "dead") {

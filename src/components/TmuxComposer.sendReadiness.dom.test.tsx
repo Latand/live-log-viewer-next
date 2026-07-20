@@ -94,11 +94,23 @@ const VIEWS: Record<string, RuntimeSessionView> = {
 };
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
+const realUseRuntime = actualRuntimeHooks.useRuntime;
 const realUseRuntimeSession = actualRuntimeHooks.useRuntimeSession;
 const realUseRuntimeReceiptsForArtifact = actualRuntimeHooks.useRuntimeReceiptsForArtifact;
 let refreshCalls = 0;
+/* Armed only while THIS file's tests run: bun's mock.module registry reaches
+   files loaded later, so the authoritative-plane override must disarm in
+   afterAll or it would flip surfaces across the rest of the branch. */
+let runtimePlaneAuthoritative = true;
 mock.module("@/hooks/useRuntime", () => ({
   ...actualRuntimeHooks,
+  /* The runtime plane is authoritative in every scenario here, exactly as in
+     production with the runtime UI flag on: a conversation the bus does not
+     carry resolves to the fail-safe `unresolved` surface, never legacy tmux. */
+  useRuntime: () => {
+    const real = realUseRuntime();
+    return runtimePlaneAuthoritative ? { ...real, enabled: true } : real;
+  },
   useRuntimeSession: (conversationId: string | null) => {
     const real = realUseRuntimeSession(conversationId);
     return (conversationId && VIEWS[conversationId]) || real;
@@ -113,6 +125,7 @@ mock.module("@/hooks/useRuntime", () => ({
   },
 }));
 afterAll(() => {
+  runtimePlaneAuthoritative = false;
   mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
 });
 
@@ -247,6 +260,52 @@ test("typed draft text survives live projection updates of the conversation card
   });
   expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("half-typed operator prompt");
   expect(sendButton(host).getAttribute("aria-disabled")).toBe("false");
+  flushSync(() => root.unmount());
+});
+
+test("unresolved runtime ownership never advertises a tmux launch (issue #499 round 2)", async () => {
+  quietWire();
+  /* An existing structured conversation the bus has not resolved yet: no
+     session view, runtime plane authoritative. The composer must present
+     messaging/recovering the EXISTING agent — not a fresh tmux launch. */
+  const { host, root } = await renderInto(
+    <TmuxComposer file={viewerLaunchedFile("codex", "conv-499-unowned")} />,
+  );
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  expect(textarea.getAttribute("placeholder")).toBe(translate("en", "composer.placeholderResolving"));
+  expect(textarea.closest("form")!.getAttribute("aria-label")).toBe(translate("en", "composer.resolvingAria"));
+  /* Never a launch affordance anywhere: the blocked send's accessible name is
+     the resolving reason (ComposerBar surfaces the block), and no control on
+     the surface promises a fresh tmux launch. */
+  expect(host.querySelector('button[aria-label="Launch the agent"]')).toBeNull();
+  const send = host.querySelector(`button[aria-label="${translate("en", "strip.resolving")}"]`) as HTMLButtonElement;
+  expect(send).toBeTruthy();
+  expect(send.getAttribute("type")).toBe("submit");
+  expect(send.getAttribute("aria-disabled")).toBe("true");
+  /* The block is derived by the composer itself (no prop needed): inline
+     reason plus the Re-check recovery route. */
+  const blocked = host.querySelector('[data-testid="composer-send-blocked"]')!;
+  expect(blocked.textContent).toContain(translate("en", "strip.resolving"));
+  const recover = blocked.querySelector("button") as HTMLButtonElement;
+  await act(async () => {
+    recover.click();
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  expect(refreshCalls).toBe(1);
+  /* A forced submit stays local: the guard reports the reason and no request
+     leaves for /api/tmux (quietWire would surface any unexpected POST as a
+     server failure, which must NOT be the announced status). */
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, { onChange: (e: unknown) => void }>)[propsKey]!;
+  flushSync(() => props.onChange({ target: { value: "reach the existing agent" } }));
+  await act(async () => {
+    textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  const status = [...host.querySelectorAll('[role="status"], [role="alert"]')]
+    .map((node) => node.textContent ?? "").join(" ");
+  expect(status).toContain(translate("en", "strip.resolving"));
+  expect(status).not.toContain(translate("en", "common.serverUnavailable"));
   flushSync(() => root.unmount());
 });
 
