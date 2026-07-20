@@ -17,6 +17,7 @@ function pipeline(overrides: Record<string, unknown> = {}): Pipeline {
   return {
     id: "pipeline-a",
     task: "Ship the board groups",
+    taskIds: [],
     project: "viewer",
     repoDir: "/repo",
     worktreeDir: "/repo-pipeline-a",

@@ -87,7 +87,7 @@ function pathAttempt(
 function pipeline(stages: PipelineStage[], attemptsByStage: Record<string, PipelineStageAttempt[]>): Pipeline {
   return {
     id: "p1", task: "Stage graph", project: "project", repoDir: "/repo", worktreeDir: "/worktree",
-    branch: "feature", baseBranch: "main", baseRef: "abc", lastPassedCommit: "abc", stages,
+    branch: "feature", baseBranch: "main", baseRef: "abc", lastPassedCommit: "abc", stages, taskIds: [],
     runs: stages.map((stage) => ({ stageId: stage.id, attempts: attemptsByStage[stage.id] ?? [] })),
     cursor: { stageId: stages[0]!.id, state: "running", input: null, activatedBy: null },
     state: "running", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null,

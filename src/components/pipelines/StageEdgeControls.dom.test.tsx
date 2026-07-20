@@ -29,7 +29,7 @@ function oneStagePipeline(): { pipeline: Pipeline; stage: PipelineStage } {
   const stage: PipelineStage = {
     id: "implement",
     kind: "run",
-    prompt: "{{task}}",
+    "prompt": "{{task}}",
     next: null,
     onFail: null,
     effectiveRole: { roleId: null, engine: "claude", model: null, effort: null, access: "read-write", promptScaffold: null },
@@ -37,6 +37,7 @@ function oneStagePipeline(): { pipeline: Pipeline; stage: PipelineStage } {
   const pipeline = {
     id: "p1",
     task: "Lone stage",
+    taskIds: [],
     project: "demo",
     repoDir: "/r",
     worktreeDir: "/w",

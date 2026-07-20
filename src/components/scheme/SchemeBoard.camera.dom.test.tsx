@@ -65,6 +65,7 @@ function pipeline(index: number): Pipeline {
   return {
     id: `camera-pipeline-${index}`,
     task: `Camera pipeline ${index}`,
+    taskIds: [],
     project: "pipeline-camera",
     repoDir: "/repo",
     worktreeDir: `/repo-pipeline-${index}`,
@@ -75,7 +76,7 @@ function pipeline(index: number): Pipeline {
     stages: [{
       id: "build",
       kind: "run",
-      prompt: "",
+      "prompt": "",
       next: null,
       effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null },
     }],

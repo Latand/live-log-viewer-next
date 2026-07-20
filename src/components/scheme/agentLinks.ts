@@ -3,6 +3,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { SchemeRect } from "@/components/scheme/layout";
 
 import { activeLoopLeg, flowByImplementer } from "@/components/flows/flowModel";
+import { latestAttempt } from "@/components/pipelines/pipelineModel";
 
 /*
  * The scheme's agent-to-agent link family (issue #16): first-class typed
@@ -366,7 +367,7 @@ function pipelineCursorActive(pipeline: Pipeline): boolean {
 /** Rail tone into a stage from the target stage's latest attempt + the cursor,
     a straight read of the §3 matrix that avoids importing the strip's helpers. */
 function pipelineLinkTone(pipeline: Pipeline, stageId: string): PipelineLinkTone {
-  const attempt = pipeline.runs.find((run) => run.stageId === stageId)?.attempts.at(-1) ?? null;
+  const attempt = latestAttempt(pipeline, stageId);
   if (attempt?.state === "passed" || attempt?.state === "skipped") return "ok";
   if (attempt?.state === "failed" || attempt?.state === "needs_decision") return "amber";
   if (pipeline.cursor?.stageId === stageId && pipelineCursorActive(pipeline)) return "active";
@@ -407,7 +408,7 @@ export function derivePipelineLinks(
        resulting edge from the preceding run collapses (from === to) and is
        suppressed below, leaving the loop's own grammar to represent it. */
     const vertexPathOf = (stage: Pipeline["stages"][number]): string | null => {
-      const attempt = pipeline.runs.find((run) => run.stageId === stage.id)?.attempts.at(-1);
+      const attempt = latestAttempt(pipeline, stage.id);
       return stage.kind === "review-loop"
         ? (attempt?.flowId ? flowImplementerPath(attempt.flowId) : null)
         : attempt?.agentPath ?? null;

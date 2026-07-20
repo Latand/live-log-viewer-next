@@ -65,7 +65,7 @@ export type PipelineStageInput = {
   model?: string | null;
   effort?: string | null;
   access?: PipelineAccess;
-  prompt: string;
+  "prompt": string;
   /** Pass edge: the stage activated when this one passes. Schema v3 allows any
       stage id (direct links, merges), constrained to an acyclic pass graph. */
   next: string | null;
@@ -104,6 +104,8 @@ export type PipelineEdgeActivation = { stageId: string; attempt: number; edge: P
 
 export type PipelineStageAttempt = {
   n: number;
+  /** Lineage-adopted evidence. Historical attempts never drive the execution cursor. */
+  historical?: boolean;
   state: PipelineAttemptState;
   effectiveRole: EffectivePipelineRole;
   launchId: string | null;
@@ -133,9 +135,19 @@ export type PipelineCursorState = "pending" | "spawning" | "running" | "reviewin
 
 export type PipelineState = "draft" | "provisioning" | "running" | "needs_decision" | "paused" | "completed" | "closed";
 
+export type PipelineCreationIntent = {
+  kind: "task-spawn";
+  taskId: string;
+  launchId: string;
+};
+
 export type Pipeline = {
   id: string;
   task: string;
+  /** Durable board-task membership. The legacy `task` field remains the title. */
+  taskIds: string[];
+  /** Launch-correlated creation evidence reserved before task-spawn actuation. */
+  creationIntent?: PipelineCreationIntent;
   /** Pinned specification and acceptance criteria, matching Flow.spec from #85. */
   spec?: string;
   project: string;
@@ -168,6 +180,7 @@ export type Pipeline = {
 
 export type CreatePipelineRequest = {
   task: string;
+  taskIds?: string[];
   spec?: string;
   repoDir: string;
   /** Merge target branch; defaults to main when the pipeline starts. */
@@ -175,6 +188,7 @@ export type CreatePipelineRequest = {
   /** Explicit git commit-ish to pin; defaults to the fetched origin branch. */
   baseRef?: string;
   stages: PipelineStageInput[];
+  /** Creator transcript. API callers may omit it only when caller authentication can derive it. */
   src?: string;
   autoStart?: boolean;
 };
@@ -192,11 +206,20 @@ export type PipelineAction =
   | "retry-stage"
   | "skip-stage"
   | "override-stage"
+  | "link-task"
+  | "unlink-task"
+  | "set-src"
   | "delete"
   | "close";
 
 export type PatchPipelineRequest = {
   action: PipelineAction;
+  /** Board task used by link-task and unlink-task. */
+  taskId?: string;
+  /** Creator transcript used by set-src. */
+  srcPath?: string;
+  /** Explicit authorization to replace existing creator lineage. */
+  overwrite?: boolean;
   /** for override-stage: the not-yet-started stage to re-configure (issue #118
       on-canvas stage controls). Only fields present are changed; a stage that
       already ran an attempt is rejected so the override always targets the future.

@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
+import { translate } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 
 /*
@@ -108,7 +109,7 @@ const task: BoardTask = {
 const dashboardProps = () => ({
   files: [], flows: [], pipelines: [], workflows: [], tasks: [task],
   project: "atlas", loaded: true, openNonce: 0, archived: false, catalogKnown: false,
-  projectCwd: "/home/tester/Projects/atlas", catalogConversationCount: 0,
+  projectCwd: "/home/user/Projects/atlas", catalogConversationCount: 0,
   onArchive: () => {}, onUnarchive: () => {},
 });
 
@@ -208,4 +209,57 @@ test("desktop: the readiness strip renders inline with no shelf modal or trigger
   expect(trigger(host)).toBeNull();
   expect(shelf(host)).toBeNull();
   await settle();
+});
+
+test("desktop and mobile global pipeline actions submit the operator draft shape", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    for (const surface of ["desktop", "mobile"] as const) {
+      mobile = surface === "mobile";
+      const posts: Array<Record<string, unknown>> = [];
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/pipelines/preflight") {
+          return new Response(JSON.stringify({
+            ok: true,
+            repoDir: process.cwd(),
+            gitCommonDir: `${process.cwd()}/.git`,
+            worktreeParent: process.cwd(),
+          }));
+        }
+        if (url === "/api/pipelines") {
+          posts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return new Response(JSON.stringify({ pipeline: { id: `pipeline-${surface}` } }), { status: 201 });
+        }
+        const body = url.startsWith("/api/conversations") ? { items: [], nextCursor: null } : {};
+        return new Response(JSON.stringify(body));
+      }) as typeof fetch;
+
+      const host = mount();
+      if (surface === "mobile") {
+        const createMenu = host.querySelector(`[aria-label="${translate("en", "dash.createMenu")}"]`) as HTMLButtonElement;
+        flushSync(() => createMenu.click());
+        const pipelineItem = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+          .find((button) => button.textContent?.includes(translate("en", "dash.pipeline")))!;
+        flushSync(() => pipelineItem.click());
+      } else {
+        const pipelineButton = host.querySelector(`[aria-label="${translate("en", "dash.newPipeline")}"]`) as HTMLButtonElement;
+        flushSync(() => pipelineButton.click());
+      }
+
+      expect(await waitFor(() => host.querySelector('[data-pipeline-picker-state="ready"]') !== null)).toBe(true);
+      const blank = [...host.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent?.includes(translate("en", "pipelineTemplates.blank")))!;
+      flushSync(() => blank.click());
+      expect(await waitFor(() => posts.length === 1)).toBe(true);
+      expect(posts).toEqual([expect.objectContaining({
+        autoStart: false,
+        repoDir: process.cwd(),
+        stages: expect.any(Array),
+      })]);
+      expect(posts[0]).not.toHaveProperty("src");
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });

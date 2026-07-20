@@ -5,6 +5,7 @@ import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type DurableMembershipInput } from "@/lib/agent/registry";
+import { transcriptAllowed } from "@/lib/agent/spawnParent";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
@@ -15,6 +16,8 @@ import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineag
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
 import { projectForCwd } from "@/lib/scanner/describe";
+import { loadTasks } from "@/lib/tasks/store";
+import type { BoardTask } from "@/lib/tasks/types";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { isShellCommand } from "@/lib/status";
 import { paneInfo } from "@/lib/tmux";
@@ -36,7 +39,8 @@ import {
 import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipelineRepo } from "./preflight";
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
-import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, PipelineStoreError, withPipelineMutation } from "./store";
+import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineMutation } from "./store";
+import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
 import type {
   CreatePipelineRequest,
   EffectivePipelineRole,
@@ -55,7 +59,7 @@ export type PipelineStageSpawn = {
   launchId: string;
   conversationId: string;
   sessionId: string | null;
-  transcript: string | null;
+  "transcript": string | null;
   paneId: string | null;
 };
 
@@ -71,7 +75,7 @@ export interface PipelinePorts {
   spawnAgent(input: {
     role: EffectivePipelineRole;
     cwd: string;
-    prompt: string;
+    "prompt": string;
     parentPath: string | null;
     clientAttemptId: string;
     membership: DurableMembershipInput;
@@ -90,7 +94,9 @@ export interface PipelinePorts {
   headCwd(transcriptPath: string): string | null;
   lastMessage(entry: FileEntry): { text: string; ts: number } | null;
   pathForConversation(conversationId: string): string | null;
+  sourcePathAllowed(pathname: string): boolean;
   conversationIdForPath(pathname: string): string | null;
+  pipelineAdoptionCandidates(pipelineId: string): PipelineAdoptionCandidate[];
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
   patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
   closeFlow(id: string): Promise<unknown>;
@@ -164,7 +170,7 @@ async function spawnPipelineAgent(
     cwd: input.cwd,
     parentConversationId: parent.conversationId,
     ...(supersedes ? { supersedes } : {}),
-    prompt: input.prompt,
+    "prompt": input.prompt,
   })).digest("hex");
   const creatorConversationId = input.creatorConversationId?.startsWith("conversation_")
     ? registry.canonicalConversationId(input.creatorConversationId as ViewerConversationId)
@@ -217,7 +223,7 @@ async function spawnPipelineAgent(
     receipt: begun.receipt,
     spec,
     account,
-    prompt: input.prompt,
+    "prompt": input.prompt,
     registry,
     client,
   });
@@ -251,7 +257,7 @@ export function defaultPipelinePorts(): PipelinePorts {
         launchId: receipt.launchId,
         conversationId: receipt.conversationId,
         sessionId: receipt.key?.sessionId ?? null,
-        transcript: receipt.artifactPath,
+        "transcript": receipt.artifactPath,
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
       };
     },
@@ -282,7 +288,45 @@ export function defaultPipelinePorts(): PipelinePorts {
     pathForConversation: (conversationId) => conversationId.startsWith("conversation_")
       ? agentRegistry().conversation(conversationId as ViewerConversationId)?.generations.at(-1)?.path ?? null
       : null,
+    sourcePathAllowed: transcriptAllowed,
     conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
+    pipelineAdoptionCandidates: (pipelineId) => {
+      const snapshot = agentRegistry().snapshot();
+      const receipts = Object.values(snapshot.receipts);
+      const candidates: PipelineAdoptionCandidate[] = [];
+      for (const [conversationId, memberships] of Object.entries(snapshot.memberships)) {
+        for (const membership of memberships) {
+          if (membership.kind !== "pipeline" || membership.containerId !== pipelineId
+            || !membership.slot.startsWith("adopt:") || !membership.stageId || !membership.parentConversationId) continue;
+          const receipt = receipts.find((candidate) => candidate.conversationId === conversationId) ?? null;
+          const conversation = snapshot.conversations[conversationId as ViewerConversationId] ?? null;
+          const generation = conversation?.generations.at(-1) ?? null;
+          const agentPath = receipt?.artifactPath ?? conversation?.generations.at(-1)?.path ?? null;
+          if (!agentPath) continue;
+          const runtime = membership.runtime ?? (receipt ? {
+            engine: receipt.engine,
+            model: receipt.launchProfile.model,
+            effort: receipt.launchProfile.effort,
+          } : conversation ? {
+            engine: conversation.engine,
+            model: generation?.launchProfile.model ?? null,
+            effort: generation?.launchProfile.effort ?? null,
+          } : null);
+          candidates.push({
+            stageId: membership.stageId,
+            sourceConversationId: membership.parentConversationId,
+            launchId: receipt?.launchId ?? null,
+            conversationId,
+            sessionId: receipt?.key?.sessionId ?? null,
+            agentPath,
+            paneId: receipt?.verifiedHost?.paneId ?? receipt?.pane?.paneId ?? null,
+            startedAt: receipt?.createdAt ?? membership.createdAt,
+            runtime,
+          });
+        }
+      }
+      return candidates;
+    },
     createFlow: createFlowFromRequest,
     patchFlow: (id, action, note) => patchFlow(id, { action, ...(note ? { note } : {}) }),
     closeFlow,
@@ -325,7 +369,7 @@ function runFor(pipeline: Pipeline, stageId: string) {
 }
 
 function currentAttempt(pipeline: Pipeline, stageId: string): PipelineStageAttempt | null {
-  return runFor(pipeline, stageId)?.attempts.at(-1) ?? null;
+  return runFor(pipeline, stageId)?.attempts.findLast((attempt) => !attempt.historical) ?? null;
 }
 
 function unixMs(value: string | null): number {
@@ -470,6 +514,171 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAtte
   return attempt;
 }
 
+export type PipelineAttemptConversationRef = {
+  sourceConversationId: string;
+  launchId: string | null;
+  conversationId: string;
+  sessionId: string | null;
+  agentPath: string;
+  paneId: string | null;
+  startedAt: string | null;
+  runtime?: Pick<EffectivePipelineRole, "engine" | "model" | "effort"> | null;
+};
+
+export type PipelineAdoptionCandidate = PipelineAttemptConversationRef & { stageId: string };
+
+export type PipelineAttemptTarget = {
+  pipelineId: string;
+  stageId: string;
+  stageOrder: number;
+  role: string;
+};
+
+/** Resolves the durable container slot that owns a fallback spawn source. */
+export function pipelineAttemptTargetForSource(sourceConversationId: string): PipelineAttemptTarget | null {
+  for (const pipeline of loadPipelines()) {
+    for (let stageOrder = 0; stageOrder < pipeline.runs.length; stageOrder += 1) {
+      const run = pipeline.runs[stageOrder]!;
+      const source = run.attempts.find((attempt) => attempt.conversationId === sourceConversationId);
+      if (!source) continue;
+      return {
+        pipelineId: pipeline.id,
+        stageId: run.stageId,
+        stageOrder,
+        role: source.effectiveRole.roleId ?? "agent",
+      };
+    }
+  }
+  return null;
+}
+
+/** Adds a lineage child as historical evidence on its source stage. */
+export function adoptAttempt(
+  pipeline: Pipeline,
+  stageId: string,
+  conversationRef: PipelineAttemptConversationRef,
+): PipelineStageAttempt | null {
+  const run = runFor(pipeline, stageId);
+  const stage = pipeline.stages.find((candidate) => candidate.id === stageId) ?? null;
+  if (!run || !stage) return null;
+  const existing = run.attempts.find((attempt) =>
+    attempt.conversationId === conversationRef.conversationId
+    || (conversationRef.launchId !== null && attempt.launchId === conversationRef.launchId));
+  if (existing) return existing;
+  const source = run.attempts.find((attempt) => attempt.conversationId === conversationRef.sourceConversationId) ?? null;
+  if (!source) return null;
+  const effectiveRole = structuredClone(source.effectiveRole ?? stage.effectiveRole);
+  if (conversationRef.runtime) {
+    effectiveRole.engine = conversationRef.runtime.engine;
+    effectiveRole.model = conversationRef.runtime.model;
+    effectiveRole.effort = conversationRef.runtime.effort;
+  }
+  const attempt: PipelineStageAttempt = {
+    n: run.attempts.length + 1,
+    historical: true,
+    state: "running",
+    effectiveRole,
+    launchId: conversationRef.launchId,
+    conversationId: conversationRef.conversationId,
+    sessionId: conversationRef.sessionId,
+    agentPath: conversationRef.agentPath,
+    paneId: conversationRef.paneId,
+    flowId: null,
+    startedAt: conversationRef.startedAt,
+    completedAt: null,
+    input: source.input,
+    activatedBy: source.activatedBy ? { ...source.activatedBy } : null,
+    output: null,
+    verdict: null,
+    error: null,
+  };
+  run.attempts.push(attempt);
+  return attempt;
+}
+
+export async function adoptPipelineAttemptFromSource(
+  sourceConversationId: string,
+  conversationRef: Omit<PipelineAttemptConversationRef, "sourceConversationId">,
+): Promise<{ pipeline: Pipeline; stageId: string; attempt: PipelineStageAttempt } | null> {
+  return withPipelineMutation((pipelines, persist) => {
+    for (const pipeline of pipelines) {
+      for (const run of pipeline.runs) {
+        if (!run.attempts.some((attempt) => attempt.conversationId === sourceConversationId)) continue;
+        const attempt = adoptAttempt(pipeline, run.stageId, { ...conversationRef, sourceConversationId });
+        if (!attempt) return null;
+        persist();
+        return { pipeline, stageId: run.stageId, attempt };
+      }
+    }
+    return null;
+  });
+}
+
+function reconcilePendingPipelineAdoptions(pipeline: Pipeline, ports: PipelinePorts): boolean {
+  let changed = false;
+  for (const candidate of ports.pipelineAdoptionCandidates(pipeline.id)) {
+    const run = runFor(pipeline, candidate.stageId);
+    const existing = run?.attempts.find((attempt) =>
+      attempt.conversationId === candidate.conversationId
+      || (candidate.launchId !== null && attempt.launchId === candidate.launchId));
+    if (existing) continue;
+    const adopted = adoptAttempt(pipeline, candidate.stageId, candidate);
+    changed = adopted !== null || changed;
+  }
+  return changed;
+}
+
+async function reconcileHistoricalAttempts(pipeline: Pipeline, entries: FileEntry[], ports: PipelinePorts): Promise<boolean> {
+  let changed = false;
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      if (!attempt.historical || !["spawning", "running"].includes(attempt.state)) continue;
+      const before = JSON.stringify(attempt);
+      updateAttemptIdentity(pipeline, attempt, entries, ports);
+      if (!attempt.agentPath) {
+        if (attempt.launchId) {
+          const receipt = ports.spawnReceipt(attempt.launchId);
+          if (receipt) {
+            attempt.conversationId = receipt.conversationId;
+            attempt.sessionId = receipt.sessionId;
+            attempt.agentPath = receipt.transcript;
+            attempt.paneId = receipt.paneId;
+            if (receipt.state === "failed" || receipt.state === "conflicted") {
+              attempt.state = "failed";
+              attempt.completedAt = ports.now();
+              attempt.error = `historical spawn ended in receipt state ${receipt.state}`;
+            }
+          }
+        }
+        changed = JSON.stringify(attempt) !== before || changed;
+        continue;
+      }
+      const durable = await ports.durableTurnEvidence(attempt.effectiveRole.engine, attempt.agentPath);
+      const terminal = durable?.turn === "terminal" && durable.message !== null && durable.message.ts > unixMs(attempt.startedAt);
+      if (!terminal) {
+        changed = JSON.stringify(attempt) !== before || changed;
+        continue;
+      }
+      const parsed = parseStageVerdict(durable.message!.text);
+      attempt.completedAt = new Date(durable.message!.ts).toISOString();
+      attempt.output = null;
+      if (!parsed) {
+        attempt.state = "failed";
+        attempt.error = "historical attempt completed without a valid final JSON verdict";
+      } else if ("failureReason" in parsed) {
+        attempt.state = "failed";
+        attempt.error = parsed.failureReason;
+      } else {
+        attempt.verdict = parsed.verdict;
+        attempt.state = parsed.verdict.status === "pass" ? "passed" : parsed.verdict.status === "fail" ? "failed" : "needs_decision";
+        attempt.error = parsed.verdict.findings?.[0] ?? null;
+      }
+      changed = JSON.stringify(attempt) !== before || changed;
+    }
+  }
+  return changed;
+}
+
 function attachReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow): void {
   attempt.flowId = flow.id;
   const round = flow.rounds.at(-1);
@@ -510,7 +719,7 @@ function failEdgeRoundsUsed(pipeline: Pipeline, stage: PipelineStage): number {
   if (!stage.onFail) return 0;
   const target = runFor(pipeline, stage.onFail.to);
   if (!target) return 0;
-  return target.attempts.filter((attempt) => attempt.activatedBy?.edge === "fail" && attempt.activatedBy.stageId === stage.id).length;
+  return target.attempts.filter((attempt) => !attempt.historical && attempt.activatedBy?.edge === "fail" && attempt.activatedBy.stageId === stage.id).length;
 }
 
 /** The `{{prev.output}}` payload a fail edge forwards: the failed attempt's
@@ -613,6 +822,13 @@ function updateAttemptIdentity(pipeline: Pipeline, attempt: PipelineStageAttempt
 
 function rebindPipelineAttemptPaths(pipeline: Pipeline, ports: PipelinePorts): boolean {
   let changed = false;
+  if (pipeline.srcConversationId) {
+    const currentPath = ports.pathForConversation(pipeline.srcConversationId);
+    if (currentPath && currentPath !== pipeline.srcPath) {
+      pipeline.srcPath = currentPath;
+      changed = true;
+    }
+  }
   for (const run of pipeline.runs) {
     for (const attempt of run.attempts) {
       if (!attempt.conversationId) continue;
@@ -662,7 +878,7 @@ async function tickRunStage(
       );
       /* The retried attempt supersedes its predecessor's round (issue #383):
          the prior attempt of the SAME stage that carries a conversation. */
-      const priorAttempt = runFor(pipeline, stage.id)?.attempts.at(-2) ?? null;
+      const priorAttempt = runFor(pipeline, stage.id)?.attempts.filter((candidate) => !candidate.historical).at(-2) ?? null;
       const spawned = await ports.spawnAgent({
         role: attempt.effectiveRole,
         cwd: pipeline.worktreeDir,
@@ -1012,7 +1228,9 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
     const result = await withPipelineMutation(async (pipelines, persist) => {
       let changed = false;
       for (const pipeline of pipelines) {
-        let pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports);
+        let pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports);
+        pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
+        pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
         pipelineChanged = resumeReopenedReviewFlow(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
           pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
@@ -1157,7 +1375,7 @@ function draftStageInputs(stages: PipelineStage[]): PipelineStageInput[] {
     ...(stage.model !== undefined ? { model: stage.model } : {}),
     ...(stage.effort !== undefined ? { effort: stage.effort } : {}),
     ...(stage.access !== undefined ? { access: stage.access } : {}),
-    prompt: stage.prompt,
+    "prompt": stage.prompt,
     next: stage.next ?? null,
     onFail: stage.onFail ?? null,
   }));
@@ -1209,6 +1427,83 @@ type PipelineMutationResult = {
   path?: string;
 };
 
+type PipelineCreatorLineage = {
+  srcPath: string | null;
+  srcConversationId: string | null;
+};
+
+function resolvePipelineCreatorLineage(
+  value: unknown,
+  ports: Pick<PipelinePorts, "sourcePathAllowed" | "conversationIdForPath">,
+): { lineage?: PipelineCreatorLineage; error?: string; status?: number } {
+  const srcPath = typeof value === "string" ? value.trim() : "";
+  if (!srcPath) return { error: "pipeline creator lineage is required; pass src", status: 400 };
+  if (!ports.sourcePathAllowed(srcPath)) return { error: "src path is not an allowed conversation transcript", status: 400 };
+  const srcConversationId = ports.conversationIdForPath(srcPath);
+  if (!srcConversationId) return { error: "src conversation does not exist", status: 400 };
+  return { lineage: { srcPath, srcConversationId } };
+}
+
+type CreatePipelineOptions = {
+  ensureTask?: BoardTask;
+  spawnParams?: TaskPipelineSpawnParams;
+  allowOperatorDraftWithoutLineage?: boolean;
+};
+
+function taskSpawnCreatorLineage(
+  spawnParams: TaskSpawnPipelineParams,
+  ports: Pick<PipelinePorts, "sourcePathAllowed" | "conversationIdForPath">,
+): { lineage?: PipelineCreatorLineage; error?: string; status?: number } {
+  if (!spawnParams.launchId || !spawnParams.conversationId) {
+    return { error: "task pipeline creation requires launch and conversation identity", status: 400 };
+  }
+  if (spawnParams.srcPath === null) {
+    return { lineage: { srcPath: null, srcConversationId: spawnParams.conversationId } };
+  }
+  const resolved = resolvePipelineCreatorLineage(spawnParams.srcPath, ports);
+  if (!resolved.lineage) return resolved;
+  if (resolved.lineage.srcConversationId !== spawnParams.conversationId) {
+    return { error: "task pipeline creator path does not match its launch conversation", status: 409 };
+  }
+  return resolved;
+}
+
+function reconcileTaskPipelineCreation(
+  pipeline: Pipeline,
+  task: BoardTask,
+  spawnParams: TaskSpawnPipelineParams,
+  ports: Pick<PipelinePorts, "sourcePathAllowed" | "conversationIdForPath" | "spawnReceipt">,
+): { changed: boolean; error?: string; status?: number } {
+  const intent = pipeline.creationIntent;
+  if (!intent) return { changed: false };
+  if (intent.kind !== "task-spawn" || intent.taskId !== task.id) {
+    return { changed: false, error: "task pipeline creation intent does not match its task", status: 409 };
+  }
+
+  let changed = false;
+  if (intent.launchId !== spawnParams.launchId) {
+    const priorReceipt = ports.spawnReceipt(intent.launchId);
+    const priorLaunchFailed = priorReceipt?.state === "failed" || priorReceipt?.state === "conflicted";
+    const replacesPendingIntent = pipeline.srcPath === null
+      && (spawnParams.retryOfLaunchId === intent.launchId || priorLaunchFailed);
+    if (!replacesPendingIntent) return { changed: false };
+    pipeline.creationIntent = { ...intent, launchId: spawnParams.launchId };
+    pipeline.srcConversationId = spawnParams.conversationId;
+    changed = true;
+  }
+
+  const activeIntent = pipeline.creationIntent;
+  if (!activeIntent || activeIntent.launchId !== spawnParams.launchId) return { changed };
+  if (pipeline.srcConversationId !== spawnParams.conversationId) {
+    return { changed: false, error: "task pipeline launch conversation changed during reconciliation", status: 409 };
+  }
+  if (spawnParams.srcPath === null || pipeline.srcPath === spawnParams.srcPath) return { changed };
+  const creator = taskSpawnCreatorLineage(spawnParams, ports);
+  if (!creator.lineage) return { changed: false, error: creator.error, status: creator.status };
+  pipeline.srcPath = creator.lineage.srcPath;
+  return { changed: true };
+}
+
 function preflightFailure(result: Extract<PipelineRepoPreflight, { ok: false }>): PipelineMutationResult {
   return {
     error: pipelineRepoPreflightError(result),
@@ -1222,6 +1517,7 @@ function preflightFailure(result: Extract<PipelineRepoPreflight, { ok: false }>)
 export async function createPipelineFromRequest(
   req: CreatePipelineRequest,
   ports: PipelinePorts = defaultPipelinePorts(),
+  options: CreatePipelineOptions = {},
 ): Promise<PipelineMutationResult> {
   const task = typeof req.task === "string" ? req.task.trim() : "";
   if (!task) return { error: "task is required", status: 400 };
@@ -1232,6 +1528,22 @@ export async function createPipelineFromRequest(
   if (req.autoStart !== undefined && typeof req.autoStart !== "boolean") return { error: "autoStart must be a boolean", status: 400 };
   if (req.baseBranch !== undefined && typeof req.baseBranch !== "string") return { error: "baseBranch must be a string", status: 400 };
   if (req.baseRef !== undefined && typeof req.baseRef !== "string") return { error: "baseRef must be a string", status: 400 };
+  if (req.taskIds !== undefined && (!Array.isArray(req.taskIds) || req.taskIds.some((taskId) => typeof taskId !== "string" || !taskId.trim()))) {
+    return { error: "taskIds must be an array of non-empty strings", status: 400 };
+  }
+  const taskSpawn = options.ensureTask && options.spawnParams && isTaskSpawnPipelineParams(options.spawnParams)
+    ? { task: options.ensureTask, params: options.spawnParams }
+    : null;
+  const operatorDraftWithoutLineage = options.allowOperatorDraftWithoutLineage
+    && req.autoStart === false
+    && (typeof req.src !== "string" || !req.src.trim());
+  const creator = taskSpawn
+    ? taskSpawnCreatorLineage(taskSpawn.params, ports)
+    : operatorDraftWithoutLineage
+      ? { lineage: { srcPath: null, srcConversationId: null } }
+    : resolvePipelineCreatorLineage(req.src, ports);
+  if (!creator.lineage) return { error: creator.error, status: creator.status };
+  const taskIds = [...new Set((req.taskIds ?? []).map((taskId) => taskId.trim()))];
   const requestedRepoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
   if (!requestedRepoDir) return { error: "repoDir is required", status: 400 };
   const admission = ports.preflightRepo(requestedRepoDir);
@@ -1250,16 +1562,17 @@ export async function createPipelineFromRequest(
     ? null
     : resolvePipelineBase(repoDir, { baseBranch: req.baseBranch, baseRef: explicitBaseRef }, ports.exec);
   if (base && !base.ok) return { error: base.error, status: 409 };
-  const srcPath = typeof req.src === "string" && req.src.trim() ? req.src.trim() : null;
   const pipeline = buildPipeline({
     id: crypto.randomUUID().slice(0, 8),
     task,
+    taskIds,
+    ...(taskSpawn ? { creationIntent: { kind: "task-spawn" as const, taskId: taskSpawn.task.id, launchId: taskSpawn.params.launchId } } : {}),
     ...(spec ? { spec } : {}),
     project: ports.projectForCwd(repoDir) ?? path.basename(repoDir),
     repoDir,
     stages: normalized.stages,
-    srcPath,
-    srcConversationId: srcPath ? ports.conversationIdForPath(srcPath) : null,
+    srcPath: creator.lineage.srcPath,
+    srcConversationId: creator.lineage.srcConversationId,
     now: ports.now(),
     state: req.autoStart === false ? "draft" : "provisioning",
   });
@@ -1269,10 +1582,51 @@ export async function createPipelineFromRequest(
     pipeline.lastPassedCommit = base.baseRef;
   }
   return withPipelineMutation((pipelines, persist) => {
+    if (options.ensureTask && options.spawnParams) {
+      const decision = ensurePipelineForTask(options.ensureTask, pipelines, options.spawnParams);
+      if (decision === null) {
+        const existing = pipelines.find((candidate) =>
+          candidate.taskIds.includes(options.ensureTask!.id)
+          && candidate.state !== "closed"
+          && !candidate.hiddenAt);
+        if (!existing) return { error: "task pipeline binding changed during creation", status: 409 };
+        if (isTaskSpawnPipelineParams(options.spawnParams)) {
+          const reconciled = reconcileTaskPipelineCreation(existing, options.ensureTask, options.spawnParams, ports);
+          if (reconciled.error) return { error: reconciled.error, status: reconciled.status };
+          if (reconciled.changed) persist();
+        }
+        return { pipeline: existing };
+      }
+    }
+    const taskLinkError = pipelineTaskLinkError(pipeline, taskIds, loadTasks());
+    if (taskLinkError) return { error: taskLinkError, status: 400 };
     pipelines.push(pipeline);
     persist();
     return { pipeline };
   });
+}
+
+export async function ensureTaskPipelineForAssignment(
+  task: BoardTask,
+  spawnParams: TaskPipelineSpawnParams,
+  ports: PipelinePorts = defaultPipelinePorts(),
+): Promise<PipelineMutationResult> {
+  const pipelines = loadPipelines();
+  const request = ensurePipelineForTask(task, pipelines, spawnParams);
+  if (request === null) {
+    return withPipelineMutation((current, persist) => {
+      const pipeline = current.find((candidate) =>
+        candidate.taskIds.includes(task.id) && candidate.state !== "closed" && !candidate.hiddenAt);
+      if (!pipeline) return { error: "task pipeline binding changed during lookup", status: 409 };
+      if (isTaskSpawnPipelineParams(spawnParams)) {
+        const reconciled = reconcileTaskPipelineCreation(pipeline, task, spawnParams, ports);
+        if (reconciled.error) return { error: reconciled.error, status: reconciled.status };
+        if (reconciled.changed) persist();
+      }
+      return { pipeline };
+    });
+  }
+  return createPipelineFromRequest(request, ports, { ensureTask: task, spawnParams });
 }
 
 /** A park without a verdict (interrupted spawn, vanished transcript) can
@@ -1301,7 +1655,31 @@ export async function patchPipeline(
     const attempt = stage ? currentAttempt(pipeline, stage.id) : null;
     const flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
 
-    if (req.action === "start") {
+    if (req.action === "set-src") {
+      if (req.overwrite !== undefined && typeof req.overwrite !== "boolean") {
+        return { error: "overwrite must be a boolean", status: 400 };
+      }
+      const creator = resolvePipelineCreatorLineage(req.srcPath, ports);
+      if (!creator.lineage) return { error: creator.error, status: creator.status };
+      const hasLineage = pipeline.srcPath !== null || pipeline.srcConversationId !== null;
+      const sameLineage = pipeline.srcPath === creator.lineage.srcPath
+        && pipeline.srcConversationId === creator.lineage.srcConversationId;
+      if (hasLineage && !sameLineage && req.overwrite !== true) {
+        return { error: "pipeline creator lineage already exists; pass overwrite: true to replace it", status: 409 };
+      }
+      pipeline.srcPath = creator.lineage.srcPath;
+      pipeline.srcConversationId = creator.lineage.srcConversationId;
+    } else if (req.action === "link-task") {
+      const taskId = typeof req.taskId === "string" ? req.taskId.trim() : "";
+      if (!taskId) return { error: "taskId is required", status: 400 };
+      const taskLinkError = pipelineTaskLinkError(pipeline, [taskId], loadTasks());
+      if (taskLinkError) return { error: taskLinkError, status: 400 };
+      if (!pipeline.taskIds.includes(taskId)) pipeline.taskIds.push(taskId);
+    } else if (req.action === "unlink-task") {
+      const taskId = typeof req.taskId === "string" ? req.taskId.trim() : "";
+      if (!taskId) return { error: "taskId is required", status: 400 };
+      pipeline.taskIds = pipeline.taskIds.filter((candidate) => candidate !== taskId);
+    } else if (req.action === "start") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       /* Start enforces the 1-stage floor (#353): the minimum graph is a single
          implement conversation. The graph rules (acyclic pass edges,
@@ -1310,8 +1688,11 @@ export async function patchPipeline(
       const admission = ports.preflightRepo(pipeline.repoDir);
       if (!admission.ok) return preflightFailure(admission);
       if (admission.repoDir !== pipeline.repoDir) {
+        const project = ports.projectForCwd(admission.repoDir) ?? path.basename(admission.repoDir);
+        const taskLinkError = pipelineTaskLinkError({ project }, pipeline.taskIds, loadTasks(), { allowMissing: true });
+        if (taskLinkError) return { error: taskLinkError, status: 400 };
         pipeline.repoDir = admission.repoDir;
-        pipeline.project = ports.projectForCwd(admission.repoDir) ?? path.basename(admission.repoDir);
+        pipeline.project = project;
         Object.assign(pipeline, pipelineIdentity(pipeline.id, pipeline.task, admission.repoDir));
       }
       if (!pipeline.baseBranch || !pipeline.baseRef || !pipeline.lastPassedCommit) {
@@ -1341,11 +1722,16 @@ export async function patchPipeline(
         repoDir = admission.repoDir;
       }
       const repoChanged = repoDir !== pipeline.repoDir;
+      const project = ports.projectForCwd(repoDir) ?? path.basename(repoDir);
+      if (repoChanged) {
+        const taskLinkError = pipelineTaskLinkError({ project }, pipeline.taskIds, loadTasks(), { allowMissing: true });
+        if (taskLinkError) return { error: taskLinkError, status: 400 };
+      }
       pipeline.task = task;
       if (spec) pipeline.spec = spec;
       else delete pipeline.spec;
       pipeline.repoDir = repoDir;
-      pipeline.project = ports.projectForCwd(repoDir) ?? path.basename(repoDir);
+      pipeline.project = project;
       Object.assign(pipeline, pipelineIdentity(pipeline.id, task, repoDir));
       if (repoChanged) {
         pipeline.baseBranch = "";
@@ -1451,7 +1837,7 @@ export async function patchPipeline(
            the in-flight round (#353). */
         const traversed = (pipeline.cursor?.activatedBy?.edge === "fail" && pipeline.cursor.activatedBy.stageId === from.id)
           || pipeline.runs.some((run) =>
-            run.attempts.some((item) => item.activatedBy?.edge === "fail" && item.activatedBy.stageId === from.id));
+            run.attempts.some((item) => !item.historical && item.activatedBy?.edge === "fail" && item.activatedBy.stageId === from.id));
         if (traversed) return { error: "fail edge has already been traversed; it is frozen evidence", status: 409 };
         if (req.to === null) {
           if (req.maxRounds !== undefined) return { error: "maxRounds requires a fail-edge target", status: 400 };

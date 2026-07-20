@@ -45,6 +45,13 @@ function pipelineOriginRejection(req: NextRequest, body: CreatePipelineRequest):
       if (isSpawnDeniedRole(role)) {
         return NextResponse.json({ error: reviewerOriginSpawnGuidance(role), code: "reviewer_origin_spawn" }, { status: 403 });
       }
+      if (typeof body.src !== "string" || !body.src.trim()) {
+        const derivedPath = registry.conversation(caller.conversationId)?.generations.at(-1)?.path ?? null;
+        if (!derivedPath) {
+          return NextResponse.json({ error: "pipeline creator lineage is required; pass src" }, { status: 400 });
+        }
+        body.src = derivedPath;
+      }
     }
     return null;
   }
@@ -73,7 +80,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; p
   try {
     const originRejection = pipelineOriginRejection(req, body);
     if (originRejection) return originRejection;
-    const result = await createPipelineFromRequest(body);
+    const result = await createPipelineFromRequest(body, undefined, {
+      allowOperatorDraftWithoutLineage: !isAgentInitiatedSpawn(req),
+    });
     if (!result.pipeline) return NextResponse.json({
       error: result.error ?? "could not create pipeline",
       ...(result.code ? { code: result.code, field: result.field, path: result.path } : {}),

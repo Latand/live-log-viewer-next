@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { buildPipeline, loadPipelines, PIPELINES_SCHEMA_VERSION, savePipelines, withPipelineMutation } from "./store";
-import type { PipelineStage } from "./types";
+import type { Pipeline, PipelineStage } from "./types";
 
 test("pipelines round-trip through a schema-versioned state file", () => {
   const previous = process.env.LLV_STATE_DIR;
@@ -15,7 +15,19 @@ test("pipelines round-trip through a schema-versioned state file", () => {
       { id: "build", kind: "run" as const, role: { roleId: "builder" }, engine: "codex" as const, prompt: "build", next: "review", effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-5.6-sol", effort: "medium", access: "read-write", promptScaffold: "builder" } },
       { id: "review", kind: "review-loop" as const, role: { roleId: "reviewer" }, engine: "codex" as const, prompt: "review", next: null, effectiveRole: { roleId: "reviewer", engine: "codex", model: "gpt-5.6-sol", effort: "xhigh", access: "read-only", promptScaffold: "reviewer" } },
     ];
-    const pipeline = buildPipeline({ id: "abcdef12", task: "task", spec: "AC1", project: "viewer", repoDir: "/repo", stages, srcPath: null, srcConversationId: null, now: "now" });
+    const pipeline = buildPipeline({
+      id: "abcdef12",
+      task: "task",
+      taskIds: ["task-1"],
+      creationIntent: { kind: "task-spawn", taskId: "task-1", launchId: "launch-task-1" },
+      spec: "AC1",
+      project: "viewer",
+      repoDir: "/repo",
+      stages,
+      srcPath: null,
+      srcConversationId: "conversation_task_1",
+      now: "now",
+    });
     savePipelines([pipeline]);
     expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8"))).toMatchObject({ schemaVersion: PIPELINES_SCHEMA_VERSION });
     expect(loadPipelines()).toEqual([pipeline]);
@@ -172,6 +184,39 @@ test("a v2 registry migrates in memory preserving all attempt history (#353)", (
     savePipelines(loaded);
     expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8")).schemaVersion).toBe(PIPELINES_SCHEMA_VERSION);
     expect(loadPipelines()).toEqual(loaded);
+  });
+});
+
+test("a legacy registry loads pipelines with an empty durable task binding", () => {
+  sandboxed((sandbox) => {
+    const pipeline = buildPipeline({
+      id: "legacy01",
+      task: "legacy task",
+      project: "viewer",
+      repoDir: "/repo",
+      stages: v3Stages(),
+      srcPath: null,
+      srcConversationId: null,
+      now: "now",
+    });
+    const legacy = JSON.parse(JSON.stringify(pipeline)) as Record<string, unknown>;
+    delete legacy.taskIds;
+    fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({
+      schemaVersion: 3,
+      pipelines: [legacy],
+    }), "utf8");
+
+    const loaded = loadPipelines();
+
+    expect((loaded[0] as Pipeline & { taskIds: string[] }).taskIds).toEqual([]);
+    savePipelines(loaded);
+    expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8")).pipelines[0].taskIds).toEqual([]);
+
+    fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({
+      schemaVersion: PIPELINES_SCHEMA_VERSION,
+      pipelines: [legacy],
+    }), "utf8");
+    expect(() => loadPipelines()).toThrow("malformed records");
   });
 });
 
