@@ -469,18 +469,19 @@ export async function advanceConversationMigration(
       if (!source) throw new Error("conversation has no source generation");
       if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true)) return restoreCreationFence(conversation);
       const conversationId = conversation.id;
+      const creationOwner = { operationId: migration.operationId, revision: migration.revision };
       receipt = await successorProvider.create({
         engine: conversation.engine,
-        operationId: migration.operationId,
+        operationId: creationOwner.operationId,
         conversationId,
         source,
         targetAccountId: migration.targetId,
         recordContinuityPath(pathname) {
-          conversation = registry.recordConversationContinuityPath(conversationId, pathname);
+          registry.recordMigrationContinuityPath(conversationId, pathname, creationOwner);
         },
       });
-      if (receipt.operationId !== migration.operationId) throw new Error("successor receipt operation does not match");
-      conversation = registry.persistMigrationProviderReceipt(conversation.id, migration.revision, migration.operationId, receipt);
+      if (receipt.operationId !== creationOwner.operationId) throw new Error("successor receipt operation does not match");
+      conversation = registry.persistMigrationProviderReceipt(conversationId, creationOwner.revision, creationOwner.operationId, receipt);
       migration = conversation.migration!;
       receipt = migration.providerReceipt ?? receipt;
     }

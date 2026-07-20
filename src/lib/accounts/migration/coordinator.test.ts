@@ -2817,6 +2817,90 @@ describe("durable account migration coordinator", () => {
     expect(store.conversationForPath("/stale-b.jsonl")?.id).toBe(conversation.id);
   });
 
+  test("a controller rebind keeps late provider continuity out of the winning migration", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source-rebind.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source-rebind.jsonl")!;
+    store.claimConversationReconfigure(conversation.id, {
+      operationId: "rebind-old",
+      revision: 90,
+      accountId: "b",
+      profile: { model: "gpt-5.6-sol", effort: "high", fast: false },
+    });
+    store.requestConversationReseat(conversation.id, "b", { operationId: "rebind-old", revision: 90 });
+
+    let releaseCreate!: () => void;
+    let creationStarted!: () => void;
+    const creationGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    const creating = new Promise<void>((resolve) => { creationStarted = resolve; });
+    const cleaned: string[] = [];
+    const staleProvider: SuccessorProviderPort = {
+      virtualSource: true,
+      async create(input) {
+        creationStarted();
+        await creationGate;
+        input.recordContinuityPath("/stale-rebind-b.jsonl");
+        return {
+          operationId: input.operationId,
+          nativeId: "stale-rebind-b",
+          path: "/stale-rebind-b.jsonl",
+          continuityPaths: ["/stale-rebind-b.jsonl"],
+          historyHash: "stale-rebind-b",
+          host: { kind: "codex-app-server", identity: "stale-rebind-b", epoch: 1, verifiedAt: "2026-07-20T12:01:00.000Z" },
+        };
+      },
+      async verify() {},
+      async cleanup(receipt) { cleaned.push(receipt.nativeId); },
+    };
+
+    const staleAdvance = advanceConversationMigration(conversation.id, store, staleProvider);
+    await creating;
+    store.claimConversationReconfigure(conversation.id, {
+      operationId: "rebind-new",
+      revision: 91,
+      accountId: "c",
+      profile: { model: "gpt-5.6-terra", effort: "xhigh", fast: true },
+    });
+    const rebound = store.requestConversationReseat(conversation.id, "c", { operationId: "rebind-new", revision: 91 });
+    const winningOperationId = rebound.migration!.operationId;
+    releaseCreate();
+    await staleAdvance;
+
+    const afterStaleCreate = new AgentRegistry(store.filename).conversation(conversation.id)!;
+    expect(afterStaleCreate.migration).toMatchObject({
+      targetId: "c",
+      operationId: winningOperationId,
+    });
+    expect(afterStaleCreate.migration?.pendingContinuityPaths).not.toContain("/stale-rebind-b.jsonl");
+    expect(afterStaleCreate.continuityPaths).toContain("/stale-rebind-b.jsonl");
+    expect(afterStaleCreate.abandonedContinuityPaths).toContain("/stale-rebind-b.jsonl");
+    expect(cleaned).toEqual(["stale-rebind-b"]);
+
+    const winningProvider: SuccessorProviderPort = {
+      virtualSource: true,
+      async create(input) {
+        input.recordContinuityPath("/winning-rebind-c.jsonl");
+        return {
+          operationId: input.operationId,
+          nativeId: "winning-rebind-c",
+          path: "/winning-rebind-c.jsonl",
+          continuityPaths: ["/winning-rebind-c.jsonl"],
+          historyHash: "winning-rebind-c",
+          host: { kind: "codex-app-server", identity: "winning-rebind-c", epoch: 1, verifiedAt: "2026-07-20T12:02:00.000Z" },
+        };
+      },
+      async verify() {},
+    };
+    const committed = await advanceConversationMigration(conversation.id, store, winningProvider);
+
+    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration?.pendingContinuityPaths).toEqual(["/winning-rebind-c.jsonl"]);
+    expect(committed.generations.at(-1)).toMatchObject({ accountId: "c", path: "/winning-rebind-c.jsonl" });
+    expect(committed.abandonedContinuityPaths).toContain("/stale-rebind-b.jsonl");
+    expect(new AgentRegistry(store.filename).conversation(conversation.id)?.abandonedContinuityPaths)
+      .toContain("/stale-rebind-b.jsonl");
+  });
+
   test("a superseded account migration cannot publish its stale successor", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source-a.jsonl", "a", "idle")]);

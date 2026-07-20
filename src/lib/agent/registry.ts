@@ -1426,6 +1426,24 @@ function addConversationContinuityPath(conversation: RegistryConversation, pathn
   }
 }
 
+function addAbandonedConversationContinuityPath(conversation: RegistryConversation, pathname: string): void {
+  if (conversation.generations.some((generation) => generation.path === pathname)) return;
+  if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
+  if (!conversation.abandonedContinuityPaths.includes(pathname)) conversation.abandonedContinuityPaths.push(pathname);
+}
+
+function adoptContinuityPathProvenance(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  pathname: string,
+): void {
+  const provisionalOwner = Object.values(file.conversations).find((candidate) =>
+    candidate.id !== conversation.id && candidate.engine === conversation.engine && conversationOwnsPath(candidate, pathname));
+  if (provisionalOwner && !adoptProvisionalOwner(file, provisionalOwner, conversation, pathname)) {
+    throw new Error("migration continuity path has another durable owner");
+  }
+}
+
 function abandonPendingContinuityPaths(conversation: RegistryConversation): void {
   const pending = conversation.migration?.pendingContinuityPaths ?? [];
   if (pending.length === 0) return;
@@ -4645,14 +4663,31 @@ export class AgentRegistry {
       const canonicalId = resolveConversationAlias(file, id);
       const conversation = file.conversations[canonicalId];
       if (!conversation) throw new Error("viewer conversation is unknown");
-      const provisionalOwner = Object.values(file.conversations).find((candidate) =>
-        candidate.id !== canonicalId && candidate.engine === conversation.engine && conversationOwnsPath(candidate, pathname));
-      if (provisionalOwner) {
-        if (!adoptProvisionalOwner(file, provisionalOwner, conversation, pathname)) {
-          throw new Error("migration continuity path has another durable owner");
-        }
-      }
+      adoptContinuityPathProvenance(file, conversation, pathname);
       addConversationContinuityPath(conversation, pathname);
+      conversation.updatedAt = now();
+      return clone(conversation);
+    });
+  }
+
+  recordMigrationContinuityPath(
+    id: ViewerConversationId,
+    pathname: string,
+    owner: { operationId: string; revision: number },
+  ): RegistryConversation {
+    return this.mutate((file) => {
+      const canonicalId = resolveConversationAlias(file, id);
+      const conversation = file.conversations[canonicalId];
+      if (!conversation) throw new Error("viewer conversation is unknown");
+      adoptContinuityPathProvenance(file, conversation, pathname);
+      const migration = conversation.migration;
+      if (migration?.phase === "successor-starting"
+        && migration.operationId === owner.operationId
+        && migration.revision === owner.revision) {
+        addConversationContinuityPath(conversation, pathname);
+      } else {
+        addAbandonedConversationContinuityPath(conversation, pathname);
+      }
       conversation.updatedAt = now();
       return clone(conversation);
     });
