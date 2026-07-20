@@ -1230,6 +1230,7 @@ export class RuntimeJournal {
       reason,
       text: command.kind === "send" || command.kind === "steer" ? command.text.slice(0, 240) : null,
       ...(command.kind === "send" || command.kind === "steer" ? { imageCount: command.images?.length ?? 0 } : {}),
+      ...((command.kind === "send" || command.kind === "steer") && command.runtime ? { runtime: command.runtime } : {}),
       at: new Date(this.now()).toISOString(),
       revision,
     };

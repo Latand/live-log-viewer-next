@@ -261,6 +261,7 @@ export const en = {
   "composer.failedInterrupt": "couldn't interrupt",
   "composer.escapeSent": "sent Escape — agent interrupted",
   "composer.spawnAria": "Launch an agent with a prompt in tmux",
+  "composer.resolvingAria": "Message the existing agent — delivery starts after its host is resolved",
   "composer.sendAria": "Send a message to the agent in tmux {target}",
   "composer.sendStructuredAria": "Send a message through the structured runtime host",
   "composer.queueAria": "Queue of sent messages",
@@ -281,7 +282,7 @@ export const en = {
   "composer.structuredImagesUnavailable": "Image delivery is unavailable for structured conversations",
   "composer.codexImagesTextOnly": "The selected Codex model accepts text input only.",
   "composer.structuredImagesProtocol": "This structured host has no negotiated image capability.",
-  "composer.imagesBlockedDuringRecovery": "Images stay selected until the structured host is recovered.",
+  "composer.imagesBlockedDuringRecovery": "Images can't be attached while the host is down — staged ones stay selected and are delivered after recovery.",
   "composer.imageCapabilityLoading": "Image capability is loading.",
   "composer.imageCapabilityError": "Image capability could not be loaded.",
   "composer.imageCapabilityRetry": "Retry image check",
@@ -296,6 +297,7 @@ export const en = {
   "composer.retrySend": "Retry send",
   "composer.placeholderRelay": "type — I'll relay through the root session…",
   "composer.placeholderSpawn": "prompt — the agent will start in tmux…",
+  "composer.placeholderResolving": "message the agent — reconnecting to its session…",
   "composer.placeholderSend": "message the agent…",
   "composer.textAria": "Text for the agent",
   /* Chat-first mobile composer (issue #419 reopened): the model/reasoning +
@@ -338,7 +340,7 @@ export const en = {
 
   // Dead-host banner (issue #247)
   "deadHost.title": "Agent host died · {since}",
-  "deadHost.body": "Messages can't be delivered. Pending approvals expired.",
+  "deadHost.body": "Text you send now is saved durably and delivered after the host recovers. Images can't be attached until then. Pending approvals expired — recover with the controls below.",
   "deadHost.respawn": "Respawn conversation",
   "deadHost.attach": "Open in terminal",
   "deadHost.recheck": "Re-check",

@@ -35,8 +35,10 @@ test("the banner states what died and when, as a polite status, with the danger 
   expect(html).toContain("data-dead-host-banner");
   expect(html).toContain("border-danger/45");
   expect(html).toContain(translate("en", "deadHost.title", { since: "12 min" }));
-  // (the apostrophe in "can't" is HTML-escaped in static markup)
-  expect(html).toContain("Pending approvals expired.");
+  // (the apostrophe in "can't" is HTML-escaped in static markup, so assert an
+  // escape-free fragment of the truthful body)
+  expect(html).toContain("Pending approvals expired");
+  expect(html).toContain("delivered after the host recovers");
   expect(html).toContain(translate("en", "deadHost.respawn"));
   expect(html).toContain(translate("en", "deadHost.attach"));
   expect(html).toContain(translate("en", "deadHost.recheck"));

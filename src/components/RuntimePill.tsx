@@ -170,11 +170,12 @@ export function RuntimePill({
   }, [engine, file.path, pillSurface]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  useEffect(() => {
-    if (!engine) return;
-    if (pillSurface !== "live-root" && pillSurface !== "structured") return;
-    localStorage.setItem(storageKey(file), JSON.stringify(liveDraft));
-  }, [engine, liveDraft, file, pillSurface]);
+  /* The draft is persisted ONLY on an explicit selection commit (below) and on
+     an error rollback — never as a render side effect. A persist-on-render
+     wrote the mount commit's synthesized defaults before the load effect's
+     corrective state landed, and the runtime plane's staged resolution
+     (bus-off → unresolved → structured) unmounts the pill mid-correction: the
+     user's stored selection was silently reverted on pane load (issue #499). */
 
   // A poll can adopt a provisional identity to the canonical one while mounted;
   // carry the persisted selection along so it is never silently orphaned.
@@ -401,6 +402,9 @@ export function RuntimePill({
       };
       liveDraftRef.current = next;
       setLiveDraft(next);
+      try {
+        localStorage.setItem(storageKey(file), JSON.stringify(next));
+      } catch { /* quota/opaque-origin: the in-memory selection still applies */ }
       announceCommit(next);
       if (pillSurface === "structured") writeProfile(file, patch);
       void applyReconfigure(next);

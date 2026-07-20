@@ -39,6 +39,9 @@ export const PERSISTENT_CHROME = {
   conversationHeader: 56,
   /** Composer primary row: the input field with its mic + send controls. */
   composerPrimary: 56,
+  /** The always-visible model/reasoning pill row under the input (issue #499):
+      the one obvious mobile runtime control, so it counts as persistent. */
+  composerRuntimePill: 44,
 } as const;
 
 /** Secondary chrome, each behind a disclosure or overlay. Closed it reserves
@@ -74,15 +77,15 @@ export interface Viewport {
 
 export interface ChatBudget {
   /** Viewport height minus the safe-area insets. */
-  usable: number;
+  readonly usable: number;
   /** Total persistent + opened-secondary chrome height. */
-  chrome: number;
+  readonly chrome: number;
   /** Height left for the transcript, never negative. */
-  transcript: number;
+  readonly transcript: number;
   /** transcript / usable, clamped to [0, 1]. */
-  share: number;
+  readonly share: number;
   /** True when the transcript clears `MIN_TRANSCRIPT_SHARE`. */
-  meetsMinimum: boolean;
+  readonly meetsMinimum: boolean;
 }
 
 function total(values: Record<string, number>): number {

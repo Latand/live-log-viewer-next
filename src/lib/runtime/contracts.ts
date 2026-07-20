@@ -182,6 +182,10 @@ export interface RuntimeOperationReceipt {
   reason?: string | null;
   text?: string | null;
   imageCount?: number;
+  /** The per-turn runtime settings snapshot a send/steer was admitted with
+      (issue #499): the durable audit record that the selected model/effort/fast
+      rode this exact message. Absent when the send carried no selection. */
+  runtime?: RuntimeSendSettings;
   at: string;
   revision: number;
 }

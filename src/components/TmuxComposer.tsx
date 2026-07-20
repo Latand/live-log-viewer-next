@@ -1303,7 +1303,16 @@ export function TmuxComposer({
   if (caps.controls.send.state === "hidden") return null;
   const resumable = canMessageWithoutPane(file);
   if (target === null && !resumable) return null;
-  const spawnMode = target === null && !structuredSession;
+  /* An EXISTING conversation whose runtime ownership is not yet resolved (the
+     fail-safe `unresolved` surface: plane on, no host evidence yet) is never a
+     spawn draft — its next message reaches the existing agent through
+     /api/runtime/send once the host resolves. The composer describes
+     messaging/recovering that agent, derives its own send block with the
+     resolving reason (so no /api/tmux POST can fire even without the pane's
+     prop), and keeps the Re-check recovery route (issue #499 round 2). */
+  const unresolvedOwnership = caps.surface === "unresolved";
+  const effectiveSendBlockedReason = sendBlockedReason ?? (unresolvedOwnership ? t("strip.resolving") : null);
+  const spawnMode = target === null && !structuredSession && !unresolvedOwnership;
   const relayMode = spawnMode && file.root === "claude-projects" && file.kind === "subagent";
 
   const persistSent = (next: SentEntry[]) => {
@@ -1341,8 +1350,8 @@ export function TmuxComposer({
     /* Host not yet resolved under the runtime plane: block the POST so a
        structured/dead conversation is never sent to via the legacy /api/tmux
        path before its real host capability arrives (finding 1). */
-    if (sendBlockedReason) {
-      setStatus({ kind: "err", text: sendBlockedReason });
+    if (effectiveSendBlockedReason) {
+      setStatus({ kind: "err", text: effectiveSendBlockedReason });
       return;
     }
     if (structuredSession && sentImages.length && !attachments.validate()) return;
@@ -1639,7 +1648,7 @@ export function TmuxComposer({
      Quick-ack calls the same `send()`, so it obeys the same block and leaves the
      menu when blocked (round-3 finding). */
   const deadHostBlocksSend = deadHost && !structuredSession;
-  const sendBlocked = deadHostBlocksSend || reconcilingSend || Boolean(sendBlockedReason);
+  const sendBlocked = deadHostBlocksSend || reconcilingSend || Boolean(effectiveSendBlockedReason);
   const canQuickAck = (!spawnMode || relayMode) && !sendBlocked;
   const quickAckDisabled = busy || voiceSending || attachments.images.length > 0;
 
@@ -1656,7 +1665,13 @@ export function TmuxComposer({
           ? "max-h-[min(38dvh,20rem)] overflow-x-clip overflow-y-auto overscroll-y-contain py-1.5"
           : "py-2"
       }`}
-      aria-label={structuredSession ? t("composer.sendStructuredAria") : spawnMode ? t("composer.spawnAria") : t("composer.sendAria", { target: target ?? "" })}
+      aria-label={structuredSession
+        ? t("composer.sendStructuredAria")
+        : unresolvedOwnership
+          ? t("composer.resolvingAria")
+          : spawnMode
+            ? t("composer.spawnAria")
+            : t("composer.sendAria", { target: target ?? "" })}
     >
       {/* Unmounts exactly when the textarea does (a key-churn remount, an
           adoption flap, a pane-target flap hiding the composer), so its
@@ -1750,7 +1765,13 @@ export function TmuxComposer({
       ) : null}
       <ComposerBar
         composer={composer}
-        placeholder={relayMode ? t("composer.placeholderRelay") : spawnMode ? t("composer.placeholderSpawn") : t("composer.placeholderSend")}
+        placeholder={unresolvedOwnership
+          ? t("composer.placeholderResolving")
+          : relayMode
+            ? t("composer.placeholderRelay")
+            : spawnMode
+              ? t("composer.placeholderSpawn")
+              : t("composer.placeholderSend")}
         textareaAriaLabel={t("composer.textAria")}
         imageAriaLabel={t("composer.addImages")}
         sendLabelIdle={spawnMode ? t("composer.launchAgent") : t("composer.sendToAgent")}
@@ -1780,7 +1801,11 @@ export function TmuxComposer({
           ? t("deadHost.sendBlocked")
           : reconcilingSend
             ? t("composer.admissionTimedOut")
-            : sendBlockedReason ?? undefined}
+            : effectiveSendBlockedReason ?? undefined}
+        /* Every blocked state keeps one recovery route (issue #499): Re-check
+           forces a fresh runtime snapshot, which resolves an unresolved host,
+           surfaces a recovered one, and reconciles a timed-out admission. */
+        onSendBlockedRecover={() => void refreshRuntime()}
         receipts={
           displayedRuntimeReceipts.length
             ? <RuntimeComposerReceipts

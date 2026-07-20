@@ -253,6 +253,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.failedInterrupt": "не вдалося перервати",
   "composer.escapeSent": "надіслано Escape — агент перервано",
   "composer.spawnAria": "Запустити агента з промптом у tmux",
+  "composer.resolvingAria": "Повідомлення наявному агенту — доставка почнеться після відновлення його хоста",
   "composer.sendAria": "Надіслати повідомлення агенту в tmux {target}",
   "composer.sendStructuredAria": "Надіслати повідомлення через структурований runtime-хост",
   "composer.queueAria": "Черга надісланих повідомлень",
@@ -272,7 +273,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.structuredImagesUnavailable": "Структуровані розмови поки не підтримують картинки",
   "composer.codexImagesTextOnly": "Обрана модель Codex приймає лише текст.",
   "composer.structuredImagesProtocol": "Цей структурований хост не узгодив підтримку зображень.",
-  "composer.imagesBlockedDuringRecovery": "Зображення залишаться вибраними до відновлення структурованого хоста.",
+  "composer.imagesBlockedDuringRecovery": "Зображення не можна додати, доки хост не працює — вже додані залишаться вибраними й будуть доставлені після відновлення.",
   "composer.imageCapabilityLoading": "Завантажуємо дані про підтримку зображень.",
   "composer.imageCapabilityError": "Не вдалося завантажити дані про підтримку зображень.",
   "composer.imageCapabilityRetry": "Повторити перевірку зображень",
@@ -287,6 +288,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.retrySend": "Надіслати ще раз",
   "composer.placeholderRelay": "написати — передам через кореневу сесію…",
   "composer.placeholderSpawn": "промпт — агент запуститься в tmux…",
+  "composer.placeholderResolving": "написати агенту — відновлюємо з'єднання з сесією…",
   "composer.placeholderSend": "написати агенту…",
   "composer.textAria": "Текст для агента",
   "composer.optionsShow": "Показати параметри повідомлення",
@@ -338,7 +340,7 @@ export const uk: Record<keyof typeof en, Message> = {
 
   // Dead-host banner (issue #247)
   "deadHost.title": "Хост агента помер · {since}",
-  "deadHost.body": "Повідомлення не доставляються. Очікувані підтвердження застаріли.",
+  "deadHost.body": "Текст, надісланий зараз, надійно зберігається і буде доставлений після відновлення хоста. Зображення не можна додати, доки хост не повернеться. Очікувані підтвердження застаріли — відновіть роботу елементами керування нижче.",
   "deadHost.respawn": "Відновити розмову",
   "deadHost.attach": "Відкрити в терміналі",
   "deadHost.recheck": "Перевірити знову",

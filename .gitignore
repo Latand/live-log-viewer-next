@@ -55,3 +55,8 @@ prod.log
 # `bun scripts/readable-tool-shots.tsx`. Committed screenshots must instead go
 # through the provenance-signed demo-capture pipeline, so keep these local.
 /docs/media/readable-tools/
+
+# issue-499 evidence: raw chrome captures stay local (digests live in capture-manifest.json)
+docs/screenshots/issue-499/*.png
+docs/screenshots/issue-499/captures.list
+docs/screenshots/issue-499/geometry.list
