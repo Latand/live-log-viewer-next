@@ -51,6 +51,12 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE: scripts/privacy-known-value-fingerprints.json
           LLV_PRIVACY_OCR_LANGUAGES: eng+ukr
+          PUBLICATION_ISSUE_COMMENT_ID: ${{ github.event_name == 'issue_comment' && github.event.comment.id || '' }}
           PUBLICATION_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.publication_number }}
           PUBLICATION_REPO: ${{ github.repository }}
-        run: bun scripts/privacy-github-audit.ts --repo "$PUBLICATION_REPO" --number "$PUBLICATION_NUMBER"
+        run: |
+          arguments=(--repo "$PUBLICATION_REPO" --number "$PUBLICATION_NUMBER")
+          if [[ -n "$PUBLICATION_ISSUE_COMMENT_ID" ]]; then
+            arguments+=(--issue-comment "$PUBLICATION_ISSUE_COMMENT_ID")
+          fi
+          bun scripts/privacy-github-audit.ts "${arguments[@]}"
