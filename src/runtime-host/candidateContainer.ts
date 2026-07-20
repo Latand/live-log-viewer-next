@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
+import { WAKATIME_CREDENTIAL_ENV, withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 export interface ViewerComposeVolume {
   type: "bind";
@@ -23,7 +24,7 @@ export interface ViewerComposeService {
   profiles: string[];
   privileged: boolean;
   restart: string;
-  user: string;
+  "user": string;
   volumes: ViewerComposeVolume[];
   working_dir: string;
 }
@@ -68,6 +69,18 @@ function assertCoveredKeys(record: Record<string, unknown>, supported: Set<strin
   if (uncovered.length > 0) throw new Error(`${label} has uncovered fields: ${uncovered.sort().join(", ")}`);
 }
 
+export function viewerComposeSnapshotWithoutWakatimeCredential(configJson: string): string {
+  const config = objectValue(JSON.parse(configJson), "Compose config");
+  const services = objectValue(config.services, "Compose services");
+  for (const [name, value] of Object.entries(services)) {
+    const service = objectValue(value, `Compose service ${name}`);
+    if (service.environment === undefined) continue;
+    const environment = objectValue(service.environment, `Compose service ${name} environment`);
+    delete environment[WAKATIME_CREDENTIAL_ENV];
+  }
+  return JSON.stringify(config);
+}
+
 function composeVolume(value: unknown, index: number): ViewerComposeVolume {
   const volume = objectValue(value, `viewer Compose volume ${index}`);
   assertCoveredKeys(volume, VOLUME_KEYS, `viewer Compose volume ${index}`);
@@ -104,7 +117,7 @@ export function viewerComposeServiceFromConfig(configJson: string): ViewerCompos
     profiles: viewer.profiles === undefined ? [] : stringArray(viewer.profiles, "Viewer Compose profiles"),
     privileged: viewer.privileged,
     restart: stringValue(viewer.restart, "Viewer Compose restart"),
-    user: stringValue(viewer.user, "Viewer Compose user"),
+    "user": stringValue(viewer.user, "Viewer Compose user"),
     volumes: viewer.volumes.map(composeVolume),
     working_dir: stringValue(viewer.working_dir, "Viewer Compose working_dir"),
   };
@@ -133,13 +146,39 @@ export function viewerCandidateTmuxEnvironment(
     : configured;
 }
 
+function viewerCandidateVolumes(
+  service: ViewerComposeService,
+  overrides: Pick<ViewerCandidateContainerOverrides, "legacyTmuxExternal" | "tmuxTmpdir">,
+): ViewerComposeVolume[] {
+  if (overrides.legacyTmuxExternal !== "1") return service.volumes;
+  if (!path.isAbsolute(overrides.tmuxTmpdir)) throw new Error("External tmux directory must be absolute");
+
+  const existing = service.volumes.find((volume) => volume.target === overrides.tmuxTmpdir);
+  if (existing) {
+    if (existing.source !== overrides.tmuxTmpdir || existing.read_only) {
+      throw new Error("External tmux directory mount does not expose the host supervisor path");
+    }
+    return service.volumes;
+  }
+
+  return [
+    ...service.volumes,
+    {
+      type: "bind",
+      source: overrides.tmuxTmpdir,
+      target: overrides.tmuxTmpdir,
+      bind: {},
+    },
+  ];
+}
+
 export function viewerCandidateDockerArgs(
   candidate: ViewerReleaseIdentity,
   service: ViewerComposeService,
   overrides: ViewerCandidateContainerOverrides,
 ): string[] {
   const endpoint = new URL(candidate.endpoint);
-  const environment = {
+  const environment = withoutWakatimeCredential({
     ...service.environment,
     PORT: endpoint.port,
     LLV_RUNTIME_EVENTS: "1",
@@ -147,12 +186,13 @@ export function viewerCandidateDockerArgs(
     LLV_LEGACY_TMUX_EXTERNAL: overrides.legacyTmuxExternal,
     LLV_ALLOW_LEGACY_VIEWER: "1",
     TMUX_TMPDIR: overrides.tmuxTmpdir,
-  };
+  });
   const labels = {
     ...service.labels,
     "dev.live-log-viewer.managed": "1",
     "dev.live-log-viewer.revision": candidate.revision,
   };
+  const volumes = viewerCandidateVolumes(service, overrides);
   const command = service.command?.map((argument) => argument.replaceAll("$$", () => "$")) ?? [];
   const args = [
     "docker", "run", "-d",
@@ -165,7 +205,7 @@ export function viewerCandidateDockerArgs(
     "--user", service.user,
     "--workdir", service.working_dir,
     ...Object.entries(environment).sort(([left], [right]) => left.localeCompare(right)).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
-    ...service.volumes.flatMap((volume) => [
+    ...volumes.flatMap((volume) => [
       "--mount",
       `type=bind,source=${volume.source},target=${volume.target}${volume.read_only ? ",readonly" : ""}`,
     ]),

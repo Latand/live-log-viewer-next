@@ -3,6 +3,14 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 
+import {
+  discardWakatimeEnvironmentCredential,
+  viewerChildProcessOptions,
+  withoutWakatimeCredential,
+} from "../bin/server-runtime.mjs";
+
+discardWakatimeEnvironmentCredential();
+
 const root = process.cwd();
 const nextBin = join(root, "node_modules", ".bin", "next");
 const standaloneDir = join(root, ".next", "standalone");
@@ -12,15 +20,15 @@ const distStandaloneDir = join(distDir, "standalone");
 
 function runNextBuild() {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, LLV_STANDALONE: "1" };
+    const env = { ...withoutWakatimeCredential(process.env), LLV_STANDALONE: "1" };
     for (const key of Object.keys(env)) {
       if (key.startsWith("__NEXT_PRIVATE_")) delete env[key];
     }
-    const child = spawn(nextBin, ["build", "--webpack"], {
+    const child = spawn(nextBin, ["build", "--webpack"], viewerChildProcessOptions({
       cwd: root,
       env,
       stdio: "inherit",
-    });
+    }));
 
     child.on("error", (error) => {
       reject(new Error(`Failed to start ${nextBin}: ${error.message}`));
@@ -46,7 +54,11 @@ function runNextBuild() {
 function runMcpBuild() {
   return new Promise((resolve, reject) => {
     const bun = process.env.LLV_BUN_EXECUTABLE || "bun";
-    const child = spawn(bun, ["run", "build:mcp"], { cwd: root, env: process.env, stdio: "inherit" });
+    const child = spawn(bun, ["run", "build:mcp"], viewerChildProcessOptions({
+      cwd: root,
+      env: withoutWakatimeCredential(process.env),
+      stdio: "inherit",
+    }));
     child.on("error", (error) => reject(new Error(`Failed to start ${bun}: ${error.message}`)));
     child.on("exit", (code, signal) => {
       if (code === 0) resolve();

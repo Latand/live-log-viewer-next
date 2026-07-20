@@ -55,6 +55,9 @@ export interface ComposerBarProps {
   /** When set, Send is disabled with this tooltip and no submit is attempted
       (issue #247 §5: a dead host blocks sends so no rejected receipts stack). */
   sendDisabledReason?: string;
+  /** A caller-owned immutable generation can supply the payload while the
+      editable textarea and image tray are empty. */
+  sendPayloadAvailable?: boolean;
   /** Durable runtime receipt chips for the last sends on this target (issue
       #25). Rendered under the status line; absent while the runtime bus is off,
       so the composer is unchanged on the landing-disabled path. */
@@ -139,6 +142,7 @@ export function ComposerBar({
   imageDisabled = false,
   imageDisabledReason,
   sendDisabledReason,
+  sendPayloadAvailable = false,
   receipts,
 }: ComposerBarProps) {
   const {
@@ -156,6 +160,8 @@ export function ComposerBar({
     dictationRecording,
     busy,
     status,
+    dictationBusy,
+    attachmentsBlocked,
   } = composer;
   const { t } = useLocale();
   const isMobile = useIsMobile();
@@ -180,7 +186,8 @@ export function ComposerBar({
       ? t("img.blockedFailed")
       : undefined;
   const sendBlocked = Boolean(sendDisabledReason);
-  const sendDisabled = sendBlocked || (!canSend && !hasSendMenu) || imageSendBlocked;
+  const effectiveCanSend = canSend || (sendPayloadAvailable && !fieldsDisabled && !dictationBusy && !attachmentsBlocked);
+  const sendDisabled = sendBlocked || (!effectiveCanSend && !hasSendMenu) || imageSendBlocked;
   /* Composer action buttons (send, image) are a 32px visual control with a 44px
      touch hit area via a pseudo-element (design doc §3.5, matching the anchored
      mic), so the accent send never renders as a full 44×44 block on a phone;
@@ -235,14 +242,14 @@ export function ComposerBar({
               dictationRecording && !sendBlocked
                 ? () => void stopAndSend()
                 : (event) => {
-                    if (sendBlocked || !canSend) {
+                    if (sendBlocked || !effectiveCanSend) {
                       event.preventDefault();
                       event.stopPropagation();
                     }
                   }
             }
             disabled={sendDisabled}
-            aria-disabled={sendBlocked || !canSend || imageSendBlocked}
+            aria-disabled={sendBlocked || !effectiveCanSend || imageSendBlocked}
             aria-label={sendBlocked ? sendDisabledReason! : dictationRecording ? sendLabelRecording : sendLabelIdle}
             style={dictationRecording ? undefined : sendIdleStyle}
             className={`inline-flex shrink-0 items-center justify-center rounded-control border text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 aria-disabled:opacity-40 ${iconBtn} ${
@@ -336,7 +343,7 @@ export function ComposerBar({
                off just the typed prefix and leave the recording running. */
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
-              if (sendBlocked || !canSend || imageSendBlocked) return;
+              if (sendBlocked || !effectiveCanSend || imageSendBlocked) return;
               if (dictation.phase === "rec") void stopAndSend();
               else void submit();
             }

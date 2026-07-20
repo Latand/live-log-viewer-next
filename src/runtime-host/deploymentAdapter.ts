@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { statePath } from "@/lib/configDir";
 import { procBackend, type ProcBackend } from "@/lib/proc";
 import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "@/lib/runtime/contracts";
+import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { ViewerDeploymentAdapter } from "./deployment";
 
@@ -174,7 +175,7 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       await reconcile();
       const child = spawn("/usr/bin/setpriv", ["--pdeathsig", "KILL", "--", executable, action], {
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1" },
+        env: { ...withoutWakatimeCredential(process.env), LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1" },
         detached: true,
       });
       child.stdin?.on("error", () => {});

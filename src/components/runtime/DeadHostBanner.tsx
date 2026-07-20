@@ -113,9 +113,10 @@ export function DeadHostBanner({ file }: { file: FileEntry }) {
     if (respawnBusy) return;
     setRespawnBusy(true);
     setRespawnError(null);
-    // A successful resume boots asynchronously and the recovering axis clears the
-    // banner; a non-2xx / network failure must be surfaced, not swallowed, so the
-    // control never appears to complete while producing no recovery (finding 4).
+    setRecheckError(null);
+    // A successful resume may republish an existing successor or boot a replacement.
+    // Refresh the runtime store immediately so the banner follows the authoritative
+    // host axis; surface transport failures so recovery stays actionable (finding 4).
     try {
       const res = await fetch("/api/tmux", {
         method: "POST",
@@ -125,6 +126,8 @@ export function DeadHostBanner({ file }: { file: FileEntry }) {
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         setRespawnError(body.error ?? t("deadHost.respawnFailed"));
+      } else if (!await refreshRuntime()) {
+        setRecheckError(t("deadHost.recheckFailed"));
       }
     } catch {
       setRespawnError(t("deadHost.respawnFailed"));

@@ -14,6 +14,7 @@ import type { Flow, FlowMergeEvidence } from "@/lib/flows/types";
 import { reconcileMigrationInventory } from "@/lib/accounts/migration/coordinator";
 import { procBackend } from "@/lib/proc";
 import { runtimeHostClient } from "@/lib/runtime/client";
+import { reconcileStaleSpawnsHeldByLiveOwners } from "@/lib/runtime/staleSpawnOwner";
 import { terminalizeStaleStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { listFiles } from "@/lib/scanner";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
@@ -407,6 +408,7 @@ async function authorshipEvidence(
   flows: Flow[],
   files: FileEntry[],
   missingTranscriptPaths: ReadonlySet<string>,
+  priorUserAuthoredPaths: Readonly<Record<string, true>>,
   priorScannedAt: Record<string, number>,
 ): Promise<{
   userAuthoredPaths: Set<string>;
@@ -417,7 +419,12 @@ async function authorshipEvidence(
      an unscanned worker (issue #112). */
   verifiedCleanAt: Map<string, number>;
 }> {
-  const userAuthoredPaths = new Set<string>();
+  /* Human authorship is sticky by contract. Re-reading a path after it has
+     already crossed the owner-message threshold cannot change that verdict;
+     it only burns through the full transcript again because authored paths do
+     not receive a clean `scannedAt` stamp. Seed the current evidence from the
+     durable map so every later controller cycle skips those files. */
+  const userAuthoredPaths = new Set(Object.keys(priorUserAuthoredPaths));
   const unverifiedPaths = new Set<string>();
   const verifiedCleanAt = new Map<string, number>();
   /* Authorship scanning cannot ride live host discovery alone: a finished
@@ -544,7 +551,15 @@ async function makeInput(
   const snapshot = registry.readOnlySnapshot();
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
     host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
-  const authorship = await authorshipEvidence(snapshot, hosts, flows, files, missingTranscriptPaths, state.scannedAt);
+  const authorship = await authorshipEvidence(
+    snapshot,
+    hosts,
+    flows,
+    files,
+    missingTranscriptPaths,
+    state.userAuthoredPaths,
+    state.scannedAt,
+  );
   let stateChanged = false;
   for (const pathname of authorship.userAuthoredPaths) {
     if (state.userAuthoredPaths[pathname]) continue;
@@ -766,6 +781,7 @@ export interface ReaperActuationOverrides {
   saveFlows?: typeof saveFlows;
   now?: () => number;
   runtimeClient?: typeof runtimeHostClient;
+  reconcileLiveOwnerSpawns?: typeof reconcileStaleSpawnsHeldByLiveOwners;
   terminalizeStaleSpawns?: typeof terminalizeStaleStructuredSpawns;
 }
 
@@ -784,6 +800,12 @@ export async function runReaperCycle(options: {
      pass is bounded and idempotent; its failure never blocks the reaper. */
   const runtimeClientForSpawns = (options.actuation?.runtimeClient ?? runtimeHostClient)();
   if (runtimeClientForSpawns) {
+    try {
+      await (options.actuation?.reconcileLiveOwnerSpawns
+        ?? reconcileStaleSpawnsHeldByLiveOwners)(registry, runtimeClientForSpawns);
+    } catch (error) {
+      console.error("[reaper] terminal structured spawn owner convergence failed", error);
+    }
     try {
       await (options.actuation?.terminalizeStaleSpawns ?? terminalizeStaleStructuredSpawns)(registry, runtimeClientForSpawns);
     } catch (error) {

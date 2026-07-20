@@ -7,13 +7,16 @@ parent→child tree, and tails the selected one in real time.
 
 ![From the overview board into a session and its live tail](docs/media/board-to-live-tail.gif)
 
-Everything runs locally against files already on disk. There is no database and
-no external service — the app reads `~/.claude` and `~/.codex` and renders what
-it finds:
+The default setup runs locally against files already on disk. The app uses no
+database; it reads `~/.claude` and `~/.codex` and renders what it finds.
+Optional outbound integrations stay disabled until you configure them:
 
 ```bash
 bunx agent-log-viewer   # or: npx agent-log-viewer
 ```
+
+See [WakaTime activity integration](docs/wakatime.md) for opt-in activity
+export, its disclosure boundary, and disablement steps.
 
 Prefer video? A 45-second cut of the full flow lives at
 [docs/media/demo.mp4](docs/media/demo.mp4).

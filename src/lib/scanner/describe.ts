@@ -296,6 +296,8 @@ export function parseWorktreeGitdir(cwd: string, gitFileText: string): { repo: s
    checkout that just became (or stopped being) a worktree is noticed. */
 const worktreeGitCache = globalCache<[number, { repo: string; worktree: string } | null]>("worktree-git");
 const WORKTREE_TTL_MS = 60_000;
+const projectInfoCwdCache = globalCache<[number, { project: string; worktree?: string; repo?: string } | null]>("project-info-cwd-v1");
+const PROJECT_INFO_CWD_TTL_MS = 10_000;
 const persistedProjectCache = globalCache<[number, string, string, {
   byCwd: Map<string, { project: string; worktree?: string }>;
   byPath: Map<string, { project: string; worktree?: string }>;
@@ -480,8 +482,13 @@ function persistedProjects(): {
     all land in the SAME sidebar group instead of lookalike neighbors. */
 export function projectInfoFromCwd(cwd: string): { project: string; worktree?: string; repo?: string } | null {
   if (!cwd.trim()) return null;
+  const cached = projectInfoCwdCache.get(cwd);
+  if (cached && cached[0] > Date.now()) return cached[1];
   const scratchpad = projectInfoFromClaudeTaskCwd(cwd);
-  if (scratchpad) return scratchpad;
+  if (scratchpad) {
+    projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, scratchpad]);
+    return scratchpad;
+  }
   let worktree =
     worktreeFromPath(cwd) ??
     worktreeFromNested(cwd) ??
@@ -489,7 +496,10 @@ export function projectInfoFromCwd(cwd: string): { project: string; worktree?: s
     worktreeFromGitFile(cwd);
   if (!worktree && !hasGitMarker(cwd)) {
     const persisted = persistedProjects().byCwd.get(cwd);
-    if (persisted) return persisted;
+    if (persisted) {
+      projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, persisted]);
+      return persisted;
+    }
     /* An arbitrary-path worktree that has since been deleted: no live
        recognizer matched and its `.git` is gone, but a resolution we recorded
        while it was alive still names the parent repo. */
@@ -497,7 +507,9 @@ export function projectInfoFromCwd(cwd: string): { project: string; worktree?: s
   }
   const root = worktree ? worktree.repo : cwd;
   const project = projectFromSlug(root.replace(/[^a-zA-Z0-9]/g, "-"));
-  return project ? { project, worktree: worktree?.worktree } : null;
+  const resolved = project ? { project, worktree: worktree?.worktree } : null;
+  projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolved]);
+  return resolved;
 }
 
 /** The project key a session running in `cwd` gets from the scanner. The

@@ -327,7 +327,7 @@ test("a bounded receipt summary keeps retry while withholding lossy edit", () =>
 /* ── Exact draft clearing on accepted delivery ──────────────────────────── */
 
 import type { PendingImage } from "./imageAttachments";
-import { adoptComposerState, attachmentsAfterDelivery, draftAfterDelivery, readPendingDeliveries, settlePendingDeliveries, writePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
+import { adoptComposerState, attachmentsAfterDelivery, draftAfterDelivery, readPendingDeliveries, rebindPendingOperations, settlePendingDeliveries, writePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
 
 function deliveredReceipt(key: string, status: RuntimeReceipt["status"] = "delivered", text?: string): RuntimeReceipt {
   return {
@@ -478,9 +478,30 @@ test("settlePendingDeliveries is idempotent across repeated admission receipts",
   expect(second.remaining).toEqual([]);
 });
 
-test("pending generations persist text-only per conversation and reload bounded", () => {
-  /* A remount or refresh must not orphan an accepted message in the composer:
-     the unsettled generation reloads (attachment snapshots are memory-only). */
+test("a retry leaf takes ownership and settles the original generation once", () => {
+  const pending: PendingDelivery[] = [{
+    key: "key-original",
+    operationId: "op-original",
+    text: "original ask",
+    images: [pendingImage("original")],
+  }];
+  const retryLeaf = {
+    ...deliveredReceipt("key-retry", "queued"),
+    operationId: "op-retry",
+    retryOfOperationId: "op-original",
+  };
+  const rebound = rebindPendingOperations(pending, [retryLeaf]);
+  expect(rebound[0]?.operationId).toBe("op-retry");
+  const first = settlePendingDeliveries(rebound, [retryLeaf]);
+  const second = settlePendingDeliveries(first.remaining, [retryLeaf]);
+  expect(first.settled).toEqual([{ entry: rebound[0]!, text: "original ask" }]);
+  expect(first.remaining).toEqual([]);
+  expect(second.settled).toEqual([]);
+});
+
+test("pending generations persist immutable image snapshots per conversation and reload bounded", () => {
+  /* A remount or refresh must retain the exact generation bytes needed for an
+     idempotent retry. Preview URLs are rebuilt from the persisted image body. */
   const backing = new Map<string, string>();
   const globalStore = globalThis as { sessionStorage?: unknown };
   const previous = globalStore.sessionStorage;
@@ -494,15 +515,70 @@ test("pending generations persist text-only per conversation and reload bounded"
       key: `key-${index}`,
       text: `ask ${index}`,
       images: index === 0 ? [pendingImage("a")] : [],
+      ...(index === 0 ? {
+        runtime: { model: "gpt-5.6-sol", effort: "high", fast: true },
+        runtimeCaptured: true as const,
+        operationId: "op-key-0",
+      } : {}),
     }));
     writePendingDeliveries("conv-persist", entries);
     const reloaded = readPendingDeliveries("conv-persist");
     expect(reloaded).toHaveLength(8);
-    expect(reloaded[0]).toEqual({ key: "key-0", text: "ask 0", images: [] });
+    expect(reloaded[0]).toEqual({
+      key: "key-0",
+      text: "ask 0",
+      images: [{
+        base64: Buffer.from("a").toString("base64"),
+        mime: "image/png",
+        preview: `data:image/png;base64,${Buffer.from("a").toString("base64")}`,
+      }],
+      runtime: { model: "gpt-5.6-sol", effort: "high", fast: true },
+      runtimeCaptured: true,
+      operationId: "op-key-0",
+    });
     writePendingDeliveries("conv-persist", []);
     expect(readPendingDeliveries("conv-persist")).toEqual([]);
     backing.set("llvPendingSend:conv-corrupt", "{not json");
     expect(readPendingDeliveries("conv-corrupt")).toEqual([]);
+  } finally {
+    if (previous === undefined) delete globalStore.sessionStorage;
+    else globalStore.sessionStorage = previous;
+  }
+});
+
+test("quota fallback preserves settlement metadata and marks the replay payload incomplete", () => {
+  const backing = new Map<string, string>();
+  const globalStore = globalThis as { sessionStorage?: unknown };
+  const previous = globalStore.sessionStorage;
+  globalStore.sessionStorage = {
+    getItem: (key: string) => backing.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      const serialized = String(value);
+      if (serialized.length > 500) throw new Error("quota");
+      backing.set(key, serialized);
+    },
+    removeItem: (key: string) => void backing.delete(key),
+  };
+  try {
+    writePendingDeliveries("conv-quota", [{
+      key: "key-image",
+      text: "preserve the receipt owner",
+      images: [{ base64: "A".repeat(2_000), mime: "image/png", preview: "blob:preview" }],
+      runtime: { model: "gpt-5.6-sol", effort: "xhigh" },
+      runtimeCaptured: true,
+      operationId: "op-image",
+      reconciling: true,
+    }]);
+    expect(readPendingDeliveries("conv-quota")).toEqual([{
+      key: "key-image",
+      text: "preserve the receipt owner",
+      images: [],
+      runtime: { model: "gpt-5.6-sol", effort: "xhigh" },
+      runtimeCaptured: true,
+      operationId: "op-image",
+      reconciling: true,
+      payloadComplete: false,
+    }]);
   } finally {
     if (previous === undefined) delete globalStore.sessionStorage;
     else globalStore.sessionStorage = previous;

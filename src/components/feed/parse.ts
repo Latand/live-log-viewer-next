@@ -88,6 +88,27 @@ export type ToolEvent = {
   statusLabel: string;
   outputPreview: string;
   outputTruncated: boolean;
+  /** Working directory recovered from the call args or a `cd … &&` prefix. */
+  cwd?: string;
+  /** Numeric exit code recovered from a `exited with code N` result line. */
+  exitCode?: number;
+  /** Wall-clock duration in ms, from a Codex `Wall time` preamble. */
+  durationMs?: number;
+  /** Result timestamp, once the tool result attaches (end of the run). */
+  endTs?: unknown;
+  /** stderr split from the combined result, rendered in its own disclosure. */
+  stderr?: string;
+  stderrTruncated?: boolean;
+  /** Redacted, bounded interactive-shell session/cell this call owns: an exec
+      reports it in its result preamble, a wait/write_stdin follow-up names it in
+      its args. Lets the readable group fold each follow-up under the exec that
+      actually owns its session, even when several sessions interleave (#475). */
+  session?: string;
+  /** A bare interactive poll: a `wait`, or a `write_stdin` that sent no
+      keystrokes. Empty consecutive polls collapse into one compact counted row
+      and keep a long-running command's tail concise (#497). A `write_stdin`
+      carrying real characters remains a readable keystroke. */
+  poll?: boolean;
   open: boolean;
   orchestration?: Orchestration;
   /** Present on a `ScheduleWakeup` call: drives the dedicated wakeup card. */
@@ -136,6 +157,11 @@ export type CmdGroupItem = {
   okCount: number;
   errCount: number;
   hasErr: boolean;
+  /** True while this is the live trailing run: one expanded aggregate that
+      shows every command and its output immediately. Flips to false when the
+      run settles (a new turn appends after it, or the session stops being
+      live), which the card reads to auto-collapse exactly once (issue #475). */
+  active: boolean;
 };
 export type Item =
   | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude" }
@@ -502,6 +528,11 @@ const CMD_GROUP_MIN = 2;
 const OUTPUT_OK_MAX = 12_000;
 const OUTPUT_ERR_MAX = 60_000;
 const COMMAND_MAX = 8_000;
+/* An explicit stderr delimiter a payload may carry so the readable block can
+   split the two streams into their own bounded disclosures (issue #475). Only an
+   explicit marker splits — an undelimited body stays entirely stdout, so the
+   parser never guesses which lines were errors. */
+const STDERR_MARKER = /^[ \t]*(?:\[stderr\]|-{2,}\s*stderr\s*-{2,}|stderr:)[ \t]*$/im;
 /* Wakeup reason/prompt are redacted and bounded before they reach the card, the
    same safety funnel every other tool field passes through (issue #161 review).
    The reason is a one-line summary; the prompt is the longer wake plan. */
@@ -511,9 +542,43 @@ const WAKEUP_PROMPT_MAX = 4_000;
    known variants). Used to strip the contiguous leading metadata block. */
 const PREAMBLE_LINE = /^(?:Chunk ID:|Wall time\b|Original token count:|Output:[ \t]*$|Script completed\b|Script running with (?:cell|session) ID\b|Process running with (?:cell|session) ID\b|Process exited with code\b)/;
 const CODE_EXT_RE = /\.([A-Za-z0-9]{1,10})$/;
+const CWD_MAX = 400;
 
 function extLang(path: string): string | null {
   return path.match(CODE_EXT_RE)?.[1]?.toLowerCase() ?? null;
+}
+
+/* The working directory a shell call ran in: an explicit `cwd`/`workdir` arg
+   (Codex `exec_command`, orchestrated `tools.exec_command`) wins; otherwise the
+   leading `cd <path> &&` of the command reveals it. Redacted and bounded here so
+   the readable block (issue #475) never surfaces a raw or unbounded path. */
+function cwdOf(args: Record<string, unknown>, command?: string): string | undefined {
+  const explicit = args.cwd ?? args.workdir ?? args.working_directory ?? args.cd;
+  const raw = typeof explicit === "string" && explicit.trim() ? explicit.trim() : command?.match(/^\s*cd\s+('([^']+)'|"([^"]+)"|(\S+))\s*&&/)?.slice(2).find(Boolean);
+  if (!raw) return undefined;
+  const safe = redactSecrets(raw).trim().slice(0, CWD_MAX);
+  return safe || undefined;
+}
+
+const SESSION_ID_MAX = 120;
+/* The interactive-shell session/cell a result preamble reports for the exec that
+   opened it: `Process running with session ID N`, `Script running with cell ID N`
+   (both engines/wrappers, issue #141). */
+const SESSION_RESULT_RE = /\brunning with (?:cell|session) ID\s+(\S+)/i;
+
+/* The redacted, bounded session/cell key a shell call owns. A follow-up names it
+   in its args (numeric in write_stdin, string in wait — see objFieldScalar); an
+   exec reports it in its result preamble. Passed through the shared redaction/cap
+   funnel so the readable block never surfaces a raw or unbounded value (#475). */
+function sessionKey(value: unknown): string | undefined {
+  const raw = typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+  if (!raw.trim()) return undefined;
+  const safe = redactSecrets(raw).trim().slice(0, SESSION_ID_MAX);
+  return safe || undefined;
+}
+
+function sessionFromArgs(args: Record<string, unknown>): string | undefined {
+  return sessionKey(args.session_id ?? args.cell_id);
 }
 
 /* Grouping bucket key: the verbatim tool name, falling back to the family for
@@ -638,6 +703,22 @@ function objFieldScalar(argsSrc: string, keys: readonly string[]): string | numb
     if (new RegExp(`(?:^|[{,]\\s*)${key}\\s*(?=[,}])`).test(argsSrc)) return key;
   }
   return undefined;
+}
+
+/* Whether an object field is encoded as a concrete literal in generated tool
+   source. Interactive wrappers need this distinction because identifier values
+   such as `chars` can only be interpreted by the runtime. */
+function objFieldIsConcreteScalar(argsSrc: string, keys: readonly string[]): boolean {
+  for (const key of keys) {
+    const re = new RegExp(`(?:^|[{,([\\s])${key}\\s*:\\s*`);
+    const match = re.exec(argsSrc);
+    if (!match) continue;
+    const start = (match.index ?? 0) + match[0].length;
+    const ch = argsSrc[start];
+    if (ch === '"' || ch === "'" || ch === "`") return true;
+    return /^(?:-?\d+(?:\.\d+)?|true\b|false\b)/.test(argsSrc.slice(start));
+  }
+  return false;
 }
 
 /* The first string/template literal in an argument source. */
@@ -801,9 +882,15 @@ function batchCommands(fullInput: string): string[] {
  * the full source and raw record expose the ground truth at level 2. Returns
  * null for a plain custom tool, which keeps rendering as one generic row.
  */
-function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body?: Orchestration; diff?: DiffModel } | null {
+function parseOrchestration(input: string): {
+  overlay: Partial<ToolEvent>;
+  body?: Orchestration;
+  diff?: DiffModel;
+  directInteractive?: { tool: "wait" | "write_stdin"; args: Record<string, unknown> };
+} | null {
   if (!input || !/\btools\.[A-Za-z_]\w*\s*\(/.test(input)) return null;
   const calls: NestedCall[] = [];
+  let concreteInteractive: { tool: "wait" | "write_stdin"; args: Record<string, unknown> } | undefined;
   ORCH_CALL_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = ORCH_CALL_RE.exec(input)) && calls.length < ORCH_MAX_CALLS) {
@@ -811,8 +898,14 @@ function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body?
     const open = match.index + match[0].length - 1; // the '(' at the end of the match
     const argsSrc = sliceCallArgs(input, open);
     const tool = ORCH_METHOD_TOOL[method] ?? method;
-    const s = summarizeTool(tool, orchCallArgs(tool, argsSrc, input), "codex");
+    const args = orchCallArgs(tool, argsSrc, input);
+    const s = summarizeTool(tool, args, "codex");
     calls.push({ id: `${method}#${calls.length}`, tool: method, family: s.family, icon: s.icon, summary: s.summary });
+    if (tool === "wait" || tool === "write_stdin") {
+      const concreteSession = objFieldIsConcreteScalar(argsSrc, ["session_id", "cell_id"]);
+      const concreteInput = tool === "wait" || objFieldIsConcreteScalar(argsSrc, ["chars"]);
+      if (concreteSession && concreteInput) concreteInteractive = { tool, args };
+    }
   }
   ORCH_HELPER_RE.lastIndex = 0;
   while ((match = ORCH_HELPER_RE.exec(input)) && calls.length < ORCH_MAX_CALLS) {
@@ -824,6 +917,13 @@ function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body?
   if (!toolCalls.length) return null;
   const source = redactSecrets(input).slice(0, COMMAND_MAX);
   const sourceTruncated = input.length > COMMAND_MAX;
+
+  /* A one-operation generated wrapper represents the concrete wait/stdin call
+     directly. The normalized event inherits session ownership, polling intent,
+     result output, and compact follow-up grouping. */
+  if (toolCalls.length === 1 && concreteInteractive) {
+    return { overlay: {}, directInteractive: concreteInteractive };
+  }
 
   /* An apply_patch payload embedded in the JS source parses into the same diff
      model a first-class apply_patch gets, so the card renders the structured
@@ -1140,6 +1240,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const body: ToolBody | undefined = diff && diff.files.length ? { type: "diff", files: diff.files, filesTruncated: diff.filesTruncated } : undefined;
     const command = opts.command !== undefined ? redactSecrets(opts.command).slice(0, COMMAND_MAX) : undefined;
     const summary = opts.summary !== undefined ? redactSecrets(opts.summary).replace(/\s+/g, " ").trim().slice(0, 160) : s.summary;
+    /* A bare poll carries no keystrokes: every `wait`, and a `write_stdin` whose
+       `chars` payload is the deliberately empty string (issue #497 / #141). */
+    const poll = opts.tool === "wait" || (opts.tool === "write_stdin" && !(typeof args.chars === "string" && args.chars.length > 0));
     return {
       kind: "tool",
       id: opts.id,
@@ -1157,6 +1260,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       statusLabel: tr("render.executing"),
       outputPreview: "",
       outputTruncated: false,
+      ...(s.family === "shell" ? (() => {
+        const cwd = cwdOf(args, command);
+        const session = sessionFromArgs(args);
+        return { ...(cwd ? { cwd } : {}), ...(session !== undefined ? { session } : {}) };
+      })() : {}),
+      ...(poll ? { poll: true } : {}),
       /* An edit/write card opens its structured diff inline by default — a
          compact preview of the first lines, with a toggle for the rest — so the
          change is visible without a click (issue #90). */
@@ -1225,10 +1334,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   };
   /* A shell command from any engine. `callId` is absent for plain job logs, so
      a synthetic id keeps the row addressable (and the last one attachable). */
-  const addShell = (ts: unknown, command: string, callId?: string, tool = "Bash"): ToolEvent => {
+  const addShell = (ts: unknown, command: string, callId?: string, tool = "Bash", extraArgs?: Record<string, unknown>): ToolEvent => {
     const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
     const engine = cfg.engine === "codex" ? "codex" : "claude";
-    const event = newToolEvent({ ts, id, tool, args: { command }, engine, command });
+    const event = newToolEvent({ ts, id, tool, args: { ...extraArgs, command }, engine, command });
     const rec = registerCall(event);
     if (!callId) lastPlainCall = rec;
     return event;
@@ -1247,7 +1356,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const emitCustomTool = (ts: unknown, name: string, input: string, callId?: string): ToolEvent => {
     const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
     const orch = parseOrchestration(input);
-    const base = newToolEvent({ ts, id, tool: name, args: { input }, engine: "codex", diff: orch?.diff });
+    const direct = orch?.directInteractive;
+    const base = newToolEvent({ ts, id, tool: direct?.tool ?? name, args: direct?.args ?? { input }, engine: "codex", diff: orch?.diff });
     const event = orch ? { ...base, ...orch.overlay, ...(orch.body ? { orchestration: orch.body } : {}) } : base;
     registerCall(event);
     return event;
@@ -1280,14 +1390,39 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     /* An empty codex wait/stdin chunk collapses to "waiting Ns" rather than an
        "ok" with a signal-free block (issue #141 §4). */
     const idleWait = !body && (prev.tool === "wait" || prev.tool === "write_stdin") && wallSeconds !== undefined;
+    /* Split an explicitly delimited stderr tail off the stdout head so the two
+       streams get their own disclosures (issue #475). No marker → all stdout. */
+    let stdoutBody = body;
+    let stderrBody = "";
+    /* Only a shell exec has a stderr stream; a Read/Edit result is file text, so
+       a `stderr:` line inside it must never be mistaken for a delimiter. */
+    const mark = prev.family === "shell" ? body.match(STDERR_MARKER) : null;
+    if (mark && mark.index !== undefined) {
+      stdoutBody = body.slice(0, mark.index).replace(/\n+$/, "");
+      stderrBody = body.slice(mark.index + mark[0].length).replace(/^\n+/, "");
+    }
     let outputPreview = prev.outputPreview;
     let outputTruncated = prev.outputTruncated;
-    if (body) {
+    if (stdoutBody) {
       const limit = isErr ? OUTPUT_ERR_MAX : OUTPUT_OK_MAX;
-      const combined = (prev.outputPreview + "\n" + redactSecrets(body)).trim();
+      const combined = (prev.outputPreview + "\n" + redactSecrets(stdoutBody)).trim();
       outputTruncated = prev.outputTruncated || combined.length > limit;
       outputPreview = combined.slice(-limit);
     }
+    let stderr = prev.stderr;
+    let stderrTruncated = prev.stderrTruncated;
+    if (stderrBody) {
+      const combined = ((prev.stderr ?? "") + "\n" + redactSecrets(stderrBody)).trim();
+      stderrTruncated = (prev.stderrTruncated ?? false) || combined.length > OUTPUT_ERR_MAX;
+      stderr = combined.slice(-OUTPUT_ERR_MAX);
+    }
+    const exitCode = code !== undefined ? Number(code) : prev.exitCode;
+    const durationMs = wallSeconds !== undefined ? Math.round(Number(wallSeconds) * 1000) : prev.durationMs;
+    /* The exec that opened the session reports it in its result preamble; a
+       follow-up already carries its session from its args, so keep that. */
+    const session = prev.session ?? (prev.family === "shell" ? sessionKey(output.match(SESSION_RESULT_RE)?.[1]) : undefined);
+    const startMs = typeof prev.ts === "string" || typeof prev.ts === "number" ? Date.parse(String(prev.ts)) : NaN;
+    const endTs = durationMs !== undefined && Number.isFinite(startMs) ? new Date(startMs + durationMs).toISOString() : prev.endTs;
     /* A wakeup's result carries the RESOLVED schedule (issue #161): on success
        refine the fire time from it (it overrides the requested delay); on error
        the call is rejected — mark it failed so it never counts down and never
@@ -1318,6 +1453,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       srcResult: curSrc,
       outputPreview,
       outputTruncated,
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(endTs !== undefined ? { endTs } : {}),
+      ...(stderr !== undefined ? { stderr } : {}),
+      ...(stderrTruncated !== undefined ? { stderrTruncated } : {}),
+      ...(session !== undefined ? { session } : {}),
       ...(wakeup ? { wakeup } : {}),
       ...(mcp ? { mcp } : {}),
     };
@@ -1573,7 +1714,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         const name = textPart(p.name);
         if (name === "exec_command" || name === "shell") {
           const cmd = String(args.cmd ?? args.command ?? "").replace(/^\/usr\/bin\/zsh -lc /, "");
-          return void addShell(ts, cmd, textPart(p.call_id), name);
+          return void addShell(ts, cmd, textPart(p.call_id), name, args);
         }
         if (name === "apply_patch") {
           return void addPatch(ts, String(args.input ?? ""), textPart(p.call_id));
@@ -1867,12 +2008,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
      tool event folds (Read/Bash/Edit/diff-bodied/orchestration alike); a "think"
      item inside a run is absorbed without breaking it (it carries no signal once
      the run it annotates is folded), while prose/user/tmsg/review/image break it.
-     In a live trailing run only the leading completed prefix folds; every
-     in-flight (`run`) call stays a visible line (and if none is running, the
-     most-recent call is held out), so a live 40-call run reads as one quiet
-     group plus its running call(s), never 40 rows (§3.4). A group whose members'
-     events are all identity-equal to the previous snapshot's is reused as-is,
-     keeping its card memoized. */
+     The live trailing run folds whole — the in-flight (`run`) calls included —
+     into one aggregate marked `active`, which the card renders expanded so every
+     command and output shows immediately (issue #475). An interior or settled
+     run folds the same way but with `active: false`. A group whose members'
+     events are all identity-equal to the previous snapshot's — and whose active
+     lifecycle matches — is reused as-is, keeping its card memoized. */
   const buildSnapshot = (isLive: boolean): FeedSnapshot => {
     const out: FeedEntry[] = [];
     const nextGroups = new Map<number, CmdGroupItem>();
@@ -1899,24 +2040,20 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         else if (cur.item.kind !== "think") break;
         j += 1;
       }
-      /* A live trailing run folds only its leading completed prefix: every
-         in-flight (`run`) call stays a visible line so concurrent running calls
-         are never buried in a quiet closed group, and if none is running the
-         most-recent call is still held out. A completed or interior run folds in
-         full. */
+      /* The whole run folds into one aggregate. When it is the live trailing
+         run it is marked active — the card renders it expanded with every
+         command and output shown at once (issue #475); an interior or settled
+         run folds the same way but inactive, so the card auto-collapses it to
+         the compact summary. */
       const isLiveTail = isLive && j === entries.length;
-      let foldCount = toolEntries.length;
-      if (isLiveTail) {
-        const firstRun = toolEntries.findIndex((entry) => entry.item.status === "run");
-        foldCount = firstRun >= 0 ? firstRun : toolEntries.length - 1;
-      }
+      const foldCount = toolEntries.length;
       if (foldCount >= CMD_GROUP_MIN) {
         const grouped = toolEntries.slice(0, foldCount);
         const groupEnd = grouped[grouped.length - 1].idx + 1;
         const gkey = grouped[0].seq;
         const prev = prevGroups.get(gkey);
         let group: CmdGroupItem;
-        if (prev && prev.calls.length === grouped.length && grouped.every((entry, k) => prev.calls[k] === entry.item)) {
+        if (prev && prev.active === isLiveTail && prev.calls.length === grouped.length && grouped.every((entry, k) => prev.calls[k] === entry.item)) {
           group = prev;
         } else {
           const byTool: Record<string, number> = {};
@@ -1938,6 +2075,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
             okCount,
             errCount,
             hasErr: errCount > 0,
+            active: isLiveTail,
           };
         }
         nextGroups.set(gkey, group);

@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 
-import { ComposerAdmissionTimeoutError, withComposerAdmissionDeadline } from "./composerAdmissionDeadline";
+import {
+  ComposerAdmissionTimeoutError,
+  withComposerAdmissionDeadline,
+} from "./composerAdmissionDeadline";
 
 test("a request without an admission response releases the composer deadline", async () => {
   const neverSettles = new Promise<Response>(() => {});

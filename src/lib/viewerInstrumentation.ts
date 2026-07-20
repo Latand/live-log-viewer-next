@@ -4,6 +4,7 @@ import { statePath } from "@/lib/configDir";
 import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { markStructuredHostStartupFailed, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
+import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential";
 
 /*
  * The Viewer's node-side startup runtime. This module (and everything it pulls
@@ -113,6 +114,22 @@ export async function initializeOperatorSpawnCapabilityAtStartup(
   else ensureOperatorSpawnCapability();
 }
 
+export async function startWakatimeIntegrationIfEnabled(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  start: () => Promise<void> = async () => {
+    const { startWakatimeSync } = await import("@/lib/wakatime/sync");
+    startWakatimeSync();
+  },
+  log: (event: string, fields: Readonly<Record<string, never>>) => void = (event, fields) => console.error(event, fields),
+): Promise<void> {
+  if (env.LLV_WAKATIME_ENABLED !== "1") return;
+  try {
+    await start();
+  } catch {
+    log("[wakatime] startup_failed", {});
+  }
+}
+
 export async function runStructuredHostStartup(
   adopt: () => Promise<unknown>,
   log: (...args: unknown[]) => void = console.error,
@@ -159,8 +176,10 @@ export async function runStructuredHostStartup(
 
 /** The full node-runtime startup sequence `src/instrumentation.ts` defers to. */
 export async function registerViewerRuntime(): Promise<void> {
+  discardWakatimeEnvironmentCredential();
   await activateViewerRuntimeWhenCurrent(async () => {
     await initializeOperatorSpawnCapabilityAtStartup();
+    await startWakatimeIntegrationIfEnabled();
     if (process.env.LLV_STRUCTURED_HOSTS === "1") {
       const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
       await runStructuredHostStartup(adoptStructuredHostsAtStartup);

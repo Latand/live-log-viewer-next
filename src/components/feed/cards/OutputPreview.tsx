@@ -21,18 +21,34 @@ export function OutputPreview({
   truncated,
   lang,
   copyLabel,
+  heading,
+  tone = "out",
+  emptyLabel,
+  emptyTip,
+  showAllLabel,
 }: {
   output: string;
   truncated: boolean;
   lang?: string | null;
   copyLabel?: string;
+  /** Small stream label above the block (e.g. "stdout"/"stderr", issue #475). */
+  heading?: string;
+  /** `err` tints the block and heading for the stderr stream. */
+  tone?: "out" | "err";
+  emptyLabel?: string;
+  emptyTip?: string;
+  showAllLabel?: string;
 }) {
   const [all, setAll] = useState(false);
+  const label = heading ? (
+    <div className={`mb-1 text-[10.5px] font-semibold uppercase tracking-wide ${tone === "err" ? "text-danger" : "text-muted"}`}>{heading}</div>
+  ) : null;
   if (!output.trim()) {
     return (
       <div className="mt-1.5">
-        <span className="inline-flex items-center rounded-md bg-sunken px-2 py-0.5 text-[11px] text-muted" title={tr("tools.noOutputTip")}>
-          {tr("tools.noOutput")}
+        {label}
+        <span className="inline-flex items-center rounded-md bg-sunken px-2 py-0.5 text-[11px] text-muted" title={emptyTip ?? tr("tools.noOutputTip")}>
+          {emptyLabel ?? tr("tools.noOutput")}
         </span>
       </div>
     );
@@ -40,19 +56,21 @@ export function OutputPreview({
   const lines = output.split("\n");
   const overflow = lines.length > PREVIEW_LINES || output.length > PREVIEW_CHARS;
   const shown = all ? output : lines.slice(0, PREVIEW_LINES).join("\n").slice(0, PREVIEW_CHARS);
+  const border = tone === "err" ? "border-danger/40" : "border-border";
   return (
     <div className="group/out relative mt-1.5">
+      {label}
       {all && lang ? (
         <CodeBlock code={shown} lang={lang} />
       ) : (
-        <pre className="max-h-[420px] max-w-full overflow-auto whitespace-pre rounded-[10px] border border-border bg-sunken px-3 py-2 font-mono text-[12px]">
+        <pre className={`max-h-[420px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-[10px] border ${border} bg-sunken px-3 py-2 font-mono text-[12px]`}>
           {shown}
         </pre>
       )}
       <CopyButton
         text={output}
         label={copyLabel ?? tr("tools.copyOutput")}
-        className="absolute right-1.5 top-1.5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/out:opacity-100 [@media(hover:none)]:opacity-60"
+        className={`absolute right-1.5 opacity-0 transition-opacity motion-reduce:transition-none focus-visible:opacity-100 group-hover/out:opacity-100 [@media(hover:none)]:opacity-60 ${heading ? "top-6" : "top-1.5"}`}
       />
       {overflow ? (
         <button
@@ -65,7 +83,7 @@ export function OutputPreview({
               {tr("common.collapse")} <ChevronUp className="h-3 w-3" aria-hidden />
             </>
           ) : (
-            tr("tools.showOutput") + (truncated ? " · " + tr("render.truncated") : "")
+            (showAllLabel ?? tr("tools.showOutput")) + (truncated ? " · " + tr("render.truncated") : "")
           )}
         </button>
       ) : truncated ? (

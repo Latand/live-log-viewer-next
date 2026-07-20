@@ -9,9 +9,21 @@ interface NeedleEntry {
 
 const needleCache = globalCache<NeedleEntry>("needle");
 const tailNeedleCache = globalCache<{ size: number; mtimeMs: number; hit: boolean }>("needle-tail-v1");
+type TailUuidIndex = {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  uuids: Set<string>;
+  complete: boolean;
+  boundary: Buffer;
+};
+const tailUuidIndexCache = globalCache<TailUuidIndex>("needle-tail-uuid-v1");
 
 const INITIAL_TAIL_BYTES = 128 * 1024;
 const MAX_TAIL_BYTES = 1024 * 1024;
+const UUID_NEEDLE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUIDS_IN_TEXT = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 function readWindow(fd: number, start: number, length: number): { bytes: Buffer; complete: boolean } {
   const bytes = Buffer.allocUnsafe(length);
@@ -28,19 +40,94 @@ function readWindow(fd: number, start: number, length: number): { bytes: Buffer;
 }
 
 /**
+ * Index every UUID in a transcript tail with one positional read per observed
+ * file generation. Compaction lineage probes ask the same growing transcript
+ * about many different UUIDs; sharing this index prevents one 1 MiB read for
+ * every successor. Proven predecessor links are persisted by the caller, so a
+ * changed generation can discard its old UUID set and keep memory bounded.
+ */
+function addUuids(uuids: Set<string>, bytes: Buffer): void {
+  for (const uuid of bytes.toString("utf8").match(UUIDS_IN_TEXT) ?? []) uuids.add(uuid.toLowerCase());
+}
+
+function fileTailHasUuid(needle: string, pathname: string, stat: fs.Stats): boolean {
+  const normalizedNeedle = needle.toLowerCase();
+  const cached = tailUuidIndexCache.get(pathname);
+  if (cached?.dev === stat.dev && cached.ino === stat.ino && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    if (cached.uuids.has(normalizedNeedle)) return true;
+    if (cached.complete) return false;
+
+    const totalLength = Math.min(stat.size, MAX_TAIL_BYTES);
+    const prefixLength = totalLength - Math.min(stat.size, INITIAL_TAIL_BYTES);
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(pathname, "r");
+      const prefix = readWindow(fd, stat.size - totalLength, prefixLength);
+      addUuids(cached.uuids, Buffer.concat([prefix.bytes, cached.boundary]));
+      if (prefix.complete) {
+        cached.complete = true;
+        cached.boundary = Buffer.alloc(0);
+      }
+      return cached.uuids.has(normalizedNeedle);
+    } catch {
+      return false;
+    } finally {
+      if (fd !== null) fs.closeSync(fd);
+    }
+  }
+
+  const uuids = new Set<string>();
+
+  const initialLength = Math.min(stat.size, INITIAL_TAIL_BYTES);
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(pathname, "r");
+    const initial = readWindow(fd, stat.size - initialLength, initialLength);
+    addUuids(uuids, initial.bytes);
+    const totalLength = Math.min(stat.size, MAX_TAIL_BYTES);
+    const prefixLength = totalLength - initialLength;
+    const entry: TailUuidIndex = {
+      dev: stat.dev,
+      ino: stat.ino,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      uuids,
+      complete: initial.complete && prefixLength === 0,
+      boundary: Buffer.from(initial.bytes.subarray(0, Math.min(initial.bytes.length, 35))),
+    };
+    tailUuidIndexCache.set(pathname, entry);
+    if (uuids.has(normalizedNeedle) || entry.complete) return uuids.has(normalizedNeedle);
+
+    const prefix = readWindow(fd, stat.size - totalLength, prefixLength);
+    addUuids(uuids, Buffer.concat([prefix.bytes, entry.boundary]));
+    if (initial.complete && prefix.complete) {
+      entry.complete = true;
+      entry.boundary = Buffer.alloc(0);
+    }
+    return uuids.has(normalizedNeedle);
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+}
+
+/**
  * Search the immutable end of an append-only transcript through two bounded
  * windows. Compaction markers reference the predecessor's tail UUID, so the
  * first 128 KiB tail covers the common case and the preceding bytes extend
  * the same observation to a 1 MiB ceiling.
  */
 export function fileTailHasNeedle(needle: string, pathname: string): boolean {
-  const cacheKey = `${needle}\u0000${pathname}`;
   let stat: fs.Stats;
   try {
     stat = fs.statSync(pathname);
   } catch {
     return false;
   }
+  if (UUID_NEEDLE.test(needle)) return fileTailHasUuid(needle, pathname, stat);
+
+  const cacheKey = `${needle}\u0000${pathname}`;
   const cached = tailNeedleCache.get(cacheKey);
   if (cached?.hit) return true;
   if (cached?.size === stat.size && cached.mtimeMs === stat.mtimeMs) return false;

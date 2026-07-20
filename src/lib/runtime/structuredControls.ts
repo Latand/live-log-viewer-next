@@ -6,6 +6,7 @@ import { sessionKeyId } from "@/lib/agent/sessionKey";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { newOperationId } from "./contracts";
+import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { recoverDeadStructuredConversation, structuredHostProcessAlive } from "./structuredRecovery";
 
@@ -32,6 +33,7 @@ export async function dispatchStructuredControl(
     enabled?: () => boolean;
     accountExists?: (engine: "claude" | "codex", accountId: string) => boolean;
     recover?: typeof recoverDeadStructuredConversation;
+    republish?: typeof republishStructuredDeliveryHost;
     hostProcessAlive?: (identity: ProcessIdentity | null) => boolean;
   } = {},
 ): Promise<StructuredControlResult | null> {
@@ -64,12 +66,28 @@ export async function dispatchStructuredControl(
   if (!entry.structuredHost && !structuredKill && !structuredReconfigureRestart) return null;
 
   if (request.action !== "interrupt" && request.action !== "kill" && request.action !== "reconfigure") {
-    if (request.action === "resume" && (entry.status === "dead" || entry.status === "unhosted")) {
-      return null;
-    }
-    if (request.action === "resume"
-      && !(dependencies.hostProcessAlive ?? structuredHostProcessAlive)(entry.structuredHost?.process ?? null)) {
+    if (request.action === "resume") {
+      if (entry.status === "dead" || entry.status === "unhosted") return null;
       try {
+        if ((dependencies.hostProcessAlive ?? structuredHostProcessAlive)(entry.structuredHost?.process ?? null)) {
+          const republished = await (dependencies.republish ?? republishStructuredDeliveryHost)({
+            engine: conversation.engine,
+            sessionId: generation.id,
+          });
+          if (!republished) {
+            return { status: 503, body: { error: "structured recovery ownership is unavailable" } };
+          }
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              structured: true,
+              target: conversation.id,
+              outcome: "resumed",
+              spawned: false,
+            },
+          };
+        }
         const recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({
           path: request.path || generation.path,
           conversationId: conversation.id,
@@ -91,7 +109,7 @@ export async function dispatchStructuredControl(
         return { status: 503, body: { error: error instanceof Error ? error.message : String(error) } };
       }
     }
-    const label = ["compact", "dialog-key", "kill", "reconfigure", "resume"].includes(request.action)
+    const label = ["compact", "dialog-key", "kill", "reconfigure"].includes(request.action)
       ? request.action
       : "requested";
     return { status: 409, body: { error: `structured host does not support the ${label} control` } };

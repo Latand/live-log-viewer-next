@@ -199,6 +199,30 @@ test("a failure renders once with retry, edit, and dismiss, and dismissal report
   flushSync(() => root.unmount());
 });
 
+test("retry appears once only after an authoritative retryable terminal failure", async () => {
+  setLocale("en");
+  const retryLabel = translate("en", "runtime.receipt.retry");
+  const view = (status: RuntimeReceipt["status"]) => (
+    <RuntimeComposerReceipts
+      receipts={[receipt({ operationId: `op-${status}`, status, text: "preserved generation" })]}
+      onRetry={() => {}}
+      onEdit={() => {}}
+      onDismiss={() => {}}
+    />
+  );
+  const { host, root } = await renderInto(view("uncertain"));
+  const retries = () => [...host.querySelectorAll("button")]
+    .filter((button) => button.textContent === retryLabel);
+
+  expect(retries()).toHaveLength(0);
+  await settle(() => root.render(view("rejected")));
+  expect(retries()).toHaveLength(0);
+  await settle(() => root.render(view("failed")));
+  expect(retries()).toHaveLength(1);
+
+  await act(async () => root.unmount());
+});
+
 test("a dismissed failure stays dismissed across a composer remount", async () => {
   mockTargets();
   publishReceipts([receipt({ operationId: "op-persist", status: "failed", reason: "dead-host", text: "retry або ні" })]);

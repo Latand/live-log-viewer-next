@@ -144,6 +144,7 @@ function cmdGroup(calls: ToolEvent[]): CmdGroupItem {
     okCount,
     errCount,
     hasErr: errCount > 0,
+    active: false,
   };
 }
 

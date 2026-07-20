@@ -10,7 +10,7 @@ import type { TFunction } from "@/lib/i18n";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { sendRuntimeMessage, useRuntimeReceiptsForArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
+import { refreshRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
@@ -19,7 +19,14 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
-import { ComposerAdmissionTimeoutError, withComposerAdmissionDeadline } from "./composerAdmissionDeadline";
+import {
+  COMPOSER_ADMISSION_DEADLINE_MS,
+  COMPOSER_RECEIPT_POLL_INTERVAL_MS,
+  COMPOSER_RECEIPT_RECONCILIATION_MS,
+  ComposerAdmissionTimeoutError,
+  reconcileComposerReceipt,
+  withComposerAdmissionDeadline,
+} from "./composerAdmissionDeadline";
 import { RuntimePill } from "./RuntimePill";
 import { savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
 import { type PendingImage } from "./imageAttachments";
@@ -75,6 +82,19 @@ interface SentEntry {
   clientMessageId?: string;
 }
 
+interface ComposerSendResult {
+  ok?: boolean;
+  structured?: boolean;
+  error?: string;
+  /** HTTP status of the response, absent when the response was lost. */
+  status?: number;
+  imagePaths?: string[];
+  target?: string;
+  spawned?: boolean;
+  outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "delivering" | "delivered" | "recovering" | "failed";
+  receipt?: RuntimeReceipt;
+}
+
 const SENT_LIMIT = 8;
 const SPAWN_TTL_MS = 90_000;
 const PANE_TTL_MS = 10 * 60_000;
@@ -85,13 +105,14 @@ export function deliveryAttemptKey(current: string, stored?: string): string {
   return stored || current;
 }
 
+type RetryAwareReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
+const retryParentOperationId = (receipt: RuntimeReceipt): string | null =>
+  (receipt as RetryAwareReceipt).retryOfOperationId ?? null;
+
 export function mergeRuntimeReceipts(
   runtimeReceipts: RuntimeReceipt[],
   immediateReceipts: RuntimeReceipt[],
 ): RuntimeReceipt[] {
-  type RetryAwareReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
-  const retryParent = (receipt: RuntimeReceipt): string | null =>
-    (receipt as RetryAwareReceipt).retryOfOperationId ?? null;
   const allReceipts = [...runtimeReceipts, ...immediateReceipts];
   const keysByOperationId = new Map<string, Set<string>>();
   const operationsByIdempotencyKey = new Map<string, Set<string>>();
@@ -142,7 +163,7 @@ export function mergeRuntimeReceipts(
   for (const receipt of attempts) {
     const lineage = new Set<string>([receipt.operationId]);
     const ancestors: string[] = [];
-    let ancestor = retryParent(receipt);
+    let ancestor = retryParentOperationId(receipt);
     let cyclic = false;
     while (ancestor) {
       if (lineage.has(ancestor)) {
@@ -153,7 +174,7 @@ export function mergeRuntimeReceipts(
       const parent = byOperationId.get(ancestor);
       if (!parent) break;
       ancestors.push(ancestor);
-      ancestor = retryParent(parent);
+      ancestor = retryParentOperationId(parent);
     }
     if (!cyclic) {
       for (const operationId of ancestors) superseded.add(operationId);
@@ -455,6 +476,20 @@ export interface PendingDelivery {
       admission removes exactly these from the composer, so images attached
       after the send stay put. */
   images: readonly PendingImage[];
+  /** Runtime selection frozen with the first request under this key. */
+  runtime?: RuntimeProfile;
+  /** Records that runtime absence was captured deliberately. */
+  runtimeCaptured?: true;
+  /** False when a legacy/quota-limited record lacks bytes needed for an exact
+      replay. Such a record remains observable for late receipt settlement and
+      never lends its key to a new payload after remount. */
+  payloadComplete?: false;
+  /** Current runtime operation that owns this logical generation. A manual
+      retry rotates the operation while preserving the generation. */
+  operationId?: string;
+  /** The immediate request crossed its deadline and snapshot reconciliation
+      still owns this generation. Persisted so a refresh resumes observation. */
+  reconciling?: true;
 }
 
 const PENDING_DELIVERY_LIMIT = 8;
@@ -464,16 +499,92 @@ const SETTLED_SEND_KEY_LIMIT = 32;
     survives a composer remount or a full page refresh (the attachment snapshot
     is memory-only — previews don't survive a refresh either). */
 const pendingSendKey = (id: string) => "llvPendingSend:" + id;
+const draftImagesKey = (id: string) => "llvDraftImages:" + id;
+
+interface PersistedPendingDelivery {
+  key?: unknown;
+  text?: unknown;
+  images?: unknown;
+  runtime?: unknown;
+  runtimeCaptured?: unknown;
+  reconciling?: unknown;
+  payloadComplete?: unknown;
+  operationId?: unknown;
+}
+
+function persistedRuntime(value: unknown): RuntimeProfile | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const runtime: RuntimeProfile = {};
+  if (typeof raw.model === "string") runtime.model = raw.model;
+  if (typeof raw.effort === "string") runtime.effort = raw.effort;
+  if (typeof raw.fast === "boolean") runtime.fast = raw.fast;
+  return Object.keys(runtime).length ? runtime : undefined;
+}
+
+function persistedImages(value: unknown): PendingImage[] | null {
+  if (!Array.isArray(value)) return null;
+  const images: PendingImage[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+    const raw = candidate as Record<string, unknown>;
+    if (typeof raw.base64 !== "string" || typeof raw.mime !== "string") return null;
+    images.push({
+      ...(typeof raw.id === "string" ? { id: raw.id } : {}),
+      base64: raw.base64,
+      mime: raw.mime,
+      preview: `data:${raw.mime};base64,${raw.base64}`,
+    });
+  }
+  return images;
+}
+
+function readDraftImages(id: string): PendingImage[] | null {
+  try {
+    const raw = sessionStorage.getItem(draftImagesKey(id));
+    return raw === null ? null : persistedImages(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function writeDraftImages(id: string, images: readonly PendingImage[], preserveEmpty: boolean): void {
+  try {
+    if (!images.length && !preserveEmpty) {
+      sessionStorage.removeItem(draftImagesKey(id));
+      return;
+    }
+    sessionStorage.setItem(draftImagesKey(id), JSON.stringify(images.map(({ id: imageId, base64, mime }) => ({
+      ...(imageId ? { id: imageId } : {}),
+      base64,
+      mime,
+    }))));
+  } catch { /* The visible in-memory tray remains authoritative. */ }
+}
 
 export function readPendingDeliveries(id: string): PendingDelivery[] {
   try {
-    const raw = JSON.parse(sessionStorage.getItem(pendingSendKey(id)) ?? "[]") as { key?: unknown; text?: unknown }[];
+    const raw = JSON.parse(sessionStorage.getItem(pendingSendKey(id)) ?? "[]") as PersistedPendingDelivery[];
     if (!Array.isArray(raw)) return [];
     return raw
-      .filter((entry): entry is { key: string; text: string } =>
+      .filter((entry): entry is PersistedPendingDelivery & { key: string; text: string } =>
         Boolean(entry) && typeof entry.key === "string" && typeof entry.text === "string")
       .slice(0, PENDING_DELIVERY_LIMIT)
-      .map((entry) => ({ key: entry.key, text: entry.text, images: [] }));
+      .map((entry) => {
+        const images = persistedImages(entry.images);
+        const payloadComplete = images !== null && entry.payloadComplete !== false;
+        const runtime = persistedRuntime(entry.runtime);
+        return {
+          key: entry.key,
+          text: entry.text,
+          images: images ?? [],
+          ...(runtime ? { runtime } : {}),
+          ...(entry.runtimeCaptured === true ? { runtimeCaptured: true as const } : {}),
+          ...(payloadComplete ? {} : { payloadComplete: false as const }),
+          ...(typeof entry.operationId === "string" ? { operationId: entry.operationId } : {}),
+          ...(entry.reconciling === true ? { reconciling: true as const } : {}),
+        };
+      });
   } catch {
     return [];
   }
@@ -482,11 +593,60 @@ export function readPendingDeliveries(id: string): PendingDelivery[] {
 export function writePendingDeliveries(id: string, pending: readonly PendingDelivery[]): void {
   try {
     if (pending.length) {
-      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text }) => ({ key, text }))));
+      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, images, runtime, runtimeCaptured, reconciling, payloadComplete, operationId }) => ({
+        key,
+        text,
+        images: images.map(({ id: imageId, base64, mime }) => ({
+          ...(imageId ? { id: imageId } : {}),
+          base64,
+          mime,
+        })),
+        ...(runtime ? { runtime } : {}),
+        ...(runtimeCaptured ? { runtimeCaptured: true } : {}),
+        ...(reconciling ? { reconciling: true } : {}),
+        ...(payloadComplete === false ? { payloadComplete: false } : {}),
+        ...(operationId ? { operationId } : {}),
+      }))));
     } else {
       sessionStorage.removeItem(pendingSendKey(id));
     }
-  } catch { /* quota/opaque-origin: the in-memory generation still settles */ }
+  } catch {
+    /* Large image generations may exceed synchronous browser storage. Retain
+       settlement metadata and explicitly fence the key from payload replay;
+       the in-memory owner still holds all bytes until this mount ends. */
+    try {
+      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, runtime, runtimeCaptured, reconciling, operationId }) => ({
+        key,
+        text,
+        ...(runtime ? { runtime } : {}),
+        ...(runtimeCaptured ? { runtimeCaptured: true } : {}),
+        ...(reconciling ? { reconciling: true } : {}),
+        ...(operationId ? { operationId } : {}),
+        payloadComplete: false,
+      }))));
+    } catch { /* opaque origin: in-memory settlement remains authoritative */ }
+  }
+}
+
+function releasePendingReconciliation(entry: PendingDelivery): PendingDelivery {
+  const released = { ...entry };
+  delete released.reconciling;
+  return released;
+}
+
+export function rebindPendingOperations(
+  pending: readonly PendingDelivery[],
+  receipts: readonly RuntimeReceipt[],
+): PendingDelivery[] {
+  return pending.map((entry) => {
+    const owner = receipts.find((receipt) =>
+      Boolean(entry.operationId) && retryParentOperationId(receipt) === entry.operationId)
+      ?? receipts.find((receipt) => receipt.operationId === entry.operationId)
+      ?? receipts.find((receipt) => receipt.idempotencyKey === entry.key);
+    return owner && owner.operationId !== entry.operationId
+      ? { ...entry, operationId: owner.operationId }
+      : entry;
+  });
 }
 
 /**
@@ -505,8 +665,13 @@ export function settlePendingDeliveries(
   receipts: readonly RuntimeReceipt[],
 ): { settled: { entry: PendingDelivery; text: string }[]; remaining: PendingDelivery[] } {
   const admittedByKey = new Map<string, RuntimeReceipt>();
+  const admittedByOperation = new Map<string, RuntimeReceipt>();
   for (const receipt of receipts) {
     if (!receiptIsAdmitted(receipt.status)) continue;
+    const currentOperation = admittedByOperation.get(receipt.operationId);
+    if (!currentOperation || (receipt.status === "delivered" && currentOperation.status !== "delivered")) {
+      admittedByOperation.set(receipt.operationId, receipt);
+    }
     const current = admittedByKey.get(receipt.idempotencyKey);
     if (!current || (receipt.status === "delivered" && current.status !== "delivered")) {
       admittedByKey.set(receipt.idempotencyKey, receipt);
@@ -515,7 +680,8 @@ export function settlePendingDeliveries(
   const settled: { entry: PendingDelivery; text: string }[] = [];
   const remaining: PendingDelivery[] = [];
   for (const entry of pending) {
-    const receipt = admittedByKey.get(entry.key);
+    const receipt = admittedByKey.get(entry.key)
+      ?? (entry.operationId ? admittedByOperation.get(entry.operationId) : undefined);
     if (!receipt) {
       remaining.push(entry);
       continue;
@@ -526,6 +692,29 @@ export function settlePendingDeliveries(
     settled.push({ entry, text: deliveredText });
   }
   return { settled, remaining };
+}
+
+/** A synthetic, local-only receipt row for a generation whose reconciliation
+    window closed without a durable admission or terminal receipt. It carries
+    the original idempotency key. A later durable receipt for the same key
+    supersedes it through mergeRuntimeReceipts tier two, keeping one visible row
+    per message. The row records an unconfirmed state and leaves draft settlement
+    to an authoritative receipt. */
+const UNCONFIRMED_RECEIPT_PREFIX = "composer-unconfirmed:";
+function unconfirmedReceiptOperationId(clientMessageId: string): string {
+  return UNCONFIRMED_RECEIPT_PREFIX + clientMessageId;
+}
+function unconfirmedReceipt(clientMessageId: string, conversationId: string, text: string): RuntimeReceipt {
+  return {
+    operationId: unconfirmedReceiptOperationId(clientMessageId),
+    idempotencyKey: clientMessageId,
+    conversationId,
+    kind: "send",
+    status: "uncertain",
+    text,
+    at: new Date().toISOString(),
+    revision: 0,
+  };
 }
 
 /** Removes one attachment per delivered snapshot entry, so attachments added
@@ -592,7 +781,7 @@ export function adoptComposerState(path: string, cardId: string): void {
     const previousOwner = sessionStorage.getItem(composerOwnerKey(path));
     for (const from of [previousOwner, path]) {
       if (!from || from === cardId) continue;
-      for (const keyOf of [draftKey, pendingSendKey, sentKey, dismissedReceiptsKey]) {
+      for (const keyOf of [draftKey, draftImagesKey, pendingSendKey, sentKey, dismissedReceiptsKey]) {
         const legacy = sessionStorage.getItem(keyOf(from));
         if (legacy === null) continue;
         if (sessionStorage.getItem(keyOf(cardId)) === null) sessionStorage.setItem(keyOf(cardId), legacy);
@@ -792,12 +981,17 @@ export function TmuxComposer({
     imageCapability: structuredSession ? structuredImageCapability ?? null : null,
   });
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
+  const attachmentDraftHydrated = useRef(false);
   const isMobile = useIsMobile();
   /* Interrupt / compact / attach-terminal / mode chip moved into the unified
      control strip (issue #241) — the composer keeps only the message surface
      (text, images, mic, send) and its delivery receipts. */
   const [sent, setSent] = useState<SentEntry[]>([]);
   const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>([]);
+  const [reconcilingSend, setReconcilingSend] = useState(() =>
+    typeof window !== "undefined" && readPendingDeliveries(cardId).some((entry) => entry.reconciling));
+  const [replayGenerationAvailable, setReplayGenerationAvailable] = useState(() =>
+    typeof window !== "undefined" && readPendingDeliveries(cardId).some((entry) => entry.payloadComplete !== false));
   /* Operation ids whose settled problem rows the user dismissed (issue #264
      rule 3). Persisted per conversation identity and adopted across id
      rotations alongside the draft. */
@@ -828,6 +1022,19 @@ export function TmuxComposer({
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
   const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
+  const displayedRuntimeReceiptsRef = useRef(displayedRuntimeReceipts);
+  useLayoutEffect(() => {
+    displayedRuntimeReceiptsRef.current = displayedRuntimeReceipts;
+  }, [displayedRuntimeReceipts]);
+  const receiptReconciliations = useRef<Map<string, AbortController>>(new Map());
+  const legacyResponseEpoch = useRef<{ cardId: string; active: boolean }>({ cardId, active: true });
+  useLayoutEffect(() => {
+    const epoch = { cardId, active: true };
+    legacyResponseEpoch.current = epoch;
+    return () => {
+      epoch.active = false;
+    };
+  }, [cardId]);
   const dismissedReceipts = new Set(dismissedReceiptIds);
   const dismissReceipts = (operationIds: string[]) => {
     if (!operationIds.length) return;
@@ -843,6 +1050,7 @@ export function TmuxComposer({
 
   const persistPendingDeliveries = (next: PendingDelivery[]) => {
     pendingDeliveries.current = next;
+    setReplayGenerationAvailable(next.some((entry) => entry.payloadComplete !== false));
     writePendingDeliveries(cardId, next);
   };
 
@@ -857,6 +1065,89 @@ export function TmuxComposer({
     }
   };
 
+  const finishReceiptReconciliation = (clientMessageId: string, receipt: RuntimeReceipt) => {
+    const controller = receiptReconciliations.current.get(clientMessageId);
+    if (!controller) return;
+    controller.abort();
+    receiptReconciliations.current.delete(clientMessageId);
+    setStatus(null);
+    if (receiptIsTerminal(receipt.status) && !receiptIsAdmitted(receipt.status)) {
+      persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
+        entry.key === clientMessageId
+          ? releasePendingReconciliation(entry)
+          : entry));
+      if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
+    }
+    setReconcilingSend(receiptReconciliations.current.size > 0);
+  };
+
+  /* The local reconciliation window closed without a durable admission or
+     terminal receipt. Release the composer for an explicit same-key retry.
+     Preserve the generation, its idempotency key, and its attachments. The
+     durable receipt stream continues observing: a late admission clears the
+     draft through settlePendingDeliveries, and a terminal failure surfaces
+     Retry. This path performs no automatic actuation. */
+  const releaseReconciliationToRetry = (clientMessageId: string) => {
+    receiptReconciliations.current.delete(clientMessageId);
+    /* Drop the reconciling marker so a remount exposes a recoverable retry.
+       Keep the generation so a late receipt can settle it and the key remains
+       replayable. */
+    persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
+      entry.key === clientMessageId
+        ? releasePendingReconciliation(entry)
+        : entry));
+    const entry = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
+    if (!entry) return;
+    /* A quota-limited remount lacks bytes for a safe replay. Keep the composer
+       fenced while the durable receipt stream determines the original fate. */
+    setReconcilingSend(receiptReconciliations.current.size > 0 || entry.payloadComplete === false);
+    setStatus({ kind: "err", text: t("composer.deliveryUnconfirmed") });
+    setImmediateRuntimeReceipts((current) => [
+      unconfirmedReceipt(clientMessageId, cardId, entry.text),
+      ...current.filter((candidate) =>
+        candidate.idempotencyKey !== clientMessageId
+        && candidate.operationId !== unconfirmedReceiptOperationId(clientMessageId)),
+    ].slice(0, 8));
+  };
+
+  const startReceiptReconciliation = (
+    clientMessageId: string,
+    lateReceipt?: Promise<RuntimeReceipt | null>,
+  ) => {
+    if (receiptReconciliations.current.has(clientMessageId)) return;
+    const controller = new AbortController();
+    receiptReconciliations.current.set(clientMessageId, controller);
+    setReconcilingSend(true);
+    void reconcileComposerReceipt({
+      read: () => displayedRuntimeReceiptsRef.current.find((receipt) =>
+        receipt.idempotencyKey === clientMessageId
+        && (receiptIsAdmitted(receipt.status) || receiptIsTerminal(receipt.status))) ?? null,
+      refresh: refreshRuntime,
+      late: lateReceipt,
+      timeoutMs: COMPOSER_RECEIPT_RECONCILIATION_MS,
+      pollIntervalMs: COMPOSER_RECEIPT_POLL_INTERVAL_MS,
+      signal: controller.signal,
+    }).then((receipt) => {
+      /* An admitted or terminal receipt aborts through
+         finishReceiptReconciliation. A remount also aborts this owner. Both
+         paths already own settlement, so this resolution stays silent. */
+      if (controller.signal.aborted) return;
+      if (receipt === null) {
+        releaseReconciliationToRetry(clientMessageId);
+        return;
+      }
+      setImmediateRuntimeReceipts((current) => [
+        receipt,
+        ...current.filter((candidate) => candidate.operationId !== receipt.operationId),
+      ].slice(0, 8));
+    });
+  };
+
+  useEffect(() => () => {
+    for (const controller of receiptReconciliations.current.values()) controller.abort();
+    receiptReconciliations.current.clear();
+  }, []);
+
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     /* Identity enrichment without a remount (a poll fills in the conversation
@@ -866,9 +1157,32 @@ export function TmuxComposer({
     setSent(readSent(cardId));
     setImmediateRuntimeReceipts([]);
     setDismissedReceiptIds(readDismissedReceipts(cardId));
-    pendingDeliveries.current = readPendingDeliveries(cardId);
-    settledSendKeys.current = new Set();
+    for (const controller of receiptReconciliations.current.values()) controller.abort();
+    receiptReconciliations.current.clear();
+    const restoredPending = readPendingDeliveries(cardId);
+    pendingDeliveries.current = restoredPending;
+    setReplayGenerationAvailable(restoredPending.some((entry) => entry.payloadComplete !== false));
     runtimeSendSnapshots.current = new Map();
+    /* Replay ownership survives independently from the editable draft. The
+       next submit resolves the oldest unresolved generation first while text
+       and attachments prepared for a later turn remain in the composer. */
+    const draftNow = typeof window !== "undefined" ? sessionStorage.getItem(draftKey(cardId)) ?? "" : "";
+    const resumable = restoredPending.find((entry) => entry.payloadComplete !== false);
+    const draftImages = readDraftImages(cardId);
+    attachmentDraftHydrated.current = false;
+    const trayImages = draftImages ?? (resumable?.text === draftNow ? resumable.images : []);
+    const restoredImages = attachments.replace(trayImages.map((image) => ({ ...image })));
+    queueMicrotask(() => { attachmentDraftHydrated.current = true; });
+    if (resumable && restoredImages) {
+      idempotencyKey.current = resumable.key;
+      if (resumable.runtimeCaptured) runtimeSendSnapshots.current.set(resumable.key, resumable.runtime);
+    }
+    const reconcilingKeys = restoredPending.filter((entry) => entry.reconciling).map((entry) => entry.key);
+    const hasIncompletePayload = restoredPending.some((entry) => entry.payloadComplete === false);
+    setReconcilingSend(reconcilingKeys.length > 0 || hasIncompletePayload);
+    if (reconcilingKeys.length || hasIncompletePayload) setStatus({ kind: "err", text: t("composer.admissionTimedOut") });
+    for (const key of reconcilingKeys) startReceiptReconciliation(key);
+    settledSendKeys.current = new Set();
     /* Keyed by identity alone: a path migration under a stable id must not
        wipe the immediate receipts or the settled-key memory (`file.path` is
        only read to adopt records the old identity left behind). */
@@ -876,14 +1190,50 @@ export function TmuxComposer({
   }, [cardId]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  useEffect(() => {
+    if (!attachmentDraftHydrated.current) return;
+    writeDraftImages(cardId, attachments.images, pendingDeliveries.current.length > 0);
+  }, [attachments.images, cardId]);
+
   /* Settle submitted generations against the receipt stream: a durably
      admitted receipt (queued or beyond) for a remembered key means the server
      holds that attempt, so its exact text leaves the draft (later typing
      survives; a rewritten draft for the next turn stays untouched). Runs on
      mount too, so a refresh snapshot reconciles a persisted generation. */
   useEffect(() => {
+    for (const [key] of receiptReconciliations.current) {
+      const receipt = displayedRuntimeReceipts.find((candidate) =>
+        candidate.idempotencyKey === key
+        && (receiptIsAdmitted(candidate.status) || receiptIsTerminal(candidate.status)));
+      if (receipt) finishReceiptReconciliation(key, receipt);
+    }
+    /* A terminal non-admitted receipt (failed/rejected) for a preserved
+       generation the local window already released: mint a fresh key so the
+       next message is never replay-deduped into silence. The failure itself
+       surfaces Retry through the durable receipt stack. */
+    for (const entry of pendingDeliveries.current) {
+      if (receiptReconciliations.current.has(entry.key)) continue;
+      if (idempotencyKey.current !== entry.key) continue;
+      const failure = displayedRuntimeReceipts.find((candidate) =>
+        candidate.idempotencyKey === entry.key
+        && receiptIsTerminal(candidate.status) && !receiptIsAdmitted(candidate.status));
+      if (failure) idempotencyKey.current = mintIdempotencyKey();
+    }
     if (!pendingDeliveries.current.length) return;
+    /* A retry leaf receives a fresh idempotency key and points at its parent
+       operation. Move logical-generation ownership to that leaf before
+       settlement so queued/delivered retry receipts consume the original once. */
+    const rebound = rebindPendingOperations(pendingDeliveries.current, displayedRuntimeReceipts);
+    const operationChanged = rebound.some((entry, index) => entry !== pendingDeliveries.current[index]);
+    if (operationChanged) persistPendingDeliveries(rebound);
     const { settled, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);
+    const incompleteStillUncertain = remaining.some((entry) => {
+      if (entry.payloadComplete !== false) return false;
+      return !displayedRuntimeReceipts.some((receipt) =>
+        (receipt.idempotencyKey === entry.key || receipt.operationId === entry.operationId)
+        && receiptIsTerminal(receipt.status));
+    });
+    setReconcilingSend(receiptReconciliations.current.size > 0 || incompleteStillUncertain);
     if (!settled.length) return;
     persistPendingDeliveries(remaining);
     for (const settlement of settled) {
@@ -962,12 +1312,22 @@ export function TmuxComposer({
   };
 
   const send = async (overrideText?: string, retry?: { receiptId: number; clientMessageId?: string }) => {
-    const payloadText = overrideText ?? text;
+    const requestedText = overrideText ?? text;
     /* The generation snapshot: exactly the text and attachments this attempt
        carries onto the wire. Read through the ref so a submit racing a paste
        still sends and later clears the same set. */
-    const sentImages: PendingImage[] = attachments.imagesRef.current.map((image) => ({ ...image }));
-    if (busy || voiceSending || (!payloadText.trim() && !sentImages.length)) return;
+    const requestedImages: PendingImage[] = attachments.imagesRef.current.map((image) => ({ ...image }));
+    /* Resolve the key before selecting the payload. A generation retained after
+       uncertain admission owns an immutable text/image snapshot; later edits
+       stay in the composer for the following generation while an explicit
+       submit replays the original bytes under the original key. */
+    const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
+    const replayGeneration = pendingDeliveries.current.find((entry) => entry.key === clientMessageId);
+    const payloadText = replayGeneration?.text ?? requestedText;
+    const sentImages: PendingImage[] = replayGeneration
+      ? replayGeneration.images.map((image) => ({ ...image }))
+      : requestedImages;
+    if (busy || voiceSending || reconcilingSend || (!payloadText.trim() && !sentImages.length)) return;
     /* A legacy dead host keeps its draft local. Structured ownership admits a
        text-only message durably and uses that request to recover its engine host. */
     if (deadHost && !structuredSession) {
@@ -990,13 +1350,19 @@ export function TmuxComposer({
     setStatus(deadHost
       ? { kind: "info", text: t("composer.receiptRecovering") }
       : null);
-    /* Idempotency key: the backend can dedupe a retried held/failed delivery
-       against this id so the successor never receives the same prompt twice. */
-    const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
     /* The runtime settings this key rides with, frozen at its first attempt so
-       a replay stays byte-identical (issue #390 §10). */
-    if (structuredSession && !runtimeSendSnapshots.current.has(clientMessageId)) {
-      runtimeSendSnapshots.current.set(clientMessageId, sendRuntimeFrom(file));
+       structured sends and legacy resume spawns replay byte-identically. */
+    const legacyResumeRuntime = spawnMode && !relayMode;
+    const capturesRuntime = Boolean(structuredSession) || legacyResumeRuntime;
+    if (capturesRuntime && !runtimeSendSnapshots.current.has(clientMessageId)) {
+      runtimeSendSnapshots.current.set(
+        clientMessageId,
+        replayGeneration?.runtimeCaptured
+          ? replayGeneration.runtime
+          : structuredSession
+            ? sendRuntimeFrom(file)
+            : resumeProfileBody(file),
+      );
       while (runtimeSendSnapshots.current.size > SETTLED_SEND_KEY_LIMIT) {
         const oldest = runtimeSendSnapshots.current.keys().next().value;
         if (oldest === undefined) break;
@@ -1017,7 +1383,13 @@ export function TmuxComposer({
       && !pendingDeliveries.current.some((entry) => entry.key === clientMessageId);
     if (recordedThisAttempt) {
       persistPendingDeliveries([
-        { key: clientMessageId, text: payloadText, images: sentImages },
+        {
+          key: clientMessageId,
+          text: payloadText,
+          images: sentImages,
+          ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
+          ...(capturesRuntime ? { runtimeCaptured: true as const } : {}),
+        },
         ...pendingDeliveries.current,
       ].slice(0, PENDING_DELIVERY_LIMIT));
     }
@@ -1031,19 +1403,44 @@ export function TmuxComposer({
       setText(draftAfterDelivery(textRef.current, clearedText));
       attachments.settleDelivered(snapshot);
     };
+    const settleLegacySuccess = (result: ComposerSendResult) => {
+      if (settledSendKeys.current.has(clientMessageId)) return;
+      const imgCount = sentImages.length;
+      const held = result.outcome === "held" || result.outcome === "queued" || result.outcome === "recovering";
+      const at = nowMs();
+      const entry: SentEntry = {
+        id: at,
+        text: payloadText.trim() || (imgCount ? t("composer.imagesCount", { count: imgCount }) : ""),
+        at,
+        via: result.outcome === "resumed" || result.spawned ? "spawn" : "pane",
+        state: held ? (result.outcome as DeliveryReceiptState) : "sent",
+        clientMessageId,
+      };
+      const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
+      persistSent([...prior, entry].slice(-SENT_LIMIT));
+      const attempt = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
+      persistPendingDeliveries(pendingDeliveries.current.filter((candidate) => candidate.key !== clientMessageId));
+      setImmediateRuntimeReceipts((current) => current.filter((candidate) =>
+        candidate.idempotencyKey !== clientMessageId
+        && candidate.operationId !== unconfirmedReceiptOperationId(clientMessageId)));
+      if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
+      settleGeneration(payloadText, attempt?.images ?? sentImages);
+      setStatus({
+        kind: held ? "info" : "ok",
+        text: held
+          ? t("composer.deliveryHeld", { label: file.migration?.targetLabel ?? file.migration?.targetAccountId ?? "" })
+          : result.outcome === "resumed" || result.spawned
+            ? t("composer.spawned", { target: result.target ?? "" })
+            : result.imagePaths?.length
+              ? t("composer.sentPaths", { count: result.imagePaths.length })
+              : t("common.sent"),
+      });
+      inputRef.current?.focus();
+    };
+    const responseEpoch = legacyResponseEpoch.current;
+    let admissionRequest: Promise<ComposerSendResult> | null = null;
     try {
-      const json: {
-        ok?: boolean;
-        structured?: boolean;
-        error?: string;
-        /** HTTP status of the response, absent when the response was lost. */
-        status?: number;
-        imagePaths?: string[];
-        target?: string;
-        spawned?: boolean;
-        outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "delivering" | "delivered" | "recovering" | "failed";
-        receipt?: RuntimeReceipt;
-      } = await withComposerAdmissionDeadline(Promise.resolve(structuredSession
+      admissionRequest = Promise.resolve(structuredSession
         ? !reachesWire
           ? { ok: false, structured: true, error: structuredImagesReason }
           : sendRuntimeMessage({
@@ -1076,12 +1473,13 @@ export function TmuxComposer({
               /* The "on resume" profile (issue #241 §4): when this send reopens a
                  finished root conversation, boot it with the model/effort the
                  strip's picker saved. Ignored for a live pane or a subagent relay. */
-              ...(spawnMode && !relayMode ? resumeProfileBody(file) : {}),
+              ...(legacyResumeRuntime ? runtimeOverride ?? {} : {}),
             }),
           }).then(async (response) => {
-            const body = await response.json() as typeof json;
+            const body = await response.json() as ComposerSendResult;
             return { ...body, status: response.status, ok: response.ok && body.ok === true };
-          })));
+          }));
+      const json = await withComposerAdmissionDeadline(admissionRequest, COMPOSER_ADMISSION_DEADLINE_MS);
       if (!json.ok) {
         if (json.structured && json.receipt) {
           /* Keep the payload readable in the compact receipt for retry and
@@ -1153,38 +1551,7 @@ export function TmuxComposer({
         inputRef.current?.focus();
         return;
       }
-      const imgCount = sentImages.length;
-      // The migration delivery fence returns `held`/`queued`/`recovering` when
-      // the text was accepted for the successor rather than delivered live. Those
-      // are durable acknowledgements (the backend persisted the message), so the
-      // draft clears but the receipt tracks the pending state until it resolves.
-      const held = json.outcome === "held" || json.outcome === "queued" || json.outcome === "recovering";
-      const at = nowMs();
-      const entry: SentEntry = {
-        id: at,
-        text: payloadText.trim() || (imgCount ? t("composer.imagesCount", { count: imgCount }) : ""),
-        at,
-        via: json.outcome === "resumed" || json.spawned ? "spawn" : "pane",
-        state: held ? (json.outcome as DeliveryReceiptState) : "sent",
-        clientMessageId,
-      };
-      const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
-      persistSent([...prior, entry].slice(-SENT_LIMIT));
-      const attempt = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
-      persistPendingDeliveries(pendingDeliveries.current.filter((candidate) => candidate.key !== clientMessageId));
-      if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey(); // next draft is a new message
-      settleGeneration(payloadText, attempt?.images ?? sentImages);
-      setStatus({
-        kind: held ? "info" : "ok",
-        text: held
-          ? t("composer.deliveryHeld", { label: file.migration?.targetLabel ?? file.migration?.targetAccountId ?? "" })
-          : json.outcome === "resumed" || json.spawned
-            ? t("composer.spawned", { target: json.target ?? "" })
-            : json.imagePaths?.length
-              ? t("composer.sentPaths", { count: json.imagePaths.length })
-              : t("common.sent"),
-      });
-      inputRef.current?.focus();
+      settleLegacySuccess(json);
     } catch (error) {
       /* The request died on the wire AFTER the server may have accepted it.
          The pre-flight record (text AND attachment snapshot) stays armed so a
@@ -1198,6 +1565,28 @@ export function TmuxComposer({
             ? t("composer.admissionTimedOut")
             : t("common.serverUnavailable"),
         });
+        if (error instanceof ComposerAdmissionTimeoutError) {
+          persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
+            entry.key === clientMessageId ? { ...entry, reconciling: true } : entry));
+          const lateReceipt = admissionRequest?.then((result) => {
+            const receipt = result.receipt;
+            if (receipt && (receiptIsAdmitted(receipt.status) || receiptIsTerminal(receipt.status))) {
+              return (receipt.kind === "send" || receipt.kind === "steer")
+                && !receipt.text && payloadText.trim()
+                ? { ...receipt, text: payloadText.trim() }
+                : receipt;
+            }
+            if (!result.ok || result.structured) return null;
+            if (!responseEpoch.active || legacyResponseEpoch.current !== responseEpoch) return null;
+            const controller = receiptReconciliations.current.get(clientMessageId);
+            settleLegacySuccess(result);
+            controller?.abort();
+            receiptReconciliations.current.delete(clientMessageId);
+            setReconcilingSend(receiptReconciliations.current.size > 0);
+            return null;
+          });
+          startReceiptReconciliation(clientMessageId, lateReceipt);
+        }
       }
     } finally {
       setBusy(false);
@@ -1250,7 +1639,7 @@ export function TmuxComposer({
      Quick-ack calls the same `send()`, so it obeys the same block and leaves the
      menu when blocked (round-3 finding). */
   const deadHostBlocksSend = deadHost && !structuredSession;
-  const sendBlocked = deadHostBlocksSend || Boolean(sendBlockedReason);
+  const sendBlocked = deadHostBlocksSend || reconcilingSend || Boolean(sendBlockedReason);
   const canQuickAck = (!spawnMode || relayMode) && !sendBlocked;
   const quickAckDisabled = busy || voiceSending || attachments.images.length > 0;
 
@@ -1386,7 +1775,12 @@ export function TmuxComposer({
         showImage={!deadHostBlocksSend}
         imageDisabled={structuredImagesDisabled}
         imageDisabledReason={structuredImagesReason}
-        sendDisabledReason={deadHostBlocksSend ? t("deadHost.sendBlocked") : sendBlockedReason ?? undefined}
+        sendPayloadAvailable={replayGenerationAvailable}
+        sendDisabledReason={deadHostBlocksSend
+          ? t("deadHost.sendBlocked")
+          : reconcilingSend
+            ? t("composer.admissionTimedOut")
+            : sendBlockedReason ?? undefined}
         receipts={
           displayedRuntimeReceipts.length
             ? <RuntimeComposerReceipts

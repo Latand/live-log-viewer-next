@@ -50,3 +50,8 @@ prod.log
 !/.claude/skills/
 /.tmux-multi-agent/
 /fixtures/demo-home/.capture/
+
+# ad-hoc readable-tool review stills (issue #475): regenerate with
+# `bun scripts/readable-tool-shots.tsx`. Committed screenshots must instead go
+# through the provenance-signed demo-capture pipeline, so keep these local.
+/docs/media/readable-tools/
