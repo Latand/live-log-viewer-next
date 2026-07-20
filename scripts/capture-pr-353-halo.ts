@@ -11,10 +11,11 @@
  * drives the real board with the locally cached Chromium (playwright-core, no
  * Docker) to write two private real screenshots for direct visual inspection:
  *
- *   /tmp/llv-pr353-halo/halo-composition-desktop.png — one colored halo
- *     enclosing the single live conversation pane plus two future-stage shells;
- *     the two passed stages are compact history off the scene, and the pass
- *     rails route from the live card into the placeholders.
+ *   /tmp/llv-pr353-halo/halo-composition-desktop.png — one colored halo where
+ *     each of the five declared stages projects exactly one surface: the single
+ *     live conversation pane, two compact history anchors for the passed stages
+ *     (their full panes folded off the scene), and two future-stage shells, with
+ *     the pass/handoff rails routing between them.
  *   /tmp/llv-pr353-halo/halo-composition-390.png — the 390px phone shell,
  *     asserted at capture time to keep scrollWidth <= innerWidth (no horizontal
  *     overflow), chat-first.
@@ -212,24 +213,28 @@ async function main(): Promise<void> {
     await desktop.waitForSelector(`[data-pipeline-group-header="${PIPELINE_ID}"]`, { timeout: 60_000 });
     await desktop.waitForSelector(`[data-scheme-node="slot::${PIPELINE_ID}::polish"]`, { timeout: 60_000 });
     await desktop.waitForSelector(`[data-scheme-node="slot::${PIPELINE_ID}::review"]`, { timeout: 60_000 });
-    /* Only the live `verify` stage keeps a full pane; the passed architect/builder
-       stages are compact history off the scene. Exactly three surfaces carry a
-       stage card: the live pane and the two future shells. */
+    await desktop.waitForSelector(`[data-scheme-node="slot::${PIPELINE_ID}::architect"]`, { timeout: 60_000 });
+    await desktop.waitForSelector(`[data-scheme-node="slot::${PIPELINE_ID}::builder"]`, { timeout: 60_000 });
+    /* Each of the five declared stages projects EXACTLY ONE surface: the live
+       `verify` pane, the passed architect/builder as compact history anchors, and
+       polish/review as future shells. */
     await desktop.waitForFunction(
-      (pipelineId) => document.querySelectorAll(`[data-pipeline-stage-card^="${pipelineId}::"]`).length === 3,
+      (pipelineId) => document.querySelectorAll(`[data-pipeline-stage-card^="${pipelineId}::"]`).length === 5,
       PIPELINE_ID,
       { timeout: 60_000 },
     );
     const stageCardIds = await desktop.locator(`[data-pipeline-stage-card^="${PIPELINE_ID}::"]`).evaluateAll((cards) =>
       cards.map((card) => card.getAttribute("data-pipeline-stage-card")).sort(),
     );
-    const expectedCards = [`${PIPELINE_ID}::polish`, `${PIPELINE_ID}::review`, `${PIPELINE_ID}::verify`];
+    const expectedCards = [`${PIPELINE_ID}::architect`, `${PIPELINE_ID}::builder`, `${PIPELINE_ID}::polish`, `${PIPELINE_ID}::review`, `${PIPELINE_ID}::verify`];
     if (JSON.stringify(stageCardIds) !== JSON.stringify(expectedCards)) {
-      throw new Error(`expected the live verify pane plus two future shells, received ${stageCardIds.join(", ")}`);
+      throw new Error(`expected five stage surfaces, received ${stageCardIds.join(", ")}`);
     }
+    const historyCount = await desktop.locator(`[data-pipeline-stage-card^="${PIPELINE_ID}::"][data-pipeline-stage-history="true"]`).count();
+    if (historyCount !== 2) throw new Error(`expected two compact history anchors, received ${historyCount}`);
     const architect = atlasStageMembers(env).architect;
     const architectCompact = await desktop.evaluate((p) => document.querySelector(`[data-scheme-node="${p}"]`) === null, architect.path);
-    if (!architectCompact) throw new Error("the passed architect stage must be compact history, not a full board pane");
+    if (!architectCompact) throw new Error("the passed architect stage must be a compact history anchor, not a full board pane");
     /* Frame the whole board so the halo and its cards fill the shot. */
     await desktop.evaluate(() => {
       const fit = Array.from(document.querySelectorAll("button")).find((button) =>
@@ -255,7 +260,7 @@ async function main(): Promise<void> {
     await mobile.screenshot({ path: path.join(outDir, "halo-composition-390.png") });
     await mobile.close();
 
-    console.log(`captured one live pane + two future shells (terminal stages compact) + 390px halo evidence into ${outDir} (390 scrollWidth ${overflow.scrollWidth} <= innerWidth ${overflow.innerWidth})`);
+    console.log(`captured one live pane + two compact history anchors + two future shells + 390px halo evidence into ${outDir} (390 scrollWidth ${overflow.scrollWidth} <= innerWidth ${overflow.innerWidth})`);
   } finally {
     await browser.close();
     server.kill("SIGTERM");

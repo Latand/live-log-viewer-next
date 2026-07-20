@@ -1,5 +1,5 @@
 import type { Flow } from "@/lib/flows/types";
-import type { Pipeline, PipelineStage } from "@/lib/pipelines/types";
+import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import type { DeckRound } from "@/components/flows/RoundDeck";
@@ -19,7 +19,7 @@ import {
   type AgentLink,
   type SchemeGroupSpec,
 } from "./agentLinks";
-import { pipelinePlaceholderStages } from "@/components/pipelines/pipelineModel";
+import { PIPELINE_PLACEHOLDER_STATES, latestAttempt, pipelinePlaceholderStages, stageAttempts } from "@/components/pipelines/pipelineModel";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex, projectDescendantsOf } from "@/components/projectModel";
 import { cleanTitle, engineColor } from "@/components/utils";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -67,6 +67,10 @@ export const GROUP_SIBLING_GAP = GROUP_PAD * 2 + GAP_X;
 export const SLOT_W = NODE_W;
 export const SLOT_H = 620;
 export const SLOT_GAP = 72;
+/* Compact-history stage cards (#353 R3): a terminal stage whose full pane is
+   folded out of the scene keeps a short navigable anchor card at its stage
+   position so its pass/fail edges and halo membership survive compaction. */
+export const HISTORY_H = 168;
 /* Quiet-branch mini cards stacked under their parent pane. */
 const MINI_W = 360;
 const MINI_H = 52;
@@ -161,6 +165,13 @@ export interface StageSlot extends SchemeRect {
   /** 0-based position of this stage within the pipeline's full chain. */
   index: number;
   total: number;
+  /** How this stage renders (#353 R3): `placeholder` = a future or still-forming
+      (pending/spawning) stage as a conversation-shaped shell; `history` = a
+      terminal stage whose full pane is folded out of the scene, standing in as a
+      compact navigable anchor so its edges and halo membership survive. */
+  presentation: "placeholder" | "history";
+  /** History slots: the terminal attempt whose transcript the compact card opens. */
+  attempt?: PipelineStageAttempt;
   /** Render an incoming handoff badge on this slot's left edge: set when the
       previous stage's slot sits directly beside it in the same row. */
   incoming?: "run" | "review-loop";
@@ -660,42 +671,67 @@ export function buildSchemeLayout(
     });
     let slotDockY = restTop;
     for (const pipeline of pool) {
-      const pending = pipelinePlaceholderStages(pipeline);
-      if (!pending.length) continue;
+      /* Classify every declared stage into exactly one surface (#353 R3): a live
+         full pane (its transcript is a placed node), a compact history card (a
+         terminal stage whose full pane was folded out of the scene by
+         compactPipelineArtifactPaths), or a placeholder (a future or still-forming
+         pending/spawning stage). Only the live stage keeps a full pane; the others
+         become slots so their edges and halo membership survive compaction. */
+      const placeholderIds = new Set(pipelinePlaceholderStages(pipeline).map((stage) => stage.id));
+      /* Compact history anchors only grow on an active pipeline, and never for the
+         cursor stage itself: a cursor stage whose only transcript is quiet history
+         (folded into an under-deck) has no live pane and shelves (#343), rather
+         than resurfacing as an anchor. */
+      const growsHistory = PIPELINE_PLACEHOLDER_STATES.has(pipeline.state);
+      type SlotStage = { stage: PipelineStage; index: number; presentation: "placeholder" | "history"; attempt?: PipelineStageAttempt };
+      const slotStages: SlotStage[] = [];
       const memberPaths = new Set<string>();
-      /* The chain's tip: the LAST stage (in chain order) with a placed window —
-         a run stage's agent node, or a review-loop's implementer. The next
-         stage's placeholder lands as the tip's child, so the row anchors there. */
+      /* The chain's tip: the LAST stage (in chain order) whose live pane is a
+         placed node. The slot row anchors as its child. */
       let tip: SchemeRect | null = null;
-      for (const stage of pipeline.stages) {
-        const attempt = pipeline.runs.find((run) => run.stageId === stage.id)?.attempts.at(-1);
-        if (!attempt) continue;
-        if (attempt.agentPath) {
-          const rect = nodeRectByPath.get(attempt.agentPath);
-          if (rect) {
-            memberPaths.add(attempt.agentPath);
-            if (stage.kind !== "review-loop") tip = rect;
-          }
+      for (let index = 0; index < pipeline.stages.length; index += 1) {
+        const stage = pipeline.stages[index]!;
+        const attempt = latestAttempt(pipeline, stage.id);
+        /* The stage's own live transcript — a run session or the live reviewer. */
+        const livePath = attempt?.agentPath ?? null;
+        const liveRect = livePath ? nodeRectByPath.get(livePath) : undefined;
+        if (liveRect && livePath) {
+          memberPaths.add(livePath);
+          tip = liveRect;
+          continue;
         }
-        if (attempt.flowId) {
-          const impl = implOfFlow(attempt.flowId);
-          const rect = impl ? nodeRectByPath.get(impl) : null;
-          if (impl && rect) {
-            memberPaths.add(impl);
-            if (stage.kind === "review-loop") tip = rect;
-          }
+        /* A folded review-loop resolves to its flow implementer node (deck laid
+           out): still a live pane, not a slot. */
+        const implPath = stage.kind === "review-loop" && attempt?.flowId ? implOfFlow(attempt.flowId) : null;
+        const implRect = implPath ? nodeRectByPath.get(implPath) : undefined;
+        if (implRect && implPath) {
+          memberPaths.add(implPath);
+          tip = implRect;
+          continue;
+        }
+        if (placeholderIds.has(stage.id)) {
+          slotStages.push({ stage, index, presentation: "placeholder" });
+          continue;
+        }
+        /* Any materialized attempt (the operational latest or a folded historical
+           one) on a NON-cursor stage makes this a terminal stage folded out of the
+           scene: a compact history anchor. */
+        if (!growsHistory || stage.id === pipeline.cursor?.stageId) continue;
+        const materialized = stageAttempts(pipeline, stage.id).findLast((candidate) => candidate.agentPath || candidate.flowId);
+        if (materialized) {
+          slotStages.push({ stage, index, presentation: "history", attempt: materialized });
         }
       }
       if (!surfaceIds.has(pipeline.id) && !memberPaths.size) continue;
-      const rowW = pending.length * SLOT_W + (pending.length - 1) * SLOT_GAP;
+      if (!slotStages.length) continue;
+      const rowW = slotStages.length * SLOT_W + (slotStages.length - 1) * SLOT_GAP;
       let sx: number;
       let sy: number;
       if (tip) {
         /* The tree indents a child one INDENT right of its parent and one
-           generation (GAP_Y) below — anchoring the first placeholder exactly
-           there makes the hand-off positionally exact: the live window the tree
-           places for the next stage lands on the placeholder's own coordinates,
-           so the dashed card becomes the solid window in place. */
+           generation (GAP_Y) below — anchoring the first slot exactly there makes
+           the hand-off positionally exact: the live window the tree places for the
+           next stage lands on the placeholder's own coordinates. */
         sx = tip.x + INDENT;
         sy = tip.y + tip.h + GAP_Y;
         /* Step below any unrelated card the row would cover — bounded, so a
@@ -713,23 +749,25 @@ export function buildSchemeLayout(
         cursor += rowW + GROUP_GAP;
       }
       const keys: string[] = [];
-      pending.forEach((stage, i) => {
-        const index = pipeline.stages.findIndex((candidate) => candidate.id === stage.id);
-        const previous = i > 0 ? pending[i - 1]! : null;
-        /* The handoff badge renders only between chain-adjacent placeholders — a
-           gap (a materialized stage between them) breaks the visual chain. */
-        const adjacent = previous !== null && pipeline.stages[index - 1]?.id === previous.id;
+      slotStages.forEach((entry, i) => {
+        const { stage, index, presentation, attempt } = entry;
+        const previous = i > 0 ? slotStages[i - 1]! : null;
+        /* The handoff badge renders only between chain-adjacent slots — a gap (a
+           live pane between them) breaks the visual chain. */
+        const adjacent = previous !== null && pipeline.stages[index - 1]?.id === previous.stage.id;
         const slot: StageSlot = {
           key: stageSlotKey(pipeline.id, stage.id),
           pipeline,
           stage,
           index,
           total: pipeline.stages.length,
+          presentation,
+          ...(attempt ? { attempt } : {}),
           ...(adjacent ? { incoming: stage.kind } : {}),
           x: sx + i * (SLOT_W + SLOT_GAP),
           y: sy,
           w: SLOT_W,
-          h: SLOT_H,
+          h: presentation === "history" ? HISTORY_H : SLOT_H,
         };
         slots.push(slot);
         keys.push(slot.key);

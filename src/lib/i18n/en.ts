@@ -1108,6 +1108,9 @@ export const en = {
 
   // pipeline stage placeholders + template picker (#196)
   "pipelineSlot.paneAria": "Planned stage {role}",
+  "pipelineSlot.historyAria": "Completed stage {role} — compact history",
+  "pipelineSlot.historyFolded": "Full transcript folded — open to review",
+  "pipelineSlot.openHistory": "Open history",
   "pipelineSlot.stageOf": "stage {k}/{n}",
   "pipelineSlot.promptLabel": "Additional prompt (optional)",
   "pipelineSlot.noPrompt": "Extra context for this agent — the wiring above is automatic.",

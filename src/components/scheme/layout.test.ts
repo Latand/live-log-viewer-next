@@ -6,7 +6,7 @@ import type { FileEntry } from "@/lib/types";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 
 import { directReviewFlows } from "@/components/flows/directReviewGroups";
-import { compactPipelineLayoutFlows } from "@/components/pipelines/pipelineModel";
+import { compactPipelineArtifactPaths, compactPipelineLayoutFlows, excludeCompactPipelineArtifacts } from "@/components/pipelines/pipelineModel";
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
 import { planRootReconciliation } from "@/components/projectBoardMutations";
 import { applyBoardMutations } from "@/lib/board/mutations";
@@ -397,6 +397,65 @@ describe("planned-stage pipelines grow a placeholder halo (#353 desktop ownershi
     expect(edge).toBeTruthy();
     expect(edge!.from).toBe("/build");
     expect(edge!.pipeline!.edge).toBe("pass");
+  });
+});
+
+describe("compact-history anchors keep terminal-stage edges under production compaction (#353 R3)", () => {
+  test("full production scene yields builder→reviewer, reviewer→future, reviewer→builder fail-loop, one hub, and direct reviewer halo membership", () => {
+    /* builder (run, passed) → reviewer (review-loop, live cursor) → future (run),
+       with reviewer→builder on fail. In production compactPipelineArtifactPaths
+       keeps only the live reviewer pane full-size and folds /build out of the
+       scene; without a compact-history anchor for builder its edges would vanish. */
+    const reviewer = entry({ path: "/reviewer", conversationId: "c-rev", activity: "live" });
+    const builderFile = entry({ path: "/build", conversationId: "c-build" });
+    const p = ({
+      id: "p", task: "Halo", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b",
+      baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
+      stages: [
+        { id: "builder", kind: "run", prompt: "", next: "reviewer" },
+        { id: "reviewer", kind: "review-loop", prompt: "", next: "future", onFail: { to: "builder", maxRounds: 5 } },
+        { id: "future", kind: "run", prompt: "", next: null },
+      ],
+      runs: [
+        { stageId: "builder", attempts: [{ n: 1, state: "passed", agentPath: "/build", flowId: null }] },
+        { stageId: "reviewer", attempts: [{ n: 1, state: "reviewing", agentPath: "/reviewer", flowId: "f1" }] },
+      ],
+      cursor: { stageId: "reviewer", state: "reviewing", input: null, activatedBy: null },
+      state: "running", pausedState: null, stateDetail: null,
+      srcPath: null, srcConversationId: null, createdAt: "1970", closedAt: null,
+    }) as unknown as Pipeline;
+
+    /* Assemble the production scene exactly as ProjectDashboard does. */
+    const allFiles = [builderFile, reviewer];
+    const layoutFlows = compactPipelineLayoutFlows([p], []); // folds the pipeline's flow deck out
+    const compactPaths = compactPipelineArtifactPaths([p], layoutFlows, allFiles);
+    expect([...compactPaths]).toContain("/build");
+    expect([...compactPaths]).not.toContain("/reviewer");
+    const sceneFiles = excludeCompactPipelineArtifacts(allFiles, compactPaths);
+    const groups = buildBranchGroups(sceneFiles, "demo");
+    const layout = buildSchemeLayout(groups, [], sceneFiles, layoutFlows, [], [p], [p]);
+
+    /* The reviewer is the live pane; builder is a compact-history anchor; future a
+       placeholder. */
+    expect(layout.nodes.map((node) => node.file.path)).toContain("/reviewer");
+    expect(layout.nodes.map((node) => node.file.path)).not.toContain("/build");
+    const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+    expect(slotByStage.get("builder")?.presentation).toBe("history");
+    expect(slotByStage.get("future")?.presentation).toBe("placeholder");
+
+    const builderSlot = stageSlotKey("p", "builder");
+    const futureSlot = stageSlotKey("p", "future");
+    const pipeLinks = layout.links.filter((link) => link.kind === "pipeline");
+    const edge = (from: string, to: string) => pipeLinks.find((link) => link.pipeline!.fromStageId === from && link.pipeline!.toStageId === to);
+    expect(edge("builder", "reviewer")).toMatchObject({ from: builderSlot, to: "/reviewer", pipeline: { edge: "pass" } });
+    expect(edge("reviewer", "future")).toMatchObject({ from: "/reviewer", to: futureSlot, pipeline: { edge: "pass" } });
+    expect(edge("reviewer", "builder")).toMatchObject({ from: "/reviewer", to: builderSlot, pipeline: { edge: "fail" } });
+    expect(pipeLinks.filter((link) => link.pipeline!.hub)).toHaveLength(1);
+
+    const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p");
+    expect(halo).toBeTruthy();
+    expect(halo!.members).toContain("/reviewer");
+    expect(halo!.members).toContain(builderSlot);
   });
 });
 

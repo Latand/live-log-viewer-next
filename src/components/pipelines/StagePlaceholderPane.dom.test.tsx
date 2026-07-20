@@ -64,7 +64,7 @@ function slot(over: { pipeline?: Partial<Pipeline>; stage?: Partial<PipelineStag
     closedAt: null,
     ...over.pipeline,
   } as Pipeline;
-  return { key: `slot::p1::${theStage.id}`, pipeline, stage: theStage, index: 0, total: 3, x: 0, y: 0, w: 600, h: 460 };
+  return { key: `slot::p1::${theStage.id}`, pipeline, stage: theStage, index: 0, total: 3, presentation: "placeholder", x: 0, y: 0, w: 600, h: 460 };
 }
 
 function mount(node: React.ReactNode): { host: HTMLElement; root: Root } {

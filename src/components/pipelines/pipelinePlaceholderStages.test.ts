@@ -62,6 +62,37 @@ test("a stage whose attempts have all folded into history stays navigable, never
   expect(pipelinePlaceholderStages(folded).map((stage) => stage.id)).toEqual(["review"]);
 });
 
+test("a pending/spawning current attempt keeps exactly one placeholder until its transcript materializes (#353 R3)", () => {
+  /* The engine created the builder attempt but its transcript has not landed yet
+     (agentPath/flowId both null). Across pending → spawning the stage must keep a
+     conversation-shaped placeholder — never zero pane / zero placeholder — and the
+     placeholder must dissolve the instant the running attempt materializes a
+     transcript. */
+  const architectRun = { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] };
+  for (const state of ["pending", "spawning"] as const) {
+    const forming = pipeline({
+      cursor: { stageId: "builder", state, input: null, activatedBy: null },
+      runs: [
+        architectRun,
+        { stageId: "builder", attempts: [{ n: 1, state, agentPath: null, flowId: null }] },
+      ],
+    } as unknown as Partial<Pipeline>);
+    /* architect is materialized (compact history), builder is the forming stage's
+       single placeholder, review is a future placeholder. */
+    expect(pipelinePlaceholderStages(forming).map((stage) => stage.id)).toEqual(["builder", "review"]);
+  }
+
+  const running = pipeline({
+    cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
+    runs: [
+      architectRun,
+      { stageId: "builder", attempts: [{ n: 1, state: "running", agentPath: "/build", flowId: null }] },
+    ],
+  } as unknown as Partial<Pipeline>);
+  /* The builder placeholder dissolved once its transcript materialized. */
+  expect(pipelinePlaceholderStages(running).map((stage) => stage.id)).toEqual(["review"]);
+});
+
 test("a completed or closed pipeline grows no placeholders", () => {
   for (const state of ["completed", "closed"] as const) {
     expect(pipelinePlaceholderStages(pipeline({ state }))).toEqual([]);

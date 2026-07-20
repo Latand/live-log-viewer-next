@@ -22,7 +22,8 @@ import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
-import { STAGE_TONES, canSourcePipeline, createDraftPipeline, latestAttempt, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, reviewLoopChainValid, stageChipLabel, stageChipState } from "@/components/pipelines/pipelineModel";
+import { StageHistoryCard } from "@/components/pipelines/StageHistoryCard";
+import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, latestAttempt, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -1056,11 +1057,35 @@ function DraftShell({
  * wraps. Every add is an optimistic add-stage PATCH on the same draft
  * contract, applied locally first (issue #221 §3).
  */
-function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean; dimmed: boolean }) {
+function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSlot; lite: boolean; dimmed: boolean; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
   const { t } = useLocale();
   const [busy, setBusy] = useState(false);
   const tone = STAGE_TONES[stageChipState(slot.pipeline, slot.stage)];
   const { pipeline } = slot;
+  /* A terminal stage folded out of the scene renders as a compact navigable
+     history anchor rather than the full-size placeholder pane (#353 R3). */
+  if (slot.presentation === "history") {
+    const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
+    const file = target ? resolveStageNavFile(target, files) : null;
+    return (
+      <div
+        data-scheme-node={slot.key}
+        className={`scheme-enter absolute${dimClass(dimmed)}`}
+        style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+      >
+        {slot.incoming ? (
+          <span
+            aria-hidden
+            className="absolute top-[24px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
+            style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
+          >
+            {slot.incoming === "review-loop" ? "⟳" : "→"}
+          </span>
+        ) : null}
+        <StageHistoryCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} />
+      </div>
+    );
+  }
   const draft = pipeline.state === "draft";
   const last = slot.index === slot.total - 1;
   const kinds = pipeline.stages.map((item) => item.kind);
@@ -1333,7 +1358,7 @@ export const NodesLayer = memo(function NodesLayer({
       {/* Placeholder windows for planned pipeline stages (issue #196): dashed
           chat-window shells the live stage windows replace in place. */}
       {slotsInDomOrder.map((slot) => (
-        <StageSlotShell key={slot.key} slot={slot} lite={lite} dimmed={attentionPaths !== null} />
+        <StageSlotShell key={slot.key} slot={slot} lite={lite} dimmed={attentionPaths !== null} files={files} onSelect={onSelect} />
       ))}
       {draftsInDomOrder.map((draft) =>
         lite ? (

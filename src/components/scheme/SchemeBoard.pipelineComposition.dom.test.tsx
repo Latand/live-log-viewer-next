@@ -125,17 +125,23 @@ test("the production scene keeps only the live stage full, compacts terminal sta
 
   /* Only the live cursor stage keeps a full conversation pane. */
   expect(host.querySelector('[data-scheme-node="/verify"]')).toBeTruthy();
-  /* The terminal architect/builder stages are compact history, off the scene. */
+  /* The terminal architect/builder stages keep NO full pane (folded off-scene)… */
   expect(host.querySelector('[data-scheme-node="/arch"]')).toBeNull();
   expect(host.querySelector('[data-scheme-node="/build"]')).toBeNull();
+  /* …but each retains a compact navigable history anchor at its stage position. */
+  expect(host.querySelector('[data-scheme-node="slot::pipe-1::architect"]')).toBeTruthy();
+  expect(host.querySelector('[data-scheme-node="slot::pipe-1::builder"]')).toBeTruthy();
+  expect(host.querySelectorAll('[data-pipeline-stage-history="true"]')).toHaveLength(2);
 
   /* Both future stages render conversation-shaped shells. */
   expect(host.querySelector('[data-scheme-node="slot::pipe-1::polish"]')).toBeTruthy();
   expect(host.querySelector('[data-scheme-node="slot::pipe-1::review"]')).toBeTruthy();
-  /* One live pane plus two future shells — the terminal stages carry no board
-     card (their compact history opens on demand). */
+  /* Every declared stage projects EXACTLY ONE surface: one live pane, two compact
+     history anchors, two future shells. */
   const stageCards = [...host.querySelectorAll('[data-pipeline-stage-card^="pipe-1::"]')];
   expect(stageCards.map((card) => card.getAttribute("data-pipeline-stage-card")).sort()).toEqual([
+    "pipe-1::architect",
+    "pipe-1::builder",
     "pipe-1::polish",
     "pipe-1::review",
     "pipe-1::verify",

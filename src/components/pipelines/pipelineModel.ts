@@ -211,18 +211,30 @@ export const PIPELINE_PLACEHOLDER_STATES: ReadonlySet<PipelineState> = new Set([
 ]);
 
 /** The stages of a pipeline that render as conversation-shaped placeholder cards
-    (#353): the yet-to-launch (future) stages — those that have never launched an
-    attempt at all. A stage that already ran keeps its real card (materialized) or
-    its navigable compact history at its stage position, never a placeholder, so a
-    failed/folded attempt does not resurrect a big empty shell. Membership reads
-    every recorded attempt, not just the operational one: a stage whose attempts
-    have ALL folded into history (`historical`) still ran, so `latestAttempt`
-    (operational-only) would wrongly report it empty and grow a duplicate
-    placeholder over its compact prior-attempt evidence. Only placeholder-state
-    pipelines grow any. */
+    (#353): a stage that has no MATERIALIZED transcript or flow anchor for its
+    current work. That covers the yet-to-launch (future) stages AND a stage whose
+    current attempt is still pending/spawning (the engine created the attempt but
+    its transcript/flow has not landed yet — `agentPath` and `flowId` are both
+    null): without a placeholder such a stage would render zero pane, zero
+    placeholder, zero halo (the #353 R3 gap between attempt creation and the
+    transcript materializing, engine.ts §pendingCursor). The placeholder dissolves
+    the instant the real pane appears. A stage with a materialized attempt
+    (`agentPath`/`flowId`) keeps its live pane or its compact navigable history —
+    including a stage whose attempts have all folded into history — never a
+    placeholder, so a failed/folded/terminal attempt does not resurrect a big empty
+    shell. Only placeholder-state pipelines grow any. */
 export function pipelinePlaceholderStages(pipeline: Pipeline): PipelineStage[] {
   if (!PIPELINE_PLACEHOLDER_STATES.has(pipeline.state)) return [];
-  return pipeline.stages.filter((stage) => stageAttempts(pipeline, stage.id).length === 0);
+  return pipeline.stages.filter((stage) => {
+    const attempt = latestAttempt(pipeline, stage.id);
+    /* No operational attempt: a never-launched stage is a placeholder; an
+       all-historical stage is compact navigable history, not a placeholder. */
+    if (!attempt) return stageAttempts(pipeline, stage.id).length === 0;
+    /* The current attempt exists but has not materialized a transcript or flow
+       anchor yet (pending/spawning) — keep exactly one placeholder until its pane
+       lands. */
+    return !attempt.agentPath && !attempt.flowId;
+  });
 }
 
 /**

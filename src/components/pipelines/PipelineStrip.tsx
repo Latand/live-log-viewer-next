@@ -298,6 +298,7 @@ function StageChip({
     stage,
     index,
     total: pipeline.stages.length,
+    presentation: "placeholder",
     x: 0,
     y: 0,
     w: 600,

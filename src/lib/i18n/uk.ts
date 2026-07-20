@@ -1077,6 +1077,9 @@ export const uk: Record<keyof typeof en, Message> = {
 
   // плейсхолдери етапів пайплайна + вибір шаблону (#196)
   "pipelineSlot.paneAria": "Запланований етап {role}",
+  "pipelineSlot.historyAria": "Завершений етап {role} — компактна історія",
+  "pipelineSlot.historyFolded": "Повний транскрипт згорнуто — відкрийте для перегляду",
+  "pipelineSlot.openHistory": "Відкрити історію",
   "pipelineSlot.stageOf": "етап {k}/{n}",
   "pipelineSlot.promptLabel": "Додатковий промпт (необов'язково)",
   "pipelineSlot.noPrompt": "Додатковий контекст для агента — все вище підключається автоматично.",
