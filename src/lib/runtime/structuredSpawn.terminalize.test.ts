@@ -83,6 +83,38 @@ test("a live admission owner keeps responsibility for its deferred launch", asyn
   expect(store.snapshot().receipts[receipt.launchId]!.state).toBe("starting");
 });
 
+test("a terminal runtime operation releases a stale launch from its long-lived admission owner", async () => {
+  const store = registry();
+  const receipt = staleStructuredReceipt(store, "terminal_owner_attempt_a1");
+  const client = {
+    operationStatus: async (operationId: string) => operationId === receipt.launchId ? {
+      receipt: {
+        operationId,
+        idempotencyKey: operationId,
+        conversationId: receipt.conversationId,
+        kind: "spawn" as const,
+        status: "failed" as const,
+        reason: "synthetic terminal spawn failure",
+        at: new Date().toISOString(),
+        revision: 2,
+      },
+      replayed: false,
+    } : null,
+    snapshot: async () => ({ revision: 0, sessions: [] }),
+  } as unknown as RuntimeHostClient;
+
+  const result = await terminalizeStaleStructuredSpawns(store, client, {
+    now: AGED,
+    ownerAlive: () => true,
+  });
+
+  expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
+  expect(store.snapshot().receipts[receipt.launchId]).toMatchObject({
+    state: "failed",
+    error: "synthetic terminal spawn failure",
+  });
+});
+
 test("a receipt younger than the pass timeout is never touched", async () => {
   const store = registry();
   const receipt = staleStructuredReceipt(store, "fresh_20260719_a1");

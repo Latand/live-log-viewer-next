@@ -252,6 +252,16 @@ export async function reconcileStructuredSpawnReplay(
 export const STALE_STRUCTURED_SPAWN_TIMEOUT_MS = 5 * 60_000;
 export const STALE_STRUCTURED_SPAWN_ACTUATION_CAP = 50;
 
+const FAILED_SPAWN_OPERATION_STATUSES = new Set([
+  "failed",
+  "rejected",
+  "uncertain",
+  "turn-started",
+  "steered",
+  "interrupted",
+  "answered",
+]);
+
 function admissionOwnerAlive(owner: { pid: number; startIdentity: string | null } | null): boolean {
   if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
   return procBackend.pidAlive(owner.pid)
@@ -292,8 +302,13 @@ export async function terminalizeStaleStructuredSpawns(
     if (receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") continue;
     const createdMs = Date.parse(receipt.createdAt);
     if (!Number.isFinite(createdMs) || now() - createdMs < timeoutMs) continue;
-    /* A live admission owner still owns its process-local deferred launch. */
-    if (receipt.admissionOwner && ownerAlive(receipt.admissionOwner)) continue;
+    /* A live admission owner keeps responsibility while the runtime operation
+       remains open. A terminal runtime receipt wins over the process lifetime:
+       long-lived web workers can outlive one failed deferred launch. */
+    if (receipt.admissionOwner && ownerAlive(receipt.admissionOwner)) {
+      const operation = await client.operationStatus(receipt.launchId).catch(() => null);
+      if (!operation || !FAILED_SPAWN_OPERATION_STATUSES.has(operation.receipt.status)) continue;
+    }
     /* A live registry host entry means the launch is progressing. */
     if (receipt.key) {
       const entry = snapshot.entries[sessionKeyId(receipt.key)];
@@ -330,16 +345,6 @@ interface HostBinding {
   stopPersistence(): void;
   unregister(): Promise<void>;
 }
-
-const FAILED_SPAWN_OPERATION_STATUSES = new Set([
-  "failed",
-  "rejected",
-  "uncertain",
-  "turn-started",
-  "steered",
-  "interrupted",
-  "answered",
-]);
 
 async function projectDeadStructuredSpawn(
   client: RuntimeHostClient,
