@@ -14,6 +14,14 @@
 # Both publish.yml and docs/screenshots/issue-499/depth-one-evidence.test.ts
 # invoke THIS script, so the release path and its regression deepen history by
 # the exact same mechanism.
+#
+# The deepen loop is PROGRESS-CHECKED, not capped at a fixed commit count: it
+# keeps extending shallow history as long as each fetch reveals new ancestors of
+# HEAD, and stops only when the sourceRevision becomes reachable OR the remote's
+# history is exhausted (the repository is no longer shallow, or a fetch adds
+# nothing). A fixed ceiling would spuriously fail whenever the reviewed HEAD sat
+# more commits ahead of the recorded evidence revision than that ceiling — even
+# though the remote could still serve the ancestor.
 set -euo pipefail
 
 manifest="docs/screenshots/issue-499/capture-manifest.json"
@@ -23,13 +31,27 @@ if [ -z "${rev}" ]; then
   exit 1
 fi
 
-# Deepen this branch's history in chunks until the recorded sourceRevision is a
-# reachable ancestor of HEAD (idempotent: a full/normal checkout already is).
-for _ in $(seq 1 20); do
-  if git merge-base --is-ancestor "${rev}" HEAD 2>/dev/null; then
+# Extend history in chunks until the recorded sourceRevision is a reachable
+# ancestor of HEAD. Terminate on genuine exhaustion — never on an arbitrary
+# commit ceiling — so an evidence revision arbitrarily far behind HEAD still
+# resolves as long as the remote can serve it (idempotent: a full/normal
+# checkout enters neither branch of the loop and validates directly).
+while ! git merge-base --is-ancestor "${rev}" HEAD 2>/dev/null; do
+  # Complete history is already present yet the revision is still not an
+  # ancestor: it is genuinely not in this branch's history. Stop; the ancestry
+  # validation below then fails loudly.
+  if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" != "true" ]; then
     break
   fi
-  git fetch --no-tags --deepen 10 origin >/dev/null 2>&1 || break
+  before="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+  # A failed fetch (no origin, offline) is exhaustion for our purposes.
+  git fetch --no-tags --deepen 100 origin >/dev/null 2>&1 || break
+  after="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+  # The fetch revealed no new ancestor of HEAD: the remote's reachable history
+  # is exhausted. Stop rather than spin.
+  if [ "${after}" = "${before}" ]; then
+    break
+  fi
 done
 
 # Fail loudly if the evidence's source revision is still unreachable — the
