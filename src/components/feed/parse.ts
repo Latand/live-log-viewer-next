@@ -147,6 +147,11 @@ export type CmdGroupItem = {
   okCount: number;
   errCount: number;
   hasErr: boolean;
+  /** True while this is the live trailing run: one expanded aggregate that
+      shows every command and its output immediately. Flips to false when the
+      run settles (a new turn appends after it, or the session stops being
+      live), which the card reads to auto-collapse exactly once (issue #475). */
+  active: boolean;
 };
 export type Item =
   | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude" }
@@ -1927,12 +1932,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
      tool event folds (Read/Bash/Edit/diff-bodied/orchestration alike); a "think"
      item inside a run is absorbed without breaking it (it carries no signal once
      the run it annotates is folded), while prose/user/tmsg/review/image break it.
-     In a live trailing run only the leading completed prefix folds; every
-     in-flight (`run`) call stays a visible line (and if none is running, the
-     most-recent call is held out), so a live 40-call run reads as one quiet
-     group plus its running call(s), never 40 rows (§3.4). A group whose members'
-     events are all identity-equal to the previous snapshot's is reused as-is,
-     keeping its card memoized. */
+     The live trailing run folds whole — the in-flight (`run`) calls included —
+     into one aggregate marked `active`, which the card renders expanded so every
+     command and output shows immediately (issue #475). An interior or settled
+     run folds the same way but with `active: false`. A group whose members'
+     events are all identity-equal to the previous snapshot's — and whose active
+     lifecycle matches — is reused as-is, keeping its card memoized. */
   const buildSnapshot = (isLive: boolean): FeedSnapshot => {
     const out: FeedEntry[] = [];
     const nextGroups = new Map<number, CmdGroupItem>();
@@ -1959,24 +1964,20 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         else if (cur.item.kind !== "think") break;
         j += 1;
       }
-      /* A live trailing run folds only its leading completed prefix: every
-         in-flight (`run`) call stays a visible line so concurrent running calls
-         are never buried in a quiet closed group, and if none is running the
-         most-recent call is still held out. A completed or interior run folds in
-         full. */
+      /* The whole run folds into one aggregate. When it is the live trailing
+         run it is marked active — the card renders it expanded with every
+         command and output shown at once (issue #475); an interior or settled
+         run folds the same way but inactive, so the card auto-collapses it to
+         the compact summary. */
       const isLiveTail = isLive && j === entries.length;
-      let foldCount = toolEntries.length;
-      if (isLiveTail) {
-        const firstRun = toolEntries.findIndex((entry) => entry.item.status === "run");
-        foldCount = firstRun >= 0 ? firstRun : toolEntries.length - 1;
-      }
+      const foldCount = toolEntries.length;
       if (foldCount >= CMD_GROUP_MIN) {
         const grouped = toolEntries.slice(0, foldCount);
         const groupEnd = grouped[grouped.length - 1].idx + 1;
         const gkey = grouped[0].seq;
         const prev = prevGroups.get(gkey);
         let group: CmdGroupItem;
-        if (prev && prev.calls.length === grouped.length && grouped.every((entry, k) => prev.calls[k] === entry.item)) {
+        if (prev && prev.active === isLiveTail && prev.calls.length === grouped.length && grouped.every((entry, k) => prev.calls[k] === entry.item)) {
           group = prev;
         } else {
           const byTool: Record<string, number> = {};
@@ -1998,6 +1999,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
             okCount,
             errCount,
             hasErr: errCount > 0,
+            active: isLiveTail,
           };
         }
         nextGroups.set(gkey, group);
