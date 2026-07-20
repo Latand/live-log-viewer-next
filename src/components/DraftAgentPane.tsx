@@ -555,6 +555,11 @@ export function DraftAgentPane({
     writeField(draftId, "boot", value ? JSON.stringify(value) : "");
   }, [draftId]);
   const readySpawnImageNegotiation = spawnImageNegotiation.status === "ready" ? spawnImageNegotiation.value : null;
+  /* The composer host capability the draft already negotiates (issue #266): a
+     structured (pane-less) spawn has no tmux window, so every launch-copy that
+     names tmux drops it. The default `tmux` transport keeps the legacy wording,
+     as does the pre-negotiation window (the server defaults to tmux too). */
+  const structuredSpawn = readySpawnImageNegotiation?.spawnTransport === "structured";
   const negotiatedSpawnImageCapability = readySpawnImageNegotiation?.spawnTransport === "structured"
     ? readySpawnImageNegotiation.imageInput[engine]
     : null;
@@ -768,7 +773,7 @@ export function DraftAgentPane({
       effort,
       fast: engine === "codex" && speed ? speed === "fast" : null,
       accountId: spawnAccountId,
-      prompt: payloadText,
+      "prompt": payloadText,
       images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
       src,
       ...(parentConversationId ? { parentConversationId } : {}),
@@ -928,7 +933,7 @@ export function DraftAgentPane({
                 {attempt.prompt || t("draft.imagesOnly")}
               </span>
             </div>
-            <DraftLaunchStatus ref={attentionRef} phase={phase} target={target} error={attempt.error ?? null} />
+            <DraftLaunchStatus ref={attentionRef} phase={phase} target={target} structured={structuredSpawn} error={attempt.error ?? null} />
           </div>
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
@@ -936,7 +941,7 @@ export function DraftAgentPane({
               {engine === "claude" ? "Claude" : "Codex"}
             </span>
             <div className="max-w-[360px] text-[12px] text-muted">
-              {src ? t("draft.hintRelay") : t("draft.hintNew")}
+              {src ? t("draft.hintRelay") : structuredSpawn ? t("draft.hintNewStructured") : t("draft.hintNew")}
             </div>
             {src ? (
               <div className="max-w-[420px] truncate font-mono text-[10px] text-muted" title={src}>
@@ -972,7 +977,7 @@ export function DraftAgentPane({
         ) : null}
         <ComposerBar
           composer={composer}
-          placeholder={t("draft.placeholder")}
+          placeholder={structuredSpawn ? t("draft.placeholderStructured") : t("draft.placeholder")}
           textareaAriaLabel={t("draft.promptTextAria")}
           imageAriaLabel={t("draft.addImages")}
           sendLabelIdle={t("composer.launchAgent")}
@@ -984,7 +989,7 @@ export function DraftAgentPane({
           leftSlot={
             <span
               className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"
-              title={t("draft.newWindowTitle")}
+              title={structuredSpawn ? t("draft.newWindowTitleStructured") : t("draft.newWindowTitle")}
             >
               <Play className="h-3 w-3 shrink-0" aria-hidden /> {t("draft.newAgent")}
             </span>
