@@ -25,6 +25,7 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
   /* The operator's manual choice once the group has settled. `null` means "no
      manual choice yet", so the default (error → open, else collapsed) applies. */
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const [autoCollapseApplied, setAutoCollapseApplied] = useState(false);
   /* The single auto-collapse: detect the first live→settled transition during
      render (the React-blessed "adjust state on prop change" pattern) so the
      collapse is applied before the DOM ever shows the settled group open. A
@@ -34,7 +35,10 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
   const [wasActive, setWasActive] = useState(active);
   if (wasActive !== active) {
     setWasActive(active);
-    if (wasActive && !active) setManualOpen(false);
+    if (wasActive && !active && !autoCollapseApplied) {
+      setAutoCollapseApplied(true);
+      setManualOpen(false);
+    }
   }
 
   /* Active → always open; settled → the operator's choice, else the error

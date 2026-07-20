@@ -109,6 +109,16 @@ test("a manual reopen after settle persists across ticks until the operator clos
   expect((h.querySelector("details") as unknown as { open: boolean }).open).toBe(false);
 });
 
+test("a later live tick does not arm a second auto-collapse over the operator choice", () => {
+  const h = mount(<CmdGroupCard item={activeGroup()} />);
+  rerender(<CmdGroupCard item={settledGroup()} />);
+  const details = h.querySelector("details")!;
+  toggle(details, true);
+  rerender(<CmdGroupCard item={activeGroup()} />);
+  rerender(<CmdGroupCard item={settledGroup()} />);
+  expect((h.querySelector("details") as unknown as { open: boolean }).open).toBe(true);
+});
+
 test("the compact summary keeps the failure status and count after collapse", () => {
   const h = mount(<CmdGroupCard item={activeFailureGroup()} />);
   rerender(<CmdGroupCard item={activeFailureGroup({ active: false })} />);

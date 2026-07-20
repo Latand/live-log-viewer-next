@@ -94,6 +94,8 @@ export type ToolEvent = {
   exitCode?: number;
   /** Wall-clock duration in ms, from a Codex `Wall time` preamble. */
   durationMs?: number;
+  /** Interactive shell cell/session that owns this call and its follow-ups. */
+  runtimeSessionId?: string;
   /** Result timestamp, once the tool result attaches (end of the run). */
   endTs?: unknown;
   /** stderr split from the combined result, rendered in its own disclosure. */
@@ -1174,6 +1176,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const body: ToolBody | undefined = diff && diff.files.length ? { type: "diff", files: diff.files, filesTruncated: diff.filesTruncated } : undefined;
     const command = opts.command !== undefined ? redactSecrets(opts.command).slice(0, COMMAND_MAX) : undefined;
     const summary = opts.summary !== undefined ? redactSecrets(opts.summary).replace(/\s+/g, " ").trim().slice(0, 160) : s.summary;
+    const runtimeSessionId = String(args.session_id ?? args.cell_id ?? "").trim() || undefined;
     return {
       kind: "tool",
       id: opts.id,
@@ -1191,6 +1194,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       statusLabel: tr("render.executing"),
       outputPreview: "",
       outputTruncated: false,
+      ...(runtimeSessionId ? { runtimeSessionId } : {}),
       ...(family === "shell" ? (() => {
         const cwd = cwdOf(args, command);
         return cwd ? { cwd } : {};
@@ -1299,6 +1303,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
        an empty `wait` can render a compact "waiting Ns" line (issue #141). Matches
        both `Wall time: 30 seconds` and the bare `Wall time 10.0 seconds` wrapper. */
     const wallSeconds = output.match(/Wall time:?\s*([\d.]+)\s*seconds?/i)?.[1];
+    const runtimeSessionId = output.match(/(?:Script|Process) running with (?:cell|session) ID\s+([^\s]+)/i)?.[1]
+      ?? callRec.event.runtimeSessionId;
     /* Codex wraps custom-tool AND interactive-shell (wait / write_stdin) results
        in a metadata preamble whose lines vary by tool and version:
          Chunk ID: …             Script completed
@@ -1380,6 +1386,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       outputTruncated,
       ...(exitCode !== undefined ? { exitCode } : {}),
       ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(runtimeSessionId ? { runtimeSessionId } : {}),
       ...(endTs !== undefined ? { endTs } : {}),
       ...(stderr !== undefined ? { stderr } : {}),
       ...(stderrTruncated !== undefined ? { stderrTruncated } : {}),

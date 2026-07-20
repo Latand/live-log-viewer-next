@@ -19,17 +19,21 @@ export function isFollowUpCall(event: ToolEvent): boolean {
 }
 
 /**
- * Folds a group's flat call list into ordered blocks: each non-follow-up call
- * owns the wait/write_stdin polls that immediately trail it, so nested waits
- * render under their parent exec while keeping their own individual state. A
- * leading follow-up with no parent yet stands as its own block.
+ * Folds a group's flat call list into ordered blocks. Interactive follow-ups
+ * attach only to a call carrying the same runtime cell/session id. A follow-up
+ * without a matching owner stays visible as its own block.
  */
 export function groupNestedCalls(calls: readonly ToolEvent[]): ToolBlock[] {
   const blocks: ToolBlock[] = [];
   for (const call of calls) {
-    const last = blocks[blocks.length - 1];
-    if (last && isFollowUpCall(call)) last.children.push(call);
-    else blocks.push({ parent: call, children: [] });
+    if (isFollowUpCall(call) && call.runtimeSessionId) {
+      const owner = blocks.findLast((block) => block.parent.runtimeSessionId === call.runtimeSessionId);
+      if (owner) {
+        owner.children.push(call);
+        continue;
+      }
+    }
+    blocks.push({ parent: call, children: [] });
   }
   return blocks;
 }

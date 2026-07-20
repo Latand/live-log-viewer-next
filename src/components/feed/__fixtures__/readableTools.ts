@@ -119,6 +119,7 @@ export const nestedParent = toolEvent({
   command: "npm run dev",
   cwd: "/workspace/app",
   outputPreview: "starting dev server",
+  runtimeSessionId: "8479",
 });
 export const nestedWait = toolEvent({
   id: "wait-1",
@@ -126,6 +127,7 @@ export const nestedWait = toolEvent({
   summary: "wait · 8479",
   statusLabel: "waiting 10s",
   outputPreview: "compiled successfully",
+  runtimeSessionId: "8479",
 });
 export const nestedPoll = toolEvent({
   id: "poll-1",
@@ -133,6 +135,7 @@ export const nestedPoll = toolEvent({
   summary: "stdin → 8479 · poll",
   statusLabel: "waiting 5s",
   outputPreview: "",
+  runtimeSessionId: "8479",
 });
 
 /** A cmd-group carrying the nested exec/wait/poll run plus a standalone read. */

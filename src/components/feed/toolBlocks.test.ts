@@ -12,9 +12,9 @@ test("wait and write_stdin are follow-ups; a plain exec is not", () => {
 
 test("follow-ups nest under the preceding exec while peers stay separate blocks", () => {
   const calls = [
-    toolEvent({ id: "e1", tool: "exec_command" }),
-    toolEvent({ id: "w1", tool: "wait" }),
-    toolEvent({ id: "s1", tool: "write_stdin" }),
+    toolEvent({ id: "e1", tool: "exec_command", runtimeSessionId: "8479" }),
+    toolEvent({ id: "w1", tool: "wait", runtimeSessionId: "8479" }),
+    toolEvent({ id: "s1", tool: "write_stdin", runtimeSessionId: "8479" }),
     toolEvent({ id: "e2", tool: "Bash" }),
     toolEvent({ id: "r1", tool: "Read", family: "read" }),
   ];
@@ -25,10 +25,24 @@ test("follow-ups nest under the preceding exec while peers stay separate blocks"
 });
 
 test("a leading follow-up with no parent stands as its own block", () => {
-  const blocks = groupNestedCalls([toolEvent({ id: "w1", tool: "wait" }), toolEvent({ id: "w2", tool: "wait" })]);
+  const blocks = groupNestedCalls([
+    toolEvent({ id: "w1", tool: "wait", runtimeSessionId: "8479" }),
+    toolEvent({ id: "w2", tool: "wait", runtimeSessionId: "8479" }),
+  ]);
   expect(blocks).toHaveLength(1);
   expect(blocks[0].parent.id).toBe("w1");
   expect(blocks[0].children.map((c) => c.id)).toEqual(["w2"]);
+});
+
+test("a follow-up never attaches to a neighboring command from another session", () => {
+  const blocks = groupNestedCalls([
+    toolEvent({ id: "e1", tool: "exec_command", runtimeSessionId: "111" }),
+    toolEvent({ id: "e2", tool: "exec_command", runtimeSessionId: "222" }),
+    toolEvent({ id: "w1", tool: "wait", runtimeSessionId: "111" }),
+  ]);
+  expect(blocks.map((block) => block.parent.id)).toEqual(["e1", "e2"]);
+  expect(blocks[0].children.map((child) => child.id)).toEqual(["w1"]);
+  expect(blocks[1].children).toHaveLength(0);
 });
 
 test("formatDuration scales from ms to seconds to minutes", () => {
