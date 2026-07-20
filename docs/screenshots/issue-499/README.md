@@ -10,15 +10,18 @@ come from one execution path. All data is synthetic and publication-safe.
 
 ## Committed immutable stills
 
-The `still-*.png` files ARE committed, inspectable evidence: deterministic
-synthetic re-renders of the verified acceptance states, produced by the
-approved generator (`scripts/generate-privacy-placeholders.ts`,
-classification `synthetic`, source `deterministic-generator`) with schema-2
-provenance in `privacy-manifest.json`. Each still names its state and the
-exact source revision in pixels and in PNG metadata (`source-revision`), and
-binds the SHA-256 of the real chrome-headless capture it re-renders as its
-source digest — proving which verified frame it mirrors without committing
-non-deterministic browser bytes.
+The `still-*.svg` files ARE committed, inspectable evidence: deterministic
+synthetic re-renders of the verified acceptance states, emitted byte-stably by
+the co-located `generate-stills.ts` (`bun docs/screenshots/issue-499/generate-stills.ts`).
+They are vector artifacts because the privacy-publication gate reproduces
+raster provenance from the TRUSTED default-branch generator, which cannot know
+about media a not-yet-merged PR introduces — new raster provenance is
+structurally unvalidatable inside a single PR (the pr-439 precedent). As text
+files they publish under the trusted gate directly, with provenance embedded
+in each frame: classification `synthetic`, the generator path, the exact
+source revision whose acceptance run the frame re-renders (visible in the
+frame AND in its `<metadata>`), and the SHA-256 of the real chrome-headless
+capture behind it.
 
 | Still | State |
 | --- | --- |

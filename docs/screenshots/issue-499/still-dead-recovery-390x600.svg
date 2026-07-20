@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="600" viewBox="0 0 390 600" role="img" aria-label="Issue 499 acceptance state Dead host — recovery">
+  <metadata id="provenance">{"classification":"synthetic","source":"deterministic-generator","generator":"docs/screenshots/issue-499/generate-stills.ts","sourceRevision":"3a5c11045eeb9b7731343f7509c5161c7339c59f","sourceCaptureSha256":"9cd926ef41eb57a6047a1363049f95fb2bcee176b16e01c1208a50e613990415"}</metadata>
+  <rect x="0" y="0" width="390" height="600" fill="#f3f4f6"/>
+  <text x="16" y="26" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#1f2937">Issue 499 — Dead host — recovery</text>
+  <text x="16" y="44" font-family="ui-monospace, monospace" font-size="11" font-weight="500" fill="#8c95a3">390×600 · synthetic fixture · rev 3a5c11045eeb</text>
+  <rect x="10" y="182" width="370" height="404" fill="#dee2e9" rx="12"/>
+  <rect x="12" y="184" width="366" height="400" fill="#ffffff" rx="10"/>
+  <text x="28" y="208" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="500" fill="#8c95a3">…transcript…</text>
+  <rect x="12" y="314" width="366" height="2" fill="#dee2e9"/>
+  <rect x="12" y="316" width="366" height="138" fill="#fce7e7"/>
+  <text x="28" y="340" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="700" fill="#cd3030">Agent host died · 5m ago</text>
+  <text x="28" y="360" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="500" fill="#1f2937">Messages can't be delivered. Pending approvals expired.</text>
+  <rect x="28" y="372" width="200" height="30" fill="#6d5ef6" rx="8"/>
+  <text x="42" y="392" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#ffffff">Respawn conversation</text>
+  <rect x="28" y="410" width="150" height="30" fill="#ffffff" rx="8" stroke="#dee2e9" stroke-width="2"/>
+  <text x="42" y="430" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="600" fill="#1f2937">Open in terminal</text>
+  <rect x="188" y="410" width="92" height="30" fill="#ffffff" rx="8" stroke="#dee2e9" stroke-width="2"/>
+  <text x="202" y="430" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="600" fill="#1f2937">Re-check</text>
+  <rect x="26" y="466" width="338" height="48" fill="#dee2e9" rx="10"/>
+  <rect x="28" y="468" width="334" height="44" fill="#eef1f5" rx="9"/>
+  <text x="42" y="495" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="500" fill="#1f2937">Recover and continue this task.</text>
+  <rect x="310" y="474" width="32" height="32" fill="#6d5ef6" rx="8"/>
+  <path d="M 321 482 L 333 490 L 321 498 Z" fill="#ffffff"/>
+  <rect x="288" y="482" width="10" height="16" fill="#8c95a3" rx="5"/>
+  <rect x="264" y="484" width="14" height="3" fill="#8c95a3"/>
+  <rect x="264" y="492" width="14" height="3" fill="#8c95a3"/>
+  <path d="M 36 526 L 30 536 L 35 536 L 29 546 L 41 533 L 36 533 L 40 526 Z" fill="#6d5ef6"/>
+  <text x="50" y="540" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2937">5.6-Sol · High ⌄</text>
+  <text x="28" y="574" font-family="ui-monospace, monospace" font-size="10" font-weight="500" fill="#8c95a3">synthetic · rev 3a5c11045eeb</text>
+</svg>
