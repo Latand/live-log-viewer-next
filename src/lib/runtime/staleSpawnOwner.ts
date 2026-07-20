@@ -25,12 +25,12 @@ function admissionOwnerAlive(owner: AdmissionOwner): boolean {
 }
 
 /**
- * Releases stale structured launches whose runtime operation already reached a
- * terminal state while their long-lived admission process remained healthy.
- * The regular stale-launch pass deliberately protects live owners, so this
- * narrow pre-pass supplies the missing per-operation evidence.
+ * Reconciles stale structured launches held by a healthy long-lived admission
+ * process when the exact runtime operation is terminal or absent. The regular
+ * stale-launch pass protects live owners, so this narrow pre-pass supplies the
+ * missing per-operation evidence and retains every open operation.
  */
-export async function reconcileTerminalSpawnsHeldByLiveOwners(
+export async function reconcileStaleSpawnsHeldByLiveOwners(
   registry: AgentRegistry,
   client: RuntimeHostClient,
   options: {
@@ -60,7 +60,7 @@ export async function reconcileTerminalSpawnsHeldByLiveOwners(
     if (!Number.isFinite(createdMs) || now() - createdMs < timeoutMs) continue;
 
     const operation = await client.operationStatus(receipt.launchId).catch(() => null);
-    if (!operation || !TERMINAL_OPERATION_STATUSES.has(operation.receipt.status)) continue;
+    if (operation && !TERMINAL_OPERATION_STATUSES.has(operation.receipt.status)) continue;
     examined += 1;
 
     try {
