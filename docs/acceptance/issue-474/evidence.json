@@ -1,0 +1,48 @@
+{
+  "issue": 474,
+  "capturedAt": "2026-07-20T08:32:23.203Z",
+  "viewer": "production next start",
+  "viewport": {
+    "desktop": "1440x900",
+    "mobile": "390x844"
+  },
+  "interactionSuite": "src/components/scheme/EdgeChips.hover.dom.test.tsx (9 tests: continuous surface, reserved control box, bounded progressive reveal, keyboard full-reveal, reduced motion, click fit, coarse-pointer removal)",
+  "checks": [
+    {
+      "id": "desktop-nav-cannot-block-content",
+      "detail": "the off-screen navigation landmark is pointer-events:none — only its chips take pointer input, never covering chat content (issue #292)"
+    },
+    {
+      "id": "desktop-offscreen-disclosure",
+      "detail": "1 «+N» edge disclosure(s) present for 2 off-screen current-work cluster(s)"
+    },
+    {
+      "id": "desktop-disclosure-count",
+      "detail": "the edge disclosure shows its folded count \"+2\""
+    },
+    {
+      "id": "desktop-disclosure-a11y",
+      "detail": "the disclosure is a collapsed, labelled control (aria-label \"Show 2 more off-screen clusters\", aria-expanded false)"
+    },
+    {
+      "id": "desktop-offscreen-list",
+      "detail": "expanding reveals 2 click-to-fit off-screen conversation button(s)"
+    },
+    {
+      "id": "desktop-offscreen-labels",
+      "detail": "every off-screen entry carries its conversation label ([\"Reasoning-effort meter reserved slot across eve…\",\"Deterministic capture pipeline — stage two buil…\"])"
+    },
+    {
+      "id": "desktop-disclosure-expands",
+      "detail": "the disclosure reports aria-expanded=true once opened"
+    },
+    {
+      "id": "mobile-chips-removed",
+      "detail": "no edge chip renders on the 390px shell (found 0)"
+    },
+    {
+      "id": "mobile-nav-removed",
+      "detail": "the off-screen navigation landmark is absent on the phone width"
+    }
+  ]
+}
