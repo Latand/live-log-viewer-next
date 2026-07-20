@@ -267,6 +267,7 @@ export const en = {
   "composer.removeFromQueue": "Remove from queue",
   "composer.deliveryHeld": "Held for «{label}» — delivers after the account switch",
   "composer.admissionTimedOut": "Delivery confirmation timed out. Checking the durable receipt; your message remains preserved.",
+  "composer.deliveryUnconfirmed": "Delivery couldn't be confirmed. Your message is preserved — send again to retry safely; the same message key is reused.",
   "composer.runtimePill": "Model and reasoning — applies to your next message",
   "composer.reasoningGroup": "Reasoning",
   "composer.modelGroup": "Model",

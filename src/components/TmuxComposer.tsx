@@ -20,6 +20,8 @@ import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
 import {
+  COMPOSER_RECEIPT_POLL_INTERVAL_MS,
+  COMPOSER_RECEIPT_RECONCILIATION_MS,
   ComposerAdmissionTimeoutError,
   reconcileComposerReceipt,
   withComposerAdmissionDeadline,
@@ -557,6 +559,29 @@ export function settlePendingDeliveries(
   return { settled, remaining };
 }
 
+/** A synthetic, local-only receipt row for a generation whose reconciliation
+    window closed without a durable admission or terminal receipt. It carries
+    the original idempotency key. A later durable receipt for the same key
+    supersedes it through mergeRuntimeReceipts tier two, keeping one visible row
+    per message. The row records an unconfirmed state and leaves draft settlement
+    to an authoritative receipt. */
+const UNCONFIRMED_RECEIPT_PREFIX = "composer-unconfirmed:";
+function unconfirmedReceiptOperationId(clientMessageId: string): string {
+  return UNCONFIRMED_RECEIPT_PREFIX + clientMessageId;
+}
+function unconfirmedReceipt(clientMessageId: string, conversationId: string, text: string): RuntimeReceipt {
+  return {
+    operationId: unconfirmedReceiptOperationId(clientMessageId),
+    idempotencyKey: clientMessageId,
+    conversationId,
+    kind: "send",
+    status: "uncertain",
+    text,
+    at: new Date().toISOString(),
+    revision: 0,
+  };
+}
+
 /** Removes one attachment per delivered snapshot entry, so attachments added
     while the send was in flight survive. An id-bearing snapshot matches ONLY
     its intake id — if that slot is already gone, a late replayed receipt must
@@ -909,6 +934,33 @@ export function TmuxComposer({
     setReconcilingSend(receiptReconciliations.current.size > 0);
   };
 
+  /* The local reconciliation window closed without a durable admission or
+     terminal receipt. Release the composer for an explicit same-key retry.
+     Preserve the generation, its idempotency key, and its attachments. The
+     durable receipt stream continues observing: a late admission clears the
+     draft through settlePendingDeliveries, and a terminal failure surfaces
+     Retry. This path performs no automatic actuation. */
+  const releaseReconciliationToRetry = (clientMessageId: string) => {
+    receiptReconciliations.current.delete(clientMessageId);
+    setReconcilingSend(receiptReconciliations.current.size > 0);
+    /* Drop the reconciling marker so a remount exposes a recoverable retry.
+       Keep the generation so a late receipt can settle it and the key remains
+       replayable. */
+    persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
+      entry.key === clientMessageId
+        ? { key: entry.key, text: entry.text, images: entry.images }
+        : entry));
+    const entry = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
+    if (!entry) return;
+    setStatus({ kind: "err", text: t("composer.deliveryUnconfirmed") });
+    setImmediateRuntimeReceipts((current) => [
+      unconfirmedReceipt(clientMessageId, cardId, entry.text),
+      ...current.filter((candidate) =>
+        candidate.idempotencyKey !== clientMessageId
+        && candidate.operationId !== unconfirmedReceiptOperationId(clientMessageId)),
+    ].slice(0, 8));
+  };
+
   const startReceiptReconciliation = (
     clientMessageId: string,
     lateReceipt?: Promise<RuntimeReceipt | null>,
@@ -923,9 +975,18 @@ export function TmuxComposer({
         && (receiptIsAdmitted(receipt.status) || receiptIsTerminal(receipt.status))) ?? null,
       refresh: refreshRuntime,
       late: lateReceipt,
+      timeoutMs: COMPOSER_RECEIPT_RECONCILIATION_MS,
+      pollIntervalMs: COMPOSER_RECEIPT_POLL_INTERVAL_MS,
       signal: controller.signal,
     }).then((receipt) => {
-      if (controller.signal.aborted || receipt === null) return;
+      /* An admitted or terminal receipt aborts through
+         finishReceiptReconciliation. A remount also aborts this owner. Both
+         paths already own settlement, so this resolution stays silent. */
+      if (controller.signal.aborted) return;
+      if (receipt === null) {
+        releaseReconciliationToRetry(clientMessageId);
+        return;
+      }
       setImmediateRuntimeReceipts((current) => [
         receipt,
         ...current.filter((candidate) => candidate.operationId !== receipt.operationId),
@@ -951,6 +1012,12 @@ export function TmuxComposer({
     receiptReconciliations.current.clear();
     const restoredPending = readPendingDeliveries(cardId);
     pendingDeliveries.current = restoredPending;
+    /* An unsettled generation whose exact draft survived the remount keeps its
+       original idempotency key. An explicit retry then replays idempotently and
+       cannot mint a second actuation. */
+    const draftNow = typeof window !== "undefined" ? sessionStorage.getItem(draftKey(cardId)) ?? "" : "";
+    const resumableKey = restoredPending.find((entry) => entry.text === draftNow)?.key;
+    if (resumableKey) idempotencyKey.current = resumableKey;
     const reconcilingKeys = restoredPending.filter((entry) => entry.reconciling).map((entry) => entry.key);
     setReconcilingSend(reconcilingKeys.length > 0);
     if (reconcilingKeys.length) setStatus({ kind: "err", text: t("composer.admissionTimedOut") });
@@ -975,6 +1042,18 @@ export function TmuxComposer({
         candidate.idempotencyKey === key
         && (receiptIsAdmitted(candidate.status) || receiptIsTerminal(candidate.status)));
       if (receipt) finishReceiptReconciliation(key, receipt);
+    }
+    /* A terminal non-admitted receipt (failed/rejected) for a preserved
+       generation the local window already released: mint a fresh key so the
+       next message is never replay-deduped into silence. The failure itself
+       surfaces Retry through the durable receipt stack. */
+    for (const entry of pendingDeliveries.current) {
+      if (receiptReconciliations.current.has(entry.key)) continue;
+      if (idempotencyKey.current !== entry.key) continue;
+      const failure = displayedRuntimeReceipts.find((candidate) =>
+        candidate.idempotencyKey === entry.key
+        && receiptIsTerminal(candidate.status) && !receiptIsAdmitted(candidate.status));
+      if (failure) idempotencyKey.current = mintIdempotencyKey();
     }
     if (!pendingDeliveries.current.length) return;
     const { settled, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);

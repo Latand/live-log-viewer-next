@@ -30,3 +30,43 @@ test("a timed-out admission keeps one actuation while its late response yields t
   expect(reconciled).toEqual({ idempotencyKey: clientMessageId });
   expect(actuations).toBe(1);
 });
+
+test("an expired window with no receipt resolves to null so the caller can recover", async () => {
+  const actuations = 0;
+  let refreshes = 0;
+
+  const reconciled = await reconcileComposerReceipt<{ idempotencyKey: string }>({
+    read: () => {
+      /* Reading the authoritative snapshot never issues a send. */
+      return null;
+    },
+    refresh: async () => {
+      refreshes += 1;
+      return false;
+    },
+    timeoutMs: 30,
+    pollIntervalMs: 4,
+  });
+
+  /* A null resolution is the recoverable signal: the window closed without a
+     receipt, and reconciliation issued zero sends. */
+  expect(reconciled).toBeNull();
+  expect(actuations).toBe(0);
+  expect(refreshes).toBeGreaterThan(0);
+});
+
+test("an aborted window resolves to null without waiting out the deadline", async () => {
+  const controller = new AbortController();
+  const started = Date.now();
+  const pending = reconcileComposerReceipt({
+    read: () => null,
+    refresh: () => new Promise<boolean>(() => {}),
+    timeoutMs: 10_000,
+    pollIntervalMs: 1_000,
+    signal: controller.signal,
+  });
+  controller.abort();
+
+  expect(await pending).toBeNull();
+  expect(Date.now() - started).toBeLessThan(1_000);
+});
