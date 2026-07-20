@@ -74,6 +74,25 @@ test("rebuild accepts an exact revision as its positional argument", () => {
   });
 });
 
+for (const [name, revision] of [
+  ["39 lowercase hex characters", "a".repeat(39)],
+  ["41 lowercase hex characters", "a".repeat(41)],
+  ["uppercase hex", "A".repeat(40)],
+  ["embedded whitespace", `${"a".repeat(20)} ${"b".repeat(19)}`],
+  ["a ref-like value", "refs/heads/main"],
+  ["an embedded newline", `${"a".repeat(20)}\n${"b".repeat(20)}`],
+  ["an embedded carriage return", `${"a".repeat(20)}\r${"b".repeat(20)}`],
+] as const) {
+  test(`rebuild rejects ${name} before deployment admission`, () => {
+    const setup = fixture();
+    const result = runRebuild("invalid-revision", setup, revision);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("invalid revision");
+    expect(fs.existsSync(setup.capture)).toBe(false);
+  });
+}
+
 test("rebuild serializes a quoted 200-character idempotency key as JSON", () => {
   const setup = fixture();
   const prefix = 'release"1\\';
