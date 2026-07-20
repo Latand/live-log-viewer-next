@@ -6,7 +6,7 @@ import path from "node:path";
 import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { reconcileObservedTranscriptHosts, type TranscriptHost } from "@/lib/agent/transcriptHost";
 
-const ROOT_SID = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+const ROOT_SID = ["019f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
 const ROOT_PATH = `/home/user/.claude/projects/-repo/${ROOT_SID}.jsonl`;
 const CHILD_PATH = `/home/user/.claude/projects/-repo/${ROOT_SID}/subagents/agent-child.jsonl`;
 

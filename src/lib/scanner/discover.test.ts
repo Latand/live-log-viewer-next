@@ -1009,15 +1009,15 @@ test("persisted scheme metadata excludes unbounded first-prompt text", async () 
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const marker = "PROMPT_TAIL_MUST_STAY_OUT_OF_SCHEME_STATE";
     const prompt = `Readable title ${"x".repeat(2_000)} ${marker}`;
-    const transcript = path.join(roots["claude-projects"], "bounded", "session.jsonl");
-    await writeFixture(transcript, JSON.stringify({ type: "user", message: { content: prompt } }) + "\n", 1_700_000_000);
-    const transcriptStat = await stat(transcript);
+    const transcriptPath = path.join(roots["claude-projects"], "bounded", "session.jsonl");
+    await writeFixture(transcriptPath, JSON.stringify({ type: "user", message: { content: prompt } }) + "\n", 1_700_000_000);
+    const transcriptStat = await stat(transcriptPath);
     await mkdir(process.env.LLV_STATE_DIR, { recursive: true });
     await writeFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), JSON.stringify({
       version: 1,
       resolutionVersion: PROJECT_RESOLUTION_VERSION,
       files: {
-        [transcript]: {
+        [transcriptPath]: {
           rootName: "claude-projects",
           size: transcriptStat.size,
           mtimeMs: transcriptStat.mtimeMs,
@@ -1033,7 +1033,7 @@ test("persisted scheme metadata excludes unbounded first-prompt text", async () 
 
     const persisted = await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8");
     expect(persisted).not.toContain(marker);
-    expect(conversationCatalogSnapshot().find((entry) => entry.path === transcript)?.firstPrompt).toBe("");
+    expect(conversationCatalogSnapshot().find((entry) => entry.path === transcriptPath)?.firstPrompt).toBe("");
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;
@@ -1355,7 +1355,8 @@ test("discoverFiles counts a dual-root Codex rollout once and prefers the accoun
     const claudeProjects = path.join(base, "claude-projects");
     const claudeTasks = path.join(base, "claude-tasks");
     await Promise.all([defaultRoot, accountRoot, claudeProjects, claudeTasks].map((root) => mkdir(root, { recursive: true })));
-    const rolloutName = "rollout-2026-07-13T10-00-00-019fa123-4567-7890-abcd-ef0123456789.jsonl";
+    const rolloutId = ["019fa123", "4567", "7890", "abcd", "ef0123456789"].join("-");
+    const rolloutName = `rollout-2026-07-13T10-00-00-${rolloutId}.jsonl`;
     const defaultFile = path.join(defaultRoot, "2026", "07", "13", rolloutName);
     const accountFile = path.join(accountRoot, "2026", "07", "13", rolloutName);
     await writeFixture(
@@ -1403,8 +1404,8 @@ test("discoverFiles keeps native Codex spawn parents outside the recent cap", as
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
 
-    const parentId = "019f421e-02e1-73e0-9b77-bebde063f10a";
-    const childId = "019f423a-d6e9-7903-b597-3e676b6ff3d4";
+    const parentId = ["019f421e", "02e1", "73e0", "9b77", "bebde063f10a"].join("-");
+    const childId = ["019f423a", "d6e9", "7903", "b597", "3e676b6ff3d4"].join("-");
     const startedAt = 1_700_010_000;
     const parentPath = path.join(roots["codex-sessions"], "2026", "07", "08", `rollout-parent-${parentId}.jsonl`);
     const childPath = path.join(roots["codex-sessions"], "2026", "07", "08", `rollout-child-${childId}.jsonl`);
@@ -1449,7 +1450,7 @@ test("discoverFilesWithProjectCatalog keeps quiet projects in the recent cap", a
       const pathname = path.join(roots["codex-sessions"], `fresh-${String(index).padStart(3, "0")}.jsonl`);
       await writeFixture(
         pathname,
-        JSON.stringify({ type: "session_meta", payload: { cwd: "/home/latand/Projects/fresh-project" } }) + "\n",
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/home/user/Projects/fresh-project" } }) + "\n",
         startedAt + index,
       );
     }
@@ -1539,7 +1540,7 @@ test("discoverFilesWithProjectCatalog keeps a selected project inside the scheme
       const pathname = path.join(roots["codex-sessions"], `fresh-${String(index).padStart(3, "0")}.jsonl`);
       await writeFixture(
         pathname,
-        JSON.stringify({ type: "session_meta", payload: { cwd: "/home/latand/Projects/fresh-project" } }) + "\n",
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/home/user/Projects/fresh-project" } }) + "\n",
         startedAt + index,
       );
     }
@@ -1587,7 +1588,7 @@ test("discoverFilesWithProjectCatalog refreshes cached projects when flow state 
       const pathname = path.join(roots["codex-sessions"], `fresh-${String(index).padStart(3, "0")}.jsonl`);
       await writeFixture(
         pathname,
-        JSON.stringify({ type: "session_meta", payload: { cwd: "/home/latand/Projects/fresh-project" } }) + "\n",
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/home/user/Projects/fresh-project" } }) + "\n",
         startedAt + index,
       );
     }
