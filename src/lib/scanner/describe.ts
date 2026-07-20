@@ -907,10 +907,16 @@ export function describeFile(
         : { value: null, complete: false };
       complete &&= sidecar.complete;
       const meta = sidecar.value ?? {};
-      title =
-        stringValue(meta.description) ??
-        stringValue(meta.name) ??
-        "Subagent " + fn.slice("agent-".length).split(".")[0];
+      title = stringValue(meta.description) ?? stringValue(meta.name) ?? null;
+      /* Workflow subagents (issue #339) ship no sidecar name/description. Their
+         transcript still carries the delegated sidechain prompt, so the first
+         real user message names the card instead of a generic «Subagent …». */
+      if (!title && complete) {
+        const titleRead = scanJsonlTitle(pathname, st, false);
+        complete &&= titleRead.complete;
+        title = titleRead.value;
+      }
+      title ??= "Subagent " + fn.slice("agent-".length).split(".")[0];
     } else {
       kind = "session";
       if (complete) {

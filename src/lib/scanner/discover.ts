@@ -5,6 +5,7 @@ import path from "node:path";
 import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
 import { forEachCooperatively, mapCooperatively } from "../cooperative";
 import { sessionProjectProjection } from "../session/titleProjection";
+import { isClaudeWorkflowBookkeeping } from "./claudeNative";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
 import type { ConversationCatalogEntry } from "./conversationCatalog";
@@ -102,6 +103,12 @@ async function hydrateRawPath(entry: RawPath, roots: Roots, limit: Limit): Promi
     st = await limit(() => stat(pathname));
   } catch (error) {
     return { raw: [], complete: discoveryFailure("stat file", pathname, error) };
+  }
+  // Workflow bookkeeping (journal.jsonl event logs, *.meta.json sidecars) lives
+  // under a parent session's subagents/ tree but is never a conversation
+  // (issue #339). Drop it before it can surface as a phantom card.
+  if (entry.rootName === "claude-projects" && isClaudeWorkflowBookkeeping(path.relative(roots["claude-projects"], pathname))) {
+    return { raw: [], complete: true };
   }
   const isTask = entry.rootName === "claude-tasks" ? taskParts(roots["claude-tasks"], pathname) : null;
   if (entry.rootName === "claude-tasks" && !isTask) return { raw: [], complete: true };

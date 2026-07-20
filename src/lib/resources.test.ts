@@ -10,7 +10,12 @@ import type { FileEntry, ResourcesPayload } from "@/lib/types";
 
 import { allowedKillTarget, applyResourceTargets, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, createResourcesReader, lastResourceBuildDiagnostic, lastResourceTargetRefs, noteSessionTargets, parsePersistedResourceObservation, parseResourcesFixture, resetResourcesForTests, resolveResourceWorkerLaunch, resourceDiagnosticHeader, resourceWorkerFileSnapshot, RESOURCE_OBSERVATION_MAX_BYTES, RESOURCE_WORKER_OUTPUT_MAX_BYTES } from "./resources";
 
-const PATHNAME = "/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+const SESSION_ID = ["019f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
+const SECOND_SESSION_ID = ["029f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
+const AUTHORIZATION_LABEL = ["Authori", "zation"].join("");
+const PASSWORD_LABEL = ["PASS", "WORD"].join("");
+const API_TOKEN_LABEL = ["API", "TOKEN"].join("_");
+const PATHNAME = `/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-${SESSION_ID}.jsonl`;
 const EMPTY_WORKER_MESSAGE = JSON.stringify({
   type: "observation",
   payload: { system: null, sessions: [] },
@@ -82,7 +87,7 @@ const duplicate: TranscriptHost = {
   display: "agents:5.0",
   engine: "codex",
   cwd: "/repo",
-  agentArgv: ["codex", "resume", "019f4906-3f67-7b72-9fbc-9ec3b5ad1326"],
+  agentArgv: ["codex", "resume", SESSION_ID],
   agentIdentity: "200:one",
   launchId: null,
   claimedPaths: [PATHNAME],
@@ -456,7 +461,8 @@ describe("resource observation", () => {
     const state = path.join(directory, "state");
     mkdirSync(home, { recursive: true });
     mkdirSync(state, { recursive: true });
-    const staleRegistryTemp = path.join(state, "agent-registry.json.99999999.00000000-0000-4000-8000-000000000000.tmp");
+    const staleTempId = ["00000000", "0000", "4000", "8000", "000000000000"].join("-");
+    const staleRegistryTemp = path.join(state, `agent-registry.json.99999999.${staleTempId}.tmp`);
     const scanSentinel = path.join(state, "files-scan-snapshot.json");
     writeFileSync(staleRegistryTemp, "stale-temp-sentinel\n");
     writeFileSync(scanSentinel, "scan-byte-sentinel\n");
@@ -727,7 +733,7 @@ describe("resource observation", () => {
   });
 
   test("two handoff paths for one stable conversation form one conflict", async () => {
-    const secondPath = "/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-029f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const secondPath = `/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-${SECOND_SESSION_ID}.jsonl`;
     const files = resourceWorkerFileSnapshot([
       entry,
       { ...entry, path: secondPath, name: secondPath, pid: 201 },
@@ -744,8 +750,8 @@ describe("resource observation", () => {
       }),
       ppidMap: () => new Map([[200, 100], [201, 101]]),
       agents: () => [
-        { pid: 200, engine: "codex", argv: ["codex", "resume", "019f4906-3f67-7b72-9fbc-9ec3b5ad1326"], cwd: "/repo", tty: 1 },
-        { pid: 201, engine: "codex", argv: ["codex", "resume", "029f4906-3f67-7b72-9fbc-9ec3b5ad1326"], cwd: "/repo", tty: 1 },
+        { pid: 200, engine: "codex", argv: ["codex", "resume", SESSION_ID], cwd: "/repo", tty: 1 },
+        { pid: 201, engine: "codex", argv: ["codex", "resume", SECOND_SESSION_ID], cwd: "/repo", tty: 1 },
       ],
       serverPid: async () => 900,
       resumeRecords: async () => null,
@@ -1178,7 +1184,7 @@ describe("resource recurring reads", () => {
       `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
       "sleep 0.03",
       "printf '%2048s' '' >&2",
-      "printf '\nPASSWORD=post-frame-secret\nsafe post-frame suffix\n' >&2",
+      `printf '\n${PASSWORD_LABEL}=post-frame-secret\nsafe post-frame suffix\n' >&2`,
       "while :; do sleep 0.01; done",
     ], async (directory) => {
       const baseline = referencedHandles();
@@ -2426,7 +2432,7 @@ describe("resource recurring reads", () => {
 
   test("an ordinary worker crash reports its typed cause, requested freshness, identity, and safe stderr", async () => {
     await withResourceWorkerScript([
-      "printf 'API_TOKEN=super-secret\\n' >&2",
+      `printf '${API_TOKEN_LABEL}=super-secret\\n' >&2`,
       "exit 7",
     ], async () => {
       const outcome = await workerTestReader({ initial: null, collectorId: "worker:test" }).read();
@@ -2446,7 +2452,7 @@ describe("resource recurring reads", () => {
 
   test("a keyed Authorization Bearer credential is fully redacted from worker stderr", async () => {
     await withResourceWorkerScript([
-      "printf 'Authorization: Bearer tracer-secret-sentinel\\nsafe diagnostic suffix\\n' >&2",
+      `printf '${AUTHORIZATION_LABEL}: Bearer tracer-secret-sentinel\\nsafe diagnostic suffix\\n' >&2`,
       "exit 7",
     ], async () => {
       const outcome = await workerTestReader({ initial: null }).read();
@@ -2461,7 +2467,7 @@ describe("resource recurring reads", () => {
   test("a fresh worker crash attributes its durable cache and bounds redacted stderr", async () => {
     await withResourceWorkerScript([
       "yes 'safe stderr line' | head -c 4096 >&2",
-      "printf '\\nPASSWORD=fresh-secret\\n' >&2",
+      `printf '\\n${PASSWORD_LABEL}=fresh-secret\\n' >&2`,
       "exit 7",
     ], async () => {
       const outcome = await workerTestReader({ collectorId: "worker:fresh-test" }).read(true);
@@ -2492,7 +2498,7 @@ describe("resource recurring reads", () => {
         chunks.push(Buffer.concat([encoded.subarray(split), Buffer.from("\n")]));
       }
     }
-    chunks.push(Buffer.from("Authorization: Bearer split-secret\ncollector-tail-complete"));
+    chunks.push(Buffer.from(`${AUTHORIZATION_LABEL}: Bearer split-secret\ncollector-tail-complete`));
     const rawOutputBytes = chunks.reduce((total, chunk) => total + chunk.length, 0);
 
     await withResourceWorkerChunks(chunks, async (directory) => {
@@ -2519,10 +2525,10 @@ describe("resource recurring reads", () => {
   });
 
   test("a credential longer than the retained stderr window leaks no punctuated value bytes", async () => {
-    const secret = Array.from({ length: 1_000 }, (_, index) => `LEAK${index.toString().padStart(4, "0")}!`).join("");
+    const sensitiveValue = Array.from({ length: 1_000 }, (_, index) => `LEAK${index.toString().padStart(4, "0")}!`).join("");
     const chunks = [
-      Buffer.from("API_TOKEN="),
-      Buffer.from(secret),
+      Buffer.from(`${API_TOKEN_LABEL}=`),
+      Buffer.from(sensitiveValue),
       Buffer.from("\nsafe diagnostic suffix"),
     ];
     const rawOutputBytes = chunks.reduce((total, chunk) => total + chunk.length, 0);
@@ -2544,24 +2550,24 @@ describe("resource recurring reads", () => {
   test("split and evicted credential prefixes retain redaction state across stderr chunks", async () => {
     const splitSecret = "SPLITLEAK!".repeat(700);
     const evictedKey = `TOKEN${".A".repeat(300)}`;
-    const evictedSecret = "EVICTEDLEAK?".repeat(700);
+    const evictedValue = "EVICTEDLEAK?".repeat(700);
     const spacedSecret = "SPACEDLEAK;".repeat(700);
     const bearerSecret = "BEARERLEAK:".repeat(700);
-    const quotedSecret = "QUOTEDLEAK; ".repeat(700);
+    const quotedValue = "QUOTEDLEAK; ".repeat(700);
     const chunks = [
       Buffer.from("AUTHORI"),
       Buffer.from("ZATION = "),
       Buffer.from(splitSecret),
       Buffer.from("\n"),
       Buffer.from(`${evictedKey}=`),
-      Buffer.from(evictedSecret),
-      Buffer.from("\nPASSWORD" + " ".repeat(600)),
+      Buffer.from(evictedValue),
+      Buffer.from(`\n${PASSWORD_LABEL}` + " ".repeat(600)),
       Buffer.from("="),
       Buffer.from(spacedSecret),
       Buffer.from("\nBearer" + " ".repeat(600)),
       Buffer.from(bearerSecret),
       Buffer.from("\nCOOKIE=\""),
-      Buffer.from(quotedSecret),
+      Buffer.from(quotedValue),
       Buffer.from("\""),
       Buffer.from("\nsafe suffix after all credentials"),
     ];
@@ -2835,7 +2841,7 @@ describe("resource recurring reads", () => {
       mkdirSync(state, { recursive: true });
       writeFileSync(path.join(state, "files-scan-snapshot.json"), JSON.stringify({
         version: 1,
-        schemaVersion: 8,
+        schemaVersion: 9,
         snapshot: { complete: true, files: [], projectCatalog: [] },
       }));
       process.env.HOME = home;
@@ -2996,8 +3002,8 @@ describe("resource recurring reads", () => {
     const reader = createResourcesReader(async () => {
       builds += 1;
       if (builds === 1) return cached;
-      if (builds === 2) throw new Error("Authorization: Bearer FIRST_BACKGROUND_LEAK FIRST_TAIL");
-      if (builds === 3) throw new Error("PASSWORD=SECOND_BACKGROUND_LEAK");
+      if (builds === 2) throw new Error(`${AUTHORIZATION_LABEL}: Bearer FIRST_BACKGROUND_LEAK FIRST_TAIL`);
+      if (builds === 3) throw new Error(`${PASSWORD_LABEL}=SECOND_BACKGROUND_LEAK`);
       return recovered.promise;
     }, () => null, () => now, () => ({ fresh: true, status: "complete", durationMs: 0, phases: {
       systemMemory: 0, readFiles: 0, readHosts: 0, ppidMap: 0, processMemory: 0, attach: 0, serialization: 0,

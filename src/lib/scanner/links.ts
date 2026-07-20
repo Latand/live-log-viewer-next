@@ -13,6 +13,7 @@ import {
 } from "../handoffLineage";
 import type { FileEntry } from "../types";
 import { globalCache } from "./caches";
+import { claudeSubagentLineage } from "./claudeNative";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { persistWorktreeMap } from "./describe";
 import { taskParts } from "./discover";
@@ -655,11 +656,13 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   for (const entry of entries) {
     if (entry.root === "claude-projects") {
-      const parts = entry.name.split(path.sep);
-      if (parts.length >= 3 && parts.at(-2) === "subagents") {
-        const slug = parts[0] ?? "";
-        const sid = parts.at(-3) ?? "";
-        const [main, subs] = await sessionTranscripts(sid, limit, slug);
+      // Both the direct `subagents/agent-*.jsonl` layout and the nested Workflow
+      // `subagents/**​/agent-*.jsonl` layout resolve to the same root parent
+      // transcript (issue #339). Path-derived, so lineage holds even when the
+      // parent transcript is absent from this scan.
+      const lineage = claudeSubagentLineage(entry.name);
+      if (lineage) {
+        const [main, subs] = await sessionTranscripts(lineage.parentSessionId, limit, lineage.slug);
         entry.parent = main;
         const meta = readJson(entry.path.slice(0, -".jsonl".length) + ".meta.json") ?? {};
         const toolUse = stringValue(meta.toolUseId);

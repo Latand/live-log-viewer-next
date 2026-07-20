@@ -7,6 +7,7 @@ import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
 import { agentProcesses, argvEngine, pidAlive, pidHoldsPath, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
+import { isClaudeSubagentLeafPath } from "@/lib/scanner/claudeNative";
 import {
   panePidMap,
   panePidOf,
@@ -611,6 +612,22 @@ function spawnReceiptReconciliationNeeded(
     && liveArtifactPaths.has(receipt.artifactPath));
 }
 
+/**
+ * The pane's root transcript for launch-receipt settlement (issue #339). A
+ * Viewer launch owns exactly one conversation — the root session. When the same
+ * pane process also writes engine-native subagent children, those appear among
+ * the pane's claims; settling the receipt onto a child would let an engine child
+ * steal the Viewer receipt. The highest-priority claimed path that is not a
+ * subagent child is the root; null when the pane exposes only child artifacts.
+ */
+function launchReceiptRootArtifact(host: TranscriptHost): string | null {
+  const candidates = [host.primaryPath, ...host.claimedPaths].filter((value): value is string => Boolean(value));
+  for (const candidate of candidates) {
+    if (host.engine !== "claude" || !isClaudeSubagentLeafPath(candidate)) return candidate;
+  }
+  return null;
+}
+
 export function reconcileObservedTranscriptHosts(
   hosts: TranscriptHost[],
   dependencies: TranscriptHostRegistryReconciliationDependencies = {
@@ -630,12 +647,22 @@ export function reconcileObservedTranscriptHosts(
       mutated = true;
     }
     if (!host.primaryPath) continue;
-    const key = sessionKeyFromTranscript(host.engine, host.primaryPath);
-    if (!key) continue;
     if (host.launchId) {
+      /* The launch receipt settles once, against the pane's ROOT transcript
+         (issue #339). An engine-native subagent child written by the same pane
+         must never claim the Viewer receipt, so resolve the root artifact from
+         the pane's claims — independent of which claim ranked as the pane's
+         primary — and quarantine a pane exposing only child artifacts rather
+         than let a child settle. */
+      const rootPath = launchReceiptRootArtifact(host);
+      const rootKey = rootPath ? sessionKeyFromTranscript(host.engine, rootPath) : null;
+      if (!rootPath || !rootKey) {
+        quarantinedPaneIds.add(host.paneId);
+        continue;
+      }
       const settled = registry.completeObservedSpawn(host.launchId, {
-        key,
-        artifactPath: host.primaryPath,
+        key: rootKey,
+        artifactPath: rootPath,
         cwd: host.cwd,
         accountId: null,
         status: "live",
@@ -648,12 +675,14 @@ export function reconcileObservedTranscriptHosts(
       /* A mismatched pane/artifact remains quarantined. It must never fall
          through into the generic upsert and overwrite the real receipt. */
       if (settled.kind === "settled") {
-        seen.add(`${key.engine}:${key.sessionId}`);
+        seen.add(`${rootKey.engine}:${rootKey.sessionId}`);
         continue;
       }
       quarantinedPaneIds.add(host.paneId);
       continue;
     }
+    const key = sessionKeyFromTranscript(host.engine, host.primaryPath);
+    if (!key) continue;
     const id = `${key.engine}:${key.sessionId}`;
     const existing = snapshot.entries[id];
     const entry = {

@@ -434,6 +434,11 @@ export interface ConversationObservation {
   expectedTurnObservedAt?: string | null;
   startedAt?: string | null;
   observedAt: string;
+  /** Path-derived engine-native parent transcript (issue #339). Resolved
+      against the post-admission path index so a parent discovered in the same
+      inventory cycle still establishes the child's lineage edge. Never
+      overrides an authoritative `viewer-spawn` edge. */
+  parentArtifactPath?: string | null;
 }
 
 export type MigrationScope = "active" | "all";
@@ -4091,6 +4096,49 @@ export class AgentRegistry {
           conversation.updatedAt = observation.observedAt;
         }
         if (priorAccountId !== generation.accountId || priorRole !== generation.launchProfile.role || priorTurnState !== conversation.turn.state) {
+          scopeChanged.add(observation.engine);
+        }
+      }
+      /* Post-admission engine-native lineage (issue #339): every observed
+         artifact now holds a conversation identity in the path index, including
+         a parent first seen in this same cycle. Resolving each path-derived
+         parent here — rather than at observation time against a pre-cycle
+         snapshot — lets one inventory pass establish a parent plus its children
+         atomically. Authoritative viewer-spawn edges are preserved; self-edges
+         and cycles are refused. */
+      const ownerForPath = (pathname: string, engine: Extract<AgentEngine, "claude" | "codex">): RegistryConversation | null =>
+        preferredConversationOwner(file, (conversationsByPath.get(pathname) ?? []).filter((candidate) =>
+          file.conversations[candidate.id] === candidate
+          && candidate.engine === engine
+          && conversationOwnsPath(candidate, pathname)));
+      const lineageWouldCycle = (childId: ViewerConversationId, parentId: ViewerConversationId): boolean => {
+        const seen = new Set<ViewerConversationId>();
+        let current: ViewerConversationId | undefined = parentId;
+        while (current && !seen.has(current)) {
+          if (current === childId) return true;
+          seen.add(current);
+          const next: ViewerConversationId | undefined = file.lineageEdges[current]?.parentConversationId;
+          current = next ? resolveConversationAlias(file, next) : undefined;
+        }
+        return false;
+      };
+      for (const observation of observations) {
+        if (!observation.parentArtifactPath) continue;
+        const child = ownerForPath(observation.path, observation.engine);
+        if (!child || file.lineageEdges[child.id]?.source === "viewer-spawn") continue;
+        const parent = ownerForPath(observation.parentArtifactPath, observation.engine);
+        if (!parent) continue;
+        const parentId = resolveConversationAlias(file, parent.id);
+        if (parentId === child.id || lineageWouldCycle(child.id, parentId)) continue;
+        const generation = child.generations.find((candidate) => candidate.path === observation.path)
+          ?? child.generations.at(-1);
+        if (!generation) continue;
+        if (generation.launchProfile.parentConversationId !== parentId) {
+          generation.launchProfile = { ...generation.launchProfile, parentConversationId: parentId };
+        }
+        const beforeParent = file.lineageEdges[child.id]?.parentConversationId ?? null;
+        recordObservedLineage(file, child, observation.path, observation.observedAt);
+        if ((file.lineageEdges[child.id]?.parentConversationId ?? null) !== beforeParent) {
           scopeChanged.add(observation.engine);
         }
       }

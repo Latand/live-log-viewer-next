@@ -16,8 +16,13 @@ import {
 import type { RawEntry } from "./discover";
 import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./projectState";
 
+/** Project-summary semantic version. Bumped to 3 for issue #339 so a restart
+    re-derives engine-native subagent titles and never replays a pre-#339
+    generic title or a phantom bookkeeping card. */
+const PROJECT_SUMMARY_VERSION = 3 as const;
+
 type CachedProjectFile = {
-  summaryVersion?: 2;
+  summaryVersion?: typeof PROJECT_SUMMARY_VERSION;
   summaryIncomplete?: true;
   rootName: RawEntry["rootName"];
   size: number;
@@ -114,7 +119,7 @@ function readState(): ProjectCatalogState {
       const sidecarMtimeMs = typeof file.sidecarMtimeMs === "number"
         ? file.sidecarMtimeMs
         : file.sidecarMtimeMs === null ? null : undefined;
-      const summaryComplete = file.summaryVersion === 2
+      const summaryComplete = file.summaryVersion === PROJECT_SUMMARY_VERSION
         && typeof file.title === "string"
         && engine !== undefined
         && fmt !== undefined
@@ -125,7 +130,7 @@ function readState(): ProjectCatalogState {
         && sidecarSize !== undefined
         && sidecarMtimeMs !== undefined;
       files[pathname] = {
-        summaryVersion: summaryComplete ? 2 : undefined,
+        summaryVersion: summaryComplete ? PROJECT_SUMMARY_VERSION : undefined,
         summaryIncomplete: !summaryComplete && file.summaryIncomplete === true ? true : undefined,
         rootName: file.rootName,
         size: file.size,
@@ -221,20 +226,20 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     cached &&
     cached.size === raw.st.size &&
     cached.mtimeMs === raw.st.mtimeMs &&
-    (cached.summaryVersion !== 2 || (
+    (cached.summaryVersion !== PROJECT_SUMMARY_VERSION || (
       cached.sidecarSize === identity.sidecarSize &&
       cached.sidecarMtimeMs === identity.sidecarMtimeMs
     )) &&
     cached.stateKey === stateKey &&
     cached.projectRoot !== undefined
   ) {
-    if (cached.summaryVersion !== 2) {
+    if (cached.summaryVersion !== PROJECT_SUMMARY_VERSION) {
       const described = describeFile(raw.rootName, raw.root, raw.path, raw.st, stateKey, identity);
       const meta = described.description;
       const refreshProjectMetadata = cached.summaryIncomplete === true;
       return {
         ...cached,
-        summaryVersion: described.complete ? 2 : undefined,
+        summaryVersion: described.complete ? PROJECT_SUMMARY_VERSION : undefined,
         summaryIncomplete: refreshProjectMetadata && !described.complete ? true : undefined,
         sidecarSize: identity.sidecarSize,
         sidecarMtimeMs: identity.sidecarMtimeMs,
@@ -268,9 +273,9 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
   }
   const described = describeFile(raw.rootName, raw.root, raw.path, raw.st, stateKey, identity);
   const meta = described.description;
-  const prior = !described.complete && cached?.summaryVersion === 2 ? cached : undefined;
+  const prior = !described.complete && cached?.summaryVersion === PROJECT_SUMMARY_VERSION ? cached : undefined;
   const file: ProjectCatalogFile = {
-    summaryVersion: described.complete ? 2 : undefined,
+    summaryVersion: described.complete ? PROJECT_SUMMARY_VERSION : undefined,
     summaryIncomplete: described.complete ? undefined : true,
     path: raw.path,
     rootName: raw.rootName,
@@ -372,7 +377,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
     previousProjects.set(entry.path, state.files[entry.path]?.project);
   });
   const files = await mapCooperatively(raw, (entry) => cachedFile(entry, state, stateKey));
-  const complete = options.complete !== false && files.every((file) => file.summaryVersion === 2);
+  const complete = options.complete !== false && files.every((file) => file.summaryVersion === PROJECT_SUMMARY_VERSION);
   const claudeSessionProjects = new Map<string, string>();
   await forEachCooperatively(raw, (entry, index) => {
     const file = files[index]!;

@@ -166,6 +166,14 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     if (responsePinOverlayPaths.has(child.path)) responsePinOverlayPaths.add(parentPath);
   }
   const scannedPaths = new Set(files.map((file) => file.path));
+  /* Receipt-owned conversations (issue #339): a Viewer launch persists a spawn
+     receipt against the conversation it created. Those carry `viewer`
+     provenance even when the root has no parent edge. Computed once per
+     response so the per-file projection stays O(1). */
+  const receiptOwnedConversationIds = new Set<string>();
+  for (const receipt of Object.values(registrySnapshot.receipts)) {
+    receiptOwnedConversationIds.add(conversationLookup.canonicalConversationId(receipt.conversationId));
+  }
   /* Supersedence lineage (issue #383): the reverse edge map gives each chain
      tail its immediate predecessor and its round number (chain depth + 1),
      bounded so a malformed chain can never hang the scan. */
@@ -282,6 +290,14 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       file.goal = profile.goal ?? file.goal;
       file.plan = profile.plan ?? file.plan;
       const durableEdge = registrySnapshot.lineageEdges[conversation.id];
+      /* Board provenance (issue #339): engine-native edges mark `engine`;
+         viewer-spawn edges and receipt-owned roots mark `viewer`. Unattributed
+         external roots stay undefined. */
+      if (durableEdge?.source === "engine-native") {
+        file.spawnOrigin = "engine";
+      } else if (durableEdge?.source === "viewer-spawn" || receiptOwnedConversationIds.has(conversation.id)) {
+        file.spawnOrigin = "viewer";
+      }
       const memberships = registrySnapshot.memberships[conversation.id] ?? [];
       if (durableEdge || memberships.length) {
         file.durableLineage = {

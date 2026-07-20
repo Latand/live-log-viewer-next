@@ -127,6 +127,8 @@ export function preallocatedStructuredSpawnCards(
       engine: receipt.engine,
       kind: "session",
       fmt: receipt.engine,
+      // A preallocated card is by definition a Viewer launch (issue #339).
+      spawnOrigin: "viewer",
       parent: parentPath && scannedPaths.has(parentPath) ? parentPath : null,
       ...(parentPath && scannedPaths.has(parentPath) ? { handoff: true } : {}),
       mtime: Date.parse(receipt.createdAt) / 1000,
