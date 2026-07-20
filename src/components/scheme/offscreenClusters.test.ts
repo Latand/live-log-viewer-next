@@ -344,6 +344,70 @@ describe("draft-pane obstacles (issue #474: chips never paint over an open draft
   });
 });
 
+describe("draft below-header / composer projection is load-bearing (issue #474 RED-first: the collision the production DraftAgentPane gate proves)", () => {
+  /* Reproduce the exact production collision the real-draft acceptance harness
+     forces: an open draft conversation pane whose composer sits at the FOOT of
+     its shell — well BELOW its header — and an off-screen cluster whose left-edge
+     chip would unfurl straight across that composer band. The chip must fold
+     ONLY because the draft is projected as a chip obstacle spanning its WHOLE
+     shell, its composer included. Removing the draft from the obstacle set, or
+     projecting only its header strip, re-admits the chip over the live composer —
+     the below-header collision this gate exists to catch. Each mutation branch
+     asserts the *buggy* admission so a regression that reintroduces it is pinned;
+     the full-shell branch is the RED-first gate that flips the instant draft
+     inclusion or the shell's below-header height is dropped. */
+  const composerBandVp = { w: 1_000, h: 700 };
+  /* The whole draft shell (header strip + transcript body + the composer at its
+     foot) and, as the header-only mutation, just its ~40px header strip. */
+  const draftFullShell = { x: 0, y: 0, w: 520, h: 640 };
+  const draftHeaderOnly = { x: 0, y: 0, w: 520, h: 40 };
+  /* An off-screen cluster to the left whose center-to-viewport ray crosses the
+     left edge down in the composer band (y ≈ 600), so its reserved reveal band
+     lands on the draft's composer, never its header. */
+  const composerCluster = cluster("draft-composer", -700, 875);
+  /* Rebuild the admitted left-edge chip's reserved reveal box the same way
+     {@link chipBox} does (CHIP_H = 44, so ±22 about its anchor y), to prove an
+     admitted chip really would paint over the composer band and not the header. */
+  const CHIP_HALF_H = 22;
+  const leftChipBox = (chip: { x: number; y: number; revealWidth: number }) => ({
+    x: chip.x,
+    y: chip.y - CHIP_HALF_H,
+    w: chip.revealWidth,
+    h: 2 * CHIP_HALF_H,
+  });
+  const hits = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): boolean =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+  test("folds the chip when the draft is projected as a full-shell obstacle (composer band protected)", () => {
+    const obstacles = chipObstacleRects([], [], [draftFullShell], cam);
+    const chips = offscreenClusterChips([composerCluster], cam, composerBandVp, 4, obstacles);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["draft-composer"]);
+  });
+
+  test("RED when draft inclusion is removed: the chip re-appears and its reveal band paints over the composer", () => {
+    const obstacles = chipObstacleRects([], [], [], cam);
+    const chips = offscreenClusterChips([composerCluster], cam, composerBandVp, 4, obstacles);
+    expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["draft-composer"]);
+    /* The admitted chip's reserved reveal band really does cover the draft's
+       whole shell (the composer included) — the collision the gate must fold. */
+    expect(hits(leftChipBox(chips.visible[0]!), draftFullShell)).toBe(true);
+  });
+
+  test("RED when only the header strip is projected: the below-header composer band is left unguarded", () => {
+    const obstacles = chipObstacleRects([], [], [draftHeaderOnly], cam);
+    const chips = offscreenClusterChips([composerCluster], cam, composerBandVp, 4, obstacles);
+    expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["draft-composer"]);
+    /* A header-only projection clears the header strip yet leaves the composer
+       below it exposed: the admitted chip misses the header but lands on the
+       composer band — the exact below-header collision full-shell projection
+       fixes. */
+    const box = leftChipBox(chips.visible[0]!);
+    expect(hits(box, draftHeaderOnly)).toBe(false);
+    expect(hits(box, draftFullShell)).toBe(true);
+  });
+});
+
 describe("viewport-safe overflow disclosure list (issue #474: the opened «+N» list opens inward and stays fully on-board)", () => {
   /* The list keeps 8px off every border; allow a hair of float slack. */
   const LIST_PAD_MIN = 8 - 1e-6;

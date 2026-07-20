@@ -470,6 +470,203 @@ async function proveObstacleMatrix(page: any, outDir: string): Promise<void> {
   console.log("  shot desktop-1440-edge-chip-keepout-clear.png");
 }
 
+/* A viewport-space box exactly as a browser {@link DOMRect} reports it. */
+type Box = { left: number; top: number; right: number; bottom: number; width: number; height: number };
+const boxOverlaps = (a: { left: number; top: number; right: number; bottom: number }, b: { left: number; top: number; right: number; bottom: number }): boolean =>
+  a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+
+/* Measure the REAL draft conversation pane the board just rendered: its complete
+   shell `section` (header strip + transcript body + the composer at its foot),
+   the `[data-scheme-node]` box the layout reserves for it (the exact world rect
+   `chipObstacleRects` projects into chip space), its `header`, and its composer
+   `form`. `band` is the strictly-below-header slice of the shell — the transcript
+   body and composer, the region a header-only measurement never covered (issue
+   #474). Returns null until the draft has mounted. */
+async function measureDraftPane(page: any): Promise<{
+  shell: Box; node: Box; header: Box | null; composer: Box | null; band: { left: number; top: number; right: number; bottom: number };
+} | null> {
+  return page.evaluate(() => {
+    const rect = (r: DOMRect): Box => ({ left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height });
+    const shell = document.querySelector('section[aria-label="Draft of a new agent conversation"]') as HTMLElement | null;
+    if (!shell) return null;
+    const node = (shell.closest("[data-scheme-node]") as HTMLElement | null) ?? shell;
+    const header = shell.querySelector("header") as HTMLElement | null;
+    const composer = shell.querySelector('form[aria-label="First prompt for the new agent"]') as HTMLElement | null;
+    const sr = shell.getBoundingClientRect();
+    const hr = header?.getBoundingClientRect() ?? null;
+    return {
+      shell: rect(sr),
+      node: rect(node.getBoundingClientRect()),
+      header: hr ? rect(hr) : null,
+      composer: composer ? rect(composer.getBoundingClientRect()) : null,
+      band: { left: sr.left, top: hr ? hr.bottom : sr.top, right: sr.right, bottom: sr.bottom },
+    };
+  });
+}
+
+/* Every visible edge chip / «+N» aggregate trigger measured against a band. */
+async function bandClearance(page: any, band: { left: number; top: number; right: number; bottom: number }): Promise<{
+  chipCount: number; triggerCount: number; chipHit: boolean; triggerHit: boolean;
+}> {
+  return page.evaluate((b: { left: number; top: number; right: number; bottom: number }) => {
+    const overlaps = (r: DOMRect) => r.width > 0 && r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top;
+    const chips = Array.from(document.querySelectorAll("[data-edge-chip]")) as HTMLElement[];
+    const triggers = Array.from(document.querySelectorAll('nav[aria-label="Off-screen work"] button')).filter((t) => /^\+\d+$/.test((t.textContent || "").trim())) as HTMLElement[];
+    return {
+      chipCount: chips.length,
+      triggerCount: triggers.length,
+      chipHit: chips.some((c) => overlaps(c.getBoundingClientRect())),
+      triggerHit: triggers.some((t) => overlaps(t.getBoundingClientRect())),
+    };
+  }, band);
+}
+
+/* The repaired draft-pane below-header contract, proven end to end in the real
+   production build against a REAL {@link DraftAgentPane} — not a synthetic
+   `data-chip-keepout` stand-in. Renders an actual draft conversation pane through
+   the board's own «+ Agent» affordance, measures its COMPLETE shell and its
+   composer, forces a real below-header collision through the normal draft-pane
+   projection (the draft is panned so its transcript/composer band lands on an
+   edge where off-screen work docks), and asserts resting, progressive, focused
+   and «+N» aggregate clearance of that below-header band. The gate fails the
+   instant `chipObstacleRects` drops draft inclusion or projects only the header
+   strip: a chip or the aggregate would then paint over the live composer, which
+   these overlaps catch (issue #474). */
+async function proveRealDraftPaneClearance(page: any, outDir: string): Promise<void> {
+  /* Reset to a clean, unpanned board so the draft mounts in view, then open a
+     REAL draft conversation pane the way an operator does — the board's own
+     bottom-left «+ Agent» control (aria-label "New conversation with an agent"). */
+  await page.evaluate(() => {
+    const opener = Array.from(document.querySelectorAll("button")).find((b) => b.getAttribute("aria-label") === "New conversation with an agent");
+    (opener as HTMLElement | undefined)?.click();
+  });
+  await page.waitForFunction(() => Boolean(document.querySelector('section[aria-label="Draft of a new agent conversation"]')), { timeout: 15_000 });
+  await Bun.sleep(600); // let the fresh draft glide to its slot and settle
+
+  const draft = await measureDraftPane(page);
+  check(Boolean(draft), "desktop-draft-pane-rendered", "a real draft conversation pane (DraftAgentPane) is rendered on the production board");
+  const d = draft!;
+  check(Boolean(d.composer && d.composer.height > 8), "desktop-draft-has-composer", `the draft pane renders its composer/input at the foot of its shell (${d.composer ? Math.round(d.composer.height) : 0}px tall)`);
+  const bandHeight = d.band.bottom - d.band.top;
+  check(bandHeight >= 24, "desktop-draft-has-below-header-region", `the draft shell extends a real transcript/composer band below its header (${Math.round(bandHeight)}px) — the region a header-only measurement misses`);
+  check(
+    Boolean(d.composer && d.header && d.composer.top >= d.header.bottom - 1 && d.composer.bottom <= d.band.bottom + 1),
+    "desktop-draft-composer-below-header",
+    "the measured composer sits strictly BELOW the draft header, inside the below-header band",
+  );
+  /* The layout reserves the WHOLE shell for the draft: the `[data-scheme-node]`
+     box the camera projects into chip space encloses the composer. A header-only
+     projection would leave the composer outside this box — exactly the gap this
+     asserts shut. */
+  check(
+    Boolean(d.composer && d.node.top <= d.composer.top + 1 && d.node.bottom >= d.composer.bottom - 1 && d.node.left <= d.composer.left + 1 && d.node.right >= d.composer.right - 1),
+    "desktop-draft-obstacle-spans-composer",
+    "the draft's projected board obstacle spans its whole shell — the composer included — so the chip layer reserves the composer band, not just the header",
+  );
+
+  // Resting clearance: nothing docks over the draft's below-header band at rest.
+  const resting = await bandClearance(page, d.band);
+  check(!resting.chipHit, "desktop-draft-resting-chip-clear", `no visible edge chip overlaps the draft's below-header body/composer band at rest (${resting.chipCount} chip(s))`);
+  check(!resting.triggerHit, "desktop-draft-resting-aggregate-clear", `no «+N» aggregate trigger overlaps the draft's below-header band at rest (${resting.triggerCount} trigger(s))`);
+
+  /* Surface a real long chip (it is app-admitted, so already clear of the draft)
+     and drive its full reveal lifecycle — resting → repeated pointer progression
+     → keyboard full-reveal → reduced-motion hover — asserting at EVERY state that
+     the chip's box never overlaps the draft's below-header/composer band. Under a
+     header-only projection an admitted chip could unfurl over the composer; the
+     focused/progressive overlaps below would catch it. */
+  const sel = await surfaceLongVisibleChip(page, 60);
+  check(Boolean(sel), "desktop-draft-chip-surfaced", "a long edge chip surfaces alongside the open draft pane, clear of every pane");
+  const band2 = (await measureDraftPane(page))!.band; // the draft shifted with the pan; re-measure its band
+  const chipBoxAt = async (): Promise<Box> => page.evaluate((s: string) => {
+    const r = (document.querySelector(s) as HTMLElement).getBoundingClientRect();
+    return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+  }, sel!);
+  const restingChip = await chipBoxAt();
+  check(!boxOverlaps(restingChip, band2), "desktop-draft-chip-resting-clears-band", "the resting surfaced chip clears the draft's below-header/composer band");
+
+  // Progressive pointer reveal: unfurl further segments; clearance holds throughout.
+  const progressed = await page.evaluate(async (selector: string) => {
+    const chip = document.querySelector(selector) as HTMLElement;
+    const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
+    const settle = () => new Promise((r) => setTimeout(r, 30));
+    chip.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    await settle();
+    let maxRight = chip.getBoundingClientRect().right;
+    const boxes: { left: number; top: number; right: number; bottom: number }[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      const end = title.getBoundingClientRect().right;
+      chip.dispatchEvent(new PointerEvent("pointermove", { clientX: end - 4, clientY: title.getBoundingClientRect().top + 4, bubbles: true }));
+      await settle();
+      const b = chip.getBoundingClientRect();
+      boxes.push({ left: b.left, top: b.top, right: b.right, bottom: b.bottom });
+      maxRight = Math.max(maxRight, b.right);
+    }
+    return { boxes, maxRight };
+  }, sel!);
+  const progressiveClears = progressed.boxes.every((b: { left: number; top: number; right: number; bottom: number }) => !boxOverlaps(b, band2));
+  check(progressiveClears, "desktop-draft-chip-progressive-clears-band", "every progressively-revealed chip step clears the draft's below-header/composer band");
+
+  // Keyboard focus → the whole label unfurls; the fully-revealed chip still clears.
+  await page.evaluate((s: string) => (document.querySelector(s) as HTMLElement).focus(), sel!);
+  await Bun.sleep(200);
+  const focusedChip = await chipBoxAt();
+  const focusedReveal = await page.evaluate((s: string) => (document.querySelector(s)!.querySelector("[data-edge-chip-title]") as HTMLElement).getAttribute("data-reveal"), sel!);
+  check(focusedReveal === "full", "desktop-draft-chip-focus-full", `keyboard focus fully reveals the chip beside the open draft (data-reveal ${focusedReveal})`);
+  check(!boxOverlaps(focusedChip, band2), "desktop-draft-chip-focused-clears-band", "the fully-revealed (focused) chip still clears the draft's below-header/composer band");
+
+  // Reduced-motion hover reveals at once; clearance still holds.
+  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  await page.evaluate((s: string) => (document.querySelector(s) as HTMLElement).blur(), sel!);
+  await Bun.sleep(100);
+  await page.evaluate((s: string) => (document.querySelector(s) as HTMLElement).dispatchEvent(new PointerEvent("pointerover", { bubbles: true })), sel!);
+  await Bun.sleep(120);
+  const reducedChip = await chipBoxAt();
+  check(!boxOverlaps(reducedChip, band2), "desktop-draft-chip-reduced-motion-clears-band", "the reduced-motion full reveal clears the draft's below-header/composer band");
+  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "no-preference" }]);
+  await page.evaluate((s: string) => (document.querySelector(s) as HTMLElement).blur(), sel!);
+
+  /* Force a real below-header collision through the NORMAL draft-pane projection:
+     pan the board so the draft's transcript/composer band lands on a viewport
+     edge where off-screen work docks. With the draft an obstacle, every chip and
+     the «+N» aggregate must fold/slide/re-home out of that band rather than paint
+     over the composer. Search a bounded set of pans for a state where the band
+     overlaps an edge's docking strip WITH off-screen work present, then assert
+     clearance there. */
+  await page.mouse.move(720, 450);
+  await page.keyboard.press("h"); // hand tool: wheels pan, never scroll a pane
+  const EDGE_STRIP = 48;
+  let forced: { edge: string; band: { left: number; top: number; right: number; bottom: number }; chipCount: number; triggerCount: number } | null = null;
+  const pans = [{ x: 300, y: 0 }, { x: -300, y: 0 }, { x: 0, y: 300 }, { x: 0, y: -300 }];
+  for (const pan of pans) {
+    for (let step = 0; step < 16 && !forced; step += 1) {
+      const m = await measureDraftPane(page);
+      if (m) {
+        const vp = await page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }));
+        const band = m.band;
+        const touchesEdge =
+          band.left <= EDGE_STRIP || band.right >= vp.w - EDGE_STRIP || band.top <= EDGE_STRIP || band.bottom >= vp.h - EDGE_STRIP;
+        const clearance = await bandClearance(page, band);
+        const offscreenWork = clearance.chipCount + clearance.triggerCount > 0;
+        if (touchesEdge && offscreenWork) {
+          check(!clearance.chipHit, "desktop-draft-forced-collision-chip-clear", `with the draft's below-header band forced onto a docking edge, no edge chip paints over it (${clearance.chipCount} chip(s), ${clearance.triggerCount} «+N»)`);
+          check(!clearance.triggerHit, "desktop-draft-forced-collision-aggregate-clear", "with the draft's below-header band forced onto a docking edge, the «+N» aggregate re-homes/slides clear of it");
+          const edge = band.left <= EDGE_STRIP ? "left" : band.right >= vp.w - EDGE_STRIP ? "right" : band.top <= EDGE_STRIP ? "top" : "bottom";
+          forced = { edge, band, chipCount: clearance.chipCount, triggerCount: clearance.triggerCount };
+          break;
+        }
+      }
+      await page.mouse.move(720, 450);
+      await page.mouse.wheel({ deltaX: pan.x, deltaY: pan.y });
+      await Bun.sleep(90);
+    }
+    if (forced) break;
+  }
+  check(Boolean(forced), "desktop-draft-below-header-collision-forced", forced ? `forced a real below-header collision: the draft's composer band met the ${forced.edge} docking edge with off-screen work present, and every chip + «+N» aggregate stayed clear` : "could not force the draft's below-header band onto a docking edge");
+  await page.screenshot({ path: path.join(outDir, "desktop-1440-draft-below-header-clear.png") });
+  console.log("  shot desktop-1440-draft-below-header-clear.png");
+}
+
 async function main(): Promise<void> {
   const home = buildFixtureHome();
   console.log(`fixture home: ${home}`);
@@ -576,6 +773,13 @@ async function main(): Promise<void> {
          «+N» aggregate clear, and the fully-blocked edge forces the aggregate to
          re-home off it or suppress — never docking over the wall (issue #474). */
       await proveObstacleMatrix(page, OUT_DIR);
+
+      /* The repaired draft-pane path, proven against a REAL DraftAgentPane: open
+         an actual draft conversation pane, measure its complete shell + composer,
+         force a real below-header collision through the normal draft projection,
+         and assert resting / progressive / focused / «+N» aggregate clearance of
+         its below-header/composer band (issue #474 — no synthetic keep-out). */
+      await proveRealDraftPaneClearance(page, OUT_DIR);
       await page.close();
     }
 
@@ -654,7 +858,7 @@ async function main(): Promise<void> {
         capturedAt: new Date().toISOString(),
         viewer: "production next start",
         viewport: { desktop: "1440x900", mobile: "390x844" },
-        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/EdgeChips.dom.test.tsx (a fully blocked edge re-homes the «+N» aggregate to a clear border, keeping it a keyboard-reachable disclosure; the opened «+N» list opens inward from its edge, width-constrained and clamped fully inside the viewport so every keyboard-focused row stays on-board) + src/components/scheme/offscreenClusters.test.ts (measured admission: a chip is admitted only when its *measured* rendered width fits at its anchor, so a wide-glyph exact 48/60-char title folds while a title that fits is admitted with exactly its measured band reserved; a top/bottom chip pinned near a corner folds into «+N» rather than render a permanently-truncated sliver; a chip whose measured reveal band overlaps a pane / the subagent avatar/round stack / the composer/input keep-out folds instead of painting over it; chipObstacleRects projects live panes, review decks AND draft conversation panes — each draft rect spanning its whole shell incl. its composer — into screen space, so a chip that would paint over an open draft or its composer folds; overflowListStyle opens the disclosure list inward per resolved edge, width-constrained to the room left and cross-axis-clamped so every focused row stays inside the viewport for all four edges and re-homed anchors; overflowAnchor returns null when an edge is fully blocked and resolveOverflowPlacement re-homes the «+N» aggregate to the nearest clear border, suppressing only when the whole viewport border is blocked)",
+        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/EdgeChips.dom.test.tsx (a fully blocked edge re-homes the «+N» aggregate to a clear border, keeping it a keyboard-reachable disclosure; the opened «+N» list opens inward from its edge, width-constrained and clamped fully inside the viewport so every keyboard-focused row stays on-board) + src/components/scheme/offscreenClusters.test.ts (measured admission: a chip is admitted only when its *measured* rendered width fits at its anchor, so a wide-glyph exact 48/60-char title folds while a title that fits is admitted with exactly its measured band reserved; a top/bottom chip pinned near a corner folds into «+N» rather than render a permanently-truncated sliver; a chip whose measured reveal band overlaps a pane / the subagent avatar/round stack / the composer/input keep-out folds instead of painting over it; chipObstacleRects projects live panes, review decks AND draft conversation panes — each draft rect spanning its whole shell incl. its composer — into screen space, so a chip that would paint over an open draft or its composer folds; a RED-first below-header regression pins that a left-edge chip whose reveal band lands on a draft's composer folds ONLY when the draft is projected as a full-shell obstacle, and is re-admitted over the composer the instant draft inclusion or the shell's below-header height is dropped; overflowListStyle opens the disclosure list inward per resolved edge, width-constrained to the room left and cross-axis-clamped so every focused row stays inside the viewport for all four edges and re-homed anchors; overflowAnchor returns null when an edge is fully blocked and resolveOverflowPlacement re-homes the «+N» aggregate to the nearest clear border, suppressing only when the whole viewport border is blocked). Production harness proves the repaired draft-pane path end to end against a REAL DraftAgentPane: it opens an actual draft conversation pane through the board's «+ Agent» control, measures its complete shell and composer, verifies the draft's projected board obstacle spans the whole shell (composer included), forces a real below-header collision by panning the composer band onto a docking edge, and asserts resting / progressive / focused / «+N» aggregate clearance of that below-header band.",
         checks,
       }, null, 2) + "\n",
     );
