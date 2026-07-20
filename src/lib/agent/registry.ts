@@ -2809,7 +2809,10 @@ export class AgentRegistry {
       const receipt = file.receipts[launchId];
       if (!receipt) throw new Error("unknown spawn receipt");
       const unbound = receipt.state === "starting" && !receipt.key && !receipt.pane;
-      const recoverablePane = transport === "tmux" && receipt.state === "pane-bound" && !receipt.key && Boolean(receipt.pane);
+      const recoverablePane = transport === "tmux"
+        && (receipt.state === "pane-bound" || receipt.state === "host-verified")
+        && !receipt.key
+        && Boolean(receipt.pane);
       if (receipt.transport !== transport || (!unbound && !recoverablePane)) {
         return { claimed: false, receipt: clone(receipt) };
       }
@@ -2830,9 +2833,9 @@ export class AgentRegistry {
     return this.claimSpawnActuation(launchId, "structured");
   }
 
-  /** Atomically adopts an unbound or pane-bound tmux receipt after its
-      actuation owner exits. A pane-bound claimant must continue inside the
-      persisted pane identity. */
+  /** Atomically adopts an unbound, pane-bound, or host-verified tmux receipt
+      after its actuation owner exits. A bound claimant must continue inside
+      the persisted pane identity. */
   claimTmuxSpawnActuation(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
     return this.claimSpawnActuation(launchId, "tmux");
   }

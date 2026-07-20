@@ -1200,7 +1200,9 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
   const session = await activeTmuxSession(endpoint);
   const server = await tmuxServerReference(endpoint);
   if (!server) throw new Error("tmux server identity is unavailable before spawn");
-  const existingPane = receipt.state === "pane-bound" ? receipt.pane : null;
+  const existingPane = receipt.state === "pane-bound" || receipt.state === "host-verified"
+    ? receipt.pane
+    : null;
   const recoveringPane = existingPane !== null;
   const initialCapability = recoveringPane ? null : agentRegistry().rotateSpawnCapabilityForReceipt(receipt.launchId);
   const binding = existingPane

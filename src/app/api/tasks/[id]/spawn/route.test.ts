@@ -855,3 +855,113 @@ test("process stop after pane binding resumes the existing pane exactly once", a
     state: "delivered",
   })]);
 });
+
+test("process stop after host verification resumes prompt delivery in the existing pane exactly once", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-host-verified-recovery-"));
+  const registryPath = path.join(cwd, "registry.json");
+  let registry = new AgentRegistry(registryPath, () => true, undefined, { sqliteMode: "off" });
+  const sessionId = crypto.randomUUID();
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  let tasks: BoardTask[] = [{
+    id: "f4373000-89c5-0064-9118-51661c4f0437",
+    project: "live-log-viewer-next",
+    status: "inbox",
+    text: "Recover host-verified task prompt delivery",
+    placement: "pinned",
+    pos: { x: 0, y: 0 },
+    assignments: [],
+    createdAt: "2026-07-20T11:00:00.000Z",
+    updatedAt: "2026-07-20T11:00:00.000Z",
+  }];
+  const pipelineIntents: Array<{ taskId: string; srcPath: string | null }> = [];
+  let stopBeforeActuation = true;
+  let promptDeliveries = 0;
+  const binding = {
+    endpoint: "/tmp",
+    server: { pid: 95, startIdentity: "95:one" },
+    paneId: "%46",
+    panePid: { pid: 3627444, startIdentity: "3627444:one" },
+    target: "agents:46.0",
+  };
+  const host = {
+    kind: "tmux" as const,
+    ...binding,
+    windowName: "claude-builder",
+    agent: { pid: 3627445, startIdentity: "3627445:one" },
+    argv: ["claude"],
+  };
+  const dependencies = {
+    registry: () => registry,
+    loadTasks: () => tasks,
+    mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
+      const mutation = mutator(tasks);
+      if (mutation.tasks) tasks = mutation.tasks;
+      return mutation.result;
+    },
+    resolveSpawnAccount: () => ({
+      engine: "claude" as const,
+      accountId: "claude-work",
+      kind: "managed" as const,
+      home: cwd,
+      transcriptRoot: cwd,
+      env: { NODE_ENV: "test" },
+    }),
+    resolveSpawnedTranscriptPath: async () => artifactPath,
+    ensureTaskPipelineForAssignment: async (task: BoardTask, spawnParams: { srcPath: string | null }) => {
+      let intent = pipelineIntents.find((candidate) => candidate.taskId === task.id) ?? null;
+      if (!intent) {
+        intent = { taskId: task.id, srcPath: spawnParams.srcPath };
+        pipelineIntents.push(intent);
+        if (stopBeforeActuation) {
+          stopBeforeActuation = false;
+          throw new Error("process stopped after pipeline intent");
+        }
+      }
+      if (spawnParams.srcPath) intent.srcPath = spawnParams.srcPath;
+      return { pipeline: { id: "pipeline-host-verified-437" } as Pipeline };
+    },
+    spawnAgentWithPrompt: async (_spec: unknown, _prompt: string, receipt: SpawnReceipt) => {
+      expect(receipt.state).toBe("host-verified");
+      expect(receipt.pane).toMatchObject({ paneId: binding.paneId });
+      expect(receipt.verifiedHost).toMatchObject({ agent: host.agent });
+      promptDeliveries += 1;
+      registry.markSpawnPromptDelivered(receipt.launchId);
+      fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: { content: tasks[0]!.text } })}\n`);
+      return { paneId: binding.paneId, display: binding.target, panePid: binding.panePid.pid, host, receipt };
+    },
+  } as Parameters<typeof POST.withDependencies>[2];
+  const request = () => new NextRequest(`http://127.0.0.1/api/tasks/${tasks[0]!.id}/spawn`, {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      clientAttemptId: "task_host_verified_recovery_20260720_a1",
+    }),
+  });
+  const context = { params: Promise.resolve({ id: tasks[0]!.id }) };
+
+  await expect(POST.withDependencies(request(), context, dependencies)).rejects.toThrow("process stopped after pipeline intent");
+  const receipt = Object.values(registry.snapshot().receipts)[0]!;
+  registry.bindSpawnPane(receipt.launchId, binding);
+  registry.markSpawnHostVerified(receipt.launchId, host);
+  expect(Object.values(registry.snapshot().receipts)).toEqual([expect.objectContaining({
+    state: "host-verified",
+    artifactPath: null,
+    pane: expect.objectContaining({ paneId: binding.paneId }),
+    verifiedHost: expect.objectContaining({ agent: host.agent }),
+  })]);
+
+  registry = new AgentRegistry(registryPath, () => false, undefined, { sqliteMode: "off" });
+  const recovered = await POST.withDependencies(request(), context, dependencies);
+  const replayed = await POST.withDependencies(request(), context, dependencies);
+
+  expect([recovered.status, replayed.status]).toEqual([200, 200]);
+  expect(promptDeliveries).toBe(1);
+  expect(pipelineIntents).toEqual([{ taskId: tasks[0]!.id, srcPath: artifactPath }]);
+  expect(tasks[0]!.assignments).toEqual([expect.objectContaining({
+    path: artifactPath,
+    panePid: binding.panePid.pid,
+    state: "delivered",
+  })]);
+});
