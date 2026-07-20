@@ -9,7 +9,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
       "sourceDigests": [
         "c61162c12b20e4080cabe341b59048a2427337c3215b56ceab6cd8a907cea238"
       ],
@@ -23,7 +23,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
       "sourceDigests": [
         "284f9627ccbda4e32734d64bf01a8c67814dbad0153d964fba7cc8ca8c0d3122"
       ],
@@ -37,7 +37,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
       "sourceDigests": [
         "4113df0ba59d4f2a077b9a598b265b5d06faebeabbbca5d34d36d7bb5ebe8c39"
       ],
@@ -51,7 +51,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
       "sourceDigests": [
         "7bed3aeebfd4ece12c12774aee3dda4c4089b77aff4b618ddc92445c570ac478"
       ],

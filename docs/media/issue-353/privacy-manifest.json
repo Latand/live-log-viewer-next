@@ -9,7 +9,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
       "sourceDigests": [
         "386c9349aa6fc59562ae62ad6a57ba4c13c21422cc81a0f7357681937ea72ae2"
       ],
@@ -23,7 +23,7 @@
       "generator": "../../../scripts/generate-privacy-placeholders.ts",
       "generatorRuntime": "bun-1.3.3",
       "generatorVersion": "privacy-placeholders-v2",
-      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
       "sourceDigests": [
         "eed6170341efdbefe837fefa4d284a8680f8c29122a4a8bee49693659df83944"
       ],
