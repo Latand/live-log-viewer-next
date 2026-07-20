@@ -174,6 +174,43 @@ export function ToolBody({ event }: { event: ToolEvent }) {
   );
 }
 
+/** One tool call rendered as an always-open readable block inside an expanded
+    aggregate group (issue #475). Unlike {@link ToolLine} it is not a `<details>`:
+    the quiet header (ordinal, glyph, summary, non-ok status) and the full
+    command/output body are both shown at once, so an operator sees every command
+    and its owned output the moment the aggregate opens — no nested disclosure to
+    click, matching Claude's live UPDATE cards. An error keeps its danger edge.
+    `index` prefixes the ordinal; `nested` marks a wait/stdin follow-up rendered
+    under its parent exec while keeping its own state. */
+export function ToolBlockRow({ event, index, nested = false }: { event: ToolEvent; index?: number; nested?: boolean }) {
+  const isErr = event.status === "err";
+  return (
+    <div className="min-w-0">
+      <div
+        className={`flex items-center gap-2 rounded-control py-0.5 text-ui ${
+          isErr ? "border-l-2 border-danger bg-danger-soft pl-2 pr-1 text-danger" : nested ? "text-muted/90" : "text-muted"
+        }`}
+      >
+        {index !== undefined ? (
+          <span className="shrink-0 tabular-nums text-caption font-semibold text-muted">{index}.</span>
+        ) : null}
+        {nested ? <span className="shrink-0 select-none text-muted" aria-hidden>↳</span> : null}
+        <GlyphIcon name={event.icon} className="h-3.5 w-3.5 shrink-0" />
+        <span className={`min-w-0 flex-1 truncate ${isErr ? "font-semibold" : "text-secondary"}`} title={event.summary}>
+          {event.summary}
+        </span>
+        {event.status !== "ok" ? (
+          <span className={`inline-flex shrink-0 items-center gap-1 text-caption font-semibold ${statusClass(event.status)}`}>
+            <StatusIcon status={event.status} className="h-3 w-3" />
+            {event.statusLabel}
+          </span>
+        ) : null}
+      </div>
+      <ToolBody event={event} />
+    </div>
+  );
+}
+
 /** One normalized tool event rendered as a quiet ToolLine (design doc §3.4):
     a borderless, tile-less single row — glyph + summary + (non-ok status) +
     time — that reads as chrome between messages. The body mounts only after the

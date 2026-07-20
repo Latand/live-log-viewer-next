@@ -136,7 +136,7 @@ export const nestedPoll = toolEvent({
 });
 
 /** A cmd-group carrying the nested exec/wait/poll run plus a standalone read. */
-export function nestedGroup(): CmdGroupItem {
+export function nestedGroup(over: Partial<CmdGroupItem> = {}): CmdGroupItem {
   const calls = [nestedParent, nestedWait, nestedPoll, toolEvent({ id: "read-1", family: "read", tool: "Read", icon: "file", summary: "Read config.ts" })];
   return {
     kind: "cmd-group",
@@ -148,10 +148,80 @@ export function nestedGroup(): CmdGroupItem {
     okCount: 4,
     errCount: 0,
     hasErr: false,
+    active: false,
+    ...over,
+  };
+}
+
+/** A settled aggregate group: two completed exec calls with commands + output,
+    no active flag — a historical run rendered from a static transcript. */
+export function settledGroup(over: Partial<CmdGroupItem> = {}): CmdGroupItem {
+  const calls = [
+    { ...execSuccess, id: "g-1" },
+    { ...withStderr, id: "g-2" },
+  ];
+  return {
+    kind: "cmd-group",
+    ids: calls.map((c) => c.id),
+    calls,
+    t0: calls[0].ts,
+    t1: "2026-07-10T10:00:04Z",
+    byTool: { Bash: 2 },
+    okCount: 2,
+    errCount: 0,
+    hasErr: false,
+    active: false,
+    ...over,
+  };
+}
+
+/** The trailing live aggregate: the same run marked `active` — one expanded
+    group whose commands and outputs must all show immediately (issue #475). */
+export function activeGroup(over: Partial<CmdGroupItem> = {}): CmdGroupItem {
+  return settledGroup({ active: true, ...over });
+}
+
+/** A trailing live aggregate that carries a failure: the compact summary must
+    keep the failure status and count visible even after it auto-collapses. */
+export function activeFailureGroup(over: Partial<CmdGroupItem> = {}): CmdGroupItem {
+  const calls = [
+    { ...execSuccess, id: "gf-1" },
+    { ...execFailure, id: "gf-2" },
+  ];
+  return {
+    kind: "cmd-group",
+    ids: calls.map((c) => c.id),
+    calls,
+    t0: calls[0].ts,
+    t1: "2026-07-10T10:00:01Z",
+    byTool: { Bash: 2 },
+    okCount: 1,
+    errCount: 1,
+    hasErr: true,
+    active: true,
+    ...over,
   };
 }
 
 /* --- Raw JSONL line builders for the parser fixtures --------------------- */
+
+/** A live Claude turn whose trailing tool run is still in flight: two completed
+    Bash calls followed by a third that has no result yet (status "run"). The
+    whole run must fold into one active aggregate — the in-flight call included —
+    not a settled group plus a loose running row (issue #475). */
+export function liveTrailingRunLines(): string[] {
+  const toolUse = (id: string, command: string, ts: string) =>
+    JSON.stringify({ type: "assistant", timestamp: ts, message: { content: [{ type: "tool_use", id, name: "Bash", input: { command } }] } });
+  const toolResult = (id: string, text: string, ts: string) =>
+    JSON.stringify({ type: "user", timestamp: ts, message: { content: [{ type: "tool_result", tool_use_id: id, content: [{ type: "text", text }] }] } });
+  return [
+    toolUse("b1", "git status --short", "2026-07-10T10:00:00Z"),
+    toolResult("b1", " M src/index.ts", "2026-07-10T10:00:00Z"),
+    toolUse("b2", "bun test", "2026-07-10T10:00:01Z"),
+    toolResult("b2", "5 pass", "2026-07-10T10:00:01Z"),
+    toolUse("b3", "bun run build", "2026-07-10T10:00:02Z"),
+  ];
+}
 
 const codexLine = (payload: Record<string, unknown>, timestamp = "2026-07-10T10:00:00Z") =>
   JSON.stringify({ type: "response_item", timestamp, payload });

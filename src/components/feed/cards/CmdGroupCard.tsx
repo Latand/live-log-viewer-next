@@ -7,19 +7,40 @@ import { hhmm } from "../../utils";
 import { tr, type CmdGroupItem } from "../parse";
 import { groupNestedCalls } from "../toolBlocks";
 import { StatusIcon } from "./shared";
-import { ToolLine } from "./ToolCard";
+import { ToolBlockRow } from "./ToolCard";
 
 /* A run of ≥2 consecutive tool events folded into one quiet ToolLine header
-   (design doc §3.4): `▸ N дій · Tool ×a · Tool ×b · t0–t1`. Expanded, it lists
-   the individual calls as quiet ToolLines. A group carrying an error opens by
-   default and shows the failing line in danger — an error is never hidden. */
+   (design doc §3.4): `▸ N дій · Tool ×a · Tool ×b · t0–t1`.
+
+   Lifecycle parity with Claude's UPDATE cards (issue #475): while the run is the
+   live trailing aggregate (`item.active`) the group is forced open and its body
+   shows every command and its owned output at once — no nested disclosure. When
+   the run settles (`active` flips to false) the group auto-collapses exactly once
+   to the compact summary; after that the operator's manual open/close wins and
+   persists across live ticks. A settled group that carries an error opens by
+   default so a failure is never hidden, and its count stays on the compact
+   summary line even when collapsed. */
 export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
-  /* Children (and their diff / output / raw-record bodies) mount only after the
-     group is first expanded. A diff-backed child sets open:true, so rendering it
-     inside a still-collapsed group would eagerly build the hidden body and break
-     the §3.4 lazy contract for long edit runs (issue #9 §7/§8). An error group
-     opens by default, so it mounts immediately. */
-  const [mounted, setMounted] = useState(item.hasErr);
+  const active = item.active;
+  /* The operator's manual choice once the group has settled. `null` means "no
+     manual choice yet", so the default (error → open, else collapsed) applies. */
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  /* The single auto-collapse: detect the first live→settled transition during
+     render (the React-blessed "adjust state on prop change" pattern) so the
+     collapse is applied before the DOM ever shows the settled group open. A
+     never-active (historical) group never triggers it, so it keeps its error-open
+     default; and it fires once, so a later re-feed can't reclose a group the
+     operator has reopened. */
+  const [wasActive, setWasActive] = useState(active);
+  if (wasActive !== active) {
+    setWasActive(active);
+    if (wasActive && !active) setManualOpen(false);
+  }
+
+  /* Active → always open; settled → the operator's choice, else the error
+     default. */
+  const open = active ? true : (manualOpen ?? item.hasErr);
+
   const tools = Object.entries(item.byTool)
     .map(([tool, count]) => `${tool} ×${count}`)
     .join(" · ");
@@ -32,9 +53,17 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
   return (
     <details
       className="group/grp ml-9"
-      open={item.hasErr}
+      open={open}
       onToggle={(e) => {
-        if (e.currentTarget.open) setMounted(true);
+        const next = e.currentTarget.open;
+        /* While live the aggregate stays open: undo an operator's collapse
+           attempt (React won't re-assert an unchanged `open` prop, so reset the
+           DOM node directly) instead of recording it. */
+        if (active) {
+          if (!next) e.currentTarget.open = true;
+          return;
+        }
+        if (next !== open) setManualOpen(next);
       }}
     >
       <summary
@@ -55,21 +84,22 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
         </span>
         {range ? <span className="ml-auto shrink-0 text-caption tabular-nums text-muted">{range}</span> : null}
       </summary>
-      {/* Each grouped call reuses the shared ToolLine, so an expanded call shows
-          the same readable block a standalone line does. Blocks are an ordered
-          list; a wait/stdin follow-up renders nested under its parent exec while
-          keeping its own state. The time is dropped — the range lives in the
-          header above. A transcript can carry the same tool id twice (a resume
-          re-emits the tool_use), so the id alone is not a unique key. */}
-      {mounted ? (
+      {/* An ordered list of readable blocks. Each call renders inline via
+          {@link ToolBlockRow} — its command and output are shown at once, with no
+          per-call disclosure to click — and a wait/stdin follow-up renders nested
+          under its parent exec while keeping its own state. Mounted only while
+          open, so a collapsed transcript keeps its DOM small (issue #9 §7/§8). A
+          transcript can carry the same tool id twice (a resume re-emits the
+          tool_use), so the id alone is not a unique key. */}
+      {open ? (
         <ol className="mb-1 mt-1 space-y-0.5">
           {blocks.map((block, bi) => (
             <li key={`${block.parent.id}:${bi}`} className="min-w-0">
-              <ToolLine event={block.parent} showTime={false} index={bi + 1} />
+              <ToolBlockRow event={block.parent} index={bi + 1} />
               {block.children.length ? (
                 <div className="ml-4 border-l border-border pl-2">
                   {block.children.map((child, ci) => (
-                    <ToolLine key={`${child.id}:${ci}`} event={child} showTime={false} nested />
+                    <ToolBlockRow key={`${child.id}:${ci}`} event={child} nested />
                   ))}
                 </div>
               ) : null}

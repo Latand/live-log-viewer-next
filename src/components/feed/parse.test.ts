@@ -399,20 +399,23 @@ describe("feed session identity stability", () => {
     }
   });
 
-  test("a tool_result changes only its own cmd item", () => {
+  test("a tool_result inside a live aggregate rebuilds the group but keeps the user bubble and key", () => {
     const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
     const lines = [claudeUser("go"), claudeTool("c1", "Bash", "ls"), claudeTool("c2", "Bash", "pwd")];
     const before = session.feed(lines, 0, true);
+    // The trailing live run of two calls is one active aggregate (issue #475).
+    expect(before.items).toHaveLength(2);
+    expect(before.items[1].item.kind).toBe("cmd-group");
     const after = session.feed([...lines, claudeResult("c1", "ok done")], 0, true);
-    // user bubble and the untouched second call keep their identity
+    // The user bubble is untouched, and the aggregate keeps its stable key.
     expect(after.items[0].item).toBe(before.items[0].item);
-    expect(after.items[2].item).toBe(before.items[2].item);
-    // the resolved call is a fresh object with the result attached
-    expect(after.items[1].item).not.toBe(before.items[1].item);
-    const resolved = after.items[1].item;
-    if (resolved.kind !== "tool") throw new Error("expected tool item");
-    expect(resolved.status).toBe("ok");
     expect(after.items[1].key).toBe(before.items[1].key);
+    // The group is a fresh object with c1 resolved and c2 still in flight.
+    expect(after.items[1].item).not.toBe(before.items[1].item);
+    const group = after.items[1].item;
+    if (group.kind !== "cmd-group") throw new Error("expected a cmd-group");
+    expect(group.calls.map((call) => call.status)).toEqual(["ok", "run"]);
+    expect(group.active).toBe(true);
   });
 
   test("idempotent re-feed of an unchanged window returns the cached snapshot", () => {
@@ -437,7 +440,7 @@ describe("feed session identity stability", () => {
     expect(after.items[0].item).toBe(group);
   });
 
-  test("a live trailing tool run folds its completed prefix but keeps the current call visible (§3.4)", () => {
+  test("a live trailing tool run folds the whole active run — the in-flight call included — into one aggregate (issue #475)", () => {
     const lines = [
       claudeTool("a1", "Bash", "echo 1"),
       claudeResult("a1", "1"),
@@ -445,23 +448,22 @@ describe("feed session identity stability", () => {
       claudeResult("a2", "2"),
       claudeTool("a3", "Read", "cat x.txt"), // in-flight: no result yet
     ];
-    // Live: the completed a1/a2 fold; the current a3 stays its own visible line —
-    // a live 40-call run must not read as 40 individual ToolLines.
+    // Live: the whole trailing run is one active aggregate — no loose running row.
     const live = buildFeed({ ...claudeFile, activity: "live" } as FileEntry, lines, false, "");
-    expect(live.items).toHaveLength(2);
+    expect(live.items).toHaveLength(1);
     const group = live.items[0];
     if (group.kind !== "cmd-group") throw new Error("expected a cmd-group");
-    expect(group.calls.map((call) => call.id)).toEqual(["a1", "a2"]);
-    const current = live.items[1];
-    if (current.kind !== "tool") throw new Error("expected the current call as a visible tool line");
-    expect(current.id).toBe("a3");
-    // Settled (not live): the whole run folds into one group.
+    expect(group.calls.map((call) => call.id)).toEqual(["a1", "a2", "a3"]);
+    expect(group.calls[2].status).toBe("run");
+    expect(group.active).toBe(true);
+    // Settled (not live): the same run folds into one inactive group.
     const settled = buildFeed(claudeFile, lines, false, "");
     expect(settled.items).toHaveLength(1);
     expect(settled.items[0].kind).toBe("cmd-group");
+    if (settled.items[0].kind === "cmd-group") expect(settled.items[0].active).toBe(false);
   });
 
-  test("a live tail keeps every concurrent in-flight call visible, folding only the completed prefix (§3.4)", () => {
+  test("a live tail folds every concurrent in-flight call into the active aggregate (issue #475)", () => {
     const lines = [
       claudeTool("c1", "Bash", "echo 1"),
       claudeResult("c1", "1"),
@@ -473,20 +475,24 @@ describe("feed session identity stability", () => {
       claudeTool("r2", "Bash", "sleep 2"), // in-flight, concurrent
     ];
     const live = buildFeed({ ...claudeFile, activity: "live" } as FileEntry, lines, false, "");
-    // The completed c1/c2/c3 fold; both running calls stay their own visible lines.
-    expect(live.items).toHaveLength(3);
+    // One active aggregate holds the completed prefix and both running calls.
+    expect(live.items).toHaveLength(1);
     const group = live.items[0];
-    if (group.kind !== "cmd-group") throw new Error("expected the completed prefix folded");
-    expect(group.calls.map((call) => call.id)).toEqual(["c1", "c2", "c3"]);
-    const running = live.items.slice(1);
-    expect(running.map((item) => (item.kind === "tool" ? item.id : item.kind))).toEqual(["r1", "r2"]);
-    expect(running.every((item) => item.kind === "tool" && item.status === "run")).toBe(true);
+    if (group.kind !== "cmd-group") throw new Error("expected one active aggregate");
+    expect(group.calls.map((call) => call.id)).toEqual(["c1", "c2", "c3", "r1", "r2"]);
+    expect(group.calls.slice(-2).every((call) => call.status === "run")).toBe(true);
+    expect(group.active).toBe(true);
   });
 
-  test("a live tail of only concurrent run calls stays fully visible with no group", () => {
+  test("a live tail of only concurrent run calls is one active aggregate (issue #475)", () => {
     const lines = [claudeTool("r1", "Bash", "a"), claudeTool("r2", "Bash", "b"), claudeTool("r3", "Bash", "c")];
     const live = buildFeed({ ...claudeFile, activity: "live" } as FileEntry, lines, false, "");
-    expect(live.items.map((item) => (item.kind === "tool" ? item.id : item.kind))).toEqual(["r1", "r2", "r3"]);
+    expect(live.items).toHaveLength(1);
+    const group = live.items[0];
+    if (group.kind !== "cmd-group") throw new Error("expected one active aggregate");
+    expect(group.calls.map((call) => call.id)).toEqual(["r1", "r2", "r3"]);
+    expect(group.calls.every((call) => call.status === "run")).toBe(true);
+    expect(group.active).toBe(true);
   });
 
   test("prepended history resets the session and reparses the wider window", () => {

@@ -22,7 +22,7 @@ import type { CmdGroupItem, ToolEvent } from "@/components/feed/parse";
 const OUT_DIR = path.join(import.meta.dir, "..", "docs", "media", "readable-tools");
 const CHROME = process.env.CHROME_BIN || "google-chrome-stable";
 
-function group(calls: ToolEvent[], hasErr: boolean): CmdGroupItem {
+function group(calls: ToolEvent[], hasErr: boolean, active = false): CmdGroupItem {
   const byTool: Record<string, number> = {};
   for (const c of calls) byTool[c.tool] = (byTool[c.tool] ?? 0) + 1;
   return {
@@ -35,6 +35,7 @@ function group(calls: ToolEvent[], hasErr: boolean): CmdGroupItem {
     okCount: calls.filter((c) => c.status === "ok").length,
     errCount: calls.filter((c) => c.status === "err").length,
     hasErr,
+    active,
   };
 }
 
@@ -57,7 +58,9 @@ const errCalls = [gitStatus, npmDev, wait, poll, bunTest];
 
 function page(): string {
   const collapsed = renderToStaticMarkup(<CmdGroupCard item={group(okCalls, false)} />);
-  const expanded = renderToStaticMarkup(<CmdGroupCard item={group(errCalls, true)} />);
+  // The live trailing aggregate renders expanded with every command and output
+  // shown inline — no per-call disclosure (issue #475).
+  const expanded = renderToStaticMarkup(<CmdGroupCard item={group(errCalls, true, true)} />);
   const single = renderToStaticMarkup(<ToolCard event={{ ...execSuccess, ts, endTs: "2100-01-02T12:00:00.240Z", open: true }} />);
   const css = fs.readdirSync(path.join(import.meta.dir, "..", ".next", "static", "css"))
     .filter((f) => f.endsWith(".css"))
