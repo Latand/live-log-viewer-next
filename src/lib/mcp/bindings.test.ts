@@ -21,7 +21,13 @@ test("spawn_agent reaches spawn validation through the operator admission lane",
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-binding-spawn-"));
   sandboxes.push(sandbox);
   process.env.LLV_STATE_DIR = sandbox;
-  const spawnAgent = viewerMcpBindings().spawn_agent;
+  const requests: Array<{ pathname: string; body: Record<string, unknown>; headers?: Record<string, string> }> = [];
+  const spawnAgent = viewerMcpBindings(undefined, {
+    post: async (pathname, body, headers) => {
+      requests.push({ pathname, body, headers });
+      throw new Error(`directory does not exist: ${String(body.cwd)}`);
+    },
+  }).spawn_agent;
   const missingCwd = path.join(sandbox, "missing-cwd");
 
   for (const request of [
@@ -30,7 +36,60 @@ test("spawn_agent reaches spawn validation through the operator admission lane",
   ]) {
     await expect(spawnAgent(request)).rejects.toThrow(`directory does not exist: ${missingCwd}`);
   }
+  expect(requests.map((request) => request.pathname)).toEqual(["/api/spawn", "/api/spawn"]);
+  expect(requests.every((request) => Boolean(request.headers?.["x-llv-spawn-capability"]))).toBe(true);
   expect(fs.readFileSync(path.join(sandbox, "operator-spawn-capability"), "utf8").trim()).toMatch(/^[A-Za-z0-9_-]{43}$/);
+});
+
+test("runtime-bound MCP tools use the live Viewer control surface", async () => {
+  const requests: Array<{ pathname: string; body: Record<string, unknown> }> = [];
+  const bindings = viewerMcpBindings(undefined, {
+    post: async (pathname, body) => {
+      requests.push({ pathname, body });
+      if (pathname === "/api/spawn") return {
+        conversationId: "conversation_http_control",
+        path: "/repo/session.jsonl",
+        launchId: "launch_http_control",
+        state: "path-pending",
+        initialMessage: "queued",
+      };
+      if (pathname === "/api/tmux") return {
+        operationId: "operation_http_control",
+        outcome: "queued",
+      };
+      return {
+        deploymentId: "deployment_http_control",
+        revision: "a".repeat(40),
+        state: "accepted",
+        replayed: false,
+      };
+    },
+  });
+
+  await bindings.spawn_agent({
+    clientRequestId: "spawn-http-control",
+    cwd: "/repo",
+    ["prompt"]: "implement",
+  });
+  await bindings.send_message({
+    clientRequestId: "send-http-control",
+    conversationId: "conversation_http_control",
+    text: "continue",
+  });
+  await bindings.deploy_exact_sha({
+    clientRequestId: "deploy-http-control",
+    confirm: "deploy",
+    revision: "a".repeat(40),
+  });
+
+  expect(requests.map((request) => request.pathname)).toEqual([
+    "/api/spawn",
+    "/api/tmux",
+    "/api/runtime/deployments",
+  ]);
+  expect(requests[0]?.body.clientAttemptId).toBe("spawn-http-control");
+  expect(requests[1]?.body.clientMessageId).toBe("send-http-control");
+  expect(requests[2]?.body.idempotencyKey).toBe("deploy-http-control");
 });
 
 test("link_task_to_pipeline binds the latest operational attempt after historical adoption", async () => {

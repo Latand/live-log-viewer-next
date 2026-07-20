@@ -24,10 +24,10 @@ export interface StructuredDeliveryHost {
 const DELIVERY_DRAIN_COALESCE_MS = 25;
 const DELIVERY_DRAIN_MAX_BACKOFF_MS = 1_000;
 
-/* Next standalone bundles instrumentation and route handlers separately, so a
-   module-level `let` written by startup adoption is invisible to routes. The
-   controller registration must live on `globalThis`, like every other
-   cross-bundle singleton in this codebase (see scanner/caches.ts). */
+/* Next standalone can evaluate instrumentation and route handlers in separate
+   bundle realms inside one Node process. Realm-local globals cannot carry the
+   controller registration between those bundles. The injected `process`
+   object is shared by the realms, so it owns the process-scoped controller. */
 interface ControllerState {
   activeQueue: StructuredDeliveryQueue | null;
   activeHosts: Map<string, EngineHost> | null;
@@ -37,7 +37,7 @@ interface ControllerState {
   terminateActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   stopActive: () => void;
 }
-const controllerStore = globalThis as typeof globalThis & { __llvStructuredDeliveryController?: ControllerState };
+const controllerStore = process as typeof process & { __llvStructuredDeliveryController?: ControllerState };
 const state: ControllerState = controllerStore.__llvStructuredDeliveryController ??= {
   activeQueue: null,
   activeHosts: null,
