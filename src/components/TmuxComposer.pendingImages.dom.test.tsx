@@ -26,7 +26,7 @@ Object.assign(globalThis, {
   sessionStorage: dom.sessionStorage,
 });
 (dom as unknown as { matchMedia: (query: string) => unknown }).matchMedia = (query: string) => ({
-  matches: false,
+  matches: query.includes("max-width"),
   media: query,
   addEventListener() {},
   removeEventListener() {},
@@ -118,6 +118,11 @@ test("a lost image send keeps its earliest snapshot through a conflicting retry 
   flushSync(() => root.render(<TmuxComposer file={file} />));
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   const form = textarea.closest("form")!;
+  expect(form.getAttribute("data-testid")).toBe("bounded-mobile-composer");
+  expect(form.className).toContain("max-h-[min(38dvh,20rem)]");
+  expect(form.className).toContain("overflow-y-auto");
+  expect(form.className).toContain("overflow-x-clip");
+  expect(form.className).toContain("overscroll-y-contain");
   const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
   const textareaProps = (textarea as unknown as Record<string, { onPaste(event: unknown): void }>)[propsKey]!;
   const previews = () => [...host.querySelectorAll("img")].map((image) => image.getAttribute("src"));

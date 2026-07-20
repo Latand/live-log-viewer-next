@@ -261,6 +261,16 @@ export function ComposerBar({
 
   return (
     <>
+      {/* On phones, staged images are the composer's first bounded row. The
+          desktop tray keeps its established position below the controls. */}
+      {isMobile && !onImageFiles ? (
+        <ImagePreviewStrip
+          attachments={attachments.attachments}
+          onRemove={attachments.remove}
+          onRetry={attachments.retry}
+          onClearAll={attachments.clearAll}
+        />
+      ) : null}
       {/* The input is the anchor (design doc §3.5): a single sunken field that
           owns the mic and send controls. Idle it lays them out at the right
           edge (row); while recording it stacks the controls below the
@@ -367,14 +377,14 @@ export function ComposerBar({
       ) : null}
       {/* The task composer renders its own durable-ref strip; the in-memory one
           stays for the pane/draft composers that still upload at send time. */}
-      {onImageFiles ? null : (
+      {!isMobile && !onImageFiles ? (
         <ImagePreviewStrip
           attachments={attachments.attachments}
           onRemove={attachments.remove}
           onRetry={attachments.retry}
           onClearAll={attachments.clearAll}
         />
-      )}
+      ) : null}
       {/* A decoding/failed attachment blocks Send — say why, and never silently
           drop the image (issue #419). Suppressed while a host-death reason
           already occupies the send tooltip. */}

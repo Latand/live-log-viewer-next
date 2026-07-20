@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "desktop-1440x1000-0-images.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "sourceDigests": [
+        "0f8a4e25191447a99312f4b3970964c47db29992c962e553c1fcbf471828459f"
+      ],
+      "description": "Redacted placeholder for the desktop focused-chat state without staged images.",
+      "sha256": "881ca5185b5778847d1999e5d964b6c149e03fdefc1346916f18020fa8b70710"
+    },
+    {
+      "path": "desktop-1440x1000-1-image.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "sourceDigests": [
+        "0e0e4c8cb127673eeca896ce13f487e44f69379f7995be0a021d588e52ed80ed"
+      ],
+      "description": "Redacted placeholder for the desktop focused-chat state with one staged image.",
+      "sha256": "90619127ffa3b90e763365285dd2eae0e6a7b716fa9c141086cb8e595889faf0"
+    },
+    {
+      "path": "desktop-1440x1000-multiple-images.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "sourceDigests": [
+        "afeb53939c2de98ec84b1aef339b406d0200f80a44135a311ea4faa7efb816e4"
+      ],
+      "description": "Redacted placeholder for the desktop focused-chat state with multiple staged images.",
+      "sha256": "90619127ffa3b90e763365285dd2eae0e6a7b716fa9c141086cb8e595889faf0"
+    },
+    {
+      "path": "mobile-390x844-0-images.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "sourceDigests": [
+        "8718ea3f40922a6de8fb4b4f23ff99f48afac9528277a8228ffb1536ce6a2271"
+      ],
+      "description": "Redacted placeholder for the 390-pixel focused-chat state without staged images.",
+      "sha256": "66706d76e368b122dca28bd4ceab510a1d0e72e2a538958ed4c1dedb10e8a2a2"
+    },
+    {
+      "path": "mobile-390x844-1-image.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "sourceDigests": [
+        "acab37f4364d4f30747f059e172ed03c1a280038babbc6484ecf072b211a18e6"
+      ],
+      "description": "Redacted placeholder for the 390-pixel focused-chat state with one staged image.",
+      "sha256": "168d7c3b8cbba86431b274bfaea43f5e3c1c1d944f26b96cb8a8425066f8cb6f"
+    },
+    {
+      "path": "mobile-390x844-multiple-images.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "18bcfff41dff7febda792eb9cd9bd73a08fb12bdb94fec83697a24e97608894b",
+      "sourceDigests": [
+        "fe7c6da0ea52de3acf668287b27615f4481c17d1c5b8eaa8854336c792efedea"
+      ],
+      "description": "Redacted placeholder for the 390-pixel focused-chat state with multiple staged images.",
+      "sha256": "1530dc20eb766157d76c8c34ef4c026cbd07f927dfd4e651f0744cff7989f256"
+    }
+  ]
+}

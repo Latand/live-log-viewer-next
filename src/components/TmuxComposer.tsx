@@ -1257,11 +1257,16 @@ export function TmuxComposer({
   return (
     <form
       onSubmit={handleSubmit}
+      data-testid={isMobile ? "bounded-mobile-composer" : undefined}
       /* Chat-first mobile budget (issue #419): the phone composer is a single
          input row with its secondary controls folded, so it takes the tighter
          vertical padding — every reclaimed row keeps the transcript above its
          ≥60% viewport share. Desktop keeps the roomier py-2. */
-      className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 ${isMobile ? "py-1.5" : "py-2"}`}
+      className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 ${
+        isMobile
+          ? "max-h-[min(38dvh,20rem)] overflow-x-clip overflow-y-auto overscroll-y-contain py-1.5"
+          : "py-2"
+      }`}
       aria-label={structuredSession ? t("composer.sendStructuredAria") : spawnMode ? t("composer.spawnAria") : t("composer.sendAria", { target: target ?? "" })}
     >
       {/* Unmounts exactly when the textarea does (a key-churn remount, an

@@ -388,7 +388,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
          with the secondary chrome folded by default, the transcript owns at
          least this share of the usable viewport before the keyboard opens. */
       data-chat-min-share={MIN_TRANSCRIPT_SHARE}
-      className="relative flex min-h-0 min-w-0 max-w-[100dvw] flex-1 flex-col overflow-x-clip"
+      className="relative flex h-full max-h-[100dvh] min-h-0 min-w-0 max-w-[100dvw] flex-1 flex-col overflow-hidden overflow-x-clip"
     >
       {/* Same runtime connection pill as desktop, compact, one thumb away.
           Renders nothing while slice-one is disabled. */}
@@ -470,7 +470,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
         {activeNode ? (
           /* The handoff control for this pane docks in the footer shelf row
              (issue #177 item 5), so the focus view itself renders only the pane. */
-          <div key={activeNode.file.path} className="flex min-h-0 flex-1">
+          <div key={activeNode.file.path} data-testid="mobile-focused-pane" className="flex min-h-0 flex-1">
             <BranchPane
               file={activeNode.file}
               tasks={activeNode.tasks}
