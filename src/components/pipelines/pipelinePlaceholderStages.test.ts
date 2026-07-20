@@ -129,6 +129,47 @@ test("a live review-loop cursor keeps its placeholder until its flow deck is pla
   expect(pipelinePlaceholderStages(reviewing, new Set(["/arch", "/build"]), new Set(["f1"]))).toEqual([]);
 });
 
+test("a current cursor parked in needs_decision keeps exactly one placeholder until a board rect is placed — pathless, published-unplaced, then dissolves (#353 R5)", () => {
+  /* The build cursor parks in needs_decision BEFORE its transcript is a placed
+     board rect. Layout excludes the cursor stage from compact navigable history,
+     so a settled cursor attempt has nowhere else to surface: without a placeholder
+     the stage falls to zero pane / zero placeholder / zero halo and drops every
+     incident pass/fail/loop rail. The R4 predicate keyed off LIVE_ATTEMPT_STATES,
+     which excludes needs_decision, so it dropped this placeholder — the R5 gap. */
+  const architectRun = { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] };
+
+  /* Transition 1 — pathless parked: the attempt settled in needs_decision without
+     ever publishing an agentPath. The builder must keep exactly one placeholder. */
+  const pathlessParked = pipeline({
+    state: "needs_decision",
+    cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
+    runs: [
+      architectRun,
+      { stageId: "builder", attempts: [{ n: 1, state: "needs_decision", agentPath: null, flowId: null }] },
+    ],
+  } as unknown as Partial<Pipeline>);
+  expect(pipelinePlaceholderStages(pathlessParked).map((stage) => stage.id)).toEqual(["builder", "review"]);
+
+  /* Transition 2 — published-yet-unplaced parked: the attempt published
+     agentPath="/build" but the scanned conversation has not been laid out as a
+     board rect. Board presence — not the stored path — governs, so while "/build"
+     is unplaced the builder keeps its single placeholder. */
+  const publishedUnplaced = pipeline({
+    state: "needs_decision",
+    cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
+    runs: [
+      architectRun,
+      { stageId: "builder", attempts: [{ n: 1, state: "needs_decision", agentPath: "/build", flowId: null }] },
+    ],
+  } as unknown as Partial<Pipeline>);
+  expect(pipelinePlaceholderStages(publishedUnplaced, new Set(["/arch"])).map((stage) => stage.id)).toEqual(["builder", "review"]);
+
+  /* Transition 3 — placed board rect: once "/build" is placed the live pane owns
+     builder's slot; the placeholder dissolves with no duplicate, leaving only the
+     future review placeholder. */
+  expect(pipelinePlaceholderStages(publishedUnplaced, new Set(["/arch", "/build"])).map((stage) => stage.id)).toEqual(["review"]);
+});
+
 test("a completed or closed pipeline grows no placeholders", () => {
   for (const state of ["completed", "closed"] as const) {
     expect(pipelinePlaceholderStages(pipeline({ state }))).toEqual([]);

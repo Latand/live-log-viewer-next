@@ -422,6 +422,70 @@ describe("planned-stage pipelines grow a placeholder halo (#353 desktop ownershi
     expect(slotByStage.get("review")?.presentation).toBe("placeholder");
   });
 
+  test("a current cursor parked in needs_decision keeps its placeholder surface and every incident rail — pathless, published-unplaced, then dissolves (#353 R5)", () => {
+    /* build is the live cursor and it PARKS in needs_decision before its transcript
+       is a placed board rect. Layout excludes the cursor stage from compact
+       navigable history, so without a placeholder the stage falls to zero surface
+       and its incident rails (plan→build pass, build→review pass, review→build
+       fail loop) lose their build endpoint and vanish. build must keep exactly one
+       placeholder across pathless + published-yet-unplaced, dissolving only once a
+       real board rect lands — with no duplicate placeholder over the live pane. */
+    const buildStages = [
+      { id: "plan", kind: "run", prompt: "", next: "build" },
+      { id: "build", kind: "run", prompt: "", next: "review" },
+      { id: "review", kind: "review-loop", prompt: "", next: null, onFail: { to: "build", maxRounds: 5 } },
+    ];
+    const parkedPipeline = (buildAttempt: Record<string, unknown>) => pipeline({
+      stages: buildStages,
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      state: "needs_decision",
+      runs: [
+        { stageId: "plan", attempts: [{ n: 1, state: "passed", agentPath: "/plan", flowId: null } as unknown as Record<string, unknown>] },
+        { stageId: "build", attempts: [buildAttempt] },
+      ],
+    });
+    const planRoot = entry({ path: "/plan" });
+    const planGroup: BranchGroup = { key: "/plan", columns: [{ file: planRoot, tasks: [] }], returnable: [], finished: [], smt: planRoot.mtime, orphanTask: false };
+
+    /* The build slot's incident rails: pass in from plan, pass out to review, and
+       the review→build fail loop back in. All three must survive the park. */
+    const buildSlot = stageSlotKey("p1", "build");
+    const railsInto = (layout: ReturnType<typeof buildSchemeLayout>) => ({
+      passIn: layout.links.some((l) => l.kind === "pipeline" && l.to === buildSlot && l.pipeline!.edge === "pass"),
+      passOut: layout.links.some((l) => l.kind === "pipeline" && l.from === buildSlot && l.pipeline!.edge === "pass"),
+      failLoop: layout.links.some((l) => l.kind === "pipeline" && l.to === buildSlot && l.pipeline!.edge === "fail"),
+    });
+
+    for (const buildAttempt of [
+      /* Pathless parked: no artifact ever published. */
+      { n: 1, state: "needs_decision", agentPath: null, flowId: null } as unknown as Record<string, unknown>,
+      /* Published-yet-unplaced parked: artifact published, no scene node placed. */
+      { n: 1, state: "needs_decision", agentPath: "/build", flowId: null } as unknown as Record<string, unknown>,
+    ]) {
+      const p = parkedPipeline(buildAttempt);
+      /* Only /plan is a placed scene node; /build is never in the scene. */
+      const layout = buildSchemeLayout([planGroup], [], [planRoot], [], [], [p], [p]);
+      const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+      expect(slotByStage.get("build")?.presentation).toBe("placeholder");
+      expect(slotByStage.get("review")?.presentation).toBe("placeholder");
+      const rails = railsInto(layout);
+      expect(rails.passIn).toBe(true);
+      expect(rails.passOut).toBe(true);
+      expect(rails.failLoop).toBe(true);
+    }
+
+    /* Placed board rect: /build is scanned and laid out. The live pane owns build's
+       slot; the placeholder dissolves with no duplicate — only review remains. */
+    const buildRoot = entry({ path: "/build" });
+    const buildGroup: BranchGroup = { key: "/build", columns: [{ file: buildRoot, tasks: [] }], returnable: [], finished: [], smt: buildRoot.mtime, orphanTask: false };
+    const placedPipeline = parkedPipeline({ n: 1, state: "needs_decision", agentPath: "/build", flowId: null } as unknown as Record<string, unknown>);
+    const placedLayout = buildSchemeLayout([planGroup, buildGroup], [], [planRoot, buildRoot], [], [], [placedPipeline], [placedPipeline]);
+    const placedSlots = new Map(placedLayout.slots.map((slot) => [slot.stage.id, slot]));
+    expect(placedLayout.nodes.map((node) => node.file.path)).toContain("/build");
+    expect(placedSlots.has("build")).toBe(false);
+    expect(placedSlots.get("review")?.presentation).toBe("placeholder");
+  });
+
   test("a materialized stage's pass edge routes a pipeline rail into the next stage's placeholder slot (#353)", () => {
     /* build ran (a real /build node); review has not launched, so it lives only as
        its planned-stage placeholder slot inside the halo. The build→review pass

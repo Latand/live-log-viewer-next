@@ -233,7 +233,12 @@ export const LIVE_ATTEMPT_STATES: ReadonlySet<PipelineAttemptState> = new Set([
     exactly one surface continuously: the placeholder is retained until
     `stageHasBoardPresence` is true, then dissolves the instant the real pane lands
     (the live pane owns the slot) — so there is never a duplicate placeholder + pane
-    once placement exists. A NON-cursor stage that has already materialized a
+    once placement exists. The cursor stage keeps its placeholder until board
+    presence even when its attempt has already SETTLED — a cursor parked in
+    needs_decision (pathless, or with a published-yet-unplaced artifact) is
+    excluded from compact history by layout, so its placeholder is the only surface
+    that keeps the stage and its incident pass/fail/loop rails alive until a real
+    board rect lands (#353 R5). A NON-cursor stage that has already materialized a
     transcript/flow but has no placed rect is compact navigable history folded out
     of the scene (compactPipelineArtifactPaths), never a placeholder — so a
     failed/folded/terminal attempt does not resurrect a big empty shell. Only
@@ -256,16 +261,31 @@ export function pipelinePlaceholderStages(
        node, or its review deck is laid out): the live pane owns the slot, so no
        placeholder — this is what prevents a duplicate placeholder + pane. */
     if (stageHasBoardPresence(pipeline, stage, placedPaths, placedFlowIds)) return false;
-    /* No placed rect yet. A settled attempt (passed/failed/skipped/needs_decision)
-       is terminal evidence — compact navigable history folded out of the scene
-       (a failed attempt folded into an under-deck, a passed prior stage), never a
-       placeholder, so it does not resurrect a big empty shell. Only an in-flight
-       attempt keeps a placeholder: across pending → spawning → path/flow
-       publication → scan → placement its live surface has no placed rect yet, so
-       the stage would otherwise fall to zero pane / zero placeholder (the R4
-       materialization gap). Keeping exactly one placeholder here, dissolved the
-       instant the pane lands above, is what preserves the single continuous
-       surface. */
+    /* No placed rect yet. The CURRENT CURSOR stage of a pipeline PARKED in
+       needs_decision keeps exactly one placeholder even though its attempt has
+       settled: layout folds every terminal NON-cursor stage into compact navigable
+       history but explicitly excludes the cursor stage from that history (a
+       cursor's quiet history shelves, not an anchor — layout §slotStages). So a
+       cursor attempt that parks in needs_decision before its transcript is a placed
+       board rect — whether it is still pathless (agentPath/flowId null) or has
+       published an artifact that has not yet been placed — has nowhere else to
+       surface: without a placeholder it falls to zero pane / zero placeholder /
+       zero halo and drops every incident pass/fail/loop rail (#353 R5). Keeping the
+       placeholder until board presence lands (dissolved the instant the pane
+       appears above) preserves the single continuous cursor surface across the
+       park. This is gated on the parked (needs_decision) pipeline state — mirroring
+       stageHasEvidence — so a merely quiet cursor whose failed transcript is a
+       reachable folded under-deck still shelves (#343) rather than resurrecting an
+       empty shell. */
+    if (pipeline.state === "needs_decision" && pipeline.cursor?.stageId === stage.id) return true;
+    /* A NON-cursor stage without a placed rect. A settled attempt
+       (passed/failed/skipped/needs_decision) is terminal evidence — compact
+       navigable history folded out of the scene (a failed attempt folded into an
+       under-deck, a passed prior stage), never a placeholder, so it does not
+       resurrect a big empty shell. Only an in-flight attempt keeps a placeholder:
+       across pending → spawning → path/flow publication → scan → placement its
+       live surface has no placed rect yet, so the stage would otherwise fall to
+       zero pane / zero placeholder (the R4 materialization gap). */
     return LIVE_ATTEMPT_STATES.has(attempt.state);
   });
 }

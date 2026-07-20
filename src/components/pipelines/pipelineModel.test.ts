@@ -1295,6 +1295,58 @@ describe("continuous exactly-one stage-surface ownership across the materializat
   });
 });
 
+describe("a current cursor parked in needs_decision retains its surface and rails (#353 R5)", () => {
+  const parkedStages = [
+    { ...stage("plan"), next: "build" },
+    { ...stage("build"), next: "review" },
+    { ...stage("review", "review-loop"), next: null, onFail: { to: "build", maxRounds: 5 } as never },
+  ];
+
+  /* The build cursor parks in needs_decision at three points on its arc: pathless
+     (no artifact ever published), published-yet-unplaced (artifact published but
+     not laid out as a board rect), and placed (a real board rect exists). */
+  const parks: Array<{ label: string; buildAttempt: Record<string, unknown>; placed: Set<string> }> = [
+    { label: "pathless parked", buildAttempt: { n: 1, state: "needs_decision", agentPath: null, flowId: null }, placed: new Set() },
+    { label: "published-yet-unplaced parked", buildAttempt: { n: 1, state: "needs_decision", agentPath: "/build", flowId: null }, placed: new Set(["/plan"]) },
+    { label: "placed board rect", buildAttempt: { n: 1, state: "needs_decision", agentPath: "/build", flowId: null }, placed: new Set(["/plan", "/build"]) },
+  ];
+
+  const parked = (park: (typeof parks)[number]) => pipeline({
+    state: "needs_decision",
+    stages: parkedStages,
+    cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+    runs: [
+      { stageId: "plan", attempts: [{ n: 1, state: "passed", agentPath: "/plan", flowId: null } as never] },
+      { stageId: "build", attempts: [park.buildAttempt as never] },
+    ],
+  });
+
+  test("the parked cursor owns exactly one surface — a placeholder until a board rect is placed, then the live pane, never neither", () => {
+    for (const park of parks) {
+      const p = parked(park);
+      const isPlaceholder = pipelinePlaceholderStages(p, park.placed, new Set())
+        .some((candidate) => candidate.id === "build");
+      const materialized = park.placed.has("/build");
+      /* Pathless + published-yet-unplaced keep the placeholder; the placed rect
+         dissolves it (the live pane owns the slot) with no duplicate. */
+      expect(isPlaceholder, `${park.label}: placeholder XOR pane`).toBe(!materialized);
+      expect(isPlaceholder !== materialized, `${park.label}: exactly one`).toBe(true);
+    }
+  });
+
+  test("every incident pass/fail/loop edge survives the whole park — no rail is dropped", () => {
+    for (const park of parks) {
+      const projection = pipelineBoardProjection(parked(park), [], [], park.placed, new Set());
+      const edgeKeys = projection.edges.map((edge) => `${edge.from}->${edge.to}:${edge.kind}`);
+      /* plan→build pass, build→review pass, review→build fail loop all persist
+         regardless of whether the parked build has a placed rect yet. */
+      expect(edgeKeys.sort(), park.label).toEqual(["build->review:pass", "plan->build:pass", "review->build:fail"]);
+      expect(projection.onBoard, park.label).toBe(true);
+      expect(projection.members, park.label).toHaveLength(3);
+    }
+  });
+});
+
 describe("stage-graph attempt navigation (path-only + current generation — PR #439)", () => {
   const fileAt = (path: string, over: Partial<FileEntry> = {}): FileEntry => ({ path, ...over }) as FileEntry;
   const makeAttempt = (over: Record<string, unknown>) =>
