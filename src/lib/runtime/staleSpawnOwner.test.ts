@@ -7,7 +7,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry } from "@/lib/agent/registry";
 
 import type { RuntimeHostClient } from "./client";
-import { reconcileTerminalSpawnsHeldByLiveOwners } from "./staleSpawnOwner";
+import { reconcileStaleSpawnsHeldByLiveOwners } from "./staleSpawnOwner";
 import { STALE_STRUCTURED_SPAWN_TIMEOUT_MS } from "./structuredSpawn";
 
 test("a terminal operation releases a stale launch from a long-lived admission owner", async () => {
@@ -42,7 +42,7 @@ test("a terminal operation releases a stale launch from a long-lived admission o
   } as unknown as RuntimeHostClient;
 
   try {
-    const result = await reconcileTerminalSpawnsHeldByLiveOwners(store, client, {
+    const result = await reconcileStaleSpawnsHeldByLiveOwners(store, client, {
       now: () => Date.now() + STALE_STRUCTURED_SPAWN_TIMEOUT_MS + 60_000,
       ownerAlive: () => true,
     });
@@ -88,13 +88,48 @@ test("an open operation remains owned by its healthy admission process", async (
   } as unknown as RuntimeHostClient;
 
   try {
-    const result = await reconcileTerminalSpawnsHeldByLiveOwners(store, client, {
+    const result = await reconcileStaleSpawnsHeldByLiveOwners(store, client, {
       now: () => Date.now() + STALE_STRUCTURED_SPAWN_TIMEOUT_MS + 60_000,
       ownerAlive: () => true,
     });
 
     expect(result).toEqual({ examined: 0, terminalized: [], recovered: [] });
     expect(store.snapshot().receipts[receipt.launchId]?.state).toBe("starting");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a stale launch with no runtime operation leaves its long-lived admission owner", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-missing-operation-owner-"));
+  const store = new AgentRegistry(path.join(directory, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    transport: "structured",
+    accountId: "work",
+    clientAttemptId: "missing_operation_owner_attempt_a1",
+    requestDigest: "f".repeat(64),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected structured launch creation");
+  const receipt = begun.receipt;
+  const client = {
+    operationStatus: async () => null,
+    snapshot: async () => ({ revision: 0, sessions: [] }),
+  } as unknown as RuntimeHostClient;
+
+  try {
+    const result = await reconcileStaleSpawnsHeldByLiveOwners(store, client, {
+      now: () => Date.now() + STALE_STRUCTURED_SPAWN_TIMEOUT_MS + 60_000,
+      ownerAlive: () => true,
+    });
+
+    expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
+    expect(store.snapshot().receipts[receipt.launchId]).toMatchObject({
+      state: "failed",
+      error: `structured spawn runtime snapshot has no session after ${STALE_STRUCTURED_SPAWN_TIMEOUT_MS}ms`,
+    });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
