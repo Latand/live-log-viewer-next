@@ -184,6 +184,250 @@ function placeholderPng({ height, path, width }: Placeholder, sourceDigest: stri
   ]);
 }
 
+/* --------------------------------------------------------------------------
+ * Issue #499 synthetic acceptance stills.
+ *
+ * Deterministic re-renderings of the #499 composer acceptance states, drawn
+ * entirely by this generator (classification `synthetic`, source
+ * `deterministic-generator`) so the committed evidence is reproducible and
+ * inspectable. Each still names its state, carries the exact source revision
+ * in pixels AND in PNG metadata, and binds the SHA-256 of the real
+ * chrome-headless capture it re-renders as its source digest — the captures
+ * themselves stay uncommitted (browser output is not byte-deterministic).
+ * ------------------------------------------------------------------------ */
+
+type Issue499State = "live-ready" | "unresolved-recovery" | "dead-recovery" | "image-upload";
+
+type Issue499Still = {
+  path: string;
+  width: number;
+  height: number;
+  state: Issue499State;
+  description: string;
+};
+
+/** The commit whose verified acceptance run these stills re-render. */
+const ISSUE_499_SOURCE_REVISION = "3a5c11045eeb9b7731343f7509c5161c7339c59f";
+
+const issue499Stills: Issue499Still[] = [
+  { path: "docs/screenshots/issue-499/still-live-ready-desktop-1440x900.png", width: 1440, height: 900, state: "live-ready", description: "Synthetic re-render of the desktop live-ready composer acceptance state for issue 499." },
+  { path: "docs/screenshots/issue-499/still-live-ready-390x844.png", width: 390, height: 844, state: "live-ready", description: "Synthetic re-render of the 390x844 live-ready composer state with the always-visible runtime pill." },
+  { path: "docs/screenshots/issue-499/still-live-ready-390x600.png", width: 390, height: 600, state: "live-ready", description: "Synthetic re-render of the 390x600 live-ready composer state at the keyboard-open height class." },
+  { path: "docs/screenshots/issue-499/still-unresolved-recovery-390x844.png", width: 390, height: 844, state: "unresolved-recovery", description: "Synthetic re-render of the unresolved-host state: inline resolving reason, Re-check recovery, no launch affordance." },
+  { path: "docs/screenshots/issue-499/still-dead-recovery-390x844.png", width: 390, height: 844, state: "dead-recovery", description: "Synthetic re-render of the dead-host recovery state: banner actions with the composer still admitting text." },
+  { path: "docs/screenshots/issue-499/still-dead-recovery-390x600.png", width: 390, height: 600, state: "dead-recovery", description: "Synthetic re-render of the 390x600 dead-host recovery state proving the short-viewport reachability." },
+  { path: "docs/screenshots/issue-499/still-image-upload-390x844.png", width: 390, height: 844, state: "image-upload", description: "Synthetic re-render of the image-upload state: staged tile in the bounded tray with Send enabled." },
+];
+
+/** SHA-256 of the real chrome-headless captures (at the source revision) each
+    still re-renders. Kept as source digests so provenance names the exact
+    verified frames without committing non-deterministic browser bytes. */
+const issue499SourceDigests: Record<string, string> = {
+  "docs/screenshots/issue-499/still-live-ready-desktop-1440x900.png": "2eafe805f6ad62a9dbca57e5c4822a8807db98cefa5ba9f041c39514232ac18e",
+  "docs/screenshots/issue-499/still-live-ready-390x844.png": "4086a25e9b4903fed9298d6510cee6bfca8f13ec48772186f0d1aa1701860894",
+  "docs/screenshots/issue-499/still-live-ready-390x600.png": "2d2b4057310ed8e1d27f5209373aea60ab4db43233435e21da7313db753f5cff",
+  "docs/screenshots/issue-499/still-unresolved-recovery-390x844.png": "18dee490ce0d223bc479635ba259a850f0417722f04406a4827d873d16a2ac21",
+  "docs/screenshots/issue-499/still-dead-recovery-390x844.png": "c78b711e72424dc8b1f6d9fdc1c9640fb57ea4876d9ae28836e6504c8d83eabf",
+  "docs/screenshots/issue-499/still-dead-recovery-390x600.png": "9cd926ef41eb57a6047a1363049f95fb2bcee176b16e01c1208a50e613990415",
+  "docs/screenshots/issue-499/still-image-upload-390x844.png": "d2d3f18aa6b45554b1818857edcc3dbc3877b65fac393cdbc812d207cbef1910",
+};
+
+/** 5x7 uppercase pixel font — enough to label every state legibly. */
+const STILL_FONT: Record<string, string[]> = {
+  "A": [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+  "B": ["####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."],
+  "C": [".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."],
+  "D": ["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."],
+  "E": ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
+  "F": ["#####", "#....", "#....", "####.", "#....", "#....", "#...."],
+  "G": [".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".####"],
+  "H": ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+  "I": ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"],
+  "J": ["....#", "....#", "....#", "....#", "#...#", "#...#", ".###."],
+  "K": ["#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"],
+  "L": ["#....", "#....", "#....", "#....", "#....", "#....", "#####"],
+  "M": ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"],
+  "N": ["#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"],
+  "O": [".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+  "P": ["####.", "#...#", "#...#", "####.", "#....", "#....", "#...."],
+  "Q": [".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"],
+  "R": ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"],
+  "S": [".####", "#....", "#....", ".###.", "....#", "....#", "####."],
+  "T": ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."],
+  "U": ["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+  "V": ["#...#", "#...#", "#...#", "#...#", ".#.#.", ".#.#.", "..#.."],
+  "W": ["#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"],
+  "X": ["#...#", ".#.#.", "..#..", "..#..", "..#..", ".#.#.", "#...#"],
+  "Y": ["#...#", ".#.#.", "..#..", "..#..", "..#..", "..#..", "..#.."],
+  "Z": ["#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"],
+  "0": [".###.", "#..##", "#.#.#", "##..#", "#...#", "#...#", ".###."],
+  "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", "#####"],
+  "2": [".###.", "#...#", "....#", "..##.", ".#...", "#....", "#####"],
+  "3": [".###.", "#...#", "....#", "..##.", "....#", "#...#", ".###."],
+  "4": ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."],
+  "5": ["#####", "#....", "####.", "....#", "....#", "#...#", ".###."],
+  "6": [".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."],
+  "7": ["#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."],
+  "8": [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."],
+  "9": [".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."],
+  "-": [".....", ".....", ".....", "####.", ".....", ".....", "....."],
+  ".": [".....", ".....", ".....", ".....", ".....", ".##..", ".##.."],
+  " ": [".....", ".....", ".....", ".....", ".....", ".....", "....."],
+};
+
+function issue499Png(still: Issue499Still): Buffer {
+  const { width, height, state } = still;
+  const stride = width * 3 + 1;
+  const pixels = Buffer.alloc(stride * height);
+  const fill = (x: number, y: number, rectangleWidth: number, rectangleHeight: number, color: Buffer) => {
+    const left = Math.max(0, Math.min(width, Math.round(x)));
+    const right = Math.max(left, Math.min(width, Math.round(x + rectangleWidth)));
+    const top = Math.max(0, Math.min(height, Math.round(y)));
+    const bottom = Math.max(top, Math.min(height, Math.round(y + rectangleHeight)));
+    for (let row = top; row < bottom; row += 1) {
+      pixels.fill(color, row * stride + 1 + left * 3, row * stride + 1 + right * 3);
+    }
+  };
+  const text = (x: number, y: number, label: string, color: Buffer, scale = 2) => {
+    let cursor = x;
+    for (const character of label) {
+      const glyph = STILL_FONT[character] ?? STILL_FONT[" "]!;
+      for (let row = 0; row < 7; row += 1) {
+        for (let column = 0; column < 5; column += 1) {
+          if (glyph[row]![column] === "#") fill(cursor + column * scale, y + row * scale, scale, scale, color);
+        }
+      }
+      cursor += 6 * scale;
+    }
+    return cursor;
+  };
+  const canvas = Buffer.from([243, 244, 246]);
+  const card = Buffer.from([255, 255, 255]);
+  const border = Buffer.from([222, 226, 233]);
+  const sunken = Buffer.from([238, 241, 245]);
+  const ink = Buffer.from([31, 41, 55]);
+  const muted = Buffer.from([140, 149, 163]);
+  const accent = Buffer.from([109, 94, 246]);
+  const accentSoft = Buffer.from([199, 193, 250]);
+  const warning = Buffer.from([176, 118, 14]);
+  const dangerSoft = Buffer.from([252, 231, 231]);
+  const danger = Buffer.from([205, 48, 48]);
+  const tile = Buffer.from([246, 138, 138]);
+
+  for (let row = 0; row < height; row += 1) pixels.fill(canvas, row * stride + 1, (row + 1) * stride);
+
+  const stateTitle: Record<Issue499State, string> = {
+    "live-ready": "LIVE READY",
+    "unresolved-recovery": "UNRESOLVED HOST - RECOVERY",
+    "dead-recovery": "DEAD HOST - RECOVERY",
+    "image-upload": "IMAGE UPLOAD",
+  };
+  text(16, 14, stateTitle[state], ink);
+  text(16, 32, `ISSUE 499 - ${width}X${height} - SYNTHETIC FIXTURE`, muted, 1);
+
+  /* Card pinned to the bottom, mirroring the pane layout. */
+  const cardWidth = Math.min(width - 24, 720);
+  const cardLeft = Math.round((width - cardWidth) / 2);
+  const cardHeight = Math.min(height - 70, state === "dead-recovery" ? 400 : 320);
+  const cardTop = height - cardHeight - 16;
+  fill(cardLeft - 2, cardTop - 2, cardWidth + 4, cardHeight + 4, border);
+  fill(cardLeft, cardTop, cardWidth, cardHeight, card);
+
+  /* Transcript region up top of the card. */
+  const bannerHeight = state === "dead-recovery" ? 132 : 0;
+  const composerTop = cardTop + cardHeight
+    - (state === "image-upload" ? 188 : state === "unresolved-recovery" ? 168 : 128);
+  text(cardLeft + 16, cardTop + 14, "TRANSCRIPT", muted, 1);
+  fill(cardLeft, composerTop - bannerHeight - 2, cardWidth, 2, border);
+
+  if (state === "dead-recovery") {
+    const bannerTop = composerTop - bannerHeight;
+    fill(cardLeft, bannerTop, cardWidth, bannerHeight, dangerSoft);
+    text(cardLeft + 16, bannerTop + 12, "AGENT HOST DIED - 5M AGO", danger);
+    text(cardLeft + 16, bannerTop + 32, "MESSAGES CANT BE DELIVERED", ink, 1);
+    const respawnWidth = 20 * 12 + 20;
+    fill(cardLeft + 16, bannerTop + 48, respawnWidth, 30, accent);
+    text(cardLeft + 26, bannerTop + 56, "RESPAWN CONVERSATION", card);
+    const terminalWidth = 16 * 12 + 20;
+    fill(cardLeft + 16, bannerTop + 86, terminalWidth, 30, border);
+    fill(cardLeft + 18, bannerTop + 88, terminalWidth - 4, 26, card);
+    text(cardLeft + 26, bannerTop + 94, "OPEN IN TERMINAL", ink);
+    const recheckWidth = 8 * 12 + 20;
+    fill(cardLeft + 24 + terminalWidth, bannerTop + 86, recheckWidth, 30, border);
+    fill(cardLeft + 26 + terminalWidth, bannerTop + 88, recheckWidth - 4, 26, card);
+    text(cardLeft + 34 + terminalWidth, bannerTop + 94, "RE-CHECK", ink);
+  }
+
+  /* Staged attachment tile (image-upload) above the input row. */
+  if (state === "image-upload") {
+    const tileTop = composerTop + 10;
+    fill(cardLeft + 16, tileTop, 48, 48, tile);
+    fill(cardLeft + 16 + 30, tileTop + 4, 14, 14, card);
+    text(cardLeft + 16 + 33, tileTop + 5, "X", ink, 1);
+  }
+
+  /* Input row: sunken field + sliders/mic/send controls. */
+  const inputTop = composerTop + (state === "image-upload" ? 70 : 12);
+  const inputHeight = 44;
+  fill(cardLeft + 14, inputTop - 2, cardWidth - 28, inputHeight + 4, border);
+  fill(cardLeft + 16, inputTop, cardWidth - 32, inputHeight, sunken);
+  const inputText: Record<Issue499State, { label: string; tone: Buffer }> = {
+    "live-ready": { label: "MESSAGE THE AGENT...", tone: muted },
+    "unresolved-recovery": { label: "RECONNECTING...", tone: muted },
+    "dead-recovery": { label: "RECOVER AND CONTINUE", tone: ink },
+    "image-upload": { label: "MESSAGE THE AGENT...", tone: muted },
+  };
+  text(cardLeft + 28, inputTop + 15, inputText[state].label, inputText[state].tone);
+  const controlsRight = cardLeft + cardWidth - 32;
+  /* Send: enabled accent for deliverable states, soft for blocked. */
+  const sendColor = state === "unresolved-recovery" ? accentSoft : accent;
+  fill(controlsRight - 36, inputTop + 6, 32, 32, sendColor);
+  for (let step = 0; step < 8; step += 1) {
+    fill(controlsRight - 36 + 11 + step, inputTop + 6 + 9 + step, 2, 2 * (8 - step), card);
+  }
+  /* Mic dot + sliders bars. */
+  fill(controlsRight - 58, inputTop + 14, 10, 16, muted);
+  fill(controlsRight - 82, inputTop + 16, 14, 3, muted);
+  fill(controlsRight - 82, inputTop + 24, 14, 3, muted);
+
+  const belowInput = inputTop + inputHeight + 12;
+  if (state === "unresolved-recovery") {
+    /* Inline blocked reason + the Re-check recovery route — never a launch. */
+    text(cardLeft + 16, belowInput, "RESOLVING THE AGENT HOST...", warning);
+    const recheckWidth = 8 * 12 + 20;
+    fill(cardLeft + 16, belowInput + 22, recheckWidth, 30, border);
+    fill(cardLeft + 18, belowInput + 24, recheckWidth - 4, 26, card);
+    text(cardLeft + 26, belowInput + 30, "RE-CHECK", ink);
+  } else {
+    /* The always-visible model/reasoning pill row. */
+    fill(cardLeft + 18, belowInput + 2, 10, 5, accent);
+    fill(cardLeft + 22, belowInput + 7, 10, 5, accent);
+    const pillEnd = text(cardLeft + 38, belowInput, "5.6-SOL - HIGH", ink);
+    for (let step = 0; step < 4; step += 1) {
+      fill(pillEnd + 8 + step, belowInput + 6 + step, 2, 2, ink);
+      fill(pillEnd + 8 + 8 - step, belowInput + 6 + step, 2, 2, ink);
+    }
+  }
+
+  text(cardLeft + 16, cardTop + cardHeight - 16, `SYNTHETIC - REV ${ISSUE_499_SOURCE_REVISION.slice(0, 12).toUpperCase()}`, muted, 1);
+
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  return Buffer.concat([
+    Buffer.from("89504e470d0a1a0a", "hex"),
+    chunk("IHDR", header),
+    chunk("tEXt", Buffer.from("capture-source\0synthetic-fixture", "latin1")),
+    chunk("tEXt", Buffer.from("privacy-classification\0synthetic", "latin1")),
+    chunk("tEXt", Buffer.from("generator\0scripts/generate-privacy-placeholders.ts", "latin1")),
+    chunk("tEXt", Buffer.from(`source-revision\0${ISSUE_499_SOURCE_REVISION}`, "latin1")),
+    chunk("IDAT", deflateSync(pixels, { level: 9 })),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
 const manifests = new Map<string, Array<Record<string, unknown>>>();
 if (Bun.version !== PRIVACY_GENERATOR_RUNTIME) {
   throw new Error("Privacy placeholder generation requires the pinned Bun runtime");
@@ -213,6 +457,31 @@ for (const placeholder of placeholders) {
   manifests.set(directory, assets);
 }
 
+for (const still of issue499Stills) {
+  const output = resolve(root, still.path);
+  const directory = dirname(output);
+  mkdirSync(directory, { recursive: true });
+  const sourceDigest = issue499SourceDigests[still.path];
+  if (!sourceDigest) throw new Error("Missing source digest for issue 499 still");
+  const contents = issue499Png(still);
+  writeFileSync(output, contents);
+  const assets = manifests.get(directory) ?? [];
+  assets.push({
+    path: output.slice(directory.length + 1),
+    classification: "synthetic",
+    source: "deterministic-generator",
+    generator: relative(directory, generatorPath),
+    generatorRuntime: `bun-${PRIVACY_GENERATOR_RUNTIME}`,
+    generatorVersion: PRIVACY_GENERATOR_VERSION,
+    generatorSha256,
+    sourceDigests: [sourceDigest],
+    sourceRevision: ISSUE_499_SOURCE_REVISION,
+    description: still.description,
+    sha256: createHash("sha256").update(contents).digest("hex"),
+  });
+  manifests.set(directory, assets);
+}
+
 for (const [directory, assets] of manifests) {
   writeFileSync(resolve(directory, "privacy-manifest.json"), `${JSON.stringify({
     schemaVersion: 2,
@@ -221,4 +490,4 @@ for (const [directory, assets] of manifests) {
   }, null, 2)}\n`);
 }
 
-process.stdout.write(`Generated ${placeholders.length} deterministic redacted placeholders with provenance.\n`);
+process.stdout.write(`Generated ${placeholders.length} deterministic redacted placeholders and ${issue499Stills.length} issue-499 synthetic stills with provenance.\n`);

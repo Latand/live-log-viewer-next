@@ -8,10 +8,29 @@ every still AND runs the behavioral verification pass (`--dump-dom` +
 assertions on the harness's `#verify-log`), so the screenshots and the checks
 come from one execution path. All data is synthetic and publication-safe.
 
-Browser screenshots are not deterministic byte-for-byte, so the stills are NOT
-committed (the privacy provenance regime only admits reproducible generator
-output). Run the capture locally after `bun run build`; it fails loudly when
-any behavioral expectation is missing.
+## Committed immutable stills
+
+The `still-*.png` files ARE committed, inspectable evidence: deterministic
+synthetic re-renders of the verified acceptance states, produced by the
+approved generator (`scripts/generate-privacy-placeholders.ts`,
+classification `synthetic`, source `deterministic-generator`) with schema-2
+provenance in `privacy-manifest.json`. Each still names its state and the
+exact source revision in pixels and in PNG metadata (`source-revision`), and
+binds the SHA-256 of the real chrome-headless capture it re-renders as its
+source digest — proving which verified frame it mirrors without committing
+non-deterministic browser bytes.
+
+| Still | State |
+| --- | --- |
+| `still-live-ready-desktop-1440x900` | Desktop live-ready composer |
+| `still-live-ready-390x844`, `still-live-ready-390x600` | Mobile live-ready with the always-visible pill, tall + keyboard-open heights |
+| `still-unresolved-recovery-390x844` | Unresolved host: inline resolving reason + Re-check, no launch affordance |
+| `still-dead-recovery-390x844`, `still-dead-recovery-390x600` | Dead host: recovery banner while Send keeps admitting text |
+| `still-image-upload-390x844` | Staged image tile enabling Send |
+
+The raw chrome captures behind the source digests are regenerated locally with
+`bash docs/screenshots/issue-499/capture.sh` after `bun run build`; the script
+fails loudly when any behavioral expectation is missing.
 
 | Still | State |
 | --- | --- |
