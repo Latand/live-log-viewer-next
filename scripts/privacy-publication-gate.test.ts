@@ -266,6 +266,42 @@ function writeFingerprintCatalog(path: string, value: string): void {
 }
 
 describe("privacy publication gate", () => {
+  test("fresh Bun startup isolates ambient credentials from publication children and evidence", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-ambient-"));
+    temporaryDirectories.push(directory);
+    runGit(directory, ["init", "--quiet"]);
+    runGit(directory, ["config", "user.email", "fixture.invalid"]);
+    runGit(directory, ["config", "user.name", "Fixture"]);
+    writeFileSync(join(directory, "README.md"), "synthetic public fixture\n");
+    runGit(directory, ["add", "README.md"]);
+    runGit(directory, ["commit", "--quiet", "-m", "fixture"]);
+
+    const credentialName = ["WAKA", "TIME_API_KEY"].join("");
+    const credentialPlaceholder = ["ambient", "public", "fixture"].join("-");
+    const bin = join(directory, "bin");
+    mkdirSync(bin);
+    const realGit = Bun.which("git");
+    if (!realGit) throw new Error("Git fixture executable is unavailable");
+    const git = join(bin, "git");
+    writeFileSync(git, `#!/bin/sh
+credential_name='WAKA''TIME_API_KEY'
+if env | grep -q "^\${credential_name}="; then exit 97; fi
+exec "$LLV_TEST_REAL_GIT" "$@"
+`);
+    chmodSync(git, 0o755);
+
+    const result = runGateArguments(["--base", "HEAD"], {
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      LLV_TEST_REAL_GIT: realGit,
+      [credentialName]: credentialPlaceholder,
+    }, directory);
+    const publicEvidence = `${result.stdout.toString()}${result.stderr.toString()}`;
+
+    expect(publicEvidence).not.toContain(credentialName);
+    expect(publicEvidence).not.toContain(credentialPlaceholder);
+    expect(result.exitCode).toBe(0);
+  });
+
   test("blocks an unsafe live raster without provenance using redacted diagnostics", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);

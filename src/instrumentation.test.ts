@@ -17,7 +17,11 @@ import { operatorSpawnCapabilityPath } from "@/lib/agent/operatorCapability";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { didStructuredHostStartupFail, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
-import { discardWakatimeEnvironmentCredential, WAKATIME_CREDENTIAL_ENV } from "@/lib/wakatime/credential";
+import {
+  discardWakatimeEnvironmentCredential,
+  WAKATIME_CREDENTIAL_ENV,
+  withoutWakatimeCredential,
+} from "@/lib/wakatime/credential";
 import { registerNodeViewerRuntime } from "./instrumentation";
 
 test("account controller delay defaults to immediate startup and retains the explicit escape hatch", () => {
@@ -48,7 +52,7 @@ test("WakaTime startup failure stays local and secret-safe", async () => {
   expect(logs).toEqual([["[wakatime] startup_failed", {}]]);
 });
 
-test("node bootstrap discards WakaTime credentials before runtime imports snapshot or spawn", async () => {
+test("node bootstrap discards WakaTime credentials before runtime imports and explicitly isolated Bun children", async () => {
   const placeholder = ["bootstrap", "fixture", "value"].join("-");
   let snapshot: NodeJS.ProcessEnv = { NODE_ENV: "test" };
   let childExit = -1;
@@ -62,7 +66,11 @@ test("node bootstrap discards WakaTime credentials before runtime imports snapsh
         process.execPath,
         "-e",
         `process.exit(process.env[${JSON.stringify(WAKATIME_CREDENTIAL_ENV)}] ? 17 : 0)`,
-      ], { stdout: "ignore", stderr: "ignore" });
+      ], {
+        env: withoutWakatimeCredential(process.env),
+        stdout: "ignore",
+        stderr: "ignore",
+      });
       childExit = await child.exited;
       return { registerViewerRuntime: async () => undefined };
     });
