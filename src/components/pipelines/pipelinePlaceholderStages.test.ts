@@ -65,9 +65,7 @@ test("a stage whose attempts have all folded into history stays navigable, never
 test("a pending/spawning current attempt keeps exactly one placeholder until its transcript materializes (#353 R3)", () => {
   /* The engine created the builder attempt but its transcript has not landed yet
      (agentPath/flowId both null). Across pending → spawning the stage must keep a
-     conversation-shaped placeholder — never zero pane / zero placeholder — and the
-     placeholder must dissolve the instant the running attempt materializes a
-     transcript. */
+     conversation-shaped placeholder — never zero pane / zero placeholder. */
   const architectRun = { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] };
   for (const state of ["pending", "spawning"] as const) {
     const forming = pipeline({
@@ -81,7 +79,17 @@ test("a pending/spawning current attempt keeps exactly one placeholder until its
        single placeholder, review is a future placeholder. */
     expect(pipelinePlaceholderStages(forming).map((stage) => stage.id)).toEqual(["builder", "review"]);
   }
+});
 
+test("the live stage keeps its placeholder across path/flow publication until a board rect is placed, then dissolves (#353 R4)", () => {
+  /* The R4 materialization gap: the builder attempt is running and has PUBLISHED
+     agentPath="/build", but the scanned conversation has not yet been placed as a
+     board rect. Keying off the stored agentPath alone (the pre-R4 predicate) would
+     drop the placeholder here and leave the stage with zero surface. Board presence
+     — not the stored path — governs: while "/build" is unplaced the builder keeps
+     exactly one placeholder; the instant "/build" is a placed rect the placeholder
+     dissolves (the live pane owns the slot) with no duplicate. */
+  const architectRun = { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] };
   const running = pipeline({
     cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
     runs: [
@@ -89,8 +97,36 @@ test("a pending/spawning current attempt keeps exactly one placeholder until its
       { stageId: "builder", attempts: [{ n: 1, state: "running", agentPath: "/build", flowId: null }] },
     ],
   } as unknown as Partial<Pipeline>);
-  /* The builder placeholder dissolved once its transcript materialized. */
-  expect(pipelinePlaceholderStages(running).map((stage) => stage.id)).toEqual(["review"]);
+
+  /* Path published, but not yet placed (nothing in placedPaths): builder retains
+     its single placeholder through the whole publish → scan gap. */
+  expect(pipelinePlaceholderStages(running).map((stage) => stage.id)).toEqual(["builder", "review"]);
+  expect(pipelinePlaceholderStages(running, new Set(["/arch"])).map((stage) => stage.id)).toEqual(["builder", "review"]);
+
+  /* Once "/build" is a placed board rect the builder placeholder dissolves; only
+     the future review stage remains. No duplicate placeholder over the live pane. */
+  expect(pipelinePlaceholderStages(running, new Set(["/arch", "/build"])).map((stage) => stage.id)).toEqual(["review"]);
+});
+
+test("a live review-loop cursor keeps its placeholder until its flow deck is placed (#353 R4)", () => {
+  /* A review-loop cursor materializes through a flow, not a run transcript: its
+     board presence is its placed round deck. While the flow's deck is unplaced the
+     stage keeps its single placeholder; once the deck id is placed it dissolves. */
+  const architectRun = { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] };
+  const builderRun = { stageId: "builder", attempts: [{ n: 1, state: "passed", agentPath: "/build", flowId: null }] };
+  const reviewing = pipeline({
+    cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
+    runs: [
+      architectRun,
+      builderRun,
+      { stageId: "review", attempts: [{ n: 1, state: "reviewing", agentPath: null, flowId: "f1" }] },
+    ],
+  } as unknown as Partial<Pipeline>);
+
+  /* Flow published but its deck unplaced: review keeps its placeholder. */
+  expect(pipelinePlaceholderStages(reviewing, new Set(["/arch", "/build"])).map((stage) => stage.id)).toEqual(["review"]);
+  /* Deck placed: the live review pane owns the slot, no placeholder remains. */
+  expect(pipelinePlaceholderStages(reviewing, new Set(["/arch", "/build"]), new Set(["f1"]))).toEqual([]);
 });
 
 test("a completed or closed pipeline grows no placeholders", () => {

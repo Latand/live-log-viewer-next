@@ -41,6 +41,8 @@ import {
   attemptNavTarget,
   resolveStageNavFile,
   partitionPipelineSurfaces,
+  pipelineBoardProjection,
+  pipelinePlaceholderStages,
   pipelineStagePresentation,
   stageOverrideBody,
   templateStageInputs,
@@ -1226,6 +1228,70 @@ describe("pipelineStagePresentation", () => {
     });
     expect(pipelineStagePresentation(review, stages[2]!, new Set(), new Set(["flow-1"]))).toBe("materialized");
     expect(pipelineStagePresentation(pipeline({ state: "draft", stages }), stages[0]!, new Set(), new Set())).toBe("waiting");
+  });
+});
+
+describe("continuous exactly-one stage-surface ownership across the materialization arc (#353 R4)", () => {
+  const stages = [stage("plan"), stage("build"), stage("review", "review-loop")];
+
+  /* Each step of the build stage's arc: from a bare pending cursor, through spawning
+     and the path publication + scan gap, to the placed board rect. `placed` is the
+     set of node paths the board has actually laid out at that step. */
+  const arc: Array<{ label: string; attempt: Record<string, unknown>; cursorState: "pending" | "spawning" | "running"; placed: Set<string> }> = [
+    { label: "pending (no path)", attempt: { n: 1, state: "pending", agentPath: null, flowId: null }, cursorState: "pending", placed: new Set() },
+    { label: "spawning (no path)", attempt: { n: 1, state: "spawning", agentPath: null, flowId: null }, cursorState: "spawning", placed: new Set() },
+    { label: "running, path published, not yet scanned", attempt: { n: 1, state: "running", agentPath: "/build", flowId: null }, cursorState: "running", placed: new Set() },
+    { label: "running, scanned but not yet placed", attempt: { n: 1, state: "running", agentPath: "/build", flowId: null }, cursorState: "running", placed: new Set(["/plan"]) },
+    { label: "running, placed board rect", attempt: { n: 1, state: "running", agentPath: "/build", flowId: null }, cursorState: "running", placed: new Set(["/plan", "/build"]) },
+  ];
+
+  test("the build stage owns exactly one surface — placeholder XOR materialized pane — at every step", () => {
+    for (const step of arc) {
+      const p = pipeline({
+        state: "running",
+        stages,
+        cursor: { stageId: "build", state: step.cursorState, input: null, activatedBy: null },
+        runs: [
+          { stageId: "plan", attempts: [{ n: 1, state: "passed", agentPath: "/plan", flowId: null } as never] },
+          { stageId: "build", attempts: [step.attempt as never] },
+        ],
+      });
+      const isPlaceholder = pipelinePlaceholderStages(p, step.placed, new Set())
+        .some((candidate) => candidate.id === "build");
+      const presentation = pipelineStagePresentation(p, stages[1]!, step.placed, new Set());
+      const materialized = presentation === "materialized";
+      /* Exactly one surface: the stage is a placeholder while its pane is unplaced,
+         and a materialized pane the instant a board rect exists — never both (a
+         duplicate) and never neither (a zero-surface hole). */
+      expect(isPlaceholder, `${step.label}: placeholder`).toBe(!materialized);
+      expect(isPlaceholder !== materialized, `${step.label}: exactly one`).toBe(true);
+    }
+  });
+
+  test("the projection edge list stays intact — every pass/fail/loop edge survives the whole arc", () => {
+    for (const step of arc) {
+      const p = pipeline({
+        state: "running",
+        stages: [
+          { ...stage("plan"), next: "build" },
+          { ...stage("build"), next: "review" },
+          { ...stage("review", "review-loop"), next: null, onFail: { to: "build", maxRounds: 5 } },
+        ],
+        cursor: { stageId: "build", state: step.cursorState, input: null, activatedBy: null },
+        runs: [
+          { stageId: "plan", attempts: [{ n: 1, state: "passed", agentPath: "/plan", flowId: null } as never] },
+          { stageId: "build", attempts: [step.attempt as never] },
+        ],
+      });
+      const projection = pipelineBoardProjection(p, [], [], step.placed, new Set());
+      const edgeKeys = projection.edges.map((edge) => `${edge.from}->${edge.to}:${edge.kind}`);
+      /* plan→build pass, build→review pass, review→null (none), review→build fail
+         all persist regardless of how far build has materialized. */
+      expect(edgeKeys.sort()).toEqual(["build->review:pass", "plan->build:pass", "review->build:fail"]);
+      /* The whole plan stays a board surface throughout. */
+      expect(projection.onBoard).toBe(true);
+      expect(projection.members).toHaveLength(3);
+    }
   });
 });
 

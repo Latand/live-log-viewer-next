@@ -373,6 +373,55 @@ describe("planned-stage pipelines grow a placeholder halo (#353 desktop ownershi
     expect(halos).toHaveLength(1);
   });
 
+  test("the cursor stage keeps exactly one placeholder surface through the materialization gap (#353 R4)", () => {
+    /* The build attempt has published agentPath="/build", but the scanner has not
+       yet surfaced that transcript, so /build is absent from the scene and never
+       gets a placed node. Between path publication and board placement the cursor
+       stage must keep exactly one conversation-shaped placeholder — never zero
+       surface. Reading the stored agentPath alone (the pre-R4 predicate) dropped
+       the placeholder the instant the path appeared, leaving the stage with no
+       pane and no placeholder until the scan caught up. */
+    const gap = pipeline({
+      stages: [
+        { id: "build", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "review-loop", prompt: "", next: null },
+      ],
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      state: "running",
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/build", flowId: null } as unknown as Record<string, unknown>] }],
+    });
+    /* No scene node for /build: the transcript is published but not yet scanned. */
+    const layout = buildSchemeLayout([], [], [], [], [], [gap], [gap]);
+    const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+    expect(slotByStage.get("build")?.presentation).toBe("placeholder");
+    expect(slotByStage.get("review")?.presentation).toBe("placeholder");
+    /* Exactly one surface for the whole plan: two placeholders, no live node. */
+    expect(layout.nodes).toHaveLength(0);
+    expect(layout.slots).toHaveLength(2);
+  });
+
+  test("once the cursor stage's transcript is scanned and placed, its placeholder dissolves without a duplicate (#353 R4)", () => {
+    /* Same pipeline, now /build has been scanned and placed as a node. The live
+       pane owns build's slot; only the future review stage remains a placeholder —
+       no lingering placeholder over the materialized pane. */
+    const root = entry({ path: "/build" });
+    const group: BranchGroup = { key: "/build", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
+    const placed = pipeline({
+      stages: [
+        { id: "build", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "review-loop", prompt: "", next: null },
+      ],
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      state: "running",
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/build", flowId: null } as unknown as Record<string, unknown>] }],
+    });
+    const layout = buildSchemeLayout([group], [], [root], [], [], [placed], [placed]);
+    const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+    expect(layout.nodes.map((node) => node.file.path)).toContain("/build");
+    expect(slotByStage.has("build")).toBe(false);
+    expect(slotByStage.get("review")?.presentation).toBe("placeholder");
+  });
+
   test("a materialized stage's pass edge routes a pipeline rail into the next stage's placeholder slot (#353)", () => {
     /* build ran (a real /build node); review has not launched, so it lives only as
        its planned-stage placeholder slot inside the halo. The build→review pass

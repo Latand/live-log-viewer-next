@@ -658,6 +658,13 @@ export function buildSchemeLayout(
   const slotKeysByPipeline = new Map<string, string[]>();
   {
     const nodeRectByPath = new Map<string, SchemeRect>(nodes.map((node) => [node.file.path, node]));
+    /* What this pass actually placed, so the placeholder predicate keys off real
+       board presence (a placed transcript node / a laid-out review deck) rather
+       than the stored agentPath/flowId. That retains the live stage's placeholder
+       continuously through the publish → scan → place gap and dissolves it exactly
+       when the node/deck lands — no zero-surface hole, no duplicate (#353 R4). */
+    const placedNodePaths = new Set(nodeRectByPath.keys());
+    const placedDeckFlowIds = new Set(decks.map((deck) => deck.flow.id));
     /* Only THIS project's pipelines may grow memberless slot rows — the global
        list serves cross-project stage membership, so without this fence a
        foreign draft would drop its slots + halo on every project's canvas. A
@@ -677,7 +684,7 @@ export function buildSchemeLayout(
          compactPipelineArtifactPaths), or a placeholder (a future or still-forming
          pending/spawning stage). Only the live stage keeps a full pane; the others
          become slots so their edges and halo membership survive compaction. */
-      const placeholderIds = new Set(pipelinePlaceholderStages(pipeline).map((stage) => stage.id));
+      const placeholderIds = new Set(pipelinePlaceholderStages(pipeline, placedNodePaths, placedDeckFlowIds).map((stage) => stage.id));
       /* Compact history anchors only grow on an active pipeline, and never for the
          cursor stage itself: a cursor stage whose only transcript is quiet history
          (folded into an under-deck) has no live pane and shelves (#343), rather
