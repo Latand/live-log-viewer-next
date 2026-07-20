@@ -5,6 +5,7 @@ import path, { join } from "node:path";
 import type { FileEntry } from "@/lib/types";
 
 import { buildFeed, createFeedSession, type Item } from "./parse";
+import { groupNestedCalls } from "./toolBlocks";
 
 const claudeFile = { path: "/tmp/x.jsonl", engine: "claude", fmt: "claude", activity: "recent" } as FileEntry;
 const codexFile = { path: "/tmp/x.jsonl", engine: "codex", fmt: "codex", activity: "recent" } as FileEntry;
@@ -167,6 +168,71 @@ describe("feed session parity with one-shot parse", () => {
     expect(stdin.outputPreview).toBe("");
     expect(stdin.statusLabel.toLowerCase()).toContain("wait");
     expect(stdin.statusLabel).toContain("5");
+  });
+
+  test("codex interleaved sessions: follow-ups own the redacted session of their exec (#475)", () => {
+    const exec = (callId: string, cmd: string, ts: string) =>
+      JSON.stringify({ type: "response_item", timestamp: ts, payload: { type: "function_call", name: "exec_command", call_id: callId, arguments: JSON.stringify({ cmd }) } });
+    const output = (callId: string, text: string, ts: string) =>
+      JSON.stringify({ type: "response_item", timestamp: ts, payload: { type: "function_call_output", call_id: callId, output: text } });
+    const follow = (callId: string, name: string, args: Record<string, unknown>, ts: string) =>
+      JSON.stringify({ type: "response_item", timestamp: ts, payload: { type: "function_call", name, call_id: callId, arguments: JSON.stringify(args) } });
+    const lines = [
+      exec("eA", "npm run dev", "t1"),
+      output("eA", "Process running with session ID 100\nOutput:\nstarting A", "t2"),
+      exec("eB", "npm run watch", "t3"),
+      output("eB", "Process running with session ID 200\nOutput:\nstarting B", "t4"),
+      // Follow-ups arrive out of session order: B's stdin before A's wait.
+      follow("sB", "write_stdin", { session_id: 200, chars: "" }, "t5"),
+      output("sB", "Script running with cell ID 200\nWall time 5.0 seconds\nOutput:\n", "t6"),
+      follow("wA", "wait", { session_id: "100" }, "t7"),
+      output("wA", "Script running with cell ID 100\nWall time 3.0 seconds\nOutput:\nA ready", "t8"),
+      // An orphan wait for a session no exec in this run opened.
+      follow("wZ", "wait", { session_id: "999" }, "t9"),
+      output("wZ", "Script running with cell ID 999\nWall time 1.0 seconds\nOutput:\n", "t10"),
+    ];
+    const feed = buildFeed(codexFile, lines, false, "");
+    const group = feed.items.find((item) => item.kind === "cmd-group");
+    if (group?.kind !== "cmd-group") throw new Error("expected the run to fold into one cmd-group");
+    const byId = new Map(group.calls.map((call) => [call.id, call]));
+    // Normalized events retain their session ownership on both execs and follow-ups.
+    expect(byId.get("eA")?.session).toBe("100");
+    expect(byId.get("eB")?.session).toBe("200");
+    expect(byId.get("wA")?.session).toBe("100");
+    expect(byId.get("sB")?.session).toBe("200");
+    expect(byId.get("wZ")?.session).toBe("999");
+    // Grouping folds each follow-up under the exec that owns its actual session,
+    // and leaves the unmatched orphan standalone.
+    const blocks = groupNestedCalls(group.calls);
+    expect(blocks.map((b) => b.parent.id)).toEqual(["eA", "eB", "wZ"]);
+    expect(blocks[0].children.map((c) => c.id)).toEqual(["wA"]);
+    expect(blocks[1].children.map((c) => c.id)).toEqual(["sB"]);
+    expect(blocks[2].children).toHaveLength(0);
+    assertParity(codexFile, lines, { chunks: [1] });
+  });
+
+  test("codex session ownership is redacted and bounded before the card sees it (#475)", () => {
+    // A credential-shaped session id: the redaction funnel must strip the value.
+    const marker = "LEAKED9";
+    const leakyId = `token=${marker}`;
+    const huge = "9".repeat(500);
+    const exec = (callId: string, sessionLine: string, ts: string) => [
+      JSON.stringify({ type: "response_item", timestamp: ts, payload: { type: "function_call", name: "exec_command", call_id: callId, arguments: JSON.stringify({ cmd: "run" }) } }),
+      JSON.stringify({ type: "response_item", timestamp: ts, payload: { type: "function_call_output", call_id: callId, output: `Process running with session ID ${sessionLine}\nOutput:\nok` } }),
+    ];
+    const lines = [
+      ...exec("eLeaky", leakyId, "t1"),
+      ...exec("eHuge", huge, "t2"),
+    ];
+    const feed = buildFeed(codexFile, lines, false, "");
+    const group = feed.items.find((item) => item.kind === "cmd-group");
+    if (group?.kind !== "cmd-group") throw new Error("expected a cmd-group");
+    const byId = new Map(group.calls.map((call) => [call.id, call]));
+    // The credential-shaped session id is redacted, and a runaway id is length-capped.
+    expect(byId.get("eLeaky")?.session).toBe("token=[redacted]");
+    expect(byId.get("eLeaky")?.session).not.toContain(marker);
+    expect((byId.get("eHuge")?.session ?? "").length).toBeLessThanOrEqual(120);
+    expect(JSON.stringify(feed.items)).not.toContain(marker);
   });
 
   test("codex rollout: echo dedup, shell calls, compaction pair, service rows", () => {

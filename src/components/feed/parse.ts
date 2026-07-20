@@ -99,6 +99,11 @@ export type ToolEvent = {
   /** stderr split from the combined result, rendered in its own disclosure. */
   stderr?: string;
   stderrTruncated?: boolean;
+  /** Redacted, bounded interactive-shell session/cell this call owns: an exec
+      reports it in its result preamble, a wait/write_stdin follow-up names it in
+      its args. Lets the readable group fold each follow-up under the exec that
+      actually owns its session, even when several sessions interleave (#475). */
+  session?: string;
   open: boolean;
   orchestration?: Orchestration;
   /** Present on a `ScheduleWakeup` call: drives the dedicated wakeup card. */
@@ -548,6 +553,27 @@ function cwdOf(args: Record<string, unknown>, command?: string): string | undefi
   if (!raw) return undefined;
   const safe = redactSecrets(raw).trim().slice(0, CWD_MAX);
   return safe || undefined;
+}
+
+const SESSION_ID_MAX = 120;
+/* The interactive-shell session/cell a result preamble reports for the exec that
+   opened it: `Process running with session ID N`, `Script running with cell ID N`
+   (both engines/wrappers, issue #141). */
+const SESSION_RESULT_RE = /\brunning with (?:cell|session) ID\s+(\S+)/i;
+
+/* The redacted, bounded session/cell key a shell call owns. A follow-up names it
+   in its args (numeric in write_stdin, string in wait — see objFieldScalar); an
+   exec reports it in its result preamble. Passed through the shared redaction/cap
+   funnel so the readable block never surfaces a raw or unbounded value (#475). */
+function sessionKey(value: unknown): string | undefined {
+  const raw = typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+  if (!raw.trim()) return undefined;
+  const safe = redactSecrets(raw).trim().slice(0, SESSION_ID_MAX);
+  return safe || undefined;
+}
+
+function sessionFromArgs(args: Record<string, unknown>): string | undefined {
+  return sessionKey(args.session_id ?? args.cell_id);
 }
 
 /* Grouping bucket key: the verbatim tool name, falling back to the family for
@@ -1193,7 +1219,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       outputTruncated: false,
       ...(family === "shell" ? (() => {
         const cwd = cwdOf(args, command);
-        return cwd ? { cwd } : {};
+        const session = sessionFromArgs(args);
+        return { ...(cwd ? { cwd } : {}), ...(session !== undefined ? { session } : {}) };
       })() : {}),
       /* An edit/write card opens its structured diff inline by default — a
          compact preview of the first lines, with a toggle for the rest — so the
@@ -1346,6 +1373,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     }
     const exitCode = code !== undefined ? Number(code) : prev.exitCode;
     const durationMs = wallSeconds !== undefined ? Math.round(Number(wallSeconds) * 1000) : prev.durationMs;
+    /* The exec that opened the session reports it in its result preamble; a
+       follow-up already carries its session from its args, so keep that. */
+    const session = prev.session ?? (prev.family === "shell" ? sessionKey(output.match(SESSION_RESULT_RE)?.[1]) : undefined);
     const startMs = typeof prev.ts === "string" || typeof prev.ts === "number" ? Date.parse(String(prev.ts)) : NaN;
     const endTs = durationMs !== undefined && Number.isFinite(startMs) ? new Date(startMs + durationMs).toISOString() : prev.endTs;
     /* A wakeup's result carries the RESOLVED schedule (issue #161): on success
@@ -1383,6 +1413,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       ...(endTs !== undefined ? { endTs } : {}),
       ...(stderr !== undefined ? { stderr } : {}),
       ...(stderrTruncated !== undefined ? { stderrTruncated } : {}),
+      ...(session !== undefined ? { session } : {}),
       ...(wakeup ? { wakeup } : {}),
       ...(mcp ? { mcp } : {}),
     };

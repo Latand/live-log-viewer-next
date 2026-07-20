@@ -31,6 +31,36 @@ test("a leading follow-up with no parent stands as its own block", () => {
   expect(blocks[0].children.map((c) => c.id)).toEqual(["w2"]);
 });
 
+test("interleaved sessions: each follow-up nests under the exec that owns its session", () => {
+  /* Two execs open two sessions, then their follow-ups arrive out of order.
+     Positional last-block nesting would wrongly hand session 1's wait to exec 2;
+     each follow-up must fold under the exec that actually owns its session. */
+  const calls = [
+    toolEvent({ id: "eA", tool: "exec_command", session: "1" }),
+    toolEvent({ id: "eB", tool: "exec_command", session: "2" }),
+    toolEvent({ id: "wA", tool: "wait", session: "1" }),
+    toolEvent({ id: "sB", tool: "write_stdin", session: "2" }),
+    toolEvent({ id: "wB", tool: "wait", session: "2" }),
+  ];
+  const blocks = groupNestedCalls(calls);
+  expect(blocks.map((b) => b.parent.id)).toEqual(["eA", "eB"]);
+  expect(blocks[0].children.map((c) => c.id)).toEqual(["wA"]);
+  expect(blocks[1].children.map((c) => c.id)).toEqual(["sB", "wB"]);
+});
+
+test("a follow-up whose session matches no exec stays standalone", () => {
+  const calls = [
+    toolEvent({ id: "eA", tool: "exec_command", session: "1" }),
+    toolEvent({ id: "wOrphan", tool: "wait", session: "9" }),
+    toolEvent({ id: "wA", tool: "wait", session: "1" }),
+  ];
+  const blocks = groupNestedCalls(calls);
+  // The orphaned wait is its own block; the matching wait still folds under eA.
+  expect(blocks.map((b) => b.parent.id)).toEqual(["eA", "wOrphan"]);
+  expect(blocks[0].children.map((c) => c.id)).toEqual(["wA"]);
+  expect(blocks[1].children).toHaveLength(0);
+});
+
 test("formatDuration scales from ms to seconds to minutes", () => {
   expect(formatDuration(240)).toBe("240ms");
   expect(formatDuration(2500)).toBe("2.5s");

@@ -29,12 +29,17 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
      render (the React-blessed "adjust state on prop change" pattern) so the
      collapse is applied before the DOM ever shows the settled group open. A
      never-active (historical) group never triggers it, so it keeps its error-open
-     default; and it fires once, so a later re-feed can't reclose a group the
-     operator has reopened. */
+     default. `collapsedOnce` latches after that first collapse so a later
+     activity cycle (settled → live → settled again) can never re-collapse: past
+     the initial collapse the operator's latest open/closed choice always wins. */
   const [wasActive, setWasActive] = useState(active);
+  const [collapsedOnce, setCollapsedOnce] = useState(false);
   if (wasActive !== active) {
     setWasActive(active);
-    if (wasActive && !active) setManualOpen(false);
+    if (wasActive && !active && !collapsedOnce) {
+      setCollapsedOnce(true);
+      setManualOpen(false);
+    }
   }
 
   /* Active → always open; settled → the operator's choice, else the error
