@@ -455,6 +455,94 @@ test("draft ghost settings retain the editable stage edge controls", () => {
   expect(host.querySelector('[data-stage-settings="build"] [data-stage-edges]')).not.toBeNull();
 });
 
+test("a run ghost popover exposes an editable prompt and submits an access override (#353 AC6)", async () => {
+  const stages = [runStage("build", null)];
+  const value = pipeline(stages, {});
+  value.state = "draft";
+  value.cursor = { stageId: "build", state: "pending", input: null, activatedBy: null };
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+    return new Response(JSON.stringify({ pipeline: value }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const host = mount(value);
+    flushSync(() => (host.querySelector('[data-stage-graph-node="build"] button[data-open-stage]') as HTMLButtonElement).click());
+
+    const settings = host.querySelector('[data-stage-settings="build"]') as HTMLElement;
+    // The compact popover exposes both the access selector (run stages only) and
+    // an editable stage-prompt field — no tall form, no nested editor scrollbar.
+    const accessSelect = settings.querySelector('[data-stage-setting="access"]') as HTMLSelectElement;
+    const promptField = settings.querySelector('[data-stage-setting="prompt"]') as HTMLTextAreaElement;
+    expect(accessSelect).not.toBeNull();
+    expect(promptField).not.toBeNull();
+    // The prompt field is seeded editable, carrying only the operator-authored
+    // extra (the {{task}}/{{prev.output}} wiring stays out of the field).
+    expect(promptField.value).not.toContain("{{");
+
+    accessSelect.value = "read-only";
+    flushSync(() => accessSelect.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event));
+    (settings.querySelector("button[data-save-stage-settings]") as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toEqual(expect.objectContaining({ action: "override-stage", stageId: "build", access: "read-only" }));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a review ghost popover never offers a read-write access control (#353 AC6)", () => {
+  const stages = [runStage("build", "review"), reviewStage("review", null)];
+  const value = pipeline(stages, {});
+  value.state = "draft";
+  value.cursor = { stageId: "review", state: "pending", input: null, activatedBy: null };
+  const host = mount(value, undefined, [reviewFlow("flow-review", 1, "reviewing")]);
+  openReviewSettings(host);
+  const settings = host.querySelector('[data-stage-settings="review"]') as HTMLElement;
+  expect(settings).not.toBeNull();
+  expect(settings.querySelector('[data-stage-setting="access"]')).toBeNull();
+  // The prompt is still editable on a review stage.
+  expect(settings.querySelector('[data-stage-setting="prompt"]')).not.toBeNull();
+});
+
+test("a draft graph adds a conversation node directly on the canvas (#353 AC7)", async () => {
+  const value = pipeline([runStage("build", null)], {});
+  value.state = "draft";
+  value.cursor = { stageId: "build", state: "pending", input: null, activatedBy: null };
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+    return new Response(JSON.stringify({ pipeline: value }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const host = mount(value);
+    const add = host.querySelector("[data-stage-graph-actions] [data-add-conversation]") as HTMLButtonElement;
+    expect(add).not.toBeNull();
+    add.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toEqual(expect.objectContaining({
+      action: "add-stage",
+      index: 1,
+      stage: expect.objectContaining({ id: "stage-2", kind: "run" }),
+    }));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a running pipeline graph shows no on-canvas add controls (#353 AC7)", () => {
+  const value = pipeline([runStage("build", null)], { build: [attempt(1, "running", "conversation-build")] });
+  const host = mount(value);
+  expect(host.querySelector("[data-stage-graph-actions]")).toBeNull();
+});
+
 test("a path-only primary node stays clickable and opens its transcript by path (PR #439)", () => {
   const build = runStage("build", null);
   const opened: string[] = [];

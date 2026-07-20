@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="820" viewBox="0 0 390 820" font-family="sans-serif">
+  <rect width="390" height="820" fill="#f4f7fa"/>
+  <text x="20" y="36" font-size="15" font-weight="700" fill="#16223a">#353 — 390px mobile column</text>
+  <text x="20" y="56" font-size="11" fill="#5b6b82">Synthetic frame. No live data. scrollWidth === innerWidth (390).</text>
+
+  <!-- viewport guide: document never overflows 390 -->
+  <rect x="1" y="66" width="388" height="740" fill="none" stroke="#c7d0dd" stroke-dasharray="4 4"/>
+
+  <!-- draft action bar (AC7) fits the column -->
+  <rect x="14" y="78" width="362" height="36" rx="9" fill="#ffffff" stroke="#dbe2ec"/>
+  <rect x="24" y="87" width="150" height="18" rx="9" fill="#f3f6fb" stroke="#c7d0dd"/>
+  <text x="36" y="100" font-size="10" font-weight="700" fill="#41506a">＋ Add conversation</text>
+  <rect x="184" y="87" width="120" height="18" rx="9" fill="#f3f6fb" stroke="#c7d0dd"/>
+  <text x="196" y="100" font-size="10" font-weight="700" fill="#41506a">＋ Add review</text>
+
+  <!-- implement node -->
+  <rect x="14" y="128" width="362" height="92" rx="12" fill="#ffffff" stroke="#3454a6" stroke-width="2"/>
+  <text x="34" y="160" font-size="14" font-weight="700" fill="#16223a">implement</text>
+  <text x="34" y="182" font-size="11" fill="#5b6b82">queued · builder · claude</text>
+  <text x="34" y="204" font-size="10" fill="#9aa7bb">conversation-card shell keeps the full width</text>
+
+  <!-- pass edge -->
+  <g stroke="#2f6f4f" stroke-width="3" fill="none"><path d="M195 220 V244"/></g>
+
+  <!-- review node with open compact popover -->
+  <rect x="14" y="244" width="362" height="470" rx="12" fill="#ffffff" stroke="#7a4fa6" stroke-width="2"/>
+  <text x="34" y="276" font-size="14" font-weight="700" fill="#16223a">review</text>
+  <text x="34" y="296" font-size="11" fill="#5b6b82">waiting · round 1/5</text>
+  <line x1="14" y1="312" x2="376" y2="312" stroke="#e4e8ef"/>
+
+  <text x="30" y="336" font-size="9" font-weight="700" fill="#7a869c">ROLE</text>
+  <rect x="30" y="342" width="160" height="26" rx="7" fill="#f7f9fc" stroke="#c7d0dd"/>
+  <text x="42" y="359" font-size="11" fill="#16223a">Reviewer ▾</text>
+  <text x="200" y="336" font-size="9" font-weight="700" fill="#7a869c">EFFORT</text>
+  <rect x="200" y="342" width="160" height="26" rx="7" fill="#f7f9fc" stroke="#c7d0dd"/>
+  <text x="212" y="359" font-size="11" fill="#16223a">high ▾</text>
+
+  <text x="30" y="392" font-size="9" font-weight="700" fill="#7a869c">MODEL</text>
+  <rect x="30" y="398" width="220" height="26" rx="7" fill="#f7f9fc" stroke="#c7d0dd"/>
+  <text x="42" y="415" font-size="11" fill="#16223a">claude-opus ▾</text>
+  <text x="262" y="392" font-size="9" font-weight="700" fill="#7a869c">ACCESS</text>
+  <rect x="262" y="398" width="98" height="26" rx="7" fill="#f7f9fc" stroke="#c7d0dd"/>
+  <text x="274" y="415" font-size="11" fill="#16223a">read-only</text>
+
+  <text x="30" y="448" font-size="9" font-weight="700" fill="#7a869c">ADDITIONAL PROMPT</text>
+  <rect x="30" y="454" width="330" height="54" rx="7" fill="#f7f9fc" stroke="#c7d0dd"/>
+  <text x="42" y="474" font-size="11" fill="#41506a">Focus the review on the parser edge</text>
+  <text x="42" y="492" font-size="10" fill="#9aa7bb">wiring {{task}} stays automatic</text>
+
+  <text x="30" y="536" font-size="9" font-weight="700" fill="#7a869c">CONNECTIONS</text>
+  <rect x="30" y="542" width="150" height="24" rx="12" fill="#eef7f1" stroke="#2f6f4f"/>
+  <text x="42" y="558" font-size="10" fill="#2f6f4f">pass → done</text>
+  <rect x="190" y="542" width="170" height="24" rx="12" fill="#fdf3e3" stroke="#d99a2b"/>
+  <text x="202" y="558" font-size="10" fill="#b47b17">fail → implement ⟳5</text>
+
+  <rect x="30" y="600" width="150" height="30" rx="15" fill="#f3f6fb" stroke="#c7d0dd"/>
+  <text x="60" y="619" font-size="11" font-weight="700" fill="#41506a">Cancel</text>
+  <rect x="210" y="600" width="150" height="30" rx="15" fill="#3454a6"/>
+  <text x="255" y="619" font-size="11" font-weight="700" fill="#ffffff">Apply</text>
+
+  <text x="34" y="672" font-size="10" fill="#8595a9">Conversation stays the primary surface;</text>
+  <text x="34" y="690" font-size="10" fill="#8595a9">no editor panel consumes half the chat.</text>
+</svg>
