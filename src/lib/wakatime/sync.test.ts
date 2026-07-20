@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { RegistryFile } from "@/lib/agent/registry";
 import type { FileEntry } from "@/lib/types";
 import { createWakatimeSync, startWakatimeSync, type WakatimeStateV1, type WakatimeSyncDependencies } from "./sync";
+import { takeWakatimeEnvironmentCredential, WAKATIME_CREDENTIAL_ENV } from "./credential";
 
 const NOW = Date.parse("2026-07-20T12:00:00.000Z");
 const TURN_START = NOW + 1_000;
@@ -80,6 +81,16 @@ function registrySnapshot(pathname = PATH): RegistryFile {
   } as unknown as RegistryFile;
 }
 
+function projectDurationSeconds(heartbeats: WakatimeStateV1["pending"][number]["heartbeat"][], project: string): number {
+  const ordered = [...heartbeats].sort((left, right) => left.time - right.time);
+  return ordered.reduce((total, heartbeat, index) => {
+    const next = ordered[index + 1];
+    if (!next || heartbeat.project !== project) return total;
+    const gap = next.time - heartbeat.time;
+    return total + (gap >= 0 && gap < 15 * 60 ? gap : 0);
+  }, 0);
+}
+
 function harness(overrides: Partial<WakatimeSyncDependencies> = {}) {
   let stored: WakatimeStateV1 | null = null;
   const writes: WakatimeStateV1[] = [];
@@ -101,7 +112,14 @@ function harness(overrides: Partial<WakatimeSyncDependencies> = {}) {
     },
     fetch: async (url, init) => {
       requests.push({ url, init });
-      return { status: 201, headers: new Headers() };
+      const count = JSON.parse(String(init.body)).length as number;
+      return {
+        status: 201,
+        headers: new Headers(),
+        text: async () => JSON.stringify({
+          responses: Array.from({ length: count }, (_, index) => [{ data: { id: `accepted-${index}` } }, 201]),
+        }),
+      };
     },
     now: () => NOW,
     random: () => 0.5,
@@ -115,6 +133,15 @@ function harness(overrides: Partial<WakatimeSyncDependencies> = {}) {
 }
 
 describe("WakaTime activity sync", () => {
+  test("environment credential capture removes the secret from the ambient server environment", () => {
+    const placeholder = ["fixture", "value"].join("-");
+    const environment: NodeJS.ProcessEnv = { NODE_ENV: "test", [WAKATIME_CREDENTIAL_ENV]: `  ${placeholder}  ` };
+
+    expect(takeWakatimeEnvironmentCredential(environment)).toBe(placeholder);
+    expect(environment[WAKATIME_CREDENTIAL_ENV]).toBeUndefined();
+    expect(JSON.stringify(environment)).not.toContain(placeholder);
+  });
+
   test("missing credentials keep newly observed work in the durable outbox", async () => {
     const { sync, writes, requests, state } = harness();
 
@@ -164,10 +191,11 @@ describe("WakaTime activity sync", () => {
     sync.stop();
   });
 
-  test("open work accrues deterministic samples without duplicates across ticks or restart", async () => {
+  test("a live silent tool accrues deterministic samples without duplicates across ticks or restart", async () => {
     let clock = NOW;
     const first = harness({
       now: () => clock,
+      scan: async () => ({ files: [entry({ activity: "stalled", activityReason: "jsonl_turn_stalled", proc: "running", pid: 42 })], complete: true }),
       recentTurnWindows: () => ({
         windows: [{ startedAt: NOW, endedAt: null }],
         prefixTruncated: false,
@@ -190,6 +218,7 @@ describe("WakaTime activity sync", () => {
     const restarted = harness({
       now: () => clock,
       readState: async () => persisted,
+      scan: async () => ({ files: [entry({ activity: "stalled", activityReason: "jsonl_turn_stalled", proc: "running", pid: 42 })], complete: true }),
       recentTurnWindows: () => ({
         windows: [{ startedAt: NOW, endedAt: null }],
         prefixTruncated: false,
@@ -198,6 +227,125 @@ describe("WakaTime activity sync", () => {
     });
     await restarted.sync.tick();
     expect(restarted.state()?.pending).toHaveLength(3);
+    restarted.sync.stop();
+  });
+
+  test("an open transcript stops accruing when its agent process exits abruptly", async () => {
+    let clock = NOW;
+    let processRunning = true;
+    const fixture = harness({
+      now: () => clock,
+      scan: async () => ({
+        files: [entry({
+          activity: processRunning ? "live" : "stalled",
+          activityReason: processRunning ? "jsonl_turn_open" : "jsonl_turn_stalled",
+          proc: processRunning ? "running" : "done",
+          pid: processRunning ? 42 : null,
+        })],
+        complete: true,
+      }),
+      recentTurnWindows: () => ({
+        windows: [{ startedAt: NOW, endedAt: null }],
+        prefixTruncated: false,
+        complete: true,
+      }),
+    });
+
+    await fixture.sync.tick();
+    processRunning = false;
+    clock += 5 * 60_000;
+    await fixture.sync.tick();
+
+    expect(fixture.state()?.pending.map((event) => event.heartbeat.time)).toEqual([NOW / 1_000]);
+    expect(Object.values(fixture.state()!.streams)[0]).toMatchObject({ endedAtMs: null, lastObservedAtMs: NOW });
+    fixture.sync.stop();
+  });
+
+  test("a stale open transcript with no live host creates no activity at enable time", async () => {
+    const fixture = harness({
+      scan: async () => ({
+        files: [entry({
+          mtime: (NOW - 60 * 60_000) / 1_000,
+          activity: "stalled",
+          activityReason: "jsonl_turn_stalled",
+          proc: "done",
+          pid: null,
+        })],
+        complete: true,
+      }),
+      recentTurnWindows: () => ({
+        windows: [{ startedAt: NOW - 2 * 60 * 60_000, endedAt: null }],
+        prefixTruncated: false,
+        complete: true,
+      }),
+    });
+
+    await fixture.sync.tick();
+
+    expect(fixture.state()?.pending).toHaveLength(0);
+    expect(Object.keys(fixture.state()!.streams)).toHaveLength(0);
+    fixture.sync.stop();
+  });
+
+  test("an idle composer freezes an unterminated transcript at its last activity", async () => {
+    let clock = NOW;
+    let atComposer = false;
+    const fixture = harness({
+      now: () => clock,
+      scan: async () => ({
+        files: [entry({
+          mtime: (NOW + (atComposer ? 30_000 : 0)) / 1_000,
+          activity: atComposer ? "recent" : "live",
+          activityReason: atComposer ? "pane_at_composer" : "jsonl_turn_open",
+          proc: "running",
+          pid: 42,
+        })],
+        complete: true,
+      }),
+      recentTurnWindows: () => ({ windows: [{ startedAt: NOW, endedAt: null }], prefixTruncated: false, complete: true }),
+    });
+
+    await fixture.sync.tick();
+    atComposer = true;
+    clock += 5 * 60_000;
+    await fixture.sync.tick();
+
+    expect(fixture.state()?.pending.map((event) => event.heartbeat.time)).toEqual([
+      NOW / 1_000,
+      (NOW + 30_000) / 1_000,
+    ]);
+    expect(Object.values(fixture.state()!.streams)[0]?.lastObservedAtMs).toBe(NOW + 30_000);
+    fixture.sync.stop();
+  });
+
+  test("restart preserves the frozen boundary of an abandoned open turn", async () => {
+    let clock = NOW;
+    let processRunning = true;
+    const scan = async () => ({
+      files: [entry({
+        activity: processRunning ? "live" as const : "stalled" as const,
+        activityReason: processRunning ? "jsonl_turn_open" : "jsonl_turn_stalled",
+        proc: processRunning ? "running" as const : "done" as const,
+        pid: processRunning ? 42 : null,
+      })],
+      complete: true,
+    });
+    const windows = () => ({ windows: [{ startedAt: NOW, endedAt: null }], prefixTruncated: false, complete: true });
+    const first = harness({ now: () => clock, scan, recentTurnWindows: windows });
+
+    await first.sync.tick();
+    processRunning = false;
+    clock += 5 * 60_000;
+    await first.sync.tick();
+    const persisted = structuredClone(first.state());
+    first.sync.stop();
+
+    clock += 10 * 60_000;
+    const restarted = harness({ now: () => clock, scan, recentTurnWindows: windows, readState: async () => persisted });
+    await restarted.sync.tick();
+
+    expect(restarted.state()?.pending.map((event) => event.heartbeat.time)).toEqual([NOW / 1_000]);
+    expect(Object.values(restarted.state()!.streams)[0]?.lastObservedAtMs).toBe(NOW);
     restarted.sync.stop();
   });
 
@@ -222,7 +370,52 @@ describe("WakaTime activity sync", () => {
       (NOW + 90_000) / 1_000,
       (NOW + 120_000) / 1_000,
     ]);
-    expect(new Set(state()?.pending.map((event) => event.heartbeat.entity)).size).toBe(2);
+    expect(new Set(state()?.pending
+      .filter((event) => event.heartbeat.project === "-repo")
+      .map((event) => event.heartbeat.entity)).size).toBe(2);
+    sync.stop();
+  });
+
+  test("same-project turns exclude a sub-timeout idle gap from project duration", async () => {
+    const { sync, state } = harness({
+      recentTurnWindows: () => ({
+        windows: [
+          { startedAt: NOW, endedAt: NOW + 30_000 },
+          { startedAt: NOW + 60_000, endedAt: NOW + 90_000 },
+        ],
+        prefixTruncated: false,
+        complete: true,
+      }),
+    });
+
+    await sync.tick();
+
+    const heartbeats = state()!.pending.map((event) => event.heartbeat);
+    expect(projectDurationSeconds(heartbeats, "-repo")).toBe(60);
+    expect(heartbeats.filter((heartbeat) => heartbeat.project === "-repo").map((heartbeat) => heartbeat.time)).toEqual([
+      NOW / 1_000,
+      (NOW + 60_000) / 1_000,
+    ]);
+    sync.stop();
+  });
+
+  test("overlapping same-project turns contribute their wall-clock union", async () => {
+    const { sync, state } = harness({
+      recentTurnWindows: () => ({
+        windows: [
+          { startedAt: NOW, endedAt: NOW + 60_000 },
+          { startedAt: NOW + 30_000, endedAt: NOW + 90_000 },
+        ],
+        prefixTruncated: false,
+        complete: true,
+      }),
+    });
+
+    await sync.tick();
+
+    const heartbeats = state()!.pending.map((event) => event.heartbeat);
+    expect(projectDurationSeconds(heartbeats, "-repo")).toBe(90);
+    expect(heartbeats.filter((heartbeat) => heartbeat.project === "agent-log-viewer-boundary")).toHaveLength(1);
     sync.stop();
   });
 
@@ -250,7 +443,7 @@ describe("WakaTime activity sync", () => {
       writeState: async () => { throw new Error("disk unavailable"); },
       fetch: async (url) => {
         requests.push(url);
-        return { status: 201, headers: new Headers() };
+        return { status: 201, headers: new Headers(), text: async () => "" };
       },
     });
 
@@ -276,6 +469,7 @@ describe("WakaTime activity sync", () => {
           return {
             status: scenario.status,
             headers: new Headers(scenario.status === 429 ? { "Retry-After": "120" } : {}),
+            text: async () => "",
           };
         },
       });
@@ -354,7 +548,7 @@ describe("WakaTime activity sync", () => {
     const { sync, state } = harness({
       recentTurnWindows: () => ({ windows, prefixTruncated: false, complete: true }),
       readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
-      fetch: async () => ({ status: 400, headers: new Headers() }),
+      fetch: async () => ({ status: 400, headers: new Headers(), text: async () => "" }),
     });
 
     await sync.tick();
@@ -383,6 +577,83 @@ describe("WakaTime activity sync", () => {
     sync.stop();
   });
 
+  test("a mixed bulk response acknowledges successes and retains transient item failures", async () => {
+    const responsePlaceholder = ["item", "response", "fixture"].join("-");
+    const { sync, state, logs, writes } = harness({
+      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
+      fetch: async () => ({
+        status: 201,
+        headers: new Headers(),
+        text: async () => JSON.stringify({
+          responses: [
+            [{ data: { id: "accepted-heartbeat" } }, 201],
+            [{ error: responsePlaceholder }, 503],
+          ],
+        }),
+      }),
+    });
+
+    await sync.tick();
+
+    expect(state()?.counters.accepted).toBe(1);
+    expect(state()?.pending).toHaveLength(1);
+    expect(state()?.pending[0]?.heartbeat.time).toBe(TURN_END / 1_000);
+    expect(state()?.retry.reason).toBe("server");
+    expect(JSON.stringify({ logs, writes })).not.toContain(responsePlaceholder);
+    sync.stop();
+  });
+
+  for (const scenario of [
+    { name: "missing responses", body: JSON.stringify({}) },
+    { name: "cardinality mismatch", body: JSON.stringify({ responses: [[{ data: { id: "only-one" } }, 201]] }) },
+    { name: "malformed JSON", body: "{broken" },
+    { name: "malformed item", body: JSON.stringify({ responses: [[{ data: { id: "ok" } }, 201], [{}, 201]] }) },
+  ]) {
+    test(`${scenario.name} retains the full batch without persisting response details`, async () => {
+      const responsePlaceholder = "private-response-placeholder";
+      const { sync, state, logs, writes } = harness({
+        readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
+        fetch: async () => ({
+          status: 202,
+          headers: new Headers(),
+          text: async () => `${scenario.body}${scenario.name === "malformed JSON" ? responsePlaceholder : ""}`,
+        }),
+      });
+
+      await sync.tick();
+
+      expect(state()?.pending).toHaveLength(2);
+      expect(state()?.counters.accepted).toBe(0);
+      expect(state()?.retry.reason).toBe("server");
+      expect(JSON.stringify({ logs, writes })).not.toContain(responsePlaceholder);
+      sync.stop();
+    });
+  }
+
+  test("a permanent bulk item rejection drops only that item", async () => {
+    const { sync, state } = harness({
+      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
+      fetch: async () => ({
+        status: 202,
+        headers: new Headers(),
+        text: async () => JSON.stringify({
+          responses: [
+            [{ data: { id: "accepted-heartbeat" } }, 202],
+            [{ errors: { time: ["invalid"] } }, 400],
+          ],
+        }),
+      }),
+    });
+
+    await sync.tick();
+
+    expect(state()?.pending).toHaveLength(0);
+    expect(state()?.counters.accepted).toBe(1);
+    expect(state()?.counters.permanentlyRejected).toBe(1);
+    expect(state()?.retry.reason).toBeNull();
+    sync.stop();
+  });
+
   test("replacing a rejected credential closes the auth circuit immediately", async () => {
     let stamp = "first";
     let deliveries = 0;
@@ -390,7 +661,16 @@ describe("WakaTime activity sync", () => {
       readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: stamp }),
       fetch: async () => {
         deliveries += 1;
-        return { status: deliveries === 1 ? 401 : 201, headers: new Headers() };
+        return {
+          status: deliveries === 1 ? 401 : 201,
+          headers: new Headers(),
+          text: async () => JSON.stringify({
+            responses: [
+              [{ data: { id: "accepted-start" } }, 201],
+              [{ data: { id: "accepted-boundary" } }, 201],
+            ],
+          }),
+        };
       },
     });
     await sync.tick();
@@ -442,6 +722,7 @@ describe("WakaTime activity sync", () => {
     const { sync, state } = harness({
       now: () => clock,
       limits: { maxPending: 20 },
+      scan: async () => ({ files: [entry({ activity: "stalled", activityReason: "jsonl_turn_stalled", proc: "running", pid: 42 })], complete: true }),
       recentTurnWindows: () => ({
         windows: [{ startedAt: NOW, endedAt: null }],
         prefixTruncated: false,

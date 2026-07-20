@@ -8,6 +8,7 @@ import { claudeManagedEnvironment, claudeSettingsPath } from "@/lib/accounts/cla
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt } from "@/lib/agent/spawnPolicy";
 import { procBackend } from "@/lib/proc";
+import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { FlowEngine, RoleConfig, Round } from "./types";
 import { outputPathFor, stderrPathFor, stdoutPathFor } from "./store";
@@ -62,7 +63,7 @@ interface LiveRun {
 const runs = new Map<string, LiveRun>();
 
 function reviewerEnvironment(base: NodeJS.ProcessEnv, spawnCapability?: string): NodeJS.ProcessEnv {
-  const env = { ...base };
+  const env = withoutWakatimeCredential(base);
   delete env.LLV_TOKEN;
   if (spawnCapability) env.LLV_SPAWN_CAPABILITY = spawnCapability;
   return env;
@@ -203,7 +204,7 @@ export function scanEventStream(stdout: string): { sessionId: string | null; las
 
 export function reviewerCommand(
   role: RoleConfig,
-  prompt: string,
+  reviewRequest: string,
   outputPath: string,
   cwd: string,
   codexAccount?: HeadlessCodexAccount | null,
@@ -216,7 +217,7 @@ export function reviewerCommand(
        linters, and local diagnostics. The read-only rule lives in the prompt. */
     const args = [
       "-p",
-      prompt,
+      reviewRequest,
       "--dangerously-skip-permissions",
       "--session-id",
       sessionId,
@@ -244,7 +245,7 @@ export function reviewerCommand(
     command: resolveBinary("codex"),
     args,
     env: reviewerEnvironment(codexAccount?.home ? { ...process.env, CODEX_HOME: codexAccount.home } : process.env, spawnCapability),
-    stdin: fenceViewerSpawnPrompt("codex", prompt),
+    stdin: fenceViewerSpawnPrompt("codex", reviewRequest),
     outputPath,
     sessionId: null,
     reviewerPath: null,
@@ -256,7 +257,7 @@ export function startHeadlessReview(
   round: number,
   role: RoleConfig,
   cwd: string,
-  prompt: string,
+  reviewRequest: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   codexAccount?: HeadlessCodexAccount | null,
   claudeAccount?: HeadlessClaudeAccount | null,
@@ -268,7 +269,7 @@ export function startHeadlessReview(
   const outputPath = outputPathFor(flowId, round);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   clearHeadlessReviewArtifacts(flowId, round);
-  const built = reviewerCommand(role, prompt, outputPath, cwd, codexAccount, claudeAccount, spawnCapability);
+  const built = reviewerCommand(role, reviewRequest, outputPath, cwd, codexAccount, claudeAccount, spawnCapability);
   /* Detached + file-backed stdio: the reviewer must not die with the viewer.
      A plain child shares the dev server's process group, so Ctrl+C on the
      server delivers SIGINT to the reviewer too; detached makes it a group

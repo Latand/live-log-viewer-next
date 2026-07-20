@@ -177,6 +177,7 @@ export async function runStructuredHostStartup(
 export async function registerViewerRuntime(): Promise<void> {
   await activateViewerRuntimeWhenCurrent(async () => {
     await initializeOperatorSpawnCapabilityAtStartup();
+    await startWakatimeIntegrationIfEnabled();
     if (process.env.LLV_STRUCTURED_HOSTS === "1") {
       const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
       await runStructuredHostStartup(adoptStructuredHostsAtStartup);
@@ -185,6 +186,5 @@ export async function registerViewerRuntime(): Promise<void> {
       const { startAccountMigrationController } = await import("@/lib/accounts/migration/controller");
       scheduleAccountMigrationController(startAccountMigrationController, accountControllerDelayMs());
     }
-    await startWakatimeIntegrationIfEnabled();
   }, () => viewerReleaseOwnsTraffic());
 }

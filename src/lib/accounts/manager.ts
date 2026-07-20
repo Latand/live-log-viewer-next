@@ -8,10 +8,11 @@ import { withAccountMutationLockAsync } from "./accountMutation";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { selectHeadlessAccount } from "./headlessSelection";
 import { selectHealthyClaudeAccount } from "./spawnHealth";
+import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 function contextForSpawn(engine: "claude" | "codex", requested?: string | null) {
-  if (engine === "claude") { const item = claudeAccountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(item.home) : process.env }; }
-  const item = accountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.sessionsDir, env: { ...process.env, CODEX_HOME: item.home } };
+  if (engine === "claude") { const item = claudeAccountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(item.home) : withoutWakatimeCredential(process.env) }; }
+  const item = accountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.sessionsDir, env: { ...withoutWakatimeCredential(process.env), CODEX_HOME: item.home } };
 }
 
 /** Viewer-visible spawn admission performs a fresh Claude OAuth health pass. */
@@ -120,7 +121,7 @@ export const accountManager: AccountManager = {
       : selected;
   },
   resolveTranscriptOwner(engine, transcript) {
-    if (engine === "claude") { const home = claudeHomeOwningTranscript(transcript); if (!home) return null; const item = listClaudeAccounts().find((candidate) => candidate.home === home); return item ? { engine, accountId: item.id, kind: item.kind, home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(home) : process.env } : null; }
-    const home = codexHomeOwningSessionPath(transcript); if (!home) return null; const item = listCodexAccounts().find((candidate) => candidate.home === home); return item ? { engine, accountId: item.id, kind: item.kind, home, transcriptRoot: item.sessionsDir, env: { ...process.env, CODEX_HOME: home } } : null;
+    if (engine === "claude") { const home = claudeHomeOwningTranscript(transcript); if (!home) return null; const item = listClaudeAccounts().find((candidate) => candidate.home === home); return item ? { engine, accountId: item.id, kind: item.kind, home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(home) : withoutWakatimeCredential(process.env) } : null; }
+    const home = codexHomeOwningSessionPath(transcript); if (!home) return null; const item = listCodexAccounts().find((candidate) => candidate.home === home); return item ? { engine, accountId: item.id, kind: item.kind, home, transcriptRoot: item.sessionsDir, env: { ...withoutWakatimeCredential(process.env), CODEX_HOME: home } } : null;
   },
 };

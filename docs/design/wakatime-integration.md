@@ -176,7 +176,7 @@ One scanner turn becomes one stable heartbeat stream.
 
 | WakaTime field | value | rule |
 |---|---|---|
-| `entity` | `agent-log-viewer/<engine>/<turnDigest[0..15]>` | Opaque and stable for one turn across restart or transcript path rotation. A distinct entity per turn prevents WakaTime from joining a short idle gap between adjacent turns. |
+| `entity` | `agent-log-viewer/<engine>/<turnDigest[0..15]>` | Opaque and stable for active samples across restart or transcript path rotation. End boundaries use `agent-log-viewer/boundary/<turnDigest[0..15]>`. |
 | `type` | `app` | The viewer observes an agent application session. It has no focused source file. |
 | `project` | canonical project string | Resolve with conversation ownership, latest launch-profile cwd/project, and `FileEntry.project` fallback through `resolveProjectAttribution()`. Freeze the result on first stream observation. |
 | `category` | `ai coding` | Exact documented category for agent work. |
@@ -196,6 +196,7 @@ The local outbox event key is:
 
 ```text
 sha256("llv-wakatime-heartbeat-v1\0" + turnDigest + "\0" + sampleTimeMs)
+sha256("llv-wakatime-boundary-v1\0" + turnDigest + "\0" + boundaryTimeMs)
 ```
 
 Titles, prompts, transcript paths, cwd values, model names, account ids, and
@@ -220,13 +221,17 @@ The module materializes heartbeats at:
 3. the exact `endedAt` for a closed turn when it differs from the latest sample.
 
 The 120-second interval matches WakaTime's documented plugin convention. A
-short closed turn receives its start and exact end. A long turn receives enough
-interior samples to stay below WakaTime's default 15-minute join threshold.
+short closed turn receives its active start and exact boundary marker. A long
+turn receives enough interior samples to stay below WakaTime's default
+15-minute join threshold.
 
-An open turn accrues samples through the current clock. A closed turn receives
-one final sample and then becomes quiescent. Idle entries create no samples.
-The per-turn entity keeps neighboring turns separate even when their gap falls
-within the account's keystroke timeout.
+An open turn accrues samples through the current clock only while a live process
+and non-idle runtime state remain authoritative. A closed or frozen interval
+receives a marker under the reserved `agent-log-viewer-boundary` project.
+WakaTime's duration algorithm assigns the following sub-timeout gap to that
+reserved project, keeping the canonical project limited to the active span.
+Overlapping turns in one canonical project suppress interior boundaries and
+contribute their wall-clock union.
 
 Completed windows ending before `enabledAtMs` stay local and unsent. A turn
 that crosses the enable boundary starts at `enabledAtMs`. This makes the first
@@ -269,6 +274,7 @@ interface WakatimeStateV1 {
   pending: Array<{
     key: string;
     stream: string;
+    kind: "activity" | "boundary";
     createdAtMs: number;
     heartbeat: WakatimeHeartbeat;
   }>;
@@ -297,7 +303,8 @@ Persistence ordering is strict:
 1. merge newly observed samples into memory;
 2. atomically persist the outbox;
 3. send the oldest batch;
-4. atomically persist the acknowledgment or retry state.
+4. validate the ordered item results from an outer `201`/`202` response;
+5. atomically persist each accepted/permanently rejected item and every retry state.
 
 A failure in step 2 suppresses network delivery for that tick. This prevents
 an untracked successful request.
@@ -340,8 +347,10 @@ Request properties:
 - five-second abort deadline;
 - body is an array of at most 25 validated heartbeat objects.
 
-The module accepts every 2xx response as batch acceptance. It stores or logs no
-response body.
+For outer `201` and `202` responses, the module validates the ordered
+`responses` array and classifies every item. Missing, malformed, or
+cardinality-mismatched responses retain the entire batch. Response bodies and
+item error details never enter state or diagnostics.
 
 Failure policy:
 
@@ -394,12 +403,12 @@ exists for deterministic tests and module replacement during development.
 | setting | precedence and effect |
 |---|---|
 | `LLV_WAKATIME_ENABLED=1` | Process-start opt-in. Any other value leaves the module unloaded. |
-| `WAKATIME_API_KEY` | Highest-priority credential, trimmed at read time. |
+| `WAKATIME_API_KEY` | Highest-priority credential, synchronously captured into integration-owned memory and removed from the ambient environment. |
 | `~/.config/agent-log-viewer/wakatime-api-key` | File fallback through `configFilePath("wakatime-api-key")`; the legacy app config path remains available through the existing resolver. |
 
-The key is read at delivery time. A file drop-in or replacement can recover an
-auth circuit without restarting the viewer. Environment changes take effect on
-the next process start.
+The key file is read at delivery time, so a drop-in or replacement can recover
+an auth circuit without restarting the viewer. A replacement environment value
+installed in the running server is captured and removed on the next tick.
 
 The implementation never reads `~/.wakatime.cfg`. That file belongs to
 WakaTime's CLI and editor plugins. The MVP also has a fixed HTTPS origin.
@@ -412,7 +421,7 @@ Secret invariants:
 - Authorization is an in-memory request header only.
 - URLs never contain keys or tokens.
 - Logger arguments carry outcome class, HTTP status, retry time, and counts.
-- Response bodies stay unread for diagnostics.
+- Response bodies are parsed only for item status validation and stay absent from diagnostics and state.
 - State and journal payloads contain no secret or secret-derived fingerprint.
 - Browser DTOs, HTML, React state, and API responses remain unchanged.
 - Test fixtures use obvious placeholders and assert their absence from state,
@@ -468,16 +477,16 @@ scans, registry fixtures, timers, logs, and fetch:
 3. canonical project attribution and current-generation registry identity feed
    the exact heartbeat fields;
 4. language, branch, titles, paths, cwd, prompts, and contents stay absent;
-5. a short closed turn produces start and exact-end samples;
+5. a short closed turn produces an active start and an exact project-boundary marker;
 6. a long/open turn produces deterministic 120-second samples and no repeats
    across ticks;
-7. neighboring turns use distinct stable entities and preserve their idle gap;
+7. neighboring turns preserve their idle gap under WakaTime's published duration algorithm, and overlapping turns use wall-clock union semantics;
 8. path rotation with the same conversation and start reuses the stream digest;
 9. several turns between scans all reach the outbox;
 10. the first enable boundary suppresses completed history and truncates a
     crossing turn;
 11. pending state persists before fetch; a failed state write suppresses fetch;
-12. 2xx acknowledgment removes only the attempted 25 records;
+12. outer 201/202 responses acknowledge successful items, retain transient items, reject permanent items, and fail closed on malformed or mismatched arrays;
 13. timeout, network, 302, 429, 5xx, 401, and 403 retain the batch and set the
     expected durable retry state;
 14. permanent 4xx removes the attempted validated batch and increments its
@@ -486,7 +495,10 @@ scans, registry fixtures, timers, logs, and fetch:
 16. overflow compaction respects bounds and endpoint retention rules;
 17. single-flight ticks produce one running fetch and one trailing cycle;
 18. the placeholder key appears only in the Authorization header supplied to
-    fake fetch and never in logs, state, URL, or body.
+    fake fetch and never in logs, state, URL, body, child environments,
+    arguments, transcripts, or artifacts;
+19. open turns freeze across abrupt exit, stale transcript, idle composer, and
+    restart, while a live silent tool call continues accruing.
 
 ### Bootstrap tests
 
@@ -574,9 +586,9 @@ Deferred:
 
 | issue #473 criterion | design closure |
 |---|---|
-| Stable project, entity, language/category, and time semantics | Canonical project attribution, digest-scoped per-turn app entities, omitted unsupported language, `ai coding`, and deterministic start/interior/end samples. |
-| Credential privacy | Server-only env/file lookup, header-only Basic auth, fixed HTTPS endpoint, secret-free state/logs/tests/browser surfaces, and the unchanged privacy gate. |
-| Duplicate, restart, idle, failure, retry, batching, and rate-limit behavior | Durable stream cursors and outbox, explicit 25-event crash replay window, per-turn entities, failure matrix, one 25-record batch per tick, and durable jittered backoff. |
+| Stable project, entity, language/category, and time semantics | Canonical project attribution, digest-scoped per-turn app entities, a reserved boundary project, omitted unsupported language, `ai coding`, deterministic sampling, and same-project overlap union. |
+| Credential privacy | Server-owned env capture, child-environment isolation, key-file lookup, header-only Basic auth, fixed HTTPS endpoint, secret-free state/logs/tests/browser surfaces, and the unchanged privacy gate. |
+| Duplicate, restart, idle, failure, retry, batching, and rate-limit behavior | Durable stream cursors and outbox, explicit 25-event crash replay window, liveness-frozen open turns, itemized bulk acknowledgments, failure matrix, one 25-record batch per tick, and durable jittered backoff. |
 | Viewer responsiveness during WakaTime failure | Traffic-owned unref'd scheduler, shared scan generations, single-flight ticks, five-second fetch deadline, bounded outbox, and swallowed module-local failures. |
 | Focused behavioral tests and operator documentation | Scanner, sync, bootstrap, privacy, retry, and overflow coverage plus `docs/wakatime.md` and environment-contract updates. |
 | Current architecture and runtime ownership | Exact `7df59ef0` grounding, scanner-owned turn semantics, registry-owned identity, project-resolution authority, current-file-scan seam, and viewer-instrumentation startup. |
@@ -594,7 +606,7 @@ The implementation stage has these fixed choices:
    paths to `agentRegistry().readOnlySnapshot()` and resolve projects through
    `resolveProjectAttribution()`.
 4. Map each turn to a digest-scoped `app` entity, `ai coding`, canonical
-   project, `ai_session`, and 120-second heartbeat samples with exact endpoints.
+   project, `ai_session`, 120-second samples, and exact reserved-project boundaries.
 5. Persist before delivery, batch 25, send one request per tick, and use the
    retry table above.
 6. Wire the dynamic opt-in import inside traffic-owned viewer instrumentation.

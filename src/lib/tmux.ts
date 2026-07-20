@@ -18,6 +18,7 @@ import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { INBOX_DIR } from "@/lib/inbox";
 import { normalizeResumePanesFile, type ResumePaneRecord, type ResumePanesFile } from "@/lib/resumePanesFile";
 import { procBackend } from "@/lib/proc";
+import { WAKATIME_CREDENTIAL_ENV, withoutWakatimeCredential } from "@/lib/wakatime/credential";
 import { admitRuntimeImagePayload, type RuntimeImageAdmissionResult } from "@/lib/runtime/runtimeImageAdmission";
 import type { RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
 import { spawnTransport, type SpawnTransport } from "@/lib/runtime/spawnTransport";
@@ -201,7 +202,7 @@ export function tmuxEndpointDescriptor(): TmuxEndpointDescriptor {
 /** Runs tmux with an explicit argv (no shell) and optional stdin payload. */
 function runTmux(args: string[], input?: Buffer | string, endpoint = tmuxEndpointDescriptor()): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(TMUX, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, TMUX_TMPDIR: endpoint.tmuxTmpdir } });
+    const child = spawn(TMUX, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...withoutWakatimeCredential(process.env), TMUX_TMPDIR: endpoint.tmuxTmpdir } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
@@ -286,6 +287,8 @@ export async function createSpawnWindow(
   },
   deps: TmuxRunnerDeps = { runTmux, processIdentity: (pid) => procBackend.processIdentity(pid) },
 ): Promise<TmuxSpawnBinding> {
+  const scrubbed = await deps.runTmux(["set-environment", "-gu", WAKATIME_CREDENTIAL_ENV], undefined, input.endpoint);
+  if (scrubbed.code !== 0) throw new Error(scrubbed.stderr.trim() || "could not isolate tmux spawn environment");
   const listed = await deps.runTmux(["list-panes", "-a", "-F", "#{pane_id}"], undefined, input.endpoint);
   if (listed.code !== 0) throw new Error(listed.stderr.trim() || "could not snapshot tmux panes before spawn");
   const existingPaneIds = new Set(listed.stdout.split("\n").map((line) => line.trim()).filter(Boolean));

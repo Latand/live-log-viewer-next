@@ -486,8 +486,10 @@ test("legacy Main status targets its exact home with inherited provider auth cle
   expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
 });
 
-test("an unrecognized home keeps the plain process environment for status", () => {
-  expect(claudeStatusEnvironment("/tmp/not-a-claude-home")).toBe(process.env);
+test("an unrecognized home receives an isolated process environment for status", () => {
+  const env = claudeStatusEnvironment("/tmp/not-a-claude-home");
+  expect(env).not.toBe(process.env);
+  expect(env.WAKATIME_API_KEY).toBeUndefined();
 });
 
 test("a reservation blocks a second account creation before filesystem mutation", () => {

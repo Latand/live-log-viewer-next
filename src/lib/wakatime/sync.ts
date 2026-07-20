@@ -8,6 +8,7 @@ import { currentFileScan } from "@/lib/scanner/scanCache";
 import { recentTurnWindowsFor, type RecentTurnWindows } from "@/lib/scanner/turnDuration";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry, TurnBoundary } from "@/lib/types";
+import { takeWakatimeEnvironmentCredential } from "./credential";
 
 const ENDPOINT = "https://api.wakatime.com/api/v1/users/current/heartbeats.bulk";
 const SAMPLE_INTERVAL_MS = 120_000;
@@ -23,6 +24,7 @@ const RETRY_MAX_MS = 15 * 60_000;
 const RETRY_AFTER_MAX_MS = 24 * 60 * 60_000;
 const AUTH_RETRY_MS = 15 * 60_000;
 const DIAGNOSTIC_REPEAT_MS = 60 * 60_000;
+const BOUNDARY_PROJECT = "agent-log-viewer-boundary";
 
 export interface WakatimeHeartbeat {
   entity: string;
@@ -48,6 +50,7 @@ export interface WakatimeStateV1 {
   pending: Array<{
     key: string;
     stream: string;
+    kind: "activity" | "boundary";
     createdAtMs: number;
     heartbeat: WakatimeHeartbeat;
   }>;
@@ -77,6 +80,7 @@ interface TimerHandle {
 interface WakatimeResponse {
   status: number;
   headers: Pick<Headers, "get">;
+  text(): Promise<string>;
 }
 
 export interface WakatimeSyncDependencies {
@@ -109,8 +113,8 @@ function turnDigest(conversationId: string, startedAtMs: number): string {
   return digest("llv-wakatime-v1", conversationId, startedAtMs);
 }
 
-function eventKey(stream: string, sampleTimeMs: number): string {
-  return digest("llv-wakatime-heartbeat-v1", stream, sampleTimeMs);
+function eventKey(stream: string, sampleTimeMs: number, kind: "activity" | "boundary" = "activity"): string {
+  return digest(kind === "activity" ? "llv-wakatime-heartbeat-v1" : "llv-wakatime-boundary-v1", stream, sampleTimeMs);
 }
 
 function freshState(now: number): WakatimeStateV1 {
@@ -188,15 +192,17 @@ function stateFrom(value: unknown): WakatimeStateV1 | null {
       || !finite(candidate.createdAtMs)) return null;
     const heartbeat = heartbeatFrom(candidate.heartbeat);
     if (!heartbeat) return null;
+    const kind = candidate.kind === undefined ? "activity" : candidate.kind;
+    if (kind !== "activity" && kind !== "boundary") return null;
     const stream = streams[candidate.stream];
     const sampleTimeMs = heartbeat.time * 1_000;
     if (!stream || !Number.isSafeInteger(sampleTimeMs)
       || heartbeat.ai_session !== candidate.stream
-      || heartbeat.entity !== stream.entity
-      || heartbeat.project !== stream.project
-      || candidate.key !== eventKey(candidate.stream, sampleTimeMs)) return null;
+      || heartbeat.entity !== (kind === "boundary" ? `agent-log-viewer/boundary/${candidate.stream.slice(0, 16)}` : stream.entity)
+      || heartbeat.project !== (kind === "boundary" ? BOUNDARY_PROJECT : stream.project)
+      || candidate.key !== eventKey(candidate.stream, sampleTimeMs, kind)) return null;
     if (pendingKeys.has(candidate.key)) continue;
-    pending.push({ key: candidate.key, stream: candidate.stream, createdAtMs: candidate.createdAtMs, heartbeat });
+    pending.push({ key: candidate.key, stream: candidate.stream, kind, createdAtMs: candidate.createdAtMs, heartbeat });
     pendingKeys.add(candidate.key);
   }
   const retry = value.retry;
@@ -249,15 +255,23 @@ function addWindow(
   window: TurnBoundary,
   now: number,
   existingKeys: Set<string>,
+  openWindowActive: boolean,
+  emitEndBoundary: boolean,
 ): void {
   if (!validWindow(window)) return;
   if (window.endedAt !== null && window.endedAt <= state.enabledAtMs) return;
   if (window.endedAt !== null && window.endedAt < now - CLOSED_STREAM_RETENTION_MS) return;
   const start = Math.max(window.startedAt, state.enabledAtMs);
-  const end = window.endedAt ?? now;
-  if (end < start) return;
   const streamKey = turnDigest(conversationId, window.startedAt);
   const existing = state.streams[streamKey];
+  if (window.endedAt === null && !openWindowActive && !existing && entry.mtime * 1_000 <= state.enabledAtMs) return;
+  const lastProvenActivityAt = Math.min(now, Math.max(
+    start,
+    entry.mtime * 1_000,
+    existing?.lastObservedAtMs ?? start,
+  ));
+  const end = window.endedAt ?? (openWindowActive ? now : lastProvenActivityAt);
+  if (end < start) return;
   const stream = existing ?? {
     entity: `agent-log-viewer/${entry.engine}/${streamKey.slice(0, 16)}`,
     engine: entry.engine as "claude" | "codex",
@@ -268,20 +282,23 @@ function addWindow(
     lastObservedAtMs: now,
   };
   stream.endedAtMs = window.endedAt;
-  stream.lastObservedAtMs = now;
+  stream.lastObservedAtMs = window.endedAt ?? (openWindowActive ? now : lastProvenActivityAt);
   state.streams[streamKey] = stream;
   const last = stream.lastMaterializedAtMs < start ? null : stream.lastMaterializedAtMs;
-  for (const sampleTimeMs of sampleTimes(start, end, window.endedAt !== null, last)) {
-    const key = eventKey(streamKey, sampleTimeMs);
+  const closesObservedInterval = window.endedAt !== null || !openWindowActive;
+  for (const sampleTimeMs of sampleTimes(start, end, closesObservedInterval, last)) {
+    const kind = closesObservedInterval && sampleTimeMs === end && emitEndBoundary ? "boundary" : "activity";
+    const key = eventKey(streamKey, sampleTimeMs, kind);
     if (existingKeys.has(key)) continue;
     state.pending.push({
       key,
       stream: streamKey,
+      kind,
       createdAtMs: now,
       heartbeat: {
-        entity: stream.entity,
+        entity: kind === "boundary" ? `agent-log-viewer/boundary/${streamKey.slice(0, 16)}` : stream.entity,
         type: "app",
-        project: stream.project,
+        project: kind === "boundary" ? BOUNDARY_PROJECT : stream.project,
         category: "ai coding",
         time: sampleTimeMs / 1_000,
         ai_session: streamKey,
@@ -290,6 +307,16 @@ function addWindow(
     existingKeys.add(key);
   }
   stream.lastMaterializedAtMs = Math.max(stream.lastMaterializedAtMs, end);
+}
+
+function openTurnIsActive(entry: FileEntry): boolean {
+  return entry.proc === "running"
+    && entry.pid !== null
+    && entry.activityReason !== "pane_at_composer"
+    && entry.authoritativeTurn?.state !== "terminal"
+    && entry.authoritativeTurn?.state !== "idle"
+    && entry.pendingQuestion === null
+    && entry.waitingInput === null;
 }
 
 function compactPending(state: WakatimeStateV1): number {
@@ -376,6 +403,34 @@ function base64(value: string): string {
   return Buffer.from(value, "utf8").toString("base64");
 }
 
+function bulkResponseStatuses(body: string, expected: number): number[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body) as unknown;
+  } catch {
+    return null;
+  }
+  if (!record(parsed) || !Array.isArray(parsed.responses) || parsed.responses.length !== expected) return null;
+  const statuses: number[] = [];
+  for (const item of parsed.responses) {
+    if (!Array.isArray(item) || item.length !== 2 || !record(item[0]) || !Number.isInteger(item[1])) return null;
+    const status = item[1] as number;
+    if (status < 100 || status > 599) return null;
+    if (status >= 200 && status < 300) {
+      if (!record(item[0].data) || typeof item[0].data.id !== "string" || item[0].data.id.length === 0) return null;
+    } else if (!(typeof item[0].error === "string" || record(item[0].errors))) return null;
+    statuses.push(status);
+  }
+  return statuses;
+}
+
+function retryReasonForItem(status: number): Exclude<WakatimeStateV1["retry"]["reason"], null> | null {
+  if (status === 401 || status === 403) return "auth";
+  if (status === 302 || status === 429) return "rate_limit";
+  if (status === 408 || status === 409 || status === 425 || status >= 500 || status < 200 || (status >= 300 && status < 400)) return "server";
+  return null;
+}
+
 export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync {
   let state: WakatimeStateV1 | null = null;
   let running: Promise<void> | null = null;
@@ -432,6 +487,13 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
     const lookup = conversationLookupFromSnapshot(registry);
     const now = deps.now();
     const existingKeys = new Set(current.pending.map((event) => event.key));
+    const observations: Array<{
+      entry: FileEntry;
+      conversationId: string;
+      project: string;
+      window: TurnBoundary;
+      openWindowActive: boolean;
+    }> = [];
     for (const entry of scan.files) {
       if ((entry.engine !== "claude" && entry.engine !== "codex")
         || (entry.root !== "claude-projects" && entry.root !== "codex-sessions")
@@ -453,7 +515,40 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
         fallbackProject: entry.project,
       }).project;
       if (!project) continue;
-      for (const window of recent.windows) addWindow(current, entry, conversation.id, project, window, now, existingKeys);
+      const openWindowActive = openTurnIsActive(entry);
+      for (const window of recent.windows) observations.push({ entry, conversationId: conversation.id, project, window, openWindowActive });
+    }
+    const effectiveEnd = (observation: typeof observations[number]): number => {
+      if (observation.window.endedAt !== null) return observation.window.endedAt;
+      if (observation.openWindowActive) return now;
+      const key = turnDigest(observation.conversationId, observation.window.startedAt);
+      return Math.min(now, Math.max(
+        observation.window.startedAt,
+        observation.entry.mtime * 1_000,
+        current.streams[key]?.lastObservedAtMs ?? observation.window.startedAt,
+      ));
+    };
+    for (let index = 0; index < observations.length; index += 1) {
+      const observation = observations[index]!;
+      const end = effectiveEnd(observation);
+      const closesObservedInterval = observation.window.endedAt !== null || !observation.openWindowActive;
+      const coveredBySameProject = closesObservedInterval && observations.some((candidate, candidateIndex) =>
+        candidateIndex !== index
+        && candidate.project === observation.project
+        && candidate.window.startedAt <= end
+        && effectiveEnd(candidate) > end,
+      );
+      addWindow(
+        current,
+        observation.entry,
+        observation.conversationId,
+        observation.project,
+        observation.window,
+        now,
+        existingKeys,
+        observation.openWindowActive,
+        !coveredBySameProject,
+      );
     }
   };
 
@@ -520,13 +615,48 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       abortController = null;
     }
 
-    if (response.status >= 200 && response.status < 300) {
-      const keys = new Set(batch.map((event) => event.key));
-      current.pending = current.pending.filter((event) => !keys.has(event.key));
-      current.counters.accepted += batch.length;
+    if (response.status === 201 || response.status === 202) {
+      let statuses: number[] | null = null;
+      try {
+        statuses = bulkResponseStatuses(await response.text(), batch.length);
+      } catch {
+        statuses = null;
+      }
+      if (!statuses) {
+        report("malformed_bulk_response", { status: response.status, expected: batch.length });
+        setRetry(current, "server", 0, response.status);
+        await persist(current);
+        return;
+      }
+      const acknowledged = new Set<string>();
+      let accepted = 0;
+      let permanentlyRejected = 0;
+      let retryReason: Exclude<WakatimeStateV1["retry"]["reason"], null> | null = null;
+      let retryStatus: number | null = null;
+      for (let index = 0; index < statuses.length; index += 1) {
+        const status = statuses[index]!;
+        const itemReason = retryReasonForItem(status);
+        if (status >= 200 && status < 300) {
+          acknowledged.add(batch[index]!.key);
+          accepted += 1;
+        } else if (itemReason) {
+          if (retryReason === null || itemReason === "auth" || (itemReason === "rate_limit" && retryReason === "server")) {
+            retryReason = itemReason;
+            retryStatus = status;
+          }
+        } else {
+          acknowledged.add(batch[index]!.key);
+          permanentlyRejected += 1;
+        }
+      }
+      current.pending = current.pending.filter((event) => !acknowledged.has(event.key));
+      current.counters.accepted += accepted;
+      current.counters.permanentlyRejected += permanentlyRejected;
+      if (permanentlyRejected > 0) report("permanent_rejection", { status: null, count: permanentlyRejected });
       const previousReason = current.retry.reason;
-      current.retry = { failures: 0, retryAtMs: 0, reason: null };
-      if (previousReason) report("delivery_recovered", { accepted: batch.length }, true);
+      if (retryReason) setRetry(current, retryReason, 0, retryStatus);
+      else current.retry = { failures: 0, retryAtMs: 0, reason: null };
+      if (previousReason && !retryReason) report("delivery_recovered", { accepted }, true);
       await persist(current);
       return;
     }
@@ -626,9 +756,16 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
   };
 }
 
+let environmentCredential = takeWakatimeEnvironmentCredential();
+let environmentCredentialGeneration = environmentCredential ? 1 : 0;
+
 function productionCredential(): WakatimeCredential | null {
-  const environment = process.env.WAKATIME_API_KEY?.trim();
-  if (environment) return { value: environment, sourceStamp: "environment" };
+  const replacement = takeWakatimeEnvironmentCredential();
+  if (replacement && replacement !== environmentCredential) {
+    environmentCredential = replacement;
+    environmentCredentialGeneration += 1;
+  }
+  if (environmentCredential) return { value: environmentCredential, sourceStamp: `environment:${environmentCredentialGeneration}` };
   const filename = configFilePath("wakatime-api-key");
   try {
     const stat = fs.statSync(filename);

@@ -25,7 +25,11 @@ manager and takes precedence over the key file.
 
 The Viewer reads credentials in its Node process. It sends the key only in the
 HTTPS `Authorization` header for `api.wakatime.com`. Browser payloads, local
-state, request bodies, URLs, diagnostics, and transcripts exclude it.
+state, request bodies, URLs, diagnostics, and transcripts exclude it. At
+startup the Viewer moves `WAKATIME_API_KEY` into integration-owned memory and
+deletes it from the ambient process environment before any agent, reviewer, or
+tmux pane starts. Replacing the environment value in a long-running server or
+replacing the key file is detected on the next delivery tick.
 
 ## Activity mapping
 
@@ -37,7 +41,7 @@ Each observed agent turn becomes a WakaTime `app` heartbeat stream:
 | Entity | An opaque, stable per-turn identifier such as `agent-log-viewer/codex/0123abcd…`. |
 | Category | `ai coding`. |
 | Language | Omitted because transcript activity does not identify a source-file language. |
-| Time | Turn start, 120-second active samples, and the exact end of a completed turn. |
+| Time | Turn start, 120-second active samples, and an exact interval-boundary marker at the end. |
 | AI session | An opaque SHA-256 turn identifier. |
 
 Project names, engine names, opaque turn identifiers, the category, and
@@ -47,8 +51,16 @@ names stay local.
 
 The first enabled start creates a forward-only boundary. Completed work from
 before that timestamp remains local. A turn that crosses the boundary begins
-at the enable timestamp. Idle periods produce no heartbeats, and separate
-turn entities preserve gaps between turns.
+at the enable timestamp. The reserved `agent-log-viewer-boundary` project
+contains interval-boundary markers. WakaTime assigns sub-timeout gaps to those
+markers, keeping each canonical project limited to observed active spans.
+Overlapping turns in one project contribute their wall-clock union. Exclude the
+reserved project when reading project totals.
+
+Open transcripts advance only while the scanner confirms a live agent process
+and no idle composer or input gate. Abrupt exits, stale transcripts, and idle
+composers freeze at the last proven activity timestamp. A live process remains
+authoritative during silent long-running tool calls.
 
 ## Delivery and local state
 
@@ -59,7 +71,11 @@ mode `0600`. The outbox survives Viewer restarts and contains payload metadata,
 including project names and timestamps. It contains no credential or raw
 conversation identifier.
 
-One scheduler tick sends up to 25 heartbeats. Network errors, five-second
+One scheduler tick sends up to 25 heartbeats. Each outer `201` or `202` bulk
+response is validated item by item. Successful items leave the outbox,
+transient item failures remain under backoff, permanent item failures increment
+the rejection count, and missing or malformed item lists retain the full batch.
+Response bodies and error details stay out of diagnostics and state. Network errors, five-second
 timeouts, WakaTime server failures, and rate limits retain the batch under
 durable exponential backoff. The scheduler honors `Retry-After` for HTTP 302
 and 429 responses. HTTP 401 and 403 open a 15-minute circuit; replacing the
@@ -90,7 +106,7 @@ classes, HTTP status values, retry timestamps, and counts.
 
 Run one short turn and one turn longer than two minutes. In the WakaTime
 dashboard, confirm the canonical project, `AI coding` category, active span,
-and idle gap. Stop network access for one tick, restore it, and confirm that the
+and idle gap after excluding `agent-log-viewer-boundary`. Stop network access for one tick, restore it, and confirm that the
 queued activity arrives after recovery. Restart the Viewer during queued work
 to exercise durable resume.
 
