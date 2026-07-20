@@ -253,6 +253,78 @@ test("pipeline chip opens the running operational attempt after a passed histori
   flushSync(() => root.unmount());
 });
 
+test("pipeline chip opens the cursor retry after a fail-edge loop-back", () => {
+  const openedPaths: string[] = [];
+  const retryFile = { path: "/tmp/pipeline-build-retry.jsonl", activity: "live", proc: "running" } as unknown as FileEntry;
+  const staleFile = { path: "/tmp/pipeline-stale-verify.jsonl", activity: "idle", proc: null } as unknown as FileEntry;
+  const linked = {
+    id: "pipeline-readiness-loop-back",
+    project: "demo",
+    state: "running",
+    stages: [
+      { id: "build", kind: "run", prompt: "", next: "verify" },
+      { id: "verify", kind: "run", prompt: "", next: null, onFail: { to: "build", maxRounds: 2 } },
+    ],
+    runs: [
+      { stageId: "build", attempts: [
+        {
+          n: 1,
+          state: "passed",
+          agentPath: "/tmp/pipeline-build-first.jsonl",
+          historical: false,
+          startedAt: "2026-07-20T11:20:00.000Z",
+          completedAt: "2026-07-20T11:21:00.000Z",
+        },
+        {
+          n: 2,
+          state: "running",
+          agentPath: retryFile.path,
+          historical: false,
+          startedAt: "2026-07-20T11:23:00.000Z",
+          completedAt: null,
+          activatedBy: { stageId: "verify", attempt: 1, edge: "fail" },
+        },
+      ] },
+      { stageId: "verify", attempts: [{
+        n: 1,
+        state: "failed",
+        agentPath: staleFile.path,
+        historical: false,
+        startedAt: "2026-07-20T11:21:00.000Z",
+        completedAt: "2026-07-20T11:22:00.000Z",
+      }] },
+    ],
+    cursor: {
+      stageId: "build",
+      state: "running",
+      input: "Fix the failed verification",
+      activatedBy: { stageId: "verify", attempt: 1, edge: "fail" },
+    },
+  } as unknown as Pipeline;
+  const item = task("t-pipeline-loop-back", "assigned", "Loop-back pipeline card", {
+    assignments: [{ path: retryFile.path, panePid: null, state: "delivered", error: null, at: "2026-07-20T11:23:00.000Z" }],
+  });
+  const { host, root } = render(
+    <TaskReadinessStrip
+      tasks={[item]}
+      files={[retryFile, staleFile]}
+      pipelines={[linked]}
+      flows={[]}
+      onOpenTask={noop}
+      onOpenFile={(file) => openedPaths.push(file.path)}
+    />,
+  );
+
+  expandStrip(host);
+  flushSync(() => sectionRow(host, "now").dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  const pipelineChip = [...host.querySelectorAll("button")].find((button) =>
+    button.getAttribute("aria-label")?.startsWith("Open the linked pipeline"))!;
+  flushSync(() => pipelineChip.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  expect(openedPaths).toEqual([retryFile.path]);
+  expect(openedPaths).not.toContain(staleFile.path);
+  flushSync(() => root.unmount());
+});
+
 test("review chip navigates to the linked flow transcript", () => {
   const openedPaths: string[] = [];
   const flowFile = { path: "/tmp/impl.jsonl", activity: "idle", proc: null } as unknown as FileEntry;

@@ -8,6 +8,7 @@ import { executeSpawnRequest, productionSpawnCommandDependencies } from "@/lib/a
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
+import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import type { CreatePipelineRequest, PatchPipelineRequest, PipelineAction } from "@/lib/pipelines/types";
 import { RuntimeHostUnavailableError, runtimeHostClient } from "@/lib/runtime/client";
@@ -169,8 +170,7 @@ async function linkTaskToPipeline(args: McpToolArgs, dependencies: LinkTaskToPip
   const pipelineId = required(args, "pipelineId");
   const pipeline = dependencies.getPipelines().pipelines.find((candidate) => candidate.id === pipelineId);
   if (!pipeline) throw new Error("pipeline not found");
-  const attempts = pipeline.runs.flatMap((run) => run.attempts);
-  const member = attempts.findLast((attempt) => !attempt.historical && Boolean(attempt.conversationId || attempt.agentPath));
+  const member = latestOperationalPipelineAttempt(pipeline);
   const transcriptPath = member?.agentPath ?? pipeline.srcPath;
   const conversationId = member?.conversationId ?? pipeline.srcConversationId;
   if (!transcriptPath && !conversationId) throw new Error("pipeline has no conversation to link");

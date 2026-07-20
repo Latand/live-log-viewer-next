@@ -8,12 +8,12 @@ import { SectionHeader } from "@/components/ui/SectionHeader";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { Flow } from "@/lib/flows/types";
+import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { FlipRow } from "./FlipRow";
-import { latestAttempt } from "./pipelines/pipelineModel";
 import { assignmentAgentState, assignmentOpenable } from "./scheme/assignmentState";
 import { TASK_TONES, taskTitle } from "./tasks/taskModel";
 import {
@@ -70,7 +70,7 @@ function TaskChip({
      attempt transcript / the flow's latest reviewer (implementer fallback),
      resolved against the current scan — a vanished worktree drops the chip. */
   const pipelineFile = links.pipelines
-    .flatMap((pipeline) => pipeline.stages.map((stage) => latestAttempt(pipeline, stage.id)))
+    .map((pipeline) => latestOperationalPipelineAttempt(pipeline))
     .map((attempt) => (attempt?.agentPath ? byPath.get(attempt.agentPath) : undefined))
     .filter((file): file is FileEntry => file !== undefined)
     .at(-1);

@@ -94,3 +94,93 @@ test("link_task_to_pipeline binds the latest operational attempt after historica
     state: "handoff",
   })]);
 });
+
+test("link_task_to_pipeline follows the cursor retry after a fail-edge loop-back", async () => {
+  const retryPath = "/pipeline/build-retry.jsonl";
+  const retryConversationId = "conversation_build_retry";
+  const stalePath = "/pipeline/stale-verify.jsonl";
+  const pipeline = {
+    id: "pipeline-mcp-loop-back",
+    srcPath: null,
+    srcConversationId: null,
+    stages: [
+      { id: "build", kind: "run" },
+      { id: "verify", kind: "run" },
+    ],
+    runs: [
+      { stageId: "build", attempts: [
+        {
+          n: 1,
+          state: "passed",
+          historical: false,
+          agentPath: "/pipeline/build-first.jsonl",
+          conversationId: "conversation_build_first",
+          startedAt: "2026-07-20T11:10:00.000Z",
+          completedAt: "2026-07-20T11:11:00.000Z",
+        },
+        {
+          n: 2,
+          state: "running",
+          historical: false,
+          agentPath: retryPath,
+          conversationId: retryConversationId,
+          startedAt: "2026-07-20T11:13:00.000Z",
+          completedAt: null,
+          activatedBy: { stageId: "verify", attempt: 1, edge: "fail" },
+        },
+      ] },
+      { stageId: "verify", attempts: [{
+        n: 1,
+        state: "failed",
+        historical: false,
+        agentPath: stalePath,
+        conversationId: "conversation_stale_verify",
+        startedAt: "2026-07-20T11:11:00.000Z",
+        completedAt: "2026-07-20T11:12:00.000Z",
+      }] },
+    ],
+    cursor: {
+      stageId: "build",
+      state: "running",
+      input: "Fix the failed verification",
+      activatedBy: { stageId: "verify", attempt: 1, edge: "fail" },
+    },
+    state: "running",
+  } as unknown as Pipeline;
+  let tasks: BoardTask[] = [{
+    id: "task-mcp-loop-back",
+    project: "live-log-viewer-next",
+    status: "inbox",
+    text: "Link the active loop-back retry",
+    placement: "unplaced",
+    assignments: [],
+    createdAt: "2026-07-20T11:14:00.000Z",
+    updatedAt: "2026-07-20T11:14:00.000Z",
+  }];
+  const bindings = viewerMcpBindings({
+    getPipelines: () => ({ pipelines: [pipeline] }),
+    mutateTasks: (mutator) => {
+      const mutation = mutator(tasks);
+      if (mutation.tasks) tasks = mutation.tasks;
+      return mutation.result;
+    },
+    isoNow: () => "2026-07-20T11:15:00.000Z",
+  });
+
+  const result = await bindings.link_task_to_pipeline({
+    taskId: tasks[0]!.id,
+    pipelineId: pipeline.id,
+    clientRequestId: "mcp-link-loop-back-attempt",
+  });
+
+  expect(result).toMatchObject({
+    conversationId: retryConversationId,
+    transcriptPath: retryPath,
+  });
+  expect(tasks[0]!.assignments).toEqual([expect.objectContaining({
+    conversationId: retryConversationId,
+    path: retryPath,
+    state: "handoff",
+  })]);
+  expect(tasks[0]!.assignments[0]!.path).not.toBe(stalePath);
+});

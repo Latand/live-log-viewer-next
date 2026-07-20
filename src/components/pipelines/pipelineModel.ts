@@ -26,6 +26,7 @@ import type {
   PatchPipelineRequest,
   StageVerdictStatus,
 } from "@/lib/pipelines/types";
+import { latestOperationalStageAttempt } from "@/lib/pipelines/attemptSelection";
 
 import { PIPELINES_CHANGED_EVENT } from "./pipelineEvents";
 
@@ -190,7 +191,7 @@ export const STAGE_GLYPH: Record<StageChipState, string> = {
 };
 
 export function latestAttempt(pipeline: Pipeline, stageId: string): PipelineStageAttempt | null {
-  return pipeline.runs.find((run) => run.stageId === stageId)?.attempts.findLast((attempt) => !attempt.historical) ?? null;
+  return latestOperationalStageAttempt(pipeline, stageId);
 }
 
 export function stageAttempts(pipeline: Pipeline, stageId: string): PipelineStageAttempt[] {
