@@ -225,7 +225,17 @@ test("390px MobileFocusView: reasoning telemetry is the merged chip inside the s
     ),
   );
 
-  // the phone slot is the merged «model · reasoning» chip (issue #241) —
+  // Chat-first default (issue #419 reopened): the conversation details — model/
+  // reasoning included — fold behind the mobile-details disclosure, so the merged
+  // «model · reasoning» chip reserves ZERO height until the operator opens it.
+  expect([...host.querySelectorAll<HTMLElement>("span")].filter((el) => el.textContent === "fable-5 · low").length).toBe(0);
+  const detailsToggle = host.querySelector('[data-testid="mobile-details-toggle"]') as HTMLButtonElement;
+  expect(detailsToggle).not.toBeNull();
+  expect(detailsToggle.getAttribute("aria-expanded")).toBe("false");
+  flushSync(() => detailsToggle.click());
+  expect(detailsToggle.getAttribute("aria-expanded")).toBe("true");
+
+  // Opened, the phone slot is the merged «model · reasoning» chip (issue #241) —
   // the vertical bars never render, so no bar can overlay the 390px header
   expect(host.querySelector("[data-effort-pills]")).toBeNull();
   const chips = [...host.querySelectorAll<HTMLElement>("span")].filter((el) => el.textContent === "fable-5 · low");
@@ -309,6 +319,15 @@ test("pane fallback badge: with model unknown, desktop and mobile engine chips c
     mobile = asMobile;
     const { host, root } = mount();
     flushSync(() => root.render(<BranchPane file={entry} tasks={[]} isRoot />));
+    // Mobile folds the conversation details behind the disclosure (issue #419
+    // reopened): the fallback engine badge is absent until it opens, so the
+    // collapsed default reserves zero height; desktop keeps it inline.
+    if (asMobile) {
+      expect([...host.querySelectorAll<HTMLElement>("span")].some((el) => el.textContent?.trim() === "Claude")).toBe(false);
+      const toggle = host.querySelector('[data-testid="mobile-details-toggle"]') as HTMLButtonElement;
+      expect(toggle).not.toBeNull();
+      flushSync(() => toggle.click());
+    }
     const badge = [...host.querySelectorAll<HTMLElement>("span")].find((el) => el.textContent?.trim() === "Claude") as HTMLElement;
     expect(badge).not.toBeNull();
     expect(badge.getAttribute("title")).toBe("Reasoning effort: low");

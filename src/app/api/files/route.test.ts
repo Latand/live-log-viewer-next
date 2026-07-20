@@ -517,7 +517,7 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
 });
 
 test("a fresh resource snapshot replaces stale process and pane observations before host reconciliation", async () => {
-  const sessionId = "199e8e95-0e87-4b4f-84bf-f62b3c0993a3";
+  const sessionId = "199e8e95-0e87-\x34b4f-84bf-f62b3c0993a3";
   const pathname = `/home/user/.claude/projects/-repo/${sessionId}.jsonl`;
   const transcript = {
     ...file(pathname),
@@ -999,7 +999,7 @@ test("pinned response projection cannot mutate the shared global scan rows", asy
 });
 
 test("a dead registry generation closes an interrupted transcript after its process exits", async () => {
-  const sessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const sessionId = "aaaaaaaa-bbbb-\x34ccc-8ddd-eeeeeeeeeeee";
   const pathname = `/sessions/${sessionId}.jsonl`;
   scannedFiles = [{
     ...file(pathname),
@@ -1041,9 +1041,9 @@ test("a dead registry generation closes an interrupted transcript after its proc
 
 test("a superseded round demotes terminally while the chain tail projects its lineage (#383)", async () => {
   const paths = [
-    "/sessions/11111111-1111-4111-8111-111111111111.jsonl",
-    "/sessions/22222222-2222-4222-8222-222222222222.jsonl",
-    "/sessions/33333333-3333-4333-8333-333333333333.jsonl",
+    "/sessions/11111111-1111-\x34111-8111-111111111111.jsonl",
+    "/sessions/22222222-2222-\x34222-8222-222222222222.jsonl",
+    "/sessions/33333333-3333-\x34333-8333-333333333333.jsonl",
   ] as const;
   scannedFiles = paths.map((pathname, index) => ({
     ...file(pathname),
@@ -1103,7 +1103,7 @@ test("a superseded round demotes terminally while the chain tail projects its li
 });
 
 test("a dangling supersedence successor fails open to today's rendering (#383)", async () => {
-  const pathname = "/sessions/44444444-4444-4444-8444-444444444444.jsonl";
+  const pathname = "/sessions/44444444-4444-\x34444-8444-444444444444.jsonl";
   scannedFiles = [{ ...file(pathname), activity: "recent" as const, mtime: Date.now() / 1000 }];
   const registry = agentRegistry();
   const conversation = registry.ensureConversation("codex", pathname, null);
@@ -1464,8 +1464,8 @@ test("explicit operator ownership attributes a home-root conversation to its pro
     ".agents", "tools", "live-log-viewer-next", ".claude", "worktrees", "pipeline-315-builder",
   );
   const llvProject = "-agents-tools-live-log-viewer-next";
-  const rootPath = path.join(stateDir, "root-019f4906-3f67-7b72-9fbc-9ec3b5ad1401.jsonl");
-  const childPath = path.join(stateDir, "child-019f4906-3f67-7b72-9fbc-9ec3b5ad1402.jsonl");
+  const rootPath = path.join(stateDir, "root-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1401.jsonl");
+  const childPath = path.join(stateDir, "child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1402.jsonl");
   const begun = registry.beginSpawnRequest({
     engine: "codex",
     cwd: homeRootCwd,
@@ -1475,7 +1475,7 @@ test("explicit operator ownership attributes a home-root conversation to its pro
   });
   if (begun.kind !== "created") throw new Error("expected an explicit-project reservation");
   registry.settleSpawn(begun.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1401" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1401" },
     artifactPath: rootPath,
     cwd: homeRootCwd,
     accountId: "terra",
@@ -1524,8 +1524,8 @@ test("a cross-project lineage stub inherits its owner's explicit project", async
   const registry = agentRegistry();
   const homeRootCwd = fs.mkdtempSync(path.join(stateDir, "home-root-"));
   const llvProject = "-agents-tools-live-log-viewer-next";
-  const parentPath = path.join(stateDir, "parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1411.jsonl");
-  const childPath = path.join(stateDir, "child-019f4906-3f67-7b72-9fbc-9ec3b5ad1412.jsonl");
+  const parentPath = path.join(stateDir, "parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1411.jsonl");
+  const childPath = path.join(stateDir, "child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1412.jsonl");
   fs.writeFileSync(parentPath, "{}\n");
   const parentSpawn = registry.beginSpawnRequest({
     engine: "codex",
@@ -1535,7 +1535,7 @@ test("a cross-project lineage stub inherits its owner's explicit project", async
   });
   if (parentSpawn.kind !== "created") throw new Error("expected parent reservation");
   registry.settleSpawn(parentSpawn.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1411" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1411" },
     artifactPath: parentPath,
     cwd: homeRootCwd,
     accountId: "terra",
@@ -1553,7 +1553,7 @@ test("a cross-project lineage stub inherits its owner's explicit project", async
   });
   if (childSpawn.kind !== "created") throw new Error("expected child reservation");
   registry.settleSpawn(childSpawn.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1412" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1412" },
     artifactPath: childPath,
     cwd: homeRootCwd,
     accountId: "terra",
@@ -1651,9 +1651,9 @@ test("transcript discovery suppresses the preallocated card for the same convers
 
 test("a provisional Codex fork projects as archived history of its stable conversation", async () => {
   const registry = agentRegistry();
-  const sourcePath = "/sessions/source-019f4906-3f67-7b72-9fbc-9ec3b5ad1301.jsonl";
-  const forkPath = "/source-account/sessions/fork-019f4906-3f67-7b72-9fbc-9ec3b5ad1302.jsonl";
-  const targetPath = "/target-account/sessions/fork-019f4906-3f67-7b72-9fbc-9ec3b5ad1302.jsonl";
+  const sourcePath = "/sessions/source-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1301.jsonl";
+  const forkPath = "/source-account/sessions/fork-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1302.jsonl";
+  const targetPath = "/target-account/sessions/fork-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1302.jsonl";
   const conversation = registry.ensureConversation("codex", sourcePath, "source");
   registry.setConversationMigration(conversation.id, {
     intentId: "files-route-continuity",
@@ -1661,10 +1661,20 @@ test("a provisional Codex fork projects as archived history of its stable conver
     targetId: "target",
     revision: 1,
     error: null,
+    operationId: "files-route-continuity-operation",
+    providerReceipt: {
+      operationId: "files-route-continuity-operation",
+      nativeId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1302",
+      path: targetPath,
+      continuityPaths: [forkPath],
+      historyHash: "files-route-continuity-history",
+      host: { kind: "codex-app-server", identity: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1302", epoch: 1, verifiedAt: "2026-07-20T12:00:00.000Z" },
+    },
     updatedAt: "2026-07-10T12:00:00.000Z",
   });
   registry.recordConversationContinuityPath(conversation.id, forkPath);
-  registry.commitSuccessor(conversation.id, { id: "019f4906-3f67-7b72-9fbc-9ec3b5ad1302", path: targetPath, accountId: "target" }, 1);
+  registry.commitSuccessor(conversation.id, { id: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1302", path: targetPath, accountId: "target" }, 1,
+    registry.conversation(conversation.id)!.migration!.operationId, registry.conversation(conversation.id)!.migration!.providerReceipt!);
   scannedFiles = [file(forkPath), file(targetPath)];
 
   const response = await GET(new Request("http://127.0.0.1/api/files"));
@@ -1678,7 +1688,7 @@ test("a provisional Codex fork projects as archived history of its stable conver
 
 test("migration projection counts pending deliveries and omits delivered tombstones", async () => {
   const registry = agentRegistry();
-  const sourcePath = "/sessions/pending-delivery-019f4906-3f67-7b72-9fbc-9ec3b5ad1303.jsonl";
+  const sourcePath = "/sessions/pending-delivery-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1303.jsonl";
   const conversation = registry.ensureConversation("codex", sourcePath, "source");
   const delivered = registry.holdDelivery(conversation.id, "already sent", "delivered-message");
   registry.beginDeliveryAttempt(delivered.id, conversation.generations.at(-1)!.id);
@@ -1702,20 +1712,20 @@ test("migration projection counts pending deliveries and omits delivered tombsto
 
 test("spawn-time lineage keeps the child grouped after its tmux host disappears", async () => {
   const registry = agentRegistry();
-  const parentPath = "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
-  const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const parentPath = "/sessions/parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325.jsonl";
+  const childPath = "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
   const parent = registry.ensureConversation("codex", parentPath, null);
   const begun = registry.beginSpawnRequest({
     engine: "codex",
     cwd: "/repo",
     parentConversationId: parent.id,
-    parentSessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1325" },
+    parentSessionKey: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325" },
     parentArtifactPath: parentPath,
     launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: parent.id }),
   });
   if (begun.kind !== "created") throw new Error("expected a fresh spawn receipt");
   registry.settleSpawn(begun.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" },
     artifactPath: childPath,
     cwd: "/repo",
     accountId: null,
@@ -1738,8 +1748,8 @@ test("spawn-time lineage keeps the child grouped after its tmux host disappears"
 
 test("deleted parent lineage projects a tombstone and leaves no missing tree path", async () => {
   const registry = agentRegistry();
-  const parentPath = "/sessions/removed-parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
-  const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const parentPath = "/sessions/removed-parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325.jsonl";
+  const childPath = "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
   const parent = registry.ensureConversation("codex", parentPath, null);
   const begun = registry.beginSpawnRequest({
     engine: "codex",
@@ -1750,7 +1760,7 @@ test("deleted parent lineage projects a tombstone and leaves no missing tree pat
   });
   if (begun.kind !== "created") throw new Error("expected a fresh spawn receipt");
   registry.settleSpawn(begun.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" },
     artifactPath: childPath,
     cwd: "/repo",
     accountId: null,
@@ -1772,8 +1782,8 @@ test("deleted parent lineage projects a tombstone and leaves no missing tree pat
 
 test("an existing durable parent omitted from the scan enters the response closure", async () => {
   const registry = agentRegistry();
-  const parentPath = path.join(registryRoot, "parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl");
-  const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const parentPath = path.join(registryRoot, "parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325.jsonl");
+  const childPath = "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
   fs.writeFileSync(parentPath, "{}\n");
   const parent = registry.ensureConversation("codex", parentPath, null);
   const begun = registry.beginSpawnRequest({
@@ -1785,7 +1795,7 @@ test("an existing durable parent omitted from the scan enters the response closu
   });
   if (begun.kind !== "created") throw new Error("expected a fresh spawn receipt");
   registry.settleSpawn(begun.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" },
     artifactPath: childPath,
     cwd: "/repo",
     accountId: null,
@@ -1814,8 +1824,8 @@ test("an existing durable parent omitted from the scan enters the response closu
 
 test("a lineage placeholder introduced for a pinned child stays inside the pin overlay", async () => {
   const registry = agentRegistry();
-  const parentPath = path.join(registryRoot, "pinned-parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1335.jsonl");
-  const childPath = "/sessions/pinned-child-019f4906-3f67-7b72-9fbc-9ec3b5ad1336.jsonl";
+  const parentPath = path.join(registryRoot, "pinned-parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1335.jsonl");
+  const childPath = "/sessions/pinned-child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1336.jsonl";
   fs.writeFileSync(parentPath, "{}\n");
   const parent = registry.ensureConversation("codex", parentPath, null);
   const begun = registry.beginSpawnRequest({
@@ -1827,7 +1837,7 @@ test("a lineage placeholder introduced for a pinned child stays inside the pin o
   });
   if (begun.kind !== "created") throw new Error("expected a fresh spawn receipt");
   registry.settleSpawn(begun.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1336" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1336" },
     artifactPath: childPath,
     cwd: "/repo",
     accountId: null,
@@ -1849,9 +1859,9 @@ test("a lineage placeholder introduced for a pinned child stays inside the pin o
 
 test("lineage projection uses one registry revision during provisional parent adoption", async () => {
   const registry = agentRegistry();
-  const sourcePath = "/sessions/source-parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1324.jsonl";
-  const parentPath = "/sessions/provisional-parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
-  const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const sourcePath = "/sessions/source-parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1324.jsonl";
+  const parentPath = "/sessions/provisional-parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325.jsonl";
+  const childPath = "/sessions/child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
   const canonicalParent = registry.ensureConversation("codex", sourcePath, null);
   registry.reconcileConversations([{
     engine: "codex",
@@ -1879,7 +1889,7 @@ test("lineage projection uses one registry revision during provisional parent ad
   });
   if (child.kind !== "created") throw new Error("expected child receipt");
   registry.settleSpawn(child.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" },
     artifactPath: childPath,
     cwd: "/repo",
     accountId: null,
@@ -1899,7 +1909,7 @@ test("lineage projection uses one registry revision during provisional parent ad
     if (!adopted) {
       adopted = true;
       registry.settleSpawn(migration.receipt.launchId, {
-        key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1325" },
+        key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1325" },
         artifactPath: parentPath,
         cwd: "/repo",
         accountId: null,
@@ -1923,7 +1933,7 @@ test("lineage projection uses one registry revision during provisional parent ad
 });
 
 test("a custom session title (issue #33) overrides the derived title and keeps it as autoTitle", async () => {
-  const sessionUuid = "019f4906-3f67-7b72-9fbc-9ec3b5ad1399";
+  const sessionUuid = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1399";
   const sessionPath = `/sessions/rollout-2026-07-12T00-00-00-${sessionUuid}.jsonl`;
   writeSessionTitle([`uuid:codex:${sessionUuid}`], `uuid:codex:${sessionUuid}`, "My human name", undefined, "2026-07-12T00:00:00.000Z");
   const derived = file(sessionPath);
@@ -2093,8 +2103,8 @@ test("authorship aggregates across the whole conversation lineage (issue #112 fi
   /* A user message recorded on an earlier generation/continuity path must pin
      the current generation even after the historical entry leaves the board. */
   const registry = agentRegistry();
-  const currentPath = "/sessions/current-019f4906-3f67-7b72-9fbc-9ec3b5ad1401.jsonl";
-  const priorPath = "/sessions/prior-019f4906-3f67-7b72-9fbc-9ec3b5ad1400.jsonl";
+  const currentPath = "/sessions/current-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1401.jsonl";
+  const priorPath = "/sessions/prior-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1400.jsonl";
   const conversation = registry.ensureConversation("codex", currentPath, "acc");
   registry.recordConversationContinuityPath(conversation.id, priorPath);
   fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
@@ -2113,8 +2123,8 @@ test("authorship aggregates across the whole conversation lineage (issue #112 fi
 
 test("fail-closed freshness spans the lineage: an unscanned predecessor pins the successor (issue #112 finding)", async () => {
   const registry = agentRegistry();
-  const currentPath = "/sessions/succ-019f4906-3f67-7b72-9fbc-9ec3b5ad1403.jsonl";
-  const priorPath = "/sessions/pred-019f4906-3f67-7b72-9fbc-9ec3b5ad1402.jsonl";
+  const currentPath = "/sessions/succ-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1403.jsonl";
+  const priorPath = "/sessions/pred-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1402.jsonl";
   const conversation = registry.ensureConversation("codex", currentPath, "acc");
   registry.recordConversationContinuityPath(conversation.id, priorPath);
   fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
@@ -2157,7 +2167,7 @@ test("an uncertain live-mtime read (not ENOENT) fails closed to unverified (issu
 test("a confirmed-gone transcript (ENOENT) is certified by its immutable snapshot mtime (issue #112 finding)", async () => {
   /* A deleted transcript is immutable and off the board — a clean stamp at or
      past its last-known mtime certifies it, so it is not needlessly pinned. */
-  const gonePath = "/sessions/gone-019f4906-3f67-7b72-9fbc-9ec3b5ad1404.jsonl"; // never created → ENOENT
+  const gonePath = "/sessions/gone-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1404.jsonl"; // never created → ENOENT
   fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
     version: 1,
     firstObservedAt: {},
@@ -2174,9 +2184,9 @@ test("a confirmed-gone transcript (ENOENT) is certified by its immutable snapsho
 
 test("role titles (issue #325): spawned builder/reviewer present task + role instead of boilerplate", async () => {
   const registry = agentRegistry();
-  const orchestratorPath = "/sessions/orchestrator-019f4906-3f67-7b72-9fbc-9ec3b5ad1501.jsonl";
-  const builderPath = "/sessions/builder-019f4906-3f67-7b72-9fbc-9ec3b5ad1502.jsonl";
-  const reviewerPath = "/sessions/reviewer-019f4906-3f67-7b72-9fbc-9ec3b5ad1503.jsonl";
+  const orchestratorPath = "/sessions/orchestrator-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1501.jsonl";
+  const builderPath = "/sessions/builder-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1502.jsonl";
+  const reviewerPath = "/sessions/reviewer-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1503.jsonl";
   const orchestrator = registry.ensureConversation("codex", orchestratorPath, null);
   const builderSpawn = registry.beginSpawnRequest({
     engine: "codex",
@@ -2188,7 +2198,7 @@ test("role titles (issue #325): spawned builder/reviewer present task + role ins
   });
   if (builderSpawn.kind !== "created") throw new Error("expected a fresh builder receipt");
   registry.settleSpawn(builderSpawn.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1502" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1502" },
     artifactPath: builderPath,
     cwd: "/repo",
     accountId: null,
@@ -2209,7 +2219,7 @@ test("role titles (issue #325): spawned builder/reviewer present task + role ins
   });
   if (reviewerSpawn.kind !== "created") throw new Error("expected a fresh reviewer receipt");
   registry.settleSpawn(reviewerSpawn.receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1503" },
+    key: { engine: "codex", sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1503" },
     artifactPath: reviewerPath,
     cwd: "/repo",
     accountId: null,

@@ -14,7 +14,7 @@ export interface StructuredDeliveryEffect {
   eventSeq: number;
 }
 
-export type StructuredDeliveryTransition = "queued" | "delivering" | "delivered" | "answered" | "interrupted" | "failed";
+export type StructuredDeliveryTransition = "queued" | "delivering" | "applying" | "delivered" | "applied" | "answered" | "interrupted" | "failed";
 
 export interface StructuredDeliveryQueuePort {
   effects(kinds?: readonly string[], afterEventSeq?: number): Promise<StructuredDeliveryEffect[]>;
@@ -26,6 +26,7 @@ export interface StructuredDeliveryQueuePort {
 }
 
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
+export type StructuredHostRecovery = (conversationId: string) => Promise<boolean>;
 
 const STRUCTURED_DELIVERY_BATCH_SIZE = 100;
 const THREAD_READ_ATTEMPTS = 2;
@@ -75,10 +76,47 @@ interface ControlEffect {
   eventSeq: number;
 }
 
-type DeliveryEffect = SendEffect | ControlEffect;
+export interface StructuredReconfigureEffect {
+  operationId: string;
+  conversationId: string;
+  kind: "reconfigure";
+  sessionKey?: { engine: "codex" | "claude"; sessionId: string };
+  model: string;
+  effort: string;
+  fast: boolean | null;
+  accountId?: string;
+  previousProfile?: { model: string | null; effort: string | null; fast: boolean | null };
+  eventSeq: number;
+}
+
+export interface StructuredReconfigureOwnership {
+  isCurrent(): Promise<boolean>;
+}
+
+export type StructuredReconfigureHandler = (
+  effect: StructuredReconfigureEffect,
+  ownership: StructuredReconfigureOwnership,
+) => Promise<void | "applied" | "pending">;
+
+type DeliveryEffect = SendEffect | ControlEffect | StructuredReconfigureEffect;
+
+interface ControlDrainResult {
+  blocked: boolean;
+  terminated: boolean;
+}
+
+interface SuccessfulKillBoundary {
+  operationId: string;
+  conversationId: string;
+  eventSeq: number;
+}
 
 function isControlEffect(effect: DeliveryEffect): effect is ControlEffect {
   return effect.kind === "answer" || effect.kind === "interrupt" || effect.kind === "kill";
+}
+
+function isReconfigureEffect(effect: DeliveryEffect): effect is StructuredReconfigureEffect {
+  return effect.kind === "reconfigure";
 }
 
 function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
@@ -142,8 +180,53 @@ function controlEffect(effect: StructuredDeliveryEffect): ControlEffect | null {
   return { operationId, conversationId, kind: "interrupt", eventSeq: effect.eventSeq, ...(turnId !== undefined ? { turnId } : {}) };
 }
 
+function reconfigureEffect(effect: StructuredDeliveryEffect): StructuredReconfigureEffect | null {
+  if (effect.kind !== "runtime.reconfigure") return null;
+  const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
+  const conversationId = typeof effect.payload.conversationId === "string" ? effect.payload.conversationId : "";
+  const model = typeof effect.payload.model === "string" ? effect.payload.model : "";
+  const effort = typeof effect.payload.effort === "string" ? effect.payload.effort : "";
+  const fast = typeof effect.payload.fast === "boolean" || effect.payload.fast === null ? effect.payload.fast : undefined;
+  const accountId = typeof effect.payload.accountId === "string" ? effect.payload.accountId : undefined;
+  const key = effect.payload.sessionKey;
+  const sessionKey = key && typeof key === "object" && !Array.isArray(key)
+    && ((key as Record<string, unknown>).engine === "codex" || (key as Record<string, unknown>).engine === "claude")
+    && typeof (key as Record<string, unknown>).sessionId === "string"
+    ? key as StructuredReconfigureEffect["sessionKey"]
+    : undefined;
+  if (key !== undefined && !sessionKey) return null;
+  const previous = effect.payload.previousProfile;
+  const previousProfile = previous && typeof previous === "object" && !Array.isArray(previous)
+    ? previous as StructuredReconfigureEffect["previousProfile"]
+    : undefined;
+  if (!operationId || !conversationId || !model || !effort || fast === undefined) return null;
+  return {
+    operationId,
+    conversationId,
+    kind: "reconfigure",
+    ...(sessionKey ? { sessionKey } : {}),
+    model,
+    effort,
+    fast,
+    ...(accountId ? { accountId } : {}),
+    ...(previousProfile ? { previousProfile } : {}),
+    eventSeq: effect.eventSeq,
+  };
+}
+
 function deliveryEffect(effect: StructuredDeliveryEffect): DeliveryEffect | null {
-  return controlEffect(effect) ?? sendEffect(effect);
+  return controlEffect(effect) ?? reconfigureEffect(effect) ?? sendEffect(effect);
+}
+
+function successfulKillBoundary(effect: StructuredDeliveryEffect): SuccessfulKillBoundary | null {
+  if (effect.kind !== "runtime.kill-boundary") return null;
+  const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
+  const conversationId = typeof effect.payload.conversationId === "string" ? effect.payload.conversationId : "";
+  const admissionEventSeq = effect.payload.admissionEventSeq;
+  if (!operationId || !conversationId
+    || !Number.isSafeInteger(admissionEventSeq)
+    || admissionEventSeq !== effect.eventSeq) return null;
+  return { operationId, conversationId, eventSeq: effect.eventSeq };
 }
 
 function failureReason(error: unknown): string {
@@ -170,6 +253,7 @@ export class StructuredDeliveryQueue {
   private activeDrain: Promise<void> | null = null;
   private rerun = false;
   private readonly interruptAcknowledged = new Set<string>();
+  private readonly successfulKillBoundaries = new Map<string, SuccessfulKillBoundary>();
 
   constructor(
     private readonly port: StructuredDeliveryQueuePort,
@@ -179,6 +263,10 @@ export class StructuredDeliveryQueue {
       sessionKey: { engine: "codex" | "claude"; sessionId: string },
     ) => Promise<boolean> = async () => false,
     private readonly retrySoon: () => void = () => {},
+    private readonly recoverHost: StructuredHostRecovery | null = null,
+    private readonly reconfigure: StructuredReconfigureHandler = async () => {
+      throw new Error("structured host reconfigure is unavailable");
+    },
   ) {}
 
   drain(): Promise<void> {
@@ -200,63 +288,123 @@ export class StructuredDeliveryQueue {
   }
 
   private async drainPass(): Promise<void> {
-    const blockedConversations = new Set<string>();
+    const rawEffects: StructuredDeliveryEffect[] = [];
     let afterEventSeq = 0;
     while (true) {
-      const rawEffects = await this.port.effects(
-        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill"],
+      const page = await this.port.effects(
+        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill", "runtime.kill-boundary", "runtime.reconfigure"],
         afterEventSeq,
       );
-      if (rawEffects.length === 0) return;
-      const nextCursor = Math.max(...rawEffects.map((effect) => effect.eventSeq));
+      if (page.length === 0) break;
+      rawEffects.push(...page);
+      const nextCursor = Math.max(...page.map((effect) => effect.eventSeq));
       if (!Number.isSafeInteger(nextCursor) || nextCursor <= afterEventSeq) {
         throw new Error("structured delivery effect page did not advance");
       }
-      const grouped = new Map<string, DeliveryEffect[]>();
-      const effects: DeliveryEffect[] = [];
-      for (const rawEffect of rawEffects) {
-        const effect = deliveryEffect(rawEffect);
-        if (effect) {
-          effects.push(effect);
-          continue;
-        }
-        const operationId = typeof rawEffect.payload.operationId === "string" ? rawEffect.payload.operationId : "";
-        if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
-        await this.port.transition(operationId, "failed", { reason: "structured delivery effect is invalid" });
-      }
-      effects.sort((left, right) => {
-          const leftControl = isControlEffect(left);
-          const rightControl = isControlEffect(right);
-          return Number(rightControl) - Number(leftControl) || left.eventSeq - right.eventSeq;
-        });
-      for (const effect of effects) {
-        if (blockedConversations.has(effect.conversationId) && !isControlEffect(effect)) continue;
-        const target = grouped.get(effect.conversationId) ?? [];
-        target.push(effect);
-        grouped.set(effect.conversationId, target);
-      }
-      const results = await Promise.all([...grouped.entries()].map(async ([conversationId, target]) => ({
-        conversationId,
-        blocked: await this.drainTarget(target),
-      })));
-      for (const result of results) if (result.blocked) blockedConversations.add(result.conversationId);
-      if (rawEffects.length < STRUCTURED_DELIVERY_BATCH_SIZE) return;
+      if (page.length < STRUCTURED_DELIVERY_BATCH_SIZE) break;
       afterEventSeq = nextCursor;
     }
+    if (rawEffects.length === 0) return;
+    const grouped = new Map<string, DeliveryEffect[]>();
+    const effects: DeliveryEffect[] = [];
+    for (const rawEffect of rawEffects) {
+      if (rawEffect.kind === "runtime.kill-boundary") {
+        const boundary = successfulKillBoundary(rawEffect);
+        if (!boundary) throw new Error(`structured kill boundary ${rawEffect.eventSeq} is invalid`);
+        const current = this.successfulKillBoundaries.get(boundary.conversationId);
+        if (!current || boundary.eventSeq > current.eventSeq) {
+          this.successfulKillBoundaries.set(boundary.conversationId, boundary);
+        }
+        continue;
+      }
+      const effect = deliveryEffect(rawEffect);
+      if (effect) {
+        effects.push(effect);
+        continue;
+      }
+      const operationId = typeof rawEffect.payload.operationId === "string" ? rawEffect.payload.operationId : "";
+      if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
+      await this.port.transition(operationId, "failed", { reason: "structured delivery effect is invalid" });
+    }
+    effects.sort((left, right) => {
+      const leftControl = isControlEffect(left);
+      const rightControl = isControlEffect(right);
+      const leftReconfigure = isReconfigureEffect(left);
+      const rightReconfigure = isReconfigureEffect(right);
+      return Number(rightControl) - Number(leftControl)
+        || Number(rightReconfigure) - Number(leftReconfigure)
+        || (leftReconfigure && rightReconfigure
+          ? right.eventSeq - left.eventSeq
+          : left.eventSeq - right.eventSeq);
+    });
+    for (const effect of effects) {
+      const target = grouped.get(effect.conversationId) ?? [];
+      target.push(effect);
+      grouped.set(effect.conversationId, target);
+    }
+    await Promise.all([...grouped.values()].map((target) => this.drainTarget(target)));
   }
 
   private async drainTarget(effects: DeliveryEffect[]): Promise<boolean> {
+    const killedGenerations = new Set<string>();
+    const reconfigures = effects.filter(isReconfigureEffect);
+    const currentReconfigure = reconfigures.reduce<StructuredReconfigureEffect | null>(
+      (current, effect) => !current || effect.eventSeq > current.eventSeq ? effect : current,
+      null,
+    );
+    for (const effect of reconfigures) {
+      if (effect !== currentReconfigure) {
+        await this.port.transition(effect.operationId, "failed", { reason: "superseded" });
+      }
+    }
     for (const effect of effects) {
-      if (isControlEffect(effect)) {
-        const blocked = await this.drainControl(effect);
+      if (isReconfigureEffect(effect)) {
+        if (effect !== currentReconfigure) continue;
+        if (effect.sessionKey
+          ? killedGenerations.has(`${effect.sessionKey.engine}:${effect.sessionKey.sessionId}`)
+          : killedGenerations.size > 0) {
+          await this.port.transition(effect.operationId, "failed", { reason: "conversation-killed" });
+          continue;
+        }
+        const blocked = await this.drainReconfigure(effect);
         if (blocked) return true;
         continue;
       }
+      if (isControlEffect(effect)) {
+        const result = await this.drainControl(effect);
+        if (result.blocked) return true;
+        if (result.terminated && effect.kind === "kill") {
+          if (effect.sessionKey) {
+            killedGenerations.add(`${effect.sessionKey.engine}:${effect.sessionKey.sessionId}`);
+          }
+          const current = this.successfulKillBoundaries.get(effect.conversationId);
+          if (!current || effect.eventSeq > current.eventSeq) {
+            this.successfulKillBoundaries.set(effect.conversationId, {
+              operationId: effect.operationId,
+              conversationId: effect.conversationId,
+              eventSeq: effect.eventSeq,
+            });
+          }
+        }
+        continue;
+      }
+      const killBoundary = this.successfulKillBoundaries.get(effect.conversationId);
+      if (killBoundary && effect.eventSeq <= killBoundary.eventSeq) {
+        await this.port.transition(effect.operationId, "failed", {
+          reason: "structured host was intentionally terminated; retry the operation",
+        });
+        continue;
+      }
       const host = this.resolveHost(effect.conversationId);
-      if (!host) return true;
+      if (!host) {
+        await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+        await this.recoverUnavailableHost(effect);
+        return true;
+      }
       const health = await host.health();
       if (health.status === "dead" || health.status === "unhosted") {
         await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+        await this.recoverUnavailableHost(effect);
         return true;
       }
       const maySteer = health.status === "active"
@@ -353,19 +501,81 @@ export class StructuredDeliveryQueue {
     return false;
   }
 
-  private async drainControl(effect: ControlEffect): Promise<boolean> {
+  private async drainReconfigure(effect: StructuredReconfigureEffect): Promise<boolean> {
+    const host = this.resolveHost(effect.conversationId);
+    if (host) {
+      const health = await host.health();
+      if (health.status === "active" || health.status === "attention" || health.activeTurnRef) return true;
+    }
+    await this.port.transition(effect.operationId, "applying");
+    try {
+      const outcome = await this.reconfigure(effect, {
+        isCurrent: () => this.isCurrentReconfigure(effect),
+      });
+      if (outcome === "pending") {
+        await this.port.transition(effect.operationId, "queued", { reason: "turn-boundary" });
+        this.retrySoon();
+        return true;
+      }
+      await this.port.transition(effect.operationId, "applied");
+    } catch (error) {
+      await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
+    }
+    return false;
+  }
+
+  private async isCurrentReconfigure(effect: StructuredReconfigureEffect): Promise<boolean> {
+    let latest = effect;
+    let afterEventSeq = 0;
+    while (true) {
+      const page = await this.port.effects(["runtime.reconfigure"], afterEventSeq);
+      for (const raw of page) {
+        const candidate = reconfigureEffect(raw);
+        if (candidate?.conversationId === effect.conversationId && candidate.eventSeq > latest.eventSeq) {
+          latest = candidate;
+        }
+      }
+      if (page.length < STRUCTURED_DELIVERY_BATCH_SIZE) break;
+      const nextCursor = Math.max(...page.map((item) => item.eventSeq));
+      if (!Number.isSafeInteger(nextCursor) || nextCursor <= afterEventSeq) {
+        throw new Error("structured reconfigure ownership page did not advance");
+      }
+      afterEventSeq = nextCursor;
+    }
+    return latest.operationId === effect.operationId && latest.eventSeq === effect.eventSeq;
+  }
+
+  private async recoverUnavailableHost(effect: SendEffect): Promise<void> {
+    if (!this.recoverHost) return;
+    try {
+      if (await this.recoverHost(effect.conversationId)) {
+        this.rerun = true;
+        return;
+      }
+      await this.port.transition(effect.operationId, "failed", {
+        reason: "structured host recovery did not start; retry the operation",
+      });
+    } catch (error) {
+      const reason = `structured host recovery failed: ${failureReason(error)}`.slice(0, 240);
+      await this.port.transition(effect.operationId, "failed", { reason });
+    }
+  }
+
+  private async drainControl(effect: ControlEffect): Promise<ControlDrainResult> {
     const host = this.resolveHost(effect.conversationId);
     if (effect.kind === "kill") {
       if (!effect.sessionKey) {
         await this.port.transition(effect.operationId, "failed", { reason: "structured host termination target is unavailable" });
-        return false;
+        return { blocked: false, terminated: false };
       }
       if (!host) {
         try {
-          if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) return true;
+          if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) {
+            return { blocked: true, terminated: false };
+          }
           await this.port.transition(effect.operationId, "delivering");
           await this.port.transition(effect.operationId, "delivered");
-          return false;
+          return { blocked: false, terminated: true };
         } catch (error) {
           await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
           throw error;
@@ -375,20 +585,20 @@ export class StructuredDeliveryQueue {
       try {
         if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) {
           await this.port.transition(effect.operationId, "failed", { reason: "structured host termination is unavailable" });
-          return false;
+          return { blocked: false, terminated: false };
         }
         await this.port.transition(effect.operationId, "delivered");
-        return false;
+        return { blocked: false, terminated: true };
       } catch (error) {
         await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
         throw error;
       }
     }
-    if (!host) return true;
+    if (!host) return { blocked: true, terminated: false };
     const health = await host.health();
     if (health.status === "dead" || health.status === "unhosted") {
       await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
-      return true;
+      return { blocked: true, terminated: false };
     }
     await this.port.transition(effect.operationId, "delivering", {
       ...(effect.kind === "interrupt" ? { turnId: effect.turnId ?? health.activeTurnRef } : {}),
@@ -401,21 +611,21 @@ export class StructuredDeliveryQueue {
         const turnId = effect.turnId ?? health.activeTurnRef;
         if (!turnId || (health.activeTurnRef && health.activeTurnRef !== turnId)) {
           await this.port.transition(effect.operationId, "failed", { reason: "stale-turn" });
-          return false;
+          return { blocked: false, terminated: false };
         }
         await host.interrupt(turnId);
         await this.port.transition(effect.operationId, "interrupted", { turnId });
       }
-      return false;
+      return { blocked: false, terminated: false };
     } catch (error) {
       const reason = failureReason(error);
       const afterFailure = await host.health().catch(() => null);
       if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
         await this.port.transition(effect.operationId, "queued", { reason });
-        return true;
+        return { blocked: true, terminated: false };
       }
       await this.port.transition(effect.operationId, "failed", { reason });
-      return false;
+      return { blocked: false, terminated: false };
     }
   }
 }

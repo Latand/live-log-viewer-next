@@ -126,6 +126,11 @@ test("a focused superseded round shows the banner with 44px actions and mounts n
 
 test("the focused successor keeps its composer and wears the truncating lineage chip at 390px", async () => {
   const host = await renderFocus([superseded, successor], "/round-2.jsonl");
+  /* Chat-first (issue #419): the lineage chip rides the metadata row, folded by
+     default behind the conversation-details disclosure. Reveal it, then assert. */
+  const details = host.querySelector('[data-testid="mobile-details-toggle"]') as HTMLButtonElement;
+  expect(details).not.toBeNull();
+  flushSync(() => details.click());
   const chip = host.querySelector("[data-continues-chip]");
   expect(chip).not.toBeNull();
   expect(chip?.getAttribute("href")).toBe("#c=conversation_round_1");

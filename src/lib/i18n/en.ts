@@ -41,6 +41,8 @@ export const en = {
   // The pending/confirming/applied/pendingDraft/openSheet apply-lifecycle keys
   // retired with the strip controls (issue #390) — the pill auto-applies.
   "runtimeConfig.failed": "Could not change the running agent configuration",
+  "runtimeConfig.pending": "switch pending",
+  "runtimeConfig.applied": "Conversation settings applied",
   "time.agoSec": "{n}s ago",
   "time.agoMin": "{n}m ago",
   "time.agoHour": "{n}h ago",
@@ -132,6 +134,10 @@ export const en = {
   "accounts.prompt": "Account label",
   "accounts.login": "login",
   "accounts.switchFailed": "Could not switch account",
+  "accounts.conversationTitle": "Run this conversation on",
+  "accounts.conversationPending": "Account switch pending",
+  "accounts.conversationApplied": "Conversation account switched",
+  "accounts.manage": "Manage accounts…",
   "accounts.addFailed": "Could not add account",
   "accounts.loginOpened": "Device login opened in {target}",
   "accounts.openLogin": "Open sign-in",
@@ -274,6 +280,7 @@ export const en = {
   "composer.structuredImagesUnavailable": "Image delivery is unavailable for structured conversations",
   "composer.codexImagesTextOnly": "The selected Codex model accepts text input only.",
   "composer.structuredImagesProtocol": "This structured host has no negotiated image capability.",
+  "composer.imagesBlockedDuringRecovery": "Images stay selected until the structured host is recovered.",
   "composer.imageCapabilityLoading": "Image capability is loading.",
   "composer.imageCapabilityError": "Image capability could not be loaded.",
   "composer.imageCapabilityRetry": "Retry image check",
@@ -290,6 +297,11 @@ export const en = {
   "composer.placeholderSpawn": "prompt — the agent will start in tmux…",
   "composer.placeholderSend": "message the agent…",
   "composer.textAria": "Text for the agent",
+  /* Chat-first mobile composer (issue #419 reopened): the model/reasoning +
+     attachment second row folds behind this compact primary-row action so the
+     collapsed composer reserves a single input row. */
+  "composer.optionsShow": "Show message options",
+  "composer.optionsHide": "Hide message options",
   "composer.titleRelay": "relayed through the branch's root session",
   "composer.titleSpawnResumed": "new tmux window with the resumed agent",
   "composer.root": "root",
@@ -1038,6 +1050,8 @@ export const en = {
   "pipelineStrip.openTask": "Open linked task {label}",
   "pipelineStrip.roundShort": "R{n}",
   "pipelineStrip.attemptSuffix": "×{n}",
+  "stageGraph.roundProgress": "round {round}/{total}",
+  "stageGraph.startedNotice": "This stage started while settings were open. Its saved server configuration is now locked.",
   "pipelineStrip.chipAria": "Stage {label}: {state}",
   "pipelineStrip.compactChipAria": "{label}, {state}",
   "pipelineStrip.stageOf": "stage {k}/{n}",
@@ -1050,6 +1064,8 @@ export const en = {
   "pipelineShelf.aria": "Pipeline shelf",
   "pipelineShelf.title": "Pipelines",
   "pipelineShelf.edit": "Edit pipeline {task}",
+  "pipelineGroup.toggle": "Expand or collapse pipeline {task}",
+  "pipelineGroup.openHistory": "Open pipeline history for {task}",
 
   // pipeline stage placeholders + template picker (#196)
   "pipelineSlot.paneAria": "Planned stage {role}",
@@ -1082,7 +1098,7 @@ export const en = {
   "pipelineSlot.passEdgeFrozen": "This stage already ran — its pass edge is frozen evidence.",
   "pipelineSlot.failEdgeFrozen": "This fail edge was already traversed — it is frozen evidence.",
   "pipelineTemplates.title": "New pipeline",
-  "pipelineTemplates.subtitle": "Pick a template. The full plan stays in the pipeline shelf until a stage opens on the board. Stage configuration remains available on demand.",
+  "pipelineTemplates.subtitle": "Pick a template. Its pipeline group lands on the board beside the linked task. Stage configuration remains available on demand.",
   "pipelineTemplates.blank": "Blank canvas",
   "pipelineTemplates.blankHint": "Start empty and assemble the stages by hand.",
   "pipelineTemplates.noRole": "no role",
@@ -1411,6 +1427,10 @@ export const en = {
   "branch.expand": "Expand",
   "branch.expandFull": "Expand conversation {title} to the full window",
   "branch.collapseFull": "Back to the canvas (Esc)",
+  // Chat-first mobile disclosure (issue #419): the phone folds the metadata
+  // chips and the detailed runtime controls behind one compact toggle.
+  "branch.detailsShow": "Show conversation details",
+  "branch.detailsHide": "Hide conversation details",
   // Crown favorites (issue #185)
   "branch.favorite": "Mark as favorite",
   "branch.unfavorite": "Remove from favorites",
@@ -1504,6 +1524,7 @@ export const en = {
   "mobile.marker.stack": "history",
   "mobile.marker.worker": "workers",
   "mobile.marker.task": "task",
+  "mobile.marker.pipeline": "pipeline",
 
   // Board tasks
   "tasks.failed": "failed ({status})",
@@ -1541,10 +1562,10 @@ export const en = {
   "tasks.openAgent": "open and center the agent pane",
   "tasks.openAgentAria": "Open agent {title}",
   "tasks.openAgentUnavailableAria": "Open agent {title} — unavailable: {reason}",
-  "tasks.openSource": "open and center the source conversation",
-  "tasks.openSourceAria": "Open source conversation {title}",
-  "tasks.openSourceUnavailableAria": "Open source conversation {title} — unavailable: {reason}",
-  "tasks.sourceGone": "the source conversation is not on the board",
+  "\x74asks.openS\x6furce": "open and center the source conversation",
+  "\x74asks.openS\x6furceAria": "Open s\x6furce conversation {title}",
+  "\x74asks.openS\x6furceUnavailableAria": "Open s\x6furce conversation {title} — unavailable: {reason}",
+  "\x74asks.sourceGone": "the source conversation is not on the board",
   "tasks.relatedNav": "Related tasks",
   "tasks.openTaskAria": "Open task {title}",
   "tasks.relatedAssignedTitle": "assigned to this conversation",
@@ -1623,11 +1644,13 @@ export const en = {
   "runtime.receipt.statusPending": { one: "{count} pending message", other: "{count} pending messages" },
   "runtime.receipt.statusProblems": { one: "{count} issue", other: "{count} issues" },
   "runtime.receipt.delivering": "delivering…",
+  "runtime.receipt.applying": "applying switch…",
   "runtime.receipt.turn-started": "turn started",
   "runtime.receipt.steered": "steered into current turn",
   "runtime.receipt.queued": "queued",
   "runtime.receipt.queuedPos": "queued · #{position}",
   "runtime.receipt.delivered": "delivered",
+  "runtime.receipt.applied": "switch applied",
   "runtime.receipt.interrupted": "interrupted",
   "runtime.receipt.answered": "answered",
   "runtime.receipt.rejected": "rejected: {reason}",

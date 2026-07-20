@@ -208,6 +208,9 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
         : runtimeImageCapability(key.engine === "claude" ? "claude" : "codex", false),
     },
     activeTurnId: typeof payload.activeTurnId === "string" ? payload.activeTurnId : null,
+    pendingReconfigure: payload.pendingReconfigure && typeof payload.pendingReconfigure === "object"
+      ? payload.pendingReconfigure as RuntimeSession["pendingReconfigure"]
+      : null,
     drift: payload.drift && typeof payload.drift === "object" ? payload.drift as RuntimeSession["drift"] : null,
   };
 }
@@ -444,13 +447,26 @@ export class RuntimeJournal {
         this.db.exec("COMMIT");
         return { operationId, receipt: previous, replayed: true };
       }
-      const queueing = status === "queued"
-        && (previous.status === "delivering" || (this.structuredHosts && previous.status === "pending"));
-      const beginning = (previous.status === "pending" || previous.status === "queued") && status === "delivering";
-      const completing = (previous.status === "pending" || previous.status === "queued" || previous.status === "delivering")
-        && status !== "delivering" && status !== "queued";
-      if (!queueing && !beginning && !completing) throw new Error("runtime operation transition is invalid");
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      const queueing = status === "queued"
+        && (previous.status === "delivering" || previous.status === "applying"
+          || (this.structuredHosts && previous.status === "pending"));
+      const beginning = (previous.status === "pending" || previous.status === "queued")
+        && (status === "delivering" || (command.kind === "reconfigure" && status === "applying"));
+      const completing = (previous.status === "pending" || previous.status === "queued"
+        || previous.status === "delivering" || previous.status === "applying")
+        && status !== "delivering" && status !== "applying" && status !== "queued";
+      if (!queueing && !beginning && !completing) throw new Error("runtime operation transition is invalid");
+      if ((status === "applying" || status === "applied") && command.kind !== "reconfigure") {
+        throw new Error("runtime operation transition is invalid");
+      }
+      const killBoundary = completing && command.kind === "kill" && status === "delivered"
+        ? this.db.query<{ event_seq: number }, [string]>("SELECT event_seq FROM outbox WHERE id = ?")
+          .get(`effect:${operationId}`)
+        : null;
+      if (completing && command.kind === "kill" && status === "delivered" && !killBoundary) {
+        throw new Error("runtime kill effect is missing");
+      }
       if (beginning && (command.kind === "send" || command.kind === "steer") && details.turnId !== undefined) {
         const effect = this.db.query<{ payload_json: string }, [string]>("SELECT payload_json FROM outbox WHERE id = ?")
           .get(`effect:${operationId}`);
@@ -487,6 +503,26 @@ export class RuntimeJournal {
       if (completing) this.appendCompletionConsequences(command, committed, operationId);
       this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ? WHERE operation_id = ?").run(stableJson(committed), event.seq, operationId);
       if (completing) this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?").run(`effect:${operationId}`);
+      if (killBoundary) {
+        this.db.query(`
+          INSERT INTO outbox(id, kind, payload_json, event_seq, state)
+          VALUES (?, 'runtime.kill-boundary', ?, ?, 'retained')
+          ON CONFLICT(id) DO UPDATE SET
+            kind = excluded.kind,
+            payload_json = excluded.payload_json,
+            event_seq = excluded.event_seq,
+            state = excluded.state
+          WHERE excluded.event_seq > outbox.event_seq
+        `).run(
+          `kill-boundary:${command.conversationId}`,
+          stableJson({
+            operationId,
+            conversationId: command.conversationId,
+            admissionEventSeq: killBoundary.event_seq,
+          }),
+          killBoundary.event_seq,
+        );
+      }
       this.db.exec("COMMIT");
       this.compactIfNeeded();
       this.notifyWaiters();
@@ -930,9 +966,12 @@ export class RuntimeJournal {
   effectBatch(limit = 100, kinds?: readonly string[], afterEventSeq = 0): Array<RuntimeEffect & { eventSeq: number }> {
     if (kinds?.length === 0) return [];
     if (!Number.isSafeInteger(afterEventSeq) || afterEventSeq < 0) throw new Error("runtime effect cursor is invalid");
+    const stateFilter = kinds?.includes("runtime.kill-boundary")
+      ? "(state = 'pending' OR (state = 'retained' AND kind = 'runtime.kill-boundary'))"
+      : "state = 'pending'";
     const kindFilter = kinds ? ` AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
     const rows = this.db.query<{ id: string; kind: string; payload_json: string; event_seq: number }, Array<string | number>>(
-      `SELECT id, kind, payload_json, event_seq FROM outbox WHERE state = 'pending'${kindFilter} AND event_seq > ? ORDER BY event_seq LIMIT ?`,
+      `SELECT id, kind, payload_json, event_seq FROM outbox WHERE ${stateFilter}${kindFilter} AND event_seq > ? ORDER BY event_seq LIMIT ?`,
     ).all(...(kinds ?? []), afterEventSeq, limit);
     return rows.map((row) => {
       const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
@@ -1038,10 +1077,10 @@ export class RuntimeJournal {
       if (!command.contentDigest) throw new Error("message content digest is required");
     }
     if (command.kind === "answer" && !command.attentionId.trim()) throw new Error("attentionId is required");
-    if (command.kind === "kill"
+    if ((command.kind === "kill" || (command.kind === "reconfigure" && command.sessionKey))
       && ((!command.sessionKey || (command.sessionKey.engine !== "codex" && command.sessionKey.engine !== "claude"))
         || !command.sessionKey.sessionId?.trim())) {
-      throw new Error("kill sessionKey is invalid");
+      throw new Error(`${command.kind} sessionKey is invalid`);
     }
     if (command.kind === "spawn"
       && (typeof command.cwd !== "string" || !command.cwd.trim() || typeof command.prompt !== "string")) {
@@ -1074,7 +1113,7 @@ export class RuntimeJournal {
       delete rest.contentDigest;
       return {
         ...rest,
-        prompt: normalized.content.text,
+        "prompt": normalized.content.text,
         ...(images.length ? { images } : {}),
         contentDigest: normalized.contentDigest,
       };
@@ -1230,6 +1269,25 @@ export class RuntimeJournal {
       }));
       return;
     }
+    if (command.kind === "reconfigure") {
+      this.appendInTransaction(normalizeRuntimeEventInput({
+        scope: { type: "session", id: command.conversationId },
+        kind: "session-status",
+        operationId,
+        producer: { ...producer, eventKey: `operation:${operationId}:reconfigure-queued` },
+        payload: {
+          conversationId: command.conversationId,
+          pendingReconfigure: {
+            operationId,
+            model: command.model,
+            effort: command.effort,
+            fast: command.fast,
+            ...(command.accountId ? { accountId: command.accountId } : {}),
+          },
+        },
+      }));
+      return;
+    }
     if (command.kind === "spawn") {
       const requestedParentConversationId = command.parentConversationId && command.parentConversationId !== command.conversationId
         ? command.parentConversationId
@@ -1283,8 +1341,73 @@ export class RuntimeJournal {
     }
   }
 
+  private failKilledGenerationReconfigures(
+    kill: Extract<RuntimeOperationCommand, { kind: "kill" }>,
+  ): void {
+    const pending = this.db.query<{
+      operation_id: string;
+      request_json: string;
+      receipt_json: string;
+    }, []>(`
+      SELECT operations.operation_id, operations.request_json, operations.receipt_json
+      FROM operations
+      JOIN outbox ON outbox.id = 'effect:' || operations.operation_id
+      WHERE outbox.state = 'pending' AND outbox.kind = 'runtime.reconfigure'
+      ORDER BY operations.event_seq
+    `).all();
+    for (const row of pending) {
+      const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      if (command.kind !== "reconfigure" || command.conversationId !== kill.conversationId) continue;
+      if (command.sessionKey
+        && (command.sessionKey.engine !== kill.sessionKey.engine
+          || command.sessionKey.sessionId !== kill.sessionKey.sessionId)) continue;
+      const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      const next: RuntimeOperationReceipt = {
+        ...previous,
+        status: "failed",
+        reason: "conversation-killed",
+        at: new Date(this.now()).toISOString(),
+        revision: previous.revision + 1,
+        ...(previous.presentationRevision !== undefined
+          ? { presentationRevision: previous.presentationRevision + 1 }
+          : {}),
+      };
+      const event = this.appendInTransaction(normalizeRuntimeEventInput({
+        scope: { type: "operation", id: row.operation_id },
+        kind: "receipt",
+        operationId: row.operation_id,
+        producer: {
+          kind: "runtime-effect",
+          eventKey: `operation:${row.operation_id}:receipt:${previous.revision + 1}:failed`,
+          hostEpoch: Number(this.meta("host_epoch")),
+        },
+        payload: next as unknown as Record<string, unknown>,
+      }));
+      const committed = { ...next, revision: event.revision };
+      this.upsertEntity("operation", row.operation_id, event.revision, committed, event.seq);
+      this.appendCompletionConsequences(command, committed, row.operation_id);
+      this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ? WHERE operation_id = ?")
+        .run(stableJson(committed), event.seq, row.operation_id);
+      this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?")
+        .run(`effect:${row.operation_id}`);
+    }
+  }
+
   private appendCompletionConsequences(command: RuntimeOperationCommand, receipt: RuntimeOperationReceipt, operationId: string): void {
     const producer = { kind: "runtime-effect", hostEpoch: Number(this.meta("host_epoch")) };
+    if (command.kind === "reconfigure" && (receipt.status === "applied" || receipt.status === "failed")) {
+      const session = this.entity<RuntimeSession>("session", command.conversationId);
+      if (session?.pendingReconfigure?.operationId === operationId) {
+        this.appendInTransaction(normalizeRuntimeEventInput({
+          scope: { type: "session", id: command.conversationId },
+          kind: "session-status",
+          operationId,
+          producer: { ...producer, eventKey: `operation:${operationId}:reconfigure-${receipt.status}` },
+          payload: { conversationId: command.conversationId, pendingReconfigure: null },
+        }));
+      }
+      return;
+    }
     if (command.kind === "spawn"
       && !command.sessionId
       && (receipt.status === "failed" || receipt.status === "rejected" || receipt.status === "uncertain")) {
@@ -1314,6 +1437,7 @@ export class RuntimeJournal {
       return;
     }
     if (command.kind === "kill" && receipt.status === "delivered") {
+      this.failKilledGenerationReconfigures(command);
       /* The delivered kill receipt asserts the OS processes are gone. Viewer
          projections ride best-effort publish chains, so the journal converges
          host/turn itself — production #367 kept killed conversations at
@@ -1512,14 +1636,14 @@ export class RuntimeJournal {
   }
 
   private decryptSecret(value: unknown): unknown {
-    const secret = record(value) as Partial<EncryptedSecret>;
-    if (secret.__runtimeEncrypted !== 1 || typeof secret.iv !== "string" || typeof secret.tag !== "string" || typeof secret.ciphertext !== "string") {
+    const encrypted = record(value) as Partial<EncryptedSecret>;
+    if (encrypted.__runtimeEncrypted !== 1 || typeof encrypted.iv !== "string" || typeof encrypted.tag !== "string" || typeof encrypted.ciphertext !== "string") {
       throw new RuntimeJournalFault("runtime operation secret is invalid");
     }
     try {
-      const decipher = createDecipheriv("aes-256-gcm", this.secretKey, Buffer.from(secret.iv, "base64"));
-      decipher.setAuthTag(Buffer.from(secret.tag, "base64"));
-      const plaintext = Buffer.concat([decipher.update(Buffer.from(secret.ciphertext, "base64")), decipher.final()]).toString("utf8");
+      const decipher = createDecipheriv("aes-256-gcm", this.secretKey, Buffer.from(encrypted.iv, "base64"));
+      decipher.setAuthTag(Buffer.from(encrypted.tag, "base64"));
+      const plaintext = Buffer.concat([decipher.update(Buffer.from(encrypted.ciphertext, "base64")), decipher.final()]).toString("utf8");
       return JSON.parse(plaintext) as unknown;
     } catch {
       throw new RuntimeJournalFault("runtime operation secret cannot be decrypted");

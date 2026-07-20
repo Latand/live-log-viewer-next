@@ -1,6 +1,6 @@
 import { roleNameById } from "@/components/builderCopy";
 import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
-import { currentMemberPath } from "@/lib/accounts/identity";
+import { currentConversationFile, currentMemberPath, isArchivedPredecessor } from "@/lib/accounts/identity";
 import { applyPipelineSnapshot, revertPipelineSnapshot } from "@/hooks/useFiles";
 import { getLocale, translate, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -26,6 +26,7 @@ import type {
   PatchPipelineRequest,
   StageVerdictStatus,
 } from "@/lib/pipelines/types";
+import { latestOperationalStageAttempt } from "@/lib/pipelines/attemptSelection";
 
 import { PIPELINES_CHANGED_EVENT } from "./pipelineEvents";
 
@@ -190,7 +191,7 @@ export const STAGE_GLYPH: Record<StageChipState, string> = {
 };
 
 export function latestAttempt(pipeline: Pipeline, stageId: string): PipelineStageAttempt | null {
-  return pipeline.runs.find((run) => run.stageId === stageId)?.attempts.at(-1) ?? null;
+  return latestOperationalStageAttempt(pipeline, stageId);
 }
 
 export function stageAttempts(pipeline: Pipeline, stageId: string): PipelineStageAttempt[] {
@@ -319,6 +320,14 @@ export function pipelineLinkedTasks(
   flows: readonly Flow[] = [],
   files: readonly FileEntry[] = [],
 ): BoardTask[] {
+  const taskIds = (pipeline as Pipeline & { taskIds?: readonly string[] }).taskIds;
+  if (taskIds?.length) {
+    const byId = new Map(tasks.map((task) => [task.id, task] as const));
+    return taskIds.flatMap((id) => {
+      const task = byId.get(id);
+      return task ? [task] : [];
+    });
+  }
   const { paths, conversationIds } = pipelineLineage(pipeline, flows, files);
   if (!paths.size && !conversationIds.size) return [];
   return tasks.filter((task) =>
@@ -446,6 +455,47 @@ export function stageOpenTarget(
   return { kind: "path", path: attempt.agentPath };
 }
 
+/** What a stage-graph attempt points at for navigation: its stable conversation
+    id (when the launch adopted one) alongside the transcript path recorded at
+    launch. Either alone is enough to open the attempt — a path-only attempt (no
+    adopted id yet) still resolves through `agentPath`. */
+export type StageNavTarget = { conversationId: string | null; agentPath: string | null };
+
+/** The navigation target for a stage attempt, or null when the attempt carries
+    neither a conversation id nor a transcript path (a pending ghost with nothing
+    to open). Both a materialized run and a path-only launch are navigable. */
+export function attemptNavTarget(attempt: PipelineStageAttempt | null): StageNavTarget | null {
+  if (!attempt) return null;
+  if (!attempt.conversationId && !attempt.agentPath) return null;
+  return { conversationId: attempt.conversationId, agentPath: attempt.agentPath };
+}
+
+/** Resolve a stage-graph navigation target to the file its card should open.
+    Precedence is strict: the stored conversation id resolves ONLY to its CURRENT
+    (non-archived) generation — never to a folded predecessor — so a migrated
+    attempt opens the live card; an id that survives only as an archived
+    predecessor (its successor left the scan) yields nothing and the target then
+    evaluates its `agentPath` fallback. A path-only attempt (no adopted id) and a
+    recorded path that itself became an archived predecessor both resolve through
+    `agentPath`, which redirects a folded path to its live generation. Returns
+    null when nothing in the scanned file set matches yet — the caller leaves the
+    click a no-op rather than opening a stale transcript. */
+export function resolveStageNavFile(target: StageNavTarget | null, files: readonly FileEntry[]): FileEntry | null {
+  if (!target) return null;
+  if (target.conversationId) {
+    /* Only a live (non-archived) generation counts; currentConversationFile
+       falls back to the archived predecessor when no successor is in scan, so
+       reject that here and let agentPath take over. */
+    const current = currentConversationFile(files, target.conversationId);
+    if (current && !isArchivedPredecessor(current)) return current;
+  }
+  if (target.agentPath) {
+    const path = currentMemberPath(target.agentPath, null, files);
+    if (path) return files.find((entry) => entry.path === path) ?? null;
+  }
+  return null;
+}
+
 /** Resolve compact history after pipeline review decks leave the board. */
 export function compactStageOpenTarget(
   stage: PipelineStage,
@@ -467,6 +517,28 @@ export function compactStageOpenTarget(
     if (reviewerPath) return { kind: "path", path: reviewerPath };
   }
   if (!renderablePaths || renderablePaths.has(flow.implementerPath)) return { kind: "path", path: flow.implementerPath };
+  return null;
+}
+
+/** First navigable artifact for a compact pipeline, newest stage first. */
+export function compactPipelineOpenTarget(
+  pipeline: Pipeline,
+  flows: readonly Flow[],
+  renderableFlows?: ReadonlySet<string>,
+  renderablePaths?: ReadonlySet<string>,
+  files: readonly FileEntry[] = [],
+): { kind: "flow"; flowId: string } | { kind: "path"; path: string } | null {
+  for (const stage of [...pipeline.stages].reverse()) {
+    const target = compactStageOpenTarget(
+      stage,
+      latestAttempt(pipeline, stage.id),
+      flows,
+      renderableFlows,
+      renderablePaths,
+      files,
+    );
+    if (target) return target;
+  }
   return null;
 }
 
@@ -499,7 +571,7 @@ export function stageHasNavigableHistory(
   if (!attempt) return false;
   const pathAvailable = (path: string) => !availablePaths || availablePaths.has(path);
   const attempts = stageAttempts(pipeline, stage.id);
-  if (attempts.some((prior) => prior.n < attempt.n && Boolean(prior.agentPath && pathAvailable(prior.agentPath)))) return true;
+  if (attempts.some((candidate) => candidate.n !== attempt.n && Boolean(candidate.agentPath && pathAvailable(candidate.agentPath)))) return true;
 
   const flowIds = new Set(attempts.flatMap((item) => item.flowId ? [item.flowId] : []));
   const attemptPaths = new Set(attempts.flatMap((item) => item.agentPath ? [item.agentPath] : []));
@@ -626,7 +698,7 @@ export type DraftStage = {
   model: string;
   effort: string;
   access: PipelineAccess;
-  prompt: string;
+  "prompt": string;
   roleParams: Record<string, string | number>;
   /** The operator edited engine/model/effort by hand, so role/param autofill must
       no longer clobber the runtime. Selecting a role preserves the pin (design
@@ -806,7 +878,7 @@ export function draftStagesToInput(drafts: DraftStage[]): PipelineStageInput[] {
           }
         : {}),
       ...(draft.kind === "review-loop" ? {} : { access: draft.access }),
-      prompt: draft.prompt,
+      "prompt": draft.prompt,
       next: ids[index + 1] ?? null,
     };
   });
@@ -885,7 +957,7 @@ export function templateStageInputs(template: PipelineTemplate): PipelineStageIn
       model: "",
       effort: "",
       access: stage.access,
-      prompt: stage.prompt,
+      "prompt": stage.prompt,
       roleParams: {},
     })),
   );
@@ -1001,7 +1073,10 @@ export function stageFailEdgeRoundsUsed(pipeline: Pipeline, stage: PipelineStage
   if (!stage.onFail) return 0;
   const target = pipeline.runs.find((run) => run.stageId === stage.onFail!.to);
   if (!target) return 0;
-  return target.attempts.filter((attempt) => attempt.activatedBy?.edge === "fail" && attempt.activatedBy.stageId === stage.id).length;
+  return target.attempts.filter((attempt) =>
+    !attempt.historical
+    && attempt.activatedBy?.edge === "fail"
+    && attempt.activatedBy.stageId === stage.id).length;
 }
 
 /**

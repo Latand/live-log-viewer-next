@@ -1,6 +1,6 @@
 "use client";
 
-import { List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2 } from "lucide-react";
+import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
@@ -372,6 +372,10 @@ export function ProjectDashboard({
      footer shelf can dock that pane's handoff control on its single row (issue
      #177 item 5). */
   const [mobileActiveFile, setMobileActiveFile] = useState<FileEntry | null>(null);
+  /* Chat-first (issue #419 reopened): on the phone the handoff/hidden/readiness
+     shelf reserves ZERO bottom rows — a compact header trigger opens it as an
+     overlay sheet instead, so the focused chat keeps its viewport budget. */
+  const [shelfOpen, setShelfOpen] = useState(false);
   /* Desktop `+ Task`: bump drops the inline sticky composer in a free slot on
      the board (pinned near the button). */
   const [newTaskNonce, setNewTaskNonce] = useState(0);
@@ -808,6 +812,39 @@ export function ProjectDashboard({
     openTaskOnBoard(task.id);
   };
 
+  useEffect(() => {
+    const navigate = (rawEvent: Event) => {
+      const detail = (rawEvent as CustomEvent<{ kind?: string; id?: string }>).detail;
+      const id = detail?.id?.trim();
+      if (!id) return;
+      if (detail.kind === "task") {
+        const task = tasks.find((candidate) => candidate.id === id);
+        if (task) openTask(task);
+        return;
+      }
+      if (detail.kind !== "pipeline") return;
+      const pipeline = pipelines.find((candidate) => candidate.id === id);
+      if (!pipeline) return;
+      if (pipeline.project !== project) {
+        sessionStorage.setItem("llvPipelineFocus", id);
+        gotoProject(pipeline.project);
+        return;
+      }
+      onUserNavigate?.();
+      setBuilderPipelineId(id);
+    };
+    window.addEventListener("llv:mcp-navigate", navigate);
+    return () => window.removeEventListener("llv:mcp-navigate", navigate);
+  });
+
+  useEffect(() => {
+    const pending = sessionStorage.getItem("llvPipelineFocus");
+    if (!pending || !pipelines.some((pipeline) => pipeline.id === pending && pipeline.project === project)) return;
+    sessionStorage.removeItem("llvPipelineFocus");
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- cross-project MCP link reveal */
+    setBuilderPipelineId(pending);
+  }, [pipelines, project]);
+
   /* Desktop `+ Task`: drop the inline sticky composer in a free slot near the
      button (the board resolves the world anchor + findFreeSlot). Voice, images
      and a deadline all live in that on-board composer. */
@@ -851,8 +888,8 @@ export function ProjectDashboard({
   };
 
   /* `+ Пайплайн` (#136, #196, #388): the picker admits a repository before it
-     creates a DRAFT. The draft opens in the screen-space shelf, where the full
-     role chain and shared editor remain available before the first run. */
+     creates a DRAFT. Its world-space PipelineGroup opens with the full role
+     chain and shared editor before the first run. */
   const addPipelineDraft = async (template: PipelineTemplate | null, repoDir: string) => {
     onUserNavigate?.();
     return createDraftPipeline(project, repoDir, template ?? undefined);
@@ -1137,9 +1174,8 @@ export function ProjectDashboard({
      canvas instead of hanging as lone stub nodes in the middle of it. */
   const dockedTasks = visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
   const schemeGroups = visibleGroups.filter((group) => !group.orphanTask);
-  /* Active pipelines for this project keep the scheme available before the
-     first stage transcript lands. Memberless drafts use the screen-space shelf;
-     materialized pipelines retain their world-space group halo. */
+  /* Active pipelines keep the scheme available before the first transcript;
+     SchemeBoard anchors their world-space PipelineGroups beside linked tasks. */
   const activePipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
   const visibleDrafts = drafts.filter((id) => !pendingRestoredHandoffs.has(id));
   const hasNodes =
@@ -1227,13 +1263,22 @@ export function ProjectDashboard({
     viewBus.reportSlice({ mode, focusedPath: null, selectedPaths: [], visiblePaths, camera: null });
   }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile]);
 
+  /* Shelf totals for the phone header trigger (issue #419 reopened). The full
+     strips live in the overlay the trigger opens; here we only need the count
+     and whether the focused conversation can be handed off, so the trigger can
+     decide to appear and badge itself without building the strips twice. */
+  const shelfHiddenTotal =
+    workerStacks.reduce((sum, stack) => sum + stack.items.length, 0) + launchHistory.length + projectTasks.length + (!hasArchiveNodes ? residual.length : 0);
+  const shelfHandoffFile = isMobile && projectView === "scheme" && mobileActiveFile && canHandoff(mobileActiveFile) ? mobileActiveFile : null;
+  const shelfHasContent = isMobile && boardReady && (shelfHiddenTotal > 0 || Boolean(shelfHandoffFile));
+
   return (
     <FavoritesProvider value={favoritesApi}>
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <div
         className={
           isMobile
-            ? "flex min-h-[52px] shrink-0 items-center gap-1.5 border-b border-border bg-card px-2 py-1.5"
+            ? "flex min-h-[52px] shrink-0 items-center gap-1 border-b border-border bg-card px-2 py-1.5"
             : "flex h-10 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4"
         }
       >
@@ -1249,7 +1294,12 @@ export function ProjectDashboard({
             <Menu className={isMobile ? "h-5 w-5" : "h-4 w-4"} aria-hidden />
           </button>
         ) : null}
-        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 flex-1" : ""}`} title={project}>{projectDisplayName(project)}</h1>
+        {/* The project name takes priority on the phone (issue #419 finding 2):
+            it shows in full (short names like «atlas» never compress to «a…»),
+            capped at 45vw so a very long name truncates instead of overflowing.
+            The attention filler beside it yields the slack. Desktop keeps its
+            natural width. */}
+        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 shrink-0 max-w-[45vw]" : ""}`} title={project}>{projectDisplayName(project)}</h1>
         <BoardHistoryControls
           canUndo={history.canUndo}
           canRedo={history.canRedo}
@@ -1266,7 +1316,29 @@ export function ProjectDashboard({
                 actions collapse into one `+` menu, and the secondary project
                 actions into a `⋯` menu — every control is a 44px hit target. */}
             {viewToggle ? <ProjectViewTabs value={projectView} onChange={chooseEmptyView} header /> : null}
-            <span className="min-w-0 max-w-[42vw] shrink truncate">{attention}</span>
+            {/* Flexible filler beside the prioritized title: absorbs the slack
+                and shrinks/truncates first so the row never overflows and the
+                project name keeps its width (issue #419 finding 2). */}
+            <span className="min-w-0 flex-1 shrink truncate">{attention}</span>
+            {/* Handoff/hidden/readiness access as a compact header trigger (issue
+                #419 reopened) — the focused chat below reserves no bottom row for
+                it; a tap opens the overlay sheet. */}
+            {shelfHasContent ? (
+              <button
+                type="button"
+                data-testid="mobile-shelf-trigger"
+                aria-haspopup="dialog"
+                aria-expanded={shelfOpen}
+                aria-label={t("dash.hiddenShelf")}
+                onClick={() => setShelfOpen(true)}
+                className="relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <Layers className="h-4 w-4" aria-hidden />
+                {shelfHiddenTotal > 0 ? (
+                  <span className="absolute -right-0.5 -top-0.5 rounded-full bg-accent/10 px-1 text-[10px] font-bold tabular-nums text-accent">{shelfHiddenTotal}</span>
+                ) : null}
+              </button>
+            ) : null}
             <HeaderMenu triggerLabel={t("dash.createMenu")} icon={<Plus className="h-5 w-5" aria-hidden />}>
               {(close) => (
                 <>
@@ -1542,6 +1614,17 @@ export function ProjectDashboard({
            just the canvas-folded subset — so the shelf badge stays truthful. */
         const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0) + launchHistory.length + projectTasks.length;
         const quietTotal = !hasArchiveNodes ? residual.length : 0;
+        /* Every shelf action is TERMINAL — it navigates to a board card, another
+           project, or a fresh draft that lives BEHIND the overlay. On the phone
+           the shelf is a modal (issue #419): leaving it open after a terminal
+           action would strand the target under the sheet with the body scroll
+           still locked. So on mobile each terminal callback first closes the
+           shelf (unmounting the modal restores focus and unlocks the body via
+           its own lifecycle), then runs. Desktop renders the strips inline with
+           no modal, so the callbacks pass through untouched. Internal disclosure
+           toggles live inside the strips' own state and are never wrapped. */
+        const closeShelfThen = <A extends unknown[]>(fn: (...args: A) => void) =>
+          isMobile ? (...args: A) => { setShelfOpen(false); fn(...args); } : fn;
         const strips = (
           <>
             <TaskReadinessStrip
@@ -1551,24 +1634,24 @@ export function ProjectDashboard({
               flows={deckFlows}
               conversationAliases={conversationAliases}
               repository={projectCatalogEntries.find((entry) => entry.project === project)?.repository ?? null}
-              onOpenTask={openTask}
+              onOpenTask={closeShelfThen(openTask)}
               onPlaceOnMap={isMobile ? undefined : placeOnMap}
-              onOpenFile={openSwitchboardFile}
+              onOpenFile={closeShelfThen(openSwitchboardFile)}
             />
-            <LaunchHistory items={launchHistory} onRetry={retryLaunch} />
-            <WorkerStacks stacks={workerStacks} files={files} flows={deckFlows} pipelines={pipelines} onSelect={openSwitchboardFile} onExpandGroup={expandReviewGroup} />
+            <LaunchHistory items={launchHistory} onRetry={closeShelfThen(retryLaunch)} />
+            <WorkerStacks stacks={workerStacks} files={files} flows={deckFlows} pipelines={pipelines} onSelect={closeShelfThen(openSwitchboardFile)} onExpandGroup={closeShelfThen(expandReviewGroup)} />
             {!hasArchiveNodes && residual.length ? (
-              <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
+              <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={closeShelfThen(openSwitchboardFile)} />
             ) : null}
           </>
         );
         if (!isMobile) return strips;
-        /* Only the scheme focus view has a focused conversation to hand off; the
-           list view and empty states dock no handoff. */
-        const handoffFile = projectView === "scheme" && mobileActiveFile && canHandoff(mobileActiveFile) ? mobileActiveFile : null;
-        const leading = handoffFile ? <HandoffHandle file={handoffFile} onHandoff={() => addHandoffDraft(handoffFile)} inline /> : null;
+        /* Chat-first (issue #419 reopened): the phone shelf reserves no bottom
+           row — it opens as an overlay sheet from the header trigger, folding the
+           handoff plus both hidden strips behind one compact disclosure. */
+        const leading = shelfHandoffFile ? <HandoffHandle file={shelfHandoffFile} onHandoff={() => { setShelfOpen(false); addHandoffDraft(shelfHandoffFile); }} inline /> : null;
         return (
-          <MobileBottomShelf total={workerTotal + quietTotal} leading={leading}>
+          <MobileBottomShelf open={shelfOpen} onClose={() => setShelfOpen(false)} total={workerTotal + quietTotal} leading={leading}>
             {strips}
           </MobileBottomShelf>
         );

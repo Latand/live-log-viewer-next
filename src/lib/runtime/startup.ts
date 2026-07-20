@@ -43,6 +43,7 @@ const STRUCTURED_HOST_OPERATION_EFFECT_KINDS = [
   "runtime.interrupt",
   "runtime.answer",
   "runtime.spawn",
+  "runtime.reconfigure",
 ] as const;
 
 interface StructuredStartupSignals {
@@ -137,7 +138,8 @@ async function structuredStartupSignals(
   const pendingOperationConversationIds = new Set(runtime.recentOperations
     .filter((receipt) => receipt.status === "pending"
       || receipt.status === "queued"
-      || receipt.status === "delivering")
+      || receipt.status === "delivering"
+      || receipt.status === "applying")
     .filter((receipt) => receipt.kind !== "kill")
     .map((receipt) => canonicalConversationId(registry, receipt.conversationId)));
   let afterEventSeq = 0;

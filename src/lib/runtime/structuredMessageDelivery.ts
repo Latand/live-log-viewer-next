@@ -453,6 +453,25 @@ export async function enqueueStructuredMessage(
      recovery of a retired round would silently fork it (issue #383). */
   const rejected = supersededRejection(registry, registry.conversation(session.conversationId as ViewerConversationId));
   if (rejected) return rejected;
+  const conversation = registry.conversation(session.conversationId as ViewerConversationId);
+  if (!conversation) return ownershipUnavailable();
+  const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
+  if ((session.host === "dead" || session.host === "unhosted") && !wantsImages) {
+    try {
+      const content = structuredContent(request.text, []);
+      registry.holdDelivery(
+        conversation.id,
+        content.content.text,
+        idempotencyKey,
+        "text",
+        [],
+        content.contentDigest,
+        commandInput(request),
+      );
+    } catch (error) {
+      return deliveryFailure(error);
+    }
+  }
   let recoveredHost = false;
   /* Ownership recovery comes BEFORE capability evaluation: a dead projection
      carries no image capability, and judging the payload against it would 409
@@ -494,8 +513,6 @@ export async function enqueueStructuredMessage(
   if (encodedImageBytes > imageCapability.maxEncodedBytesPerRequest) {
     return { ok: false, structured: true, outcome: "failed", error: "runtime image request encoding is too large", status: 413 };
   }
-  const conversation = registry.conversation(session.conversationId as ViewerConversationId);
-  if (!conversation) return ownershipUnavailable();
   try {
     if (rawImages.length > 0 && suppliedRefs.length > 0) throw new Error("structured image payload is ambiguous");
     /* Conflict preflight computes candidate refs and digest before writing.
@@ -506,7 +523,6 @@ export async function enqueueStructuredMessage(
       ? suppliedRefs
       : (dependencies.previewImageRefs ?? runtimeImageRefsForUploads)(rawImages);
     const content = structuredContent(request.text, refs);
-    const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
     const admissionKey = request.clientMessageId?.trim()
       ? `${conversation.id} ${request.clientMessageId.trim()}`
       : null;

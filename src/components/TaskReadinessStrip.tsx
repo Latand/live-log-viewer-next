@@ -8,6 +8,7 @@ import { SectionHeader } from "@/components/ui/SectionHeader";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { Flow } from "@/lib/flows/types";
+import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
@@ -65,12 +66,12 @@ function TaskChip({
   const decoration = assignmentDecoration(task, byPath);
   const issues = issueRefs(task.text);
   const links = taskLinks(task, index);
-  /* One navigation chip per linked container: the pipeline's latest attempt
-     transcript / the flow's latest reviewer (implementer fallback), resolved
-     against the current scan — a vanished worktree simply drops the chip. */
+  /* One navigation chip per linked container: the pipeline's latest operational
+     attempt transcript / the flow's latest reviewer (implementer fallback),
+     resolved against the current scan — a vanished worktree drops the chip. */
   const pipelineFile = links.pipelines
-    .flatMap((pipeline) => pipeline.runs.flatMap((run) => run.attempts))
-    .map((attempt) => (attempt.agentPath ? byPath.get(attempt.agentPath) : undefined))
+    .map((pipeline) => latestOperationalPipelineAttempt(pipeline))
+    .map((attempt) => (attempt?.agentPath ? byPath.get(attempt.agentPath) : undefined))
     .filter((file): file is FileEntry => file !== undefined)
     .at(-1);
   const reviewFile = links.flows

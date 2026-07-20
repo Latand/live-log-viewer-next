@@ -6,6 +6,6 @@
  * worker stacks. So collapsed worker stacks count toward map availability — not
  * only having more than one navigable node.
  */
-export function mapReachable(nodeCount: number, workerStackCount: number): boolean {
-  return nodeCount > 1 || workerStackCount > 0;
+export function mapReachable(nodeCount: number, workerStackCount: number, pipelineCount = 0): boolean {
+  return nodeCount > 1 || workerStackCount > 0 || pipelineCount > 0;
 }

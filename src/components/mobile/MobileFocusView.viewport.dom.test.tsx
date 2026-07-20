@@ -110,26 +110,50 @@ function view() {
   );
 }
 
-test("a focused conversation collapses several pipelines into one summary row with live counts (#419)", async () => {
+test("a focused conversation reserves ZERO bottom rows: pipelines ride a compact top-strip trigger (#419)", async () => {
   roots.push(mount(view()));
   await settle();
 
-  const summary = dom.document.querySelector('[data-testid="mobile-pipeline-summary"]');
+  const shell = dom.document.querySelector('[data-testid="mobile-chat-shell"]')!;
+  const summary = shell.querySelector('[data-testid="mobile-pipeline-summary"]') as unknown as HTMLElement;
   expect(summary).not.toBeNull();
-  /* One summary row, never a row per pipeline. */
+  /* One trigger, never a row per pipeline, and no dock rail mounted inline. */
   expect(dom.document.querySelectorAll('[data-testid="mobile-pipeline-summary"]').length).toBe(1);
   expect(dom.document.querySelector('[data-testid="mobile-pipeline-dock"]')).toBeNull();
-  /* Counts: 3 total, 1 active, 2 done. */
-  expect(summary!.textContent).toContain("3 pipelines");
-  expect(summary!.textContent).toContain("1 active");
-  expect(summary!.textContent).toContain("2 done");
+
+  /* It is a compact icon trigger, NOT a persistent full-width bottom row. */
+  expect(summary.tagName).toBe("BUTTON");
+  expect(summary.className).toContain("min-w-11");
+  expect(summary.className).not.toContain("w-full");
+
+  /* And it sits in the top strip — ahead of the transcript pane in DOM order —
+     so nothing steals height below the chat. */
+  const pane = shell.querySelector("textarea") as unknown as Node;
+  expect(summary.compareDocumentPosition(pane) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  /* The full count summary is preserved for screen readers on the label. */
+  expect(summary.getAttribute("aria-label")).toContain("3 pipelines");
+  expect(summary.getAttribute("aria-label")).toContain("1 active");
+  expect(summary.getAttribute("aria-label")).toContain("2 done");
+
+  /* The focused chat mounts no bottom-shelf row of its own either. */
+  expect(shell.querySelector('[data-testid="mobile-bottom-shelf"]')).toBeNull();
+});
+
+test("the top-strip pipelines trigger opens the sheet with the full rails (#419)", async () => {
+  roots.push(mount(view()));
+  await settle();
+  const summary = dom.document.querySelector('[data-testid="mobile-pipeline-summary"]') as unknown as HTMLButtonElement;
+  flushSync(() => summary.click());
+  await settle();
+  expect(dom.document.querySelector('[data-testid="mobile-pipeline-sheet"]')).not.toBeNull();
 });
 
 test("the focused chat is one 100dvh-bounded shell whose pane owns the remaining height (#440)", async () => {
   roots.push(mount(view()));
   await settle();
 
-  const shell = dom.document.querySelector('[data-testid="mobile-focused-chat-shell"]') as HTMLElement | null;
+  const shell = dom.document.querySelector('[data-testid="mobile-chat-shell"]') as HTMLElement | null;
   expect(shell).not.toBeNull();
   expect(shell!.className).toContain("h-full");
   expect(shell!.className).toContain("max-h-[100dvh]");
@@ -182,6 +206,18 @@ test("the sheet folds completed pipelines behind one reversible disclosure (#419
   flushSync(() => toggle.click());
   await settle();
   expect(sheet.querySelectorAll('[data-testid="mobile-pipeline-dock"]').length).toBe(1);
+});
+
+test("the focus shell stamps the chat-first transcript budget onto the DOM it governs (#419)", async () => {
+  roots.push(mount(view()));
+  await settle();
+
+  const shell = dom.document.querySelector('[data-testid="mobile-chat-shell"]')!;
+  /* The transcript's guaranteed viewport share travels with the shell root, and
+     the root keeps the #353 horizontal-overflow clip. */
+  expect(Number(shell.getAttribute("data-chat-min-share"))).toBeGreaterThanOrEqual(0.6);
+  expect(shell.className).toContain("overflow-x-clip");
+  expect(shell.className).toContain("max-w-[100dvw]");
 });
 
 test("opening and closing the map never remounts the focused pane", async () => {

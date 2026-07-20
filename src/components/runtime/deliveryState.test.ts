@@ -33,11 +33,13 @@ test("every receipt status maps to exactly one surfacing class", () => {
   const classes: Record<ReceiptStatus, "active" | "resolved" | "problem"> = {
     pending: "active",
     delivering: "active",
+    applying: "active",
     queued: "active",
     uncertain: "active",
     "turn-started": "resolved",
     steered: "resolved",
     delivered: "resolved",
+    applied: "resolved",
     answered: "resolved",
     interrupted: "resolved",
     rejected: "problem",

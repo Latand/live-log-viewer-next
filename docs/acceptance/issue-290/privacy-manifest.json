@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "readiness-kanban.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "4bbee6dd05cd6ea991910ccb602e6eebe97160678a987fcbd82906635e9a4ff5"
+      ],
+      "description": "Redacted placeholder retaining the readiness Kanban acceptance viewport.",
+      "sha256": "5c6a3608b10f0c03486a4c30e14ed3c53c66da9041469fe06175c3259753a830"
+    }
+  ]
+}

@@ -760,9 +760,12 @@ export function TmuxComposer({
   // path at all, so the whole composer stands down below (finding 2).
   const { caps, structuredSession } = useAgentCapabilities(file);
   const structuredImageCapability = structuredSession?.session.capabilities?.imageInput;
-  const structuredImagesDisabled = Boolean(structuredSession && !structuredImageCapability?.supported);
+  const structuredImageControl = caps.controls.images;
+  const structuredImagesDisabled = Boolean(structuredSession && structuredImageControl.state !== "enabled");
   const structuredImagesReason = structuredImagesDisabled
-    ? t("composer.structuredImagesProtocol")
+    ? t(structuredImageControl.state === "disabled"
+      ? structuredImageControl.reason
+      : "composer.structuredImagesProtocol")
     : undefined;
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of
@@ -944,9 +947,9 @@ export function TmuxComposer({
   // A surface whose Send capability is hidden exposes NO message surface — no
   // Send, quick-ack, mic, or image path, and fires zero requests. This gates the
   // gated scanner-shaped subagent (inert row) that `canMessageWithoutPane` would
-  // otherwise treat as resumable and let POST /api/tmux (finding 2). Dead and
-  // unresolved hosts keep a *disabled* Send (not hidden), so their composer stays
-  // visible-but-blocked via `deadHost`/`sendBlockedReason`.
+  // otherwise treat as resumable and let POST /api/tmux (finding 2). Unresolved
+  // hosts keep a disabled Send. Durable structured ownership keeps text-only
+  // dead-host drafts usable through recovery admission.
   if (caps.controls.send.state === "hidden") return null;
   const resumable = canMessageWithoutPane(file);
   if (target === null && !resumable) return null;
@@ -965,11 +968,14 @@ export function TmuxComposer({
        still sends and later clears the same set. */
     const sentImages: PendingImage[] = attachments.imagesRef.current.map((image) => ({ ...image }));
     if (busy || voiceSending || (!payloadText.trim() && !sentImages.length)) return;
-    /* Dead host (§5): the draft survives but no POST is attempted, so no new
-       `rejected: dead-host` receipts can stack. The banner is the single source
-       of the bad news; the composer only says why Send is inert. */
-    if (deadHost) {
+    /* A legacy dead host keeps its draft local. Structured ownership admits a
+       text-only message durably and uses that request to recover its engine host. */
+    if (deadHost && !structuredSession) {
       setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
+      return;
+    }
+    if (structuredSession && structuredImagesDisabled && sentImages.length) {
+      setStatus({ kind: "err", text: structuredImagesReason! });
       return;
     }
     /* Host not yet resolved under the runtime plane: block the POST so a
@@ -981,7 +987,9 @@ export function TmuxComposer({
     }
     if (structuredSession && sentImages.length && !attachments.validate()) return;
     setBusy(true);
-    setStatus(null);
+    setStatus(deadHost
+      ? { kind: "info", text: t("composer.receiptRecovering") }
+      : null);
     /* Idempotency key: the backend can dedupe a retried held/failed delivery
        against this id so the successor never receives the same prompt twice. */
     const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
@@ -1237,12 +1245,12 @@ export function TmuxComposer({
   /* Mode chip, interrupt, compact, and attach-terminal now live in the unified
      control strip (issue #241); the composer no longer renders them. */
 
-  /* The main send surface is inert on a dead host (§5) or an unresolved host
-     (finding 1); quick-ack calls the same `send()`, so it must obey the same
-     block — otherwise the menu offers a control whose POST the inner guard
-     silently swallows (round-3 finding). Blocked ⇒ the action leaves the menu
-     entirely, so neither pointer nor keyboard can reach an enabled quick-ack. */
-  const sendBlocked = deadHost || Boolean(sendBlockedReason);
+  /* The main send surface stays inert for legacy dead hosts and unresolved
+     ownership. Structured dead hosts use durable text-only recovery admission.
+     Quick-ack calls the same `send()`, so it obeys the same block and leaves the
+     menu when blocked (round-3 finding). */
+  const deadHostBlocksSend = deadHost && !structuredSession;
+  const sendBlocked = deadHostBlocksSend || Boolean(sendBlockedReason);
   const canQuickAck = (!spawnMode || relayMode) && !sendBlocked;
   const quickAckDisabled = busy || voiceSending || attachments.images.length > 0;
 
@@ -1250,8 +1258,14 @@ export function TmuxComposer({
     <form
       onSubmit={handleSubmit}
       data-testid={isMobile ? "bounded-mobile-composer" : undefined}
-      className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2 ${
-        isMobile ? "max-h-[min(38dvh,20rem)] overflow-x-clip overflow-y-auto overscroll-y-contain" : ""
+      /* Chat-first mobile budget (issue #419): the phone composer is a single
+         input row with its secondary controls folded, so it takes the tighter
+         vertical padding — every reclaimed row keeps the transcript above its
+         ≥60% viewport share. Desktop keeps the roomier py-2. */
+      className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 ${
+        isMobile
+          ? "max-h-[min(38dvh,20rem)] overflow-x-clip overflow-y-auto overscroll-y-contain py-1.5"
+          : "py-2"
       }`}
       aria-label={structuredSession ? t("composer.sendStructuredAria") : spawnMode ? t("composer.spawnAria") : t("composer.sendAria", { target: target ?? "" })}
     >
@@ -1369,15 +1383,15 @@ export function TmuxComposer({
               ]
             : []
         }
-        showImage={!deadHost}
+        showImage={!deadHostBlocksSend}
         imageDisabled={structuredImagesDisabled}
         imageDisabledReason={structuredImagesReason}
-        sendDisabledReason={deadHost ? t("deadHost.sendBlocked") : sendBlockedReason ?? undefined}
+        sendDisabledReason={deadHostBlocksSend ? t("deadHost.sendBlocked") : sendBlockedReason ?? undefined}
         receipts={
           displayedRuntimeReceipts.length
             ? <RuntimeComposerReceipts
                 receipts={displayedRuntimeReceipts}
-                actionsDisabled={busy || voiceSending || deadHost}
+                actionsDisabled={busy || voiceSending || deadHostBlocksSend}
                 dismissed={dismissedReceipts}
                 onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
                 onEdit={editRuntimeReceipt}
@@ -1394,6 +1408,7 @@ export function TmuxComposer({
               file={file}
               surface={caps.surface}
               runtimeSettings={structuredSession?.session.capabilities?.runtimeSettings ?? null}
+              runtimeSession={structuredSession?.session ?? null}
             />
           ) : null
         }

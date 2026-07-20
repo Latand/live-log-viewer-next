@@ -22,6 +22,7 @@ import { isWorkflowDraftId } from "@/components/workflows/workflowModel";
 import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
 import { RoundDeck } from "@/components/flows/RoundDeck";
 import { mapReachable } from "./mapGate";
+import { MIN_TRANSCRIPT_SHARE } from "./chatBudget";
 import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
@@ -29,9 +30,13 @@ import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 import { STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, partitionPipelineSurfaces, pipelineLinkedTasks, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { MobilePipelineDock } from "./MobilePipelineDock";
-import { MobilePipelineDockSheet, MobilePipelineSummaryRow } from "./MobilePipelineDockSheet";
+import { MobilePipelineDockSheet, MobilePipelineSummaryButton, MobilePipelineSummaryRow } from "./MobilePipelineDockSheet";
+import { conversationIdentity } from "@/lib/accounts/identity";
 import { deckKey } from "@/components/scheme/agentLinks";
 import { buildSchemeLayout } from "@/components/scheme/layout";
+import { SubagentBadges } from "@/components/scheme/SubagentBadges";
+import { layoutPipelineGroups, type PipelinePane } from "@/components/scheme/pipelineAnchor";
+import { isPlacedTask, taskRect } from "@/components/scheme/taskGeometry";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
 import { MobileMapLite } from "./MobileMapLite";
 
@@ -48,6 +53,12 @@ const STATE_SCORE: Record<PaneState, number> = { waiting: 5, stalled: 4, live: 3
 /* Swipe on the pane header: mostly-horizontal and long enough to be deliberate. */
 const SWIPE_MIN_X = 56;
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
+
+/* Height of the phone's bottom-up subagent badge rail — the 12-badge hard cap
+   at 30px + 6px gaps. The rail anchors to the focused pane's left edge and lifts
+   clear of the composer, so a tap expands the title rightward inside the 390px
+   viewport with no horizontal overflow. */
+const SUBAGENT_RAIL_H = 12 * 36;
 
 interface Entry {
   key: string;
@@ -149,6 +160,32 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
     () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths),
     [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths],
   );
+  const mobilePipelineOutlines = useMemo(() => {
+    const live = surfacePipelines.filter((pipeline) => pipeline.state !== "completed" && pipeline.state !== "closed");
+    const panes: PipelinePane[] = layout.nodes.map((node) => ({
+      x: node.x,
+      y: node.y,
+      w: node.w,
+      h: node.h,
+      path: node.file.path,
+      conversationId: node.file.conversationId,
+    }));
+    const placedTasks = tasks.filter(isPlacedTask);
+    const taskRects = placedTasks.map((task) => taskRect(task, false));
+    const obstacles = [
+      ...layout.nodes,
+      ...layout.decks,
+      ...layout.stacks,
+      ...layout.drafts,
+      ...layout.slots,
+      ...taskRects,
+    ];
+    const placements = layoutPipelineGroups(live, tasks, panes, obstacles);
+    return live.flatMap((pipeline) => {
+      const placement = placements.get(pipeline.id);
+      return placement ? [{ id: pipeline.id, title: pipeline.task, rect: placement.bounds }] : [];
+    });
+  }, [surfacePipelines, layout, tasks]);
   /* Scheme order (depth-first, groups left to right) becomes the strip order,
      so chips and the map agree on what "next" means. */
   const entries = useMemo<Entry[]>(
@@ -346,8 +383,12 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
        document scrollWidth equals the innerWidth (the production record showed
        564px before this fix). */
     <div
-      data-testid="mobile-focused-chat-shell"
-      className="relative flex h-full max-h-[100dvh] min-h-0 min-w-0 max-w-[100dvw] flex-1 flex-col overflow-hidden"
+      data-testid="mobile-chat-shell"
+      /* The chat-first budget contract (issue #419) rides the DOM it governs:
+         with the secondary chrome folded by default, the transcript owns at
+         least this share of the usable viewport before the keyboard opens. */
+      data-chat-min-share={MIN_TRANSCRIPT_SHARE}
+      className="relative flex h-full max-h-[100dvh] min-h-0 min-w-0 max-w-[100dvw] flex-1 flex-col overflow-hidden overflow-x-clip"
     >
       {/* Same runtime connection pill as desktop, compact, one thumb away.
           Renders nothing while slice-one is disabled. */}
@@ -360,7 +401,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
       <div className="flex shrink-0 items-stretch border-b border-border bg-card">
         {entries.length > 1 || pipelineFocus ? (
           <div className="relative min-w-0 flex-1">
-            <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1.5">
+            <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1">
               {pipelineFocus ? (
                 <>
                   <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} flows={flows} files={files} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
@@ -388,10 +429,16 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
           <span className="min-w-0 flex-1" aria-hidden />
         )}
         <div className="flex shrink-0 items-center gap-1 border-l border-border px-1.5">
+          {/* Chat-first (issue #419 reopened): with a conversation focused the
+              docked pipelines reserve ZERO height below the transcript — this
+              compact trigger rides the strip and opens the same bottom sheet. */}
+          {(activeNode || activeDeck || activeDraft) && dockedPipelines.length ? (
+            <MobilePipelineSummaryButton pipelines={dockedPipelines} onOpen={() => setPipelineSheetOpen(true)} />
+          ) : null}
           {/* Collapsed worker stacks count toward map availability (issue #136):
               a worker-heavy board is often one visible root plus several stacks,
               and the map is the only place their per-origin dots can be seen. */}
-          {mapReachable(layout.nodes.length, workerStacks.length) ? (
+          {mapReachable(layout.nodes.length, workerStacks.length, mobilePipelineOutlines.length) ? (
             <button
               type="button"
               className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -419,7 +466,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
 
       {/* Even card gutters that also clear the notch/rounded corners (finding 8):
           the safe-area insets keep the pane off the screen edges symmetrically. */}
-      <div className="relative flex min-h-0 flex-1 flex-col py-1.5 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
+      <div className="relative flex min-h-0 flex-1 flex-col pt-1 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
         {activeNode ? (
           /* The handoff control for this pane docks in the footer shelf row
              (issue #177 item 5), so the focus view itself renders only the pane. */
@@ -481,15 +528,36 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
             {t("common.loading")}
           </div>
         )}
+        {/* The subagent badge/anchor interaction on the phone (PR #441): the same
+            30x30 bottom-up circles the desktop board carries, anchored to the
+            focused pane's left edge and lifted above the composer. A hover/tap
+            expands the title, a second tap navigates to the child's CURRENT
+            generation. The overlay is pointer-events-none so only the badges
+            themselves take taps; expansion grows rightward within the 390px
+            viewport, so it never adds horizontal overflow. */}
+        {activeNode ? (
+          <div
+            data-testid="mobile-subagent-rail"
+            className="pointer-events-none absolute bottom-20 left-2 z-[20]"
+            style={{ width: 0, height: SUBAGENT_RAIL_H }}
+          >
+            <SubagentBadges
+              conversationId={conversationIdentity(activeNode.file)}
+              entries={files}
+              cardRect={{ x: 0, y: 0, w: 0, h: SUBAGENT_RAIL_H }}
+              onNavigate={(path) => {
+                const target = files.find((entry) => entry.path === path);
+                if (target) onSelect(target);
+              }}
+            />
+          </div>
+        ) : null}
       </div>
 
-      {/* Chat owns the viewport (issue #419): with a conversation focused, the
-          docked pipelines collapse into ONE 44px summary row instead of a row
-          per pipeline — a tap opens the bottom sheet with the full rails, so a
-          handful of completed pipelines never crowd out the transcript. */}
-      {(activeNode || activeDeck || activeDraft) && dockedPipelines.length ? (
-        <MobilePipelineSummaryRow pipelines={dockedPipelines} onOpen={() => setPipelineSheetOpen(true)} />
-      ) : null}
+      {/* Chat owns the viewport (issue #419 reopened): the docked pipelines no
+          longer reserve ANY row below the transcript — the compact trigger in the
+          top strip opens the same bottom sheet, so the focused chat keeps the full
+          bottom of the viewport for the composer. */}
 
       {mapOpen ? (
         <div className="fixed inset-0 z-50 flex flex-col bg-canvas pb-[env(safe-area-inset-bottom)]">
@@ -532,6 +600,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
             layout={layout}
             tasks={tasks}
             workerStacks={workerStacks}
+            pipelineOutlines={mobilePipelineOutlines}
             frame={mapFrame}
             ringKey={resolvedKey}
             onPick={pickFromMap}

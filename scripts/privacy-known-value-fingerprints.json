@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "normalization": "nfkc-lower-alnum-v1",
+  "scope": "operator-account-and-host-labels",
+  "fingerprints": [
+    {
+      "length": 8,
+      "sha256": "f1855008865db4a472e383a04e0b39b7d0ad4660654301c1fe9dc3a3e5b3d408"
+    },
+    {
+      "length": 10,
+      "sha256": "b829e805ab160bf10124b48da39c07eecc55bea7b9229820abbcc396ebf35cf1"
+    },
+    {
+      "length": 12,
+      "sha256": "28fe3addd231b430e39ec89e66d98dffa86ff782e700c395a784220406a21e11"
+    },
+    {
+      "length": 13,
+      "sha256": "15a288af8eb7325154f6600c36d9eda580d8fe308df97c56d8d7d159d0915da1"
+    },
+    {
+      "length": 13,
+      "sha256": "27385f1e678dc862575b9cfeba9a06f5cf09b79d7cc02121085d8f03b9ee9645"
+    },
+    {
+      "length": 13,
+      "sha256": "d0bbbb524b6882b7987154eafd6d5e721d3ff9c416c39014d9de1aec289ef923"
+    },
+    {
+      "length": 14,
+      "sha256": "405e221bc7eecaa111e68c8488d227cb6659ef6cfcaa8579c782e0d2b9e2c294"
+    },
+    {
+      "length": 16,
+      "sha256": "2fc8a6fe3c66e21de6e6bbe19dd7dfc97540eb20741e4b3dfbaebfc9b5042cea"
+    },
+    {
+      "length": 17,
+      "sha256": "e7cdd1ebd9854d7844b7b543649b09c16d765432d95d5fe3c92ee45ebc284277"
+    },
+    {
+      "length": 17,
+      "sha256": "fad92623b3efd8fdfcd2884a79d1e2fee320f4dc96886d4d09670cbe6f9f1a45"
+    }
+  ]
+}

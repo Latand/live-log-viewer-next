@@ -398,6 +398,10 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       ) : null}
       <div
         ref={scroller}
+        /* Stable geometry hook (issue #419): the chat-first viewport-budget
+           capture measures this scroller's rendered height against the usable
+           visual viewport to prove the transcript owns its ≥60% share. */
+        data-log-feed-scroller
         className={compact ? "min-h-0 flex-1 overflow-y-auto py-3" : "min-h-0 flex-1 overflow-y-auto py-6"}
         onScroll={(event) => {
           const el = event.currentTarget;

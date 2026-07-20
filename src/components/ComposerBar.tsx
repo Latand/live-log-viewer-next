@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
+import { SlidersHorizontal } from "lucide-react";
 
 import { Loader2, Play } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -159,6 +160,16 @@ export function ComposerBar({
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
+  /* Chat-first mobile composer (issue #419 reopened): the model/reasoning +
+     attachment second row folds behind a compact primary-row action on the
+     phone so the collapsed composer reserves a single input row (zero secondary
+     height). Desktop always renders the row inline, so the flag only gates the
+     phone. Paste/drop attachment behavior lives on the textarea and is
+     unaffected by the fold. */
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const optionsRowId = useId();
+  const hasSecondaryRow = Boolean(leftSlot) || showImage;
+  const showSecondaryRow = !isMobile || optionsOpen;
   const hasSendMenu = sendMenuActions.length > 0;
   const imageSendBlocked = imageDisabled && attachments.images.length > 0;
   /* An attachment still decoding (or one that failed to read) blocks Send with a
@@ -184,6 +195,27 @@ export function ComposerBar({
      the controls sit inline at the field's right edge as before. */
   const controls = (
     <>
+      {/* The compact primary-row disclosure for the folded model/reasoning +
+          attachment row (issue #419 reopened). Phone only, and hidden while
+          recording (the input flips to a column and the secondary row has no
+          room); desktop keeps the row inline and never renders this. */}
+      {isMobile && hasSecondaryRow && !dictationRecording ? (
+        <Hint label={optionsOpen ? t("composer.optionsHide") : t("composer.optionsShow")} align="right">
+          <button
+            type="button"
+            data-testid="composer-options-toggle"
+            aria-expanded={optionsOpen}
+            aria-controls={optionsRowId}
+            aria-label={optionsOpen ? t("composer.optionsHide") : t("composer.optionsShow")}
+            onClick={() => setOptionsOpen((open) => !open)}
+            className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              optionsOpen ? "bg-sunken text-accent" : ""
+            } ${iconBtn}`}
+          >
+            <SlidersHorizontal className="h-4 w-4" aria-hidden />
+          </button>
+        </Hint>
+      ) : null}
       {/* Dictation is inert while the host is dead (§5): a spoken message could
           never be delivered, so the mic disables alongside Send — no half-open
           affordance that records into a void. */}
@@ -323,9 +355,12 @@ export function ComposerBar({
         )}
       </div>
       {/* Secondary controls (mode chip, interrupt/compact, images): one quiet
-          borderless row under the input. */}
-      {leftSlot || showImage ? (
-        <div className="flex items-center justify-between gap-1.5">
+          borderless row under the input. On the phone it folds behind the
+          primary-row disclosure above (issue #419 reopened), so collapsed it is
+          absent from the DOM entirely — zero reserved height. Desktop always
+          renders it inline. */}
+      {hasSecondaryRow && showSecondaryRow ? (
+        <div id={optionsRowId} data-testid="composer-options-row" className="flex items-center justify-between gap-1.5">
           <div className="flex min-w-0 items-center gap-1.5">{leftSlot}</div>
           {showImage ? (
             <Hint label={imageAriaLabel}>

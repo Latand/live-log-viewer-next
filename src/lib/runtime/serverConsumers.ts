@@ -1,7 +1,7 @@
 import { isoNow, newRound } from "@/lib/flows/engine";
 import { loadFlows, saveFlows } from "@/lib/flows/store";
 import type { Flow } from "@/lib/flows/types";
-import { loadTasks, saveTasks } from "@/lib/tasks/store";
+import { mutateTasks } from "@/lib/tasks/store";
 import { loadWorkflows, saveWorkflows } from "@/lib/workflows/store";
 
 import type { RuntimeConsumerPorts } from "./consumers";
@@ -52,17 +52,17 @@ export function createServerRuntimeConsumers(): RuntimeConsumerPorts {
       return workflow;
     },
     taskDeliveryAcknowledged(taskId, assignmentId) {
-      const tasks = loadTasks();
-      const task = tasks.find((item) => item.id === taskId);
-      if (!task) return undefined;
-      const assignment = task.assignments.find((item) => item.path === assignmentId || item.panePid === Number(assignmentId));
-      if (!assignment) return task;
-      assignment.state = "delivered";
-      assignment.error = null;
-      assignment.at = isoNow();
-      task.updatedAt = isoNow();
-      saveTasks(tasks);
-      return task;
+      return mutateTasks((tasks) => {
+        const task = tasks.find((item) => item.id === taskId);
+        if (!task) return { tasks: undefined, result: undefined };
+        const assignment = task.assignments.find((item) => item.path === assignmentId || item.panePid === Number(assignmentId));
+        if (!assignment) return { tasks: undefined, result: task };
+        assignment.state = "delivered";
+        assignment.error = null;
+        assignment.at = isoNow();
+        task.updatedAt = isoNow();
+        return { tasks, result: task };
+      });
     },
   };
 }

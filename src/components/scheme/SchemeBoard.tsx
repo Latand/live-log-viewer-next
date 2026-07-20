@@ -23,14 +23,15 @@ import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
-import { compactPipelineLayoutFlows, partitionPipelineSurfaces, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
-import { PipelineShelf } from "@/components/pipelines/PipelineShelf";
+import { compactPipelineLayoutFlows, compactPipelineOpenTarget, patchPipeline, pipelineAnnouncement, pipelineLinkedTasks, pipelineStripByPath, renderableFlowIds, resolveStageNavFile, type StageNavTarget } from "@/components/pipelines/pipelineModel";
+import { PipelineEditor } from "@/components/pipelines/PipelineEditor";
+import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { BulkActionBar } from "./BulkActionBar";
 import { EdgeChips } from "./EdgeChips";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { resolveExpandedNode } from "./expandedNode";
 import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest } from "./renameRequest";
-import { currentWorkRect, currentWorkRects } from "./currentWork";
+import { currentWorkRect, currentWorkRects, rectUnion } from "./currentWork";
 import { buildSchemeLayout } from "./layout";
 import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
 import { boardClusters } from "./offscreenClusters";
@@ -53,9 +54,12 @@ import {
   type SchemeRect,
 } from "./taskGeometry";
 import { resolveTaskPlacements } from "./taskPlacement";
+import { PipelineGroup } from "./PipelineGroup";
+import { PIPELINE_GROUP_EXPANDED_H, layoutPipelineGroups, type PipelinePane } from "./pipelineAnchor";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
 import { useSpatialNav } from "./useSpatialNav";
+import { createSubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
 
 /* Below this zoom the big node labels fade in over the unreadable panes. */
 const LABEL_Z = 0.45;
@@ -66,6 +70,7 @@ const DORMANT_ENTER_Z = LABEL_Z * 0.95;
 const DORMANT_EXIT_Z = LABEL_Z * 1.1;
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
+const EMPTY_PIPELINE_STRIPS = new Map<string, Pipeline>();
 
 interface Props {
   project: string;
@@ -85,8 +90,7 @@ interface Props {
   /** Collapsed worker stacks (issue #136): drawn as one minimap dot per origin so
       folded workers read as a handful of dots, not an agent flood. */
   workerStacks?: WorkerStack[];
-  /** Active project pipelines. Memberless drafts render in the screen-space
-      shelf; pipelines with board occupants retain their group halo. */
+  /** Active project pipelines rendered as world-space desktop containers. */
   surfacePipelines?: Pipeline[];
   /** Ids of not-yet-spawned conversation drafts drawn as full panes. */
   drafts: string[];
@@ -212,8 +216,23 @@ export function SchemeBoard({
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
   const [selected, setSelected] = useState<string | null>(null);
+  const [badgeAnchorRevision, setBadgeAnchorRevision] = useState(0);
+  const badgeAnchors = useMemo(
+    () => createSubagentBadgeAnchorRegistry(() => setBadgeAnchorRevision((revision) => revision + 1)),
+    [],
+  );
   const [localBuilderPipelineId, setLocalBuilderPipelineId] = useState<string | null>(null);
+  const [expandedPipelineIds, setExpandedPipelineIds] = useState<ReadonlySet<string>>(EMPTY_PATHS);
   const activeBuilderPipelineId = builderPipelineId ?? localBuilderPipelineId;
+  const setPipelineExpanded = useCallback((id: string, expanded: boolean) => {
+    setExpandedPipelineIds((previous) => {
+      if (previous.has(id) === expanded) return previous;
+      const next = new Set(previous);
+      if (expanded) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
   const handleBuilderOpened = useCallback(() => {
     setLocalBuilderPipelineId(null);
     onBuilderOpened?.();
@@ -240,17 +259,12 @@ export function SchemeBoard({
      flowsByImpl and every strip/hub below keep reading the real `flows`. */
   const deckFlows = useMemo(() => (reviewGroups.length ? [...flows, ...reviewGroups] : flows), [flows, reviewGroups]);
   const layoutFlows = useMemo(() => compactPipelineLayoutFlows(pipelines, deckFlows), [pipelines, deckFlows]);
+  /* The phone projection keeps its established group halos and sheet model.
+     Desktop pipeline ownership moves into dedicated PipelineGroup containers. */
+  const layoutPipelines = useMemo(() => mapMode ? pipelines : [], [mapMode, pipelines]);
   const layout = useMemo(
-    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths),
-    [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths],
-  );
-  const memberfulPipelineIds = useMemo(
-    () => new Set(layout.groups.filter((group) => group.kind === "pipeline" && group.pipeline).map((group) => group.id)),
-    [layout.groups],
-  );
-  const shelfPipelines = useMemo(
-    () => partitionPipelineSurfaces(surfacePipelines, memberfulPipelineIds).shelf,
-    [surfacePipelines, memberfulPipelineIds],
+    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, layoutPipelines, mapMode ? surfacePipelines : [], favorites, isolatedManualPaths),
+    [groups, manual, files, layoutFlows, drafts, layoutPipelines, mapMode, surfacePipelines, favorites, isolatedManualPaths],
   );
 
   /* Selection keys are transcript paths, so the 10s poll relayout keeps the
@@ -430,13 +444,19 @@ export function SchemeBoard({
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
   const stableExpand = useCallback((path: string) => setExpanded(path), []);
 
-  /* Controls for a pipeline group's on-halo stage strip (issue #136): opening a
-     run stage routes through the board's normal select; a review-loop stage
-     glides to the flow's latest round. Stable identities keep GroupsLayer from
-     thrashing across polls. renderablePaths/renderableFlows gate actions to what
-     the board can actually reveal, matching NodesLayer's own strips. */
+  /* Compact node strips keep their path/flow navigation below. The group graph
+     resolves every materialized stage by conversation id through stableSelect. */
   const openPipelinePath = useCallback((path: string) => {
     const file = files.find((entry) => entry.path === path);
+    if (file) stableSelect(file);
+  }, [files, stableSelect]);
+  /* A stage-graph node hands back the attempt's conversation id AND its recorded
+     transcript path. Resolution opens the CURRENT non-archived generation for the
+     conversation id first, then falls back to the path — so a path-only attempt
+     (no adopted id yet) still navigates and a migrated attempt never opens the
+     folded predecessor. */
+  const openPipelineAttempt = useCallback((target: StageNavTarget) => {
+    const file = resolveStageNavFile(target, files);
     if (file) stableSelect(file);
   }, [files, stableSelect]);
   const openPipelineFlow = useCallback((flowId: string) => {
@@ -446,22 +466,37 @@ export function SchemeBoard({
   const renderablePipelinePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   const placedNodePaths = useMemo(() => new Set(layout.nodes.map((node) => node.file.path)), [layout]);
   const renderableGroupFlows = useMemo(() => renderableFlowIds(layoutFlows, placedNodePaths), [layoutFlows, placedNodePaths]);
-  /* Pipelines whose per-node compact strip is actually mounted: its board-strip
-     node must be PLACED on the layout, not merely resolvable. A pipeline missing
-     here has no on-board plan surface, so its group halo renders one (finding 1). */
-  const nodeStripPipelineIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const [path, pipeline] of pipelineStrips) if (placedNodePaths.has(path)) ids.add(pipeline.id);
-    return ids;
-  }, [pipelineStrips, placedNodePaths]);
   const linkedTasksByPipeline = useMemo(
     () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, allTasks, flows, files)] as const)),
     [pipelines, allTasks, flows, files],
   );
+  const completedPipelinesByTask = useMemo(() => {
+    const byTask = new Map<string, Pipeline[]>();
+    for (const pipeline of pipelines) {
+      if (pipeline.state !== "completed" && pipeline.state !== "closed") continue;
+      if (!compactPipelineOpenTarget(pipeline, flows, renderableGroupFlows, renderablePipelinePaths, files)) continue;
+      for (const task of linkedTasksByPipeline.get(pipeline.id) ?? []) {
+        const rows = byTask.get(task.id) ?? [];
+        rows.push(pipeline);
+        byTask.set(task.id, rows);
+      }
+    }
+    return byTask;
+  }, [pipelines, linkedTasksByPipeline, flows, renderableGroupFlows, renderablePipelinePaths, files]);
   const pipelineControls = useMemo<PipelineGroupControls>(
-    () => ({ flows, files, renderablePaths: renderablePipelinePaths, renderableFlows: renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, onOpenPath: openPipelinePath, onOpenFlow: openPipelineFlow, onOpenTask: stableOpenTask }),
-    [flows, files, renderablePipelinePaths, renderableGroupFlows, nodeStripPipelineIds, linkedTasksByPipeline, openPipelinePath, openPipelineFlow, stableOpenTask],
+    () => ({ flows, onOpenAttempt: openPipelineAttempt }),
+    [flows, openPipelineAttempt],
   );
+  const pinPipeline = useCallback(
+    (pipeline: Pipeline, pos: { x: number; y: number }) =>
+      patchPipeline(pipeline.id, "set-position", { pos }, { ...pipeline, pos }),
+    [],
+  );
+  const openPipelineHistory = useCallback((pipeline: Pipeline) => {
+    const target = compactPipelineOpenTarget(pipeline, flows, renderableGroupFlows, renderablePipelinePaths, files);
+    if (target?.kind === "path") openPipelinePath(target.path);
+    else if (target?.kind === "flow") openPipelineFlow(target.flowId);
+  }, [flows, renderableGroupFlows, renderablePipelinePaths, files, openPipelinePath, openPipelineFlow]);
   /* One minimap dot per collapsed worker-stack origin (issue #136): orchestration
      origins (flow/pipeline) in accent, spawner/worktree origins in gray. */
   const stackDots = useMemo<StackDot[]>(() => stackDotsFor(workerStacks), [workerStacks]);
@@ -566,10 +601,47 @@ export function SchemeBoard({
       }),
     [boardTasks, placement],
   );
+  const pipelineAnchorTasks = useMemo(() => {
+    const placedById = new Map(placedTasks.map((task) => [task.id, task] as const));
+    return mergedTasks.map((task) => placedById.get(task.id) ?? task);
+  }, [mergedTasks, placedTasks]);
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
     () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task, textExpandedIds.has(task.id))] as const)),
     [placedTasks, textExpandedIds],
+  );
+  const livePipelineGroups = useMemo(
+    () => surfacePipelines.filter((pipeline) => pipeline.state !== "completed" && pipeline.state !== "closed"),
+    [surfacePipelines],
+  );
+  const pipelinePanes = useMemo<PipelinePane[]>(
+    () => layout.nodes.map((node) => ({
+      x: node.x,
+      y: node.y,
+      w: node.w,
+      h: node.h,
+      path: node.file.path,
+      conversationId: node.file.conversationId,
+    })),
+    [layout.nodes],
+  );
+  const pipelineGroupHeights = useMemo(
+    () => new Map(livePipelineGroups.flatMap((pipeline) =>
+      expandedPipelineIds.has(pipeline.id) || activeBuilderPipelineId === pipeline.id
+        ? [[pipeline.id, PIPELINE_GROUP_EXPANDED_H] as const]
+        : [],
+    )),
+    [livePipelineGroups, expandedPipelineIds, activeBuilderPipelineId],
+  );
+  const pipelineGroupRects = useMemo(
+    () => layoutPipelineGroups(
+      livePipelineGroups,
+      pipelineAnchorTasks,
+      pipelinePanes,
+      [...taskObstacles, ...taskRects.values()],
+      pipelineGroupHeights,
+    ),
+    [livePipelineGroups, pipelineAnchorTasks, pipelinePanes, taskObstacles, taskRects, pipelineGroupHeights],
   );
   const taskNavLabels = useMemo(
     () => new Map(placedTasks.map((task) => [`task::${task.id}`, taskTitle(task.text) || t("tasks.untitled")] as const)),
@@ -605,18 +677,18 @@ export function SchemeBoard({
      detour can swing a connector or its retry badge past the card extent, so both
      stay reachable and on the map, never clipping out (issue #17). */
   const world = useMemo(() => {
-    const rects = [...taskRects.values()];
+    const rects = [...taskRects.values(), ...pipelineGroupRects.values()];
     const routeBox = routePathsBounds(taskRoutes.values());
     if (routeBox) rects.push(routeBox);
     return taskWorldBounds(layout.width, layout.height, rects);
-  }, [layout.width, layout.height, taskRects, taskRoutes]);
-  const currentWork = useMemo(
-    () => currentWorkRect(layout, placedTasks, favorites ?? EMPTY_PATHS, textExpandedIds),
-    [layout, placedTasks, favorites, textExpandedIds],
-  );
+  }, [layout.width, layout.height, taskRects, pipelineGroupRects, taskRoutes]);
+  const currentWork = useMemo(() => {
+    const base = currentWorkRect(layout, placedTasks, favorites ?? EMPTY_PATHS, textExpandedIds);
+    return rectUnion([...(base ? [base] : []), ...pipelineGroupRects.values()]);
+  }, [layout, placedTasks, favorites, textExpandedIds, pipelineGroupRects]);
   const currentWorkCount = useMemo(
-    () => currentWorkRects(layout, placedTasks, favorites ?? EMPTY_PATHS, textExpandedIds).length,
-    [layout, placedTasks, favorites, textExpandedIds],
+    () => currentWorkRects(layout, placedTasks, favorites ?? EMPTY_PATHS, textExpandedIds).length + pipelineGroupRects.size,
+    [layout, placedTasks, favorites, textExpandedIds, pipelineGroupRects],
   );
   const clusters = useMemo(() => boardClusters(layout, favorites ?? EMPTY_PATHS), [layout, favorites]);
   /* Conversation-side relation controls (issue #292): each pane reserves a
@@ -629,10 +701,10 @@ export function SchemeBoard({
     (kind: "current" | "all") => {
       const count = kind === "current"
         ? currentWorkCount
-        : layout.nodes.length + layout.drafts.length + layout.groups.length + layout.stacks.length + layout.decks.length + placedTasks.length;
+        : layout.nodes.length + layout.drafts.length + layout.groups.length + layout.stacks.length + layout.decks.length + placedTasks.length + pipelineGroupRects.size;
       setFrameAnnouncement(t(kind === "current" ? "scheme.framedCurrent" : "scheme.framedAll", { count }));
     },
-    [currentWorkCount, layout.nodes.length, layout.drafts.length, layout.groups.length, layout.stacks.length, layout.decks.length, placedTasks.length, t],
+    [currentWorkCount, layout.nodes.length, layout.drafts.length, layout.groups.length, layout.stacks.length, layout.decks.length, placedTasks.length, pipelineGroupRects, t],
   );
 
   /* Place-on-map arms this ref with the id of an existing unplaced task; the
@@ -708,6 +780,7 @@ export function SchemeBoard({
         },
     onWorldTap: mapMode ? undefined : onWorldTap,
     taskRects,
+    pipelineRects: pipelineGroupRects,
     onPlaceTask: mapMode ? undefined : onPlaceTask,
     onArrowNav: navArrowRef,
     onZoomKey: navZoomRef,
@@ -740,7 +813,11 @@ export function SchemeBoard({
   });
   const appliedMapFrame = useRef<"all" | "current" | null>(null);
   const hasMapContent =
-    layout.nodes.length > 0 || layout.drafts.length > 0 || layout.groups.length > 0 || taskRects.size > 0;
+    layout.nodes.length > 0
+    || layout.drafts.length > 0
+    || layout.groups.length > 0
+    || taskRects.size > 0
+    || pipelineGroupRects.size > 0;
   useEffect(() => {
     if (!mapMode || !mapFrame || !hasMapContent) {
       appliedMapFrame.current = null;
@@ -773,22 +850,20 @@ export function SchemeBoard({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires only on a new `+ Task` press
   }, [newTaskNonce]);
 
-  /* A fresh draft opens its editor on the surface that owns it. Materialized
-     pipelines glide to their world halo; memberless drafts stay in screen space. */
+  /* A fresh draft glides to its world-space PipelineGroup and expands there. */
   const builderRevealed = useRef<string | null>(null);
   useEffect(() => {
     if (!activeBuilderPipelineId || mapMode) return;
     if (builderRevealed.current === activeBuilderPipelineId) return;
-    const group = layout.groups.find((candidate) => candidate.id === activeBuilderPipelineId && candidate.pipeline);
-    const onShelf = shelfPipelines.some((pipeline) => pipeline.id === activeBuilderPipelineId);
-    if (!group && !onShelf) return;
+    const group = pipelineGroupRects.get(activeBuilderPipelineId);
+    if (!group) return;
     builderRevealed.current = activeBuilderPipelineId;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot reveal syncing camera + selection to a new draft
     clearSession();
     setMode("select");
-    if (group) centerOn(group, 0.75);
+    centerOn(group, 0.75);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires when the new draft's group first renders
-  }, [activeBuilderPipelineId, layout, shelfPipelines]);
+  }, [activeBuilderPipelineId, pipelineGroupRects]);
 
   /* Spatial keyboard navigation: live only on the desktop board — a selection
      session, an expanded overlay, or map mode all suspend it. */
@@ -1064,7 +1139,7 @@ export function SchemeBoard({
         {/* Group halos sit behind every edge and card so a running flow/pipeline
             reads as one framed region; the label chip stays live off the map. */}
         <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} pipelineControls={mapMode ? undefined : pipelineControls} autoOpenGroupId={activeBuilderPipelineId} onAutoOpen={handleBuilderOpened} />
-        <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
+        <EdgesLayer edges={layout.edges} badgeAnchors={badgeAnchors} badgeAnchorRevision={badgeAnchorRevision} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
             tap target there — the mobile lite map reaches pipeline controls only
@@ -1084,10 +1159,11 @@ export function SchemeBoard({
           attentionPaths={attentionPaths ?? null}
           flowsByImpl={flowsByImpl}
           flows={flows}
-          pipelineStrips={pipelineStrips}
+          pipelineStrips={mapMode ? pipelineStrips : EMPTY_PIPELINE_STRIPS}
           linkedTasksByPipeline={linkedTasksByPipeline}
           relatedTasksByPath={relatedTasksByPath}
           deckFocus={deckFocus}
+          badgeAnchors={badgeAnchors}
           onSelect={stableSelect}
           onClose={stableClose}
           onFocusRound={focusRound}
@@ -1113,7 +1189,46 @@ export function SchemeBoard({
           pending={pendingTask}
           onStickyCreated={handleStickyCreated}
           onCreateCancel={cancelCreate}
+          completedPipelinesByTask={completedPipelinesByTask}
+          onOpenPipelineHistory={openPipelineHistory}
         />
+        {!mapMode ? livePipelineGroups.map((pipeline) => {
+          const rect = pipelineGroupRects.get(pipeline.id);
+          if (!rect) return null;
+          return (
+            <PipelineGroup
+              key={pipeline.id}
+              pipeline={pipeline}
+              rect={rect}
+              camRef={camRef}
+              onPin={pinPipeline}
+              interactive={!handLike && !session}
+              expanded={pipelineGroupHeights.has(pipeline.id)}
+              onExpandedChange={setPipelineExpanded}
+              autoOpen={activeBuilderPipelineId === pipeline.id}
+              onAutoOpen={handleBuilderOpened}
+            >
+              {({ collapse }) => pipeline.state === "draft" ? (
+                <PipelineEditor pipeline={pipeline} onClose={collapse} />
+              ) : (
+                <PipelineStrip
+                  pipeline={pipeline}
+                  flows={flows}
+                  files={files}
+                  renderablePaths={renderablePipelinePaths}
+                  renderableFlows={renderableGroupFlows}
+                  materializedPaths={placedNodePaths}
+                  materializedFlows={renderableGroupFlows}
+                  linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []}
+                  compact
+                  onOpenPath={openPipelinePath}
+                  onOpenFlow={openPipelineFlow}
+                  onOpenTask={stableOpenTask}
+                />
+              )}
+            </PipelineGroup>
+          );
+        }) : null}
         {/* Session bbox lives inside the transformed world div: the camera
             moves it through the container transform, never a re-render. */}
         {session && bbox ? (
@@ -1166,24 +1281,6 @@ export function SchemeBoard({
         obstacles={chipObstacles}
         onFit={fitRect}
       />
-
-      {!mapMode ? (
-        <PipelineShelf
-          pipelines={shelfPipelines}
-          flows={flows}
-          files={files}
-          renderablePaths={renderablePipelinePaths}
-          renderableFlows={renderableGroupFlows}
-          materializedPaths={placedNodePaths}
-          materializedFlows={renderableGroupFlows}
-          linkedTasksByPipeline={linkedTasksByPipeline}
-          autoOpenPipelineId={activeBuilderPipelineId}
-          onAutoOpen={handleBuilderOpened}
-          onOpenPath={openPipelinePath}
-          onOpenFlow={openPipelineFlow}
-          onOpenTask={stableOpenTask}
-        />
-      ) : null}
 
       <div data-scheme-ui className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-border bg-card/95 p-1 shadow-1">
         {mapMode ? null : (
@@ -1250,7 +1347,21 @@ export function SchemeBoard({
         />
       ) : null}
 
-      <Minimap layout={layout} world={world} tasks={placedTasks} textExpandedIds={textExpandedIds} currentWork={currentWork} stackDots={stackDots} cam={cam} vp={vp} onJump={jump} />
+      <Minimap
+        layout={layout}
+        world={world}
+        tasks={placedTasks}
+        textExpandedIds={textExpandedIds}
+        currentWork={currentWork}
+        pipelineGroups={livePipelineGroups.flatMap((pipeline) => {
+          const rect = pipelineGroupRects.get(pipeline.id);
+          return rect ? [{ pipeline, rect }] : [];
+        })}
+        stackDots={stackDots}
+        cam={cam}
+        vp={vp}
+        onJump={jump}
+      />
     </div>
     {/* The full-window conversation: the same pane component over the whole
         viewport, with the live feed and the composer of exactly this

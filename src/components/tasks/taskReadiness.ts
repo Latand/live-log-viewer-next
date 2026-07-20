@@ -2,6 +2,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { Pipeline, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 
+import { latestAttempt } from "../pipelines/pipelineModel";
 import type { TaskTone } from "./taskModel";
 
 /*
@@ -112,12 +113,11 @@ export function taskLinks(task: BoardTask, index: ReadinessIndex): ReadinessLink
   return { pipelines: [...pipelines], flows: [...flows] };
 }
 
-/** Last attempt of the last stage that ran anything, in stage order. */
+/** Latest operational attempt of the last stage that ran anything, in stage order. */
 function lastAttemptedVerdictPass(pipeline: Pipeline): boolean {
-  const attemptsByStage = new Map(pipeline.runs.map((run) => [run.stageId, run.attempts] as const));
   let last: PipelineStageAttempt | undefined;
   for (const stage of pipeline.stages) {
-    const attempt = attemptsByStage.get(stage.id)?.at(-1);
+    const attempt = latestAttempt(pipeline, stage.id);
     if (attempt) last = attempt;
   }
   return last?.verdict?.status === "pass";

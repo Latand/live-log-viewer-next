@@ -1,8 +1,9 @@
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import type { ResumeSpec } from "@/lib/agent/cli";
-import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type ProcessIdentity } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 
@@ -29,6 +30,20 @@ export interface StructuredRecoveryDependencies {
   resolveAccount?: (engine: "claude" | "codex", accountId: string | null) => AccountContext;
   spawn?: typeof spawnStructuredConversation;
   processIdentity?: () => { pid: number; startIdentity: string | null };
+  requestDeliveryDrain?: () => void;
+  ownership?: {
+    operationId: string;
+    revision: number;
+    owns: () => Promise<boolean>;
+    releaseHost: (key: SessionKey) => Promise<boolean>;
+  };
+}
+
+class StructuredRecoverySupersededError extends Error {
+  constructor() {
+    super("structured recovery operation is superseded");
+    this.name = "StructuredRecoverySupersededError";
+  }
 }
 
 interface RecoveryCandidate {
@@ -42,7 +57,7 @@ interface RecoveryCandidate {
   publishReady: boolean;
 }
 
-function processIdentityAlive(identity: { pid: number; startIdentity: string | null } | null): boolean {
+export function structuredHostProcessAlive(identity: ProcessIdentity | null): boolean {
   if (!identity || !Number.isInteger(identity.pid) || identity.pid <= 0) return false;
   if (!procBackend.pidAlive(identity.pid)) return false;
   return identity.startIdentity === null || procBackend.processIdentity(identity.pid) === identity.startIdentity;
@@ -56,6 +71,7 @@ const recoveries = recoveryStore.__llvStructuredRecovery ??= new Map();
 function candidateFor(
   registry: AgentRegistry,
   request: StructuredRecoveryRequest,
+  durableProfileWins = false,
 ): RecoveryCandidate | null {
   const conversation = request.conversationId?.startsWith("conversation_")
     ? registry.conversation(request.conversationId as `conversation_${string}`)
@@ -72,11 +88,15 @@ function candidateFor(
       && registry.canonicalConversationId(receipt.conversationId) === conversation.id);
   if (!entry.structuredHost && !structuredReceipt) return null;
   const terminal = entry.status === "dead" || entry.status === "unhosted";
-  const publishReady = Boolean(processIdentityAlive(entry.structuredHost?.process ?? null)
+  const publishReady = Boolean(structuredHostProcessAlive(entry.structuredHost?.process ?? null)
     && entry.claimOwner
     && entry.pendingAction === null
     && !terminal);
-  const profile = emptyLaunchProfile({
+  const profile = emptyLaunchProfile(durableProfileWins ? {
+    ...(entry.launchProfile ?? {}),
+    ...generation.launchProfile,
+    cwd: generation.launchProfile.cwd || entry.launchProfile?.cwd || entry.cwd,
+  } : {
     ...generation.launchProfile,
     ...(entry.launchProfile ?? {}),
     cwd: entry.launchProfile?.cwd || generation.launchProfile.cwd || entry.cwd,
@@ -98,7 +118,7 @@ function candidateFor(
       cwd: profile.cwd,
       windowName: "structured-resume",
       engine: conversation.engine,
-      transcript: generation.path,
+      "transcript": generation.path,
       launchProfile: profile,
     },
     publishReady,
@@ -111,20 +131,33 @@ async function recoverCandidate(
   registry: AgentRegistry,
   candidate: RecoveryCandidate,
 ): Promise<StructuredRecoveryResult | null> {
+  const ownership = dependencies.ownership;
+  const assertOwnership = async (): Promise<void> => {
+    if (ownership && !await ownership.owns()) throw new StructuredRecoverySupersededError();
+  };
   const owner = (dependencies.processIdentity ?? (() => ({
     pid: process.pid,
     startIdentity: procBackend.processIdentity(process.pid),
   })))();
   return registry.withOperationLock(candidate.key, owner, async () => {
-    const current = candidateFor(registry, request);
+    await assertOwnership();
+    let current = candidateFor(registry, request, Boolean(ownership));
     if (!current) return null;
     if (current.publishReady) {
-      return {
-        target: null,
-        path: current.path,
-        conversationId: current.conversationId,
-        spawned: false,
-      };
+      if (!ownership) {
+        return {
+          target: null,
+          path: current.path,
+          conversationId: current.conversationId,
+          spawned: false,
+        };
+      }
+      await ownership.releaseHost(current.key);
+      await assertOwnership();
+      registry.terminateStructuredHost(current.key);
+      await assertOwnership();
+      current = candidateFor(registry, request, true);
+      if (!current) return null;
     }
     const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
     if (!client) throw new Error("structured recovery runtime host is unavailable");
@@ -142,16 +175,30 @@ async function recoverCandidate(
       launchProfile: current.spec.launchProfile,
     });
     if (begun.kind !== "created") throw new Error("structured recovery reservation is unavailable");
+    try {
+      await assertOwnership();
+    } catch (error) {
+      registry.failSpawn(begun.receipt.launchId, "structured recovery operation was superseded");
+      throw error;
+    }
     const response = await (dependencies.spawn ?? spawnStructuredConversation)({
       engine: current.engine,
       receipt: begun.receipt,
       spec: current.spec,
       account,
-      prompt: "",
+      "prompt": "",
       registry,
       client,
     });
     if (!response.ok || !response.path) throw new Error("structured recovery host did not publish its transcript");
+    try {
+      await assertOwnership();
+    } catch (error) {
+      await ownership?.releaseHost(current.key);
+      registry.terminateStructuredHost(current.key);
+      throw error;
+    }
+    (dependencies.requestDeliveryDrain ?? requestAccountMigrationTick)();
     return {
       target: null,
       path: response.path,
@@ -167,12 +214,17 @@ export async function recoverDeadStructuredConversation(
 ): Promise<StructuredRecoveryResult | null> {
   if ((dependencies.transport ?? spawnTransport)() !== "structured") return null;
   const registry = dependencies.registry ?? agentRegistry();
-  const candidate = candidateFor(registry, request);
+  if (dependencies.ownership && !await dependencies.ownership.owns()) {
+    throw new StructuredRecoverySupersededError();
+  }
+  const candidate = candidateFor(registry, request, Boolean(dependencies.ownership));
   if (!candidate) return null;
-  const recoveryKey = `${registry.filename}:${candidate.conversationId}`;
+  const recoveryKey = dependencies.ownership
+    ? `${registry.filename}:${candidate.conversationId}:${dependencies.ownership.operationId}:${dependencies.ownership.revision}`
+    : `${registry.filename}:${candidate.conversationId}`;
   const pending = recoveries.get(recoveryKey);
   if (pending) return pending;
-  if (candidate.publishReady) {
+  if (candidate.publishReady && !dependencies.ownership) {
     return {
       target: null,
       path: candidate.path,

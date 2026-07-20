@@ -16,6 +16,25 @@ const { buildWorkflow, defaultFixerFromRoles, loadTemplates, loadWorkflows, merg
 
 type WorkflowTemplate = import("./types").WorkflowTemplate;
 
+function commitTestSuccessor(
+  registry: AgentRegistry,
+  conversationId: Parameters<AgentRegistry["conversation"]>[0],
+  successor: Parameters<AgentRegistry["commitSuccessor"]>[1],
+  revision: number,
+): void {
+  let migration = registry.conversation(conversationId)!.migration!;
+  const receipt = {
+    operationId: migration.operationId,
+    nativeId: successor.id,
+    path: successor.path,
+    continuityPaths: [],
+    historyHash: `history-${successor.id}`,
+    host: { kind: "codex-app-server" as const, identity: successor.id, epoch: 1, verifiedAt: "2026-07-20T12:00:00.000Z" },
+  };
+  migration = registry.transitionConversationMigration(conversationId, revision, ["verifying"], { providerReceipt: receipt }).migration!;
+  registry.commitSuccessor(conversationId, successor, revision, migration.operationId, receipt);
+}
+
 afterAll(() => {
   if (previousState === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousState;
@@ -228,7 +247,7 @@ test("workflow bindings follow the active conversation generation", () => {
   const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "workflow-registry.json"));
   const owner = registry.ensureConversation("codex", "/stage-a.jsonl", "a");
   registry.setConversationMigration(owner.id, { intentId: "workflow", phase: "verifying", targetId: "b", revision: 1, error: null, updatedAt: "now" });
-  registry.commitSuccessor(owner.id, { id: "stage-b", path: "/stage-b.jsonl", accountId: "b" }, 1);
+  commitTestSuccessor(registry, owner.id, { id: "stage-b", path: "/stage-b.jsonl", accountId: "b" }, 1);
   const template = normalizeTemplate({ name: "owner-demo", stages: [IMPLEMENT, REVIEW] })!;
   const workflow = buildWorkflow({ id: "owner123", name: "owner-demo", task: "Ship", project: "repo", repoDir: "/repo", template, mode: "manual", now: "now" });
   workflow.srcPath = "/stage-a.jsonl";
@@ -253,7 +272,7 @@ test("cooperative ownership reconciliation preserves a workflow closed during a 
   const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "workflow-race-registry.json"));
   const owner = registry.ensureConversation("codex", "/stage-race-a.jsonl", "a");
   registry.setConversationMigration(owner.id, { intentId: "workflow-race", phase: "verifying", targetId: "b", revision: 1, error: null, updatedAt: "now" });
-  registry.commitSuccessor(owner.id, { id: "stage-race-b", path: "/stage-race-b.jsonl", accountId: "b" }, 1);
+  commitTestSuccessor(registry, owner.id, { id: "stage-race-b", path: "/stage-race-b.jsonl", accountId: "b" }, 1);
   const template = normalizeTemplate({ name: "owner-race-demo", stages: [IMPLEMENT, REVIEW] })!;
   const workflows = Array.from({ length: 17 }, (_, index) => {
     const workflow = buildWorkflow({ id: `owner-race-${index}`, name: "owner-race-demo", task: "Ship", project: "repo", repoDir: "/repo", template, mode: "manual", now: "now" });

@@ -153,6 +153,7 @@ test("snapshot exposes the canonical projected runtime model", () => {
         }),
       },
       activeTurnId: "turn-one",
+      pendingReconfigure: null,
       drift: null,
     }],
     attentions: [{
@@ -238,6 +239,65 @@ test("send operations converge by idempotency key and persist one receipt and ef
   expect(journal.snapshot().sessions[0]?.recentReceipts).toHaveLength(1);
   expect(() => journal.executeOperation({ ...command, text: "different" })).toThrow("idempotency key already belongs to another request");
   expect(() => journal.executeOperation({ ...command, idempotencyKey: "send-key-two" })).toThrow("operationId already belongs to another request");
+  journal.close();
+});
+
+test("reconfigure admission durably replaces the session pending switch", () => {
+  const dir = sandbox("reconfigure-last-write-wins");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true, now: () => 100 });
+  journal.append({
+    scope: runtimeScope("session", "conv-reconfigure"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-reconfigure",
+      sessionKey: { engine: "codex", sessionId: "thread-one" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      provenance: "structured",
+      accountId: "default",
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: "turn-one",
+    },
+  });
+
+  const first = journal.executeOperation({
+    kind: "reconfigure",
+    operationId: "reconfigure-one",
+    idempotencyKey: "reconfigure-one",
+    conversationId: "conv-reconfigure",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: false,
+  });
+  const second = journal.executeOperation({
+    kind: "reconfigure",
+    operationId: "reconfigure-two",
+    idempotencyKey: "reconfigure-two",
+    conversationId: "conv-reconfigure",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+    accountId: "work",
+  });
+
+  expect(first.receipt.status).toBe("queued");
+  expect(second.receipt.status).toBe("queued");
+  expect(journal.snapshot().sessions[0]?.pendingReconfigure).toEqual({
+    operationId: "reconfigure-two",
+    model: "gpt-5.6-terra",
+    effort: "xhigh",
+    fast: true,
+    accountId: "work",
+  });
+  expect(journal.effectBatch(100, ["runtime.reconfigure"])).toHaveLength(2);
+  expect(journal.transitionOperation(first.operationId, "failed", { reason: "superseded" }).receipt.status).toBe("failed");
+  expect(journal.snapshot().sessions[0]?.pendingReconfigure?.operationId).toBe(second.operationId);
+  expect(journal.transitionOperation(second.operationId, "applying").receipt.status).toBe("applying");
+  expect(journal.effectBatch(100, ["runtime.reconfigure"])).toHaveLength(1);
+  expect(journal.transitionOperation(second.operationId, "applied").receipt.status).toBe("applied");
+  expect(journal.snapshot().sessions[0]?.pendingReconfigure).toBeNull();
+  expect(journal.effectBatch(100, ["runtime.reconfigure"])).toHaveLength(0);
   journal.close();
 });
 
@@ -1055,7 +1115,7 @@ test("spawn acceptance creates the placeholder session and lineage edge atomical
     idempotencyKey: "spawn-one",
     engine: "codex" as const,
     cwd: "/repo",
-    prompt: "Implement the task",
+    "prompt": "Implement the task",
     accountId: "account-one",
     parentConversationId: "parent-one",
     sessionId: "thread-child-one",
@@ -1098,7 +1158,7 @@ test("successor spawn preserves one canonical lineage edge and rejects self line
       idempotencyKey: operationId,
       engine: "codex",
       cwd: "/repo",
-      prompt: "Resume the worker",
+      "prompt": "Resume the worker",
       accountId: "account-one",
       parentConversationId,
       sessionId: "thread-child-one",
@@ -1346,7 +1406,7 @@ test("runtime host acknowledges a durable command while consumer recovery is slo
           idempotencyKey: "op-worker",
           engine: "claude",
           cwd: "/repo",
-          prompt: "work",
+          "prompt": "work",
           accountId: "account-one",
           parentConversationId: null,
         },
@@ -1471,7 +1531,7 @@ test("restart reconstructs identical sessions, receipts, flow state, and graph",
     idempotencyKey: "spawn-one",
     engine: "codex" as const,
     cwd: "/repo",
-    prompt: "Implement",
+    "prompt": "Implement",
     parentConversationId: "parent-one",
   };
   const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
@@ -1839,8 +1899,8 @@ test("issue 367: a failed structured spawn retires its registering placeholder w
     idempotencyKey: "launch-6799487f",
     engine: "claude",
     cwd: "/repo",
-    prompt: "Implement the follow-up",
-    accountId: "botfatherdev-2",
+    "prompt": "Implement the follow-up",
+    accountId: "botfat\x68erdev-2",
   });
   expect(journal.snapshot().sessions[0]).toMatchObject({
     conversationId: "conversation_fable_one",
@@ -1877,7 +1937,7 @@ test("issue 367: a delivered spawn keeps its placeholder for the launcher's host
     idempotencyKey: "launch-live",
     engine: "claude",
     cwd: "/repo",
-    prompt: "Implement",
+    "prompt": "Implement",
   });
   journal.transitionOperation("launch-live", "delivered");
   expect(journal.snapshot().sessions[0]).toMatchObject({
@@ -1899,7 +1959,7 @@ test("issue 367: a new host epoch retires registering placeholders abandoned by 
       idempotencyKey: `launch-${conversation}`,
       engine: "claude",
       cwd: "/repo",
-      prompt: "Implement",
+      "prompt": "Implement",
     });
   }
   journal.append({
@@ -1931,6 +1991,60 @@ test("issue 367: a new host epoch retires registering placeholders abandoned by 
   expect(restarted.snapshot().sessions.filter((session) => session.host === "registering")).toEqual([]);
   restarted.close();
 });
+
+for (const order of ["reconfigure-then-kill", "kill-then-reconfigure"] as const) {
+  test(`a delivered kill durably fences a same-generation reconfigure admitted ${order}`, () => {
+    const dir = sandbox(`kill-reconfigure-${order}`);
+    const filename = path.join(dir, "events.sqlite");
+    const journal = new RuntimeJournal(filename, { structuredHosts: true, now: () => 100 });
+    journal.append({
+      scope: runtimeScope("session", "conv-kill-reconfigure"),
+      kind: "session-status",
+      payload: {
+        conversationId: "conv-kill-reconfigure",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+        hostKind: "codex-app-server",
+        host: "hosted",
+        turn: "idle",
+        provenance: "structured",
+        capabilities: { steer: true, structuredAttention: true },
+      },
+    });
+    const reconfigure = {
+      kind: "reconfigure" as const,
+      operationId: "reconfigure-one",
+      idempotencyKey: "reconfigure-one",
+      conversationId: "conv-kill-reconfigure",
+      sessionKey: { engine: "codex" as const, sessionId: "thread-one" },
+      model: "gpt-5.6-sol",
+      effort: "high",
+      fast: false,
+    };
+    const kill = {
+      kind: "kill" as const,
+      operationId: "kill-one",
+      idempotencyKey: "kill-one",
+      conversationId: "conv-kill-reconfigure",
+      sessionKey: { engine: "codex" as const, sessionId: "thread-one" },
+    };
+    for (const command of order === "reconfigure-then-kill" ? [reconfigure, kill] : [kill, reconfigure]) {
+      journal.executeOperation(command);
+    }
+
+    journal.transitionOperation(kill.operationId, "delivering");
+    journal.transitionOperation(kill.operationId, "delivered");
+    journal.close();
+
+    const reopened = new RuntimeJournal(filename, { structuredHosts: true, now: () => 200 });
+    expect(reopened.operationResult(reconfigure.operationId)?.receipt).toMatchObject({
+      status: "failed",
+      reason: "conversation-killed",
+    });
+    expect(reopened.effectBatch(100, ["runtime.reconfigure"])).toEqual([]);
+    expect(reopened.snapshot().sessions[0]).toMatchObject({ host: "dead", pendingReconfigure: null });
+    reopened.close();
+  });
+}
 
 test("issue 367: a delivered structured kill converges host and turn projection with its receipt", () => {
   const dir = sandbox("kill-terminal-projection");
@@ -1982,6 +2096,57 @@ test("issue 367: a delivered structured kill converges host and turn projection 
   journal.close();
 });
 
+test("a delivered kill retains its original admission boundary through compaction", () => {
+  const dir = sandbox("kill-boundary-compaction");
+  const filename = path.join(dir, "events.sqlite");
+  let journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conversation_boundary"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation_boundary",
+      sessionKey: { engine: "claude", sessionId: "session-boundary" },
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "turn-boundary",
+      provenance: "structured",
+      capabilities: { steer: false, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "kill",
+    conversationId: "conversation_boundary",
+    operationId: "op-kill-boundary",
+    idempotencyKey: "op-kill-boundary",
+    sessionKey: { engine: "claude", sessionId: "session-boundary" },
+  });
+  const admissionEventSeq = journal.effectBatch(100, ["runtime.kill"])[0]!.eventSeq;
+
+  journal.transitionOperation("op-kill-boundary", "delivering");
+  journal.transitionOperation("op-kill-boundary", "delivered");
+
+  expect(journal.effectBatch()).toEqual([]);
+  expect(journal.effectBatch(100, ["runtime.kill-boundary"])).toEqual([{
+    id: "kill-boundary:conversation_boundary",
+    kind: "runtime.kill-boundary",
+    eventSeq: admissionEventSeq,
+    payload: {
+      operationId: "op-kill-boundary",
+      conversationId: "conversation_boundary",
+      admissionEventSeq,
+    },
+  }]);
+  journal.compact(1);
+  journal.close();
+
+  journal = new RuntimeJournal(filename, { structuredHosts: true });
+  expect(journal.effectBatch(100, ["runtime.kill-boundary"])).toEqual([
+    expect.objectContaining({ eventSeq: admissionEventSeq }),
+  ]);
+  journal.close();
+});
+
 test("issue 367: a failed structured kill leaves the live projection untouched", () => {
   const dir = sandbox("kill-failed-projection");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100, structuredHosts: true });
@@ -2007,6 +2172,7 @@ test("issue 367: a failed structured kill leaves the live projection untouched",
     sessionKey: { engine: "claude", sessionId: "session-alive" },
   });
   journal.transitionOperation("op-kill-alive", "failed", { reason: "structured host termination is unavailable" });
+  expect(journal.effectBatch(100, ["runtime.kill-boundary"])).toEqual([]);
   expect(journal.snapshot().sessions[0]).toMatchObject({
     host: "hosted",
     turn: "running",

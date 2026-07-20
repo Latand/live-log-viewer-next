@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
 import type { Pipeline } from "@/lib/pipelines/types";
+import type { BoardTask } from "@/lib/tasks/types";
 
 import { SchemeBoard } from "./SchemeBoard";
 
@@ -44,16 +45,16 @@ afterEach(() => {
   dom.sessionStorage.clear();
 });
 
-/* A fresh empty draft in the screen-space pipeline shelf. */
+/* A fresh draft with no linked task or stage pane uses the free-space grid. */
 const draft: Pipeline = {
-  id: "d1", task: "New pipeline", project: "demo", repoDir: "/r",
+  id: "d1", task: "New pipeline", taskIds: [], project: "demo", repoDir: "/r",
   worktreeDir: "/r-pipeline-d1", branch: "pipeline/new-pipeline-d1",
   baseBranch: "", baseRef: "", lastPassedCommit: "", stages: [], runs: [],
   cursor: null, state: "draft", pausedState: null, stateDetail: null,
   srcPath: null, srcConversationId: null, createdAt: new Date(0).toISOString(), closedAt: null,
 } as Pipeline;
 
-function board(builderPipelineId: string | null) {
+function board(builderPipelineId: string | null, value: Pipeline = draft, tasks: BoardTask[] = []) {
   return (
     <SchemeBoard
       project="demo"
@@ -61,9 +62,9 @@ function board(builderPipelineId: string | null) {
       manual={[]}
       files={[]}
       flows={[]}
-      pipelines={[draft]}
-      surfacePipelines={[draft]}
-      tasks={[]}
+      pipelines={[value]}
+      surfacePipelines={[value]}
+      tasks={tasks}
       drafts={[]}
       focus={null}
       onSelect={() => {}}
@@ -83,7 +84,7 @@ const settle = async () => {
   flushSync(() => undefined);
 };
 
-test("the builder reveal ends an active selection session and opens the shelf editor (#388)", async () => {
+test("the builder reveal ends an active selection session and opens the world-group editor", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -99,13 +100,41 @@ test("the builder reveal ends an active selection session and opens the shelf ed
   flushSync(() => lasso.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   await settle();
 
-  /* The shelf remains reachable while the world selection session is active. */
+  /* The draft owns one deterministic world-space container during selection. */
   expect(host.querySelector("[data-group-override]")).toBeNull();
-  expect(host.querySelector('[data-pipeline-shelf-item="d1"]')).toBeTruthy();
-  expect(host.querySelector('[data-scheme-group]')).toBeNull();
+  const group = host.querySelector('[data-pipeline-group="d1"]') as HTMLElement;
+  expect(group).toBeTruthy();
+  expect(group.style.transform).toMatch(/^translate\([1-9]\d*px, \d+px\)$/);
+  expect(host.querySelector("[data-pipeline-shelf]")).toBeNull();
 
-  /* Targeting this draft clears the world session and opens the shared editor. */
+  /* Targeting this draft clears the world session and opens its editor in place. */
   flushSync(() => root.render(board("d1")));
   await settle();
   expect(host.querySelector("[data-group-override]")).toBeTruthy();
+});
+
+test("a pipeline with taskIds renders beside its first placed task", async () => {
+  const task: BoardTask = {
+    id: "task-linked",
+    project: "demo",
+    status: "assigned",
+    text: "Linked task",
+    placement: "pinned",
+    pos: { x: 420, y: 180 },
+    assignments: [],
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:00:00.000Z",
+  };
+  const linked = { ...draft, id: "linked", taskIds: [task.id] } as Pipeline;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+
+  flushSync(() => root.render(board(null, linked, [task])));
+  await settle();
+
+  const group = host.querySelector('[data-pipeline-group="linked"]') as HTMLElement;
+  expect(group).toBeTruthy();
+  expect(group.style.transform).toBe("translate(712px, 180px)");
 });

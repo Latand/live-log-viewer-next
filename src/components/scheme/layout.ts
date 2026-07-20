@@ -99,6 +99,9 @@ export interface DraftNode extends SchemeRect {
 
 export interface SchemeEdge {
   to: string;
+  /** Stable lineage identities used by the optional subagent badge anchor. */
+  sourceConversationId?: string;
+  targetConversationId?: string;
   x1: number;
   y1: number;
   x2: number;
@@ -222,8 +225,8 @@ export function buildSchemeLayout(
   flows: Flow[] = [],
   draftIds: string[] = [],
   pipelines: Pipeline[] = [],
-  /** Active project pipelines are accepted for call-site compatibility. Their
-      memberless presentation lives in the screen-space pipeline shelf. */
+  /** Active project pipelines are accepted for call-site compatibility. The
+      caller owns their board projection outside this conversation layout. */
   surfacePipelines: Pipeline[] = [],
   /** Durable identities (`conversationIdentity`) the user has crowned (issue
       #224). A group/manual root whose identity is favorited is lifted into a
@@ -382,6 +385,8 @@ export function buildSchemeLayout(
         const child = children[i]!;
         edges.push({
           to: child.file.path,
+          sourceConversationId: conversationIdentity(col.file),
+          targetConversationId: conversationIdentity(child.file),
           x1: x + 40,
           y1: y + h,
           x2: cx + NODE_W / 2,

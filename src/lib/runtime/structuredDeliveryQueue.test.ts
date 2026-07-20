@@ -69,6 +69,175 @@ test("structured delivery preserves queue order within one conversation", async 
   ]);
 });
 
+test("a busy structured turn keeps reconfigure queued and applies it before later messages", async () => {
+  const actions: string[] = [];
+  const terminal = new Set<string>();
+  let active = true;
+  const currentHost = host(async (entry) => {
+    actions.push(`send:${entry.id}`);
+    return { outcome: "turn-started", turnId: `turn-${entry.id}` };
+  });
+  currentHost.health = async () => ({
+    ...idleState(),
+    status: active ? "active" : "idle",
+    activeTurnRef: active ? "turn-current" : null,
+  });
+  const effects = [
+    {
+      id: "effect:switch-model",
+      kind: "runtime.reconfigure",
+      eventSeq: 1,
+      payload: {
+        operationId: "switch-model", conversationId: "conversation-one",
+        model: "gpt-5.6-sol", effort: "high", fast: false,
+      },
+    },
+    {
+      id: "effect:message-after-switch",
+      kind: "runtime.send",
+      eventSeq: 2,
+      payload: { operationId: "message-after-switch", conversationId: "conversation-one", text: "next", policy: "queue" },
+    },
+  ];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => effects.filter((effect) => !terminal.has(String(effect.payload.operationId))),
+    transition: async (operationId, status) => {
+      actions.push(`${status}:${operationId}`);
+      if (status === "applied" || status === "failed" || status === "delivered") terminal.add(operationId);
+    },
+  }, () => currentHost, undefined, undefined, undefined, async (effect) => {
+    actions.push(`reconfigure:${effect.model}:${effect.effort}`);
+  });
+
+  await queue.drain();
+  expect(actions).toEqual([]);
+
+  active = false;
+  await queue.drain();
+  expect(actions).toEqual([
+    "applying:switch-model",
+    "reconfigure:gpt-5.6-sol:high",
+    "applied:switch-model",
+    "delivering:message-after-switch",
+    "send:message-after-switch",
+    "delivered:message-after-switch",
+  ]);
+});
+
+test("queued reconfigures are last-write-wins with one host restart", async () => {
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const applied: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:switch-one", kind: "runtime.reconfigure", eventSeq: 1,
+        payload: { operationId: "switch-one", conversationId: "conversation-one", model: "gpt-5.5", effort: "high", fast: false },
+      },
+      {
+        id: "effect:switch-two", kind: "runtime.reconfigure", eventSeq: 2,
+        payload: { operationId: "switch-two", conversationId: "conversation-one", model: "gpt-5.6-sol", effort: "xhigh", fast: true },
+      },
+    ],
+    transition: async (operationId, status, details) => { transitions.push([operationId, status, details?.reason]); },
+  }, () => host(async () => ({ outcome: "turn-started", turnId: "unused" })), undefined, undefined, undefined, async (effect) => {
+    applied.push(effect.operationId);
+  });
+
+  await queue.drain();
+
+  expect(applied).toEqual(["switch-two"]);
+  expect(transitions).toEqual([
+    ["switch-one", "failed", "superseded"],
+    ["switch-two", "applying", undefined],
+    ["switch-two", "applied", undefined],
+  ]);
+});
+
+test("a reconfigure admitted during an active apply supersedes it before publication", async () => {
+  const effects = [{
+    id: "effect:switch-b",
+    kind: "runtime.reconfigure",
+    eventSeq: 10,
+    payload: { operationId: "switch-b", conversationId: "conversation-one", model: "gpt-5.6-sol", effort: "high", fast: false, accountId: "b" },
+  }];
+  const terminal = new Set<string>();
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const applied: string[] = [];
+  let releaseB!: () => void;
+  let enteredB!: () => void;
+  const bGate = new Promise<void>((resolve) => { releaseB = resolve; });
+  const bEntered = new Promise<void>((resolve) => { enteredB = resolve; });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => effects.filter((item) => !terminal.has(String(item.payload.operationId))),
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+      if (status === "applied" || status === "failed") terminal.add(operationId);
+    },
+  }, () => null, undefined, undefined, undefined, async (effect, ownership) => {
+    if (effect.operationId === "switch-b") {
+      enteredB();
+      await bGate;
+    }
+    if (!await ownership.isCurrent()) throw new Error("superseded");
+    applied.push(effect.operationId);
+  });
+
+  const firstDrain = queue.drain();
+  await bEntered;
+  effects.push({
+    id: "effect:switch-c",
+    kind: "runtime.reconfigure",
+    eventSeq: 11,
+    payload: { operationId: "switch-c", conversationId: "conversation-one", model: "gpt-5.6-terra", effort: "xhigh", fast: true, accountId: "c" },
+  });
+  const rerun = queue.drain();
+  releaseB();
+  await Promise.all([firstDrain, rerun]);
+
+  expect(applied).toEqual(["switch-c"]);
+  expect(transitions).toEqual([
+    ["switch-b", "applying", undefined],
+    ["switch-b", "failed", "superseded"],
+    ["switch-c", "applying", undefined],
+    ["switch-c", "applied", undefined],
+  ]);
+});
+
+test("a dead host applies pending reconfigure before queued delivery recovery", async () => {
+  const actions: string[] = [];
+  let recovered = false;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:switch-after-crash", kind: "runtime.reconfigure", eventSeq: 1,
+        payload: { operationId: "switch-after-crash", conversationId: "conversation-one", model: "claude-opus-4-6", effort: "high", fast: null },
+      },
+      {
+        id: "effect:message-after-crash", kind: "runtime.send", eventSeq: 2,
+        payload: { operationId: "message-after-crash", conversationId: "conversation-one", text: "continue", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status) => { actions.push(`${status}:${operationId}`); },
+  }, () => recovered ? host(async (entry) => {
+    actions.push(`send:${entry.id}`);
+    return { outcome: "turn-started", turnId: "turn-recovered" };
+  }) : null, undefined, undefined, undefined, async () => {
+    actions.push("recover");
+    recovered = true;
+  });
+
+  await queue.drain();
+
+  expect(actions).toEqual([
+    "applying:switch-after-crash",
+    "recover",
+    "applied:switch-after-crash",
+    "delivering:message-after-crash",
+    "send:message-after-crash",
+    "delivered:message-after-crash",
+  ]);
+});
+
 test("a runtime settings snapshot on the durable effect rides the queue entry to the host (issue #390 §10)", async () => {
   const entries: QueueEntry[] = [];
   const port: StructuredDeliveryQueuePort = {
@@ -139,7 +308,15 @@ test("unrelated outbox effects cannot starve structured message delivery", async
 
   await queue.drain();
 
-  expect(requestedKinds).toEqual([["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill"]]);
+  expect(requestedKinds).toEqual([[
+    "runtime.send",
+    "runtime.steer",
+    "runtime.answer",
+    "runtime.interrupt",
+    "runtime.kill",
+    "runtime.kill-boundary",
+    "runtime.reconfigure",
+  ]]);
   expect(sent).toEqual(["op-after-spawns"]);
 });
 
@@ -191,6 +368,48 @@ test("a full page from one busy conversation cannot hide a later ready conversat
 
   expect(sent).toEqual(["ready-101"]);
   expect(busySends).toBe(0);
+});
+
+test("a retained successful-kill boundary fences only earlier operations", async () => {
+  const pending = new Set(["send-before", "send-after"]);
+  const transitions: Array<[string, string]> = [];
+  const writes: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async (_kinds, afterEventSeq = 0) => [{
+      id: "effect:send-before",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: { operationId: "send-before", conversationId: "conversation-one", text: "stale", policy: "queue" },
+    }, {
+      id: "kill-boundary:conversation-one",
+      kind: "runtime.kill-boundary",
+      eventSeq: 2,
+      payload: { operationId: "kill-one", conversationId: "conversation-one", admissionEventSeq: 2 },
+    }, {
+      id: "effect:send-after",
+      kind: "runtime.send",
+      eventSeq: 3,
+      payload: { operationId: "send-after", conversationId: "conversation-one", text: "successor", policy: "queue" },
+    }].filter((effect) => effect.eventSeq > afterEventSeq
+      && (effect.kind === "runtime.kill-boundary" || pending.has(String(effect.payload.operationId)))),
+    transition: async (operationId, status) => {
+      transitions.push([operationId, status]);
+      if (status === "delivered" || status === "failed") pending.delete(operationId);
+    },
+  }, () => host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started", turnId: `turn:${entry.id}` };
+  }));
+
+  await queue.drain();
+  await queue.drain();
+
+  expect(writes).toEqual(["send-after"]);
+  expect(transitions).toEqual([
+    ["send-before", "failed"],
+    ["send-after", "delivering"],
+    ["send-after", "delivered"],
+  ]);
 });
 
 test("structured delivery surfaces a host actuation failure", async () => {
@@ -959,6 +1178,107 @@ test("a structured kill terminates its host and completes its receipt", async ()
   expect(transitions).toEqual([
     ["kill-one", "delivering"],
     ["kill-one", "delivered"],
+  ]);
+});
+
+for (const order of ["reconfigure-then-kill", "kill-then-reconfigure"] as const) {
+  test(`a delivered kill fences a pending same-generation reconfigure admitted ${order}`, async () => {
+    const reconfigure = {
+      id: "reconfigure-one",
+      kind: "runtime.reconfigure",
+      eventSeq: order === "reconfigure-then-kill" ? 1 : 2,
+      payload: {
+        operationId: "reconfigure-one",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+        model: "gpt-5.6-sol",
+        effort: "high",
+        fast: false,
+      },
+    };
+    const kill = {
+      id: "kill-one",
+      kind: "runtime.kill",
+      eventSeq: order === "reconfigure-then-kill" ? 2 : 1,
+      payload: {
+        operationId: "kill-one",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    };
+    const transitions: Array<[string, string, string | null | undefined]> = [];
+    const actions: string[] = [];
+    let hosted = true;
+    const target = host(async () => ({ outcome: "turn-started", turnId: "unexpected" }));
+    const queue = new StructuredDeliveryQueue({
+      effects: async () => [reconfigure, kill],
+      transition: async (operationId, status, details) => {
+        transitions.push([operationId, status, details?.reason]);
+      },
+    }, () => hosted ? target : null, async () => {
+      actions.push("terminate");
+      hosted = false;
+      return true;
+    }, undefined, undefined, async () => {
+      actions.push("recover");
+      hosted = true;
+    });
+
+    await queue.drain();
+
+    expect(actions).toEqual(["terminate"]);
+    expect(hosted).toBeFalse();
+    expect(transitions).toEqual([
+      ["kill-one", "delivering", undefined],
+      ["kill-one", "delivered", undefined],
+      ["reconfigure-one", "failed", "conversation-killed"],
+    ]);
+  });
+}
+
+test("a failed kill leaves the queued send eligible for its live host", async () => {
+  const pending = new Set(["send-one", "kill-one"]);
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const writes: string[] = [];
+  const target = host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started", turnId: `turn:${entry.id}` };
+  });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "send-one",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: {
+        operationId: "send-one",
+        conversationId: "conversation-one",
+        text: "deliver after the failed kill",
+        policy: "queue",
+      },
+    }, {
+      id: "kill-one",
+      kind: "runtime.kill",
+      eventSeq: 2,
+      payload: {
+        operationId: "kill-one",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }].filter((effect) => pending.has(String(effect.payload.operationId))),
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+      if (status === "delivered" || status === "failed") pending.delete(operationId);
+    },
+  }, () => target, async () => false);
+
+  await queue.drain();
+
+  expect(writes).toEqual(["send-one"]);
+  expect(transitions).toEqual([
+    ["kill-one", "delivering", undefined],
+    ["kill-one", "failed", "structured host termination is unavailable"],
+    ["send-one", "delivering", undefined],
+    ["send-one", "delivered", undefined],
   ]);
 });
 

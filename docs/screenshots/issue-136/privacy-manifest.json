@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "builder-desktop-1440.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "073fe5e8d008ecf7484989d482b3fef97930f12c39a6fab3126be40c1a764a2e"
+      ],
+      "description": "Redacted placeholder for the desktop builder evidence.",
+      "sha256": "be2ade89de92938ad2748e7d85b5d206476a7c38d45e5496059ecd9f9dbcd4f4"
+    },
+    {
+      "path": "builder-mobile-390.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "1c84c2afc312fa1203541ec1b0a53331633452aedd56ee87a7f9d0695b443899",
+      "sourceDigests": [
+        "f9236e9d7677c236bad5cc76b98ac8f756c55329664ed5cd8c92216b8a7514a4"
+      ],
+      "description": "Redacted placeholder for the mobile builder evidence.",
+      "sha256": "b71188eac5b29b97742e178919cd30cbcbde6fb87ed63be43d310e14cb074a33"
+    }
+  ]
+}
