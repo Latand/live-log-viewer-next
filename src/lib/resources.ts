@@ -21,6 +21,7 @@ import { overlayResourceSessionTitles } from "@/lib/session/titleProjection";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { captureTmuxAttachReferences, type TmuxAttachReference } from "@/lib/tmux";
 import { statePath } from "@/lib/configDir";
+import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { FileEntry, ResourceSession, ResourcesPayload } from "./types";
 
@@ -1044,7 +1045,7 @@ async function collectResourcesInWorker(
       cwd: process.cwd(),
       detached: true,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, [RESOURCE_WORKER_OWNER_ENV]: workerOwner },
+      env: { ...withoutWakatimeCredential(process.env), [RESOURCE_WORKER_OWNER_ENV]: workerOwner },
     },
   );
   return new Promise<CollectedResources>((resolve, reject) => {

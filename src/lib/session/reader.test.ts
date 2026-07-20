@@ -65,6 +65,59 @@ describe("readSession", () => {
     expect(result.messages.map((item) => item.text)).toEqual(["Fix the tests", "Fixed."]);
     expect(result.traces[0]?.name).toBe("turn_complete");
   });
+
+  test("reads modern Codex response-item text and stops authorship scanning at the first user record", () => {
+    const pathname = path.join(SANDBOX, "codex-modern-input-text.jsonl");
+    const firstRows = [
+      { type: "session_meta", payload: { id: "session-modern" } },
+      {
+        type: "response_item",
+        timestamp: "t1",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Fix the production queue" }],
+        },
+      },
+    ];
+    fs.writeFileSync(pathname, firstRows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    fs.appendFileSync(pathname, JSON.stringify({
+      type: "response_item",
+      timestamp: "t2",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "x".repeat(1024 * 1024) }],
+      },
+    }) + "\n");
+
+    const originalOpen = fs.openSync;
+    const originalRead = fs.readSync;
+    let targetFd: number | null = null;
+    let bytesRead = 0;
+    fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+      const fd = originalOpen(...args);
+      if (String(args[0]) === pathname) targetFd = fd;
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
+      const read = originalRead(...args);
+      if (args[0] === targetFd) bytesRead += read;
+      return read;
+    }) as typeof fs.readSync;
+    try {
+      expect(scanUserAuthoredMessages(pathname, "codex", 1)).toEqual({ count: 1, complete: true });
+    } finally {
+      fs.openSync = originalOpen;
+      fs.readSync = originalRead;
+    }
+
+    expect(bytesRead).toBeLessThanOrEqual(64 * 1024);
+    expect(readSession(pathname, "codex").messages.map((item) => item.text)).toEqual([
+      "Fix the production queue",
+      "x".repeat(1024 * 1024),
+    ]);
+  });
 });
 
 test("authorship scan reports malformed and oversized records as incomplete", () => {

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import { lastTurnFromRecords } from "./turnDuration";
+import type { FileEntry } from "../types";
+import { lastTurnFromRecords, recentTurnWindowsFor, recentTurnWindowsFromRecords } from "./turnDuration";
 
 const ms = (iso: string) => Date.parse(iso);
 
@@ -61,6 +65,28 @@ const codexToolOutput = (timestamp: string, id: string) => ({
 const codexTaskComplete = (timestamp: string) => ({ timestamp, payload: { type: "task_complete" } });
 
 describe("lastTurnFromRecords — Claude", () => {
+  test("enumerates every completed turn in chronological order", () => {
+    const result = recentTurnWindowsFromRecords(
+      [
+        claudeUser("2026-07-14T09:00:00.000Z", "first"),
+        claudeAssistantEnd("2026-07-14T09:01:00.000Z"),
+        claudeUser("2026-07-14T10:00:00.000Z", "second"),
+        claudeAssistantEnd("2026-07-14T10:00:45.000Z"),
+      ],
+      false,
+    );
+    expect(result).toEqual([
+      {
+        startedAt: ms("2026-07-14T09:00:00.000Z"),
+        endedAt: ms("2026-07-14T09:01:00.000Z"),
+      },
+      {
+        startedAt: ms("2026-07-14T10:00:00.000Z"),
+        endedAt: ms("2026-07-14T10:00:45.000Z"),
+      },
+    ]);
+  });
+
   test("completed turn: prompt start to end_turn end", () => {
     const boundary = lastTurnFromRecords(
       [
@@ -394,6 +420,21 @@ describe("lastTurnFromRecords — Claude", () => {
 });
 
 describe("lastTurnFromRecords — Codex", () => {
+  test("enumerates completed turns followed by the final open turn", () => {
+    expect(recentTurnWindowsFromRecords(
+      [
+        codexUser("2026-07-14T08:00:00.000Z", "first"),
+        codexTaskComplete("2026-07-14T08:01:00.000Z"),
+        codexUser("2026-07-14T10:00:00.000Z", "second"),
+        codexTaskStarted("2026-07-14T10:00:01.000Z"),
+      ],
+      true,
+    )).toEqual([
+      { startedAt: ms("2026-07-14T08:00:00.000Z"), endedAt: ms("2026-07-14T08:01:00.000Z") },
+      { startedAt: ms("2026-07-14T10:00:00.000Z"), endedAt: null },
+    ]);
+  });
+
   test("completed turn: user_message start to task_complete end", () => {
     const boundary = lastTurnFromRecords(
       [
@@ -461,4 +502,51 @@ describe("lastTurnFromRecords — Codex", () => {
       endedAt: ms("2026-07-14T10:45:00.000Z"),
     });
   });
+});
+
+test("a truncated transcript prefix reports the gap and never fabricates a turn start", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-turn-windows-"));
+  const pathname = path.join(directory, "session.jsonl");
+  try {
+    const records = [
+      claudeUser("2026-07-14T08:00:00.000Z", "old prompt outside the retained tail"),
+      { type: "assistant", timestamp: "2026-07-14T08:00:01.000Z", message: { role: "assistant", stop_reason: null, content: "x".repeat(140_000) } },
+      claudeAssistantEnd("2026-07-14T08:01:00.000Z"),
+      claudeUser("2026-07-14T10:00:00.000Z", "visible prompt"),
+      claudeAssistantEnd("2026-07-14T10:01:00.000Z"),
+    ];
+    fs.writeFileSync(pathname, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+    const stat = fs.statSync(pathname);
+    const entry = {
+      path: pathname,
+      root: "claude-projects",
+      name: "session.jsonl",
+      project: "fixture",
+      title: "fixture",
+      engine: "claude",
+      kind: "session",
+      fmt: "claude",
+      parent: null,
+      mtime: stat.mtimeMs / 1_000,
+      size: stat.size,
+      activity: "recent",
+      derivationComplete: true,
+      proc: "done",
+      pid: null,
+      model: null,
+      pendingQuestion: null,
+      waitingInput: null,
+    } satisfies FileEntry;
+
+    expect(recentTurnWindowsFor(entry)).toEqual({
+      prefixTruncated: true,
+      complete: true,
+      windows: [{
+        startedAt: ms("2026-07-14T10:00:00.000Z"),
+        endedAt: ms("2026-07-14T10:01:00.000Z"),
+      }],
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

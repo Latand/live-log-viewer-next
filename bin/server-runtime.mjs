@@ -1,3 +1,33 @@
+export const WAKATIME_CREDENTIAL_ENV = "WAKATIME_API_KEY";
+
+/** @param {Record<string, string | undefined>} environment */
+export function discardWakatimeEnvironmentCredential(environment = process.env) {
+  delete environment[WAKATIME_CREDENTIAL_ENV];
+}
+
+/**
+ * @param {Readonly<Record<string, string | undefined>>} base
+ * @returns {Record<string, string | undefined>}
+ */
+export function withoutWakatimeCredential(base) {
+  const env = { NODE_ENV: base.NODE_ENV };
+  for (const key of Object.keys(base)) {
+    if (key === WAKATIME_CREDENTIAL_ENV) continue;
+    env[key] = base[key];
+  }
+  return env;
+}
+
+/**
+ * @param {Record<string, unknown> & { env?: Readonly<Record<string, string | undefined>> }} options
+ */
+export function viewerChildProcessOptions(options = {}) {
+  return {
+    ...options,
+    env: withoutWakatimeCredential(options.env ?? process.env),
+  };
+}
+
 export function viewerServerBunRuntime(options = {}) {
   const env = options.env ?? process.env;
   const versions = options.versions ?? process.versions;

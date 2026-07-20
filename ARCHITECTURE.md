@@ -14,7 +14,9 @@ Runs with `bun dev` (dev) / `bun run build && bun start` on **127.0.0.1:8898**.
   `tailscale serve` behind the `src/proxy.ts` token gate. API routes must reject
   any `path` outside the whitelisted roots (port `path_allowed` exactly:
   realpath + prefix check).
-- No database, no external services. Filesystem only.
+- The default runtime uses the local filesystem only. Explicit opt-in
+  integrations may send documented, bounded payloads to their configured
+  provider; WakaTime activity export is the first such integration.
 - Keep the light design language: white panels, soft borders/shadows,
   bg `#f6f6f8`, Codex teal `#0d8a72` (+soft `#e3f4f0`), Claude coral `#d97757`
   (+soft `#faeee9`), accent `#5a51e0`. Ukrainian UI labels, same wording as the
@@ -73,6 +75,12 @@ Both the `Host` header and any `Origin` header must resolve to that allowlist.
 | `LLV_TS_HOST` | CLI after `tailscale status --json` | Adds the tailnet DNS name to same-origin allowed hosts. |
 | `LLV_TS_URL` | CLI when `--tailscale` is used | Full tailnet URL (with `?k=` token) returned by `GET /api/access` for the in-app QR button. Absent means the button shows the "start with --tailscale" hint. |
 | `LLV_STANDALONE` | `scripts/prepack.mjs` | Enables `output: "standalone"` during publish packaging only. |
+| `LLV_WAKATIME_ENABLED` | Operator | Exact value `1` starts the traffic-owning server's WakaTime scheduler. Other values leave the module unloaded. |
+
+WakaTime credentials use the explicit
+`${XDG_CONFIG_HOME:-~/.config}/agent-log-viewer/wakatime-api-key` file with
+exact mode `0600`. Viewer entrypoints discard the unsupported
+`WAKATIME_API_KEY` environment variable without reading its value.
 
 ## File tree and ownership
 

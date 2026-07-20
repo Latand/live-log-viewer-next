@@ -10,6 +10,7 @@ import {
 } from "./codexAppServerProtocol";
 import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "../processGroup";
 import { headlessCodexThreadConfig } from "../codexHeadlessConfig";
+import { withoutWakatimeCredential } from "../wakatime/credential";
 
 export interface CodexAppServerChild {
   pid?: number;
@@ -101,9 +102,13 @@ const defaultClock: CodexAppServerClock = {
   clearTimeout: (timer) => clearTimeout(timer),
 };
 
+export function codexAppServerEnvironment(home: string): NodeJS.ProcessEnv {
+  return { ...withoutWakatimeCredential(process.env), CODEX_HOME: home };
+}
+
 function spawnCodexAppServer(home: string): CodexAppServerChild {
   const child = spawn(process.env.LLV_CODEX_BINARY || "codex", ["-c", "cli_auth_credentials_store=file", "-c", "mcp_servers={}", "app-server"], {
-    env: { ...process.env, CODEX_HOME: home },
+    env: codexAppServerEnvironment(home),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
   });

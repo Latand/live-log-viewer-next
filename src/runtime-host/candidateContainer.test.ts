@@ -4,12 +4,14 @@ import os from "node:os";
 import path from "node:path";
 
 import { runtimeEventsEnabled, runtimeHostSocket } from "@/lib/runtime/flags";
+import { WAKATIME_CREDENTIAL_ENV, withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import {
   obsoleteManagedViewerContainers,
   viewerAuthenticationTokenFromConfig,
   viewerCandidateDockerArgs,
   viewerCandidateTmuxEnvironment,
+  viewerComposeSnapshotWithoutWakatimeCredential,
   viewerComposeServiceFromConfig,
   type ViewerComposeService,
 } from "./candidateContainer";
@@ -26,7 +28,7 @@ const composeService = {
   command: null,
   entrypoint: null,
   environment: {
-    HOME: "/home/latand",
+    HOME: "/home/user",
     HOSTNAME: "127.0.0.1",
     PORT: "8898",
     LLV_RUNTIME_EVENTS: "0",
@@ -35,7 +37,7 @@ const composeService = {
     TMUX_TMPDIR: "/tmp",
     LLV_DOCKER_NSENTER_SHIMS: "1",
     LLV_TRANSCRIBE_BACKEND: "chatgpt",
-    HF_HOME: "/home/latand/.cache/huggingface",
+    HF_HOME: "/home/user/.cache/huggingface",
     GIT_SSH_COMMAND: "ssh compose-config",
   },
   image: "agent-log-viewer:node22",
@@ -45,9 +47,9 @@ const composeService = {
   profiles: [],
   privileged: true,
   restart: "unless-stopped",
-  user: "1000:1000",
+  "user": "1000:1000",
   volumes: [
-    { type: "bind", source: "/home/latand", target: "/home/latand", bind: {} },
+    { type: "bind", source: "/home/user", target: "/home/user", bind: {} },
     { type: "bind", source: "/tmp/tmux-1000", target: "/tmp/tmux-1000", bind: {} },
   ],
   working_dir: "/app",
@@ -68,7 +70,7 @@ interface ResolvedComposeService {
   command: string[] | null;
   environment: Record<string, string>;
   profiles?: string[];
-  user: string;
+  "user": string;
   volumes: Array<{ source: string; target: string }>;
 }
 
@@ -80,7 +82,7 @@ function resolvedCompose(overrides: Record<string, string> = {}): { services: Re
      CI shell that exports it would leak into `docker compose config` and break
      the default-value assertions. Drop it from the inherited env so the test is
      hermetic — an override still sets it explicitly when a case needs it. */
-  const baseEnv = { ...process.env };
+  const baseEnv = withoutWakatimeCredential(process.env);
   delete baseEnv.LLV_ALLOW_LEGACY_VIEWER;
   const result = Bun.spawnSync(["docker", "compose", "--profile", "*", "config", "--format", "json"], {
     cwd: process.cwd(),
@@ -105,7 +107,7 @@ test("promoted candidate derives its runtime contract from Compose", () => {
   expect(runtimeHostSocket(environment as NodeJS.ProcessEnv)).toBe("/state/runtime-host.sock");
   expect(environment.LLV_LEGACY_TMUX_EXTERNAL).toBe("1");
   expect(environment.TMUX_TMPDIR).toBe("/run/user/1000/agent-log-viewer");
-  expect(environment.HF_HOME).toBe("/home/latand/.cache/huggingface");
+  expect(environment.HF_HOME).toBe("/home/user/.cache/huggingface");
   expect(environment.LLV_TRANSCRIBE_BACKEND).toBe("chatgpt");
   expect(environment.LLV_DOCKER_NSENTER_SHIMS).toBe("1");
   expect(environment.GIT_SSH_COMMAND).toBe("ssh compose-config");
@@ -116,7 +118,7 @@ test("promoted candidate derives its runtime contract from Compose", () => {
     `dev.live-log-viewer.revision=${candidate.revision}`,
   ]);
   expect(valuesAfter(args, "--mount")).toEqual([
-    "type=bind,source=/home/latand,target=/home/latand",
+    "type=bind,source=/home/user,target=/home/user",
     "type=bind,source=/tmp/tmux-1000,target=/tmp/tmux-1000",
   ]);
   expect(args[args.indexOf("--restart") + 1]).toBe("unless-stopped");
@@ -127,13 +129,45 @@ test("promoted candidate derives its runtime contract from Compose", () => {
   expect(args).toContain("--privileged");
 });
 
+test("candidate artifacts exclude the legacy WakaTime credential", () => {
+  const credentialPlaceholder = ["legacy", "credential", "placeholder"].join("-");
+  const rawConfig = JSON.stringify({
+    services: {
+      viewer: {
+        ...composeService,
+        environment: {
+          ...composeService.environment,
+          [WAKATIME_CREDENTIAL_ENV]: credentialPlaceholder,
+        },
+      },
+      "runtime-host": {
+        environment: { [WAKATIME_CREDENTIAL_ENV]: credentialPlaceholder },
+      },
+    },
+  });
+
+  const snapshot = viewerComposeSnapshotWithoutWakatimeCredential(rawConfig);
+  const service = viewerComposeServiceFromConfig(snapshot);
+  const args = viewerCandidateDockerArgs(candidate, service, {
+    runtimeSocket: "/state/runtime-host.sock",
+    legacyTmuxExternal: "1",
+    tmuxTmpdir: "/run/user/1000/agent-log-viewer",
+  });
+
+  expect(snapshot).not.toContain(WAKATIME_CREDENTIAL_ENV);
+  expect(snapshot).not.toContain(credentialPlaceholder);
+  expect(JSON.stringify(args)).not.toContain(WAKATIME_CREDENTIAL_ENV);
+  expect(JSON.stringify(args)).not.toContain(credentialPlaceholder);
+  expect(environmentFromArgs(args)[WAKATIME_CREDENTIAL_ENV]).toBeUndefined();
+});
+
 test("actual Viewer Compose keys remain covered by the candidate generator", () => {
   const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-compose-parity-"));
   const envFile = path.join(fixtureDir, "service.env");
   fs.writeFileSync(envFile, "");
   const config = Bun.spawnSync(["docker", "compose", "--profile", "*", "config", "--format", "json"], {
     cwd: process.cwd(),
-    env: { ...process.env, LLV_ENV_FILE: envFile },
+    env: { ...withoutWakatimeCredential(process.env), LLV_ENV_FILE: envFile },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -204,7 +238,7 @@ test("candidate executes the Compose guard with its runtime launch grant", () =>
   fs.writeFileSync(bunContainer, "#!/bin/sh\nshift\nexec \"$@\"\n", { mode: 0o755 });
   const result = Bun.spawnSync(command, {
     cwd: sandbox,
-    env: { ...process.env, ...environmentFromArgs(args), PATH: `${sandbox}:${process.env.PATH ?? ""}` },
+    env: { ...withoutWakatimeCredential(process.env), ...environmentFromArgs(args), PATH: `${sandbox}:${process.env.PATH ?? ""}` },
     stdout: "pipe",
     stderr: "pipe",
   });

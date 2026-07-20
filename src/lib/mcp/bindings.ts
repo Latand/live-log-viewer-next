@@ -1,17 +1,12 @@
 import crypto from "node:crypto";
 
-import { NextRequest } from "next/server";
-
 import { agentRegistry } from "@/lib/agent/registry";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
-import { executeSpawnRequest, productionSpawnCommandDependencies } from "@/lib/agent/spawnCommand";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
-import { deliverConversationMessage } from "@/lib/delivery";
 import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import type { CreatePipelineRequest, PatchPipelineRequest, PipelineAction } from "@/lib/pipelines/types";
-import { RuntimeHostUnavailableError, runtimeHostClient } from "@/lib/runtime/client";
 import { listFiles } from "@/lib/scanner";
 import { readSession } from "@/lib/session/reader";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
@@ -34,6 +29,37 @@ const productionLinkTaskDependencies: LinkTaskToPipelineDependencies = {
   mutateTasks,
   isoNow,
 };
+
+export interface ViewerControlDependencies {
+  post(pathname: string, body: Record<string, unknown>, headers?: Record<string, string>): Promise<Record<string, unknown>>;
+}
+
+const VIEWER_CONTROL_URL = "http://127.0.0.1:8898";
+
+async function postViewerControl(
+  pathname: string,
+  body: Record<string, unknown>,
+  headers: Record<string, string> = {},
+): Promise<Record<string, unknown>> {
+  const baseUrl = process.env.LLV_VIEWER_CONTROL_URL?.trim() || VIEWER_CONTROL_URL;
+  const response = await fetch(new URL(pathname, baseUrl), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: baseUrl,
+      "sec-fetch-site": "same-origin",
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  });
+  const result = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (result.error || (!response.ok && result.state !== "busy")) {
+    throw new Error(text(result.error) || `Viewer control request failed with status ${response.status}`);
+  }
+  return result;
+}
+
+const productionViewerControlDependencies: ViewerControlDependencies = { post: postViewerControl };
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -64,26 +90,12 @@ function spawnAttemptId(value: string): string {
     : `mcp_${crypto.createHash("sha256").update(value).digest("hex").slice(0, 24)}`;
 }
 
-async function spawnAgent(args: McpToolArgs): Promise<McpToolPayload> {
+async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
   const clientAttemptId = spawnAttemptId(requestId(args));
   const body = withoutKeys(args, ["clientRequestId"]);
-  const request = new NextRequest("http://127.0.0.1/api/spawn", {
-    method: "POST",
-    headers: {
-      host: "127.0.0.1",
-      origin: "http://127.0.0.1",
-      "sec-fetch-site": "same-origin",
-      "content-type": "application/json",
-      [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
-    },
-    body: JSON.stringify({ ...body, clientAttemptId }),
+  const result = await control.post("/api/spawn", { ...body, clientAttemptId }, {
+    [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
   });
-  const response = await executeSpawnRequest(request, {
-    ...productionSpawnCommandDependencies,
-    defer: (work) => { void work(); },
-  });
-  const result = await response.json() as Record<string, unknown>;
-  if (!response.ok || result.ok === false || result.error) throw new Error(text(result.error) || `spawn failed with status ${response.status}`);
   return {
     conversationId: result.conversationId,
     transcriptPath: result.path,
@@ -94,12 +106,12 @@ async function spawnAgent(args: McpToolArgs): Promise<McpToolPayload> {
   };
 }
 
-async function sendMessage(args: McpToolArgs): Promise<McpToolPayload> {
+async function sendMessage(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
   const conversationId = text(args.conversationId);
   const transcriptPath = text(args.transcriptPath) || text(args.path);
   if (!conversationId && !transcriptPath) throw new Error("conversationId or transcriptPath is required");
   const message = required(args, "text");
-  const outcome = await deliverConversationMessage({
+  const outcome = await control.post("/api/tmux", {
     pid: null,
     path: transcriptPath,
     ...(conversationId ? { conversationId } : {}),
@@ -107,14 +119,13 @@ async function sendMessage(args: McpToolArgs): Promise<McpToolPayload> {
     text: message,
     images: [],
   });
-  if (!outcome.ok) throw new Error(outcome.error);
   const conversation = conversationId
     ? agentRegistry().conversation(conversationId as `conversation_${string}`)
     : agentRegistry().conversationForPath(transcriptPath);
   return {
     conversationId: (conversation?.id ?? conversationId) || null,
     transcriptPath: (conversation?.generations.at(-1)?.path ?? transcriptPath) || null,
-    operationId: outcome.operationId ?? outcome.receipt?.operationId ?? null,
+    operationId: outcome.operationId ?? (outcome.receipt as { operationId?: unknown } | undefined)?.operationId ?? null,
     outcome: outcome.outcome ?? "delivered",
   };
 }
@@ -235,19 +246,17 @@ async function getConversation(args: McpToolArgs): Promise<McpToolPayload> {
   };
 }
 
-async function deployExactSha(args: McpToolArgs): Promise<McpToolPayload> {
+async function deployExactSha(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
   if (args.confirm !== "deploy") throw new Error('confirm must equal "deploy"');
   const revision = required(args, "revision");
   if (!/^[0-9a-f]{40}$/i.test(revision)) throw new Error("revision must be a full 40-character commit SHA");
-  const client = runtimeHostClient();
-  if (!client) throw new Error("runtime host socket is unavailable");
-  try {
-    const receipt = await client.requestViewerDeployment({ revision, idempotencyKey: requestId(args) });
-    return { deploymentId: receipt.deploymentId, revision: receipt.revision, replayed: receipt.state === "accepted" && receipt.replayed, state: receipt.state };
-  } catch (error) {
-    if (error instanceof RuntimeHostUnavailableError) throw new Error(error.message);
-    throw error;
-  }
+  const receipt = await control.post("/api/runtime/deployments", { revision, idempotencyKey: requestId(args) });
+  return {
+    deploymentId: receipt.deploymentId,
+    revision: receipt.revision,
+    replayed: receipt.state === "accepted" && receipt.replayed === true,
+    state: receipt.state,
+  };
 }
 
 async function getPipeline(args: McpToolArgs): Promise<McpToolPayload> {
@@ -257,10 +266,13 @@ async function getPipeline(args: McpToolArgs): Promise<McpToolPayload> {
   return { pipelineId, pipeline };
 }
 
-export function viewerMcpBindings(linkTaskDependencies: LinkTaskToPipelineDependencies = productionLinkTaskDependencies): McpToolBindings {
+export function viewerMcpBindings(
+  linkTaskDependencies: LinkTaskToPipelineDependencies = productionLinkTaskDependencies,
+  controlDependencies: ViewerControlDependencies = productionViewerControlDependencies,
+): McpToolBindings {
   return {
-    spawn_agent: spawnAgent,
-    send_message: sendMessage,
+    spawn_agent: (args) => spawnAgent(args, controlDependencies),
+    send_message: (args) => sendMessage(args, controlDependencies),
     create_task: createBoardTask,
     update_task: updateBoardTask,
     create_pipeline: createPipeline,
@@ -268,7 +280,7 @@ export function viewerMcpBindings(linkTaskDependencies: LinkTaskToPipelineDepend
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
     list_conversations: listConversations,
     get_conversation: getConversation,
-    deploy_exact_sha: deployExactSha,
+    deploy_exact_sha: (args) => deployExactSha(args, controlDependencies),
     get_pipeline: getPipeline,
   };
 }
