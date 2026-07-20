@@ -313,3 +313,15 @@ test("the instrumentation shim keeps node: imports out of its static graph (dev 
   expect(source).not.toMatch(/^\s*export\s.*\sfrom\s/m);
   expect(source).toMatch(/NEXT_RUNTIME === "nodejs"/);
 });
+
+test("runtime-host discards the unsupported credential before loading child-capable modules", () => {
+  const source = fs.readFileSync(new URL("./runtime-host/main.ts", import.meta.url), "utf8");
+  const discardAt = source.indexOf("discardWakatimeEnvironmentCredential()");
+  const runtimeImportAt = source.indexOf('await import("@/lib/configDir")');
+
+  expect(discardAt).toBeGreaterThanOrEqual(0);
+  expect(runtimeImportAt).toBeGreaterThan(discardAt);
+  expect(source.match(/^import .* from .*;$/gm)).toEqual([
+    'import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential";',
+  ]);
+});

@@ -23,6 +23,7 @@ export async function registerNodeViewerRuntime(
  * compile. Regression symptom when broken: `UnhandledSchemeError: Reading from
  * "node:fs" …` at dev boot and a 500 on every request (local QA /api/files).
  */
+
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME === "nodejs" && !process.env.NEXT_PHASE?.includes("build")) {
     await registerNodeViewerRuntime(() => import("@/lib/viewerInstrumentation"));

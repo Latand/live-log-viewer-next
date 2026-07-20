@@ -755,6 +755,8 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
   };
 }
 
+/** Opens the configured key without following symlinks and verifies its mode
+    before reading credential bytes into integration-owned memory. */
 export function readWakatimeCredentialFile(filename: string): WakatimeCredential | null {
   let descriptor: number | null = null;
   try {
