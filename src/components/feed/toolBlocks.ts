@@ -18,16 +18,35 @@ export function isFollowUpCall(event: ToolEvent): boolean {
   return FOLLOW_UP_TOOLS.has(event.tool);
 }
 
+/* The exec block a wait/write_stdin follow-up belongs to. A follow-up that names
+   its session folds under the exec that owns that exact session — scanning back
+   so the right exec wins even when several sessions interleave; a session that
+   matches no exec in the run stays standalone. A follow-up with no session id
+   (a single-session run, or an older payload that never carried the id) falls
+   back to the most recent block, the pre-#475 positional behavior. */
+function ownerBlock(blocks: readonly ToolBlock[], followUp: ToolEvent): ToolBlock | undefined {
+  if (followUp.session !== undefined) {
+    for (let i = blocks.length - 1; i >= 0; i -= 1) {
+      if (blocks[i].parent.session === followUp.session) return blocks[i];
+    }
+    return undefined;
+  }
+  return blocks[blocks.length - 1];
+}
+
 /**
- * Folds a group's flat call list into ordered blocks. Interactive follow-ups
- * attach only to a call carrying the same runtime cell/session id. A follow-up
- * without a matching owner stays visible as its own block.
+ * Folds a group's flat call list into ordered blocks: each non-follow-up call
+ * owns the wait/write_stdin polls that belong to its session, so nested waits
+ * render under the exec that actually owns them — matched by session so
+ * interleaved sessions never cross-attach (#475). A follow-up that matches no
+ * exec (a leading follow-up, or one for an unknown session) stands as its own
+ * block, keeping its own individual state.
  */
 export function groupNestedCalls(calls: readonly ToolEvent[]): ToolBlock[] {
   const blocks: ToolBlock[] = [];
   for (const call of calls) {
-    if (isFollowUpCall(call) && call.runtimeSessionId) {
-      const owner = blocks.findLast((block) => block.parent.runtimeSessionId === call.runtimeSessionId);
+    if (isFollowUpCall(call)) {
+      const owner = ownerBlock(blocks, call);
       if (owner) {
         owner.children.push(call);
         continue;

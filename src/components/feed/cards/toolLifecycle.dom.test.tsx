@@ -109,13 +109,28 @@ test("a manual reopen after settle persists across ticks until the operator clos
   expect((h.querySelector("details") as unknown as { open: boolean }).open).toBe(false);
 });
 
-test("a later live tick does not arm a second auto-collapse over the operator choice", () => {
+test("a later live→settled cycle preserves the operator's reopen — the auto-collapse fires only once", () => {
+  // active → settled (auto-collapse) → operator reopens → active again → settled again.
   const h = mount(<CmdGroupCard item={activeGroup()} />);
-  rerender(<CmdGroupCard item={settledGroup()} />);
+  rerender(<CmdGroupCard item={settledGroup()} />); // first settle: auto-collapse
   const details = h.querySelector("details")!;
+  expect((details as unknown as { open: boolean }).open).toBe(false);
+  // Operator reopens the settled group.
   toggle(details, true);
+  expect((h.querySelector("details") as unknown as { open: boolean }).open).toBe(true);
+  // A new activity cycle: the same group goes live again, then settles again.
   rerender(<CmdGroupCard item={activeGroup()} />);
   rerender(<CmdGroupCard item={settledGroup()} />);
+  // The second settle must NOT re-collapse — the operator's reopen wins.
+  expect((h.querySelector("details") as unknown as { open: boolean }).open).toBe(true);
+  expect(h.textContent).toContain("git status --short");
+});
+
+test("a never-active error group keeps its default-open behavior", () => {
+  // A historical (never live) group that carries a failure opens by default so the
+  // failure is never hidden — the one-time auto-collapse only applies to a group
+  // that was actually live and then settled.
+  const h = mount(<CmdGroupCard item={activeFailureGroup({ active: false })} />);
   expect((h.querySelector("details") as unknown as { open: boolean }).open).toBe(true);
 });
 
