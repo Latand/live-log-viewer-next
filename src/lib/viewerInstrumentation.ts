@@ -113,6 +113,22 @@ export async function initializeOperatorSpawnCapabilityAtStartup(
   else ensureOperatorSpawnCapability();
 }
 
+export async function startWakatimeIntegrationIfEnabled(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  start: () => Promise<void> = async () => {
+    const { startWakatimeSync } = await import("@/lib/wakatime/sync");
+    startWakatimeSync();
+  },
+  log: (event: string, fields: Readonly<Record<string, never>>) => void = (event, fields) => console.error(event, fields),
+): Promise<void> {
+  if (env.LLV_WAKATIME_ENABLED !== "1") return;
+  try {
+    await start();
+  } catch {
+    log("[wakatime] startup_failed", {});
+  }
+}
+
 export async function runStructuredHostStartup(
   adopt: () => Promise<unknown>,
   log: (...args: unknown[]) => void = console.error,
@@ -169,5 +185,6 @@ export async function registerViewerRuntime(): Promise<void> {
       const { startAccountMigrationController } = await import("@/lib/accounts/migration/controller");
       scheduleAccountMigrationController(startAccountMigrationController, accountControllerDelayMs());
     }
+    await startWakatimeIntegrationIfEnabled();
   }, () => viewerReleaseOwnsTraffic());
 }

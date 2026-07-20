@@ -10,6 +10,7 @@ import {
   initializeOperatorSpawnCapabilityAtStartup,
   runStructuredHostStartup,
   scheduleAccountMigrationController,
+  startWakatimeIntegrationIfEnabled,
   viewerReleaseOwnsTraffic,
 } from "@/lib/viewerInstrumentation";
 import { operatorSpawnCapabilityPath } from "@/lib/agent/operatorCapability";
@@ -21,6 +22,28 @@ test("account controller delay defaults to immediate startup and retains the exp
   expect(accountControllerDelayMs({})).toBe(0);
   expect(accountControllerDelayMs({ LLV_ACCOUNT_CONTROLLER_DELAY_MS: "250" })).toBe(250);
   expect(accountControllerDelayMs({ LLV_ACCOUNT_CONTROLLER_DELAY_MS: "invalid" })).toBe(0);
+});
+
+test("WakaTime startup remains disabled unless the server opt-in is exact", async () => {
+  let starts = 0;
+  const start = async () => { starts += 1; };
+
+  await startWakatimeIntegrationIfEnabled({}, start);
+  await startWakatimeIntegrationIfEnabled({ LLV_WAKATIME_ENABLED: "true" }, start);
+  expect(starts).toBe(0);
+
+  await startWakatimeIntegrationIfEnabled({ LLV_WAKATIME_ENABLED: "1" }, start);
+  expect(starts).toBe(1);
+});
+
+test("WakaTime startup failure stays local and secret-safe", async () => {
+  const logs: unknown[][] = [];
+  await startWakatimeIntegrationIfEnabled(
+    { LLV_WAKATIME_ENABLED: "1" },
+    async () => { throw new Error("credential-shaped internal detail"); },
+    (...args) => { logs.push(args); },
+  );
+  expect(logs).toEqual([["[wakatime] startup_failed", {}]]);
 });
 
 test("deployment candidates stay passive until their endpoint owns the durable release target", () => {

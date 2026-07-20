@@ -31,9 +31,10 @@ type CachedTailRecords = {
   size: number;
   mtimeMs: number;
   nbytes: number;
+  prefixTruncated: boolean;
   records: Record<string, unknown>[];
 };
-const tailCache = globalCache<CachedTailRecords>("tail-v2");
+const tailCache = globalCache<CachedTailRecords>("tail-v3");
 const TAIL_CACHE_CAP = 64;
 type CachedHeadRecords = {
   size: number;
@@ -113,6 +114,7 @@ export function headRecords(
 export interface TailRecordsResult {
   records: Record<string, unknown>[];
   complete: boolean;
+  prefixTruncated: boolean;
 }
 
 function storeTurnEvidence(pathname: string, evidence: CachedTurnEvidence): void {
@@ -279,7 +281,7 @@ export async function readStableTailRecords(pathname: string, nbytes = 131_072):
 export function tailRecordsResult(pathname: string, size: number, mtimeMs: number, nbytes = 131_072): TailRecordsResult {
   const cached = tailCache.get(pathname);
   if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.nbytes === nbytes) {
-    return { records: cached.records.slice(), complete: true };
+    return { records: cached.records.slice(), complete: true, prefixTruncated: cached.prefixTruncated };
   }
   const result = readTail(pathname, size, nbytes);
   if (!result.complete) return result;
@@ -287,10 +289,10 @@ export function tailRecordsResult(pathname: string, size: number, mtimeMs: numbe
     const oldest = tailCache.keys().next().value;
     if (oldest !== undefined) tailCache.delete(oldest);
   }
-  tailCache.set(pathname, { size, mtimeMs, nbytes, records: result.records });
+  tailCache.set(pathname, { size, mtimeMs, nbytes, prefixTruncated: result.prefixTruncated, records: result.records });
   /* Hand out a fresh copy every call: consumers reverse() the result in place,
      which must never reorder the shared cached array under the next consumer. */
-  return { records: result.records.slice(), complete: true };
+  return { records: result.records.slice(), complete: true, prefixTruncated: result.prefixTruncated };
 }
 
 export function tailRecords(pathname: string, size: number, mtimeMs: number, nbytes = 131_072): Record<string, unknown>[] {
@@ -318,7 +320,7 @@ function readTail(pathname: string, size: number, nbytes: number): TailRecordsRe
       fs.closeSync(fd);
     }
   } catch {
-    return { records: [], complete: false };
+    return { records: [], complete: false, prefixTruncated: false };
   }
   let lines = data.split("\n");
   if (seek > 0 && lines.length) lines = lines.slice(1);
@@ -333,7 +335,7 @@ function readTail(pathname: string, size: number, nbytes: number): TailRecordsRe
       /* skip malformed tail rows */
     }
   }
-  return { records: out, complete };
+  return { records: out, complete, prefixTruncated: seek > 0 };
 }
 
 /** Compatibility projection retained for scanner callers. */
