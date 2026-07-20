@@ -789,6 +789,10 @@ export async function runReaperCycle(options: {
     try {
       await (options.actuation?.reconcileTerminalOwnerSpawns
         ?? reconcileTerminalSpawnsHeldByLiveOwners)(registry, runtimeClientForSpawns);
+    } catch (error) {
+      console.error("[reaper] terminal structured spawn owner convergence failed", error);
+    }
+    try {
       await (options.actuation?.terminalizeStaleSpawns ?? terminalizeStaleStructuredSpawns)(registry, runtimeClientForSpawns);
     } catch (error) {
       console.error("[reaper] stale structured spawn convergence failed", error);

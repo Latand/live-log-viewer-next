@@ -12,10 +12,7 @@ const TERMINAL_OPERATION_STATUSES = new Set([
   "failed",
   "rejected",
   "uncertain",
-  "turn-started",
-  "steered",
   "interrupted",
-  "answered",
 ]);
 
 type AdmissionOwner = { pid: number; startIdentity: string | null };
