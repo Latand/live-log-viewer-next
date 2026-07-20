@@ -8,7 +8,7 @@ import { statePath } from "@/lib/configDir";
 import { AccountMutationBusyError, withAccountMutationLock, withAccountMutationLockAsync } from "./accountMutation";
 
 import type { LoginOperationSummary, LoginPhase, LoginResult } from "./contracts";
-import { claudeAccountForSpawn, claudeManagedEnvironment, isManagedClaudeHome, managedClaudeCredentialIsSafe } from "./claude";
+import { claudeAccountForSpawn, claudeManagedEnvironment, isManagedClaudeHome, legacyClaudeHome, managedClaudeCredentialIsSafe } from "./claude";
 
 const OUTPUT_LIMIT = 64 * 1024;
 const CODE_LIMIT = 8 * 1024;
@@ -89,8 +89,18 @@ function expectedClaude(pid: number): boolean {
   try { return isExpectedClaudeLoginCommand(fs.readFileSync(`/proc/${pid}/cmdline`, "utf8")); } catch { return false; }
 }
 
+/** A recognized Claude home is either a safe managed home or the exact legacy
+    Main home. Both reauthenticate in place; nothing else may direct the login. */
+export function isSupervisedClaudeHome(home: string): boolean {
+  return isManagedClaudeHome(home) || home === legacyClaudeHome();
+}
+
+/** Status reads target the exact account home with inherited provider auth
+    variables cleared, so a legacy or managed check reflects the OAuth
+    credentials at that home rather than an ambient API key. An unrecognized
+    home keeps the plain process environment. */
 export function claudeStatusEnvironment(home: string): NodeJS.ProcessEnv {
-  return isManagedClaudeHome(home) ? claudeManagedEnvironment(home) : process.env;
+  return isSupervisedClaudeHome(home) ? claudeManagedEnvironment(home) : process.env;
 }
 
 async function structuredStatus(home: string): Promise<{ loggedIn: boolean; method: string | null; email: string | null; plan: string | null }> {
@@ -304,7 +314,10 @@ export class ClaudeLoginSupervisor {
       const id = operationId;
       if (!id) throw new Error("Claude login operation is unavailable");
       const account = claudeAccountForSpawn(accountId);
-      if (account.kind !== "managed" || !isManagedClaudeHome(account.home)) throw new Error("unsafe Claude account");
+      // Legacy Main reauthenticates at its exact legacy home; managed accounts at
+      // their safe managed home. claudeManagedEnvironment pins CLAUDE_CONFIG_DIR to
+      // that home and strips inherited provider auth variables for either kind.
+      if (!isSupervisedClaudeHome(account.home)) throw new Error("unsafe Claude account");
       const child = this.ports.spawn(resolveBinary("claude"), ["auth", "login", "--claudeai"], {
         cwd: osHome(), env: { ...claudeManagedEnvironment(account.home), UMASK: "077" }, detached: true, stdio: ["pipe", "pipe", "pipe"],
       });
@@ -554,7 +567,9 @@ export class ClaudeLoginSupervisor {
         if (terminated && typeof inherited.accountId === "string") {
           try {
             const account = claudeAccountForSpawn(inherited.accountId);
-            if (account.kind === "managed" && managedClaudeCredentialIsSafe(account.home, true)) {
+            // Verify recovery for either a safe managed home or the exact legacy
+            // Main home, and only when its credential file passes the safety check.
+            if (isSupervisedClaudeHome(account.home) && managedClaudeCredentialIsSafe(account.home, true)) {
               const status = await this.ports.status(account.home);
               authenticated = status.loggedIn;
             }

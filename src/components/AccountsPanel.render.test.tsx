@@ -229,9 +229,24 @@ test("an unknown failure code falls back to the generic sanitized line", () => {
 test("a managed unauthenticated account with no live login offers Sign in", () => {
   const html = render(claudeState(null));
   expect(html).toContain("Sign in");
-  // A legacy account never gets the managed sign-in affordance.
-  const legacy = render(claudeState(null, { accounts: [{ id: "acc", label: "Acc", kind: "legacy", authPresent: false, loginPending: false, loginState: "idle", deviceAuth: null, login: null }] }));
-  expect(legacy).not.toContain(">Sign in<");
+});
+
+test("legacy Main stranded in signed_out or error gets an in-place recovery affordance (issue #470)", () => {
+  // A signed-out legacy account offers Sign in — legacy is no longer excluded.
+  const signedOut = render(claudeState(null, { accounts: [{ id: "default", label: "Main", kind: "legacy", authPresent: false, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null, login: null }] }));
+  expect(signedOut).toContain(">Sign in<");
+  // A credentialed legacy account whose live auth is erroring offers Retry.
+  const errored = render(claudeState(null, { accounts: [{ id: "default", label: "Main", kind: "legacy", authPresent: true, authHealth: "error", loginPending: false, loginState: "authenticated", deviceAuth: null, login: null }] }));
+  expect(errored).toContain(">Retry<");
+  // A healthy legacy account shows no recovery affordance.
+  const healthy = render(claudeState(null, { accounts: [{ id: "default", label: "Main", kind: "legacy", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null, login: null }] }));
+  expect(healthy).not.toContain(">Sign in<");
+  expect(healthy).not.toContain(">Retry<");
+});
+
+test("a managed account erroring with credentials present offers Retry in place (issue #470)", () => {
+  const html = render(claudeState(null, { accounts: [{ id: "acc", label: "Acc", kind: "managed", authPresent: true, authHealth: "error", loginPending: false, loginState: "authenticated", deviceAuth: null, login: null }] }));
+  expect(html).toContain(">Retry<");
 });
 
 test("a live claude login disables the Add-account submit (no second sign-in races)", () => {

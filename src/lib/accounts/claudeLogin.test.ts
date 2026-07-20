@@ -52,6 +52,42 @@ test("a clean environment starts the Claude CLI login protocol without activatio
   expect(calls).toEqual([{ command: expect.any(String), args: ["auth", "login", "--claudeai"] }]);
 });
 
+test("legacy Main reauthenticates in place at its exact home with provider auth cleared (issue #470)", () => {
+  process.env.ANTHROPIC_API_KEY = "present";
+  const calls: Array<{ env: NodeJS.ProcessEnv | undefined }> = [];
+  const supervisor = new ClaudeLoginSupervisor({
+    ...ports(),
+    spawn: (_command, _args, options) => {
+      calls.push({ env: options?.env as NodeJS.ProcessEnv | undefined });
+      return child as never;
+    },
+  });
+
+  // The legacy Main account id is "default"; no managed home is created for it.
+  const operation = supervisor.start("default");
+
+  expect(operation).toEqual(expect.objectContaining({ phase: "awaiting_browser" }));
+  expect(calls[0].env?.CLAUDE_CONFIG_DIR).toBe(process.env.LLV_CLAUDE_HOME!);
+  expect(calls[0].env?.ANTHROPIC_API_KEY).toBeUndefined();
+  expect(calls[0].env?.UMASK).toBe("077");
+  delete process.env.ANTHROPIC_API_KEY;
+});
+
+test("a managed account still erroring with a safe credential file can retry in place (issue #470)", () => {
+  const account = createManagedClaudeAccount("Erroring");
+  fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
+  const calls: Array<{ env: NodeJS.ProcessEnv | undefined }> = [];
+  const supervisor = new ClaudeLoginSupervisor({
+    ...ports(),
+    spawn: (_command, _args, options) => { calls.push({ env: options?.env as NodeJS.ProcessEnv | undefined }); return child as never; },
+  });
+
+  const operation = supervisor.start(account.id);
+
+  expect(operation).toEqual(expect.objectContaining({ phase: "awaiting_browser" }));
+  expect(calls[0].env?.CLAUDE_CONFIG_DIR).toBe(account.home);
+});
+
 test("an unfenced child is rejected before it can accept a login code", () => {
   const account = createManagedClaudeAccount("Unfenced");
   const supervisor = new ClaudeLoginSupervisor({ ...ports(), pidStartToken: () => null });
@@ -442,8 +478,16 @@ test("timeout records its terminal outcome after killing a TERM-resistant child"
   expect(supervisor.get(operation.operationId)).toEqual(expect.objectContaining({ phase: "timed_out" }));
 });
 
-test("legacy Main status keeps the normal process environment", () => {
-  expect(claudeStatusEnvironment(process.env.LLV_CLAUDE_HOME!)).toBe(process.env);
+test("legacy Main status targets its exact home with inherited provider auth cleared", () => {
+  const env = claudeStatusEnvironment(process.env.LLV_CLAUDE_HOME!);
+  expect(env).not.toBe(process.env);
+  expect(env.CLAUDE_CONFIG_DIR).toBe(process.env.LLV_CLAUDE_HOME!);
+  expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+});
+
+test("an unrecognized home keeps the plain process environment for status", () => {
+  expect(claudeStatusEnvironment("/tmp/not-a-claude-home")).toBe(process.env);
 });
 
 test("a reservation blocks a second account creation before filesystem mutation", () => {

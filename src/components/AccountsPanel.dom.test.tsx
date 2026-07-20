@@ -145,6 +145,38 @@ test("canceling an armed removal backs out without removing the account", async 
   expect([...view.host.querySelectorAll("button")].some((button) => button.textContent === "Remove")).toBe(true);
 });
 
+test("clicking Retry on an erroring legacy Main starts an in-place login recovery (issue #470)", async () => {
+  let retried: string | null = null;
+  const initial = state(login(), {
+    accounts: [{ id: "default", label: "Main", kind: "legacy", authPresent: true, authHealth: "error", loginPending: false, loginState: "authenticated", deviceAuth: null, login: null }],
+    active: "default",
+    retryLogin: async (id) => { retried = id; return true; },
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const retry = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Retry")!;
+
+  flushSync(() => { retry.click(); });
+  await Promise.resolve();
+  expect(retried as unknown as string).toBe("default");
+});
+
+test("clicking Sign in on a signed-out legacy Main starts an in-place login recovery (issue #470)", async () => {
+  let retried: string | null = null;
+  const initial = state(login(), {
+    accounts: [{ id: "default", label: "Main", kind: "legacy", authPresent: false, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null, login: null }],
+    active: "",
+    retryLogin: async (id) => { retried = id; return true; },
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const signIn = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Sign in")!;
+
+  flushSync(() => { signIn.click(); });
+  await Promise.resolve();
+  expect(retried as unknown as string).toBe("default");
+});
+
 test("signed-out and pending account rows cannot be selected", async () => {
   const initial = state(login(), {
     accounts: [
