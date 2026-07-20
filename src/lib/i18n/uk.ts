@@ -1102,6 +1102,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelinePreflight.repo_unreadable": "Репозиторій недоступний для читання: {path}",
   "pipelinePreflight.repo_untraversable": "Репозиторій неможливо відкрити: {path}",
   "pipelinePreflight.not_git": "Обери Git-репозиторій: {path}",
+  "pipelinePreflight.probe_failed": "Перевірку репозиторію не завершено — повтори: {path}",
   "pipelinePreflight.git_metadata_unwritable": "Метадані Git доступні лише для читання: {path}",
   "pipelinePreflight.worktree_parent_unwritable": "Поруч із цим репозиторієм неможливо створити робочу копію пайплайна: {path}",
 

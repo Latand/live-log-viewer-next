@@ -22,8 +22,7 @@ import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
-import { PipelineStageGraph, PipelineStageGraphFlowsProvider } from "@/components/scheme/PipelineStageGraph";
-import { STAGE_TONES, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState, type StageNavTarget } from "@/components/pipelines/pipelineModel";
+import { STAGE_TONES, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, reviewLoopChainValid, stageChipState } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -381,31 +380,23 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
  * stays readable when the board is zoomed out to the map. A group appears only
  * while its flow/pipeline is open, so it dissolves on close with no extra state.
  */
-/** Navigation seam for the stage graph mounted in an interactive pipeline group. */
-export interface PipelineGroupControls {
-  flows: readonly Flow[];
-  onOpenAttempt: (target: StageNavTarget) => void;
-}
-
 export const GroupsLayer = memo(function GroupsLayer({
   groups,
   interactive,
-  pipelineControls,
   autoOpenGroupId,
   onAutoOpen,
 }: {
   groups: SchemeGroup[];
   /** Passive on the hand-tool, during a selection session and on the lite map:
-      the halos still render, but the label chip stops opening the panel. */
+      the halos still render, but the header chip stops opening the panel. */
   interactive: boolean;
-  /** Interactive groups render the complete declared stage graph through this seam. */
-  pipelineControls?: PipelineGroupControls | null;
   /** A group id whose override/builder panel should open on its own as soon as it
       arrives — the canvas builder lands the operator straight in a fresh draft's
       panel (#136). `onAutoOpen` fires once consumed so the caller clears it. */
   autoOpenGroupId?: string | null;
   onAutoOpen?: () => void;
 }) {
+  const { t } = useLocale();
   const [openId, setOpenId] = useState<string | null>(null);
   /* Open the requested group once it appears (the draft POST → refetch → layout
      round-trip means its halo may not exist on the render that first receives the
@@ -462,23 +453,14 @@ export const GroupsLayer = memo(function GroupsLayer({
                 ...(draft ? { backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--color-warning) 7%, transparent) 12px 14px)" } : {}),
               }}
             />
-            {/* Every declared stage stays visible here from pipeline creation. */}
-            {group.pipeline && pipelineControls ? (
-              <div
-                data-scheme-group-strip
-                className={`absolute left-4 right-4 top-3 z-[7] ${interactive ? "pointer-events-auto" : "pointer-events-none"}`}
-              >
-                <PipelineStageGraphFlowsProvider flows={pipelineControls.flows}>
-                  <PipelineStageGraph
-                    pipeline={group.pipeline}
-                    onOpenAttempt={pipelineControls.onOpenAttempt}
-                  />
-                </PipelineStageGraphFlowsProvider>
-              </div>
-            ) : null}
+            {/* One compact header attached to the halo (#353): title, progress,
+                lifecycle, and the disclosure control — no second stage graph and
+                no white body below. The real stage conversations and planned
+                placeholders live inside the region itself. */}
             <button
               data-scheme-ui
-              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[22em] items-center gap-[0.4em] rounded-full bg-card px-[0.7em] py-[0.15em] font-bold shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
+              data-pipeline-group-header={group.pipeline ? group.id : undefined}
+              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[26em] items-center gap-[0.4em] rounded-full bg-card px-[0.7em] py-[0.15em] font-bold shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
                 interactive ? "pointer-events-auto" : ""
               }`}
               /* Font fully counter-scaled (constant on-screen at any zoom); border
@@ -489,11 +471,23 @@ export const GroupsLayer = memo(function GroupsLayer({
               disabled={!interactive}
               onClick={() => setOpenId((value) => (value === group.id ? null : group.id))}
             >
-              {/* Title only — the draft status badge lives on the strip below
-                  (one title, one badge; issue #221 §2). The dashed warning
-                  border already reads as "draft" at a glance. */}
               <span aria-hidden>{group.kind === "pipeline" ? "⇢" : "⟳"}</span>
               <span className="truncate">{group.label}</span>
+              {group.pipeline ? (
+                <>
+                  <span
+                    data-pipeline-progress
+                    className="shrink-0 rounded-full px-[0.5em] py-[0.02em] tabular-nums opacity-90"
+                    style={{ backgroundColor: soft }}
+                  >
+                    {(() => { const p = pipelineStagePosition(group.pipeline!); return `${p.k}/${p.n}`; })()}
+                  </span>
+                  <span data-pipeline-lifecycle className="shrink-0 truncate opacity-80">
+                    {pipelineStateLabel(t, group.pipeline.state)}
+                  </span>
+                </>
+              ) : null}
+              <span aria-hidden className="shrink-0 opacity-70">▾</span>
             </button>
           </div>
         );

@@ -1133,6 +1133,7 @@ export const en = {
   "pipelinePreflight.repo_unreadable": "The repository cannot be read: {path}",
   "pipelinePreflight.repo_untraversable": "The repository cannot be opened: {path}",
   "pipelinePreflight.not_git": "Choose a Git repository: {path}",
+  "pipelinePreflight.probe_failed": "The repository check could not finish — retry: {path}",
   "pipelinePreflight.git_metadata_unwritable": "Git metadata is read-only: {path}",
   "pipelinePreflight.worktree_parent_unwritable": "Pipeline worktrees cannot be created beside this repository: {path}",
 

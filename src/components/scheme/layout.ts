@@ -14,9 +14,11 @@ import {
   deriveGroups,
   derivePipelineLinks,
   groupRect,
+  hueFromId,
   type AgentLink,
   type SchemeGroupSpec,
 } from "./agentLinks";
+import { pipelinePlaceholderStages } from "@/components/pipelines/pipelineModel";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex, projectDescendantsOf } from "@/components/projectModel";
 import { cleanTitle, engineColor } from "@/components/utils";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -237,7 +239,6 @@ export function buildSchemeLayout(
       chain remains represented by the pipeline evidence rail. */
   isolatedManualPaths: ReadonlySet<string> = new Set(),
 ): SchemeLayout {
-  void surfacePipelines;
   const byAll = new Map(files.map((file) => [file.path, file]));
   const kids = kidsIndex(files);
   const nodes: SchemeNode[] = [];
@@ -633,11 +634,108 @@ export function buildSchemeLayout(
     });
   }
 
-  /* Planned stages live in the compact group rail (#353). Configuration opens
-     on demand from that rail, so planned stages contribute no world-space
-     windows, obstacles, minimap blocks, or Fit All bounds. The legacy StageSlot
-     type stays as the shared input for the configuration pane. */
+  /* Planned stages render as conversation-shaped placeholder cards INSIDE the
+     pipeline's colored halo, at their real stage positions (#353 desktop
+     ownership): the halo is the sole pipeline region, so every yet-to-launch
+     stage sits beside the materialized conversations it hands off to — never a
+     detached rail or a duplicate stage graph. A slot dissolves the instant its
+     stage materializes a live window (the solid card takes its position). */
+  const rectsIntersect = (a: SchemeRect, b: SchemeRect) =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
   const slots: StageSlot[] = [];
+  const slotKeysByPipeline = new Map<string, string[]>();
+  {
+    const nodeRectByPath = new Map<string, SchemeRect>(nodes.map((node) => [node.file.path, node]));
+    /* Only THIS project's pipelines may grow memberless slot rows — the global
+       list serves cross-project stage membership, so without this fence a
+       foreign draft would drop its slots + halo on every project's canvas. A
+       global pipeline still gets slots once it has a placed member here. */
+    const surfaceIds = new Set(surfacePipelines.map((pipeline) => pipeline.id));
+    const seen = new Set<string>();
+    const pool = [...surfacePipelines, ...pipelines].filter((pipeline) => {
+      if (pipeline.state === "closed" || seen.has(pipeline.id)) return false;
+      seen.add(pipeline.id);
+      return true;
+    });
+    let slotDockY = restTop;
+    for (const pipeline of pool) {
+      const pending = pipelinePlaceholderStages(pipeline);
+      if (!pending.length) continue;
+      const memberPaths = new Set<string>();
+      /* The chain's tip: the LAST stage (in chain order) with a placed window —
+         a run stage's agent node, or a review-loop's implementer. The next
+         stage's placeholder lands as the tip's child, so the row anchors there. */
+      let tip: SchemeRect | null = null;
+      for (const stage of pipeline.stages) {
+        const attempt = pipeline.runs.find((run) => run.stageId === stage.id)?.attempts.at(-1);
+        if (!attempt) continue;
+        if (attempt.agentPath) {
+          const rect = nodeRectByPath.get(attempt.agentPath);
+          if (rect) {
+            memberPaths.add(attempt.agentPath);
+            if (stage.kind !== "review-loop") tip = rect;
+          }
+        }
+        if (attempt.flowId) {
+          const impl = implOfFlow(attempt.flowId);
+          const rect = impl ? nodeRectByPath.get(impl) : null;
+          if (impl && rect) {
+            memberPaths.add(impl);
+            if (stage.kind === "review-loop") tip = rect;
+          }
+        }
+      }
+      if (!surfaceIds.has(pipeline.id) && !memberPaths.size) continue;
+      const rowW = pending.length * SLOT_W + (pending.length - 1) * SLOT_GAP;
+      let sx: number;
+      let sy: number;
+      if (tip) {
+        /* The tree indents a child one INDENT right of its parent and one
+           generation (GAP_Y) below — anchoring the first placeholder exactly
+           there makes the hand-off positionally exact: the live window the tree
+           places for the next stage lands on the placeholder's own coordinates,
+           so the dashed card becomes the solid window in place. */
+        sx = tip.x + INDENT;
+        sy = tip.y + tip.h + GAP_Y;
+        /* Step below any unrelated card the row would cover — bounded, so a
+           pathological board can never loop forever. */
+        const row = (): SchemeRect => ({ x: sx, y: sy, w: rowW, h: SLOT_H });
+        const blocked = () =>
+          nodes.some((node) => !memberPaths.has(node.file.path) && rectsIntersect(node, row())) ||
+          stacks.some((stack) => rectsIntersect(stack, row())) ||
+          decks.some((deck) => rectsIntersect(deck, row()));
+        for (let guard = 0; guard < 40 && blocked(); guard += 1) sy += SLOT_H / 2;
+      } else {
+        sx = cursor;
+        sy = slotDockY;
+        slotDockY += SLOT_H + GROUP_GAP;
+        cursor += rowW + GROUP_GAP;
+      }
+      const keys: string[] = [];
+      pending.forEach((stage, i) => {
+        const index = pipeline.stages.findIndex((candidate) => candidate.id === stage.id);
+        const previous = i > 0 ? pending[i - 1]! : null;
+        /* The handoff badge renders only between chain-adjacent placeholders — a
+           gap (a materialized stage between them) breaks the visual chain. */
+        const adjacent = previous !== null && pipeline.stages[index - 1]?.id === previous.id;
+        const slot: StageSlot = {
+          key: `slot::${pipeline.id}::${stage.id}`,
+          pipeline,
+          stage,
+          index,
+          total: pipeline.stages.length,
+          ...(adjacent ? { incoming: stage.kind } : {}),
+          x: sx + i * (SLOT_W + SLOT_GAP),
+          y: sy,
+          w: SLOT_W,
+          h: SLOT_H,
+        };
+        slots.push(slot);
+        keys.push(slot.key);
+      });
+      slotKeysByPipeline.set(pipeline.id, keys);
+    }
+  }
 
   let bottom = 0;
   let right = 0;
@@ -645,6 +743,7 @@ export function buildSchemeLayout(
   for (const stack of stacks) { bottom = Math.max(bottom, stack.y + stack.h); right = Math.max(right, stack.x + stack.w); }
   for (const deck of decks) { bottom = Math.max(bottom, deck.y + deck.h); right = Math.max(right, deck.x + deck.w); }
   for (const draft of drafts) { bottom = Math.max(bottom, draft.y + draft.h); right = Math.max(right, draft.x + draft.w); }
+  for (const slot of slots) { bottom = Math.max(bottom, slot.y + slot.h); right = Math.max(right, slot.x + slot.w); }
   /* Links resolve against what this pass actually placed, so geometry and
      link endpoints can never disagree. */
   const anchors = buildAnchorIndex(
@@ -683,12 +782,39 @@ export function buildSchemeLayout(
     if (spec.flow) return cleanTitle(byAll.get(spec.flow.implementerPath)?.title ?? spec.flow.project, 60);
     return spec.key;
   };
+  /* Every planned stage's placeholder is a member of its pipeline halo, so the
+     colored region grows to enclose the future stages that sit beside the live
+     conversations (#353). A draft with no materialized window yet is still a
+     region: its halo is derived from its placeholder members alone. */
+  const specs = deriveGroups(actionableFlows, pipelines, (key) => anchors.get(key) ?? null, flowImplementerPath);
+  const pipelineSpecById = new Map(specs.filter((spec) => spec.pipeline).map((spec) => [spec.pipeline!.id, spec] as const));
+  const pipelineById = new Map<string, Pipeline>();
+  for (const pipeline of [...surfacePipelines, ...pipelines]) if (!pipelineById.has(pipeline.id)) pipelineById.set(pipeline.id, pipeline);
+  for (const [pipelineId, keys] of slotKeysByPipeline) {
+    const existing = pipelineSpecById.get(pipelineId);
+    if (existing) {
+      existing.members = [...existing.members, ...keys];
+      continue;
+    }
+    const pipeline = pipelineById.get(pipelineId);
+    if (!pipeline) continue;
+    const spec: SchemeGroupSpec = {
+      key: `group::pipeline::${pipeline.id}`,
+      kind: "pipeline",
+      id: pipeline.id,
+      hue: hueFromId(pipeline.id),
+      members: keys,
+      pipeline,
+    };
+    specs.push(spec);
+    pipelineSpecById.set(pipelineId, spec);
+  }
   const groupHalos: SchemeGroup[] = [];
-  for (const spec of deriveGroups(actionableFlows, pipelines, (key) => anchors.get(key) ?? null, flowImplementerPath)) {
+  for (const spec of specs) {
     const members = spec.kind === "pipeline" ? expandMembers(spec.members) : spec.members;
     const rect = groupRect(members, (key) => byPath.get(key) ?? null, GROUP_PAD);
     if (!rect) continue;
-    /* Lift the top edge to enclose the hovering control strip; bottom stays put,
+    /* Lift the top edge to enclose the hovering compact header; bottom stays put,
        so the y shrinks up and h grows by the same amount (issue #136). */
     const framed = { x: rect.x, y: rect.y - GROUP_STRIP_HEADROOM, w: rect.w, h: rect.h + GROUP_STRIP_HEADROOM };
     groupHalos.push({ ...spec, ...framed, label: groupLabel(spec) });

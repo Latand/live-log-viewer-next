@@ -198,6 +198,28 @@ export function stageAttempts(pipeline: Pipeline, stageId: string): PipelineStag
   return pipeline.runs.find((run) => run.stageId === stageId)?.attempts ?? [];
 }
 
+/** Pipeline lifecycle states that still project planned-stage placeholders on the
+    board: a draft/provisioning/running/blocked pipeline shows its yet-to-launch
+    stages as conversation-shaped placeholders inside its colored halo (#353).
+    A completed/closed pipeline has no future stages, so it grows no placeholder. */
+export const PIPELINE_PLACEHOLDER_STATES: ReadonlySet<PipelineState> = new Set([
+  "draft",
+  "provisioning",
+  "running",
+  "needs_decision",
+  "paused",
+]);
+
+/** The stages of a pipeline that render as conversation-shaped placeholder cards
+    (#353): the yet-to-launch (future) stages — those with no operational attempt
+    at all. A stage that already ran keeps its real card (materialized) or its
+    navigable folded history, never a placeholder, so a failed/folded attempt does
+    not resurrect a big empty shell. Only placeholder-state pipelines grow any. */
+export function pipelinePlaceholderStages(pipeline: Pipeline): PipelineStage[] {
+  if (!PIPELINE_PLACEHOLDER_STATES.has(pipeline.state)) return [];
+  return pipeline.stages.filter((stage) => !latestAttempt(pipeline, stage.id));
+}
+
 /**
  * Transcript artifacts already represented by the compact pipeline rail.
  * The current run keeps its latest agent pane. During a review loop the flow's

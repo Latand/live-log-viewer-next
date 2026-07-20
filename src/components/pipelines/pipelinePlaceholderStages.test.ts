@@ -1,0 +1,60 @@
+import { expect, test } from "bun:test";
+
+import type { Pipeline } from "@/lib/pipelines/types";
+
+import { PIPELINE_PLACEHOLDER_STATES, pipelinePlaceholderStages } from "./pipelineModel";
+
+/* A pipeline whose stages materialize one at a time; `runs` decides which stages
+   have already launched an attempt (materialized or folded history) and which are
+   still future placeholders inside the colored halo (#353 desktop ownership). */
+function pipeline(over: Partial<Pipeline>): Pipeline {
+  return {
+    id: "p", task: "Restore the halo", project: "demo", repoDir: "/r", worktreeDir: "/w",
+    branch: "b", baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
+    stages: [
+      { id: "architect", kind: "run", prompt: "", next: "builder" },
+      { id: "builder", kind: "run", prompt: "", next: "review" },
+      { id: "review", kind: "review-loop", prompt: "", next: null },
+    ],
+    runs: [], cursor: null, state: "running", pausedState: null, stateDetail: null,
+    srcPath: null, srcConversationId: null, createdAt: "1970", closedAt: null,
+    ...over,
+  } as unknown as Pipeline;
+}
+
+test("every declared stage is a placeholder before anything launches", () => {
+  const draft = pipeline({ state: "draft" });
+  expect(pipelinePlaceholderStages(draft).map((stage) => stage.id)).toEqual(["architect", "builder", "review"]);
+});
+
+test("a launched stage is not a placeholder; only the future stages remain", () => {
+  const running = pipeline({
+    runs: [{ stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] }],
+  } as unknown as Partial<Pipeline>);
+  /* architect ran (a real card / folded history), so only builder + review are
+     future placeholders. */
+  expect(pipelinePlaceholderStages(running).map((stage) => stage.id)).toEqual(["builder", "review"]);
+});
+
+test("a failed or folded attempt is navigable history, never a placeholder", () => {
+  /* The builder attempt failed; its transcript is folded, but the stage still ran
+     — it must not resurrect a big empty placeholder shell. */
+  const failed = pipeline({
+    runs: [
+      { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] },
+      { stageId: "builder", attempts: [{ n: 1, state: "failed", agentPath: "/build", flowId: null }] },
+    ],
+  } as unknown as Partial<Pipeline>);
+  expect(pipelinePlaceholderStages(failed).map((stage) => stage.id)).toEqual(["review"]);
+});
+
+test("a completed or closed pipeline grows no placeholders", () => {
+  for (const state of ["completed", "closed"] as const) {
+    expect(pipelinePlaceholderStages(pipeline({ state }))).toEqual([]);
+    expect(PIPELINE_PLACEHOLDER_STATES.has(state)).toBe(false);
+  }
+});
+
+test("an empty (zero-stage) shell grows no placeholders", () => {
+  expect(pipelinePlaceholderStages(pipeline({ state: "draft", stages: [] }))).toEqual([]);
+});

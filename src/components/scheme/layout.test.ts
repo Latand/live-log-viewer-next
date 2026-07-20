@@ -335,7 +335,7 @@ describe("buildSchemeLayout byPath", () => {
   });
 });
 
-describe("memberless pipelines stay outside world geometry (#388)", () => {
+describe("planned-stage pipelines grow a placeholder halo (#353 desktop ownership)", () => {
   const pipeline = (over: Record<string, unknown>): Pipeline =>
     ({
       id: "p1", task: "Ship it", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main",
@@ -344,14 +344,23 @@ describe("memberless pipelines stay outside world geometry (#388)", () => {
       srcConversationId: null, createdAt: "1970", closedAt: null, ...over,
     }) as unknown as Pipeline;
 
-  test("1, 3, and 10 memberless pipelines add zero groups, slots, or world bounds", () => {
-    const empty = buildSchemeLayout([], [], []);
+  test("each planned surface pipeline grows one placeholder slot inside one colored halo", () => {
+    /* The colored SchemeGroup halo is the sole pipeline region (#353): a planned
+       stage with no live window yet renders as a conversation-shaped placeholder
+       INSIDE that halo, not as a detached rail. One stage ⇒ one slot ⇒ one halo. */
     for (const count of [1, 3, 10]) {
       const rows = Array.from({ length: count }, (_, index) => pipeline({ id: `p${index + 1}` }));
       const layout = buildSchemeLayout([], [], [], [], [], rows, rows);
-      expect(layout.groups, String(count)).toEqual([]);
-      expect(layout.slots, String(count)).toEqual([]);
-      expect({ width: layout.width, height: layout.height }, String(count)).toEqual({ width: empty.width, height: empty.height });
+      const pipelineGroups = layout.groups.filter((group) => group.kind === "pipeline");
+      expect(pipelineGroups, String(count)).toHaveLength(count);
+      expect(layout.slots, String(count)).toHaveLength(count);
+      /* Every placeholder sits within its own pipeline halo. */
+      for (const slot of layout.slots) {
+        const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === slot.pipeline.id)!;
+        expect(slot.x).toBeGreaterThanOrEqual(halo.x);
+        expect(slot.x + slot.w).toBeLessThanOrEqual(halo.x + halo.w);
+        expect(slot.y + slot.h).toBeLessThanOrEqual(halo.y + halo.h);
+      }
     }
   });
 
@@ -423,16 +432,35 @@ describe("pipeline world ownership (#353/#388)", () => {
       srcConversationId: null, createdAt: "1970", closedAt: null, ...over,
     }) as unknown as Pipeline;
 
-  test("a template draft stays out of world geometry", () => {
+  test("a template draft renders every stage as a placeholder inside its halo", () => {
+    /* An optimistic draft shell appears on the canvas immediately (#353): each of
+       its three declared stages is a conversation-shaped placeholder, enclosed by
+       one colored pipeline halo — the draft is a real region, not an empty shell. */
     const pipeline = staged({});
-    const empty = buildSchemeLayout([], [], []);
     const layout = buildSchemeLayout([], [], [], [], [], [pipeline], [pipeline]);
+    expect(layout.slots).toHaveLength(3);
+    expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["architect", "builder", "review"]);
+    const halos = layout.groups.filter((group) => group.kind === "pipeline" && group.id === "p9");
+    expect(halos).toHaveLength(1);
+    const halo = halos[0]!;
+    for (const slot of layout.slots) {
+      expect(slot.x).toBeGreaterThanOrEqual(halo.x);
+      expect(slot.x + slot.w).toBeLessThanOrEqual(halo.x + halo.w);
+    }
+  });
+
+  test("a zero-stage draft shell stays out of world geometry", () => {
+    /* Empty pipeline shells stay out of the board projection (#340): no stages ⇒
+       no placeholders ⇒ no halo, no world bounds. */
+    const empty = buildSchemeLayout([], [], []);
+    const shell = staged({ stages: [] });
+    const layout = buildSchemeLayout([], [], [], [], [], [shell], [shell]);
     expect(layout.slots).toHaveLength(0);
     expect(layout.groups.filter((group) => group.kind === "pipeline")).toHaveLength(0);
     expect({ width: layout.width, height: layout.height }).toEqual({ width: empty.width, height: empty.height });
   });
 
-  test("a materialized current stage stays as the group's single full pane", () => {
+  test("a materialized current stage keeps its full pane and future stages become placeholders", () => {
     const root = entry({ path: "/arch", activity: "live" });
     const group: BranchGroup = { key: "/arch", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
     const running = staged({
@@ -441,7 +469,9 @@ describe("pipeline world ownership (#353/#388)", () => {
       runs: [{ stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] }],
     });
     const layout = buildSchemeLayout([group], [], [root], [], [], [running], [running]);
-    expect(layout.slots).toHaveLength(0);
+    /* architect materialized (a full pane); builder + review are future stages
+       (no attempt yet) ⇒ two placeholders, both inside the same halo. */
+    expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["builder", "review"]);
     const node = layout.nodes.find((candidate) => candidate.file.path === "/arch")!;
     const halos = layout.groups.filter((candidate) => candidate.kind === "pipeline" && candidate.id === "p9");
     expect(halos).toHaveLength(1);
@@ -449,6 +479,12 @@ describe("pipeline world ownership (#353/#388)", () => {
     expect(node.x).toBeGreaterThanOrEqual(halo.x);
     expect(node.x + node.w).toBeLessThanOrEqual(halo.x + halo.w);
     expect(node.y + node.h).toBeLessThanOrEqual(halo.y + halo.h);
+    /* The materialized pane stays the single full window for its stage. */
+    expect(layout.nodes.map((candidate) => candidate.file.path)).toEqual(["/arch"]);
+    for (const slot of layout.slots) {
+      expect(slot.x).toBeGreaterThanOrEqual(halo.x);
+      expect(slot.y + slot.h).toBeLessThanOrEqual(halo.y + halo.h);
+    }
   });
 
   test("an active review stage keeps one conversation pane and folds its review deck", () => {
@@ -495,28 +531,27 @@ describe("pipeline world ownership (#353/#388)", () => {
 
   test("a foreign project's memberless draft never grows slots or a halo on this canvas (round-1 finding 2)", () => {
     /* Global list carries another project's draft; the project-scoped surface
-       list does not include it — nothing of it may render here. */
+       list does not include it — a foreign draft with no placed member may not
+       drop its placeholders or halo on this canvas. */
     const foreign = staged({ id: "px", project: "other" });
     const layout = buildSchemeLayout([], [], [], [], [], [foreign], []);
     expect(layout.slots).toHaveLength(0);
     expect(layout.groups.filter((group) => group.kind === "pipeline")).toHaveLength(0);
-    /* Project-scoped surface membership is owned by the screen-space shelf. */
-    const local = buildSchemeLayout([], [], [], [], [], [foreign], [foreign]);
-    expect(local.slots).toHaveLength(0);
-    expect(local.groups.filter((group) => group.kind === "pipeline")).toHaveLength(0);
   });
 
   for (const count of [1, 3, 10]) {
-    test(`${count} memberless pipeline${count === 1 ? "" : "s"} leave every zoom and Fit All unchanged`, () => {
+    test(`${count} planned surface pipeline${count === 1 ? "" : "s"} grow one bounded placeholder halo each`, () => {
+      /* Placeholders are current work: they belong to the active pipeline cluster
+         and stay bounded to their own halos — one halo per pipeline, three stage
+         placeholders inside each. */
       const pipelines = Array.from({ length: count }, (_, index) => staged({ id: `p${index}` }));
-      const empty = buildSchemeLayout([], [], []);
       const layout = buildSchemeLayout([], [], [], [], [], pipelines, pipelines);
       const pipelineGroups = layout.groups.filter((group) => group.kind === "pipeline");
-      expect(pipelineGroups).toHaveLength(0);
-      expect(layout.nodes).toHaveLength(0);
-      expect(layout.slots).toHaveLength(0);
-      expect({ width: layout.width, height: layout.height }).toEqual({ width: empty.width, height: empty.height });
-      expect(layout.byPath.size).toBe(0);
+      expect(pipelineGroups).toHaveLength(count);
+      expect(layout.slots).toHaveLength(count * 3);
+      /* No detached duplicate: exactly one halo owns each pipeline id. */
+      const ids = pipelineGroups.map((group) => group.id);
+      expect(new Set(ids).size).toBe(ids.length);
     });
   }
 });
