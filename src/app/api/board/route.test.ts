@@ -75,7 +75,28 @@ function commitMigration(
   successor: { id: string; path: string; accountId: string },
 ): void {
   registry.transitionConversationMigration(conversationId, revision, ["successor-starting"], { phase: "verifying" });
-  registry.commitSuccessor(conversationId, successor, revision);
+  commitCurrentSuccessor(registry, conversationId, successor, revision);
+}
+
+function commitCurrentSuccessor(
+  registry: AgentRegistry,
+  conversationId: Parameters<AgentRegistry["conversation"]>[0],
+  successor: Parameters<AgentRegistry["commitSuccessor"]>[1],
+  revision: number,
+): void {
+  let migration = registry.conversation(conversationId)!.migration!;
+  const receipt = migration.providerReceipt ?? {
+    operationId: migration.operationId,
+    nativeId: successor.id,
+    path: successor.path,
+    continuityPaths: [],
+    historyHash: successor.historyHash ?? `history-${successor.id}`,
+    host: successor.host ?? { kind: "codex-app-server", identity: successor.id, epoch: 1, verifiedAt: "2026-07-20T12:00:00.000Z" },
+  };
+  if (!migration.providerReceipt) {
+    migration = registry.transitionConversationMigration(conversationId, revision, ["verifying"], { providerReceipt: receipt }).migration!;
+  }
+  registry.commitSuccessor(conversationId, successor, revision, migration.operationId, receipt);
 }
 
 test("board route accepts revision-fenced mutations and converges an identical stale replay", async () => {
@@ -330,7 +351,7 @@ test("a closed conversation stays hidden when a registry successor arrives witho
   registry.transitionConversationMigration(conversation.id, revision, ["requested", "waiting-turn"], { phase: "preparing" });
   registry.transitionConversationMigration(conversation.id, revision, ["preparing"], { phase: "successor-starting" });
   registry.transitionConversationMigration(conversation.id, revision, ["successor-starting"], { phase: "verifying" });
-  registry.commitSuccessor(conversation.id, { id: "successor", path: successor, accountId: "account-b" }, revision);
+  commitCurrentSuccessor(registry, conversation.id, { id: "successor", path: successor, accountId: "account-b" }, revision);
 
   const reconciled = await PATCH(patch({
     schemaVersion: 1,
@@ -387,7 +408,7 @@ test("a pre-commit continuity path cannot create a reverse board alias", async (
   registry.transitionConversationMigration(conversation.id, revision, ["requested", "waiting-turn"], { phase: "preparing" });
   registry.transitionConversationMigration(conversation.id, revision, ["preparing"], { phase: "successor-starting" });
   registry.transitionConversationMigration(conversation.id, revision, ["successor-starting"], { phase: "verifying" });
-  registry.commitSuccessor(conversation.id, { id: "continuity-successor", path: successor, accountId: "account-b" }, revision);
+  commitCurrentSuccessor(registry, conversation.id, { id: "continuity-successor", path: successor, accountId: "account-b" }, revision);
 
   const reconciled = await PATCH(patch({
     schemaVersion: 1,
@@ -425,7 +446,7 @@ test("a repeated migration cannot alias its pending successor backward", async (
   registry.transitionConversationMigration(conversation.id, firstRevision, ["requested", "waiting-turn"], { phase: "preparing" });
   registry.transitionConversationMigration(conversation.id, firstRevision, ["preparing"], { phase: "successor-starting" });
   registry.transitionConversationMigration(conversation.id, firstRevision, ["successor-starting"], { phase: "verifying" });
-  registry.commitSuccessor(conversation.id, { id: "generation-two", path: second, accountId: "account-b" }, firstRevision);
+  commitCurrentSuccessor(registry, conversation.id, { id: "generation-two", path: second, accountId: "account-b" }, firstRevision);
 
   const placed = await PATCH(patch({
     schemaVersion: 1,
@@ -464,7 +485,7 @@ test("a repeated migration cannot alias its pending successor backward", async (
   registry.transitionConversationMigration(conversation.id, secondRevision, ["requested", "waiting-turn"], { phase: "preparing" });
   registry.transitionConversationMigration(conversation.id, secondRevision, ["preparing"], { phase: "successor-starting" });
   registry.transitionConversationMigration(conversation.id, secondRevision, ["successor-starting"], { phase: "verifying" });
-  registry.commitSuccessor(conversation.id, { id: "generation-three", path: third, accountId: "account-c" }, secondRevision);
+  commitCurrentSuccessor(registry, conversation.id, { id: "generation-three", path: third, accountId: "account-c" }, secondRevision);
 
   const reconciled = await PATCH(patch({
     schemaVersion: 1,
@@ -502,7 +523,7 @@ test("a scanner-discovered repeated successor stays pending before its provider 
   registry.transitionConversationMigration(conversation.id, firstRevision, ["requested", "waiting-turn"], { phase: "preparing" });
   registry.transitionConversationMigration(conversation.id, firstRevision, ["preparing"], { phase: "successor-starting" });
   registry.transitionConversationMigration(conversation.id, firstRevision, ["successor-starting"], { phase: "verifying" });
-  registry.commitSuccessor(conversation.id, { id: "scanner-generation-b", path: second, accountId: "account-b" }, firstRevision);
+  commitCurrentSuccessor(registry, conversation.id, { id: "scanner-generation-b", path: second, accountId: "account-b" }, firstRevision);
 
   const placed = await PATCH(patch({
     schemaVersion: 1,
@@ -552,7 +573,7 @@ test("a scanner-discovered repeated successor stays pending before its provider 
   registry.transitionConversationMigration(conversation.id, secondRevision, ["requested", "waiting-turn"], { phase: "preparing" });
   registry.transitionConversationMigration(conversation.id, secondRevision, ["preparing"], { phase: "successor-starting" });
   registry.transitionConversationMigration(conversation.id, secondRevision, ["successor-starting"], { phase: "verifying" });
-  registry.commitSuccessor(conversation.id, { id: "scanner-generation-c", path: third, accountId: "account-c" }, secondRevision);
+  commitCurrentSuccessor(registry, conversation.id, { id: "scanner-generation-c", path: third, accountId: "account-c" }, secondRevision);
 
   const reconciled = await PATCH(patch({
     schemaVersion: 1,
@@ -590,7 +611,7 @@ test("returning to the current account keeps an abandoned successor out of board
   registry.transitionConversationMigration(conversation.id, firstRevision, ["requested", "waiting-turn"], { phase: "preparing" });
   registry.transitionConversationMigration(conversation.id, firstRevision, ["preparing"], { phase: "successor-starting" });
   registry.transitionConversationMigration(conversation.id, firstRevision, ["successor-starting"], { phase: "verifying" });
-  registry.commitSuccessor(conversation.id, { id: "return-generation-b", path: second, accountId: "account-b" }, firstRevision);
+  commitCurrentSuccessor(registry, conversation.id, { id: "return-generation-b", path: second, accountId: "account-b" }, firstRevision);
 
   const placed = await PATCH(patch({
     schemaVersion: 1,
@@ -648,7 +669,7 @@ test("retiring a migration target keeps its abandoned successor out of board ali
   registry.transitionConversationMigration(conversation.id, firstRevision, ["requested", "waiting-turn"], { phase: "preparing" });
   registry.transitionConversationMigration(conversation.id, firstRevision, ["preparing"], { phase: "successor-starting" });
   registry.transitionConversationMigration(conversation.id, firstRevision, ["successor-starting"], { phase: "verifying" });
-  registry.commitSuccessor(conversation.id, { id: "retire-generation-b", path: second, accountId: "account-b" }, firstRevision);
+  commitCurrentSuccessor(registry, conversation.id, { id: "retire-generation-b", path: second, accountId: "account-b" }, firstRevision);
 
   const placed = await PATCH(patch({
     schemaVersion: 1,
@@ -713,7 +734,7 @@ test("a pending repeated migration preserves deferred historical continuity tomb
   registry.transitionConversationMigration(conversation.id, firstRevision, ["requested", "waiting-turn"], { phase: "preparing" });
   registry.transitionConversationMigration(conversation.id, firstRevision, ["preparing"], { phase: "successor-starting" });
   registry.transitionConversationMigration(conversation.id, firstRevision, ["successor-starting"], { phase: "verifying" });
-  registry.commitSuccessor(conversation.id, { id: "deferred-generation-b", path: second, accountId: "account-b" }, firstRevision);
+  commitCurrentSuccessor(registry, conversation.id, { id: "deferred-generation-b", path: second, accountId: "account-b" }, firstRevision);
 
   registry.commitMigrationIntent({
     engine: "codex",

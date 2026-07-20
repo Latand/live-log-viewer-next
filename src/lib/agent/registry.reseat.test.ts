@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { emptyLaunchProfile, type ProviderReceipt, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { AgentRegistry, type AgentRegistrySqliteMode, type ConversationObservation } from "./registry";
 
@@ -40,6 +40,22 @@ function observation(pathname: string, accountId: string): ConversationObservati
     }),
     turn: { state: "idle", source: "empty", terminalAt: null },
     observedAt: "2026-07-10T18:00:00.000Z",
+  };
+}
+
+function providerReceipt(operationId: string, nativeId: string, pathname: string): ProviderReceipt {
+  return {
+    operationId,
+    nativeId,
+    path: pathname,
+    continuityPaths: [pathname],
+    historyHash: `history-${nativeId}`,
+    host: {
+      kind: "codex-app-server",
+      identity: nativeId,
+      epoch: 1,
+      verifiedAt: "2026-07-20T12:00:00.000Z",
+    },
   };
 }
 
@@ -115,7 +131,7 @@ test("a new spawn during a conversation reseat is never adopted into the drain",
     pendingAction: null,
   });
   const spawn = store.beginSpawn("codex", "/repo/checkout");
-  const settled = store.settleSpawn(spawn.launchId, spawnEntry("019f4906-3f67-7b72-9fbc-9ec3b5ad1326", "/sessions/unrelated-spawn.jsonl"));
+  const settled = store.settleSpawn(spawn.launchId, spawnEntry("019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326", "/sessions/unrelated-spawn.jsonl"));
   expect(settled.kind).toBe("settled");
   expect(store.conversationForPath("/sessions/unrelated-spawn.jsonl")!.migration).toBeNull();
 
@@ -129,7 +145,7 @@ test("a new spawn during a conversation reseat is never adopted into the drain",
     expectedRevision: store.engineRouting("codex").revision,
   });
   const second = store.beginSpawn("codex", "/repo/checkout");
-  expect(store.settleSpawn(second.launchId, spawnEntry("019f4906-3f67-7b72-9fbc-9ec3b5ad1327", "/sessions/adopted-spawn.jsonl")).kind).toBe("settled");
+  expect(store.settleSpawn(second.launchId, spawnEntry("019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327", "/sessions/adopted-spawn.jsonl")).kind).toBe("settled");
   expect(store.conversationForPath("/sessions/adopted-spawn.jsonl")!.migration).toMatchObject({ targetId: "engine-target" });
 });
 
@@ -151,18 +167,66 @@ test("repeat reseat clicks never mint a second successor operation", () => {
   });
 });
 
+test("a stale successor cannot commit through a same-revision retarget", () => {
+  const { store, id } = seededRegistry("off", registryFile());
+  const profile = store.conversation(id)!.generations.at(-1)!.launchProfile;
+  const ownerB = { operationId: "reconfigure-b", revision: 20 };
+  store.claimConversationReconfigure(id, {
+    ...ownerB,
+    profile: { model: profile.model, effort: profile.effort, fast: profile.fast },
+    accountId: "healthy",
+  });
+  let migrationB = store.requestConversationReseat(id, "healthy", ownerB).migration!;
+  migrationB = store.transitionConversationMigration(id, migrationB.revision, ["requested"], { phase: "preparing" }).migration!;
+  migrationB = store.transitionConversationMigration(id, migrationB.revision, ["preparing"], { phase: "successor-starting" }).migration!;
+  const receiptB = providerReceipt(migrationB.operationId, "successor-b", "/sessions/successor-b.jsonl");
+  store.persistMigrationProviderReceipt(id, migrationB.revision, migrationB.operationId, receiptB);
+
+  const ownerC = { operationId: "reconfigure-c", revision: 21 };
+  store.claimConversationReconfigure(id, {
+    ...ownerC,
+    profile: { model: profile.model, effort: profile.effort, fast: profile.fast },
+    accountId: "alternate",
+  });
+  let migrationC = store.requestConversationReseat(id, "alternate", ownerC).migration!;
+  expect(migrationC.revision).toBe(migrationB.revision);
+  migrationC = store.transitionConversationMigration(id, migrationC.revision, ["requested"], { phase: "preparing" }).migration!;
+  migrationC = store.transitionConversationMigration(id, migrationC.revision, ["preparing"], { phase: "successor-starting" }).migration!;
+  const receiptC = providerReceipt(migrationC.operationId, "successor-c", "/sessions/successor-c.jsonl");
+  store.persistMigrationProviderReceipt(id, migrationC.revision, migrationC.operationId, receiptC);
+
+  expect(() => store.commitSuccessor(id, {
+    id: receiptB.nativeId,
+    path: receiptB.path,
+    accountId: "healthy",
+    historyHash: receiptB.historyHash,
+    host: receiptB.host,
+  }, migrationB.revision, migrationB.operationId, receiptB)).toThrow("migration succession ownership is stale");
+  expect(store.conversation(id)?.generations).toHaveLength(1);
+  expect(store.conversation(id)?.migration).toMatchObject({
+    targetId: "alternate",
+    operationId: migrationC.operationId,
+    phase: "verifying",
+  });
+});
+
 test("a thread a migration already forked is never reseated again", () => {
   const { store, id } = seededRegistry("off", registryFile());
   const requested = store.requestConversationReseat(id, "healthy");
   const revision = requested.migration!.revision;
   store.transitionConversationMigration(id, revision, ["requested"], { phase: "preparing" });
   store.transitionConversationMigration(id, revision, ["preparing"], { phase: "successor-starting" });
-  store.transitionConversationMigration(id, revision, ["successor-starting"], { phase: "verifying" });
+  const committedReceipt = providerReceipt(
+    store.conversation(id)!.migration!.operationId,
+    "successor-native-id",
+    "/sessions/successor.jsonl",
+  );
+  store.transitionConversationMigration(id, revision, ["successor-starting"], { phase: "verifying", providerReceipt: committedReceipt });
   const committed = store.commitSuccessor(id, {
     id: "successor-native-id",
     path: "/sessions/successor.jsonl",
     accountId: "healthy",
-  }, revision);
+  }, revision, store.conversation(id)!.migration!.operationId, committedReceipt);
   expect(committed.migration!.phase).toBe("committed");
   expect(committed.generations).toHaveLength(2);
   expect(committed.generations.at(-1)!.launchProfile.cwd).toBe("/repo/checkout");

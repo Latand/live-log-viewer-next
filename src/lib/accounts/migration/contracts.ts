@@ -297,6 +297,7 @@ export interface SuccessorProviderPort {
     conversationId: ViewerConversationId;
     targetAccountId: string;
     launchProfile: LaunchProfile;
+    ownsOperation?: () => Promise<boolean>;
   }): Promise<void>;
   cleanup?(receipt: ProviderReceipt): Promise<void>;
 }

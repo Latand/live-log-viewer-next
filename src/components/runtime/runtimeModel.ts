@@ -22,7 +22,7 @@ import type { MessageKey } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { Activity } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
-import type { RuntimeSettingsCapability, ViewerDeploymentStatus } from "@/lib/runtime/contracts";
+import type { RuntimePendingReconfigure, RuntimeSettingsCapability, ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 /* ------------------------------------------------------------------ *
@@ -80,17 +80,19 @@ export type AttentionState =
 export type ReceiptStatus =
   | "pending"
   | "delivering"
+  | "applying"
   | "turn-started"
   | "steered"
   | "queued"
   | "delivered"
+  | "applied"
   | "interrupted"
   | "answered"
   | "rejected"
   | "failed"
   | "uncertain";
 
-export type OperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn";
+export type OperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure";
 
 /** Client connection state (Fable §2). `resynced` is a transient note, not a state. */
 export type ConnectionState = "live" | "reconnecting" | "degraded" | "offline";
@@ -155,13 +157,13 @@ export interface AttentionRequest {
   /** Structured AskUserQuestion / requestUserInput payload. */
   question?: {
     header?: string;
-    prompt: string;
+    "prompt": string;
     options?: { label: string; description?: string; recommended?: boolean }[];
     multiSelect?: boolean;
   };
   questions?: Array<{
     header?: string;
-    prompt: string;
+    "prompt": string;
     options?: { label: string; description?: string; recommended?: boolean }[];
     multiSelect?: boolean;
   }>;
@@ -241,6 +243,7 @@ export interface RuntimeSession {
   artifactPath: string | null;
   capabilities: { steer: boolean; structuredAttention: boolean; imageInput?: RuntimeImageCapability; runtimeSettings?: RuntimeSettingsCapability };
   activeTurnId: string | null;
+  pendingReconfigure?: RuntimePendingReconfigure | null;
   /** Unresolved drift notice, if any. */
   drift?: RuntimeDrift | null;
 }
@@ -558,6 +561,7 @@ function baseSession(id: string, p: Partial<RuntimeSession>): RuntimeSession {
     artifactPath: p.artifactPath ?? null,
     capabilities: p.capabilities ?? { steer: false, structuredAttention: false },
     activeTurnId: p.activeTurnId ?? null,
+    pendingReconfigure: p.pendingReconfigure ?? null,
     drift: null,
   };
 }
@@ -621,7 +625,7 @@ export function hasBlockingAttention(store: RuntimeStore, session: RuntimeSessio
 
 /** A receipt is terminal once no further transition is expected. */
 export function receiptIsTerminal(status: ReceiptStatus): boolean {
-  return status === "delivered" || status === "answered" || status === "rejected" || status === "failed" || status === "interrupted";
+  return status === "delivered" || status === "applied" || status === "answered" || status === "rejected" || status === "failed" || status === "interrupted";
 }
 
 /**

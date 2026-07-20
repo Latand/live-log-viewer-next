@@ -1,6 +1,7 @@
 import { resumeSpecFor } from "@/lib/agent/cli";
 import type { AgentReconfiguration } from "@/lib/agent/reconfigure";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type RegistryConversation, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { accountManager } from "@/lib/accounts/manager";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
@@ -83,6 +84,14 @@ interface ReconfigureConversationOverrides {
   paneScreen?: typeof paneScreen;
   killHost?: typeof killTmuxHostIfMatches;
   deliver?: typeof deliverToTranscriptHost;
+  resolveAccount?: typeof accountManager.resolveSpawn;
+  validateAccount?: (engine: "claude" | "codex", accountId: string) => Promise<void>;
+  requestMigrationTick?: typeof requestAccountMigrationTick;
+}
+
+async function validateAccountAuthentication(engine: "claude" | "codex", accountId: string): Promise<void> {
+  const account = await accountManager.status(engine, accountId, true);
+  if (account.auth.state !== "authenticated") throw new Error(`${engine} account requires authentication`);
 }
 
 export async function reconfigureConversation(
@@ -96,6 +105,30 @@ export async function reconfigureConversation(
   const registry = overrides.registry ?? agentRegistry();
   const registered = registeredHostForPath(registry.snapshot(), filePath);
   if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
+  const conversation = registry.conversationForPath(filePath);
+  const generation = conversation?.generations.at(-1);
+  if (config.accountId && (!conversation || !generation)) return failure("conversation identity is unavailable for an account switch", 409);
+  if (config.accountId && conversation && generation && config.accountId !== generation.accountId) {
+    const previousProfile = generation.launchProfile;
+    let profileUpdated = false;
+    try {
+      await (overrides.validateAccount ?? validateAccountAuthentication)(entry.engine, config.accountId);
+      (overrides.resolveAccount ?? accountManager.resolveSpawn)(entry.engine, config.accountId);
+      registry.updateConversationLaunchProfile(conversation.id, {
+        model: config.model,
+        effort: config.effort,
+        fast: config.fast,
+      });
+      profileUpdated = true;
+      const queued = registry.requestConversationReseat(conversation.id, config.accountId);
+      if (!queued.migration) throw new Error("account switch could not be queued");
+      (overrides.requestMigrationTick ?? requestAccountMigrationTick)();
+      return { ok: true, target: registered.host.paneId, outcome: "pending" };
+    } catch (error) {
+      if (profileUpdated) registry.updateConversationLaunchProfile(conversation.id, previousProfile);
+      return failure(error, 409);
+    }
+  }
   const buildSpec = (profile: AgentRegistryEntry["launchProfile"]) => (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
     ...config,
     readOnly: profile?.readOnly ?? null,

@@ -175,7 +175,9 @@ export class RuntimeHost {
         const status = request.params?.status;
         if (status !== "queued"
           && status !== "delivering"
+          && status !== "applying"
           && status !== "delivered"
+          && status !== "applied"
           && status !== "interrupted"
           && status !== "answered"
           && status !== "failed") {

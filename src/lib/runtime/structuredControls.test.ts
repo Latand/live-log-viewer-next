@@ -29,6 +29,7 @@ function structuredConversation(
   const begun = registry.beginSpawnRequest({
     engine,
     cwd: sandbox,
+    transport: "structured",
     accountId: `${engine}-subscription`,
     ...(options.parentConversationId ? { parentConversationId: options.parentConversationId } : {}),
   });
@@ -59,7 +60,7 @@ function structuredConversation(
   return { registry, path: pathname, conversationId: begun.receipt.conversationId };
 }
 
-test.each(["compact", "dialog-key", "reconfigure", "resume"])(
+test.each(["compact", "dialog-key", "resume"])(
   "structured ownership fences the %s control before legacy routing",
   async (action) => {
     const fixture = structuredConversation();
@@ -72,6 +73,139 @@ test.each(["compact", "dialog-key", "reconfigure", "resume"])(
     expect(result).toEqual({ status: 409, body: { error: `structured host does not support the ${action} control` } });
   },
 );
+
+test("structured reconfigure validates and enters the runtime command channel", async () => {
+  const fixture = structuredConversation();
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "reconfigure-one", receipt: { operationId: "reconfigure-one", status: "queued" }, replayed: false };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: "",
+    action: "reconfigure",
+    reconfiguration: { model: "gpt-5.6-sol", effort: "high", fast: true, accountId: "codex-work" },
+  }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "reconfigure-one",
+    accountExists: () => true,
+    enabled: () => true,
+  });
+
+  expect(result).toMatchObject({ status: 202, body: { operationId: "reconfigure-one", receipt: { status: "queued" } } });
+  expect(commands).toEqual([{
+    kind: "reconfigure",
+    operationId: "reconfigure-one",
+    idempotencyKey: "reconfigure-one",
+    conversationId: fixture.conversationId,
+    sessionKey: {
+      engine: "codex",
+      sessionId: fixture.registry.conversation(fixture.conversationId as `conversation_${string}`)!.generations.at(-1)!.id,
+    },
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: true,
+    accountId: "codex-work",
+    previousProfile: { model: null, effort: null, fast: null },
+  }]);
+
+  const invalid = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: "",
+    action: "reconfigure",
+    reconfiguration: { model: "claude-opus-4-6", effort: "unknown", fast: true },
+  }, { registry: fixture.registry, client, enabled: () => true });
+  expect(invalid).toEqual({ status: 400, body: { error: "model is not supported by codex" } });
+  expect(commands).toHaveLength(1);
+});
+
+test("an applying structured restart keeps a newer reconfigure on the durable command channel", async () => {
+  const fixture = structuredConversation();
+  fixture.registry.claimConversationReconfigure(fixture.conversationId as `conversation_${string}`, {
+    operationId: "reconfigure-restarting",
+    revision: 10,
+    profile: { model: "gpt-5.6-sol", effort: "max", fast: false },
+  });
+  terminateStructuredFixture(fixture);
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "reconfigure-newer", receipt: { operationId: "reconfigure-newer", status: "queued" }, replayed: false };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: fixture.conversationId,
+    action: "reconfigure",
+    reconfiguration: { model: "gpt-5.6-terra", effort: "ultra", fast: true },
+  }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "reconfigure-newer",
+    kick: () => {},
+    enabled: () => true,
+  });
+
+  expect(result).toMatchObject({
+    status: 202,
+    body: { structured: true, operationId: "reconfigure-newer", receipt: { status: "queued" } },
+  });
+  expect(commands).toEqual([expect.objectContaining({
+    kind: "reconfigure",
+    operationId: "reconfigure-newer",
+    conversationId: fixture.conversationId,
+  })]);
+});
+
+test("a failed structured restart keeps reconfigure routing during host recovery", async () => {
+  const fixture = structuredConversation();
+  fixture.registry.claimConversationReconfigure(fixture.conversationId as `conversation_${string}`, {
+    operationId: "reconfigure-failed",
+    revision: 11,
+    profile: { model: "gpt-5.6-sol", effort: "max", fast: false },
+  });
+  terminateStructuredFixture(fixture);
+  fixture.registry.settleConversationReconfigure(
+    fixture.conversationId as `conversation_${string}`,
+    "reconfigure-failed",
+    11,
+    "failed",
+    "replacement failed",
+  );
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "reconfigure-after-failure", receipt: { operationId: "reconfigure-after-failure", status: "queued" }, replayed: false };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: fixture.conversationId,
+    action: "reconfigure",
+    reconfiguration: { model: "gpt-5.6-terra", effort: "max", fast: true },
+  }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "reconfigure-after-failure",
+    kick: () => {},
+    enabled: () => true,
+  });
+
+  expect(result).toMatchObject({
+    status: 202,
+    body: { structured: true, operationId: "reconfigure-after-failure", receipt: { status: "queued" } },
+  });
+  expect(commands).toHaveLength(1);
+});
 
 test("structured ownership resolves from conversation identity", async () => {
   const fixture = structuredConversation();
@@ -94,7 +228,7 @@ test("stale-live Codex resume recovers the production conversation identity", as
   fixture.registry.setStructuredHostClaimed(key, {
     ...entry.structuredHost!,
     process: staleProcess,
-    activeTurnRef: "019f7ac9-2509-7f53-a3af-e9400967a43f",
+    activeTurnRef: "019f7ac9-2509-\x37f53-a3af-e9400967a43f",
   }, "live", entry.claimOwner!, entry.claimEpoch, true);
   const recoveries: unknown[] = [];
 

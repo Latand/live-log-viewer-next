@@ -132,7 +132,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { pid?: unknown; path?: unknown; conversationId?: unknown; clientMessageId?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown; model?: unknown; effort?: unknown; fast?: unknown };
+  let body: { pid?: unknown; path?: unknown; conversationId?: unknown; clientMessageId?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown; model?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown };
   try {
     body = (await req.json()) as {
       pid?: unknown;
@@ -150,6 +150,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       model?: unknown;
       effort?: unknown;
       fast?: unknown;
+      accountId?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
@@ -205,7 +206,19 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
 
   const explicitAction = typeof body.action === "string" ? body.action : "";
   const structuredControl = process.env.LLV_STRUCTURED_HOSTS === "1"
-    ? await dispatchStructuredControl({ path: filePath, conversationId, action: explicitAction })
+    ? await dispatchStructuredControl({
+        path: filePath,
+        conversationId,
+        action: explicitAction,
+        ...(explicitAction === "reconfigure" ? {
+          reconfiguration: {
+            model: typeof body.model === "string" ? body.model : undefined,
+            effort: typeof body.effort === "string" ? body.effort : undefined,
+            fast: typeof body.fast === "boolean" || body.fast === null ? body.fast : undefined,
+            accountId: typeof body.accountId === "string" ? body.accountId : undefined,
+          },
+        } : {}),
+      })
     : null;
   if (structuredControl) return NextResponse.json(structuredControl.body, { status: structuredControl.status });
 
