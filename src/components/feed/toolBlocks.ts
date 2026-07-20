@@ -57,10 +57,9 @@ export function groupNestedCalls(calls: readonly ToolEvent[]): ToolBlock[] {
   return blocks;
 }
 
-/* A poll worth collapsing (issue #497): a bare `wait`/empty `write_stdin` that
-   captured nothing worth a full card — no output, no stderr, and not an error.
-   A poll that surfaced output (e.g. a `wait` that returned "ready") or failed
-   keeps its own readable row so nothing meaningful is ever hidden. */
+/* A poll worth collapsing (issue #497): a bare `wait`/empty `write_stdin` with
+   empty output, empty stderr, and a successful status. Output and failures keep
+   their own readable rows. */
 export function isCollapsiblePoll(event: ToolEvent): boolean {
   return event.poll === true && event.status !== "err" && !event.outputPreview.trim() && event.stderr === undefined;
 }
@@ -77,8 +76,7 @@ export type ToolChild =
  * collapsible polls coalesce into one `polls` run that carries the shared
  * session and the summed elapsed wall-time, while a keystroke `write_stdin` or a
  * poll that captured output stays its own readable `call` (issue #497). A single
- * empty poll still collapses — a run of one — so its empty output/raw-record
- * fields never render.
+ * empty poll also forms a run of one and omits empty output/raw-record fields.
  */
 export function coalesceFollowUps(children: readonly ToolEvent[]): ToolChild[] {
   const out: ToolChild[] = [];

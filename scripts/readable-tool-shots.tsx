@@ -46,11 +46,11 @@ const gitStatus = toolEvent({ ...execSuccess, ts, id: "g1", cwd: "/workspace/app
 const npmDev = toolEvent({ id: "e2", tool: "exec_command", ts, summary: "npm run dev", command: "npm run dev", cwd: "/workspace/app", outputPreview: "starting dev server on :3000" });
 const wait = toolEvent({ id: "w2", tool: "wait", ts, summary: "wait · 8479", statusLabel: "waiting 10s", session: "8479", poll: true, durationMs: 10_000, outputPreview: "compiled successfully" });
 // A run of empty polls (issue #497): each is a bare poll with no output; the
-// group must coalesce them into one compact counted row, not five dead cards.
+// group must coalesce them into one compact counted row.
 const polls = Array.from({ length: 5 }, (_, i) =>
   toolEvent({ id: `s${i}`, tool: "write_stdin", ts, summary: "stdin → 8479 · poll", statusLabel: "waiting 5s", session: "8479", poll: true, durationMs: 5_000, outputPreview: "" }),
 );
-// A keystroke write_stdin is never collapsed — it keeps its readable row.
+// A keystroke write_stdin keeps its readable row.
 const keystroke = toolEvent({ id: "k2", tool: "write_stdin", ts, summary: "stdin → 8479 · y⏎", session: "8479", outputPreview: "accepted" });
 const bunTest = toolEvent({
   id: "e3", tool: "exec_command", ts, summary: "bun test", command: "bun test ./src/components/feed", cwd: "/workspace/app",

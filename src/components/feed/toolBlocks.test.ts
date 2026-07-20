@@ -61,19 +61,19 @@ test("a follow-up whose session matches no exec stays standalone", () => {
   expect(blocks[1].children).toHaveLength(0);
 });
 
-test("only a bare empty poll is collapsible — keystrokes, output, and errors are not", () => {
+test("bare empty polls collapse while keystrokes, output, and errors keep rows", () => {
   // A wait/empty write_stdin with no captured output collapses.
   expect(isCollapsiblePoll(emptyPoll("p1"))).toBe(true);
   expect(isCollapsiblePoll(toolEvent({ tool: "write_stdin", poll: true, outputPreview: "" }))).toBe(true);
   // A poll that surfaced output stays a full readable row.
   expect(isCollapsiblePoll(emptyPoll("p2", { outputPreview: "ready" }))).toBe(false);
-  // A keystroke write_stdin is never a poll.
+  // A keystroke write_stdin keeps its readable input row.
   expect(isCollapsiblePoll(toolEvent({ tool: "write_stdin", poll: false, outputPreview: "" }))).toBe(false);
-  // A failed poll keeps its own row so the failure is never hidden.
+  // A failed poll keeps its own visible row.
   expect(isCollapsiblePoll(emptyPoll("p3", { status: "err", statusLabel: "exit 1" }))).toBe(false);
-  // A poll that carries a stderr stream is not collapsed.
+  // A poll carrying stderr keeps its readable row.
   expect(isCollapsiblePoll(emptyPoll("p4", { stderr: "boom" }))).toBe(false);
-  // A plain exec is never a poll.
+  // A plain exec owns its regular command row.
   expect(isCollapsiblePoll(toolEvent({ tool: "Bash" }))).toBe(false);
 });
 
@@ -105,7 +105,7 @@ test("keystrokes and output-bearing waits break the poll run and stay their own 
   expect(out[0].events.map((e) => e.id)).toEqual(["p1", "p2"]);
 });
 
-test("a single empty poll still collapses — a run of one, so its empty body never renders", () => {
+test("a single empty poll collapses and omits its empty body", () => {
   const out = coalesceFollowUps([emptyPoll("solo")]);
   expect(out).toHaveLength(1);
   expect(out[0].kind).toBe("polls");

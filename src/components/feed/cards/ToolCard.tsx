@@ -142,10 +142,10 @@ function RawRecord({ event }: { event: ToolEvent }) {
    collapsed transcript keeps its DOM small (issue #9 §7/§8). */
 export function ToolBody({ event }: { event: ToolEvent }) {
   const hasDiff = event.body?.type === "diff";
-  /* An interactive follow-up (wait/write_stdin) that captured nothing carries no
-     output, source, or raw record worth a card: hide those empty fields so it
-     never shows an apology chip or a dead raw-record toggle (issue #497). A
-     follow-up that surfaced output, or failed, keeps its full readable body. */
+  /* An interactive follow-up (wait/write_stdin) with an empty result carries no
+     useful output, source, or raw record. Hiding those fields removes the
+     apology chip and dead raw-record toggle (issue #497). Output and failures
+     keep their full readable body. */
   const emptyFollowUp = isFollowUpCall(event) && !event.outputPreview.trim() && event.stderr === undefined && event.status !== "err";
   const showOutput = !emptyFollowUp && (!hasDiff || Boolean(event.outputPreview.trim()));
   return (
@@ -179,8 +179,8 @@ export function ToolBody({ event }: { event: ToolEvent }) {
   );
 }
 
-/** A coalesced run of consecutive empty interactive polls, rendered as one quiet
-    counted row instead of N signal-free cards (issue #497). It keeps the shared
+/** A coalesced run of consecutive empty interactive polls rendered as one quiet
+    counted row (issue #497). It keeps the shared
     session identity and the summed elapsed wall-time, so an operator still reads
     "how long the command was polled" without scrolling past every tick. */
 export function PollRow({ events, session, elapsedMs }: { events: ToolEvent[]; session?: string; elapsedMs?: number }) {

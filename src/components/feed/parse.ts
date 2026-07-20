@@ -106,8 +106,8 @@ export type ToolEvent = {
   session?: string;
   /** A bare interactive poll: a `wait`, or a `write_stdin` that sent no
       keystrokes. Empty consecutive polls collapse into one compact counted row
-      so a long-running command's tail does not dominate the feed (#497). A
-      `write_stdin` carrying real characters is a keystroke, never a poll. */
+      and keep a long-running command's tail concise (#497). A `write_stdin`
+      carrying real characters remains a readable keystroke. */
   poll?: boolean;
   open: boolean;
   orchestration?: Orchestration;
@@ -705,6 +705,22 @@ function objFieldScalar(argsSrc: string, keys: readonly string[]): string | numb
   return undefined;
 }
 
+/* Whether an object field is encoded as a concrete literal in generated tool
+   source. Interactive wrappers need this distinction because identifier values
+   such as `chars` can only be interpreted by the runtime. */
+function objFieldIsConcreteScalar(argsSrc: string, keys: readonly string[]): boolean {
+  for (const key of keys) {
+    const re = new RegExp(`(?:^|[{,([\\s])${key}\\s*:\\s*`);
+    const match = re.exec(argsSrc);
+    if (!match) continue;
+    const start = (match.index ?? 0) + match[0].length;
+    const ch = argsSrc[start];
+    if (ch === '"' || ch === "'" || ch === "`") return true;
+    return /^(?:-?\d+(?:\.\d+)?|true\b|false\b)/.test(argsSrc.slice(start));
+  }
+  return false;
+}
+
 /* The first string/template literal in an argument source. */
 function firstLiteral(argsSrc: string): string {
   for (let i = 0; i < argsSrc.length; i += 1) {
@@ -866,9 +882,15 @@ function batchCommands(fullInput: string): string[] {
  * the full source and raw record expose the ground truth at level 2. Returns
  * null for a plain custom tool, which keeps rendering as one generic row.
  */
-function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body?: Orchestration; diff?: DiffModel } | null {
+function parseOrchestration(input: string): {
+  overlay: Partial<ToolEvent>;
+  body?: Orchestration;
+  diff?: DiffModel;
+  directInteractive?: { tool: "wait" | "write_stdin"; args: Record<string, unknown> };
+} | null {
   if (!input || !/\btools\.[A-Za-z_]\w*\s*\(/.test(input)) return null;
   const calls: NestedCall[] = [];
+  let concreteInteractive: { tool: "wait" | "write_stdin"; args: Record<string, unknown> } | undefined;
   ORCH_CALL_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = ORCH_CALL_RE.exec(input)) && calls.length < ORCH_MAX_CALLS) {
@@ -876,8 +898,14 @@ function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body?
     const open = match.index + match[0].length - 1; // the '(' at the end of the match
     const argsSrc = sliceCallArgs(input, open);
     const tool = ORCH_METHOD_TOOL[method] ?? method;
-    const s = summarizeTool(tool, orchCallArgs(tool, argsSrc, input), "codex");
+    const args = orchCallArgs(tool, argsSrc, input);
+    const s = summarizeTool(tool, args, "codex");
     calls.push({ id: `${method}#${calls.length}`, tool: method, family: s.family, icon: s.icon, summary: s.summary });
+    if (tool === "wait" || tool === "write_stdin") {
+      const concreteSession = objFieldIsConcreteScalar(argsSrc, ["session_id", "cell_id"]);
+      const concreteInput = tool === "wait" || objFieldIsConcreteScalar(argsSrc, ["chars"]);
+      if (concreteSession && concreteInput) concreteInteractive = { tool, args };
+    }
   }
   ORCH_HELPER_RE.lastIndex = 0;
   while ((match = ORCH_HELPER_RE.exec(input)) && calls.length < ORCH_MAX_CALLS) {
@@ -889,6 +917,13 @@ function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body?
   if (!toolCalls.length) return null;
   const source = redactSecrets(input).slice(0, COMMAND_MAX);
   const sourceTruncated = input.length > COMMAND_MAX;
+
+  /* A one-operation generated wrapper represents the concrete wait/stdin call
+     directly. The normalized event inherits session ownership, polling intent,
+     result output, and compact follow-up grouping. */
+  if (toolCalls.length === 1 && concreteInteractive) {
+    return { overlay: {}, directInteractive: concreteInteractive };
+  }
 
   /* An apply_patch payload embedded in the JS source parses into the same diff
      model a first-class apply_patch gets, so the card renders the structured
@@ -1225,7 +1260,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       statusLabel: tr("render.executing"),
       outputPreview: "",
       outputTruncated: false,
-      ...(family === "shell" ? (() => {
+      ...(s.family === "shell" ? (() => {
         const cwd = cwdOf(args, command);
         const session = sessionFromArgs(args);
         return { ...(cwd ? { cwd } : {}), ...(session !== undefined ? { session } : {}) };
@@ -1321,7 +1356,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const emitCustomTool = (ts: unknown, name: string, input: string, callId?: string): ToolEvent => {
     const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
     const orch = parseOrchestration(input);
-    const base = newToolEvent({ ts, id, tool: name, args: { input }, engine: "codex", diff: orch?.diff });
+    const direct = orch?.directInteractive;
+    const base = newToolEvent({ ts, id, tool: direct?.tool ?? name, args: direct?.args ?? { input }, engine: "codex", diff: orch?.diff });
     const event = orch ? { ...base, ...orch.overlay, ...(orch.body ? { orchestration: orch.body } : {}) } : base;
     registerCall(event);
     return event;

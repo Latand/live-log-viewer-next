@@ -121,8 +121,8 @@ export const nestedParent = toolEvent({
   session: "8479",
   outputPreview: "starting dev server",
 });
-/** A wait that surfaced real output: a poll, but never collapsed — its captured
-    line stays readable in its own follow-up row (issue #497). */
+/** A wait that surfaced real output keeps its captured line readable in a
+    dedicated follow-up row (issue #497). */
 export const nestedWait = toolEvent({
   id: "wait-1",
   tool: "wait",
@@ -143,7 +143,7 @@ export const nestedPoll = toolEvent({
   durationMs: 5000,
   outputPreview: "",
 });
-/** A write_stdin carrying real keystrokes: never a poll, keeps its session. */
+/** A write_stdin carrying real keystrokes keeps its session and readable row. */
 export const nestedKeystroke = toolEvent({
   id: "keys-1",
   tool: "write_stdin",
@@ -152,8 +152,8 @@ export const nestedKeystroke = toolEvent({
   outputPreview: "",
 });
 
-/** An empty poll builder for a collapsing run: each carries the shared session
-    and a wall-time, but no output — the row the group must coalesce (#497). */
+/** An empty poll builder for a collapsing run: each carries the shared session,
+    a wall-time, and an empty output captured by the coalesced row (#497). */
 export function emptyPoll(id: string, over: Partial<ToolEvent> = {}): ToolEvent {
   return toolEvent({ id, tool: "wait", summary: "wait · 8479", session: "8479", poll: true, durationMs: 5000, outputPreview: "", statusLabel: "waiting 5s", ...over });
 }

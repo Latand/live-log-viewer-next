@@ -92,7 +92,7 @@ test("a wait/write_stdin run nests as follow-ups of the exec that owns them", ()
   expect(blocks[0].children.every((c) => c.status === "ok")).toBe(true);
 });
 
-test("the parser marks bare polls but not keystroke write_stdin", () => {
+test("the parser distinguishes bare polls from keystroke write_stdin", () => {
   const line = (payload: Record<string, unknown>, ts: string) => JSON.stringify({ type: "response_item", timestamp: ts, payload });
   const lines = [
     line({ type: "function_call", call_id: "e1", name: "exec_command", arguments: JSON.stringify({ cmd: "npm run dev", workdir: "/w" }) }, "2026-07-10T10:00:00Z"),
@@ -100,7 +100,7 @@ test("the parser marks bare polls but not keystroke write_stdin", () => {
     // A wait is always a bare poll.
     line({ type: "function_call", call_id: "w1", name: "wait", arguments: JSON.stringify({ cell_id: "8479", yield_time_ms: 10000 }) }, "2026-07-10T10:00:02Z"),
     line({ type: "function_call_output", call_id: "w1", output: "Script running with cell ID 8479\nWall time 10.0 seconds\nOutput:\n" }, "2026-07-10T10:00:12Z"),
-    // An empty write_stdin is a poll; a keystroke write_stdin is not.
+    // An empty write_stdin is a poll; a keystroke keeps its input semantics.
     line({ type: "function_call", call_id: "s1", name: "write_stdin", arguments: JSON.stringify({ session_id: 8479, chars: "" }) }, "2026-07-10T10:00:13Z"),
     line({ type: "function_call_output", call_id: "s1", output: "Script running with cell ID 8479\nWall time 5.0 seconds\nOutput:\n" }, "2026-07-10T10:00:18Z"),
     line({ type: "function_call", call_id: "k1", name: "write_stdin", arguments: JSON.stringify({ session_id: 8479, chars: "y\n" }) }, "2026-07-10T10:00:19Z"),
@@ -109,7 +109,7 @@ test("the parser marks bare polls but not keystroke write_stdin", () => {
   const group = buildFeed(codexFile, lines, false, "").items.find((item): item is CmdGroupItem => item.kind === "cmd-group");
   if (!group) throw new Error("expected a cmd-group");
   const byId = new Map(group.calls.map((c) => [c.id, c]));
-  expect(byId.get("e1")?.poll).toBeUndefined(); // the exec parent is not a poll
+  expect(byId.get("e1")?.poll).toBeUndefined(); // the exec parent owns the session
   expect(byId.get("w1")?.poll).toBe(true);
   expect(byId.get("s1")?.poll).toBe(true);
   // Keystrokes are retained as a readable, non-poll write; the session survives.

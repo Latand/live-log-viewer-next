@@ -134,7 +134,7 @@ test("a cmd-group nests wait/stdin follow-ups under an ordered exec block", () =
   // The output-bearing wait keeps its own readable follow-up row.
   const firstBlock = list!.querySelector("li")!;
   expect(firstBlock.textContent).toContain("wait");
-  // The empty poll collapses to the compact counted row, not a full stdin card.
+  // The empty poll collapses to the compact counted row.
   expect(firstBlock.textContent).toContain(en("tools.pollRun", { count: 1 }));
 });
 
@@ -146,7 +146,7 @@ test("a poll-dominated run collapses its empty polls into one counted row", () =
   expect(firstBlock.textContent).toContain(en("tools.pollRun", { count: 6 }));
   // ...carries the shared session identity...
   expect(firstBlock.textContent).toContain("8479");
-  // ...and the summed elapsed wall-time (6 × 5s = 30s), not 6 separate cards.
+  // The row shows the summed elapsed wall-time (6 × 5s = 30s).
   expect(firstBlock.textContent).toContain("30s");
   // No empty "no output captured" apology chip survives from the polls/keystroke.
   expect(host.textContent).not.toContain(en("tools.noOutput"));
@@ -154,7 +154,7 @@ test("a poll-dominated run collapses its empty polls into one counted row", () =
   // keystroke contribute none (pre-#497 they each mounted their own).
   const rawToggles = [...host.querySelectorAll("button")].filter((b) => (b.textContent ?? "") === en("tools.rawRecord"));
   expect(rawToggles).toHaveLength(1);
-  // The trailing keystroke write_stdin is never collapsed — it stays readable.
+  // The trailing keystroke write_stdin stays readable.
   expect(host.textContent).toContain("y⏎");
 });
 
