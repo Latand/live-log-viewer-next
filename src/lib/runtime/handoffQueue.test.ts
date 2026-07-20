@@ -221,6 +221,50 @@ describe("candidate health failure and rollback (protocol step 6)", () => {
     expect(retry.replay.map((d) => d.deliveryId)).toEqual(["d1"]);
   });
 
+  test("rollback preserves acknowledgements inherited from earlier promotions", () => {
+    const { q } = queue();
+    const delivery = (deliveryId: string, seq: number) => ({
+      deliveryId,
+      clientMessageId: `client-${deliveryId}`,
+      seq,
+    });
+
+    q.enqueue([rowInput({
+      operationId: "handoff_blue",
+      pendingDeliveries: [delivery("d1", 1)],
+    })]);
+    q.beginDrain("gen-blue");
+    q.claim("handoff_blue", { fromGeneration: "gen-blue", toGeneration: "gen-green" });
+    expect(q.acknowledgeReplay("handoff_blue", "gen-green", ["d1"])).toBe(true);
+
+    q.enqueue([rowInput({
+      operationId: "handoff_green",
+      hostGeneration: "gen-green",
+      pendingDeliveries: [delivery("d1", 1), delivery("d2", 2)],
+    })]);
+    q.beginDrain("gen-green");
+    q.claim("handoff_green", { fromGeneration: "gen-green", toGeneration: "gen-teal" });
+    expect(q.acknowledgeReplay("handoff_green", "gen-teal", ["d2"])).toBe(true);
+
+    q.failCandidate("gen-teal");
+    expect(q.claim("handoff_green", {
+      fromGeneration: "gen-green",
+      toGeneration: "gen-teal-retry",
+    }).replay.map(({ deliveryId }) => deliveryId)).toEqual(["d2"]);
+    expect(q.acknowledgeReplay("handoff_green", "gen-teal-retry", ["d2"])).toBe(true);
+
+    q.enqueue([rowInput({
+      operationId: "handoff_teal",
+      hostGeneration: "gen-teal-retry",
+      pendingDeliveries: [delivery("d1", 1), delivery("d2", 2), delivery("d3", 3)],
+    })]);
+    q.beginDrain("gen-teal-retry");
+    expect(q.claim("handoff_teal", {
+      fromGeneration: "gen-teal-retry",
+      toGeneration: "gen-purple",
+    }).replay.map(({ deliveryId }) => deliveryId)).toEqual(["d3"]);
+  });
+
   test("outgoing generation is only retirable once every row is claimed, terminal, or explicitly failed", () => {
     const { q } = queue();
     q.enqueue([

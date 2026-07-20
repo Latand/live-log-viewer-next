@@ -170,6 +170,58 @@ test("SQLite restart keeps one active conversation lease and its completed hando
   }
 });
 
+test("three promotions retain every durable replay acknowledgement across restarts", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-handoff-queue-three-promotions-"));
+  const filename = path.join(directory, "handoff-queue.sqlite");
+  const delivery = (id: string, seq: number) => ({ deliveryId: id, clientMessageId: `client-${id}`, seq });
+
+  try {
+    const blue = new HandoffQueue(new SqliteHandoffQueueStore(filename));
+    blue.enqueue([rowInput({
+      operationId: "handoff_root_blue",
+      hostGeneration: "gen-blue",
+      pendingDeliveries: [delivery("d1", 1)],
+    })]);
+    blue.beginDrain("gen-blue");
+    expect(blue.claim("handoff_root_blue", {
+      fromGeneration: "gen-blue",
+      toGeneration: "gen-green",
+    }).replay.map(({ deliveryId }) => deliveryId)).toEqual(["d1"]);
+    expect(blue.acknowledgeReplay("handoff_root_blue", "gen-green", ["d1"])).toBe(true);
+
+    const green = new HandoffQueue(new SqliteHandoffQueueStore(filename));
+    green.enqueue([rowInput({
+      operationId: "handoff_root_green",
+      hostGeneration: "gen-green",
+      pendingDeliveries: [delivery("d1", 1), delivery("d2", 2)],
+    })]);
+    green.beginDrain("gen-green");
+    expect(green.claim("handoff_root_green", {
+      fromGeneration: "gen-green",
+      toGeneration: "gen-teal",
+    }).replay.map(({ deliveryId }) => deliveryId)).toEqual(["d2"]);
+    expect(green.acknowledgeReplay("handoff_root_green", "gen-teal", ["d2"])).toBe(true);
+
+    const teal = new HandoffQueue(new SqliteHandoffQueueStore(filename));
+    teal.enqueue([rowInput({
+      operationId: "handoff_root_teal",
+      hostGeneration: "gen-teal",
+      pendingDeliveries: [delivery("d1", 1), delivery("d2", 2), delivery("d3", 3)],
+    })]);
+    teal.beginDrain("gen-teal");
+    expect(teal.claim("handoff_root_teal", {
+      fromGeneration: "gen-teal",
+      toGeneration: "gen-purple",
+    }).replay.map(({ deliveryId }) => deliveryId)).toEqual(["d3"]);
+    expect(teal.history().map((row) => row.operationId)).toEqual([
+      "handoff_root_blue",
+      "handoff_root_green",
+    ]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("SQLite restart preserves a drain-window turn refresh before claim", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-handoff-queue-turn-"));
   const filename = path.join(directory, "handoff-queue.sqlite");
