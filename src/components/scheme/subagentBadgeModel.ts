@@ -1,7 +1,15 @@
-import { conversationIdentity, isArchivedPredecessor } from "@/lib/accounts/identity";
+import { conversationIdentity } from "@/lib/accounts/identity";
 import type { Engine, FileEntry } from "@/lib/types";
 
-export type SubagentBadgeState = "running" | "live" | "closed" | "dead";
+import { badgeState, currentGenerationChildrenOf, type SubagentBadgeState } from "./subagentTray";
+
+export type { SubagentBadgeState } from "./subagentTray";
+
+/** Badge display rank: active leads, every quiet/dead state trails together —
+    ties break by spawn time, unchanged from the pre-#142 ordering. */
+function activeRank(state: SubagentBadgeState): number {
+  return state === "running" || state === "live" ? 0 : 1;
+}
 
 export interface SubagentBadge {
   id: string;
@@ -16,49 +24,24 @@ export interface SubagentBadge {
   avatarSeed: string;
 }
 
-function badgeState(entry: FileEntry): SubagentBadgeState {
-  if (entry.path.startsWith("spawn:")) return "dead";
-  if (entry.spawn?.state === "failed") return "dead";
-  if (entry.proc === "done" || entry.proc === "killed" || entry.supersededBy || entry.activity === "idle") return "closed";
-  if (entry.proc === "running" || entry.spawn?.state === "starting" || entry.spawn?.state === "binding" || entry.spawn?.state === "queued") {
-    return "running";
-  }
-  return "live";
-}
-
 function spawnTime(entry: FileEntry): number {
   const started = entry.sessionStartedAt ? Date.parse(entry.sessionStartedAt) : Number.NaN;
   return Number.isFinite(started) ? started : entry.mtime * 1_000;
 }
 
-function activeRank(state: SubagentBadgeState): number {
-  return state === "running" || state === "live" ? 0 : 1;
-}
-
-/** Direct spawned children of one stable conversation, ordered for bottom-up display. */
-export function subagentsOf(conversationId: string, entries: readonly FileEntry[]): SubagentBadge[] {
-  const parentPaths = new Set(
-    entries
-      .filter((entry) => conversationIdentity(entry) === conversationId)
-      .map((entry) => entry.path),
-  );
-  const currentById = new Map<string, FileEntry>();
-  for (const entry of entries) {
-    if (isArchivedPredecessor(entry)) continue;
-    if (entry.engine === "shell") continue;
-    const id = conversationIdentity(entry);
-    const durableParent = entry.durableLineage?.parentConversationId;
-    if (durableParent !== conversationId && (!entry.parent || !parentPaths.has(entry.parent))) continue;
-    if (id === conversationId) continue;
-    const current = currentById.get(id);
-    const generation = entry.generation ?? 0;
-    const currentGeneration = current?.generation ?? 0;
-    if (!current || generation > currentGeneration || (generation === currentGeneration && entry.mtime > current.mtime)) {
-      currentById.set(id, entry);
-    }
-  }
-
-  return [...currentById.values()]
+/**
+ * Direct spawned children of one stable conversation, ordered for bottom-up
+ * display. `exclude` drops any child already placed on another surface — a tray
+ * member folded into the parent card must not also enumerate as a promoted
+ * badge (issue #142: a card renders in exactly one place).
+ */
+export function subagentsOf(
+  conversationId: string,
+  entries: readonly FileEntry[],
+  exclude: ReadonlySet<string> = new Set(),
+): SubagentBadge[] {
+  return currentGenerationChildrenOf(conversationId, entries)
+    .filter((entry) => !exclude.has(entry.path) && !exclude.has(conversationIdentity(entry)))
     .map((entry) => ({ entry, state: badgeState(entry) }))
     .sort((left, right) =>
       activeRank(left.state) - activeRank(right.state)

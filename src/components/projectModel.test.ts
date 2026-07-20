@@ -316,6 +316,38 @@ describe("buildBranchGroups", () => {
     expect(group.returnable).toHaveLength(0);
     expect(group.finished).toHaveLength(0);
   });
+
+  test("engine placement folds a quiet child out of the columns and promotes an idle one back in", () => {
+    const root = entry({ path: "/root", activity: "live" });
+    const folded = entry({ path: "/root/quiet", parent: "/root", kind: "subagent", activity: "idle", spawnOrigin: "engine" });
+    const promoted = entry({ path: "/root/attn", parent: "/root", kind: "subagent", activity: "idle", spawnOrigin: "engine" });
+
+    const group = buildBranchGroups([root, folded, promoted], "demo", {
+      enginePlacement: {
+        foldedEnginePaths: new Set(["/root/quiet"]),
+        promotedEnginePaths: new Set(["/root/attn"]),
+      },
+    })[0]!;
+
+    const columnPaths = group.columns.map((column) => column.file.path);
+    // The folded child never takes a column; it renders only as a tray row.
+    expect(columnPaths).not.toContain("/root/quiet");
+    // The promoted (idle-but-actionable) child stays a full node.
+    expect(columnPaths).toContain("/root/attn");
+    // The folded child is not lost — it drops into the group's finished stack.
+    expect(group.finished.map((file) => file.path)).toContain("/root/quiet");
+  });
+
+  test("a promoted engine child opens its parent group even when the parent is idle", () => {
+    const idleParent = entry({ path: "/parent", activity: "idle" });
+    const promoted = entry({ path: "/parent/attn", parent: "/parent", kind: "subagent", activity: "idle", spawnOrigin: "engine" });
+    const groups = buildBranchGroups([idleParent, promoted], "demo", {
+      enginePlacement: { promotedEnginePaths: new Set(["/parent/attn"]) },
+    });
+    expect(groups.map((group) => group.key)).toContain("/parent");
+    const group = groups.find((candidate) => candidate.key === "/parent")!;
+    expect(group.columns.map((column) => column.file.path)).toContain("/parent/attn");
+  });
 });
 
 describe("buildArchiveBranchGroups", () => {

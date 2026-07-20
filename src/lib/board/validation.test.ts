@@ -66,3 +66,22 @@ test("accepts a well-formed set-favorite mutation and rejects malformed ones", a
     validateBoardPatchRequest(patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 3, mutations: [{ kind: "set-favorite", id: "conv-1", favorite: "yes" }] })),
   ).rejects.toThrow();
 });
+
+test("accepts well-formed engine tray mutations and rejects malformed ones", async () => {
+  const fold = await validateBoardPatchRequest(
+    patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 3, mutations: [{ kind: "set-engine-child-fold", id: "conv-child", path: "/child", folded: true }] }),
+  );
+  expect(fold.mutations).toEqual([{ kind: "set-engine-child-fold", id: "conv-child", path: "/child", folded: true }]);
+  const expand = await validateBoardPatchRequest(
+    patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 3, mutations: [{ kind: "set-engine-tray-expanded", parentId: "conv-parent", expanded: false }] }),
+  );
+  expect(expand.mutations).toEqual([{ kind: "set-engine-tray-expanded", parentId: "conv-parent", expanded: false }]);
+
+  // Missing / mistyped fields draw the atomic rejection.
+  await expect(
+    validateBoardPatchRequest(patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 3, mutations: [{ kind: "set-engine-child-fold", id: "conv-child", path: "/child" }] })),
+  ).rejects.toThrow();
+  await expect(
+    validateBoardPatchRequest(patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 3, mutations: [{ kind: "set-engine-tray-expanded", parentId: "", expanded: true }] })),
+  ).rejects.toThrow();
+});

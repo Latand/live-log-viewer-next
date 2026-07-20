@@ -45,6 +45,7 @@ import { routeTaskEdge, segHitsRect } from "./taskGeometry";
 import { GroupOverridePanel } from "./GroupOverridePanel";
 import { stableDomOrder, stableNodeDomOrder } from "./domOrder";
 import { SubagentBadges } from "./SubagentBadges";
+import { SubagentTray, type SubagentTrayApi } from "./SubagentTrayView";
 import type { SubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
 import {
   LOOP_GAP,
@@ -807,6 +808,7 @@ function NodeShell({
   onExpand,
   onPipelineCreated,
   badgeAnchors,
+  trayApi,
 }: {
   node: SchemeNode;
   ringed: boolean;
@@ -852,6 +854,7 @@ function NodeShell({
   onExpand: (path: string) => void;
   onPipelineCreated?: (pipeline: Pipeline) => void;
   badgeAnchors?: SubagentBadgeAnchorRegistry;
+  trayApi?: SubagentTrayApi;
 }) {
   const { t } = useLocale();
   const [underOpen, setUnderOpen] = useState(false);
@@ -968,11 +971,24 @@ function NodeShell({
         cardRect={node}
         anchorRegistry={badgeAnchors}
         onExpandedChange={setBadgesExpanded}
+        exclude={trayApi?.foldedChildPaths}
+        onFold={trayApi?.onFoldChild}
         onNavigate={(path) => {
           const target = files.find((entry) => entry.path === path);
           if (target) onSelect(target);
         }}
       />
+      {(() => {
+        const tray = trayApi?.trays.get(conversationIdentity(node.file));
+        return tray ? (
+          <SubagentTray
+            tray={tray}
+            onToggleExpanded={(expanded) => trayApi!.onToggleExpanded(tray.parentConversationId, expanded)}
+            onOpenMember={trayApi!.onOpenMember}
+            onUnfold={trayApi!.onUnfold}
+          />
+        ) : null;
+      })()}
       {flow ? <RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /> : null}
       <FarLabel file={node.file} />
       {/* The handoff handle pinned outside the card's bottom-left corner —
@@ -1187,6 +1203,7 @@ export const NodesLayer = memo(function NodesLayer({
   relatedTasksByPath,
   deckFocus,
   badgeAnchors,
+  trayApi,
   onSelect,
   onClose,
   onFocusRound,
@@ -1225,6 +1242,7 @@ export const NodesLayer = memo(function NodesLayer({
   relatedTasksByPath?: ReadonlyMap<string, readonly TaskRelation[]>;
   deckFocus: DeckFocus | null;
   badgeAnchors?: SubagentBadgeAnchorRegistry;
+  trayApi?: SubagentTrayApi;
   onSelect: (file: FileEntry) => void;
   onClose: (path: string) => void;
   onFocusRound: (flowId: string, round: number) => void;
@@ -1382,6 +1400,7 @@ export const NodesLayer = memo(function NodesLayer({
             onExpand={onExpand}
             onPipelineCreated={onPipelineCreated}
             badgeAnchors={badgeAnchors}
+            trayApi={trayApi}
           />
         );
       })}

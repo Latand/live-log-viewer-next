@@ -34,6 +34,25 @@ describe("board store", () => {
     expect(seeded).toMatchObject({ ok: true, board: { revision: 6 } });
     expect(boardFor("viewer", file).prefs.favorites).toEqual(["conv-2"]);
   });
+
+  test("engine tray fold + disclosure pins persist across a reload and default on legacy boards", () => {
+    const file = temporaryFile();
+    mutateBoard("viewer", 0, [{ kind: "set-engine-child-fold", id: "conv-child", path: "/child", folded: true }], file);
+    const expanded = mutateBoard("viewer", 1, [{ kind: "set-engine-tray-expanded", parentId: "conv-parent", expanded: true }], file);
+    expect(expanded).toMatchObject({ ok: true, board: { revision: 2 } });
+    // Survive a fresh read of the persisted file (a reload/redeploy).
+    const reloaded = boardFor("viewer", file);
+    expect(reloaded.prefs.foldedEngineChildIds).toEqual(["conv-child"]);
+    expect(reloaded.prefs.expandedEngineTrayParentIds).toEqual(["conv-parent"]);
+    // A board written before the tray pins existed reads back with empty lists.
+    fs.writeFileSync(file, JSON.stringify({ projects: { viewer: {
+      schemaVersion: 1, revision: 5, updatedAt: "2026-07-10T00:00:00.000Z",
+      prefs: { manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false },
+    } } }), "utf8");
+    const legacy = boardFor("viewer", file);
+    expect(legacy.prefs.foldedEngineChildIds).toEqual([]);
+    expect(legacy.prefs.expandedEngineTrayParentIds).toEqual([]);
+  });
   test("durable writes fsync the board file and parent directory", async () => {
     const file = temporaryFile();
     const modulePath = path.join(import.meta.dir, "store.ts");
@@ -306,7 +325,7 @@ describe("board store", () => {
     expect(forward.older).toBeUndefined();
     expect(forward.newest).toBeUndefined();
     expect(forward.canonical.prefs).toEqual({
-      manual: ["/a"], hidden: [], expanded: ["/base", "/b"], favorites: [], viewMode: "list", taskPanelOpen: true,
+      manual: ["/a"], hidden: [], expanded: ["/base", "/b"], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode: "list", taskPanelOpen: true,
     });
     expect(forward.canonical.pathAliases).toEqual({ "/alias": "/new" });
     expect(reverse.canonical.prefs).toEqual(forward.canonical.prefs);

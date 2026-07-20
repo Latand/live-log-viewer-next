@@ -77,6 +77,16 @@ function mutation(value: unknown, index: number): BoardMutationV1 {
     if (typeof raw.favorite !== "boolean") throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].favorite`);
     return { kind: "set-favorite", id: validPath(raw.id, `mutations[${index}].id`), favorite: raw.favorite };
   }
+  if (raw.kind === "set-engine-child-fold") {
+    exact(raw, ["kind", "id", "path", "folded"], `mutations[${index}]`);
+    if (typeof raw.folded !== "boolean") throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].folded`);
+    return { kind: "set-engine-child-fold", id: validPath(raw.id, `mutations[${index}].id`), path: validPath(raw.path, `mutations[${index}].path`), folded: raw.folded };
+  }
+  if (raw.kind === "set-engine-tray-expanded") {
+    exact(raw, ["kind", "parentId", "expanded"], `mutations[${index}]`);
+    if (typeof raw.expanded !== "boolean") throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].expanded`);
+    return { kind: "set-engine-tray-expanded", parentId: validPath(raw.parentId, `mutations[${index}].parentId`), expanded: raw.expanded };
+  }
   if (raw.kind === "set-presentation") {
     exact(raw, ["kind", "viewMode", "taskPanelOpen"], `mutations[${index}]`);
     if (raw.viewMode === undefined && raw.taskPanelOpen === undefined) throw new ViewValidationError("INVALID_REQUEST", `empty mutations[${index}]`);
@@ -115,13 +125,18 @@ export async function validateBoardPatchRequest(request: Request): Promise<{ pro
     rejectMutationAliasCycles(mutations);
     return { project: body.project, baseRevision: body.baseRevision as number, mutations };
   }
-  const rawPatch = record(body.patch, "patch"); exact(rawPatch, ["manual", "hidden", "expanded", "favorites", "viewMode", "taskPanelOpen"], "patch");
+  const rawPatch = record(body.patch, "patch"); exact(rawPatch, ["manual", "hidden", "expanded", "favorites", "foldedEngineChildIds", "expandedEngineTrayParentIds", "viewMode", "taskPanelOpen"], "patch");
   if (Object.keys(rawPatch).length === 0) throw new ViewValidationError("INVALID_REQUEST", "empty patch");
   const patch: BoardPatch = {};
   if (rawPatch.manual !== undefined) patch.manual = pathList(rawPatch.manual, "patch.manual");
   if (rawPatch.hidden !== undefined) patch.hidden = pathList(rawPatch.hidden, "patch.hidden");
   if (rawPatch.expanded !== undefined) patch.expanded = pathList(rawPatch.expanded, "patch.expanded");
   if (rawPatch.favorites !== undefined) patch.favorites = pathList(rawPatch.favorites, "patch.favorites");
+  /* Identity-keyed tray intent (#142): the legacy seed writes whole prefs, so
+     the patch form must admit these two lists even though live edits use the
+     semantic `set-engine-*` mutations. */
+  if (rawPatch.foldedEngineChildIds !== undefined) patch.foldedEngineChildIds = pathList(rawPatch.foldedEngineChildIds, "patch.foldedEngineChildIds");
+  if (rawPatch.expandedEngineTrayParentIds !== undefined) patch.expandedEngineTrayParentIds = pathList(rawPatch.expandedEngineTrayParentIds, "patch.expandedEngineTrayParentIds");
   if (rawPatch.viewMode !== undefined) {
     if (rawPatch.viewMode !== null && rawPatch.viewMode !== "scheme" && rawPatch.viewMode !== "list") throw new ViewValidationError("INVALID_REQUEST", "invalid patch.viewMode");
     patch.viewMode = rawPatch.viewMode;

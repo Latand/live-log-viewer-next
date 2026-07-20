@@ -969,6 +969,19 @@ export const en = {
   "roundDeck.groupAria": { one: "Review conversation group · {count} round", other: "Review conversation group · {count} rounds" },
   "roundDeck.groupAriaNamed": { one: "Review group for {name} · {count} round", other: "Review group for {name} · {count} rounds" },
 
+  // scheme/subagentTray — engine-native subagent tray (issue #142)
+  "subagentTray.label": { one: "{count} subagent", other: "{count} subagents" },
+  "subagentTray.toggle": { one: "Expand the subagent tray ({count} folded subagent)", other: "Expand the subagent tray ({count} folded subagents)" },
+  "subagentTray.collapse": { one: "Collapse the subagent tray ({count} folded subagent)", other: "Collapse the subagent tray ({count} folded subagents)" },
+  "subagentTray.rows": "Folded subagents",
+  "subagentTray.open": "Open the {name} subagent transcript",
+  "subagentTray.fold": "Fold {name} into the subagent tray",
+  "subagentTray.unfold": "Restore {name} to a full card",
+  "subagentTray.state.running": "working",
+  "subagentTray.state.live": "live",
+  "subagentTray.state.closed": "idle",
+  "subagentTray.state.dead": "unavailable",
+
   // flows/flowModel state labels
   "flowState.waiting_ready": "waiting for READY",
   "flowState.spawn_pending": "ready to spawn the reviewer",

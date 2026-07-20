@@ -9,7 +9,7 @@ import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations
 import type { BoardFileV1, BoardProjectStateV1 } from "@/lib/view/types";
 
 export const BOARD_FILE = statePath("board.json");
-const EMPTY_PREFS: BoardProjectStateV1["prefs"] = { manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false };
+const EMPTY_PREFS: BoardProjectStateV1["prefs"] = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode: null, taskPanelOpen: false };
 const BOARD_LOCK_ATTEMPTS = 1_000;
 const BOARD_LOCK_WAIT_MS = 5;
 const BOARD_LOCK_STALE_MS = 30_000;
@@ -35,6 +35,8 @@ function projectState(value: unknown): value is BoardProjectStateV1 {
   return state.schemaVersion === 1 && Number.isInteger(state.revision) && state.revision! >= 0 && typeof state.updatedAt === "string" && Boolean(prefs) &&
     stringArray(prefs!.manual) && stringArray(prefs!.hidden) && stringArray(prefs!.expanded) &&
     (prefs!.favorites === undefined || stringArray(prefs!.favorites)) &&
+    (prefs!.foldedEngineChildIds === undefined || stringArray(prefs!.foldedEngineChildIds)) &&
+    (prefs!.expandedEngineTrayParentIds === undefined || stringArray(prefs!.expandedEngineTrayParentIds)) &&
     (state.explicitManual === undefined || stringArray(state.explicitManual)) &&
     (state.pathAliases === undefined || aliases(state.pathAliases)) &&
     (prefs!.viewMode === null || prefs!.viewMode === "scheme" || prefs!.viewMode === "list") && typeof prefs!.taskPanelOpen === "boolean";
@@ -53,9 +55,15 @@ function read(filePath: string): BoardFileV1 {
       ...state,
       pathAliases: state.pathAliases ?? {},
       explicitManual: state.explicitManual ?? state.prefs.manual,
-      /* Boards written before favorites existed lack the field; default it so
-         every GET response and reducer input carries the durable-id list. */
-      prefs: { ...state.prefs, favorites: state.prefs.favorites ?? [] },
+      /* Boards written before favorites / tray intent existed lack the fields;
+         default them so every GET response and reducer input carries the
+         durable-id lists (issue #185 favorites, issue #142 tray pins). */
+      prefs: {
+        ...state.prefs,
+        favorites: state.prefs.favorites ?? [],
+        foldedEngineChildIds: state.prefs.foldedEngineChildIds ?? [],
+        expandedEngineTrayParentIds: state.prefs.expandedEngineTrayParentIds ?? [],
+      },
     }])) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { projects: {} };
@@ -386,6 +394,10 @@ function mergedBoards(states: readonly BoardProjectStateV1[]): BoardProjectState
        no path role, so they merge independently of the manual/hidden/expanded
        reconciliation. */
     favorites: [...new Set(ordered.flatMap((state) => state.prefs.favorites ?? []))],
+    /* Identity-keyed tray intent unions independently of the path-role
+       reconciliation, exactly like favorites (issue #142 S2). */
+    foldedEngineChildIds: [...new Set(ordered.flatMap((state) => state.prefs.foldedEngineChildIds ?? []))],
+    expandedEngineTrayParentIds: [...new Set(ordered.flatMap((state) => state.prefs.expandedEngineTrayParentIds ?? []))],
     viewMode,
     taskPanelOpen,
   };

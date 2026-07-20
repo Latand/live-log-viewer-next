@@ -30,6 +30,9 @@ import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow, res
 import { compactPipelineArtifactPaths, compactPipelineLayoutFlows, createDraftPipeline, excludeCompactPipelineArtifacts, pipelinesForProject, replaceCompactPipelineEphemeral, resolvePipelineMemberPaths, type PipelineTemplate } from "./pipelines/pipelineModel";
 import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
 import { buildSchemeLayout } from "./scheme/layout";
+import { buildSubagentTrays } from "./scheme/subagentTray";
+import type { SubagentTrayApi } from "./scheme/SubagentTrayView";
+import { conversationIdentity } from "@/lib/accounts/identity";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { launchHistoryFor } from "./launchHistoryModel";
 import { LaunchHistory } from "./LaunchHistory";
@@ -633,9 +636,51 @@ export function ProjectDashboard({
       : groupFiles),
     [groupFiles, collapsedPaths, launchHistoryPaths, compactPipelinePaths],
   );
-  const groups = useMemo(
+  /* Engine-native subagent tray projection (#142 S2). A first placement pass
+     learns which parent cards actually render (host eligibility) — a child
+     whose host cannot host a tray stays visible via the full-node path — then
+     the projection partitions each engine child into a promoted node or a
+     folded tray row. The final group build consumes that single authority. */
+  const baseGroups = useMemo(
     () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations }),
     [sceneFiles, project, expandedConversations],
+  );
+  const engineProjection = useMemo(() => {
+    const hiddenPaths = new Set(prefs.hidden);
+    const placedPaths = new Set<string>(prefs.manual);
+    for (const group of baseGroups) {
+      placedPaths.add(group.key);
+      for (const column of group.columns) placedPaths.add(column.file.path);
+    }
+    const hostEligibleParentIds = new Set<string>();
+    for (const path of placedPaths) {
+      if (hiddenPaths.has(path)) continue;
+      const file = filesByPath.get(path);
+      if (!file || projectKey(file) !== project) continue;
+      hostEligibleParentIds.add(conversationIdentity(file));
+    }
+    /* Existing surfaces keep authority: a claimed pipeline artifact, a folded
+       worker, or launch history is never re-owned by the tray projection. */
+    const claimedPaths = new Set<string>([...compactPipelinePaths, ...collapsedPaths, ...launchHistoryPaths]);
+    return buildSubagentTrays({
+      entries: files,
+      foldedEngineChildIds: new Set(board.prefs.foldedEngineChildIds ?? []),
+      expandedTrayParentIds: new Set(board.prefs.expandedEngineTrayParentIds ?? []),
+      pinnedPaths,
+      hiddenPaths,
+      claimedPaths,
+      hostEligibleParentIds,
+      now: nowMs,
+    });
+  }, [baseGroups, prefs.hidden, prefs.manual, board.prefs.foldedEngineChildIds, board.prefs.expandedEngineTrayParentIds, filesByPath, project, files, compactPipelinePaths, collapsedPaths, launchHistoryPaths, pinnedPaths, nowMs]);
+  const groups = useMemo(
+    () => (engineProjection.promotedPaths.size || engineProjection.foldedPaths.size
+      ? buildBranchGroups(sceneFiles, project, {
+        expandedConversationPaths: expandedConversations,
+        enginePlacement: { promotedEnginePaths: engineProjection.promotedPaths, foldedEnginePaths: engineProjection.foldedPaths },
+      })
+      : baseGroups),
+    [sceneFiles, project, expandedConversations, engineProjection, baseGroups],
   );
   const activeRoots = useMemo(() => new Set(groups.map((group) => group.key)), [groups]);
   const cards = useMemo(() => collapsedTrees(sceneFiles, project, activeRoots), [sceneFiles, project, activeRoots]);
@@ -1102,6 +1147,29 @@ export function ProjectDashboard({
     }
     pendingFocusRef.current = file.path;
   };
+  /* Open a folded tray member read-only (#142 §1.4): reveal it as an ephemeral
+     node for inspection without touching durable board membership — folding
+     stays intact, so the P4 look never un-docks the child. */
+  const openTrayMember = (path: string) => {
+    onUserNavigate?.();
+    const file = files.find((entry) => entry.path === path);
+    if (!file) return;
+    if (projectKey(file) !== project) {
+      openSwitchboardFile(file);
+      return;
+    }
+    pendingFocusRef.current = path;
+    setEphemeral((prev) => (prev.includes(path) ? prev : [...prev, path]));
+  };
+  const trayApi = useMemo<SubagentTrayApi>(() => ({
+    trays: engineProjection.traysByParent,
+    foldedChildPaths: engineProjection.foldedPaths,
+    onToggleExpanded: (parentId, expanded) => board.setEngineTrayExpanded(parentId, expanded),
+    onOpenMember: openTrayMember,
+    onUnfold: (id, path) => board.setEngineChildFold(id, path, false),
+    onFoldChild: (id, path) => board.setEngineChildFold(id, path, true),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [engineProjection, board]);
   const openFullCatalogFile = onOpenCatalogFile ?? openSwitchboardFile;
 
   /* Expand a terminal direct review group back onto the board (#289 + #325):
@@ -1481,6 +1549,7 @@ export function ProjectDashboard({
               onDraftSpawned={draftSpawned}
               onActiveChange={setMobileActiveFile}
               taskSheetNonce={taskSheetNonce}
+              trayApi={trayApi}
             />
           ) : listAvailable ? (
             <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
@@ -1519,6 +1588,7 @@ export function ProjectDashboard({
                 isolatedManualPaths={isolatedCompactHistoryPaths}
                 focus={highlight}
                 attentionPaths={attentionPaths}
+                trayApi={trayApi}
                 onSelect={openSwitchboardFile}
                 onClose={closeNode}
                 onDraftClose={removeDraft}

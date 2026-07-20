@@ -175,6 +175,11 @@ export function isCollapseExempt(file: FileEntry, context: CollapseContext): boo
  * the idle window. Owner-touched / live / pinned conversations never collapse.
  */
 export function shouldCollapseWorker(file: FileEntry, context: CollapseContext): boolean {
+  /* Engine-native subagents (#142 S2) are owned by the tray projection, which
+     decides their promoted/folded surface — generic age-based worker collapse
+     must not also fold them into an origin stack, or a tray member would render
+     in two places. S2 claims them before this classifier ever runs. */
+  if (file.spawnOrigin === "engine") return false;
   const klass = classifyWorker(file, context);
   if (!klass) return false;
   if (isCollapseExempt(file, context)) return false;
