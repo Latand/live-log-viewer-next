@@ -16,7 +16,7 @@ test("separate bundle module instances share structured startup status", async (
 
 test("issue 367: the structured startup axis never reports ready before adoption succeeds", async () => {
   const { markStructuredHostStartupFailed, markStructuredHostStartupReady, structuredStartupAxis } = await import(`./startupStatus?${"axis-copy"}`);
-  const store = globalThis as typeof globalThis & { __llvStructuredHostStartupFailed?: boolean };
+  const store = process as typeof process & { __llvStructuredHostStartupFailed?: boolean };
   const previous = store.__llvStructuredHostStartupFailed;
   try {
     delete store.__llvStructuredHostStartupFailed;
