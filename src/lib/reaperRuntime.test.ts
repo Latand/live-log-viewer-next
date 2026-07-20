@@ -528,6 +528,61 @@ test("a non-host worker with an owner message is recorded user-authored (issue #
   }
 });
 
+test("a sticky owner-authored verdict prevents later full transcript rescans (issue #493)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-sticky-authorship-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13ac.jsonl");
+  const now = Date.parse("2026-07-20T18:00:00.000Z");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "sticky authorship" });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: pathname,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 60_000).toISOString() },
+    observedAt: new Date(now - 60_000).toISOString(),
+  }]);
+
+  try {
+    fs.writeFileSync(pathname, JSON.stringify({
+      type: "event_msg",
+      timestamp: new Date(now - 60_000).toISOString(),
+      payload: { type: "user_message", message: "keep this conversation visible" },
+    }) + "\n");
+    await runReaperCycle({
+      registry,
+      hosts: [runtimeHost(pathname)],
+      files: [runtimeFile(pathname, fs.statSync(pathname).mtimeMs / 1000)],
+      now,
+    });
+
+    /* A changed, owner-free body would earn a clean stamp if the second cycle
+       opened the transcript again. Sticky authorship makes that read useless. */
+    fs.writeFileSync(pathname, JSON.stringify({
+      type: "event_msg",
+      timestamp: new Date(now).toISOString(),
+      payload: { type: "agent_message", message: "x".repeat(128 * 1024) },
+    }) + "\n");
+    await runReaperCycle({
+      registry,
+      hosts: [runtimeHost(pathname)],
+      files: [runtimeFile(pathname, fs.statSync(pathname).mtimeMs / 1000)],
+      now: now + 1_000,
+    });
+
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBe(true);
+    expect(state.scannedAt?.[pathname]).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 function claudeSubagentFile(pathname: string, mtime: number): FileEntry {
   return { ...runtimeFile(pathname, mtime), root: "claude-projects", engine: "claude", kind: "subagent", fmt: "claude", name: path.basename(pathname) };
 }
