@@ -174,27 +174,31 @@ async function placeConversations(page: any): Promise<void> {
 }
 
 /* Pan the board (plain wheel = pan; hand tool so a wheel over a pane never
-   scrolls it) until one long-titled off-screen cluster surfaces as an on-edge
-   chip whose reserved reveal band is clear of every conversation pane. Returns a
-   stable `[data-edge-chip="…"]` selector for it, or null if none can be
+   scrolls it) until an off-screen cluster whose cleaned title is *exactly*
+   `targetLen` characters surfaces as an on-edge chip whose reserved reveal band
+   is clear of every conversation pane. Targeting the length makes the reveal
+   proof deterministic across both ends of the current-work label band (48 and
+   60) instead of accepting whichever long chip happens to surface. Returns a
+   stable `[data-edge-chip="…"]` selector, or null if that length cannot be
    isolated. The collision geometry only shows a chip whose *fully-revealed*
    width clears content, so a surfaced chip is always safe to unfurl. */
-async function surfaceLongVisibleChip(page: any): Promise<string | null> {
+async function surfaceLongVisibleChip(page: any, targetLen: number): Promise<string | null> {
   await page.mouse.move(720, 450);
   await page.keyboard.press("h"); // hand tool: every wheel pans, none scroll a feed
-  const directions = [{ x: 320, y: 0 }, { x: -320, y: 0 }, { x: 0, y: 320 }, { x: 0, y: -320 }];
+  const directions = [{ x: 320, y: 0 }, { x: -320, y: 0 }, { x: 0, y: 320 }, { x: 0, y: -320 }, { x: 320, y: 320 }, { x: -320, y: -320 }];
   for (const dir of directions) {
-    for (let step = 0; step < 26; step += 1) {
-      const key = await page.evaluate(() => {
+    for (let step = 0; step < 30; step += 1) {
+      const key = await page.evaluate((len: number) => {
         for (const chip of Array.from(document.querySelectorAll("[data-edge-chip]"))) {
           const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement | null;
           const rect = (chip as HTMLElement).getBoundingClientRect();
           const overflowing = title ? title.scrollWidth - title.clientWidth > 1 : false;
+          const exactLength = (title?.textContent || "").length === len;
           const inBounds = rect.width > 0 && rect.left >= -0.5 && rect.right <= window.innerWidth + 0.5 && rect.top >= 0 && rect.bottom <= window.innerHeight;
-          if (overflowing && inBounds) return chip.getAttribute("data-edge-chip");
+          if (overflowing && exactLength && inBounds) return chip.getAttribute("data-edge-chip");
         }
         return null;
-      });
+      }, targetLen);
       if (key) return `[data-edge-chip="${key}"]`;
       await page.mouse.move(720, 450);
       await page.mouse.wheel({ deltaX: dir.x, deltaY: dir.y });
@@ -202,6 +206,114 @@ async function surfaceLongVisibleChip(page: any): Promise<string | null> {
     }
   }
   return null;
+}
+
+/* The whole reveal proof for one surfaced chip: resting truncation, repeated
+   pointer progression, keyboard full-reveal, and reduced-motion hover — each
+   asserted to render the exact-length title in full, inside the viewport, clear
+   of every conversation pane. Check ids are suffixed with the title length so a
+   single run proves BOTH the 48- and the 60-character path (issue #474). */
+async function proveChipReveal(page: any, sel: string, len: number, outDir: string): Promise<void> {
+  // Resting: title truncated, direction control reserved beside it, in-viewport.
+  const resting = await page.evaluate((selector: string) => {
+    const chip = document.querySelector(selector) as HTMLElement;
+    const control = chip.querySelector("[data-edge-chip-control]") as HTMLElement;
+    const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
+    const cr = control.getBoundingClientRect();
+    const tr = title.getBoundingClientRect();
+    const br = chip.getBoundingClientRect();
+    const panes = Array.from(document.querySelectorAll("header.reasoning-host")).map((p) => p.getBoundingClientRect());
+    const overlapsPane = panes.some((p) => br.left < p.right && br.right > p.left && br.top < p.bottom && br.bottom > p.top);
+    return {
+      label: title.textContent || "",
+      reveal: title.getAttribute("data-reveal"),
+      truncated: title.scrollWidth - title.clientWidth > 1,
+      controlBeforeTitle: cr.right <= tr.left + 1,
+      inViewport: br.left >= -0.5 && br.right <= window.innerWidth + 0.5,
+      width: Math.round(br.width),
+      overlapsPane,
+    };
+  }, sel);
+  check(resting.label.length === len, `desktop-chip-exact-length-${len}`, `the surfaced chip carries an exact ${resting.label.length}-character current-work title`);
+  check(resting.truncated, `desktop-chip-resting-truncated-${len}`, `the resting ${len}-char chip label "${resting.label}" overflows its resting width — data-reveal ${resting.reveal}`);
+  check(resting.controlBeforeTitle, `desktop-chip-control-reserved-${len}`, "the direction control sits in its own reserved box before the title — never over the label");
+  check(resting.inViewport, `desktop-chip-resting-in-viewport-${len}`, `the resting pill (width ${resting.width}px) stays inside the 1440px viewport`);
+  check(!resting.overlapsPane, `desktop-chip-resting-clear-${len}`, "the resting chip does not overlap any open conversation pane");
+  await page.screenshot({ path: path.join(outDir, `desktop-1440-edge-chip-${len}-resting.png`) });
+  console.log(`  shot desktop-1440-edge-chip-${len}-resting.png`);
+
+  /* Progressive pointer reveal: repeated moves that reach the truncated end
+     unfurl further segments (bounded, within the viewport). */
+  const progressed = await page.evaluate(async (selector: string) => {
+    const chip = document.querySelector(selector) as HTMLElement;
+    const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
+    const settle = () => new Promise((r) => setTimeout(r, 30));
+    chip.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    await settle();
+    const reveals: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      const end = title.getBoundingClientRect().right;
+      chip.dispatchEvent(new PointerEvent("pointermove", { clientX: end - 4, clientY: title.getBoundingClientRect().top + 4, bubbles: true }));
+      await settle();
+      reveals.push(title.getAttribute("data-reveal") || "?");
+    }
+    return { reveals, maxRight: chip.getBoundingClientRect().right, viewport: window.innerWidth };
+  }, sel);
+  const advanced = progressed.reveals.some((r: string, i: number) => i > 0 && Number(r) > Number(progressed.reveals[0] ?? "0")) || progressed.reveals.includes("1");
+  check(advanced, `desktop-chip-progressive-reveal-${len}`, `repeated pointer progression unfurls further segments (data-reveal steps ${JSON.stringify(progressed.reveals)})`);
+  check(progressed.maxRight <= progressed.viewport + 0.5, `desktop-chip-progress-in-viewport-${len}`, `the progressively-revealed ${len}-char chip stays inside the viewport (right ${Math.round(progressed.maxRight)}px ≤ ${progressed.viewport}px)`);
+
+  // Keyboard focus → the whole label unfurls inside the same button, still bounded.
+  await page.evaluate((selector: string) => (document.querySelector(selector) as HTMLElement).focus(), sel);
+  await Bun.sleep(200);
+  const revealed = await page.evaluate((selector: string) => {
+    const chip = document.querySelector(selector) as HTMLElement;
+    const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
+    const br = chip.getBoundingClientRect();
+    const panes = Array.from(document.querySelectorAll("header.reasoning-host")).map((p) => p.getBoundingClientRect());
+    const overlapsPane = panes.some((p) => br.left < p.right && br.right > p.left && br.top < p.bottom && br.bottom > p.top);
+    return {
+      reveal: title.getAttribute("data-reveal"),
+      fullyShown: title.scrollWidth - title.clientWidth <= 1,
+      label: title.textContent || "",
+      inViewport: br.left >= -0.5 && br.right <= window.innerWidth + 0.5,
+      width: Math.round(br.width),
+      overlapsPane,
+    };
+  }, sel);
+  check(revealed.reveal === "full", `desktop-chip-focus-full-${len}`, `keyboard focus sets the ${len}-char title to its full reveal (data-reveal ${revealed.reveal})`);
+  check(revealed.fullyShown, `desktop-chip-fully-revealed-${len}`, `the whole ${revealed.label.length}-char label "${revealed.label}" is visible with no ellipsis — its scrollWidth is contained within the pill once revealed`);
+  check(revealed.inViewport, `desktop-chip-revealed-in-viewport-${len}`, `the fully-revealed pill (width ${revealed.width}px) stays inside the 1440px viewport`);
+  check(!revealed.overlapsPane, `desktop-chip-revealed-clear-${len}`, "the fully-revealed chip still does not overlap any open conversation pane");
+  await page.screenshot({ path: path.join(outDir, `desktop-1440-edge-chip-${len}-revealed.png`) });
+  console.log(`  shot desktop-1440-edge-chip-${len}-revealed.png`);
+
+  /* Reduced motion: a hover (no keyboard, no stepping) settles the whole label
+     at once — still fully contained (scrollWidth ≤ pill) and inside the
+     viewport. Blur first so the reveal comes from the hover alone. */
+  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  await page.evaluate((selector: string) => (document.querySelector(selector) as HTMLElement).blur(), sel);
+  await Bun.sleep(100);
+  const reduced = await page.evaluate(async (selector: string) => {
+    const chip = document.querySelector(selector) as HTMLElement;
+    const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
+    const settle = () => new Promise((r) => setTimeout(r, 60));
+    chip.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    await settle();
+    const br = chip.getBoundingClientRect();
+    return {
+      reveal: title.getAttribute("data-reveal"),
+      fullyShown: title.scrollWidth - title.clientWidth <= 1,
+      label: title.textContent || "",
+      inViewport: br.left >= -0.5 && br.right <= window.innerWidth + 0.5,
+    };
+  }, sel);
+  check(reduced.reveal === "full", `desktop-chip-reduced-motion-hover-${len}`, `reduced-motion hover reveals the whole ${len}-char label at once (data-reveal ${reduced.reveal})`);
+  check(reduced.fullyShown, `desktop-chip-reduced-motion-contained-${len}`, `under reduced motion the ${reduced.label.length}-char label shows in full with its scrollWidth contained inside the pill (no ellipsis)`);
+  check(reduced.inViewport, `desktop-chip-reduced-motion-in-viewport-${len}`, "the reduced-motion reveal stays inside the 1440px viewport");
+  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "no-preference" }]);
+  await page.evaluate((selector: string) => (document.querySelector(selector) as HTMLElement).blur(), sel);
+  await Bun.sleep(100);
 }
 
 async function main(): Promise<void> {
@@ -287,113 +399,22 @@ async function main(): Promise<void> {
       await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-offscreen-edge-nav-expanded.png") });
       console.log("  shot desktop-1440-offscreen-edge-nav-expanded.png");
 
-      /* Close the disclosure, then pan until one long chip is isolated on an
-         edge with a clear reveal band. Every fixture title is exactly 48 or 60
-         chars, so whichever chip surfaces proves an exact-length reveal end to
-         end. */
+      /* Close the disclosure, then prove the reveal for BOTH ends of the
+         current-work label band deterministically: surface a chip whose title
+         is exactly 48 characters, run the whole reveal proof (resting
+         truncation, repeated pointer progression, keyboard full-reveal,
+         reduced-motion hover), then do the same for an exactly 60-character
+         chip. Neither is left to "whichever chip happens to surface". */
       await page.keyboard.press("Escape");
       await Bun.sleep(150);
-      const sel = await surfaceLongVisibleChip(page);
-      check(Boolean(sel), "desktop-visible-chip-isolated", "panned the board until a single long-titled chip surfaced on an edge, clear of every conversation pane");
-
-      // Resting: title truncated, direction control reserved beside it, in-viewport.
-      const resting = await page.evaluate((selector: string) => {
-        const chip = document.querySelector(selector) as HTMLElement;
-        const control = chip.querySelector("[data-edge-chip-control]") as HTMLElement;
-        const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
-        const cr = control.getBoundingClientRect();
-        const tr = title.getBoundingClientRect();
-        const br = chip.getBoundingClientRect();
-        const panes = Array.from(document.querySelectorAll("header.reasoning-host")).map((p) => p.getBoundingClientRect());
-        const overlapsPane = panes.some((p) => br.left < p.right && br.right > p.left && br.top < p.bottom && br.bottom > p.top);
-        return {
-          label: title.textContent || "",
-          reveal: title.getAttribute("data-reveal"),
-          truncated: title.scrollWidth - title.clientWidth > 1,
-          controlBeforeTitle: cr.right <= tr.left + 1,
-          inViewport: br.left >= -0.5 && br.right <= window.innerWidth + 0.5,
-          width: Math.round(br.width),
-          overlapsPane,
-        };
-      }, sel);
-      check(resting.truncated, "desktop-chip-resting-truncated", `the resting chip label "${resting.label}" (${resting.label.length} chars) overflows its resting width — data-reveal ${resting.reveal}`);
-      check(resting.label.length === 48 || resting.label.length === 60, "desktop-chip-exact-length", `the surfaced chip carries an exact ${resting.label.length}-character current-work title`);
-      check(resting.controlBeforeTitle, "desktop-chip-control-reserved", "the direction control sits in its own reserved box before the title — never over the label");
-      check(resting.inViewport, "desktop-chip-resting-in-viewport", `the resting pill (width ${resting.width}px) stays inside the 1440px viewport`);
-      check(!resting.overlapsPane, "desktop-chip-resting-clear", "the resting chip does not overlap any open conversation pane");
-      await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-edge-chip-resting.png") });
-      console.log("  shot desktop-1440-edge-chip-resting.png");
-
-      /* Progressive pointer reveal: repeated moves that reach the truncated end
-         unfurl further segments (bounded, within the viewport). */
-      const progressed = await page.evaluate(async (selector: string) => {
-        const chip = document.querySelector(selector) as HTMLElement;
-        const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
-        const settle = () => new Promise((r) => setTimeout(r, 30));
-        chip.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
-        await settle();
-        const reveals: string[] = [];
-        for (let i = 0; i < 4; i += 1) {
-          const end = title.getBoundingClientRect().right;
-          chip.dispatchEvent(new PointerEvent("pointermove", { clientX: end - 4, clientY: title.getBoundingClientRect().top + 4, bubbles: true }));
-          await settle();
-          reveals.push(title.getAttribute("data-reveal") || "?");
-        }
-        return { reveals, maxRight: chip.getBoundingClientRect().right, viewport: window.innerWidth };
-      }, sel);
-      const advanced = progressed.reveals.some((r: string, i: number) => i > 0 && Number(r) > Number(progressed.reveals[0] ?? "0")) || progressed.reveals.includes("1");
-      check(advanced, "desktop-chip-progressive-reveal", `repeated pointer progression unfurls further segments (data-reveal steps ${JSON.stringify(progressed.reveals)})`);
-      check(progressed.maxRight <= progressed.viewport + 0.5, "desktop-chip-progress-in-viewport", `the progressively-revealed chip stays inside the viewport (right ${Math.round(progressed.maxRight)}px ≤ ${progressed.viewport}px)`);
-
-      // Keyboard focus → the whole label unfurls inside the same button, still bounded.
-      await page.evaluate((selector: string) => (document.querySelector(selector) as HTMLElement).focus(), sel);
-      await Bun.sleep(200);
-      const revealed = await page.evaluate((selector: string) => {
-        const chip = document.querySelector(selector) as HTMLElement;
-        const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
-        const br = chip.getBoundingClientRect();
-        const panes = Array.from(document.querySelectorAll("header.reasoning-host")).map((p) => p.getBoundingClientRect());
-        const overlapsPane = panes.some((p) => br.left < p.right && br.right > p.left && br.top < p.bottom && br.bottom > p.top);
-        return {
-          reveal: title.getAttribute("data-reveal"),
-          fullyShown: title.scrollWidth - title.clientWidth <= 1,
-          label: title.textContent || "",
-          inViewport: br.left >= -0.5 && br.right <= window.innerWidth + 0.5,
-          width: Math.round(br.width),
-          overlapsPane,
-        };
-      }, sel);
-      check(revealed.reveal === "full", "desktop-chip-focus-full", `keyboard focus sets the title to its full reveal (data-reveal ${revealed.reveal})`);
-      check(revealed.fullyShown, "desktop-chip-fully-revealed", `the whole ${revealed.label.length}-char label "${revealed.label}" is visible with no ellipsis — its scrollWidth is contained within the pill once revealed`);
-      check(revealed.inViewport, "desktop-chip-revealed-in-viewport", `the fully-revealed pill (width ${revealed.width}px) stays inside the 1440px viewport`);
-      check(!revealed.overlapsPane, "desktop-chip-revealed-clear", "the fully-revealed chip still does not overlap any open conversation pane");
-      await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-edge-chip-revealed.png") });
-      console.log("  shot desktop-1440-edge-chip-revealed.png");
-
-      /* Reduced motion: a hover (no keyboard, no stepping) settles the whole
-         label at once — still fully contained (scrollWidth ≤ pill) and inside
-         the viewport. Blur first so the reveal comes from the hover alone. */
-      await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
-      await page.evaluate((selector: string) => (document.querySelector(selector) as HTMLElement).blur(), sel);
-      await Bun.sleep(100);
-      const reduced = await page.evaluate(async (selector: string) => {
-        const chip = document.querySelector(selector) as HTMLElement;
-        const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
-        const settle = () => new Promise((r) => setTimeout(r, 60));
-        chip.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
-        await settle();
-        const br = chip.getBoundingClientRect();
-        return {
-          reveal: title.getAttribute("data-reveal"),
-          fullyShown: title.scrollWidth - title.clientWidth <= 1,
-          label: title.textContent || "",
-          inViewport: br.left >= -0.5 && br.right <= window.innerWidth + 0.5,
-        };
-      }, sel);
-      check(reduced.reveal === "full", "desktop-chip-reduced-motion-hover", `reduced-motion hover reveals the whole label at once (data-reveal ${reduced.reveal})`);
-      check(reduced.fullyShown, "desktop-chip-reduced-motion-contained", `under reduced motion the ${reduced.label.length}-char label shows in full with its scrollWidth contained inside the pill (no ellipsis)`);
-      check(reduced.inViewport, "desktop-chip-reduced-motion-in-viewport", "the reduced-motion reveal stays inside the 1440px viewport");
-      await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "no-preference" }]);
+      let lastSel: string | null = null;
+      for (const len of [48, 60] as const) {
+        const surfaced = await surfaceLongVisibleChip(page, len);
+        check(Boolean(surfaced), `desktop-visible-chip-isolated-${len}`, `panned the board until an exact ${len}-character chip surfaced on an edge, clear of every conversation pane`);
+        await proveChipReveal(page, surfaced!, len, OUT_DIR);
+        lastSel = surfaced;
+      }
+      const sel = lastSel!;
 
       /* Overlap regression (operator report): the revealed chip/title/direction
          control must clear the vertical agent-avatar/round stack and never paint
@@ -423,17 +444,23 @@ async function main(): Promise<void> {
         const railOverlap = chips.some((c) => { const r = c.getBoundingClientRect(); return r.width > 0 && overlaps(r, rail); });
         // Overlap check against EVERY real keep-out surface currently on screen.
         const keepouts = Array.from(document.querySelectorAll("[data-chip-keepout]")) as HTMLElement[];
-        const anyKeepoutOverlap = chips.some((c) => {
-          const r = c.getBoundingClientRect();
+        const overlapsKeepout = (el: HTMLElement): boolean => {
+          const r = el.getBoundingClientRect();
           if (r.width <= 0) return false;
           return keepouts.some((k) => { const kr = k.getBoundingClientRect(); return kr.width > 0 && kr.height > 0 && overlaps(r, kr); });
-        });
+        };
+        const anyKeepoutOverlap = chips.some(overlapsKeepout);
+        /* The folded «+N» aggregate trigger must itself dock clear of every
+           keep-out — obstacle-aware placement slides it off the band. */
+        const triggers = Array.from(document.querySelectorAll('nav[aria-label="Off-screen work"] button')).filter((b) => /^\+\d+$/.test((b.textContent || "").trim())) as HTMLElement[];
+        const triggerKeepoutOverlap = triggers.some(overlapsKeepout);
         document.getElementById("llv-474-keepout-probe")?.remove();
-        return { chipGone: !document.querySelector(selector), railOverlap, anyKeepoutOverlap };
+        return { chipGone: !document.querySelector(selector), railOverlap, anyKeepoutOverlap, triggerCount: triggers.length, triggerKeepoutOverlap };
       }, sel);
       check(beforeFold >= 1, "desktop-keepout-precondition", `a chip was on the board before the keep-out band was placed (${beforeFold} chip(s))`);
       check(afterFold.chipGone, "desktop-chip-folds-off-agent-stack", "a chip whose reveal band overlaps the agent-avatar/round keep-out folds into its «+N» disclosure instead of painting over it");
       check(!afterFold.railOverlap && !afterFold.anyKeepoutOverlap, "desktop-chip-clears-keepout", "no visible edge chip overlaps the agent-avatar/round stack or the composer/input keep-out surfaces");
+      check(!afterFold.triggerKeepoutOverlap, "desktop-aggregate-clears-keepout", `the folded «+N» aggregate trigger(s) (${afterFold.triggerCount}) dock clear of every keep-out surface — obstacle-aware placement slides them off the band`);
       await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-edge-chip-keepout-clear.png") });
       console.log("  shot desktop-1440-edge-chip-keepout-clear.png");
       await page.close();
@@ -514,7 +541,7 @@ async function main(): Promise<void> {
         capturedAt: new Date().toISOString(),
         viewer: "production next start",
         viewport: { desktop: "1440x900", mobile: "390x844" },
-        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/offscreenClusters.test.ts (reserves the fully-revealed width in collision geometry; top/bottom chips pinned into a corner fold into «+N» instead of reserving a sub-minimal reveal band; every admitted chip reserves at least the minimum collision-safe width; a chip whose revealed band overlaps the subagent avatar/round stack or the composer/input keep-out folds instead of painting over it)",
+        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/offscreenClusters.test.ts (reserves the whole CHIP_MAX_W title band in collision geometry so an admitted near-corner chip either fully fits or folds; top/bottom chips pinned near a corner fold into «+N» rather than render a permanently-truncated sliver; every admitted chip reserves the full collision-safe title band; a chip whose revealed band overlaps the subagent avatar/round stack or the composer/input keep-out folds instead of painting over it; the «+N» aggregate trigger slides along its edge to a slot clear of every pane and keep-out, falling back to the midpoint only when the edge is fully blocked)",
         checks,
       }, null, 2) + "\n",
     );

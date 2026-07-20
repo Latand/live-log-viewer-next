@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { FileEntry } from "@/lib/types";
 
 import type { SchemeLayout } from "./layout";
-import { boardClusters, CHIP_MIN_W, chipRevealWidth, offscreenClusterChips, screenKeepoutObstacles, type BoardCluster } from "./offscreenClusters";
+import { boardClusters, CHIP_MAX_W, chipRevealWidth, offscreenClusterChips, OVERFLOW_TRIGGER, overflowAnchor, screenKeepoutObstacles, type BoardCluster } from "./offscreenClusters";
 
 const cam = { x: 0, y: 0, z: 1 };
 const vp = { w: 1_000, h: 700 };
@@ -84,11 +84,12 @@ describe("offscreen cluster chips", () => {
   });
 });
 
-describe("corner reveal geometry (issue #474: a positive, collision-safe reveal width or fold)", () => {
+describe("corner reveal geometry (issue #474: the full title band fits or the chip folds)", () => {
   /* A top/bottom chip is centered on its anchor, so near a viewport corner its
-     reveal band has ~0 horizontal room: it can never paint a usable pill, and a
-     zero-width reserved box also slips past every obstacle. Such a chip must
-     fold into the edge «+N» aggregate, never reserve a sub-minimal sliver. */
+     reveal band has too little horizontal room to unfurl the whole 48–60 char
+     title: it can never paint the complete pill, and a truncated-forever sliver
+     is not acceptable. Such a chip must fold into the edge «+N» aggregate, so a
+     near-corner title either fully fits or folds — never a permanent ellipsis. */
   test("a top chip pinned into a corner folds into overflow instead of reserving a sliver", () => {
     /* Off-screen up-left: its center-to-corner ray crosses the *top* edge at
        x≈CHIP_EDGE_PAD (the left corner), where chipRevealWidth is ~0. */
@@ -103,17 +104,30 @@ describe("corner reveal geometry (issue #474: a positive, collision-safe reveal 
     expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["bottom-corner"]);
   });
 
+  test("a top chip whose centered band cannot hold the whole title — but is wider than the old resting minimum — folds instead of truncating forever", () => {
+    /* Its center-to-corner ray crosses the *top* edge at x≈200: the centered
+       reveal band there is ~356px — comfortably past a resting pill, but far
+       short of the full CHIP_MAX_W title band, so a 48/60-char label would
+       ellipsis-truncate even fully revealed. Admitting it is the corner defect;
+       it must fold. */
+    const chips = offscreenClusterChips([cluster("top-near-corner", -150, -400)], cam, vp);
+    const { edge, x } = { edge: "top" as const, x: 200 };
+    expect(chipRevealWidth(edge, x, vp)).toBeLessThan(CHIP_MAX_W);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["top-near-corner"]);
+  });
+
   test("a top chip clear of both corners keeps its full reveal band and stays visible", () => {
     const chips = offscreenClusterChips([cluster("top-center", 450, -700)], cam, vp);
     expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["top-center"]);
     const { edge, x } = chips.visible[0]!;
-    expect(chipRevealWidth(edge, x, vp)).toBeGreaterThanOrEqual(CHIP_MIN_W);
+    expect(chipRevealWidth(edge, x, vp)).toBeGreaterThanOrEqual(CHIP_MAX_W);
   });
 
-  test("every admitted chip around every edge and both corners reserves at least the minimum collision-safe reveal width", () => {
+  test("every admitted chip around every edge and both corners reserves the full collision-safe title band", () => {
     /* A dense ring of off-screen clusters aimed at every edge and both corners:
-       whichever survive as visible must each reserve a positive, at-least-
-       minimum band — the corner-pinned ones fold instead. */
+       whichever survive as visible must each reserve the *whole* CHIP_MAX_W
+       title band — the corner-pinned ones fold instead of truncating. */
     const ring: BoardCluster[] = [];
     for (let angle = 0; angle < 360; angle += 12) {
       const rad = (angle * Math.PI) / 180;
@@ -122,8 +136,46 @@ describe("corner reveal geometry (issue #474: a positive, collision-safe reveal 
     const chips = offscreenClusterChips(ring, cam, vp, 99);
     expect(chips.visible.length).toBeGreaterThan(0);
     for (const chip of chips.visible) {
-      expect(chipRevealWidth(chip.edge, chip.x, vp)).toBeGreaterThanOrEqual(CHIP_MIN_W);
+      expect(chipRevealWidth(chip.edge, chip.x, vp)).toBeGreaterThanOrEqual(CHIP_MAX_W);
     }
+  });
+});
+
+describe("overflow aggregate placement (issue #474: the «+N» disclosure clears panes and keep-outs)", () => {
+  const overlaps = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): boolean =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  const triggerBox = (edge: "left" | "right" | "top" | "bottom", anchor: { x: number; y: number }) => {
+    const half = OVERFLOW_TRIGGER / 2;
+    if (edge === "left") return { x: 10, y: anchor.y - half, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+    if (edge === "right") return { x: vp.w - 10 - OVERFLOW_TRIGGER, y: anchor.y - half, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+    if (edge === "top") return { x: anchor.x - half, y: 10, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+    return { x: anchor.x - half, y: vp.h - 10 - OVERFLOW_TRIGGER, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+  };
+
+  test("with a clear edge the trigger stays at the edge midpoint", () => {
+    expect(overflowAnchor("left", vp)).toEqual({ x: 10, y: vp.h / 2 });
+    expect(overflowAnchor("top", vp)).toEqual({ x: vp.w / 2, y: 10 });
+  });
+
+  test("slides the left-edge trigger off an avatar-rail keep-out covering the midpoint", () => {
+    /* A subagent avatar/round column pokes into the viewport at the left edge,
+       centered vertically over where the trigger would default. */
+    const rail = { x: 0, y: vp.h / 2 - 70, w: 60, h: 140 };
+    const anchor = overflowAnchor("left", vp, [rail]);
+    expect(overlaps(triggerBox("left", anchor), rail)).toBe(false);
+    expect(anchor.x).toBe(10);
+  });
+
+  test("slides the bottom-edge trigger off a composer keep-out covering the midpoint", () => {
+    const composer = { x: vp.w / 2 - 170, y: vp.h - 70, w: 340, h: 70 };
+    const anchor = overflowAnchor("bottom", vp, [composer]);
+    expect(overlaps(triggerBox("bottom", anchor), composer)).toBe(false);
+    expect(anchor.y).toBe(vp.h - 10);
+  });
+
+  test("falls back to the midpoint when the whole edge is blocked", () => {
+    const wall = { x: 0, y: 0, w: 60, h: vp.h };
+    expect(overflowAnchor("left", vp, [wall])).toEqual({ x: 10, y: vp.h / 2 });
   });
 });
 

@@ -8,7 +8,7 @@ import { useLocale } from "@/lib/i18n";
 
 import type { SchemeRect } from "./layout";
 import type { Camera } from "./Minimap";
-import { chipRevealWidth, offscreenClusterChips, type BoardCluster, type ChipEdge, type ClusterChip } from "./offscreenClusters";
+import { chipRevealWidth, offscreenClusterChips, overflowAnchor, type BoardCluster, type ChipEdge, type ClusterChip } from "./offscreenClusters";
 
 const transformFor = (edge: ChipEdge): string => {
   if (edge === "right") return "translate(-100%, -50%)";
@@ -105,7 +105,7 @@ function ChipButton({ chip, vp, onFit }: {
    menu — the list is ordinary tab-reachable buttons, so menu roles would promise
    arrow-key semantics the widget doesn't have (round-1 review). Escape closes
    and returns focus to the trigger; a press outside dismisses. */
-function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, vp }: {
+function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, vp, obstacles }: {
   edge: ChipEdge;
   rows: ClusterChip[];
   open: boolean;
@@ -113,6 +113,9 @@ function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, vp }: 
   onClose: () => void;
   onFit: (rect: SchemeRect) => void;
   vp: { w: number; h: number };
+  /** Same conversation/keep-out boxes the reveal chips fold around: the «+N»
+      trigger slides along its edge to a slot clear of them (issue #474). */
+  obstacles: readonly SchemeRect[];
 }) {
   const { t } = useLocale();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -128,8 +131,7 @@ function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, vp }: 
   }, [open, onClose]);
 
   const vertical = edge === "left" || edge === "right";
-  const x = edge === "left" ? 10 : edge === "right" ? vp.w - 10 : vp.w / 2;
-  const y = edge === "top" ? 10 : edge === "bottom" ? vp.h - 10 : vp.h / 2;
+  const { x, y } = overflowAnchor(edge, vp, obstacles);
   const listId = `edge-chip-overflow-${edge}`;
   return (
     <div
@@ -215,6 +217,7 @@ export function EdgeChips({ clusters, cam, vp, hidden, obstacles = [], onFit }: 
           edge={edge}
           rows={rows}
           vp={vp}
+          obstacles={obstacles}
           open={openEdge === edge}
           onToggle={() => setOpenEdge((current) => current === edge ? null : edge)}
           onClose={() => setOpenEdge(null)}

@@ -70,15 +70,6 @@ export const CHIP_EDGE_PAD = 22;
     plus the reserved control box and padding. The label never grows past this,
     so collision geometry can reserve it up front. */
 export const CHIP_MAX_W = 520;
-/** Smallest outer width a chip needs to render its resting state without
-    clipping: the reserved direction-control box, the base (unrevealed) label
-    segment (REVEAL_BASE_PX in {@link EdgeChips}), and the pill's horizontal
-    padding. A top/bottom chip anchored so near a corner that its viewport-
-    clamped reveal budget drops below this can never paint a usable pill — and a
-    near-zero reserved box would also slip past every obstacle — so it folds
-    into the edge «+N» disclosure instead of reserving a sub-minimal, unreadable
-    sliver (issue #474 corner reveal). */
-export const CHIP_MIN_W = 180;
 const CHIP_H = 44;
 
 /** The widest a chip can ever paint at this anchor: the fully-revealed width,
@@ -124,6 +115,51 @@ function chipAnchor(rect: SchemeRect, cam: Camera, vp: { w: number; h: number })
   return { edge, x: Math.max(pad, Math.min(vp.w - pad, vx + dx * ty)), y: edge === "bottom" ? vp.h - pad : pad };
 }
 
+/** Fixed outer size of an edge's «+N» overflow trigger (Tailwind min-h-11 /
+    min-w-11). Reserved as a collision box so the aggregate control, like the
+    reveal chips, never docks over a conversation pane or the keep-out chrome. */
+export const OVERFLOW_TRIGGER = 44;
+/** Distance the aggregate trigger stays off its viewport border — mirrors the
+    inline offset {@link EdgeChips} anchors it at. */
+const OVERFLOW_PAD = 10;
+
+/** Where an edge's «+N» overflow disclosure trigger anchors. The trigger is a
+    fixed-size control docked against `edge`; like the reveal chips it must never
+    paint over a conversation pane or the avatar/composer keep-out, so it slides
+    along its edge from the midpoint to the nearest slot whose trigger box clears
+    every obstacle, falling back to the midpoint only when the whole edge is
+    blocked (issue #474 obstacle-aware aggregate placement). The returned `{x,y}`
+    is the same edge-anchor the disclosure's per-edge transform expects. */
+export function overflowAnchor(
+  edge: ChipEdge,
+  vp: { w: number; h: number },
+  obstacles: readonly SchemeRect[] = [],
+): { x: number; y: number } {
+  const vertical = edge === "left" || edge === "right";
+  const fixedX = edge === "left" ? OVERFLOW_PAD : edge === "right" ? vp.w - OVERFLOW_PAD : vp.w / 2;
+  const fixedY = edge === "top" ? OVERFLOW_PAD : edge === "bottom" ? vp.h - OVERFLOW_PAD : vp.h / 2;
+  const half = OVERFLOW_TRIGGER / 2;
+  const boxAt = (v: number): SchemeRect => {
+    if (edge === "left") return { x: OVERFLOW_PAD, y: v - half, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+    if (edge === "right") return { x: vp.w - OVERFLOW_PAD - OVERFLOW_TRIGGER, y: v - half, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+    if (edge === "top") return { x: v - half, y: OVERFLOW_PAD, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+    return { x: v - half, y: vp.h - OVERFLOW_PAD - OVERFLOW_TRIGGER, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+  };
+  const at = (v: number): { x: number; y: number } => (vertical ? { x: fixedX, y: v } : { x: v, y: fixedY });
+  const clear = (v: number): boolean => !obstacles.some((obstacle) => intersects(boxAt(v), obstacle));
+  const span = vertical ? vp.h : vp.w;
+  const center = span / 2;
+  const min = half + OVERFLOW_PAD;
+  const max = span - half - OVERFLOW_PAD;
+  if (clear(center)) return at(center);
+  for (let offset = 24; offset <= span; offset += 24) {
+    for (const v of [center - offset, center + offset]) {
+      if (v >= min && v <= max && clear(v)) return at(v);
+    }
+  }
+  return at(center);
+}
+
 /** Pure off-screen filtering, ray/edge placement, priority, and per-edge cap.
  * `obstacles` are screen-space boxes of rendered conversation surfaces (panes,
  * decks): a chip whose pill would paint over one folds into that edge's compact
@@ -146,13 +182,18 @@ export function offscreenClusterChips(
   for (const cluster of sorted) {
     const chip = { cluster, ...chipAnchor(cluster.rect, cam, vp) };
     const count = counts.get(chip.edge) ?? 0;
-    const width = chipRevealWidth(chip.edge, chip.x, vp);
-    const box = chipBox(chip, width);
-    /* A chip is admitted only when its edge still has a slot, its viewport-
-       clamped reveal band is at least CHIP_MIN_W (positive and wide enough to
-       render — corner-pinned top/bottom chips fail here), and that reserved
-       band clears every conversation surface. Otherwise it folds into «+N». */
-    if (count < perEdgeCap && width >= CHIP_MIN_W && !obstacles.some((obstacle) => intersects(box, obstacle))) {
+    /* Reserve the *whole* title band (CHIP_MAX_W): an admitted chip must be able
+       to unfurl its complete 48–60 character label, so we never admit one whose
+       full reveal would spill past a viewport edge (a top/bottom chip centered
+       near a corner) or paint over a conversation surface / keep-out. A chip is
+       admitted only when its edge still has a slot, that full band fits the
+       viewport at this anchor (chipRevealWidth reaches CHIP_MAX_W), and the band
+       clears every obstacle. Otherwise it folds into «+N» — so a near-corner
+       title either fully fits or folds, never renders a permanently-truncated
+       sliver (issue #474 collision-safe full-title admission). */
+    const fitsViewport = chipRevealWidth(chip.edge, chip.x, vp) >= CHIP_MAX_W;
+    const box = chipBox(chip, CHIP_MAX_W);
+    if (count < perEdgeCap && fitsViewport && !obstacles.some((obstacle) => intersects(box, obstacle))) {
       visible.push(chip);
       counts.set(chip.edge, count + 1);
     } else {
