@@ -1,12 +1,12 @@
 {
   "issue": 474,
-  "capturedAt": "2026-07-20T20:13:33.495Z",
+  "capturedAt": "2026-07-20T20:55:56.390Z",
   "viewer": "production next start",
   "viewport": {
     "desktop": "1440x900",
     "mobile": "390x844"
   },
-  "interactionSuite": "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/offscreenClusters.test.ts (reserves the whole CHIP_MAX_W title band in collision geometry so an admitted near-corner chip either fully fits or folds; top/bottom chips pinned near a corner fold into «+N» rather than render a permanently-truncated sliver; every admitted chip reserves the full collision-safe title band; a chip whose revealed band overlaps the subagent avatar/round stack or the composer/input keep-out folds instead of painting over it; the «+N» aggregate trigger slides along its edge to a slot clear of every pane and keep-out, falling back to the midpoint only when the edge is fully blocked)",
+  "interactionSuite": "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/EdgeChips.dom.test.tsx (a fully blocked edge re-homes the «+N» aggregate to a clear border, keeping it a keyboard-reachable disclosure) + src/components/scheme/offscreenClusters.test.ts (measured admission: a chip is admitted only when its *measured* rendered width fits at its anchor, so a wide-glyph exact 48/60-char title folds while a title that fits is admitted with exactly its measured band reserved; a top/bottom chip pinned near a corner folds into «+N» rather than render a permanently-truncated sliver; a chip whose measured reveal band overlaps a pane / the subagent avatar/round stack / the composer/input keep-out folds instead of painting over it; overflowAnchor returns null when an edge is fully blocked and resolveOverflowPlacement re-homes the «+N» aggregate to the nearest clear border, suppressing only when the whole viewport border is blocked)",
   "checks": [
     {
       "id": "fixture-exact-title-lengths",
@@ -38,7 +38,7 @@
     },
     {
       "id": "desktop-offscreen-labels",
-      "detail": "every off-screen entry carries its WHOLE cleaned title, never a truncation ([\"Deterministic capture pipeline for stage builder\",\"Off-screen edge navigation with a bounded progressive reveal\"])"
+      "detail": "every off-screen entry carries its WHOLE cleaned title, never a truncation ([\"Off-screen edge navigation with a bounded progressive reveal\",\"Deterministic capture pipeline for stage builder\"])"
     },
     {
       "id": "desktop-disclosure-expands",
@@ -54,7 +54,7 @@
     },
     {
       "id": "desktop-chip-resting-truncated-48",
-      "detail": "the resting 48-char chip label \"Bounded off-screen edge chip progressive reveals\" overflows its resting width — data-reveal 0"
+      "detail": "the resting 48-char chip label \"Reserved reasoning effort meter on every surface\" overflows its resting width — data-reveal 0"
     },
     {
       "id": "desktop-chip-control-reserved-48",
@@ -82,11 +82,11 @@
     },
     {
       "id": "desktop-chip-fully-revealed-48",
-      "detail": "the whole 48-char label \"Bounded off-screen edge chip progressive reveals\" is visible with no ellipsis — its scrollWidth is contained within the pill once revealed"
+      "detail": "the whole 48-char label \"Reserved reasoning effort meter on every surface\" is visible with no ellipsis — its scrollWidth is contained within the pill once revealed"
     },
     {
       "id": "desktop-chip-revealed-in-viewport-48",
-      "detail": "the fully-revealed pill (width 303px) stays inside the 1440px viewport"
+      "detail": "the fully-revealed pill (width 301px) stays inside the 1440px viewport"
     },
     {
       "id": "desktop-chip-revealed-clear-48",
@@ -165,20 +165,88 @@
       "detail": "the reduced-motion reveal stays inside the 1440px viewport"
     },
     {
-      "id": "desktop-keepout-precondition",
-      "detail": "a chip was on the board before the keep-out band was placed (3 chip(s))"
+      "id": "desktop-keepout-precondition-avatar-rail",
+      "detail": "a surfaced chip is present before the avatar-rail keep-out is placed (a subagent avatar/round column poking in at the chip's edge)"
     },
     {
-      "id": "desktop-chip-folds-off-agent-stack",
-      "detail": "a chip whose reveal band overlaps the agent-avatar/round keep-out folds into its «+N» disclosure instead of painting over it"
+      "id": "desktop-chip-folds-off-avatar-rail",
+      "detail": "a chip whose reserved reveal band meets a subagent avatar/round column poking in at the chip's edge folds into its «+N» disclosure instead of painting over it"
     },
     {
-      "id": "desktop-chip-clears-keepout",
-      "detail": "no visible edge chip overlaps the agent-avatar/round stack or the composer/input keep-out surfaces"
+      "id": "desktop-chip-clears-avatar-rail",
+      "detail": "no visible edge chip overlaps the avatar-rail keep-out surface"
     },
     {
-      "id": "desktop-aggregate-clears-keepout",
-      "detail": "the folded «+N» aggregate trigger(s) (1) dock clear of every keep-out surface — obstacle-aware placement slides them off the band"
+      "id": "desktop-aggregate-clears-avatar-rail",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the avatar-rail keep-out"
+    },
+    {
+      "id": "desktop-keepout-precondition-round-badge",
+      "detail": "a surfaced chip is present before the round-badge keep-out is placed (a round/reasoning badge landing on the chip)"
+    },
+    {
+      "id": "desktop-chip-folds-off-round-badge",
+      "detail": "a chip whose reserved reveal band meets a round/reasoning badge landing on the chip folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-round-badge",
+      "detail": "no visible edge chip overlaps the round-badge keep-out surface"
+    },
+    {
+      "id": "desktop-aggregate-clears-round-badge",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the round-badge keep-out"
+    },
+    {
+      "id": "desktop-keepout-precondition-composer",
+      "detail": "a surfaced chip is present before the composer keep-out is placed (the composer/input band overlapping the chip)"
+    },
+    {
+      "id": "desktop-chip-folds-off-composer",
+      "detail": "a chip whose reserved reveal band meets the composer/input band overlapping the chip folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-composer",
+      "detail": "no visible edge chip overlaps the composer keep-out surface"
+    },
+    {
+      "id": "desktop-aggregate-clears-composer",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the composer keep-out"
+    },
+    {
+      "id": "desktop-keepout-precondition-pane",
+      "detail": "a surfaced chip is present before the pane keep-out is placed (an open conversation pane overlapping the chip's reveal band)"
+    },
+    {
+      "id": "desktop-chip-folds-off-pane",
+      "detail": "a chip whose reserved reveal band meets an open conversation pane overlapping the chip's reveal band folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-pane",
+      "detail": "no visible edge chip overlaps the pane keep-out surface"
+    },
+    {
+      "id": "desktop-aggregate-clears-pane",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the pane keep-out"
+    },
+    {
+      "id": "desktop-keepout-precondition-blocked-edge",
+      "detail": "a surfaced chip is present before the blocked-edge keep-out is placed (the whole edge walled — the aggregate must re-home or suppress)"
+    },
+    {
+      "id": "desktop-chip-folds-off-blocked-edge",
+      "detail": "a chip whose reserved reveal band meets the whole edge walled — the aggregate must re-home or suppress folds into its «+N» disclosure instead of painting over it"
+    },
+    {
+      "id": "desktop-chip-clears-blocked-edge",
+      "detail": "no visible edge chip overlaps the blocked-edge keep-out surface"
+    },
+    {
+      "id": "desktop-aggregate-clears-blocked-edge",
+      "detail": "every folded «+N» aggregate trigger (1) docks clear of the blocked-edge keep-out"
+    },
+    {
+      "id": "desktop-aggregate-rehomes-off-blocked-edge",
+      "detail": "with the bottom edge fully walled the «+N» aggregate re-homes to a clear border and stays a keyboard-reachable disclosure (1 trigger(s), all clear of the wall)"
     },
     {
       "id": "mobile-conversation-open",

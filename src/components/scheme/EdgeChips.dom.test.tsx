@@ -120,6 +120,37 @@ test("a press outside the open overflow dismisses it", () => {
   expect(host.querySelector("[data-overflow-chip]")).toBeTruthy();
 });
 
+test("re-homes the «+N» aggregate off a fully blocked edge, keeping it a keyboard-reachable disclosure clear of the obstacle (issue #474)", () => {
+  /* A keep-out wall covers the whole right edge — the border every overflow
+     cluster folds toward. The aggregate must not dock over the wall: it re-homes
+     to a clear border and stays a labelled, tab-reachable disclosure so keyboard
+     navigation to the off-screen clusters is preserved. */
+  const rightWall = { x: 940, y: 0, w: 60, h: 700 };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  flushSync(() => root.render(
+    <EdgeChips
+      clusters={clusters}
+      cam={{ x: 0, y: 0, z: 1 }}
+      vp={{ w: 1_000, h: 700 }}
+      hidden={false}
+      obstacles={[rightWall]}
+      onFit={() => {}}
+    />,
+  ));
+  const more = Array.from(host.querySelectorAll("button")).find((b) => /^\+\d+$/.test((b.textContent || "").trim())) as HTMLButtonElement;
+  expect(more).toBeTruthy();
+  expect(more.tagName).toBe("BUTTON"); // still keyboard-focusable
+  flushSync(() => more.click());
+  const listId = more.getAttribute("aria-controls");
+  expect(listId).toBeTruthy();
+  /* Re-homed off the walled right edge onto a clear border. */
+  expect(listId).not.toBe("edge-chip-overflow-right");
+  expect(host.querySelectorAll("[data-overflow-chip]").length).toBeGreaterThan(0);
+});
+
 test("hides every chip during map/pan/marquee modes", () => {
   const host = document.createElement("div");
   document.body.append(host);

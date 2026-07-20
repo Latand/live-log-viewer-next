@@ -22,6 +22,11 @@ export interface ClusterChip {
   /** Screen-space anchor on the chosen viewport edge. */
   x: number;
   y: number;
+  /** The viewport-clamped outer width this chip's pill may paint at its anchor —
+      the *measured* full label+control width (see {@link chipRevealWidth}),
+      already clamped to the room at `edge`/`x`. An admitted chip's reveal caps
+      here so a full unfurl can never spill past a viewport edge. */
+  revealWidth: number;
 }
 
 export interface ClusterChipPartition {
@@ -72,18 +77,27 @@ export const CHIP_EDGE_PAD = 22;
 export const CHIP_MAX_W = 520;
 const CHIP_H = 44;
 
-/** The widest a chip can ever paint at this anchor: the fully-revealed width,
-    clamped so a revealed/focused label can never spill past a viewport edge.
-    Used both to reserve collision space (so a chip that *could* unfurl over a
-    conversation folds into «+N» before it ever reveals) and to cap the live
-    reveal in {@link EdgeChips}. Left/right chips grow one way from their edge;
-    top/bottom chips are centered, so they grow both ways. */
-export function chipRevealWidth(edge: ChipEdge, x: number, vp: { w: number; h: number }): number {
+/** The widest a chip can actually paint at this anchor: the *measured*
+    fully-revealed width `fullWidth` (label + reserved control + padding, as the
+    caller measured it), clamped to the room left before the opposite viewport
+    edge so a revealed/focused label can never spill past it. Used both to
+    reserve collision space (so a chip that *could* unfurl over a conversation —
+    or whose measured wide-glyph label simply cannot fit — folds into «+N»
+    before it ever reveals) and to cap the live reveal in {@link EdgeChips}.
+    Left/right chips grow one way from their edge; top/bottom chips are centered,
+    so they grow both ways. `fullWidth` defaults to {@link CHIP_MAX_W}, the widest
+    a latin 48–60 char label needs, for callers without a measurement. */
+export function chipRevealWidth(
+  edge: ChipEdge,
+  x: number,
+  vp: { w: number; h: number },
+  fullWidth: number = CHIP_MAX_W,
+): number {
   const room =
     edge === "right" ? x - CHIP_EDGE_PAD
     : edge === "left" ? vp.w - CHIP_EDGE_PAD - x
     : 2 * Math.min(x - CHIP_EDGE_PAD, vp.w - CHIP_EDGE_PAD - x);
-  return Math.max(0, Math.min(CHIP_MAX_W, room));
+  return Math.max(0, Math.min(Math.max(0, fullWidth), room));
 }
 
 /* The rendered pill's outer bounds resolved from the per-edge CSS transform in
@@ -97,7 +111,7 @@ function chipBox(chip: Omit<ClusterChip, "cluster">, w: number): SchemeRect {
   return { x: chip.x - w / 2, y: chip.y - CHIP_H, w, h: CHIP_H };
 }
 
-function chipAnchor(rect: SchemeRect, cam: Camera, vp: { w: number; h: number }): Omit<ClusterChip, "cluster"> {
+function chipAnchor(rect: SchemeRect, cam: Camera, vp: { w: number; h: number }): { edge: ChipEdge; x: number; y: number } {
   const cx = (rect.x + rect.w / 2) * cam.z + cam.x;
   const cy = (rect.y + rect.h / 2) * cam.z + cam.y;
   const vx = vp.w / 2;
@@ -125,16 +139,18 @@ const OVERFLOW_PAD = 10;
 
 /** Where an edge's «+N» overflow disclosure trigger anchors. The trigger is a
     fixed-size control docked against `edge`; like the reveal chips it must never
-    paint over a conversation pane or the avatar/composer keep-out, so it slides
-    along its edge from the midpoint to the nearest slot whose trigger box clears
-    every obstacle, falling back to the midpoint only when the whole edge is
-    blocked (issue #474 obstacle-aware aggregate placement). The returned `{x,y}`
-    is the same edge-anchor the disclosure's per-edge transform expects. */
+    paint over a conversation pane or the avatar/round/composer keep-out, so it
+    slides along its edge from the midpoint to the nearest slot whose trigger box
+    clears every obstacle. Returns `null` when the whole edge is blocked — every
+    candidate slot overlaps an obstacle — so the caller can re-home the aggregate
+    to a clear edge or suppress it rather than dock it over content (issue #474
+    collision-safe aggregate placement). The returned `{x,y}` is the same
+    edge-anchor the disclosure's per-edge transform expects. */
 export function overflowAnchor(
   edge: ChipEdge,
   vp: { w: number; h: number },
   obstacles: readonly SchemeRect[] = [],
-): { x: number; y: number } {
+): { x: number; y: number } | null {
   const vertical = edge === "left" || edge === "right";
   const fixedX = edge === "left" ? OVERFLOW_PAD : edge === "right" ? vp.w - OVERFLOW_PAD : vp.w / 2;
   const fixedY = edge === "top" ? OVERFLOW_PAD : edge === "bottom" ? vp.h - OVERFLOW_PAD : vp.h / 2;
@@ -157,7 +173,37 @@ export function overflowAnchor(
       if (v >= min && v <= max && clear(v)) return at(v);
     }
   }
-  return at(center);
+  return null;
+}
+
+/** The four viewport borders in a stable clockwise order, used to re-home a
+    blocked aggregate deterministically. */
+const EDGE_ORDER: readonly ChipEdge[] = ["top", "right", "bottom", "left"];
+
+/** Where an edge's «+N» aggregate actually docks. Prefers its own `edge`; when
+    that edge is fully blocked ({@link overflowAnchor} returns null) it re-homes
+    to the nearest clear border in a deterministic clockwise sweep, so the
+    aggregate — and the keyboard-reachable disclosure it opens — always lands on a
+    slot clear of every pane/avatar/round/composer keep-out. Returns `null` only
+    when the entire viewport border is blocked, in which case the caller
+    suppresses the trigger (no non-overlapping slot exists anywhere). Issue #474
+    nullable / re-homed aggregate placement. */
+export interface OverflowPlacement {
+  edge: ChipEdge;
+  x: number;
+  y: number;
+}
+export function resolveOverflowPlacement(
+  edge: ChipEdge,
+  vp: { w: number; h: number },
+  obstacles: readonly SchemeRect[] = [],
+): OverflowPlacement | null {
+  const order = [edge, ...EDGE_ORDER.filter((candidate) => candidate !== edge)];
+  for (const candidate of order) {
+    const anchor = overflowAnchor(candidate, vp, obstacles);
+    if (anchor) return { edge: candidate, x: anchor.x, y: anchor.y };
+  }
+  return null;
 }
 
 /** Pure off-screen filtering, ray/edge placement, priority, and per-edge cap.
@@ -171,6 +217,14 @@ export function offscreenClusterChips(
   vp: { w: number; h: number },
   perEdgeCap = 4,
   obstacles: readonly SchemeRect[] = [],
+  /** Measures the *rendered* outer width a chip needs to fully paint `label`
+      plus its reserved control box and padding. Defaults to {@link CHIP_MAX_W}
+      (the widest a latin 48–60 char label needs) for callers without a live
+      measurement; {@link EdgeChips} supplies a real canvas measurement so an
+      exact 48/60-character *wide-glyph* title — whose true width exceeds the
+      latin band — is admitted only when it genuinely fits, and otherwise folds
+      instead of truncating forever (issue #474 measured admission). */
+  measure: (label: string) => number = () => CHIP_MAX_W,
 ): ClusterChipPartition {
   const viewport: SchemeRect = { x: -cam.x / cam.z, y: -cam.y / cam.z, w: vp.w / cam.z, h: vp.h / cam.z };
   const sorted = clusters
@@ -180,19 +234,24 @@ export function offscreenClusterChips(
   const overflow: ClusterChip[] = [];
   const counts = new Map<ChipEdge, number>();
   for (const cluster of sorted) {
-    const chip = { cluster, ...chipAnchor(cluster.rect, cam, vp) };
+    const anchor = chipAnchor(cluster.rect, cam, vp);
+    /* Reserve the chip's *measured* full width: an admitted chip must be able to
+       unfurl its complete rendered label, so we never admit one whose full
+       reveal would spill past a viewport edge (a top/bottom chip centered near a
+       corner), simply not fit at all (a wide-glyph 48–60 char title wider than
+       the room), or paint over a conversation surface / keep-out. `fullWidth` is
+       the measured outer width; `revealWidth` clamps it to the room at this
+       anchor. The chip is admitted only when its edge still has a slot, that
+       clamped width still holds the whole measured band (revealWidth ==
+       fullWidth), and the band clears every obstacle. Otherwise it folds into
+       «+N» — so a chip either fully fits or folds, never renders a
+       permanently-truncated sliver (issue #474 measured full-title admission). */
+    const fullWidth = Math.max(0, measure(cluster.label));
+    const revealWidth = chipRevealWidth(anchor.edge, anchor.x, vp, fullWidth);
+    const chip: ClusterChip = { cluster, ...anchor, revealWidth };
     const count = counts.get(chip.edge) ?? 0;
-    /* Reserve the *whole* title band (CHIP_MAX_W): an admitted chip must be able
-       to unfurl its complete 48–60 character label, so we never admit one whose
-       full reveal would spill past a viewport edge (a top/bottom chip centered
-       near a corner) or paint over a conversation surface / keep-out. A chip is
-       admitted only when its edge still has a slot, that full band fits the
-       viewport at this anchor (chipRevealWidth reaches CHIP_MAX_W), and the band
-       clears every obstacle. Otherwise it folds into «+N» — so a near-corner
-       title either fully fits or folds, never renders a permanently-truncated
-       sliver (issue #474 collision-safe full-title admission). */
-    const fitsViewport = chipRevealWidth(chip.edge, chip.x, vp) >= CHIP_MAX_W;
-    const box = chipBox(chip, CHIP_MAX_W);
+    const fitsViewport = revealWidth >= fullWidth;
+    const box = chipBox(chip, fullWidth);
     if (count < perEdgeCap && fitsViewport && !obstacles.some((obstacle) => intersects(box, obstacle))) {
       visible.push(chip);
       counts.set(chip.edge, count + 1);

@@ -316,6 +316,101 @@ async function proveChipReveal(page: any, sel: string, len: number, outDir: stri
   await Bun.sleep(100);
 }
 
+/* The production obstacle matrix: every keep-out *class* a surfaced edge chip
+   must never paint over, plus the fully-blocked-edge case that forces the «+N»
+   aggregate to re-home or suppress. Each row is dropped over a freshly surfaced
+   long chip's reserved reveal band as a `data-chip-keepout` surface; the board
+   must fold that chip and leave every remaining chip AND every «+N» aggregate
+   trigger clear of every keep-out. `fullEdge` walls the whole border the chip
+   sits on, so the aggregate has no clear slot on its own edge and must re-home
+   to a clear border (or suppress) without ever docking over the wall — issue
+   #474 nullable / re-homed aggregate placement. Table-driven so a single run
+   exercises pane, avatar-rail, round-badge and composer obstacles plus the
+   fully-blocked aggregate deterministically. */
+type KeepoutProbe = {
+  id: string;
+  detail: string;
+  /** Keep-out geometry relative to the surfaced chip's box `r` and the viewport. */
+  band: (r: { left: number; top: number; width: number; height: number }, vw: number, vh: number) => { left: number; top: number; width: number; height: number };
+  /** Wall the entire edge the chip sits on (fully-blocked aggregate). */
+  fullEdge?: boolean;
+};
+const KEEPOUT_PROBES: KeepoutProbe[] = [
+  { id: "avatar-rail", detail: "a subagent avatar/round column poking in at the chip's edge", band: (r) => ({ left: Math.round(r.left), top: Math.round(r.top - 12), width: 44, height: Math.round(r.height + 44) }) },
+  { id: "round-badge", detail: "a round/reasoning badge landing on the chip", band: (r) => ({ left: Math.round(r.left), top: Math.round(r.top), width: 40, height: 40 }) },
+  { id: "composer", detail: "the composer/input band overlapping the chip", band: (r) => ({ left: Math.round(r.left - 40), top: Math.round(r.top - 6), width: 260, height: Math.round(r.height + 12) }) },
+  { id: "pane", detail: "an open conversation pane overlapping the chip's reveal band", band: (r) => ({ left: Math.round(r.left - 30), top: Math.round(r.top - 30), width: 360, height: Math.round(r.height + 60) }) },
+  /* Wall the whole edge the chip sits on. Anchored off the chip's own box (not
+     the window border) so it walls the chip's reveal band AND the aggregate's
+     docking strip regardless of any board inset — spanning the full length of
+     that edge so no slot along it stays clear, forcing the «+N» aggregate to
+     re-home to another border (or suppress). */
+  { id: "blocked-edge", detail: "the whole edge walled — the aggregate must re-home or suppress", fullEdge: true, band: (r, vw, vh) => {
+    const pad = 24;
+    if (r.left <= pad) return { left: Math.round(r.left - 30), top: 0, width: 90, height: vh };
+    if (r.left + r.width >= vw - pad) return { left: Math.round(r.left + r.width - 60), top: 0, width: 90, height: vh };
+    return { left: 0, top: Math.round(r.top - 30), width: vw, height: Math.round(r.height + 50) };
+  } },
+];
+
+async function proveObstacleMatrix(page: any, outDir: string): Promise<void> {
+  for (const probe of KEEPOUT_PROBES) {
+    /* Freshly surface a long chip so each probe starts from a clean board. */
+    const sel = await surfaceLongVisibleChip(page, 60);
+    check(Boolean(sel), `desktop-keepout-precondition-${probe.id}`, `a surfaced chip is present before the ${probe.id} keep-out is placed (${probe.detail})`);
+    /* Read the surfaced chip's box + which edge it sits on, then compute this
+       probe's keep-out band from it and drop the band over the reveal band. */
+    const geom = await page.evaluate((selector: string) => {
+      const r = (document.querySelector(selector) as HTMLElement).getBoundingClientRect();
+      const edge = r.left <= 24 ? "left" : r.right >= window.innerWidth - 24 ? "right" : r.top <= 24 ? "top" : "bottom";
+      return { left: r.left, top: r.top, width: r.width, height: r.height, edge, vw: window.innerWidth, vh: window.innerHeight };
+    }, sel!);
+    const band = probe.band(geom, geom.vw, geom.vh);
+    const placed = { edge: geom.edge };
+    await page.evaluate((b: { left: number; top: number; width: number; height: number }) => {
+      const el = document.createElement("div");
+      el.setAttribute("data-chip-keepout", "");
+      el.id = "llv-474-keepout-probe";
+      Object.assign(el.style, {
+        position: "fixed", left: `${b.left}px`, top: `${b.top}px`,
+        width: `${b.width}px`, height: `${b.height}px`, zIndex: "5", pointerEvents: "none",
+      });
+      document.body.appendChild(el);
+    }, band);
+    await Bun.sleep(500); // MutationObserver → re-measure → re-render
+    const result = await page.evaluate((selector: string) => {
+      const overlaps = (a: DOMRect, b: DOMRect) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+      const keepouts = Array.from(document.querySelectorAll("[data-chip-keepout]")) as HTMLElement[];
+      const overlapsKeepout = (el: HTMLElement): boolean => {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0) return false;
+        return keepouts.some((k) => { const kr = k.getBoundingClientRect(); return kr.width > 0 && kr.height > 0 && overlaps(r, kr); });
+      };
+      const chips = Array.from(document.querySelectorAll("[data-edge-chip]")) as HTMLElement[];
+      const anyChipOverlap = chips.some(overlapsKeepout);
+      const triggerEls = Array.from(document.querySelectorAll('nav[aria-label="Off-screen work"] button')).filter((b) => /^\+\d+$/.test((b.textContent || "").trim())) as HTMLElement[];
+      const triggerOverlap = triggerEls.some(overlapsKeepout);
+      document.getElementById("llv-474-keepout-probe")?.remove();
+      return { chipGone: !document.querySelector(selector), anyChipOverlap, triggerCount: triggerEls.length, triggerOverlap };
+    }, sel!);
+    check(result.chipGone, `desktop-chip-folds-off-${probe.id}`, `a chip whose reserved reveal band meets ${probe.detail} folds into its «+N» disclosure instead of painting over it`);
+    check(!result.anyChipOverlap, `desktop-chip-clears-${probe.id}`, `no visible edge chip overlaps the ${probe.id} keep-out surface`);
+    check(!result.triggerOverlap, `desktop-aggregate-clears-${probe.id}`, `every folded «+N» aggregate trigger (${result.triggerCount}) docks clear of the ${probe.id} keep-out`);
+    if (probe.fullEdge) {
+      /* The wall covers the entire blocked edge's docking strip, so a trigger
+         clear of it (asserted above) is by construction not docking on the
+         blocked edge. With only that one edge walled a clear border remains, so
+         the aggregate must re-home there rather than suppress — a still-present,
+         keyboard-reachable «+N» disclosure preserves navigation to the folded
+         off-screen clusters (issue #474). */
+      check(result.triggerCount >= 1, "desktop-aggregate-rehomes-off-blocked-edge", `with the ${placed.edge} edge fully walled the «+N» aggregate re-homes to a clear border and stays a keyboard-reachable disclosure (${result.triggerCount} trigger(s), all clear of the wall)`);
+    }
+    await Bun.sleep(400); // re-measure back to a clean board before the next probe
+  }
+  await page.screenshot({ path: path.join(outDir, "desktop-1440-edge-chip-keepout-clear.png") });
+  console.log("  shot desktop-1440-edge-chip-keepout-clear.png");
+}
+
 async function main(): Promise<void> {
   const home = buildFixtureHome();
   console.log(`fixture home: ${home}`);
@@ -407,62 +502,17 @@ async function main(): Promise<void> {
          chip. Neither is left to "whichever chip happens to surface". */
       await page.keyboard.press("Escape");
       await Bun.sleep(150);
-      let lastSel: string | null = null;
       for (const len of [48, 60] as const) {
         const surfaced = await surfaceLongVisibleChip(page, len);
         check(Boolean(surfaced), `desktop-visible-chip-isolated-${len}`, `panned the board until an exact ${len}-character chip surfaced on an edge, clear of every conversation pane`);
         await proveChipReveal(page, surfaced!, len, OUT_DIR);
-        lastSel = surfaced;
       }
-      const sel = lastSel!;
 
-      /* Overlap regression (operator report): the revealed chip/title/direction
-         control must clear the vertical agent-avatar/round stack and never paint
-         over the composer/input. Those surfaces are tagged `data-chip-keepout`
-         and reserved as collision obstacles. Drop a keep-out band exactly over
-         the surfaced chip's reveal band — standing in for a subagent avatar
-         column poking in at the edge — and the board must fold the chip into its
-         «+N» disclosure rather than reveal across the band. */
-      const beforeFold = await page.evaluate((selector: string) => {
-        const chip = document.querySelector(selector) as HTMLElement;
-        const r = chip.getBoundingClientRect();
-        const rail = document.createElement("div");
-        rail.setAttribute("data-chip-keepout", "");
-        rail.id = "llv-474-keepout-probe";
-        Object.assign(rail.style, {
-          position: "fixed", left: `${Math.round(r.left)}px`, top: `${Math.round(r.top - 12)}px`,
-          width: "44px", height: `${Math.round(r.height + 44)}px`, zIndex: "5", pointerEvents: "none",
-        });
-        document.body.appendChild(rail);
-        return Array.from(document.querySelectorAll("[data-edge-chip]")).length;
-      }, sel);
-      await Bun.sleep(500); // MutationObserver → re-measure → re-render
-      const afterFold = await page.evaluate((selector: string) => {
-        const overlaps = (a: DOMRect, b: DOMRect) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-        const rail = document.getElementById("llv-474-keepout-probe")!.getBoundingClientRect();
-        const chips = Array.from(document.querySelectorAll("[data-edge-chip]")) as HTMLElement[];
-        const railOverlap = chips.some((c) => { const r = c.getBoundingClientRect(); return r.width > 0 && overlaps(r, rail); });
-        // Overlap check against EVERY real keep-out surface currently on screen.
-        const keepouts = Array.from(document.querySelectorAll("[data-chip-keepout]")) as HTMLElement[];
-        const overlapsKeepout = (el: HTMLElement): boolean => {
-          const r = el.getBoundingClientRect();
-          if (r.width <= 0) return false;
-          return keepouts.some((k) => { const kr = k.getBoundingClientRect(); return kr.width > 0 && kr.height > 0 && overlaps(r, kr); });
-        };
-        const anyKeepoutOverlap = chips.some(overlapsKeepout);
-        /* The folded «+N» aggregate trigger must itself dock clear of every
-           keep-out — obstacle-aware placement slides it off the band. */
-        const triggers = Array.from(document.querySelectorAll('nav[aria-label="Off-screen work"] button')).filter((b) => /^\+\d+$/.test((b.textContent || "").trim())) as HTMLElement[];
-        const triggerKeepoutOverlap = triggers.some(overlapsKeepout);
-        document.getElementById("llv-474-keepout-probe")?.remove();
-        return { chipGone: !document.querySelector(selector), railOverlap, anyKeepoutOverlap, triggerCount: triggers.length, triggerKeepoutOverlap };
-      }, sel);
-      check(beforeFold >= 1, "desktop-keepout-precondition", `a chip was on the board before the keep-out band was placed (${beforeFold} chip(s))`);
-      check(afterFold.chipGone, "desktop-chip-folds-off-agent-stack", "a chip whose reveal band overlaps the agent-avatar/round keep-out folds into its «+N» disclosure instead of painting over it");
-      check(!afterFold.railOverlap && !afterFold.anyKeepoutOverlap, "desktop-chip-clears-keepout", "no visible edge chip overlaps the agent-avatar/round stack or the composer/input keep-out surfaces");
-      check(!afterFold.triggerKeepoutOverlap, "desktop-aggregate-clears-keepout", `the folded «+N» aggregate trigger(s) (${afterFold.triggerCount}) dock clear of every keep-out surface — obstacle-aware placement slides them off the band`);
-      await page.screenshot({ path: path.join(OUT_DIR, "desktop-1440-edge-chip-keepout-clear.png") });
-      console.log("  shot desktop-1440-edge-chip-keepout-clear.png");
+      /* Table-driven obstacle matrix: pane / avatar-rail / round-badge / composer
+         keep-outs each fold a surfaced chip and leave every chip + «+N» aggregate
+         clear, and the fully-blocked edge forces the aggregate to re-home off it
+         or suppress — never docking over the wall (issue #474). */
+      await proveObstacleMatrix(page, OUT_DIR);
       await page.close();
     }
 
@@ -541,7 +591,7 @@ async function main(): Promise<void> {
         capturedAt: new Date().toISOString(),
         viewer: "production next start",
         viewport: { desktop: "1440x900", mobile: "390x844" },
-        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/offscreenClusters.test.ts (reserves the whole CHIP_MAX_W title band in collision geometry so an admitted near-corner chip either fully fits or folds; top/bottom chips pinned near a corner fold into «+N» rather than render a permanently-truncated sliver; every admitted chip reserves the full collision-safe title band; a chip whose revealed band overlaps the subagent avatar/round stack or the composer/input keep-out folds instead of painting over it; the «+N» aggregate trigger slides along its edge to a slot clear of every pane and keep-out, falling back to the midpoint only when the edge is fully blocked)",
+        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/EdgeChips.dom.test.tsx (a fully blocked edge re-homes the «+N» aggregate to a clear border, keeping it a keyboard-reachable disclosure) + src/components/scheme/offscreenClusters.test.ts (measured admission: a chip is admitted only when its *measured* rendered width fits at its anchor, so a wide-glyph exact 48/60-char title folds while a title that fits is admitted with exactly its measured band reserved; a top/bottom chip pinned near a corner folds into «+N» rather than render a permanently-truncated sliver; a chip whose measured reveal band overlaps a pane / the subagent avatar/round stack / the composer/input keep-out folds instead of painting over it; overflowAnchor returns null when an edge is fully blocked and resolveOverflowPlacement re-homes the «+N» aggregate to the nearest clear border, suppressing only when the whole viewport border is blocked)",
         checks,
       }, null, 2) + "\n",
     );

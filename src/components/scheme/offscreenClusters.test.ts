@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { FileEntry } from "@/lib/types";
 
 import type { SchemeLayout } from "./layout";
-import { boardClusters, CHIP_MAX_W, chipRevealWidth, offscreenClusterChips, OVERFLOW_TRIGGER, overflowAnchor, screenKeepoutObstacles, type BoardCluster } from "./offscreenClusters";
+import { boardClusters, CHIP_MAX_W, chipRevealWidth, offscreenClusterChips, OVERFLOW_TRIGGER, overflowAnchor, resolveOverflowPlacement, screenKeepoutObstacles, type BoardCluster } from "./offscreenClusters";
 
 const cam = { x: 0, y: 0, z: 1 };
 const vp = { w: 1_000, h: 700 };
@@ -162,20 +162,96 @@ describe("overflow aggregate placement (issue #474: the «+N» disclosure clears
        centered vertically over where the trigger would default. */
     const rail = { x: 0, y: vp.h / 2 - 70, w: 60, h: 140 };
     const anchor = overflowAnchor("left", vp, [rail]);
-    expect(overlaps(triggerBox("left", anchor), rail)).toBe(false);
-    expect(anchor.x).toBe(10);
+    expect(anchor).not.toBeNull();
+    expect(overlaps(triggerBox("left", anchor!), rail)).toBe(false);
+    expect(anchor!.x).toBe(10);
   });
 
   test("slides the bottom-edge trigger off a composer keep-out covering the midpoint", () => {
     const composer = { x: vp.w / 2 - 170, y: vp.h - 70, w: 340, h: 70 };
     const anchor = overflowAnchor("bottom", vp, [composer]);
-    expect(overlaps(triggerBox("bottom", anchor), composer)).toBe(false);
-    expect(anchor.y).toBe(vp.h - 10);
+    expect(anchor).not.toBeNull();
+    expect(overlaps(triggerBox("bottom", anchor!), composer)).toBe(false);
+    expect(anchor!.y).toBe(vp.h - 10);
   });
 
-  test("falls back to the midpoint when the whole edge is blocked", () => {
+  test("returns null when the whole edge is blocked — no slot to dock the trigger without overlap", () => {
     const wall = { x: 0, y: 0, w: 60, h: vp.h };
-    expect(overflowAnchor("left", vp, [wall])).toEqual({ x: 10, y: vp.h / 2 });
+    expect(overflowAnchor("left", vp, [wall])).toBeNull();
+  });
+});
+
+describe("nullable / re-homed aggregate placement (issue #474: a fully blocked edge suppresses or re-homes «+N» without overlap)", () => {
+  const overlaps = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): boolean =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  const half = OVERFLOW_TRIGGER / 2;
+  const triggerBox = (edge: "left" | "right" | "top" | "bottom", anchor: { x: number; y: number }) => {
+    if (edge === "left") return { x: 10, y: anchor.y - half, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+    if (edge === "right") return { x: vp.w - 10 - OVERFLOW_TRIGGER, y: anchor.y - half, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+    if (edge === "top") return { x: anchor.x - half, y: 10, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+    return { x: anchor.x - half, y: vp.h - 10 - OVERFLOW_TRIGGER, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+  };
+
+  test("keeps the aggregate on its own edge when that edge has a clear slot", () => {
+    const placement = resolveOverflowPlacement("left", vp, []);
+    expect(placement).toEqual({ edge: "left", x: 10, y: vp.h / 2 });
+  });
+
+  test("re-homes to a clear border when the requested edge is fully walled — landing on a slot clear of every obstacle", () => {
+    /* The whole left edge is walled, but the rest of the viewport border is
+       open: the aggregate must re-home rather than dock over the wall. */
+    const wall = { x: 0, y: 0, w: 60, h: vp.h };
+    const placement = resolveOverflowPlacement("left", vp, [wall]);
+    expect(placement).not.toBeNull();
+    expect(placement!.edge).not.toBe("left");
+    expect(overlaps(triggerBox(placement!.edge, placement!), wall)).toBe(false);
+  });
+
+  test("suppresses the aggregate (null) only when the entire viewport border is blocked", () => {
+    /* A pane filling the whole viewport walls every border — there is no
+       non-overlapping slot anywhere, so the caller suppresses the trigger. */
+    const fullPane = { x: 0, y: 0, w: vp.w, h: vp.h };
+    expect(resolveOverflowPlacement("bottom", vp, [fullPane])).toBeNull();
+  });
+});
+
+describe("measured admission (issue #474: exact wide-glyph 48/60-char titles fully fit or fold)", () => {
+  /* offscreenClusterChips reserves the *measured* rendered width, not a fixed
+     latin band. A wide-glyph exact-length title measures wider than the room and
+     folds; a title that genuinely fits at the same anchor is admitted with its
+     whole band reserved. The default (no measure) keeps the CHIP_MAX_W band. */
+  const rightEdge = (key: string): BoardCluster => cluster(key, 4_000, 350);
+
+  test("a title whose measured width exceeds the room at its anchor folds instead of truncating forever", () => {
+    /* The right edge on a 1000px viewport has ~956px of room. A measured width
+       past that — a 60-char wide-glyph (CJK/emoji) label — cannot ever paint in
+       full, so the chip folds. */
+    const wideGlyph = () => 1_200;
+    const chips = offscreenClusterChips([rightEdge("wide")], cam, vp, 4, [], wideGlyph);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["wide"]);
+  });
+
+  test("a title whose measured width fits the room at its anchor is admitted, reserving exactly its measured band", () => {
+    const measured = () => 480;
+    const chips = offscreenClusterChips([rightEdge("fits")], cam, vp, 4, [], measured);
+    expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["fits"]);
+    /* The admitted chip carries its measured reveal budget, so its live reveal
+       caps exactly at the band the collision geometry reserved. */
+    expect(chips.visible[0]!.revealWidth).toBe(480);
+  });
+
+  test("admission tracks the *measured* width, not the label length: a narrow near-corner title fits where a wide one folds", () => {
+    /* Same near-corner top anchor (centered band ~356px) the fixed-band code
+       always folded: a narrow measured title (≤ the band) is now correctly
+       admitted, while a wide one still folds. Proves admission is measured. */
+    const nearCorner = cluster("near-corner", -150, -400);
+    const narrow = offscreenClusterChips([nearCorner], cam, vp, 4, [], () => 300);
+    const wide = offscreenClusterChips([nearCorner], cam, vp, 4, [], () => 500);
+    expect(narrow.visible.map((chip) => chip.cluster.key)).toEqual(["near-corner"]);
+    expect(narrow.visible[0]!.edge).toBe("top");
+    expect(wide.visible).toHaveLength(0);
+    expect(wide.overflow.map((chip) => chip.cluster.key)).toEqual(["near-corner"]);
   });
 });
 

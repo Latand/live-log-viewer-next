@@ -8,7 +8,7 @@ import { useLocale } from "@/lib/i18n";
 
 import type { SchemeRect } from "./layout";
 import type { Camera } from "./Minimap";
-import { chipRevealWidth, offscreenClusterChips, overflowAnchor, type BoardCluster, type ChipEdge, type ClusterChip } from "./offscreenClusters";
+import { offscreenClusterChips, resolveOverflowPlacement, type BoardCluster, type ChipEdge, type ClusterChip } from "./offscreenClusters";
 
 const transformFor = (edge: ChipEdge): string => {
   if (edge === "right") return "translate(-100%, -50%)";
@@ -38,6 +38,46 @@ const prefersReducedMotion = (): boolean =>
   typeof window.matchMedia === "function" &&
   window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+/* Non-text chrome reserved inside a chip pill, added to the measured label width
+   to get the full outer width: the direction control box (color dot + arrow),
+   the gaps around it, the horizontal padding (px-3) and the border. Kept a touch
+   generous so a measured label is reserved *at least* its true footprint — the
+   chip folds a hair early rather than admitting a title it would then truncate. */
+const CHIP_CHROME_PX = 68;
+
+/* A canvas-backed measurer for the chip's rendered label width (bold 11px in the
+   board's font). offscreenClusterChips reserves this *measured* width, so an
+   exact 48/60-character wide-glyph title — whose real width exceeds the latin
+   band CHIP_MAX_W assumes — is admitted only when it truly fits at its anchor
+   and otherwise folds into «+N» instead of truncating forever (issue #474). Falls
+   back to a per-character estimate wherever a 2D canvas is unavailable (SSR, or a
+   headless DOM without canvas). */
+function useChipMeasure(): (label: string) => number {
+  return useMemo(() => {
+    let ctx: { measureText: (text: string) => { width: number } } | null = null;
+    if (typeof document !== "undefined") {
+      try {
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+        if (context && typeof context.measureText === "function") {
+          const family = (typeof getComputedStyle === "function" && document.body
+            ? getComputedStyle(document.body).fontFamily
+            : "") || "system-ui, sans-serif";
+          context.font = `700 11px ${family}`;
+          // happy-dom returns a zero-width stub; only trust a real measurement.
+          if (context.measureText("MMMMM").width > 0) ctx = context;
+        }
+      } catch {
+        ctx = null;
+      }
+    }
+    return (label: string): number => {
+      const text = ctx ? ctx.measureText(label).width : label.length * 7;
+      return Math.ceil(text) + CHIP_CHROME_PX;
+    };
+  }, []);
+}
+
 /* Desktop chip with a progressive hover reveal. The chip button is the whole
    hover/focus surface — the label unfurls inside it, so moving from the arrow
    onto freshly revealed text never crosses a gap that would drop hover. Each
@@ -45,11 +85,11 @@ const prefersReducedMotion = (): boolean =>
    through until the full title shows; keyboard focus reveals it all at once
    (a keyboard can't "reach the end"), and reduced motion swaps the animated
    stepping for a single settled reveal on hover. The pill's outer width is
-   capped at the same viewport-clamped budget the collision geometry reserved
-   (chipRevealWidth), so a full reveal can never spill past a viewport edge. */
-function ChipButton({ chip, vp, onFit }: {
+   capped at the same measured, viewport-clamped budget the collision geometry
+   reserved (chip.revealWidth), so a full reveal can never spill past a viewport
+   edge. */
+function ChipButton({ chip, onFit }: {
   chip: ClusterChip;
-  vp: { w: number; h: number };
   onFit: (rect: SchemeRect) => void;
 }) {
   const titleRef = useRef<HTMLSpanElement | null>(null);
@@ -57,7 +97,7 @@ function ChipButton({ chip, vp, onFit }: {
   const [focused, setFocused] = useState(false);
   const [motionReveal, setMotionReveal] = useState(false);
   const full = focused || motionReveal;
-  const budget = chipRevealWidth(chip.edge, chip.x, vp);
+  const budget = chip.revealWidth;
 
   const advanceOnMove = (clientX: number) => {
     if (full || prefersReducedMotion()) return;
@@ -105,17 +145,17 @@ function ChipButton({ chip, vp, onFit }: {
    menu — the list is ordinary tab-reachable buttons, so menu roles would promise
    arrow-key semantics the widget doesn't have (round-1 review). Escape closes
    and returns focus to the trigger; a press outside dismisses. */
-function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, vp, obstacles }: {
+function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, anchor }: {
+  /** The border the aggregate actually docks against — its own edge, or a clear
+      edge it was re-homed to when its own edge was fully blocked (issue #474). */
   edge: ChipEdge;
   rows: ClusterChip[];
   open: boolean;
   onToggle: () => void;
   onClose: () => void;
   onFit: (rect: SchemeRect) => void;
-  vp: { w: number; h: number };
-  /** Same conversation/keep-out boxes the reveal chips fold around: the «+N»
-      trigger slides along its edge to a slot clear of them (issue #474). */
-  obstacles: readonly SchemeRect[];
+  /** The resolved, obstacle-clear anchor for this disclosure's trigger. */
+  anchor: { x: number; y: number };
 }) {
   const { t } = useLocale();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -131,7 +171,7 @@ function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, vp, ob
   }, [open, onClose]);
 
   const vertical = edge === "left" || edge === "right";
-  const { x, y } = overflowAnchor(edge, vp, obstacles);
+  const { x, y } = anchor;
   const listId = `edge-chip-overflow-${edge}`;
   return (
     <div
@@ -194,30 +234,46 @@ export function EdgeChips({ clusters, cam, vp, hidden, obstacles = [], onFit }: 
   const { t } = useLocale();
   const coarse = useCoarsePointer();
   const mobile = useIsMobile();
-  const partition = useMemo(() => offscreenClusterChips(clusters, cam, vp, 4, obstacles), [clusters, cam, vp, obstacles]);
+  const measure = useChipMeasure();
+  const partition = useMemo(() => offscreenClusterChips(clusters, cam, vp, 4, obstacles, measure), [clusters, cam, vp, obstacles, measure]);
+  /* Group each edge's folded rows, then resolve where its «+N» aggregate docks:
+     its own edge when clear, a re-homed clear edge when its own edge is fully
+     blocked, and nowhere (suppressed) only when the whole viewport border is
+     blocked. Re-homed rows merge into the target edge's disclosure so they stay
+     one keyboard-reachable list — a fully blocked edge never docks its aggregate
+     over a pane/avatar/round/composer keep-out (issue #474). */
+  const disclosures = useMemo(() => {
+    const byEdge = new Map<ChipEdge, ClusterChip[]>();
+    for (const chip of partition.overflow) {
+      const rows = byEdge.get(chip.edge) ?? [];
+      rows.push(chip);
+      byEdge.set(chip.edge, rows);
+    }
+    const placed = new Map<ChipEdge, { anchor: { x: number; y: number }; rows: ClusterChip[] }>();
+    for (const [edge, rows] of byEdge) {
+      const placement = resolveOverflowPlacement(edge, vp, obstacles);
+      if (!placement) continue; // whole border blocked: suppress rather than overlap
+      const bucket = placed.get(placement.edge);
+      if (bucket) bucket.rows.push(...rows);
+      else placed.set(placement.edge, { anchor: { x: placement.x, y: placement.y }, rows: [...rows] });
+    }
+    return placed;
+  }, [partition.overflow, vp, obstacles]);
   const [openEdge, setOpenEdge] = useState<ChipEdge | null>(null);
   /* Touch-first and phone-width canvases fold this wayfinding into the minimap
      and mobile map instead: floating edge chips fight the finger for chat
      content and can bleed past a 390px viewport. */
   if (hidden || coarse || mobile || (!partition.visible.length && !partition.overflow.length)) return null;
 
-  const overflowByEdge = new Map<ChipEdge, ClusterChip[]>();
-  for (const chip of partition.overflow) {
-    const rows = overflowByEdge.get(chip.edge) ?? [];
-    rows.push(chip);
-    overflowByEdge.set(chip.edge, rows);
-  }
-
   return (
     <nav data-scheme-ui aria-label={t("scheme.offscreenNav")} className="pointer-events-none absolute inset-0 z-[39]">
-      {partition.visible.map((chip) => <ChipButton key={chip.cluster.key} chip={chip} vp={vp} onFit={onFit} />)}
-      {[...overflowByEdge].map(([edge, rows]) => (
+      {partition.visible.map((chip) => <ChipButton key={chip.cluster.key} chip={chip} onFit={onFit} />)}
+      {[...disclosures].map(([edge, { anchor, rows }]) => (
         <OverflowDisclosure
           key={edge}
           edge={edge}
           rows={rows}
-          vp={vp}
-          obstacles={obstacles}
+          anchor={anchor}
           open={openEdge === edge}
           onToggle={() => setOpenEdge((current) => current === edge ? null : edge)}
           onClose={() => setOpenEdge(null)}
