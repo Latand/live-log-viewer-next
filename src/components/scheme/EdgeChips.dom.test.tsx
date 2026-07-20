@@ -151,6 +151,39 @@ test("re-homes the «+N» aggregate off a fully blocked edge, keeping it a keybo
   expect(host.querySelectorAll("[data-overflow-chip]").length).toBeGreaterThan(0);
 });
 
+test("opens the «+N» list inward from its edge, width-constrained and clamped inside the viewport (issue #474)", () => {
+  /* The default clusters all fold onto the RIGHT edge, so the disclosure opens
+     its list LEFT — inward — never off the right border. The list carries the
+     computed inline geometry (a right offset, a bounded width and max-height),
+     and reconstructing its box from the anchor proves it stays on-board. */
+  const host = mount();
+  const more = host.querySelector('button[aria-label="Show 2 more off-screen clusters"]') as HTMLButtonElement;
+  flushSync(() => more.click());
+  const listEl = host.querySelector("[data-overflow-list]") as HTMLElement;
+  expect(listEl).toBeTruthy();
+  expect(listEl.getAttribute("data-overflow-list")).toBe("right");
+  const style = listEl.style;
+  // Inward: a right-edge list opens left (right offset set), never rightward.
+  expect(parseFloat(style.right)).toBeGreaterThan(0);
+  expect(style.left).toBe("");
+  const width = parseFloat(style.width);
+  const maxHeight = parseFloat(style.maxHeight);
+  expect(width).toBeGreaterThan(0);
+  expect(maxHeight).toBeGreaterThan(0);
+  /* Container sits at the trigger anchor (right edge midpoint of a 1000×700
+     viewport). Reconstruct the list box and require it fully on-board. */
+  const container = listEl.parentElement as HTMLElement;
+  const anchorX = parseFloat(container.style.left);
+  const anchorY = parseFloat(container.style.top);
+  const boxRight = anchorX - parseFloat(style.right);
+  const boxLeft = boxRight - width;
+  const boxTop = anchorY + parseFloat(style.top);
+  expect(boxLeft).toBeGreaterThanOrEqual(8 - 1e-6);
+  expect(boxRight).toBeLessThanOrEqual(1_000);
+  expect(boxTop).toBeGreaterThanOrEqual(8 - 1e-6);
+  expect(boxTop + maxHeight).toBeLessThanOrEqual(700 - 8 + 1e-6);
+});
+
 test("hides every chip during map/pan/marquee modes", () => {
   const host = document.createElement("div");
   document.body.append(host);

@@ -222,8 +222,13 @@ async function proveChipReveal(page: any, sel: string, len: number, outDir: stri
     const cr = control.getBoundingClientRect();
     const tr = title.getBoundingClientRect();
     const br = chip.getBoundingClientRect();
-    const panes = Array.from(document.querySelectorAll("header.reasoning-host")).map((p) => p.getBoundingClientRect());
-    const overlapsPane = panes.some((p) => br.left < p.right && br.right > p.left && br.top < p.bottom && br.bottom > p.top);
+    /* Measure the COMPLETE pane shell — the whole `section[data-link-path]`
+       column (header, transcript body, and the composer at its foot) — not just
+       its header. A chip that clears the header strip but paints over the body
+       or composer below it is still covering chat content; only the full-shell
+       measurement catches that below-header collision (issue #474). */
+    const shells = Array.from(document.querySelectorAll("section[data-link-path]")).map((p) => p.getBoundingClientRect());
+    const overlapsPane = shells.some((p) => br.left < p.right && br.right > p.left && br.top < p.bottom && br.bottom > p.top);
     return {
       label: title.textContent || "",
       reveal: title.getAttribute("data-reveal"),
@@ -238,7 +243,7 @@ async function proveChipReveal(page: any, sel: string, len: number, outDir: stri
   check(resting.truncated, `desktop-chip-resting-truncated-${len}`, `the resting ${len}-char chip label "${resting.label}" overflows its resting width — data-reveal ${resting.reveal}`);
   check(resting.controlBeforeTitle, `desktop-chip-control-reserved-${len}`, "the direction control sits in its own reserved box before the title — never over the label");
   check(resting.inViewport, `desktop-chip-resting-in-viewport-${len}`, `the resting pill (width ${resting.width}px) stays inside the 1440px viewport`);
-  check(!resting.overlapsPane, `desktop-chip-resting-clear-${len}`, "the resting chip does not overlap any open conversation pane");
+  check(!resting.overlapsPane, `desktop-chip-resting-clear-${len}`, "the resting chip does not overlap any open conversation pane's complete shell (header, body, and composer)");
   await page.screenshot({ path: path.join(outDir, `desktop-1440-edge-chip-${len}-resting.png`) });
   console.log(`  shot desktop-1440-edge-chip-${len}-resting.png`);
 
@@ -270,8 +275,10 @@ async function proveChipReveal(page: any, sel: string, len: number, outDir: stri
     const chip = document.querySelector(selector) as HTMLElement;
     const title = chip.querySelector("[data-edge-chip-title]") as HTMLElement;
     const br = chip.getBoundingClientRect();
-    const panes = Array.from(document.querySelectorAll("header.reasoning-host")).map((p) => p.getBoundingClientRect());
-    const overlapsPane = panes.some((p) => br.left < p.right && br.right > p.left && br.top < p.bottom && br.bottom > p.top);
+    /* Same complete-shell measurement as at rest: the fully-revealed pill must
+       clear the entire pane column, composer included, not merely its header. */
+    const shells = Array.from(document.querySelectorAll("section[data-link-path]")).map((p) => p.getBoundingClientRect());
+    const overlapsPane = shells.some((p) => br.left < p.right && br.right > p.left && br.top < p.bottom && br.bottom > p.top);
     return {
       reveal: title.getAttribute("data-reveal"),
       fullyShown: title.scrollWidth - title.clientWidth <= 1,
@@ -284,7 +291,7 @@ async function proveChipReveal(page: any, sel: string, len: number, outDir: stri
   check(revealed.reveal === "full", `desktop-chip-focus-full-${len}`, `keyboard focus sets the ${len}-char title to its full reveal (data-reveal ${revealed.reveal})`);
   check(revealed.fullyShown, `desktop-chip-fully-revealed-${len}`, `the whole ${revealed.label.length}-char label "${revealed.label}" is visible with no ellipsis — its scrollWidth is contained within the pill once revealed`);
   check(revealed.inViewport, `desktop-chip-revealed-in-viewport-${len}`, `the fully-revealed pill (width ${revealed.width}px) stays inside the 1440px viewport`);
-  check(!revealed.overlapsPane, `desktop-chip-revealed-clear-${len}`, "the fully-revealed chip still does not overlap any open conversation pane");
+  check(!revealed.overlapsPane, `desktop-chip-revealed-clear-${len}`, "the fully-revealed chip still does not overlap any open conversation pane's complete shell (header, body, and composer)");
   await page.screenshot({ path: path.join(outDir, `desktop-1440-edge-chip-${len}-revealed.png`) });
   console.log(`  shot desktop-1440-edge-chip-${len}-revealed.png`);
 
@@ -316,6 +323,53 @@ async function proveChipReveal(page: any, sel: string, len: number, outDir: stri
   await Bun.sleep(100);
 }
 
+/* The below-header contract: every rendered conversation pane is measured as a
+   COMPLETE shell (header + transcript body + composer), and no edge chip or «+N»
+   aggregate trigger may overlap any part of it — most pointedly the region
+   BELOW its header, where the transcript and composer live. The pre-fix
+   acceptance measured only `header.reasoning-host`, so a chip painting over a
+   pane's body or composer (a below-header collision) slipped through; this check
+   deliberately fails under that header-only measurement and passes only once the
+   whole shell is both an obstacle and the thing we assert against (issue #474). */
+async function proveBelowHeaderClearance(page: any): Promise<void> {
+  const result = await page.evaluate(() => {
+    const overlaps = (a: DOMRect, b: { left: number; top: number; right: number; bottom: number }) =>
+      a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    const shells = Array.from(document.querySelectorAll("section[data-link-path]")) as HTMLElement[];
+    let belowHeaderShells = 0;
+    const belowHeaderBands: { left: number; top: number; right: number; bottom: number }[] = [];
+    for (const shell of shells) {
+      const sr = shell.getBoundingClientRect();
+      if (sr.width <= 0 || sr.height <= 0) continue;
+      const header = shell.querySelector("header.reasoning-host") as HTMLElement | null;
+      const hr = header?.getBoundingClientRect();
+      /* The strictly-below-header slice of the complete shell — the transcript
+         body and the composer. It must be a real, non-trivial region, and it is
+         exactly what a header-only measurement never covered. */
+      const top = hr ? hr.bottom : sr.top;
+      if (sr.bottom - top < 24) continue;
+      belowHeaderShells += 1;
+      belowHeaderBands.push({ left: sr.left, top, right: sr.right, bottom: sr.bottom });
+    }
+    const chips = Array.from(document.querySelectorAll("[data-edge-chip]")) as HTMLElement[];
+    const triggers = Array.from(document.querySelectorAll('nav[aria-label="Off-screen work"] button')).filter((b) => /^\+\d+$/.test((b.textContent || "").trim())) as HTMLElement[];
+    const hits = (el: HTMLElement) => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && belowHeaderBands.some((band) => overlaps(r, band));
+    };
+    return {
+      belowHeaderShells,
+      chipCount: chips.length,
+      triggerCount: triggers.length,
+      chipBelowHeaderOverlap: chips.some(hits),
+      triggerBelowHeaderOverlap: triggers.some(hits),
+    };
+  });
+  check(result.belowHeaderShells >= 1, "desktop-shell-has-below-header-region", `at least one complete pane shell extends below its header (${result.belowHeaderShells} shell(s) with a transcript/composer band) — the region a header-only measurement misses`);
+  check(!result.chipBelowHeaderOverlap, "desktop-chip-clears-below-header", `no edge chip (${result.chipCount}) overlaps any pane's below-header body/composer band — proven against the COMPLETE shell, not just the header`);
+  check(!result.triggerBelowHeaderOverlap, "desktop-aggregate-clears-below-header", `no «+N» aggregate trigger (${result.triggerCount}) overlaps any pane's below-header body/composer band`);
+}
+
 /* The production obstacle matrix: every keep-out *class* a surfaced edge chip
    must never paint over, plus the fully-blocked-edge case that forces the «+N»
    aggregate to re-home or suppress. Each row is dropped over a freshly surfaced
@@ -340,6 +394,11 @@ const KEEPOUT_PROBES: KeepoutProbe[] = [
   { id: "round-badge", detail: "a round/reasoning badge landing on the chip", band: (r) => ({ left: Math.round(r.left), top: Math.round(r.top), width: 40, height: 40 }) },
   { id: "composer", detail: "the composer/input band overlapping the chip", band: (r) => ({ left: Math.round(r.left - 40), top: Math.round(r.top - 6), width: 260, height: Math.round(r.height + 12) }) },
   { id: "pane", detail: "an open conversation pane overlapping the chip's reveal band", band: (r) => ({ left: Math.round(r.left - 30), top: Math.round(r.top - 30), width: 360, height: Math.round(r.height + 60) }) },
+  /* A pane's transcript body/composer band reaching UP into the chip from below
+     its (conceptually higher) header: the collision lands in the below-header
+     zone, so a chip that folds here proves the complete shell — not just the
+     header — is protected (issue #474). */
+  { id: "below-header", detail: "a pane's transcript body/composer band (below its header) over the chip's reveal band", band: (r) => ({ left: Math.round(r.left - 30), top: Math.round(r.top), width: 360, height: Math.round(r.height + 200) }) },
   /* Wall the whole edge the chip sits on. Anchored off the chip's own box (not
      the window border) so it walls the chip's reveal band AND the aggregate's
      docking strip regardless of any board inset — spanning the full length of
@@ -508,10 +567,14 @@ async function main(): Promise<void> {
         await proveChipReveal(page, surfaced!, len, OUT_DIR);
       }
 
-      /* Table-driven obstacle matrix: pane / avatar-rail / round-badge / composer
-         keep-outs each fold a surfaced chip and leave every chip + «+N» aggregate
-         clear, and the fully-blocked edge forces the aggregate to re-home off it
-         or suppress — never docking over the wall (issue #474). */
+      /* Complete-shell contract: no chip or aggregate paints over any pane's
+         below-header body/composer band, measured against the whole shell. */
+      await proveBelowHeaderClearance(page);
+
+      /* Table-driven obstacle matrix: pane / avatar-rail / round-badge / composer /
+         below-header keep-outs each fold a surfaced chip and leave every chip +
+         «+N» aggregate clear, and the fully-blocked edge forces the aggregate to
+         re-home off it or suppress — never docking over the wall (issue #474). */
       await proveObstacleMatrix(page, OUT_DIR);
       await page.close();
     }
@@ -591,7 +654,7 @@ async function main(): Promise<void> {
         capturedAt: new Date().toISOString(),
         viewer: "production next start",
         viewport: { desktop: "1440x900", mobile: "390x844" },
-        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/EdgeChips.dom.test.tsx (a fully blocked edge re-homes the «+N» aggregate to a clear border, keeping it a keyboard-reachable disclosure) + src/components/scheme/offscreenClusters.test.ts (measured admission: a chip is admitted only when its *measured* rendered width fits at its anchor, so a wide-glyph exact 48/60-char title folds while a title that fits is admitted with exactly its measured band reserved; a top/bottom chip pinned near a corner folds into «+N» rather than render a permanently-truncated sliver; a chip whose measured reveal band overlaps a pane / the subagent avatar/round stack / the composer/input keep-out folds instead of painting over it; overflowAnchor returns null when an edge is fully blocked and resolveOverflowPlacement re-homes the «+N» aggregate to the nearest clear border, suppressing only when the whole viewport border is blocked)",
+        interactionSuite: "src/components/scheme/EdgeChips.hover.dom.test.tsx (continuous surface, reserved control box, bounded progressive reveal, repeated progression within viewport bounds, keyboard full-reveal, reduced motion, exact 48- and 60-character titles unfurled through focus + repeated progression + reduced-motion hover, click fit, coarse-pointer removal) + src/components/scheme/EdgeChips.dom.test.tsx (a fully blocked edge re-homes the «+N» aggregate to a clear border, keeping it a keyboard-reachable disclosure; the opened «+N» list opens inward from its edge, width-constrained and clamped fully inside the viewport so every keyboard-focused row stays on-board) + src/components/scheme/offscreenClusters.test.ts (measured admission: a chip is admitted only when its *measured* rendered width fits at its anchor, so a wide-glyph exact 48/60-char title folds while a title that fits is admitted with exactly its measured band reserved; a top/bottom chip pinned near a corner folds into «+N» rather than render a permanently-truncated sliver; a chip whose measured reveal band overlaps a pane / the subagent avatar/round stack / the composer/input keep-out folds instead of painting over it; chipObstacleRects projects live panes, review decks AND draft conversation panes — each draft rect spanning its whole shell incl. its composer — into screen space, so a chip that would paint over an open draft or its composer folds; overflowListStyle opens the disclosure list inward per resolved edge, width-constrained to the room left and cross-axis-clamped so every focused row stays inside the viewport for all four edges and re-homed anchors; overflowAnchor returns null when an edge is fully blocked and resolveOverflowPlacement re-homes the «+N» aggregate to the nearest clear border, suppressing only when the whole viewport border is blocked)",
         checks,
       }, null, 2) + "\n",
     );

@@ -206,6 +206,94 @@ export function resolveOverflowPlacement(
   return null;
 }
 
+/** Gap between the «+N» trigger and its opened disclosure list, and the padding
+    the list keeps off every viewport border so keyboard-focused rows never sit
+    against (or past) an edge. */
+const LIST_GAP = 8;
+const LIST_PAD = 8;
+/** Comfortable resting widths for the opened list: a narrower column for the
+    vertical (left/right) edges, a touch wider for the horizontal (top/bottom)
+    ones. Each is clamped down to the room actually left at the anchor. */
+const LIST_W_VERTICAL = 220;
+const LIST_W_HORIZONTAL = 260;
+/** Tallest the scrollable list grows before it pages internally. */
+const LIST_MAX_H = 256;
+
+/** Inline geometry for an «+N» disclosure's opened list, expressed as CSS
+    offsets relative to a zero-size container anchored at the trigger's
+    `{x,y}` (nav/viewport space). The list always opens *inward* from its
+    resolved edge — right off a left edge, left off a right edge, down off the
+    top, up off the bottom — is width-constrained to the room actually left
+    toward the opposite border, and is clamped along its cross axis so that,
+    however tall it renders (up to {@link maxHeight}), it stays fully inside the
+    viewport. That keeps every keyboard-focused row visible for all four edges
+    and for a re-homed aggregate anchored anywhere along its border (issue #474
+    viewport-safe disclosures). */
+export interface OverflowListStyle {
+  left?: number;
+  right?: number;
+  top?: number;
+  bottom?: number;
+  width: number;
+  maxHeight: number;
+}
+export function overflowListStyle(
+  edge: ChipEdge,
+  anchor: { x: number; y: number },
+  vp: { w: number; h: number },
+): OverflowListStyle {
+  const { x, y } = anchor;
+  const off = OVERFLOW_TRIGGER + LIST_GAP;
+  const clamp = (value: number, lo: number, hi: number): number => Math.max(lo, Math.min(value, Math.max(lo, hi)));
+  if (edge === "left" || edge === "right") {
+    /* Vertical list: opens horizontally inward, its height clamped so the whole
+       column sits inside [LIST_PAD, vp.h - LIST_PAD] regardless of where along
+       the edge the trigger docked. */
+    const listH = Math.min(LIST_MAX_H, Math.max(0, vp.h - 2 * LIST_PAD));
+    const topNav = clamp(y - listH / 2, LIST_PAD, vp.h - LIST_PAD - listH);
+    const vertical = { top: topNav - y, maxHeight: listH };
+    if (edge === "left") {
+      const width = Math.max(0, Math.min(LIST_W_VERTICAL, vp.w - LIST_PAD - (x + off)));
+      return { left: off, width, ...vertical };
+    }
+    const width = Math.max(0, Math.min(LIST_W_VERTICAL, x - off - LIST_PAD));
+    return { right: off, width, ...vertical };
+  }
+  /* Horizontal list: opens vertically inward, centered on the trigger and
+     clamped so it never spills past a left/right corner. */
+  const width = Math.max(0, Math.min(LIST_W_HORIZONTAL, vp.w - 2 * LIST_PAD));
+  const leftNav = clamp(x - width / 2, LIST_PAD, vp.w - LIST_PAD - width);
+  const horizontal = { left: leftNav - x, width };
+  if (edge === "top") {
+    return { top: off, maxHeight: Math.max(0, vp.h - LIST_PAD - (y + off)), ...horizontal };
+  }
+  return { bottom: off, maxHeight: Math.max(0, y - off - LIST_PAD), ...horizontal };
+}
+
+/** Project every rendered conversation surface — live panes, review decks, and
+    draft conversation panes — from world space into the chip layer's screen
+    space with the existing camera projection, then append the fixed keep-out
+    chrome (subagent avatar/round stack, composers). A draft pane's rect spans
+    its whole shell, its composer included, so an edge chip whose revealed band
+    would paint over an open draft or its composer folds into the «+N»
+    disclosure exactly as it does for a live pane (issue #292 / #474 draft-pane
+    obstacles). */
+export function chipObstacleRects(
+  panes: readonly SchemeRect[],
+  decks: readonly SchemeRect[],
+  drafts: readonly SchemeRect[],
+  cam: Camera,
+  keepouts: readonly SchemeRect[] = [],
+): SchemeRect[] {
+  const projected = [...panes, ...decks, ...drafts].map((surface) => ({
+    x: surface.x * cam.z + cam.x,
+    y: surface.y * cam.z + cam.y,
+    w: surface.w * cam.z,
+    h: surface.h * cam.z,
+  }));
+  return [...projected, ...keepouts];
+}
+
 /** Pure off-screen filtering, ray/edge placement, priority, and per-edge cap.
  * `obstacles` are screen-space boxes of rendered conversation surfaces (panes,
  * decks): a chip whose pill would paint over one folds into that edge's compact

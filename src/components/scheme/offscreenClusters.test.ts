@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { FileEntry } from "@/lib/types";
 
 import type { SchemeLayout } from "./layout";
-import { boardClusters, CHIP_MAX_W, chipRevealWidth, offscreenClusterChips, OVERFLOW_TRIGGER, overflowAnchor, resolveOverflowPlacement, screenKeepoutObstacles, type BoardCluster } from "./offscreenClusters";
+import { boardClusters, CHIP_MAX_W, chipObstacleRects, chipRevealWidth, offscreenClusterChips, OVERFLOW_TRIGGER, overflowAnchor, overflowListStyle, resolveOverflowPlacement, screenKeepoutObstacles, type BoardCluster, type ChipEdge } from "./offscreenClusters";
 
 const cam = { x: 0, y: 0, z: 1 };
 const vp = { w: 1_000, h: 700 };
@@ -297,6 +297,129 @@ describe("pane-overlap folding (issue #292: navigation chips never cover chat co
     );
     expect(chips.visible).toHaveLength(0);
     expect(chips.overflow).toHaveLength(1);
+  });
+});
+
+describe("draft-pane obstacles (issue #474: chips never paint over an open draft conversation pane / its composer)", () => {
+  /* A draft conversation pane is a rendered surface just like a live pane, and
+     its rect spans the whole shell — header, body, and the composer at the
+     bottom. chipObstacleRects must project it into screen space alongside the
+     live panes and review decks, so an edge chip whose revealed band would land
+     over an open draft (or the composer inside it) folds into «+N» instead. */
+  test("projects live panes, review decks, AND draft panes into screen space, then appends keep-out chrome", () => {
+    const pane = { x: 100, y: 100, w: 300, h: 400 };
+    const deck = { x: 500, y: 100, w: 200, h: 300 };
+    const draft = { x: 800, y: 200, w: 260, h: 360 }; // draft shell incl. its composer
+    const keepout = { x: 5, y: 5, w: 40, h: 40 };
+    const rects = chipObstacleRects([pane], [deck], [draft], { x: 20, y: 30, z: 2 }, [keepout]);
+    /* Every world surface is projected by the SAME camera math the chip layer
+       already uses (surface * z + pan); the keep-out chrome is already screen
+       space, so it passes through untouched. */
+    expect(rects).toContainEqual({ x: draft.x * 2 + 20, y: draft.y * 2 + 30, w: draft.w * 2, h: draft.h * 2 });
+    expect(rects).toContainEqual({ x: pane.x * 2 + 20, y: pane.y * 2 + 30, w: pane.w * 2, h: pane.h * 2 });
+    expect(rects).toContainEqual({ x: deck.x * 2 + 20, y: deck.y * 2 + 30, w: deck.w * 2, h: deck.h * 2 });
+    expect(rects).toContainEqual(keepout);
+    expect(rects).toHaveLength(4);
+  });
+
+  test("a chip whose revealed band would paint over an open draft pane's composer folds into overflow", () => {
+    /* A draft pane docked across the left of the viewport (its composer band at
+       the bottom). Feeding it through chipObstacleRects, a left-edge chip whose
+       reserved reveal band overlaps the draft folds — proving drafts are real
+       chip obstacles, not just live panes (the pre-fix set omitted them). */
+    const draft = { x: 0, y: 0, w: 520, h: 700 };
+    const obstacles = chipObstacleRects([], [], [draft], cam);
+    const chips = offscreenClusterChips([cluster("left-task", -700, 300)], cam, vp, 4, obstacles);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["left-task"]);
+  });
+
+  test("with the draft omitted the same chip stays visible — pinning that drafts are what fold it", () => {
+    /* The identical scene with NO draft in the obstacle set (the pre-fix
+       behavior): the chip is admitted. So the fold above is caused by the draft
+       pane being an obstacle, nothing else. */
+    const obstacles = chipObstacleRects([], [], [], cam);
+    const chips = offscreenClusterChips([cluster("left-task", -700, 300)], cam, vp, 4, obstacles);
+    expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["left-task"]);
+  });
+});
+
+describe("viewport-safe overflow disclosure list (issue #474: the opened «+N» list opens inward and stays fully on-board)", () => {
+  /* The list keeps 8px off every border; allow a hair of float slack. */
+  const LIST_PAD_MIN = 8 - 1e-6;
+  const edges: ChipEdge[] = ["top", "right", "bottom", "left"];
+  /* Reconstruct the list's nav/viewport-space box from the CSS offsets the
+     function returns, relative to a zero-size container at the anchor. */
+  const boxOf = (style: ReturnType<typeof overflowListStyle>, anchor: { x: number; y: number }) => {
+    const left = style.left !== undefined ? anchor.x + style.left : anchor.x - style.right! - style.width;
+    const top = style.top !== undefined ? anchor.y + style.top : anchor.y - style.bottom! - style.maxHeight;
+    return { left, right: left + style.width, top, bottom: top + style.maxHeight };
+  };
+
+  test("each edge opens its list inward from the trigger", () => {
+    const anchor = { x: vp.w / 2, y: vp.h / 2 };
+    /* left → opens right, right → opens left, top → opens down, bottom → up. */
+    expect(overflowListStyle("left", { x: 10, y: anchor.y }, vp).left).toBeGreaterThan(0);
+    expect(overflowListStyle("right", { x: vp.w - 10, y: anchor.y }, vp).right).toBeGreaterThan(0);
+    expect(overflowListStyle("top", { x: anchor.x, y: 10 }, vp).top).toBeGreaterThan(0);
+    expect(overflowListStyle("bottom", { x: anchor.x, y: vp.h - 10 }, vp).bottom).toBeGreaterThan(0);
+    /* The vertical edges never also set a horizontal-open offset, and vice versa. */
+    expect(overflowListStyle("left", { x: 10, y: anchor.y }, vp).right).toBeUndefined();
+    expect(overflowListStyle("top", { x: anchor.x, y: 10 }, vp).bottom).toBeUndefined();
+  });
+
+  test("every edge's list stays fully inside the viewport at the edge midpoint", () => {
+    const anchors: Record<ChipEdge, { x: number; y: number }> = {
+      left: { x: 10, y: vp.h / 2 },
+      right: { x: vp.w - 10, y: vp.h / 2 },
+      top: { x: vp.w / 2, y: 10 },
+      bottom: { x: vp.w / 2, y: vp.h - 10 },
+    };
+    for (const edge of edges) {
+      const box = boxOf(overflowListStyle(edge, anchors[edge], vp), anchors[edge]);
+      expect(box.left).toBeGreaterThanOrEqual(LIST_PAD_MIN);
+      expect(box.right).toBeLessThanOrEqual(vp.w - LIST_PAD_MIN);
+      expect(box.top).toBeGreaterThanOrEqual(LIST_PAD_MIN);
+      expect(box.bottom).toBeLessThanOrEqual(vp.h - LIST_PAD_MIN);
+    }
+  });
+
+  test("clamps near every corner so keyboard-focused rows stay on-board (all four edges + re-homed anchors)", () => {
+    /* Drive each edge's trigger to BOTH ends of its border — the re-homed
+       anchors an aggregate lands on when its own edge is walled — and require
+       the whole list to remain inside the viewport, so a focused row is never
+       scrolled off-screen past a corner. */
+    const nearCornerAnchors: Array<{ edge: ChipEdge; anchor: { x: number; y: number } }> = [
+      { edge: "left", anchor: { x: 10, y: 30 } },
+      { edge: "left", anchor: { x: 10, y: vp.h - 30 } },
+      { edge: "right", anchor: { x: vp.w - 10, y: 30 } },
+      { edge: "right", anchor: { x: vp.w - 10, y: vp.h - 30 } },
+      { edge: "top", anchor: { x: 30, y: 10 } },
+      { edge: "top", anchor: { x: vp.w - 30, y: 10 } },
+      { edge: "bottom", anchor: { x: 30, y: vp.h - 10 } },
+      { edge: "bottom", anchor: { x: vp.w - 30, y: vp.h - 10 } },
+    ];
+    for (const { edge, anchor } of nearCornerAnchors) {
+      const style = overflowListStyle(edge, anchor, vp);
+      const box = boxOf(style, anchor);
+      expect(box.left).toBeGreaterThanOrEqual(LIST_PAD_MIN);
+      expect(box.right).toBeLessThanOrEqual(vp.w - LIST_PAD_MIN);
+      expect(box.top).toBeGreaterThanOrEqual(LIST_PAD_MIN);
+      expect(box.bottom).toBeLessThanOrEqual(vp.h - LIST_PAD_MIN);
+      expect(style.width).toBeGreaterThan(0);
+      expect(style.maxHeight).toBeGreaterThan(0);
+    }
+  });
+
+  test("constrains the list width to the room actually left toward the opposite border", () => {
+    /* A right-edge aggregate re-homed to x=140 (a narrow strip of room to its
+       left): the list must shrink to fit rather than spill off the left edge. */
+    const style = overflowListStyle("right", { x: 140, y: vp.h / 2 }, vp);
+    const available = 140 - (OVERFLOW_TRIGGER + 8) - 8;
+    expect(style.width).toBeLessThanOrEqual(available);
+    expect(style.width).toBeGreaterThan(0);
+    const box = boxOf(style, { x: 140, y: vp.h / 2 });
+    expect(box.left).toBeGreaterThanOrEqual(LIST_PAD_MIN);
   });
 });
 

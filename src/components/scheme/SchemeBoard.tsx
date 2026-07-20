@@ -34,7 +34,7 @@ import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest }
 import { currentWorkRect, currentWorkRects, rectUnion } from "./currentWork";
 import { buildSchemeLayout } from "./layout";
 import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
-import { boardClusters, screenKeepoutObstacles } from "./offscreenClusters";
+import { boardClusters, chipObstacleRects, screenKeepoutObstacles } from "./offscreenClusters";
 import type { WorkerStack } from "./workerCollapse";
 import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus, type PipelineGroupControls } from "./nodes";
 import type { TaskCardHandlers } from "./TaskCard";
@@ -842,20 +842,14 @@ export function SchemeBoard({
     };
   }, [measureKeepouts, viewportRef]);
 
-  /* Screen-space boxes of every rendered conversation surface (panes + review
-     decks) plus the fixed keep-out chrome above: an edge-navigation chip that
-     would paint over one folds into the «+N» disclosure instead of covering
-     chat content (issue #292 rejection) or the agent stack / composer (#474). */
+  /* Screen-space boxes of every rendered conversation surface — live panes,
+     review decks, AND draft conversation panes (each draft rect spans its whole
+     shell, its composer included) — plus the fixed keep-out chrome above: an
+     edge-navigation chip that would paint over one folds into the «+N»
+     disclosure instead of covering chat content (issue #292 rejection), the
+     agent stack / composer, or an open draft's composer (#474). */
   const chipObstacles = useMemo(
-    () => [
-      ...[...layout.nodes, ...layout.decks].map((surface) => ({
-        x: surface.x * cam.z + cam.x,
-        y: surface.y * cam.z + cam.y,
-        w: surface.w * cam.z,
-        h: surface.h * cam.z,
-      })),
-      ...keepoutObstacles,
-    ],
+    () => chipObstacleRects(layout.nodes, layout.decks, layout.drafts, cam, keepoutObstacles),
     [layout, cam, keepoutObstacles],
   );
 

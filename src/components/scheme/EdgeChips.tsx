@@ -8,7 +8,7 @@ import { useLocale } from "@/lib/i18n";
 
 import type { SchemeRect } from "./layout";
 import type { Camera } from "./Minimap";
-import { offscreenClusterChips, resolveOverflowPlacement, type BoardCluster, type ChipEdge, type ClusterChip } from "./offscreenClusters";
+import { offscreenClusterChips, overflowListStyle, resolveOverflowPlacement, type BoardCluster, type ChipEdge, type ClusterChip } from "./offscreenClusters";
 
 const transformFor = (edge: ChipEdge): string => {
   if (edge === "right") return "translate(-100%, -50%)";
@@ -145,7 +145,7 @@ function ChipButton({ chip, onFit }: {
    menu — the list is ordinary tab-reachable buttons, so menu roles would promise
    arrow-key semantics the widget doesn't have (round-1 review). Escape closes
    and returns focus to the trigger; a press outside dismisses. */
-function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, anchor }: {
+function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, anchor, vp }: {
   /** The border the aggregate actually docks against — its own edge, or a clear
       edge it was re-homed to when its own edge was fully blocked (issue #474). */
   edge: ChipEdge;
@@ -156,6 +156,9 @@ function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, anchor
   onFit: (rect: SchemeRect) => void;
   /** The resolved, obstacle-clear anchor for this disclosure's trigger. */
   anchor: { x: number; y: number };
+  /** Viewport the list is clamped inside so it opens inward and never carries a
+      keyboard-focused row past a border/corner (issue #474). */
+  vp: { w: number; h: number };
 }) {
   const { t } = useLocale();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -170,14 +173,20 @@ function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, anchor
     return () => document.removeEventListener("pointerdown", onDown);
   }, [open, onClose]);
 
-  const vertical = edge === "left" || edge === "right";
   const { x, y } = anchor;
   const listId = `edge-chip-overflow-${edge}`;
+  /* The list opens inward from the resolved edge, width-constrained to the room
+     left toward the opposite border and clamped along its cross axis so the
+     whole column stays inside the viewport — every row keyboard-reachable for
+     all four edges and a re-homed anchor anywhere along its border. Computed in
+     nav/viewport space, so the trigger keeps its own edge transform while the
+     list sits in an untransformed zero-size container at the anchor. */
+  const list = overflowListStyle(edge, anchor, vp);
   return (
     <div
       ref={containerRef}
       className="pointer-events-auto absolute"
-      style={{ left: x, top: y, transform: transformFor(edge) }}
+      style={{ left: x, top: y }}
       onKeyDown={(event) => {
         if (event.key !== "Escape" || !open) return;
         event.stopPropagation();
@@ -188,7 +197,8 @@ function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, anchor
       <button
         ref={triggerRef}
         type="button"
-        className="flex min-h-11 min-w-11 items-center justify-center rounded-full border border-border bg-card px-2 text-[11px] font-bold text-accent shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="absolute left-0 top-0 flex min-h-11 min-w-11 items-center justify-center rounded-full border border-border bg-card px-2 text-[11px] font-bold text-accent shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        style={{ transform: transformFor(edge) }}
         aria-expanded={open}
         aria-controls={open ? listId : undefined}
         aria-label={t("scheme.offscreenMore", { count: rows.length })}
@@ -199,9 +209,9 @@ function OverflowDisclosure({ edge, rows, open, onToggle, onClose, onFit, anchor
       {open ? (
         <div
           id={listId}
-          className={`absolute z-10 flex max-h-64 min-w-[220px] flex-col gap-1 overflow-y-auto rounded-[10px] border border-border bg-card p-1 shadow-2 ${
-            vertical ? "top-12" : edge === "bottom" ? "bottom-12 left-1/2 -translate-x-1/2" : "top-12 left-1/2 -translate-x-1/2"
-          }`}
+          data-overflow-list={edge}
+          className="absolute z-10 flex flex-col gap-1 overflow-y-auto rounded-[10px] border border-border bg-card p-1 shadow-2"
+          style={{ left: list.left, right: list.right, top: list.top, bottom: list.bottom, width: list.width, maxHeight: list.maxHeight }}
         >
           {rows.map((chip) => (
             <button
@@ -274,6 +284,7 @@ export function EdgeChips({ clusters, cam, vp, hidden, obstacles = [], onFit }: 
           edge={edge}
           rows={rows}
           anchor={anchor}
+          vp={vp}
           open={openEdge === edge}
           onToggle={() => setOpenEdge((current) => current === edge ? null : edge)}
           onClose={() => setOpenEdge(null)}
