@@ -478,9 +478,9 @@ test("settlePendingDeliveries is idempotent across repeated admission receipts",
   expect(second.remaining).toEqual([]);
 });
 
-test("pending generations persist text-only per conversation and reload bounded", () => {
-  /* A remount or refresh must not orphan an accepted message in the composer:
-     the unsettled generation reloads (attachment snapshots are memory-only). */
+test("pending generations persist immutable image snapshots per conversation and reload bounded", () => {
+  /* A remount or refresh must retain the exact generation bytes needed for an
+     idempotent retry. Preview URLs are rebuilt from the persisted image body. */
   const backing = new Map<string, string>();
   const globalStore = globalThis as { sessionStorage?: unknown };
   const previous = globalStore.sessionStorage;
@@ -494,15 +494,66 @@ test("pending generations persist text-only per conversation and reload bounded"
       key: `key-${index}`,
       text: `ask ${index}`,
       images: index === 0 ? [pendingImage("a")] : [],
+      ...(index === 0 ? {
+        runtime: { model: "gpt-5.6-sol", effort: "high", fast: true },
+        runtimeCaptured: true as const,
+      } : {}),
     }));
     writePendingDeliveries("conv-persist", entries);
     const reloaded = readPendingDeliveries("conv-persist");
     expect(reloaded).toHaveLength(8);
-    expect(reloaded[0]).toEqual({ key: "key-0", text: "ask 0", images: [] });
+    expect(reloaded[0]).toEqual({
+      key: "key-0",
+      text: "ask 0",
+      images: [{
+        base64: Buffer.from("a").toString("base64"),
+        mime: "image/png",
+        preview: `data:image/png;base64,${Buffer.from("a").toString("base64")}`,
+      }],
+      runtime: { model: "gpt-5.6-sol", effort: "high", fast: true },
+      runtimeCaptured: true,
+    });
     writePendingDeliveries("conv-persist", []);
     expect(readPendingDeliveries("conv-persist")).toEqual([]);
     backing.set("llvPendingSend:conv-corrupt", "{not json");
     expect(readPendingDeliveries("conv-corrupt")).toEqual([]);
+  } finally {
+    if (previous === undefined) delete globalStore.sessionStorage;
+    else globalStore.sessionStorage = previous;
+  }
+});
+
+test("quota fallback preserves settlement metadata and marks the replay payload incomplete", () => {
+  const backing = new Map<string, string>();
+  const globalStore = globalThis as { sessionStorage?: unknown };
+  const previous = globalStore.sessionStorage;
+  globalStore.sessionStorage = {
+    getItem: (key: string) => backing.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      const serialized = String(value);
+      if (serialized.length > 500) throw new Error("quota");
+      backing.set(key, serialized);
+    },
+    removeItem: (key: string) => void backing.delete(key),
+  };
+  try {
+    writePendingDeliveries("conv-quota", [{
+      key: "key-image",
+      text: "preserve the receipt owner",
+      images: [{ base64: "A".repeat(2_000), mime: "image/png", preview: "blob:preview" }],
+      runtime: { model: "gpt-5.6-sol", effort: "xhigh" },
+      runtimeCaptured: true,
+      reconciling: true,
+    }]);
+    expect(readPendingDeliveries("conv-quota")).toEqual([{
+      key: "key-image",
+      text: "preserve the receipt owner",
+      images: [],
+      runtime: { model: "gpt-5.6-sol", effort: "xhigh" },
+      runtimeCaptured: true,
+      reconciling: true,
+      payloadComplete: false,
+    }]);
   } finally {
     if (previous === undefined) delete globalStore.sessionStorage;
     else globalStore.sessionStorage = previous;

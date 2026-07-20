@@ -183,6 +183,72 @@ test("no receipt within the local window recovers the composer for an exactly-on
   }
 });
 
+test("editing after expiry retries the immutable generation and preserves the later draft", async () => {
+  setLocale("en");
+  mobileViewport = false;
+  const conversationId = "conv-expiry-edited-draft";
+  const original = "confirm the original deployment";
+  const laterDraft = "inspect the follow-up metrics";
+  const attempts: { key: string; text: string }[] = [];
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/tmux/targets") {
+      return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+    }
+    if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+    const body = JSON.parse(String(init?.body)) as { clientMessageId: string; text: string };
+    attempts.push({ key: body.clientMessageId, text: body.text });
+    if (attempts.length === 1) throw new ComposerAdmissionTimeoutError();
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        structured: true,
+        receipt: {
+          operationId: "op-expiry-edited-draft",
+          idempotencyKey: body.clientMessageId,
+          conversationId,
+          kind: "send",
+          status: "queued",
+          text: original,
+          at: "2026-07-20T09:00:30.000Z",
+          revision: 1,
+        },
+      }),
+    } as Response;
+  }) as typeof fetch;
+  refreshRuntimeImpl = async () => false;
+
+  sessionStorage.setItem(`llvDraft:${conversationId}`, original);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const form = textarea.closest("form")!;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const textareaProps = (textarea as unknown as Record<string, { onChange(event: unknown): void }>)[propsKey]!;
+
+  try {
+    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    await untilSendEnabled(host);
+    flushSync(() => textareaProps.onChange({ target: { value: laterDraft } }));
+
+    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    await sleep(0);
+
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]).toEqual({ key: attempts[0]!.key, text: original });
+    expect(textarea.value).toBe(laterDraft);
+  } finally {
+    flushSync(() => root.unmount());
+    publishReceipts([]);
+    refreshRuntimeImpl = async () => false;
+    sessionStorage.clear();
+    host.remove();
+  }
+});
+
 test("a late receipt after the window still settles the preserved generation with no resend", async () => {
   setLocale("en");
   mobileViewport = false;
@@ -295,6 +361,96 @@ test("the recovered generation survives a remount and keeps its original key", a
     sessionStorage.clear();
     host.remove();
   }
+});
+
+test("an image-bearing generation restores exact bytes across a remount on desktop and 390px", async () => {
+  setLocale("en");
+  for (const [width, mobile] of [[1440, false], [390, true]] as const) {
+    mobileViewport = mobile;
+    Object.defineProperty(dom, "innerWidth", { configurable: true, value: width });
+    const conversationId = `conv-expiry-image-remount-${width}`;
+    const prompt = `restore the screenshot at ${width}`;
+    const attempts: { key: string; images: string[] }[] = [];
+    globalThis.fetch = (async (input, init) => {
+      if (String(input) === "/api/tmux/targets") {
+        return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+      }
+      if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+      const body = JSON.parse(String(init?.body)) as { clientMessageId: string; images?: { base64: string }[] };
+      attempts.push({ key: body.clientMessageId, images: body.images?.map((image) => image.base64) ?? [] });
+      if (attempts.length === 1) throw new ComposerAdmissionTimeoutError();
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          structured: true,
+          receipt: {
+            operationId: `op-expiry-image-remount-${width}`,
+            idempotencyKey: body.clientMessageId,
+            conversationId,
+            kind: "send",
+            status: "queued",
+            text: prompt,
+            at: "2026-07-20T09:01:30.000Z",
+            revision: 1,
+          },
+        }),
+      } as Response;
+    }) as typeof fetch;
+    refreshRuntimeImpl = async () => false;
+
+    sessionStorage.setItem(`llvDraft:${conversationId}`, prompt);
+    const host = document.createElement("div");
+    document.body.append(host);
+    let root = createRoot(host);
+    flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+    let textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+    let form = textarea.closest("form")!;
+    const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+    const textareaProps = (textarea as unknown as Record<string, { onPaste(event: unknown): void }>)[propsKey]!;
+    const image = new TextEncoder().encode(`remount-image-${width}`);
+
+    try {
+      textareaProps.onPaste({
+        clipboardData: { items: [{ type: "image/png", getAsFile: () => new dom.File([image], `remount-${width}.png`, { type: "image/png" }) }] },
+        preventDefault() {},
+      });
+      for (let attempt = 0; attempt < 50 && host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]').length !== 1; attempt += 1) {
+        await sleep(2);
+      }
+      expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(1);
+
+      flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+      await untilSendEnabled(host);
+      expect(attempts[0]?.images).toHaveLength(1);
+
+      flushSync(() => root.unmount());
+      root = createRoot(host);
+      flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+      for (let attempt = 0; attempt < 50 && host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]').length !== 1; attempt += 1) {
+        await sleep(2);
+      }
+      expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(1);
+
+      textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+      form = textarea.closest("form")!;
+      flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+      await sleep(0);
+
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]).toEqual(attempts[0]);
+      expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(0);
+      if (mobile) expect(form.getAttribute("data-testid")).toBe("bounded-mobile-composer");
+    } finally {
+      flushSync(() => root.unmount());
+      publishReceipts([]);
+      refreshRuntimeImpl = async () => false;
+      sessionStorage.clear();
+      host.remove();
+    }
+  }
+  mobileViewport = false;
 });
 
 test("typing after the window survives; a late admission clears only the sent prefix", async () => {
@@ -416,7 +572,7 @@ test("a terminal failure after the window exposes Retry and re-enables the compo
   }
 });
 
-test("multiple images survive the window and ride the same-key retry on desktop and 390px", async () => {
+test("an edited image tray retries the immutable images and preserves later attachments on desktop and 390px", async () => {
   setLocale("en");
   for (const [width, mobile] of [[1440, false], [390, true]] as const) {
     mobileViewport = mobile;
@@ -424,15 +580,15 @@ test("multiple images survive the window and ride the same-key retry on desktop 
     const conversationId = `conv-expiry-images-${width}`;
     const prompt = `compare both shots at ${width}`;
     const sentKeys: string[] = [];
-    const sentImageCounts: number[] = [];
+    const sentImages: string[][] = [];
     globalThis.fetch = (async (input, init) => {
       if (String(input) === "/api/tmux/targets") {
         return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
       }
       if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
-      const body = JSON.parse(String(init?.body)) as { clientMessageId: string; images?: unknown[] };
+      const body = JSON.parse(String(init?.body)) as { clientMessageId: string; images?: { base64: string }[] };
       sentKeys.push(body.clientMessageId);
-      sentImageCounts.push(body.images?.length ?? 0);
+      sentImages.push(body.images?.map((image) => image.base64) ?? []);
       if (sentKeys.length === 1) throw new ComposerAdmissionTimeoutError();
       return {
         ok: true,
@@ -484,18 +640,29 @@ test("multiple images survive the window and ride the same-key retry on desktop 
       const attached = previews();
       flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
       await untilSendEnabled(host);
-      expect(sentImageCounts).toEqual([2]);
+      expect(sentImages[0]).toHaveLength(2);
       /* Both attachments stay through the window — nothing was admitted. */
       expect(previews()).toEqual(attached);
       expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(1);
 
-      /* The explicit retry replays the same key with the exact same images. */
+      /* The operator edits the tray before retrying. The removed original and
+         newly-added image belong to UI state around the pending generation. */
+      const firstTile = host.querySelector('[data-testid="attachment-tile"]') as HTMLElement;
+      flushSync(() => (firstTile.querySelector("button") as HTMLButtonElement).click());
+      pasteImage(`later-${width}`);
+      await untilPreviews(2);
+      const editedTray = previews();
+      expect(editedTray).not.toEqual(attached);
+
+      /* The retry replays the same key with the original image bytes. */
       flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
       await sleep(0);
       expect(sentKeys).toHaveLength(2);
       expect(sentKeys[1]).toBe(sentKeys[0]);
-      expect(sentImageCounts).toEqual([2, 2]);
-      expect(previews()).toEqual([]);
+      expect(sentImages[1]).toEqual(sentImages[0]);
+      /* Settlement removes the surviving original image by intake id. The
+         attachment added after expiry remains for the following generation. */
+      expect(previews()).toEqual([editedTray[1]]);
       expect(host.querySelectorAll('[data-receipt-status="queued"]')).toHaveLength(1);
       if (mobile) {
         expect(form.getAttribute("data-testid")).toBe("bounded-mobile-composer");
