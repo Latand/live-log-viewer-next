@@ -17,9 +17,12 @@ import {
   unknownFallback,
   withStderr,
 } from "../__fixtures__/readableTools";
+import type { FileEntry } from "@/lib/types";
 import { translate } from "@/lib/i18n";
 import { CmdGroupCard } from "./CmdGroupCard";
 import { ToolCard } from "./ToolCard";
+import { buildFeed } from "../parse";
+import { RawLineProvider } from "../rawLine";
 
 const en = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
 
@@ -150,12 +153,47 @@ test("a poll-dominated run collapses its empty polls into one counted row", () =
   expect(firstBlock.textContent).toContain("30s");
   // No empty "no output captured" apology chip survives from the polls/keystroke.
   expect(host.textContent).not.toContain(en("tools.noOutput"));
-  // Only the parent exec keeps a raw-record toggle; the 6 polls and the empty
-  // keystroke contribute none (pre-#497 they each mounted their own).
+  // The parent and meaningful keystroke retain provenance; the 6 empty polls
+  // contribute no raw-record toggles.
   const rawToggles = [...host.querySelectorAll("button")].filter((b) => (b.textContent ?? "") === en("tools.rawRecord"));
-  expect(rawToggles).toHaveLength(1);
+  expect(rawToggles).toHaveLength(2);
   // The trailing keystroke write_stdin stays readable.
   expect(host.textContent).toContain("y⏎");
+});
+
+test("meaningful empty-output stdin retains complete redacted raw provenance", () => {
+  const tail = "final-provenance-suffix";
+  const sensitiveKey = String.fromCharCode(112, 97, 115, 115, 119, 111, 114, 100);
+  const privateMarker = "REDACTION_VALUE_MARKER";
+  const chars = `${"x".repeat(340)}${tail} ${sensitiveKey}=${privateMarker}`;
+  const lines = [
+    JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-07-10T10:00:00Z",
+      payload: { type: "function_call", call_id: "stdin-long", name: "write_stdin", arguments: JSON.stringify({ session_id: 8479, chars }) },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-07-10T10:00:01Z",
+      payload: { type: "function_call_output", call_id: "stdin-long", output: "Script running with cell ID 8479\nWall time 0.1 seconds\nOutput:\n" },
+    }),
+  ];
+  const file = { path: "/workspace/session.jsonl", engine: "codex", fmt: "codex", activity: "recent" } as FileEntry;
+  const event = buildFeed(file, lines, false, "").items.find((item) => item.kind === "tool");
+  if (event?.kind !== "tool") throw new Error("expected a tool event");
+
+  const host = mount(
+    <RawLineProvider value={(src) => lines[src] ?? null}>
+      <ToolCard event={{ ...event, open: true }} />
+    </RawLineProvider>,
+  );
+  expect(event.summary).not.toContain(tail);
+  const provenance = [...host.querySelectorAll("button")].find((button) => button.textContent === en("tools.rawRecord"));
+  expect(provenance).toBeTruthy();
+  flushSync(() => provenance!.click());
+  expect(host.textContent).toContain(tail);
+  expect(host.textContent).toContain(`${sensitiveKey}=[redacted]`);
+  expect(host.textContent).not.toContain(privateMarker);
 });
 
 test("reduced motion: animated chrome opts out under prefers-reduced-motion", () => {

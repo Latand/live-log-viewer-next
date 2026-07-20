@@ -9,7 +9,7 @@ import { hhmm } from "../../utils";
 import { CopyButton } from "../CopyButton";
 import { tr, type ToolEvent } from "../parse";
 import type { ArgChip } from "../tools";
-import { formatDuration, isFollowUpCall } from "../toolBlocks";
+import { formatDuration, isCollapsiblePoll, isFollowUpCall } from "../toolBlocks";
 import { useRawLine } from "../rawLine";
 import { DiffCard } from "./DiffCard";
 import { OrchestrationCard } from "./OrchestrationCard";
@@ -142,11 +142,12 @@ function RawRecord({ event }: { event: ToolEvent }) {
    collapsed transcript keeps its DOM small (issue #9 §7/§8). */
 export function ToolBody({ event }: { event: ToolEvent }) {
   const hasDiff = event.body?.type === "diff";
-  /* An interactive follow-up (wait/write_stdin) with an empty result carries no
-     useful output, source, or raw record. Hiding those fields removes the
-     apology chip and dead raw-record toggle (issue #497). Output and failures
-     keep their full readable body. */
+  /* An interactive follow-up with an empty result carries no useful output, so
+     its apology chip stays suppressed. A collapsible empty poll also omits its
+     source disclosure. Meaningful stdin keeps that bounded redacted provenance
+     even when the result body is empty (issue #502). */
   const emptyFollowUp = isFollowUpCall(event) && !event.outputPreview.trim() && event.stderr === undefined && event.status !== "err";
+  const emptyPoll = isCollapsiblePoll(event);
   const showOutput = !emptyFollowUp && (!hasDiff || Boolean(event.outputPreview.trim()));
   return (
     <div className="mb-1 mt-1 rounded-surface bg-sunken px-3 py-2.5">
@@ -174,7 +175,7 @@ export function ToolBody({ event }: { event: ToolEvent }) {
           emptyLabel={tr("tools.noStderr")}
         />
       ) : null}
-      {emptyFollowUp ? null : <RawRecord event={event} />}
+      {emptyPoll ? null : <RawRecord event={event} />}
     </div>
   );
 }
