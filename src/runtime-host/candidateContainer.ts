@@ -146,6 +146,32 @@ export function viewerCandidateTmuxEnvironment(
     : configured;
 }
 
+function viewerCandidateVolumes(
+  service: ViewerComposeService,
+  overrides: Pick<ViewerCandidateContainerOverrides, "legacyTmuxExternal" | "tmuxTmpdir">,
+): ViewerComposeVolume[] {
+  if (overrides.legacyTmuxExternal !== "1") return service.volumes;
+  if (!path.isAbsolute(overrides.tmuxTmpdir)) throw new Error("External tmux directory must be absolute");
+
+  const existing = service.volumes.find((volume) => volume.target === overrides.tmuxTmpdir);
+  if (existing) {
+    if (existing.source !== overrides.tmuxTmpdir || existing.read_only) {
+      throw new Error("External tmux directory mount does not expose the host supervisor path");
+    }
+    return service.volumes;
+  }
+
+  return [
+    ...service.volumes,
+    {
+      type: "bind",
+      source: overrides.tmuxTmpdir,
+      target: overrides.tmuxTmpdir,
+      bind: {},
+    },
+  ];
+}
+
 export function viewerCandidateDockerArgs(
   candidate: ViewerReleaseIdentity,
   service: ViewerComposeService,
@@ -166,6 +192,7 @@ export function viewerCandidateDockerArgs(
     "dev.live-log-viewer.managed": "1",
     "dev.live-log-viewer.revision": candidate.revision,
   };
+  const volumes = viewerCandidateVolumes(service, overrides);
   const command = service.command?.map((argument) => argument.replaceAll("$$", () => "$")) ?? [];
   const args = [
     "docker", "run", "-d",
@@ -178,7 +205,7 @@ export function viewerCandidateDockerArgs(
     "--user", service.user,
     "--workdir", service.working_dir,
     ...Object.entries(environment).sort(([left], [right]) => left.localeCompare(right)).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
-    ...service.volumes.flatMap((volume) => [
+    ...volumes.flatMap((volume) => [
       "--mount",
       `type=bind,source=${volume.source},target=${volume.target}${volume.read_only ? ",readonly" : ""}`,
     ]),
