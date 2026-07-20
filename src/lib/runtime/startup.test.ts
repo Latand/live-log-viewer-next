@@ -119,7 +119,11 @@ function runtimeJournalClient(journal: RuntimeJournal): RuntimeHostClient {
     snapshot: async () => journal.snapshot(),
     append: async (event) => journal.append(event),
     command: async (command) => journal.executeOperation(command),
-    operationStatus: async (operationId) => journal.operationResult(operationId),
+    operationStatus: async (operationId, options) => options?.currentRetryLeaf
+      ? journal.currentRetryResult(operationId)
+      : journal.operationResult(operationId),
+    retryOperation: async (operationId, nextIdempotencyKey, options) =>
+      journal.retryOperation(operationId, nextIdempotencyKey, options),
     effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
     transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
   } as RuntimeHostClient;
@@ -694,6 +698,247 @@ test("startup adoption boots one live unfinished host across terminal history", 
 
   expect(await startupAdoptionAttempts(registry)).toEqual([`codex:${liveSessionId}`]);
 
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a busy Codex turn advances after container replacement without operator messaging", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-codex-continuation-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "11111111-2222-4222-8222-111111111111";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-interrupted-by-promotion",
+    transcriptRecords: [{ timestamp: "2026-07-20T11:47:00.000Z", payload: { type: "task_started" } }],
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const ledger = createFakeDeliveryLedger();
+  const baseHost = new FakeEngineHost(ledger);
+  let host = Object.assign(baseHost, {
+    onStateChange: () => () => {},
+    send: async (entry: Parameters<FakeEngineHost["send"]>[0]) => {
+      const receipt = await FakeEngineHost.prototype.send.call(baseHost, entry);
+      fs.appendFileSync(artifactPath, `${JSON.stringify({
+        timestamp: "2026-07-20T11:50:00.000Z",
+        payload: { type: "user_message", text: entry.text },
+      })}\n`);
+      return receipt;
+    },
+  });
+  const before = fs.statSync(artifactPath).size;
+
+  const startup = () => adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+      const entry = received.snapshot().entries[`codex:${sessionId}`];
+      return entry?.structuredHost && shouldAdopt(entry)
+        ? [{ key: { engine: "codex", sessionId }, host: host as never }]
+        : [];
+    },
+    adoptClaude: async () => [],
+  });
+  await startup();
+
+  await waitFor(() => ledger.writes.length === 1);
+  expect(ledger.writes).toEqual([expect.objectContaining({
+    text: "Continue the interrupted turn from the transcript.",
+  })]);
+  expect(fs.statSync(artifactPath).size).toBeGreaterThan(before);
+  expect(registry.conversation(conversation.id)?.id).toBe(conversation.id);
+  const advanced = fs.statSync(artifactPath).size;
+
+  await startup();
+  expect(ledger.writes).toHaveLength(1);
+  expect(fs.statSync(artifactPath).size).toBe(advanced);
+
+  const nextLedger = createFakeDeliveryLedger();
+  const nextBaseHost = new FakeEngineHost(nextLedger);
+  host = Object.assign(nextBaseHost, {
+    onStateChange: () => () => {},
+    send: async (entry: Parameters<FakeEngineHost["send"]>[0]) => {
+      const receipt = await FakeEngineHost.prototype.send.call(nextBaseHost, entry);
+      fs.appendFileSync(artifactPath, `${JSON.stringify({
+        timestamp: "2026-07-20T11:55:00.000Z",
+        payload: { type: "user_message", text: entry.text },
+      })}\n`);
+      return receipt;
+    },
+  });
+  const entry = registry.snapshot().entries[`codex:${sessionId}`]!;
+  registry.upsert({
+    ...entry,
+    claimEpoch: 4,
+    structuredHost: { ...entry.structuredHost!, writerClaimEpoch: 4 },
+  });
+
+  await startup();
+  await waitFor(() => nextLedger.writes.length === 1);
+  expect(nextLedger.writes).toEqual([expect.objectContaining({
+    id: `recovery-continuation-${sessionId}-4`,
+  })]);
+  expect(fs.statSync(artifactPath).size).toBeGreaterThan(advanced);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a repeated promotion reuses one pending Codex continuation", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-codex-pending-continuation-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "11111111-3333-4333-8333-111111111111";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-interrupted-before-retry",
+    transcriptRecords: [{ timestamp: "2026-07-20T11:47:00.000Z", payload: { type: "task_started" } }],
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  projectHostedRestart(journal, "codex", conversation.id, sessionId, directory, artifactPath);
+  const pendingOperationId = `recovery-continuation-${sessionId}-3`;
+  journal.executeOperation({
+    kind: "send",
+    operationId: pendingOperationId,
+    idempotencyKey: pendingOperationId,
+    conversationId: conversation.id,
+    text: "Continue the interrupted turn from the transcript.",
+    policy: "queue",
+    turnId: null,
+  });
+  const entry = registry.snapshot().entries[`codex:${sessionId}`]!;
+  registry.upsert({
+    ...entry,
+    claimEpoch: 5,
+    structuredHost: { ...entry.structuredHost!, writerClaimEpoch: 5 },
+  });
+  const ledger = createFakeDeliveryLedger();
+  const host = Object.assign(new FakeEngineHost(ledger), { onStateChange: () => () => {} });
+
+  await adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    adopt: async () => [{ key: { engine: "codex", sessionId }, host: host as never }],
+    adoptClaude: async () => [],
+  });
+
+  expect(ledger.writes).toEqual([expect.objectContaining({ id: pendingOperationId })]);
+  expect(journal.operationResult(`recovery-continuation-${sessionId}-5`)).toBeNull();
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup retries a failed Codex continuation once through the published successor", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-codex-continuation-retry-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "11111111-4444-4444-8444-111111111111";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-interrupted-before-failed-continuation",
+    transcriptRecords: [{ timestamp: "2026-07-20T11:47:00.000Z", payload: { type: "task_started" } }],
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  projectHostedRestart(journal, "codex", conversation.id, sessionId, directory, artifactPath);
+  const failedOperationId = `recovery-continuation-${sessionId}-3`;
+  journal.executeOperation({
+    kind: "send",
+    operationId: failedOperationId,
+    idempotencyKey: failedOperationId,
+    conversationId: conversation.id,
+    text: "Continue the interrupted turn from the transcript.",
+    policy: "queue",
+    turnId: null,
+  });
+  journal.transitionOperation(failedOperationId, "delivering");
+  journal.transitionOperation(failedOperationId, "failed", { reason: "successor socket closed" });
+  const entry = registry.snapshot().entries[`codex:${sessionId}`]!;
+  registry.upsert({
+    ...entry,
+    claimEpoch: 4,
+    structuredHost: { ...entry.structuredHost!, writerClaimEpoch: 4 },
+  });
+  const ledger = createFakeDeliveryLedger();
+  const host = Object.assign(new FakeEngineHost(ledger), { onStateChange: () => () => {} });
+  const startup = () => adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    adopt: async () => [{ key: { engine: "codex", sessionId }, host: host as never }],
+    adoptClaude: async () => [],
+  });
+
+  await startup();
+
+  expect(journal.currentRetryResult(failedOperationId)?.receipt).toMatchObject({
+    retryOfOperationId: failedOperationId,
+    status: "delivered",
+  });
+  expect(journal.operationResult(`recovery-continuation-${sessionId}-4`)).toBeNull();
+  expect(ledger.writes).toHaveLength(1);
+
+  await startup();
+  expect(ledger.writes).toHaveLength(1);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup preserves a queued user draft before the Codex continuation", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-codex-draft-order-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "11111111-5555-4555-8555-111111111111";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-interrupted-with-queued-draft",
+    transcriptRecords: [{ timestamp: "2026-07-20T11:47:00.000Z", payload: { type: "task_started" } }],
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  projectHostedRestart(journal, "codex", conversation.id, sessionId, directory, artifactPath);
+  journal.executeOperation({
+    kind: "send",
+    operationId: "queued-user-draft-before-promotion",
+    idempotencyKey: "queued-user-draft-before-promotion",
+    conversationId: conversation.id,
+    text: "keep this queued draft lossless",
+    policy: "queue",
+    turnId: null,
+  });
+  const ledger = createFakeDeliveryLedger();
+  const host = Object.assign(new FakeEngineHost(ledger), { onStateChange: () => () => {} });
+
+  await adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    adopt: async () => [{ key: { engine: "codex", sessionId }, host: host as never }],
+    adoptClaude: async () => [],
+  });
+
+  expect(ledger.writes.map(({ id, text }) => ({ id, text }))).toEqual([
+    { id: "queued-user-draft-before-promotion", text: "keep this queued draft lossless" },
+    {
+      id: `recovery-continuation-${sessionId}-3`,
+      text: "Continue the interrupted turn from the transcript.",
+    },
+  ]);
+  expect(journal.operationResult("queued-user-draft-before-promotion")?.receipt).toMatchObject({
+    status: "delivered",
+    text: "keep this queued draft lossless",
+  });
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
   fs.rmSync(directory, { recursive: true, force: true });
 });
 

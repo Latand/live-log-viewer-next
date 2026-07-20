@@ -87,6 +87,21 @@ test("a non-2xx respawn surfaces the failure instead of silently completing", as
   await act(async () => root.unmount());
 });
 
+test("a successful respawn refreshes the runtime projection immediately", async () => {
+  globalThis.fetch = (() => Promise.resolve({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ outcome: "resumed", spawned: false }),
+  } as unknown as Response)) as unknown as typeof fetch;
+  const { host, root } = await mount();
+
+  await click(byLabel(host, "deadHost.respawn"));
+
+  expect(refreshCalls).toBe(1);
+  expect(host.querySelectorAll('[role="alert"]')).toHaveLength(0);
+  await act(async () => root.unmount());
+});
+
 test("a respawn network error surfaces the localized failure", async () => {
   globalThis.fetch = (() => Promise.reject(new Error("offline"))) as unknown as typeof fetch;
   const { host, root } = await mount();
