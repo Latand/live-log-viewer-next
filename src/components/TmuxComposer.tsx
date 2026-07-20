@@ -1028,7 +1028,7 @@ export function TmuxComposer({
   }, [displayedRuntimeReceipts]);
   const receiptReconciliations = useRef<Map<string, AbortController>>(new Map());
   const legacyResponseEpoch = useRef<{ cardId: string; active: boolean }>({ cardId, active: true });
-  useEffect(() => {
+  useLayoutEffect(() => {
     const epoch = { cardId, active: true };
     legacyResponseEpoch.current = epoch;
     return () => {

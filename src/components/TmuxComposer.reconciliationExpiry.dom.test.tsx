@@ -1,6 +1,6 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
-import { useSyncExternalStore } from "react";
+import { useLayoutEffect, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
@@ -78,6 +78,24 @@ afterAll(() => {
 });
 
 const { TmuxComposer } = await import("./TmuxComposer");
+
+function IdentityCommitHarness({ file, onCommit }: { file: FileEntry; onCommit?: () => void }) {
+  useLayoutEffect(() => {
+    onCommit?.();
+  }, [file.conversationId, onCommit]);
+  return <TmuxComposer file={file} />;
+}
+
+function PresenceCommitHarness({ file, visible, onHiddenCommit }: {
+  file: FileEntry;
+  visible: boolean;
+  onHiddenCommit?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (!visible) onHiddenCommit?.();
+  }, [onHiddenCommit, visible]);
+  return visible ? <TmuxComposer file={file} /> : null;
+}
 
 function fileFor(conversationId: string): FileEntry {
   return {
@@ -174,6 +192,122 @@ test("late receipt-free legacy success settles live-pane and resume generations 
       sessionStorage.clear();
       host.remove();
     }
+  }
+});
+
+test("identity commit invalidates a delayed legacy success before passive cleanup", async () => {
+  setLocale("en");
+  mobileViewport = false;
+  const originalId = "conv-expiry-identity-original";
+  const successorId = "conv-expiry-identity-successor";
+  const original = "original identity payload";
+  let resolveResponse!: (response: Response) => void;
+  globalThis.fetch = (async (input) => {
+    if (String(input) === "/api/tmux/targets") {
+      return { ok: true, json: async () => ({ targets: { "0": "agents:1.0" } }) } as Response;
+    }
+    if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+    return new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    });
+  }) as typeof fetch;
+  refreshRuntimeImpl = async () => false;
+  sessionStorage.setItem(`llvDraft:${originalId}`, original);
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<IdentityCommitHarness file={fileFor(originalId)} />));
+  try {
+    await sleep(5);
+    const form = (host.querySelector("textarea") as HTMLTextAreaElement).closest("form")!;
+    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    for (let attempt = 0; attempt < 50 && !host.querySelector('[data-receipt-status="uncertain"]'); attempt += 1) {
+      await sleep(3);
+    }
+    const pendingBefore = sessionStorage.getItem(`llvPendingSend:${originalId}`);
+    expect(pendingBefore).not.toBeNull();
+
+    const enrichedFile = { ...fileFor(successorId), path: fileFor(originalId).path };
+    flushSync(() => root.render(
+      <IdentityCommitHarness
+        file={enrichedFile}
+        onCommit={() => resolveResponse({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, outcome: "delivered-to-live" }),
+        } as Response)}
+      />,
+    ));
+    await sleep(30);
+
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe(original);
+    expect(sessionStorage.getItem(`llvDraft:${successorId}`)).toBe(original);
+    expect(sessionStorage.getItem(`llvPendingSend:${successorId}`)).not.toBeNull();
+  } finally {
+    flushSync(() => root.unmount());
+    publishReceipts([]);
+    refreshRuntimeImpl = async () => false;
+    sessionStorage.clear();
+    host.remove();
+  }
+});
+
+test("unmount commit invalidates a delayed legacy success before passive cleanup", async () => {
+  setLocale("en");
+  mobileViewport = false;
+  const conversationId = "conv-expiry-unmount";
+  const prompt = "keep the unmounted generation";
+  let resolveResponse!: (response: Response) => void;
+  globalThis.fetch = (async (input) => {
+    if (String(input) === "/api/tmux/targets") {
+      return { ok: true, json: async () => ({ targets: { "0": "agents:1.0" } }) } as Response;
+    }
+    if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+    return new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    });
+  }) as typeof fetch;
+  refreshRuntimeImpl = async () => false;
+  sessionStorage.setItem(`llvDraft:${conversationId}`, prompt);
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<PresenceCommitHarness file={fileFor(conversationId)} visible />));
+  try {
+    await sleep(5);
+    const form = (host.querySelector("textarea") as HTMLTextAreaElement).closest("form")!;
+    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    for (let attempt = 0; attempt < 50 && !host.querySelector('[data-receipt-status="uncertain"]'); attempt += 1) {
+      await sleep(3);
+    }
+    const pendingBefore = sessionStorage.getItem(`llvPendingSend:${conversationId}`);
+    expect(pendingBefore).not.toBeNull();
+
+    flushSync(() => root.render(
+      <PresenceCommitHarness
+        file={fileFor(conversationId)}
+        visible={false}
+        onHiddenCommit={() => resolveResponse({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, outcome: "delivered-to-live" }),
+        } as Response)}
+      />,
+    ));
+    await sleep(10);
+
+    const pendingAfter = JSON.parse(sessionStorage.getItem(`llvPendingSend:${conversationId}`) ?? "[]") as Array<{ key: string; text: string }>;
+    expect(pendingAfter).toHaveLength(1);
+    expect(pendingAfter[0]).toMatchObject({ text: prompt });
+    expect(sessionStorage.getItem(`llvDraft:${conversationId}`)).toBe(prompt);
+  } finally {
+    flushSync(() => root.unmount());
+    publishReceipts([]);
+    refreshRuntimeImpl = async () => false;
+    sessionStorage.clear();
+    host.remove();
   }
 });
 
