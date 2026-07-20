@@ -18,6 +18,7 @@ export type GithubAuditOptions = {
   number: number;
   repo: string;
   requireKnownValues?: boolean;
+  surface?: { id: number; kind: "issue_comment" };
   token: string;
 };
 
@@ -426,34 +427,53 @@ export async function auditGithubPublication(options: GithubAuditOptions): Promi
   const fetcher = options.fetcher ?? fetch;
   const githubBase = new URL(`https://github.com/${options.repo}/`);
   const root = `repos/${options.repo}`;
-  const issueResult = await fetchJson(
-    new URL(`${root}/issues/${options.number}`, apiBase),
-    options.token,
-    apiBase.origin,
-    fetcher,
-  );
-  if (typeof issueResult !== "object" || issueResult === null || Array.isArray(issueResult)) {
-    addFinding(findings, "inspection_error");
-    return findings;
-  }
-  const issue = issueResult as GithubIssue;
-  const comments = await fetchPages(apiBase, `${root}/issues/${options.number}/comments`, options.token, fetcher);
-  if (!comments) {
-    addFinding(findings, "inspection_error");
-    return findings;
-  }
-  const texts = new Set(surfaceTexts([issue, ...comments]));
-  if (issue.pull_request) {
-    const [pullResult, reviewComments, reviews] = await Promise.all([
-      fetchJson(new URL(`${root}/pulls/${options.number}`, apiBase), options.token, apiBase.origin, fetcher),
-      fetchPages(apiBase, `${root}/pulls/${options.number}/comments`, options.token, fetcher),
-      fetchPages(apiBase, `${root}/pulls/${options.number}/reviews`, options.token, fetcher),
-    ]);
-    if (typeof pullResult !== "object" || pullResult === null || Array.isArray(pullResult) || !reviewComments || !reviews) {
+  const texts = new Set<string>();
+  if (options.surface) {
+    if (!Number.isSafeInteger(options.surface.id) || options.surface.id < 1) {
+      addFinding(findings, "configuration_error");
+      return findings;
+    }
+    const commentResult = await fetchJson(
+      new URL(`${root}/issues/comments/${options.surface.id}`, apiBase),
+      options.token,
+      apiBase.origin,
+      fetcher,
+    );
+    if (typeof commentResult !== "object" || commentResult === null || Array.isArray(commentResult)) {
       addFinding(findings, "inspection_error");
       return findings;
     }
-    for (const text of surfaceTexts([pullResult as GithubSurface, ...reviewComments, ...reviews])) texts.add(text);
+    for (const text of surfaceTexts([commentResult as GithubSurface])) texts.add(text);
+  } else {
+    const issueResult = await fetchJson(
+      new URL(`${root}/issues/${options.number}`, apiBase),
+      options.token,
+      apiBase.origin,
+      fetcher,
+    );
+    if (typeof issueResult !== "object" || issueResult === null || Array.isArray(issueResult)) {
+      addFinding(findings, "inspection_error");
+      return findings;
+    }
+    const issue = issueResult as GithubIssue;
+    const comments = await fetchPages(apiBase, `${root}/issues/${options.number}/comments`, options.token, fetcher);
+    if (!comments) {
+      addFinding(findings, "inspection_error");
+      return findings;
+    }
+    for (const text of surfaceTexts([issue, ...comments])) texts.add(text);
+    if (issue.pull_request) {
+      const [pullResult, reviewComments, reviews] = await Promise.all([
+        fetchJson(new URL(`${root}/pulls/${options.number}`, apiBase), options.token, apiBase.origin, fetcher),
+        fetchPages(apiBase, `${root}/pulls/${options.number}/comments`, options.token, fetcher),
+        fetchPages(apiBase, `${root}/pulls/${options.number}/reviews`, options.token, fetcher),
+      ]);
+      if (typeof pullResult !== "object" || pullResult === null || Array.isArray(pullResult) || !reviewComments || !reviews) {
+        addFinding(findings, "inspection_error");
+        return findings;
+      }
+      for (const text of surfaceTexts([pullResult as GithubSurface, ...reviewComments, ...reviews])) texts.add(text);
+    }
   }
 
   for (const text of texts) mergeFindings(findings, sensitiveClasses(text));
@@ -518,11 +538,15 @@ function argumentValue(arguments_: string[], flag: string): string | undefined {
 if (import.meta.main) {
   const arguments_ = process.argv.slice(2);
   const number = Number(argumentValue(arguments_, "--number"));
+  const issueCommentId = argumentValue(arguments_, "--issue-comment");
   const findings = await auditGithubPublication({
     apiUrl: argumentValue(arguments_, "--api-url"),
     number,
     repo: argumentValue(arguments_, "--repo") ?? "",
     requireKnownValues: true,
+    surface: issueCommentId === undefined
+      ? undefined
+      : { id: Number(issueCommentId), kind: "issue_comment" },
     token: process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? "",
   });
   reportPrivacyFindings(findings);

@@ -382,6 +382,38 @@ test("a same-key retry re-sends the ORIGINAL runtime snapshot even after the sel
   await act(async () => root.unmount());
 });
 
+test("a remounted same-key retry restores the original runtime snapshot", async () => {
+  localStorage.setItem("llvAgentRuntime:conv-snapshot:profile", JSON.stringify({ effort: "ultra" }));
+  const sends: SendBody[] = [];
+  mockWire(sends, [
+    () => ({ status: 502, json: { error: "wire down" } }),
+    delivered,
+  ]);
+
+  const rendered = await renderInto(<TmuxComposer file={file} />);
+  const host = rendered.host;
+  let root = rendered.root;
+  await settle(() => composerControls(host).type("persist this runtime generation"));
+  await settle(() => composerControls(host).submit());
+  expect(sends[0]!.runtime).toEqual({ effort: "ultra" });
+
+  await act(async () => root.unmount());
+  writeProfile(file, { effort: "low" });
+  root = createRoot(host);
+  await act(async () => {
+    root.render(<TmuxComposer file={file} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await settle(() => composerControls(host).submit());
+
+  expect(sends).toHaveLength(2);
+  expect(sends[1]!.idempotencyKey).toBe(sends[0]!.idempotencyKey);
+  expect(sends[1]!.text).toBe(sends[0]!.text);
+  expect(sends[1]!.runtime).toEqual({ effort: "ultra" });
+
+  await act(async () => root.unmount());
+});
+
 test("the delegating mock leaks nothing: another conversation resolves the REAL session and takes the legacy send path", async () => {
   /* Regression for the bun mock.module leak: an unconditional structured stub
      here flipped every later-loaded pane test (e.g. BranchPane.render) to the
@@ -414,14 +446,22 @@ test("a send with no explicit selection rides no runtime override, on first atte
     delivered,
   ]);
 
-  const { host, root } = await renderInto(<TmuxComposer file={file} />);
+  const rendered = await renderInto(<TmuxComposer file={file} />);
+  const host = rendered.host;
+  let root = rendered.root;
   const { type, submit } = composerControls(host);
 
   await settle(() => type("no override"));
   await settle(() => submit());
-  // A selection made after admission must not leak into the key's retry.
+  await act(async () => root.unmount());
+  // A selection made after admission must not leak into the key's retry after remount.
   writeProfile(file, { effort: "medium" });
-  await settle(() => submit());
+  root = createRoot(host);
+  await act(async () => {
+    root.render(<TmuxComposer file={file} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await settle(() => composerControls(host).submit());
 
   expect(sends).toHaveLength(2);
   expect(sends[0]!.runtime).toBeUndefined();
