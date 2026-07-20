@@ -246,6 +246,11 @@ async function waitFor<T>(read: () => T | null, label: string, tries = 60): Prom
 }
 
 async function drive(): Promise<void> {
+  /* The page's real CSS viewport, logged for every view: capture.sh asserts
+     this against the requested --window-size, and build-manifest.ts verifies
+     the captured PNG pixels against the same geometry — so the committed
+     evidence is mechanically pinned to the viewport it claims. */
+  logVerify({ kind: "geometry", view, lang, viewport: { width: window.innerWidth, height: window.innerHeight } });
   if (view === "rest") {
     const pill = await waitFor(() => document.querySelector("[data-runtime-pill]"), "runtime pill");
     logVerify({ kind: "state", view, pillVisible: Boolean(pill) });
@@ -278,12 +283,23 @@ async function drive(): Promise<void> {
     );
     const textarea = await waitFor(() => document.querySelector("textarea"), "composer textarea");
     typeInto(textarea, "Recover and continue this task.");
+    /* The truthful dead-host surface (repair round): the banner body states
+       durable admission / delayed delivery / the image restriction in the
+       CURRENT locale, the composer's inline image-restriction notice renders,
+       and the model/reasoning pill is absent exactly as the production
+       capability matrix hides `runtime` on the dead surface. */
+    const imagesNotice = [...document.querySelectorAll('[role="status"]')]
+      .some((node) => (node.textContent ?? "").trim() === t("composer.imagesBlockedDuringRecovery"));
     logVerify({
       kind: "state",
       view,
+      lang,
       bannerVisible: Boolean(banner),
+      bannerBody: banner.querySelector("p")?.textContent ?? "",
       recoveryActions: banner.querySelectorAll("button").length,
       sendAriaDisabled: send.getAttribute("aria-disabled"),
+      imagesNotice,
+      pillVisible: Boolean(document.querySelector("[data-runtime-pill]")),
     });
     return;
   }

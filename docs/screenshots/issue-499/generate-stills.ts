@@ -1,51 +1,163 @@
 /**
- * Deterministic SVG acceptance stills for issue #499.
+ * Deterministic SVG acceptance stills for issue #499, mechanically bound to
+ * the committed capture manifest.
  *
  * The privacy-publication gate reproduces raster provenance from the TRUSTED
  * default-branch generator, which cannot know about media a not-yet-merged PR
  * introduces — new raster provenance is structurally unvalidatable inside a
  * single PR (see the pr-439 precedent on main). These frames are therefore
- * vector artifacts: byte-stable text files the gate scans as text, needing no
- * raster manifest, while remaining fully inspectable evidence of the verified
- * composer states.
+ * vector artifacts: byte-stable text files the gate scans as text, while
+ * remaining fully inspectable evidence of the verified composer states.
  *
- * Every frame embeds its provenance: classification `synthetic`, this
- * generator's path, the exact source revision whose acceptance run it
- * re-renders, and the SHA-256 of the real chrome-headless capture behind it
- * (the captures themselves are regenerated locally via capture.sh and stay
- * uncommitted because browser output is not byte-deterministic).
+ * Nothing in a frame is hand-declared:
+ *  - geometry, capture digest, and source revision come from
+ *    `capture-manifest.json`, which capture.sh writes from the REAL
+ *    chrome-headless captures (per-PNG SHA-256, IHDR-verified pixel size, and
+ *    digests of the harness inputs themselves);
+ *  - the depicted capability set (Send / model-reasoning pill / images /
+ *    recovery) is resolved through the PRODUCTION `capabilitiesFor` matrix
+ *    for each state's fixtures;
+ *  - all user-facing copy is read from the production locale dictionaries.
+ *
+ * `evidence.test.ts` fails whenever a committed frame drifts from this
+ * regeneration, from the manifest, from the harness bytes, or from the
+ * production capability matrix.
  *
  *   bun docs/screenshots/issue-499/generate-stills.ts
  *
- * Re-running always emits identical bytes. All data is synthetic.
+ * Re-running against the same manifest always emits identical bytes. All data
+ * is synthetic.
  */
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-type StillState = "live-ready" | "unresolved-recovery" | "dead-recovery" | "image-upload";
+import { capabilitiesFor, type Capability } from "@/components/agentCapabilities";
+import type { RuntimeSessionView } from "@/hooks/useRuntime";
+import { en } from "@/lib/i18n/en";
+import { uk } from "@/lib/i18n/uk";
+import type { FileEntry } from "@/lib/types";
 
-interface Still {
+export type StillState = "live-ready" | "unresolved-recovery" | "dead-recovery" | "image-upload";
+export type StillLocale = "en" | "uk";
+
+export interface StillSpec {
+  /** Committed SVG filename. */
   name: string;
-  width: number;
-  height: number;
+  /** The capture-manifest entry this frame re-renders. */
+  capture: string;
   state: StillState;
-  /** SHA-256 of the chrome-headless capture (at the source revision) this
-      frame re-renders. */
-  sourceCaptureSha256: string;
+  lang: StillLocale;
 }
 
-/** The commit whose verified acceptance run these frames re-render. */
-const SOURCE_REVISION = "3a5c11045eeb9b7731343f7509c5161c7339c59f";
+export interface CaptureEntry {
+  view: string;
+  lang: string;
+  theme: string;
+  viewport: { width: number; height: number };
+  png: { width: number; height: number; sha256: string };
+}
 
-const STILLS: Still[] = [
-  { name: "still-live-ready-desktop-1440x900.svg", width: 1440, height: 900, state: "live-ready", sourceCaptureSha256: "2eafe805f6ad62a9dbca57e5c4822a8807db98cefa5ba9f041c39514232ac18e" },
-  { name: "still-live-ready-390x844.svg", width: 390, height: 844, state: "live-ready", sourceCaptureSha256: "4086a25e9b4903fed9298d6510cee6bfca8f13ec48772186f0d1aa1701860894" },
-  { name: "still-live-ready-390x600.svg", width: 390, height: 600, state: "live-ready", sourceCaptureSha256: "2d2b4057310ed8e1d27f5209373aea60ab4db43233435e21da7313db753f5cff" },
-  { name: "still-unresolved-recovery-390x844.svg", width: 390, height: 844, state: "unresolved-recovery", sourceCaptureSha256: "18dee490ce0d223bc479635ba259a850f0417722f04406a4827d873d16a2ac21" },
-  { name: "still-dead-recovery-390x844.svg", width: 390, height: 844, state: "dead-recovery", sourceCaptureSha256: "c78b711e72424dc8b1f6d9fdc1c9640fb57ea4876d9ae28836e6504c8d83eabf" },
-  { name: "still-dead-recovery-390x600.svg", width: 390, height: 600, state: "dead-recovery", sourceCaptureSha256: "9cd926ef41eb57a6047a1363049f95fb2bcee176b16e01c1208a50e613990415" },
-  { name: "still-image-upload-390x844.svg", width: 390, height: 844, state: "image-upload", sourceCaptureSha256: "d2d3f18aa6b45554b1818857edcc3dbc3877b65fac393cdbc812d207cbef1910" },
+export interface CaptureManifest {
+  classification: string;
+  generator: string;
+  sourceRevision: string;
+  deviceScaleFactor: number;
+  /** SHA-256 of the harness inputs at capture time, keyed by basename. */
+  harness: Record<string, string>;
+  captures: Record<string, CaptureEntry>;
+}
+
+const DIR = dirname(new URL(import.meta.url).pathname);
+
+export const STILLS: StillSpec[] = [
+  { name: "still-live-ready-desktop-1440x900.svg", capture: "rest-desktop-en-light", state: "live-ready", lang: "en" },
+  { name: "still-live-ready-390x844.svg", capture: "rest-390-en-light", state: "live-ready", lang: "en" },
+  { name: "still-live-ready-390x600.svg", capture: "rest-390x600-en-light", state: "live-ready", lang: "en" },
+  { name: "still-unresolved-recovery-390x844.svg", capture: "blocked-390-en-light", state: "unresolved-recovery", lang: "en" },
+  { name: "still-dead-recovery-390x844.svg", capture: "dead-390-en-light", state: "dead-recovery", lang: "en" },
+  { name: "still-dead-recovery-390x600.svg", capture: "dead-390x600-en-light", state: "dead-recovery", lang: "en" },
+  { name: "still-dead-recovery-390x844-uk.svg", capture: "dead-390-uk-light", state: "dead-recovery", lang: "uk" },
+  { name: "still-dead-recovery-390x600-uk.svg", capture: "dead-390x600-uk-light", state: "dead-recovery", lang: "uk" },
+  { name: "still-image-upload-390x844.svg", capture: "images-390-en-light", state: "image-upload", lang: "en" },
 ];
+
+export function loadManifest(): CaptureManifest {
+  return JSON.parse(readFileSync(join(DIR, "capture-manifest.json"), "utf8")) as CaptureManifest;
+}
+
+/** The production locale dictionaries are the only copy source. */
+const DICTS = { en, uk } as const;
+function msg(lang: StillLocale, key: keyof typeof en): string {
+  const value = DICTS[lang][key];
+  if (typeof value !== "string") throw new Error(`non-string message for ${key}`);
+  return value;
+}
+
+/**
+ * The exact fixture shapes the browser harness mounts (harness.tsx): a
+ * Viewer-launched codex conversation whose structured session is hosted,
+ * dead, or not yet resolved. `evidence.test.ts` resolves these through
+ * `capabilitiesFor` independently to hold the frames to the production
+ * capability matrix.
+ */
+export function evidenceFixtures(state: StillState): { file: FileEntry; view: RuntimeSessionView | null } {
+  const file = {
+    path: "/codex-viewer-499.jsonl",
+    root: "codex-sessions",
+    name: "codex-viewer-499.jsonl",
+    project: "viewer",
+    title: "Viewer-launched conversation",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    parent: null,
+    mtime: 1,
+    size: 1,
+    activity: "live",
+    proc: "running",
+    pid: null,
+    conversationId: "conversation_viewer499accept",
+    spawnOrigin: "viewer",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    fast: false,
+    pendingQuestion: null,
+    waitingInput: null,
+  } as FileEntry;
+  if (state === "unresolved-recovery") return { file, view: null };
+  const view = {
+    session: {
+      conversationId: "conversation_viewer499accept",
+      sessionKey: { engine: "codex", sessionId: "codex-thread-499" },
+      hostKind: "codex-app-server",
+      host: state === "dead-recovery" ? "dead" : "hosted",
+      turn: "idle",
+      provenance: "structured",
+      revision: 4,
+      attentionIds: [],
+      recentReceipts: [],
+      accountId: null,
+      parentConversationId: null,
+      flowId: null,
+      workflowId: null,
+      cwd: "/home/user/projects/viewer",
+      artifactPath: "/codex-viewer-499.jsonl",
+      capabilities: {
+        steer: true,
+        structuredAttention: true,
+        imageInput: { supported: true },
+        runtimeSettings: { perTurnEffort: true, perTurnModel: false },
+      },
+      activeTurnId: null,
+    },
+    uiState: {},
+    attentions: [],
+    receipts: [],
+    legacy: false,
+    structuredControlsEnabled: true,
+  } as unknown as RuntimeSessionView;
+  return { file, view };
+}
 
 const STATE_TITLE: Record<StillState, string> = {
   "live-ready": "Live ready",
@@ -57,14 +169,44 @@ const STATE_TITLE: Record<StillState, string> = {
 const FONT = "font-family=\"ui-sans-serif, system-ui, sans-serif\"";
 const MONO = "font-family=\"ui-monospace, monospace\"";
 
-function stillSvg(still: Still): string {
-  const { width, height, state } = still;
+function xmlEscape(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+}
+
+/** Deterministic greedy word wrap by character budget. */
+function wrap(value: string, budget: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of value.split(" ")) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length > budget && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function capabilitySummary(cell: Capability): string {
+  return cell.state === "disabled" ? `disabled:${cell.reason}` : cell.state;
+}
+
+export function stillSvg(spec: StillSpec, manifest: CaptureManifest): string {
+  const capture = manifest.captures[spec.capture];
+  if (!capture) throw new Error(`capture-manifest.json has no capture named ${spec.capture}`);
+  const { width, height } = capture.viewport;
+  const { state, lang } = spec;
+  const { file, view } = evidenceFixtures(state);
+  const caps = capabilitiesFor(file, view, { runtimeEnabled: true });
+
   const parts: string[] = [];
   const rect = (x: number, y: number, w: number, h: number, fill: string, extra = "") =>
     parts.push(`  <rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}"${extra ? ` ${extra}` : ""}/>`);
   const text = (x: number, y: number, label: string, fill: string, size = 13, font = FONT, weight = 600) =>
-    parts.push(`  <text x="${x}" y="${y}" ${font} font-size="${size}" font-weight="${weight}" fill="${fill}">${label
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;")}</text>`);
+    parts.push(`  <text x="${x}" y="${y}" ${font} font-size="${size}" font-weight="${weight}" fill="${fill}">${xmlEscape(label)}</text>`);
 
   const ink = "#1f2937";
   const muted = "#8c95a3";
@@ -76,84 +218,157 @@ function stillSvg(still: Still): string {
   const danger = "#cd3030";
   const dangerSoft = "#fce7e7";
 
-  rect(0, 0, width, height, "#f3f4f6");
-  text(16, 26, `Issue 499 — ${STATE_TITLE[state]}`, ink, 16);
-  text(16, 44, `${width}×${height} · synthetic fixture · rev ${SOURCE_REVISION.slice(0, 12)}`, muted, 11, MONO, 500);
-
   const cardWidth = Math.min(width - 24, 720);
   const cardLeft = Math.round((width - cardWidth) / 2);
-  const cardHeight = Math.min(height - 70, state === "dead-recovery" ? 400 : 320);
+  const budget = Math.max(20, Math.floor((cardWidth - 32) / 6));
+
+  // The banner and status copy come from the production dictionaries so the
+  // committed frames can only show what the shipped UI says.
+  const bannerBody = wrap(msg(lang, "deadHost.body"), budget);
+  const imagesReason = caps.controls.images.state === "disabled"
+    ? wrap(msg(lang, caps.controls.images.reason as keyof typeof en), Math.max(20, Math.floor((cardWidth - 32) / 5.4)))
+    : [];
+  const sendReason = caps.controls.send.state === "disabled"
+    ? wrap(msg(lang, caps.controls.send.reason as keyof typeof en), budget)
+    : [];
+  const pillDrawn = caps.controls.runtime.state === "enabled";
+
+  // Bottom-anchored vertical flow: measure the card, then draw top-down.
+  const transcriptH = 36;
+  const bannerH = state === "dead-recovery" ? 30 + bannerBody.length * 15 + 8 + 30 + 8 + 30 + 14 : 0;
+  const tileH = state === "image-upload" ? 60 : 0;
+  const inputH = 56;
+  const belowH = (pillDrawn ? 40 : 0)
+    + (sendReason.length ? sendReason.length * 15 + 40 : 0)
+    + (imagesReason.length ? imagesReason.length * 14 + 8 : 0);
+  const footerH = 24;
+  const cardHeight = transcriptH + bannerH + tileH + inputH + belowH + footerH + 12;
   const cardTop = height - cardHeight - 16;
+
+  rect(0, 0, width, height, "#f3f4f6");
+  text(16, 26, `Issue 499 — ${STATE_TITLE[state]}`, ink, 16);
+  text(16, 44, `${width}×${height} · synthetic fixture · rev ${manifest.sourceRevision.slice(0, 12)}`, muted, 11, MONO, 500);
+
   rect(cardLeft - 2, cardTop - 2, cardWidth + 4, cardHeight + 4, border, 'rx="12"');
   rect(cardLeft, cardTop, cardWidth, cardHeight, "#ffffff", 'rx="10"');
-  text(cardLeft + 16, cardTop + 24, "…transcript…", muted, 12, FONT, 500);
-
-  const bannerHeight = state === "dead-recovery" ? 138 : 0;
-  const composerTop = cardTop + cardHeight
-    - (state === "image-upload" ? 190 : state === "unresolved-recovery" ? 170 : 130);
-  rect(cardLeft, composerTop - bannerHeight - 2, cardWidth, 2, border);
+  let y = cardTop;
+  text(cardLeft + 16, y + 24, "…transcript…", muted, 12, FONT, 500);
+  y += transcriptH;
 
   if (state === "dead-recovery") {
-    const bannerTop = composerTop - bannerHeight;
-    rect(cardLeft, bannerTop, cardWidth, bannerHeight, dangerSoft);
-    text(cardLeft + 16, bannerTop + 24, "Agent host died · 5m ago", danger, 14, FONT, 700);
-    text(cardLeft + 16, bannerTop + 44, "Messages can't be delivered. Pending approvals expired.", ink, 11, FONT, 500);
-    rect(cardLeft + 16, bannerTop + 56, 200, 30, accent, 'rx="8"');
-    text(cardLeft + 30, bannerTop + 76, "Respawn conversation", "#ffffff", 12, FONT, 700);
-    rect(cardLeft + 16, bannerTop + 94, 150, 30, "#ffffff", `rx="8" stroke="${border}" stroke-width="2"`);
-    text(cardLeft + 30, bannerTop + 114, "Open in terminal", ink, 12);
-    rect(cardLeft + 176, bannerTop + 94, 92, 30, "#ffffff", `rx="8" stroke="${border}" stroke-width="2"`);
-    text(cardLeft + 190, bannerTop + 114, "Re-check", ink, 12);
+    rect(cardLeft, y, cardWidth, bannerH, dangerSoft);
+    const since = lang === "en" ? "5m ago" : "5 хв тому";
+    text(cardLeft + 16, y + 22, msg(lang, "deadHost.title").replace("{since}", since), danger, 14, FONT, 700);
+    let lineY = y + 42;
+    for (const line of bannerBody) {
+      text(cardLeft + 16, lineY, line, ink, 11, FONT, 500);
+      lineY += 15;
+    }
+    const button = (x: number, top: number, label: string, primary: boolean): number => {
+      const w = 24 + Math.round(label.length * 6.6);
+      if (primary) {
+        rect(x, top, w, 30, accent, 'rx="8"');
+        text(x + 12, top + 20, label, "#ffffff", 12, FONT, 700);
+      } else {
+        rect(x, top, w, 30, "#ffffff", `rx="8" stroke="${border}" stroke-width="2"`);
+        text(x + 12, top + 20, label, ink, 12);
+      }
+      return w;
+    };
+    // The three recovery controls the production banner offers (§5).
+    button(cardLeft + 16, lineY + 1, msg(lang, "deadHost.respawn"), true);
+    const attachW = button(cardLeft + 16, lineY + 39, msg(lang, "deadHost.attach"), false);
+    button(cardLeft + 16 + attachW + 10, lineY + 39, msg(lang, "deadHost.recheck"), false);
+    y += bannerH;
   }
 
   if (state === "image-upload") {
-    const tileTop = composerTop + 12;
-    rect(cardLeft + 16, tileTop, 48, 48, "#f68a8a", 'rx="6"');
-    rect(cardLeft + 44, tileTop + 4, 16, 16, "#ffffff", 'rx="8"');
-    text(cardLeft + 48, tileTop + 16, "×", ink, 12, FONT, 700);
+    rect(cardLeft + 16, y + 8, 48, 48, "#f68a8a", 'rx="6"');
+    rect(cardLeft + 44, y + 12, 16, 16, "#ffffff", 'rx="8"');
+    text(cardLeft + 48, y + 24, "×", ink, 12, FONT, 700);
+    y += tileH;
   }
 
-  const inputTop = composerTop + (state === "image-upload" ? 72 : 14);
+  const inputTop = y + 6;
   rect(cardLeft + 14, inputTop - 2, cardWidth - 28, 48, border, 'rx="10"');
   rect(cardLeft + 16, inputTop, cardWidth - 32, 44, sunken, 'rx="9"');
   const inputCopy: Record<StillState, { label: string; tone: string }> = {
-    "live-ready": { label: "message the agent…", tone: muted },
-    "unresolved-recovery": { label: "message the agent — reconnecting to its session…", tone: muted },
+    "live-ready": { label: msg(lang, "composer.placeholderSend"), tone: muted },
+    "unresolved-recovery": { label: msg(lang, "composer.placeholderResolving"), tone: muted },
+    // The dead composer keeps admitting text durably — the frame shows the
+    // typed draft the harness driver enters, not a placeholder.
     "dead-recovery": { label: "Recover and continue this task.", tone: ink },
-    "image-upload": { label: "message the agent…", tone: muted },
+    "image-upload": { label: msg(lang, "composer.placeholderSend"), tone: muted },
   };
   text(cardLeft + 30, inputTop + 27, inputCopy[state].label, inputCopy[state].tone, 12, FONT, 500);
   const controlsRight = cardLeft + cardWidth - 32;
-  const sendColor = state === "unresolved-recovery" ? accentSoft : accent;
+  const sendColor = caps.controls.send.state === "enabled" ? accent : accentSoft;
   rect(controlsRight - 36, inputTop + 6, 32, 32, sendColor, 'rx="8"');
   parts.push(`  <path d="M ${controlsRight - 25} ${inputTop + 14} L ${controlsRight - 13} ${inputTop + 22} L ${controlsRight - 25} ${inputTop + 30} Z" fill="#ffffff"/>`);
   rect(controlsRight - 58, inputTop + 14, 10, 16, muted, 'rx="5"');
   rect(controlsRight - 82, inputTop + 16, 14, 3, muted);
   rect(controlsRight - 82, inputTop + 24, 14, 3, muted);
+  y = inputTop + 50;
 
-  const belowInput = inputTop + 56;
-  if (state === "unresolved-recovery") {
-    text(cardLeft + 16, belowInput + 12, "resolving the agent host…", warning, 12, FONT, 700);
-    rect(cardLeft + 16, belowInput + 22, 92, 30, "#ffffff", `rx="8" stroke="${border}" stroke-width="2"`);
-    text(cardLeft + 30, belowInput + 42, "Re-check", ink, 12);
-  } else {
-    parts.push(`  <path d="M ${cardLeft + 24} ${belowInput + 2} L ${cardLeft + 18} ${belowInput + 12} L ${cardLeft + 23} ${belowInput + 12} L ${cardLeft + 17} ${belowInput + 22} L ${cardLeft + 29} ${belowInput + 9} L ${cardLeft + 24} ${belowInput + 9} L ${cardLeft + 28} ${belowInput + 2} Z" fill="${accent}"/>`);
-    text(cardLeft + 38, belowInput + 16, "5.6-Sol · High ⌄", ink, 13, FONT, 700);
+  if (pillDrawn) {
+    // The one obvious 44px model/reasoning pill — drawn exactly when the
+    // production matrix enables the runtime control for this surface.
+    parts.push(`  <path d="M ${cardLeft + 24} ${y + 10} L ${cardLeft + 18} ${y + 20} L ${cardLeft + 23} ${y + 20} L ${cardLeft + 17} ${y + 30} L ${cardLeft + 29} ${y + 17} L ${cardLeft + 24} ${y + 17} L ${cardLeft + 28} ${y + 10} Z" fill="${accent}"/>`);
+    text(cardLeft + 38, y + 24, "5.6-Sol · High ⌄", ink, 13, FONT, 700);
+    y += 40;
   }
 
-  text(cardLeft + 16, cardTop + cardHeight - 10, `synthetic · rev ${SOURCE_REVISION.slice(0, 12)}`, muted, 10, MONO, 500);
+  if (sendReason.length) {
+    let lineY = y + 12;
+    for (const line of sendReason) {
+      text(cardLeft + 16, lineY, line, warning, 12, FONT, 700);
+      lineY += 15;
+    }
+    rect(cardLeft + 16, lineY - 5, 24 + Math.round(msg(lang, "deadHost.recheck").length * 6.6), 30, "#ffffff", `rx="8" stroke="${border}" stroke-width="2"`);
+    text(cardLeft + 28, lineY + 15, msg(lang, "deadHost.recheck"), ink, 12);
+    y += sendReason.length * 15 + 40;
+  }
+
+  if (imagesReason.length) {
+    let lineY = y + 12;
+    for (const line of imagesReason) {
+      text(cardLeft + 16, lineY, line, muted, 11, FONT, 600);
+      lineY += 14;
+    }
+    y += imagesReason.length * 14 + 8;
+  }
+
+  text(cardLeft + 16, cardTop + cardHeight - 10, `synthetic · rev ${manifest.sourceRevision.slice(0, 12)}`, muted, 10, MONO, 500);
+
+  const provenance = {
+    classification: "synthetic",
+    source: "deterministic-generator",
+    generator: "docs/screenshots/issue-499/generate-stills.ts",
+    sourceRevision: manifest.sourceRevision,
+    capture: spec.capture,
+    sourceCaptureSha256: capture.png.sha256,
+    viewport: { width, height },
+    capabilities: {
+      surface: caps.surface,
+      send: capabilitySummary(caps.controls.send),
+      runtime: capabilitySummary(caps.controls.runtime),
+      images: capabilitySummary(caps.controls.images),
+    },
+  };
 
   return [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Issue 499 acceptance state ${STATE_TITLE[still.state]}">`,
-    `  <metadata id="provenance">{"classification":"synthetic","source":"deterministic-generator","generator":"docs/screenshots/issue-499/generate-stills.ts","sourceRevision":"${SOURCE_REVISION}","sourceCaptureSha256":"${still.sourceCaptureSha256}"}</metadata>`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Issue 499 acceptance state ${STATE_TITLE[state]} (${lang})">`,
+    `  <metadata id="provenance">${JSON.stringify(provenance)}</metadata>`,
     ...parts,
     "</svg>",
     "",
   ].join("\n");
 }
 
-const outputDirectory = dirname(new URL(import.meta.url).pathname);
-for (const still of STILLS) {
-  writeFileSync(join(outputDirectory, still.name), stillSvg(still));
+if (import.meta.main) {
+  const manifest = loadManifest();
+  for (const spec of STILLS) {
+    writeFileSync(join(DIR, spec.name), stillSvg(spec, manifest));
+  }
+  process.stdout.write(`Generated ${STILLS.length} deterministic issue-499 SVG stills from capture-manifest.json.\n`);
 }
-process.stdout.write(`Generated ${STILLS.length} deterministic issue-499 SVG stills.\n`);
