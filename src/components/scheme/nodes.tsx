@@ -22,7 +22,8 @@ import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
-import { STAGE_TONES, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState } from "@/components/pipelines/pipelineModel";
+import { PipelineStageGraph, PipelineStageGraphFlowsProvider } from "@/components/scheme/PipelineStageGraph";
+import { STAGE_TONES, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState, type StageNavTarget } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -379,24 +380,10 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
  * stays readable when the board is zoomed out to the map. A group appears only
  * while its flow/pipeline is open, so it dissolves on close with no extra state.
  */
-/** Everything a pipeline group's on-halo stage strip needs to render + route
-    (issue #136): supplied by SchemeBoard for the interactive board, omitted on
-    the lite map. Absent → group halos keep only their label chip. */
+/** Navigation seam for the stage graph mounted in an interactive pipeline group. */
 export interface PipelineGroupControls {
-  flows: Flow[];
-  files: readonly FileEntry[];
-  renderablePaths: ReadonlySet<string>;
-  renderableFlows: ReadonlySet<string>;
-  /** Ids of pipelines whose per-node compact strip is ACTUALLY mounted on a
-      placed board node. A pipeline absent from this set has no on-board plan
-      surface — even if its current stage resolved to a path, that node may be
-      hidden/collapsed — so the group halo must carry the plan itself (issue
-      #136). Membership, not `pipelineBoardStripPath`, is the source of truth. */
-  nodeStripPipelineIds: ReadonlySet<string>;
-  linkedTasksByPipeline: ReadonlyMap<string, BoardTask[]>;
-  onOpenPath: (path: string) => void;
-  onOpenFlow: (flowId: string) => void;
-  onOpenTask: (task: BoardTask) => void;
+  flows: readonly Flow[];
+  onOpenAttempt: (target: StageNavTarget) => void;
 }
 
 export const GroupsLayer = memo(function GroupsLayer({
@@ -410,10 +397,7 @@ export const GroupsLayer = memo(function GroupsLayer({
   /** Passive on the hand-tool, during a selection session and on the lite map:
       the halos still render, but the label chip stops opening the panel. */
   interactive: boolean;
-  /** When present, a pipeline group whose current stage has NO per-node strip
-      (a review-loop or not-yet-materialized stage) renders the full planned
-      stage graph on the halo itself, so the group is always the pipeline surface
-      (issue #136). */
+  /** Interactive groups render the complete declared stage graph through this seam. */
   pipelineControls?: PipelineGroupControls | null;
   /** A group id whose override/builder panel should open on its own as soon as it
       arrives — the canvas builder lands the operator straight in a fresh draft's
@@ -477,28 +461,18 @@ export const GroupsLayer = memo(function GroupsLayer({
                 ...(draft ? { backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--color-warning) 7%, transparent) 12px 14px)" } : {}),
               }}
             />
-            {/* The pipeline's full planned stage graph on the halo itself, shown
-                only when no per-node strip is actually mounted for it — so the
-                group is the single stage-plan surface with no duplication, and a
-                pipeline whose current node is hidden/collapsed still shows its
-                plan (issue #136 / review finding 1). */}
-            {group.pipeline && pipelineControls && !pipelineControls.nodeStripPipelineIds.has(group.pipeline.id) ? (
+            {/* Every declared stage stays visible here from pipeline creation. */}
+            {group.pipeline && pipelineControls ? (
               <div
                 data-scheme-group-strip
                 className={`absolute left-4 right-4 top-3 z-[7] ${interactive ? "pointer-events-auto" : "pointer-events-none"}`}
               >
-                <PipelineStrip
-                  pipeline={group.pipeline}
-                  flows={pipelineControls.flows}
-                  files={pipelineControls.files}
-                  renderablePaths={pipelineControls.renderablePaths}
-                  renderableFlows={pipelineControls.renderableFlows}
-                  linkedTasks={pipelineControls.linkedTasksByPipeline.get(group.pipeline.id)}
-                  compact
-                  onOpenPath={pipelineControls.onOpenPath}
-                  onOpenFlow={pipelineControls.onOpenFlow}
-                  onOpenTask={pipelineControls.onOpenTask}
-                />
+                <PipelineStageGraphFlowsProvider flows={pipelineControls.flows}>
+                  <PipelineStageGraph
+                    pipeline={group.pipeline}
+                    onOpenAttempt={pipelineControls.onOpenAttempt}
+                  />
+                </PipelineStageGraphFlowsProvider>
               </div>
             ) : null}
             <button

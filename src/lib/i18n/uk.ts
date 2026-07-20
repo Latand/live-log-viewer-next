@@ -1019,6 +1019,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineStrip.openTask": "Відкрити пов’язане завдання {label}",
   "pipelineStrip.roundShort": "Р{n}",
   "pipelineStrip.attemptSuffix": "×{n}",
+  "stageGraph.roundProgress": "раунд {round}/{total}",
+  "stageGraph.startedNotice": "Етап запустився, поки налаштування були відкриті. Збережену серверну конфігурацію тепер заблоковано.",
   "pipelineStrip.chipAria": "Етап {label}: {state}",
   "pipelineStrip.compactChipAria": "{label}, {state}",
   "pipelineStrip.stageOf": "етап {k}/{n}",

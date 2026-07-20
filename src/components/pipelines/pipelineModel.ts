@@ -1,6 +1,6 @@
 import { roleNameById } from "@/components/builderCopy";
 import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
-import { currentMemberPath } from "@/lib/accounts/identity";
+import { currentConversationFile, currentMemberPath, isArchivedPredecessor } from "@/lib/accounts/identity";
 import { applyPipelineSnapshot, revertPipelineSnapshot } from "@/hooks/useFiles";
 import { getLocale, translate, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -453,6 +453,47 @@ export function stageOpenTarget(
      chip/Open-transcript stays disabled and never no-ops on a missing file. */
   if (renderablePaths && !renderablePaths.has(attempt.agentPath)) return null;
   return { kind: "path", path: attempt.agentPath };
+}
+
+/** What a stage-graph attempt points at for navigation: its stable conversation
+    id (when the launch adopted one) alongside the transcript path recorded at
+    launch. Either alone is enough to open the attempt — a path-only attempt (no
+    adopted id yet) still resolves through `agentPath`. */
+export type StageNavTarget = { conversationId: string | null; agentPath: string | null };
+
+/** The navigation target for a stage attempt, or null when the attempt carries
+    neither a conversation id nor a transcript path (a pending ghost with nothing
+    to open). Both a materialized run and a path-only launch are navigable. */
+export function attemptNavTarget(attempt: PipelineStageAttempt | null): StageNavTarget | null {
+  if (!attempt) return null;
+  if (!attempt.conversationId && !attempt.agentPath) return null;
+  return { conversationId: attempt.conversationId, agentPath: attempt.agentPath };
+}
+
+/** Resolve a stage-graph navigation target to the file its card should open.
+    Precedence is strict: the stored conversation id resolves ONLY to its CURRENT
+    (non-archived) generation — never to a folded predecessor — so a migrated
+    attempt opens the live card; an id that survives only as an archived
+    predecessor (its successor left the scan) yields nothing and the target then
+    evaluates its `agentPath` fallback. A path-only attempt (no adopted id) and a
+    recorded path that itself became an archived predecessor both resolve through
+    `agentPath`, which redirects a folded path to its live generation. Returns
+    null when nothing in the scanned file set matches yet — the caller leaves the
+    click a no-op rather than opening a stale transcript. */
+export function resolveStageNavFile(target: StageNavTarget | null, files: readonly FileEntry[]): FileEntry | null {
+  if (!target) return null;
+  if (target.conversationId) {
+    /* Only a live (non-archived) generation counts; currentConversationFile
+       falls back to the archived predecessor when no successor is in scan, so
+       reject that here and let agentPath take over. */
+    const current = currentConversationFile(files, target.conversationId);
+    if (current && !isArchivedPredecessor(current)) return current;
+  }
+  if (target.agentPath) {
+    const path = currentMemberPath(target.agentPath, null, files);
+    if (path) return files.find((entry) => entry.path === path) ?? null;
+  }
+  return null;
 }
 
 /** Resolve compact history after pipeline review decks leave the board. */

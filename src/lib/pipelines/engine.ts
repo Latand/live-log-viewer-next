@@ -1194,6 +1194,31 @@ async function tickPipeline(pipeline: Pipeline, entries: FileEntry[], ports: Pip
 }
 
 const tickStore = globalThis as unknown as { __llvPipelineTick?: boolean };
+const REOPENED_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
+  "waiting_ready",
+  "spawn_pending",
+  "spawning",
+  "reviewing",
+  "relay_pending",
+  "relaying",
+  "fixing",
+  "approved",
+]);
+
+function resumeReopenedReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boolean {
+  if (pipeline.state !== "needs_decision") return false;
+  const stage = currentStage(pipeline);
+  if (stage?.kind !== "review-loop") return false;
+  const attempt = currentAttempt(pipeline, stage.id);
+  const flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
+  if (!attempt?.error?.startsWith("review loop ended in ") || !flow || !REOPENED_REVIEW_FLOW_STATES.has(flow.state)) return false;
+  pipeline.state = "running";
+  pipeline.stateDetail = null;
+  attempt.state = "reviewing";
+  attempt.error = null;
+  setCursorState(pipeline, stage.id, "reviewing");
+  return true;
+}
 
 export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts = defaultPipelinePorts()): Promise<{ pipelines: Pipeline[]; changed: boolean }> {
   if (tickStore.__llvPipelineTick) return { pipelines: [], changed: false };
@@ -1206,6 +1231,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         let pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports);
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
+        pipelineChanged = resumeReopenedReviewFlow(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
           pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
         }
