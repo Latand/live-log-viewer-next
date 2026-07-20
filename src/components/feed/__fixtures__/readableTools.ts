@@ -118,22 +118,45 @@ export const nestedParent = toolEvent({
   summary: "npm run dev",
   command: "npm run dev",
   cwd: "/workspace/app",
+  session: "8479",
   outputPreview: "starting dev server",
 });
+/** A wait that surfaced real output: a poll, but never collapsed — its captured
+    line stays readable in its own follow-up row (issue #497). */
 export const nestedWait = toolEvent({
   id: "wait-1",
   tool: "wait",
   summary: "wait · 8479",
   statusLabel: "waiting 10s",
+  session: "8479",
+  poll: true,
   outputPreview: "compiled successfully",
 });
+/** A bare empty poll: no keystrokes, no output — the row that collapses. */
 export const nestedPoll = toolEvent({
   id: "poll-1",
   tool: "write_stdin",
   summary: "stdin → 8479 · poll",
   statusLabel: "waiting 5s",
+  session: "8479",
+  poll: true,
+  durationMs: 5000,
   outputPreview: "",
 });
+/** A write_stdin carrying real keystrokes: never a poll, keeps its session. */
+export const nestedKeystroke = toolEvent({
+  id: "keys-1",
+  tool: "write_stdin",
+  summary: "stdin → 8479 · y⏎",
+  session: "8479",
+  outputPreview: "",
+});
+
+/** An empty poll builder for a collapsing run: each carries the shared session
+    and a wall-time, but no output — the row the group must coalesce (#497). */
+export function emptyPoll(id: string, over: Partial<ToolEvent> = {}): ToolEvent {
+  return toolEvent({ id, tool: "wait", summary: "wait · 8479", session: "8479", poll: true, durationMs: 5000, outputPreview: "", statusLabel: "waiting 5s", ...over });
+}
 
 /** A cmd-group carrying the nested exec/wait/poll run plus a standalone read. */
 export function nestedGroup(over: Partial<CmdGroupItem> = {}): CmdGroupItem {
@@ -146,6 +169,35 @@ export function nestedGroup(over: Partial<CmdGroupItem> = {}): CmdGroupItem {
     t1: "2026-07-10T10:00:20Z",
     byTool: { exec_command: 1, wait: 1, write_stdin: 1, Read: 1 },
     okCount: 4,
+    errCount: 0,
+    hasErr: false,
+    active: false,
+    ...over,
+  };
+}
+
+/** A poll-dominated interactive run (issue #497 production evidence): one exec
+    parent trailed by six empty polls that must coalesce into one compact counted
+    row, with a keystroke write_stdin still readable at the tail. */
+export function pollHeavyGroup(over: Partial<CmdGroupItem> = {}): CmdGroupItem {
+  const calls = [
+    nestedParent,
+    emptyPoll("p1"),
+    emptyPoll("p2"),
+    emptyPoll("p3"),
+    emptyPoll("p4"),
+    emptyPoll("p5"),
+    emptyPoll("p6"),
+    nestedKeystroke,
+  ];
+  return {
+    kind: "cmd-group",
+    ids: calls.map((c) => c.id),
+    calls,
+    t0: calls[0].ts,
+    t1: "2026-07-10T10:00:40Z",
+    byTool: { exec_command: 1, wait: 6, write_stdin: 1 },
+    okCount: 8,
     errCount: 0,
     hasErr: false,
     active: false,

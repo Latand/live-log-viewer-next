@@ -104,6 +104,11 @@ export type ToolEvent = {
       its args. Lets the readable group fold each follow-up under the exec that
       actually owns its session, even when several sessions interleave (#475). */
   session?: string;
+  /** A bare interactive poll: a `wait`, or a `write_stdin` that sent no
+      keystrokes. Empty consecutive polls collapse into one compact counted row
+      so a long-running command's tail does not dominate the feed (#497). A
+      `write_stdin` carrying real characters is a keystroke, never a poll. */
+  poll?: boolean;
   open: boolean;
   orchestration?: Orchestration;
   /** Present on a `ScheduleWakeup` call: drives the dedicated wakeup card. */
@@ -1200,6 +1205,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const body: ToolBody | undefined = diff && diff.files.length ? { type: "diff", files: diff.files, filesTruncated: diff.filesTruncated } : undefined;
     const command = opts.command !== undefined ? redactSecrets(opts.command).slice(0, COMMAND_MAX) : undefined;
     const summary = opts.summary !== undefined ? redactSecrets(opts.summary).replace(/\s+/g, " ").trim().slice(0, 160) : s.summary;
+    /* A bare poll carries no keystrokes: every `wait`, and a `write_stdin` whose
+       `chars` payload is the deliberately empty string (issue #497 / #141). */
+    const poll = opts.tool === "wait" || (opts.tool === "write_stdin" && !(typeof args.chars === "string" && args.chars.length > 0));
     return {
       kind: "tool",
       id: opts.id,
@@ -1222,6 +1230,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         const session = sessionFromArgs(args);
         return { ...(cwd ? { cwd } : {}), ...(session !== undefined ? { session } : {}) };
       })() : {}),
+      ...(poll ? { poll: true } : {}),
       /* An edit/write card opens its structured diff inline by default — a
          compact preview of the first lines, with a toggle for the rest — so the
          change is visible without a click (issue #90). */

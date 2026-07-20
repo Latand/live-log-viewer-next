@@ -9,7 +9,7 @@ import { hhmm } from "../../utils";
 import { CopyButton } from "../CopyButton";
 import { tr, type ToolEvent } from "../parse";
 import type { ArgChip } from "../tools";
-import { formatDuration } from "../toolBlocks";
+import { formatDuration, isFollowUpCall } from "../toolBlocks";
 import { useRawLine } from "../rawLine";
 import { DiffCard } from "./DiffCard";
 import { OrchestrationCard } from "./OrchestrationCard";
@@ -142,7 +142,12 @@ function RawRecord({ event }: { event: ToolEvent }) {
    collapsed transcript keeps its DOM small (issue #9 §7/§8). */
 export function ToolBody({ event }: { event: ToolEvent }) {
   const hasDiff = event.body?.type === "diff";
-  const showOutput = !hasDiff || Boolean(event.outputPreview.trim());
+  /* An interactive follow-up (wait/write_stdin) that captured nothing carries no
+     output, source, or raw record worth a card: hide those empty fields so it
+     never shows an apology chip or a dead raw-record toggle (issue #497). A
+     follow-up that surfaced output, or failed, keeps its full readable body. */
+  const emptyFollowUp = isFollowUpCall(event) && !event.outputPreview.trim() && event.stderr === undefined && event.status !== "err";
+  const showOutput = !emptyFollowUp && (!hasDiff || Boolean(event.outputPreview.trim()));
   return (
     <div className="mb-1 mt-1 rounded-surface bg-sunken px-3 py-2.5">
       <ToolChips chips={event.chips} />
@@ -169,7 +174,24 @@ export function ToolBody({ event }: { event: ToolEvent }) {
           emptyLabel={tr("tools.noStderr")}
         />
       ) : null}
-      <RawRecord event={event} />
+      {emptyFollowUp ? null : <RawRecord event={event} />}
+    </div>
+  );
+}
+
+/** A coalesced run of consecutive empty interactive polls, rendered as one quiet
+    counted row instead of N signal-free cards (issue #497). It keeps the shared
+    session identity and the summed elapsed wall-time, so an operator still reads
+    "how long the command was polled" without scrolling past every tick. */
+export function PollRow({ events, session, elapsedMs }: { events: ToolEvent[]; session?: string; elapsedMs?: number }) {
+  const count = events.length;
+  const elapsed = typeof elapsedMs === "number" && elapsedMs > 0 ? formatDuration(elapsedMs) : "";
+  const detail = [tr("tools.pollRun", { count }), session ? `→ ${session}` : "", elapsed].filter(Boolean).join(" · ");
+  return (
+    <div className="flex items-center gap-2 rounded-control py-0.5 text-ui text-muted/80">
+      <span className="shrink-0 select-none text-muted" aria-hidden>↳</span>
+      <GlyphIcon name="clock" className="h-3.5 w-3.5 shrink-0" />
+      <span className="min-w-0 flex-1 truncate tabular-nums text-caption">{detail}</span>
     </div>
   );
 }

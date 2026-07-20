@@ -57,6 +57,49 @@ export function groupNestedCalls(calls: readonly ToolEvent[]): ToolBlock[] {
   return blocks;
 }
 
+/* A poll worth collapsing (issue #497): a bare `wait`/empty `write_stdin` that
+   captured nothing worth a full card — no output, no stderr, and not an error.
+   A poll that surfaced output (e.g. a `wait` that returned "ready") or failed
+   keeps its own readable row so nothing meaningful is ever hidden. */
+export function isCollapsiblePoll(event: ToolEvent): boolean {
+  return event.poll === true && event.status !== "err" && !event.outputPreview.trim() && event.stderr === undefined;
+}
+
+/** One rendered child under an exec block: either a full follow-up call row, or
+    a coalesced run of consecutive empty polls shown as one compact counted row
+    (issue #497). */
+export type ToolChild =
+  | { kind: "call"; event: ToolEvent }
+  | { kind: "polls"; events: ToolEvent[]; session?: string; elapsedMs?: number };
+
+/**
+ * Folds a block's flat follow-up children into render children: consecutive
+ * collapsible polls coalesce into one `polls` run that carries the shared
+ * session and the summed elapsed wall-time, while a keystroke `write_stdin` or a
+ * poll that captured output stays its own readable `call` (issue #497). A single
+ * empty poll still collapses — a run of one — so its empty output/raw-record
+ * fields never render.
+ */
+export function coalesceFollowUps(children: readonly ToolEvent[]): ToolChild[] {
+  const out: ToolChild[] = [];
+  for (const event of children) {
+    if (isCollapsiblePoll(event)) {
+      const last = out[out.length - 1];
+      const ms = typeof event.durationMs === "number" && Number.isFinite(event.durationMs) ? event.durationMs : 0;
+      if (last && last.kind === "polls") {
+        last.events.push(event);
+        if (last.session === undefined && event.session !== undefined) last.session = event.session;
+        last.elapsedMs = (last.elapsedMs ?? 0) + ms;
+        continue;
+      }
+      out.push({ kind: "polls", events: [event], session: event.session, elapsedMs: ms });
+      continue;
+    }
+    out.push({ kind: "call", event });
+  }
+  return out;
+}
+
 /** Human wall-clock duration: sub-second in ms, then `N.Ns`, then `Mm Ss`. */
 export function formatDuration(ms: number): string {
   const locale = getLocale();

@@ -811,6 +811,7 @@ export const en = {
   "tools.noOutputTip": "the full output lives in the rollout session",
   "tools.stdin": "stdin",
   "tools.stdinPoll": "poll",
+  "tools.pollRun": { one: "{count} poll", other: "{count} polls" },
   "tools.wait": "wait",
   "tools.session": "session",
   "tools.waitingSeconds": "waiting {n}s",

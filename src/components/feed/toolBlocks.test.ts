@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
-import { toolEvent } from "./__fixtures__/readableTools";
-import { formatDuration, groupNestedCalls, isFollowUpCall } from "./toolBlocks";
+import { emptyPoll, toolEvent } from "./__fixtures__/readableTools";
+import { coalesceFollowUps, formatDuration, groupNestedCalls, isCollapsiblePoll, isFollowUpCall } from "./toolBlocks";
 
 test("wait and write_stdin are follow-ups; a plain exec is not", () => {
   expect(isFollowUpCall(toolEvent({ tool: "wait" }))).toBe(true);
@@ -59,6 +59,56 @@ test("a follow-up whose session matches no exec stays standalone", () => {
   expect(blocks.map((b) => b.parent.id)).toEqual(["eA", "wOrphan"]);
   expect(blocks[0].children.map((c) => c.id)).toEqual(["wA"]);
   expect(blocks[1].children).toHaveLength(0);
+});
+
+test("only a bare empty poll is collapsible — keystrokes, output, and errors are not", () => {
+  // A wait/empty write_stdin with no captured output collapses.
+  expect(isCollapsiblePoll(emptyPoll("p1"))).toBe(true);
+  expect(isCollapsiblePoll(toolEvent({ tool: "write_stdin", poll: true, outputPreview: "" }))).toBe(true);
+  // A poll that surfaced output stays a full readable row.
+  expect(isCollapsiblePoll(emptyPoll("p2", { outputPreview: "ready" }))).toBe(false);
+  // A keystroke write_stdin is never a poll.
+  expect(isCollapsiblePoll(toolEvent({ tool: "write_stdin", poll: false, outputPreview: "" }))).toBe(false);
+  // A failed poll keeps its own row so the failure is never hidden.
+  expect(isCollapsiblePoll(emptyPoll("p3", { status: "err", statusLabel: "exit 1" }))).toBe(false);
+  // A poll that carries a stderr stream is not collapsed.
+  expect(isCollapsiblePoll(emptyPoll("p4", { stderr: "boom" }))).toBe(false);
+  // A plain exec is never a poll.
+  expect(isCollapsiblePoll(toolEvent({ tool: "Bash" }))).toBe(false);
+});
+
+test("consecutive empty polls coalesce into one counted run with summed elapsed", () => {
+  const children = [emptyPoll("p1"), emptyPoll("p2"), emptyPoll("p3")];
+  const out = coalesceFollowUps(children);
+  expect(out).toHaveLength(1);
+  expect(out[0].kind).toBe("polls");
+  if (out[0].kind !== "polls") throw new Error("expected a polls run");
+  expect(out[0].events).toHaveLength(3);
+  expect(out[0].session).toBe("8479");
+  // Each fixture poll carries a 5s wall-time; the run sums them.
+  expect(out[0].elapsedMs).toBe(15000);
+});
+
+test("keystrokes and output-bearing waits break the poll run and stay their own rows", () => {
+  const children = [
+    emptyPoll("p1"),
+    emptyPoll("p2"),
+    toolEvent({ id: "k1", tool: "write_stdin", poll: false, summary: "stdin → 8479 · y⏎" }),
+    emptyPoll("p3"),
+    emptyPoll("p4", { outputPreview: "ready" }),
+    emptyPoll("p5"),
+  ];
+  const out = coalesceFollowUps(children);
+  // run(p1,p2) · call(k1) · run(p3) · call(p4 with output) · run(p5)
+  expect(out.map((c) => c.kind)).toEqual(["polls", "call", "polls", "call", "polls"]);
+  if (out[0].kind !== "polls") throw new Error("expected a polls run");
+  expect(out[0].events.map((e) => e.id)).toEqual(["p1", "p2"]);
+});
+
+test("a single empty poll still collapses — a run of one, so its empty body never renders", () => {
+  const out = coalesceFollowUps([emptyPoll("solo")]);
+  expect(out).toHaveLength(1);
+  expect(out[0].kind).toBe("polls");
 });
 
 test("formatDuration scales from ms to seconds to minutes", () => {
