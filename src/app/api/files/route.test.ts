@@ -179,7 +179,7 @@ test("a restart serves the persisted completed snapshot while revalidating", asy
   };
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
     version: 1,
-    schemaVersion: 8,
+    schemaVersion: 9,
     snapshot: persistedSnapshot,
   }));
   resetFilesRouteCacheForTests();
@@ -199,7 +199,7 @@ test("a restart serves the persisted completed snapshot while revalidating", asy
 test("a current scan joins restart revalidation before publishing transcript metadata", async () => {
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
     version: 1,
-    schemaVersion: 8,
+    schemaVersion: 9,
     snapshot: {
       files: [file("/sessions/persisted-resource.jsonl")],
       projectCatalog: [],
@@ -635,7 +635,7 @@ test("a fresh resource snapshot replaces stale process and pane observations bef
 test("a client automatically converges from a persisted restart snapshot to its completed generation", async () => {
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
     version: 1,
-    schemaVersion: 8,
+    schemaVersion: 9,
     snapshot: {
       files: [file("/sessions/persisted-client.jsonl")],
       projectCatalog: [],
@@ -673,7 +673,7 @@ test("a restart hydrates a persisted 7700-row snapshot within two seconds", asyn
   const files = Array.from({ length: 7_700 }, (_, index) => file(`/sessions/persisted-${index}.jsonl`));
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
     version: 1,
-    schemaVersion: 8,
+    schemaVersion: 9,
     snapshot: { files, projectCatalog: [], complete: true },
   }));
   resetFilesRouteCacheForTests();
@@ -697,7 +697,7 @@ test("a corrupt completed snapshot falls back to a cold scan and repairs persist
   expect(scans).toBe(1);
   const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "files-scan-snapshot.json"), "utf8"));
   expect(persisted.version).toBe(1);
-  expect(persisted.schemaVersion).toBe(8);
+  expect(persisted.schemaVersion).toBe(9);
 });
 
 test("repeated first-ever incomplete scans stay unpublished until recovery", async () => {
@@ -762,7 +762,7 @@ test("snapshot publication failures preserve the canonical file, clean temps, st
   const snapshotPath = path.join(stateDir, "files-scan-snapshot.json");
   const canonical = JSON.stringify({
     version: 1,
-    schemaVersion: 8,
+    schemaVersion: 9,
     snapshot: {
       files: [file("/sessions/canonical.jsonl")],
       projectCatalog: [],
@@ -1930,6 +1930,56 @@ test("lineage projection uses one registry revision during provisional parent ad
   expect(projectedChild?.parent).toBe(parentPath);
   expect(projectedChild?.parentRemoved).toBeUndefined();
   expect(originalSnapshot().conversationAliases[provisionalParent.id]).toBe(canonicalParent.id);
+});
+
+test("a Viewer root with three engine-native children projects viewer/engine provenance and three parent links (issue #339)", async () => {
+  const registry = agentRegistry();
+  const parentSid = "019f4906-3f67-\x37b72-9fbc-9ec3b5ad2001";
+  const parentPath = `/sessions/rollout-2026-07-20-${parentSid}.jsonl`;
+  const childSids = [
+    "019f4906-3f67-\x37b72-9fbc-9ec3b5ad2002",
+    "019f4906-3f67-\x37b72-9fbc-9ec3b5ad2003",
+    "019f4906-3f67-\x37b72-9fbc-9ec3b5ad2004",
+  ];
+  const childPaths = childSids.map((sid) => `/sessions/rollout-2026-07-20-${sid}.jsonl`);
+
+  // The Viewer launch settles a spawn receipt onto the root conversation, so the
+  // root is receipt-owned even though it carries no parent lineage edge.
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: null });
+  if (begun.kind !== "created") throw new Error("expected create");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: parentSid },
+    artifactPath: parentPath,
+    cwd: "/repo",
+    accountId: null,
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  // Three engine-native children observed in one inventory cycle, each carrying
+  // only its path-derived parent (no pre-resolved parentConversationId).
+  registry.reconcileConversations(childPaths.map((childPath) => ({
+    engine: "codex" as const,
+    path: childPath,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    turn: { state: "idle" as const, source: "empty" as const, terminalAt: null },
+    observedAt: "2026-07-20T12:00:00.000Z",
+    parentArtifactPath: parentPath,
+  })));
+
+  scannedFiles = [file(parentPath), ...childPaths.map((childPath) => file(childPath))];
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+
+  expect(Object.values(registry.snapshot().conversations)).toHaveLength(4);
+  expect(body.files.find((entry) => entry.path === parentPath)?.spawnOrigin).toBe("viewer");
+  const children = childPaths.map((childPath) => body.files.find((entry) => entry.path === childPath));
+  expect(children.map((child) => child?.spawnOrigin)).toEqual(["engine", "engine", "engine"]);
+  expect(children.map((child) => child?.parent)).toEqual([parentPath, parentPath, parentPath]);
 });
 
 test("a custom session title (issue #33) overrides the derived title and keeps it as autoTitle", async () => {

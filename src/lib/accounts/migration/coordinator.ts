@@ -136,6 +136,12 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
         plan: entry.plan ?? currentProfile?.plan ?? null,
       }),
       turn,
+      // Path-derived engine-native parent (issue #339). The scanner already
+      // resolved `entry.parent` from the subagent path grammar; carrying it as
+      // an explicit observation field lets registry reconciliation establish the
+      // lineage edge against the post-admission index, even for a parent first
+      // discovered in this same inventory cycle.
+      parentArtifactPath: entry.parent,
       expectedTurnObservedAt: existing?.turn.observedAt ?? null,
       startedAt: entry.sessionStartedAt ?? headSessionStartedAt(entry.path, transcriptIdentity),
       observedAt: !observedTurn.complete && existing?.turn.observedAt

@@ -77,6 +77,12 @@ export interface FileEntry {
   parent: string | null;
   /** Durable lineage tombstone when the parent conversation transcript is gone. */
   parentRemoved?: { conversationId: string; path: string | null };
+  /** How this conversation came to exist (issue #339 board provenance):
+      `viewer` for preallocated spawn cards, receipt-owned conversations and
+      `viewer-spawn` lineage edges; `engine` for engine-native subagent edges.
+      A Viewer root carries `viewer` provenance even though it has no parent
+      edge. Unattributed external roots stay undefined. */
+  spawnOrigin?: "viewer" | "engine";
   /** Unix seconds. */
   mtime: number;
   size: number;

@@ -63,7 +63,9 @@ const FILE_SCAN_PIN_CACHE_MAX = 8;
 // v8: lastTurn boundaries follow the shared meta/command classification
 // (issue #406) — persisted v7 snapshots carry windows opened by meta records
 // and must be recomputed.
-const FILE_SCAN_CACHE_SCHEMA_VERSION = 8 as const;
+// Bumped to 9 for issue #339: engine-native subagent titles/lineage and the
+// `spawnOrigin` provenance marker must not replay from a pre-#339 snapshot.
+const FILE_SCAN_CACHE_SCHEMA_VERSION = 9 as const;
 const FILE_SCAN_SNAPSHOT_VERSION = 1 as const;
 const FILE_SCAN_SNAPSHOT_FILE = "files-scan-snapshot.json";
 const FILE_SCAN_PERSISTENCE_DIAGNOSTIC_MS = 60_000;

@@ -725,7 +725,7 @@ test("a corrupt per-file scanner index falls back to a full parse and repairs it
 
     expect(recovered.files.find((entry) => entry.path === transcript)?.title).toBe("Recovered summary");
     const persisted = JSON.parse(await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8"));
-    expect(persisted.files[transcript]).toMatchObject({ summaryVersion: 2, title: "Recovered summary" });
+    expect(persisted.files[transcript]).toMatchObject({ summaryVersion: 3, title: "Recovered summary" });
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;

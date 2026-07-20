@@ -4,6 +4,7 @@ import { headCwd, slugifyCwd } from "@/lib/agent/transcript";
 
 import type { FileEntry } from "../types";
 import { globalCache } from "./caches";
+import { claudeSubagentParentPath } from "./claudeNative";
 import {
   agentProcesses,
   argvEngine,
@@ -48,16 +49,15 @@ export function transcriptEngine(pathname: string): AgentEngine | null {
   return null;
 }
 
-/** Returns the top-level Claude session that owns a direct subagent
- * transcript. Claude writes the child through this session's process. */
+/** Returns the top-level Claude session that owns a subagent transcript,
+ * covering both the direct `subagents/agent-*.jsonl` layout and the nested
+ * Workflow `subagents/**​/agent-*.jsonl` layout (issue #339). Claude writes the
+ * child through this session's process, so the owner is always the root parent
+ * transcript regardless of nesting depth. */
 export function claudeSubagentOwnerPath(pathname: string, knownRoot?: string | null): string | null {
   const root = knownRoot === undefined ? claudeProjectRootFor(pathname) : knownRoot;
   if (!root) return null;
-  const relative = path.relative(root, pathname);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
-  const parts = relative.split(path.sep);
-  if (parts.length !== 4 || parts[2] !== "subagents" || !pathname.endsWith(".jsonl")) return null;
-  return path.join(root, parts[0], `${parts[1]}.jsonl`);
+  return claudeSubagentParentPath(root, pathname);
 }
 
 /**

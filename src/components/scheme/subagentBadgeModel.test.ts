@@ -106,6 +106,42 @@ test("subagentsOf returns direct lineage children with active spawn order before
   ]);
 });
 
+test("a live engine-native Workflow child renders as a titled badge under its parent (issue #339)", () => {
+  const parent = entry({ path: "/proj/parent.jsonl", conversationId: "parent", engine: "claude", fmt: "claude", root: "claude-projects" });
+  const workflowChild = entry({
+    path: "/proj/parent/subagents/workflows/wf-1/agent-abc.jsonl",
+    conversationId: "wf-child",
+    parent: parent.path,
+    engine: "claude",
+    fmt: "claude",
+    root: "claude-projects",
+    kind: "subagent",
+    title: "Audit the synthetic config loader",
+    activity: "live",
+    proc: "running",
+    spawnOrigin: "engine",
+    durableLineage: {
+      kind: "spawn",
+      role: null,
+      parentConversationId: "parent",
+      reviewsConversationId: null,
+      memberships: [],
+    },
+  });
+
+  expect(subagentsOf("parent", [parent, workflowChild])).toEqual([
+    {
+      id: "wf-child",
+      path: "/proj/parent/subagents/workflows/wf-1/agent-abc.jsonl",
+      title: "Audit the synthetic config loader",
+      engine: "claude",
+      model: null,
+      state: "running",
+      avatarSeed: "wf-child",
+    },
+  ]);
+});
+
 test("subagentsOf carries the current non-archived generation path for navigation", () => {
   const parent = entry({ path: "/parent", conversationId: "parent" });
   /* Two live generations of one child share a conversation id; the stale one
