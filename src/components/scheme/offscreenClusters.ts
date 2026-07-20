@@ -147,7 +147,7 @@ export function boardClusters(
     if (!favorite && !isCurrentWorkFile(node.file)) continue;
     clusters.push({
       key: node.file.path,
-      label: cleanTitle(node.file.title, 48),
+      label: cleanTitle(node.file.title),
       rect: node,
       priority: isCurrentWorkFile(node.file) ? 4 : 2,
       color: node.file.engine === "codex" ? "var(--color-codex)" : "var(--color-claude)",

@@ -31,6 +31,22 @@ describe("board clusters", () => {
     expect(clusters.map((cluster) => cluster.key)).toEqual(["/live.jsonl"]);
     expect(clusters.some((cluster) => cluster.key.startsWith("task::"))).toBe(false);
   });
+
+  test("keeps title text beyond the resting chip segment for progressive reveal", () => {
+    const title = "Repair durable pipeline ownership while preserving every queued reviewer conversation title";
+    const live: FileEntry = {
+      path: "/long-title.jsonl", root: "codex-sessions", name: "long-title.jsonl", project: "project", title,
+      engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 1, activity: "live",
+      proc: "running", pid: 1, model: null, pendingQuestion: null, waitingInput: null,
+    };
+    const layout = {
+      groups: [],
+      nodes: [{ x: 0, y: 0, w: 600, h: 780, file: live, isRoot: true }],
+      stacks: [], decks: [], drafts: [], slots: [],
+    } as unknown as SchemeLayout;
+
+    expect(boardClusters(layout, new Set<string>())[0]?.label).toBe(title);
+  });
 });
 
 describe("offscreen cluster chips", () => {
