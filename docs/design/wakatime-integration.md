@@ -403,12 +403,11 @@ exists for deterministic tests and module replacement during development.
 | setting | precedence and effect |
 |---|---|
 | `LLV_WAKATIME_ENABLED=1` | Process-start opt-in. Any other value leaves the module unloaded. |
-| `WAKATIME_API_KEY` | Highest-priority credential, synchronously captured into integration-owned memory and removed from the ambient environment. |
-| `~/.config/agent-log-viewer/wakatime-api-key` | File fallback through `configFilePath("wakatime-api-key")`; the legacy app config path remains available through the existing resolver. |
+| `~/.config/agent-log-viewer/wakatime-api-key` | Sole credential source through `configFilePath("wakatime-api-key")`; the file must open directly as a regular file with exact mode `0600`, symlinks are rejected, and the legacy app config path remains available through the existing resolver. |
 
 The key file is read at delivery time, so a drop-in or replacement can recover
-an auth circuit without restarting the viewer. A replacement environment value
-installed in the running server is captured and removed on the next tick.
+an auth circuit without restarting the viewer. Viewer entrypoints discard the
+unsupported `WAKATIME_API_KEY` environment variable without reading it.
 
 The implementation never reads `~/.wakatime.cfg`. That file belongs to
 WakaTime's CLI and editor plugins. The MVP also has a fixed HTTPS origin.
@@ -532,8 +531,8 @@ Implementation includes:
 1. `docs/wakatime.md` with setup, data disclosure, key-file permissions,
    forward-only first enable, disablement, dashboard verification, retry
    behavior, state backup, and the 25-event crash replay limitation;
-2. `ARCHITECTURE.md` environment-contract rows for
-   `LLV_WAKATIME_ENABLED` and `WAKATIME_API_KEY`/key-file fallback;
+2. `ARCHITECTURE.md` environment-contract documentation for
+   `LLV_WAKATIME_ENABLED` and file-only credential delivery;
 3. an update to the architecture's external-service constraint describing
    local filesystem authority plus explicit opt-in outbound integrations;
 4. the non-draft PR description with `Closes #473`, verification evidence,
@@ -587,7 +586,7 @@ Deferred:
 | issue #473 criterion | design closure |
 |---|---|
 | Stable project, entity, language/category, and time semantics | Canonical project attribution, digest-scoped per-turn app entities, a reserved boundary project, omitted unsupported language, `ai coding`, deterministic sampling, and same-project overlap union. |
-| Credential privacy | Server-owned env capture, child-environment isolation, key-file lookup, header-only Basic auth, fixed HTTPS endpoint, secret-free state/logs/tests/browser surfaces, and the unchanged privacy gate. |
+| Credential privacy | File-only `0600` credential delivery, filtered child and snapshot environments, discard-without-read startup handling, header-only Basic auth, fixed HTTPS endpoint, secret-free state/logs/tests/browser surfaces, and the unchanged privacy gate. |
 | Duplicate, restart, idle, failure, retry, batching, and rate-limit behavior | Durable stream cursors and outbox, explicit 25-event crash replay window, liveness-frozen open turns, itemized bulk acknowledgments, failure matrix, one 25-record batch per tick, and durable jittered backoff. |
 | Viewer responsiveness during WakaTime failure | Traffic-owned unref'd scheduler, shared scan generations, single-flight ticks, five-second fetch deadline, bounded outbox, and swallowed module-local failures. |
 | Focused behavioral tests and operator documentation | Scanner, sync, bootstrap, privacy, retry, and overflow coverage plus `docs/wakatime.md` and environment-contract updates. |

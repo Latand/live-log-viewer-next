@@ -7,6 +7,7 @@ import { sessionKeyId } from "@/lib/agent/sessionKey";
 import { VIEWER_SPAWN_CAPABILITY_ENV } from "@/lib/agent/spawnPolicy";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { readStableTailRecords } from "@/lib/scanner/activity";
+import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import {
   adoptClaudeRegistryHosts,
@@ -226,6 +227,7 @@ export async function adoptStructuredHostsAtStartup(
     accountManager.resolveTranscriptOwner("codex", entry.artifactPath));
   const resolveClaudeOwner = dependencies.resolveClaudeOwner ?? ((entry: AgentRegistryEntry) =>
     accountManager.resolveTranscriptOwner("claude", entry.artifactPath));
+  const startupEnvironment = withoutWakatimeCredential(process.env);
   const codex = await (dependencies.adopt ?? adoptCodexRegistryHosts)(
     registry,
     (entry) => {
@@ -237,10 +239,13 @@ export async function adoptStructuredHostsAtStartup(
         fileAuthCredentials: owner?.kind === "managed",
         model: entry.launchProfile?.model ?? undefined,
         effort: entry.launchProfile?.effort ?? undefined,
-        ...(capability ? { env: { ...process.env, [VIEWER_SPAWN_CAPABILITY_ENV]: capability } } : {}),
+        env: {
+          ...startupEnvironment,
+          ...(capability ? { [VIEWER_SPAWN_CAPABILITY_ENV]: capability } : {}),
+        },
       };
     },
-    process.env,
+    startupEnvironment,
     shouldAdopt,
   );
   nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, codex);
@@ -250,9 +255,8 @@ export async function adoptStructuredHostsAtStartup(
     (entry) => {
       const owner = resolveClaudeOwner(entry);
       const capability = registry.rotateSpawnCapabilityForPath(entry.artifactPath);
-      const env: NodeJS.ProcessEnv | undefined = capability
-        ? Object.assign({} as NodeJS.ProcessEnv, owner?.env, { [VIEWER_SPAWN_CAPABILITY_ENV]: capability })
-        : owner?.env;
+      const env = withoutWakatimeCredential(owner?.env ?? startupEnvironment);
+      if (capability) env[VIEWER_SPAWN_CAPABILITY_ENV] = capability;
       return {
         cwd: entry.cwd,
         claudeConfigDir: owner?.kind === "managed" ? owner.home : undefined,
@@ -265,7 +269,7 @@ export async function adoptStructuredHostsAtStartup(
         permissionMode: entry.launchProfile?.permissionMode ?? undefined,
       };
     },
-    process.env,
+    startupEnvironment,
     shouldAdopt,
   );
   nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, claude);

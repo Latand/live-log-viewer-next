@@ -3,7 +3,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { expect, test } from "bun:test";
 
-import { viewerServerBunRuntime } from "./server-runtime.mjs";
+import {
+  viewerServerBunRuntime,
+  WAKATIME_CREDENTIAL_ENV,
+  withoutWakatimeCredential,
+} from "./server-runtime.mjs";
 
 test("structured hosts select Bun for a CLI process launched by Node", () => {
   expect(viewerServerBunRuntime({
@@ -41,4 +45,22 @@ test("legacy Node mode stays available when Bun-only features are disabled", () 
     versions: { node: "20.9.0" },
     execPath: "/usr/bin/node",
   })).toBeNull();
+});
+
+test("Viewer child processes receive no ambient WakaTime key material", () => {
+  const placeholder = ["child", "fixture", "value"].join("-");
+  const env = withoutWakatimeCredential({
+    PATH: process.env.PATH,
+    KEEP_ME: "kept",
+    [WAKATIME_CREDENTIAL_ENV]: placeholder,
+  });
+  const probe = Bun.spawnSync([
+    process.execPath,
+    "--eval",
+    "process.stdout.write(JSON.stringify({ keep: process.env.KEEP_ME, key: process.env.WAKATIME_API_KEY ?? null }))",
+  ], { env, stdout: "pipe", stderr: "pipe" });
+
+  expect(probe.exitCode).toBe(0);
+  expect(JSON.parse(probe.stdout.toString())).toEqual({ keep: "kept", key: null });
+  expect(JSON.stringify(env)).not.toContain(placeholder);
 });

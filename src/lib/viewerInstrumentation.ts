@@ -4,6 +4,7 @@ import { statePath } from "@/lib/configDir";
 import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { markStructuredHostStartupFailed, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
+import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential";
 
 /*
  * The Viewer's node-side startup runtime. This module (and everything it pulls
@@ -175,6 +176,7 @@ export async function runStructuredHostStartup(
 
 /** The full node-runtime startup sequence `src/instrumentation.ts` defers to. */
 export async function registerViewerRuntime(): Promise<void> {
+  discardWakatimeEnvironmentCredential();
   await activateViewerRuntimeWhenCurrent(async () => {
     await initializeOperatorSpawnCapabilityAtStartup();
     await startWakatimeIntegrationIfEnabled();

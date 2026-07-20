@@ -6,8 +6,8 @@ WakaTime account. The integration starts only when the Viewer process has
 
 ## Setup
 
-Use the key file for routine installations. This keeps the credential out of
-shell history and process arguments.
+The key file is the supported credential source. This keeps the credential out
+of shell history, process arguments, and process environments.
 
 ```bash
 install -d -m 700 "${XDG_CONFIG_HOME:-$HOME/.config}/agent-log-viewer"
@@ -20,16 +20,17 @@ chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/agent-log-viewer/wakatime-api-key"
 ```
 
 Set `LLV_WAKATIME_ENABLED=1` in the environment that starts Agent Log Viewer,
-then restart the Viewer. `WAKATIME_API_KEY` can supply the key from a secret
-manager and takes precedence over the key file.
+then restart the Viewer. The Viewer accepts the key file only when it is a
+directly opened regular file with exact mode `0600`. Symlinks are rejected
+before credential bytes are read.
 
 The Viewer reads credentials in its Node process. It sends the key only in the
 HTTPS `Authorization` header for `api.wakatime.com`. Browser payloads, local
 state, request bodies, URLs, diagnostics, and transcripts exclude it. At
-startup the Viewer moves `WAKATIME_API_KEY` into integration-owned memory and
-deletes it from the ambient process environment before any agent, reviewer, or
-tmux pane starts. Replacing the environment value in a long-running server or
-replacing the key file is detected on the next delivery tick.
+startup the Viewer discards any legacy `WAKATIME_API_KEY` value without reading
+it, before any agent, reviewer, tmux pane, runtime host, or copied environment
+snapshot is created. Replacing the key file is detected on the next delivery
+tick.
 
 ## Activity mapping
 

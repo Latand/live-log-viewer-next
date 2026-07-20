@@ -244,7 +244,12 @@ export function reviewerCommand(
   return {
     command: resolveBinary("codex"),
     args,
-    env: reviewerEnvironment(codexAccount?.home ? { ...process.env, CODEX_HOME: codexAccount.home } : process.env, spawnCapability),
+    env: reviewerEnvironment(
+      codexAccount?.home
+        ? { ...withoutWakatimeCredential(process.env), CODEX_HOME: codexAccount.home }
+        : process.env,
+      spawnCapability,
+    ),
     stdin: fenceViewerSpawnPrompt("codex", reviewRequest),
     outputPath,
     sessionId: null,

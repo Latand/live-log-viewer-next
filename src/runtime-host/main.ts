@@ -1,14 +1,17 @@
-import { statePath } from "@/lib/configDir";
-import { procBackend } from "@/lib/proc";
-import { createServerRuntimeConsumers } from "@/lib/runtime/serverConsumers";
+import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential";
 
-import { RuntimeHost, RuntimeHostFence } from "./host";
-import { RuntimeJournal } from "./journal";
-import { createLegacyRuntimeScheduler } from "./legacyScheduler";
-import { serveRuntimeHost } from "./socket";
-import { ViewerDeploymentCoordinator } from "./deployment";
-import { HostCommandViewerDeploymentAdapter } from "./deploymentAdapter";
-import { serveViewerDeploymentProxy } from "./deploymentProxy";
+discardWakatimeEnvironmentCredential();
+
+const { statePath } = await import("@/lib/configDir");
+const { procBackend } = await import("@/lib/proc");
+const { createServerRuntimeConsumers } = await import("@/lib/runtime/serverConsumers");
+const { RuntimeHost, RuntimeHostFence } = await import("./host");
+const { RuntimeJournal } = await import("./journal");
+const { createLegacyRuntimeScheduler } = await import("./legacyScheduler");
+const { serveRuntimeHost } = await import("./socket");
+const { ViewerDeploymentCoordinator } = await import("./deployment");
+const { HostCommandViewerDeploymentAdapter } = await import("./deploymentAdapter");
+const { serveViewerDeploymentProxy } = await import("./deploymentProxy");
 
 const socketPath = process.env.LLV_RUNTIME_HOST_SOCKET || statePath("runtime-host.sock");
 if (process.env.LLV_RUNTIME_EVENTS !== "1") throw new Error("runtime host activation requires LLV_RUNTIME_EVENTS=1");

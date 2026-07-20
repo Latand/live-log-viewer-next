@@ -14,7 +14,11 @@ process.env.LLV_CLAUDE_HOME = path.join(sandbox, "claude");
 const { accountManager } = await import("./manager");
 const { codexAppServerEnvironment } = await import("./codexAppServer");
 const { claudeStatusEnvironment } = await import("./claudeLogin");
-const { WAKATIME_CREDENTIAL_ENV } = await import("../wakatime/credential");
+const {
+  discardWakatimeEnvironmentCredential,
+  WAKATIME_CREDENTIAL_ENV,
+  withoutWakatimeCredential,
+} = await import("../wakatime/credential");
 
 afterAll(() => {
   if (previousState === undefined) delete process.env.LLV_STATE_DIR;
@@ -58,4 +62,41 @@ test("Codex app-server children exclude the Viewer-owned WakaTime credential", (
     if (previous === undefined) Reflect.deleteProperty(process.env, WAKATIME_CREDENTIAL_ENV);
     else Reflect.set(process.env, WAKATIME_CREDENTIAL_ENV, previous);
   }
+});
+
+test("captured environment snapshots never read WakaTime key material", () => {
+  const placeholder = ["snapshot", "fixture", "value"].join("-");
+  let secretReads = 0;
+  const source = new Proxy<NodeJS.ProcessEnv>({ NODE_ENV: "test" }, {
+    ownKeys: () => ["NODE_ENV", WAKATIME_CREDENTIAL_ENV],
+    getOwnPropertyDescriptor: () => ({ configurable: true, enumerable: true }),
+    get: (target, property) => {
+      if (property === WAKATIME_CREDENTIAL_ENV) {
+        secretReads += 1;
+        return placeholder;
+      }
+      return Reflect.get(target, property);
+    },
+  });
+
+  const snapshot = withoutWakatimeCredential(source);
+
+  expect(secretReads).toBe(0);
+  expect(snapshot).toEqual({ NODE_ENV: "test" });
+  expect(JSON.stringify(snapshot)).not.toContain(placeholder);
+});
+
+test("startup discards the unsupported environment credential without reading it", () => {
+  const environment = new Proxy<NodeJS.ProcessEnv>({
+    NODE_ENV: "test",
+    [WAKATIME_CREDENTIAL_ENV]: "guarded",
+  }, {
+    get: (_target, property) => {
+      if (property === WAKATIME_CREDENTIAL_ENV) throw new Error("secret value was read");
+      return undefined;
+    },
+  });
+
+  expect(() => discardWakatimeEnvironmentCredential(environment)).not.toThrow();
+  expect(Object.hasOwn(environment, WAKATIME_CREDENTIAL_ENV)).toBe(false);
 });

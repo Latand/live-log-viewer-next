@@ -1,17 +1,21 @@
 export const WAKATIME_CREDENTIAL_ENV = "WAKATIME_API_KEY";
 
-/** Move the environment credential into server-owned memory. The deletion is
-    synchronous so later startup work cannot copy it into a child process. */
-export function takeWakatimeEnvironmentCredential(environment: NodeJS.ProcessEnv = process.env): string | null {
-  const value = environment[WAKATIME_CREDENTIAL_ENV]?.trim() || null;
+/** Discard the unsupported environment credential without materializing it. */
+export function discardWakatimeEnvironmentCredential(
+  environment: Record<string, string | undefined> = process.env,
+): void {
   delete environment[WAKATIME_CREDENTIAL_ENV];
-  return value;
 }
 
-/** Copy an environment for a child process while keeping the Viewer-owned
-    WakaTime credential inside the server process. */
-export function withoutWakatimeCredential(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env = { ...base };
-  delete env[WAKATIME_CREDENTIAL_ENV];
+/** Copy an environment while omitting the unsupported credential name before
+    its value can be read into the snapshot. */
+export function withoutWakatimeCredential(
+  base: Readonly<Record<string, string | undefined>>,
+): NodeJS.ProcessEnv {
+  const env = {} as NodeJS.ProcessEnv;
+  for (const key of Object.keys(base)) {
+    if (key === WAKATIME_CREDENTIAL_ENV) continue;
+    env[key] = base[key];
+  }
   return env;
 }

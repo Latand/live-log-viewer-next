@@ -8,7 +8,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { detectTailscale, getToken, readStatus, serve as serveTailscale, TailscaleError } from "./tailscale.mjs";
-import { viewerServerBunRuntime } from "./server-runtime.mjs";
+import {
+  discardWakatimeEnvironmentCredential,
+  viewerServerBunRuntime,
+  withoutWakatimeCredential,
+} from "./server-runtime.mjs";
+
+discardWakatimeEnvironmentCredential();
 
 const DEFAULT_PORT = 8898;
 const DEFAULT_HOSTNAME = "127.0.0.1";
@@ -250,7 +256,7 @@ function resolveServer(packageRoot) {
 
 function buildChildEnv(options, runtime) {
   const env = {
-    ...process.env,
+    ...withoutWakatimeCredential(process.env),
     PORT: String(options.port),
     // zsh exports HOSTNAME with the machine name on this user's machine; setting it here keeps standalone bound to the requested address.
     HOSTNAME: options.hostname,
