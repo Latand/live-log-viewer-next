@@ -43,6 +43,7 @@ let mobileViewport = false;
 const actualDeadline = await import("./composerAdmissionDeadline");
 mock.module("./composerAdmissionDeadline", () => ({
   ...actualDeadline,
+  COMPOSER_ADMISSION_DEADLINE_MS: 8,
   COMPOSER_RECEIPT_RECONCILIATION_MS: 40,
   COMPOSER_RECEIPT_POLL_INTERVAL_MS: 5,
 }));
@@ -106,6 +107,68 @@ async function untilSendEnabled(host: HTMLElement): Promise<void> {
   for (let attempt = 0; attempt < 100 && submitButton(host).disabled; attempt += 1) await sleep(3);
   expect(submitButton(host).disabled).toBe(false);
 }
+
+test("late receipt-free legacy success settles live-pane and resume generations once", async () => {
+  setLocale("en");
+  mobileViewport = false;
+  for (const scenario of [
+    { name: "pane", target: "agents:1.0", outcome: "delivered-to-live" },
+    { name: "resume", target: null, outcome: "resumed" },
+  ] as const) {
+    const conversationId = `conv-expiry-legacy-${scenario.name}`;
+    const original = `send through delayed ${scenario.name}`;
+    const later = `keep this ${scenario.name} draft`;
+    const attempts: { key: string; text: string }[] = [];
+    globalThis.fetch = (async (input, init) => {
+      if (String(input) === "/api/tmux/targets") {
+        return { ok: true, json: async () => ({ targets: { "0": scenario.target } }) } as Response;
+      }
+      if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
+      const body = JSON.parse(String(init?.body)) as { clientMessageId: string; text: string };
+      attempts.push({ key: body.clientMessageId, text: body.text });
+      await sleep(18);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          outcome: scenario.outcome,
+          ...(scenario.name === "resume" ? { spawned: true, target: "agents:2.0" } : {}),
+        }),
+      } as Response;
+    }) as typeof fetch;
+    refreshRuntimeImpl = async () => false;
+    sessionStorage.setItem(`llvDraft:${conversationId}`, original);
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+    const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+    const form = textarea.closest("form")!;
+    const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+    const textareaProps = (textarea as unknown as Record<string, { onChange(event: unknown): void }>)[propsKey]!;
+    try {
+      await sleep(5);
+      flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+      await sleep(10);
+      flushSync(() => textareaProps.onChange({ target: { value: later } }));
+      await sleep(20);
+
+      expect(attempts).toEqual([{ key: attempts[0]!.key, text: original }]);
+      expect(textarea.value).toBe(later);
+      expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBeNull();
+      expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(0);
+      expect(submitButton(host).disabled).toBe(false);
+    } finally {
+      flushSync(() => root.unmount());
+      publishReceipts([]);
+      refreshRuntimeImpl = async () => false;
+      sessionStorage.clear();
+      host.remove();
+    }
+  }
+});
 
 test("no receipt within the local window recovers the composer for an exactly-once same-key retry", async () => {
   setLocale("en");

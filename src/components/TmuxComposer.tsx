@@ -20,6 +20,7 @@ import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
 import {
+  COMPOSER_ADMISSION_DEADLINE_MS,
   COMPOSER_RECEIPT_POLL_INTERVAL_MS,
   COMPOSER_RECEIPT_RECONCILIATION_MS,
   ComposerAdmissionTimeoutError,
@@ -1394,6 +1395,37 @@ export function TmuxComposer({
       setText(draftAfterDelivery(textRef.current, clearedText));
       attachments.settleDelivered(snapshot);
     };
+    const settleLegacySuccess = (result: ComposerSendResult) => {
+      if (settledSendKeys.current.has(clientMessageId)) return;
+      const imgCount = sentImages.length;
+      const held = result.outcome === "held" || result.outcome === "queued" || result.outcome === "recovering";
+      const at = nowMs();
+      const entry: SentEntry = {
+        id: at,
+        text: payloadText.trim() || (imgCount ? t("composer.imagesCount", { count: imgCount }) : ""),
+        at,
+        via: result.outcome === "resumed" || result.spawned ? "spawn" : "pane",
+        state: held ? (result.outcome as DeliveryReceiptState) : "sent",
+        clientMessageId,
+      };
+      const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
+      persistSent([...prior, entry].slice(-SENT_LIMIT));
+      const attempt = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
+      persistPendingDeliveries(pendingDeliveries.current.filter((candidate) => candidate.key !== clientMessageId));
+      if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
+      settleGeneration(payloadText, attempt?.images ?? sentImages);
+      setStatus({
+        kind: held ? "info" : "ok",
+        text: held
+          ? t("composer.deliveryHeld", { label: file.migration?.targetLabel ?? file.migration?.targetAccountId ?? "" })
+          : result.outcome === "resumed" || result.spawned
+            ? t("composer.spawned", { target: result.target ?? "" })
+            : result.imagePaths?.length
+              ? t("composer.sentPaths", { count: result.imagePaths.length })
+              : t("common.sent"),
+      });
+      inputRef.current?.focus();
+    };
     let admissionRequest: Promise<ComposerSendResult> | null = null;
     try {
       admissionRequest = Promise.resolve(structuredSession
@@ -1435,7 +1467,7 @@ export function TmuxComposer({
             const body = await response.json() as ComposerSendResult;
             return { ...body, status: response.status, ok: response.ok && body.ok === true };
           }));
-      const json = await withComposerAdmissionDeadline(admissionRequest);
+      const json = await withComposerAdmissionDeadline(admissionRequest, COMPOSER_ADMISSION_DEADLINE_MS);
       if (!json.ok) {
         if (json.structured && json.receipt) {
           /* Keep the payload readable in the compact receipt for retry and
@@ -1507,38 +1539,7 @@ export function TmuxComposer({
         inputRef.current?.focus();
         return;
       }
-      const imgCount = sentImages.length;
-      // The migration delivery fence returns `held`/`queued`/`recovering` when
-      // the text was accepted for the successor rather than delivered live. Those
-      // are durable acknowledgements (the backend persisted the message), so the
-      // draft clears but the receipt tracks the pending state until it resolves.
-      const held = json.outcome === "held" || json.outcome === "queued" || json.outcome === "recovering";
-      const at = nowMs();
-      const entry: SentEntry = {
-        id: at,
-        text: payloadText.trim() || (imgCount ? t("composer.imagesCount", { count: imgCount }) : ""),
-        at,
-        via: json.outcome === "resumed" || json.spawned ? "spawn" : "pane",
-        state: held ? (json.outcome as DeliveryReceiptState) : "sent",
-        clientMessageId,
-      };
-      const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
-      persistSent([...prior, entry].slice(-SENT_LIMIT));
-      const attempt = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
-      persistPendingDeliveries(pendingDeliveries.current.filter((candidate) => candidate.key !== clientMessageId));
-      if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey(); // next draft is a new message
-      settleGeneration(payloadText, attempt?.images ?? sentImages);
-      setStatus({
-        kind: held ? "info" : "ok",
-        text: held
-          ? t("composer.deliveryHeld", { label: file.migration?.targetLabel ?? file.migration?.targetAccountId ?? "" })
-          : json.outcome === "resumed" || json.spawned
-            ? t("composer.spawned", { target: json.target ?? "" })
-            : json.imagePaths?.length
-              ? t("composer.sentPaths", { count: json.imagePaths.length })
-              : t("common.sent"),
-      });
-      inputRef.current?.focus();
+      settleLegacySuccess(json);
     } catch (error) {
       /* The request died on the wire AFTER the server may have accepted it.
          The pre-flight record (text AND attachment snapshot) stays armed so a
@@ -1557,11 +1558,20 @@ export function TmuxComposer({
             entry.key === clientMessageId ? { ...entry, reconciling: true } : entry));
           const lateReceipt = admissionRequest?.then((result) => {
             const receipt = result.receipt;
-            if (!receipt || (!receiptIsAdmitted(receipt.status) && !receiptIsTerminal(receipt.status))) return null;
-            return (receipt.kind === "send" || receipt.kind === "steer")
-              && !receipt.text && payloadText.trim()
-              ? { ...receipt, text: payloadText.trim() }
-              : receipt;
+            if (receipt && (receiptIsAdmitted(receipt.status) || receiptIsTerminal(receipt.status))) {
+              return (receipt.kind === "send" || receipt.kind === "steer")
+                && !receipt.text && payloadText.trim()
+                ? { ...receipt, text: payloadText.trim() }
+                : receipt;
+            }
+            if (!result.ok || result.structured) return null;
+            const controller = receiptReconciliations.current.get(clientMessageId);
+            if (!controller || controller.signal.aborted) return null;
+            settleLegacySuccess(result);
+            controller.abort();
+            receiptReconciliations.current.delete(clientMessageId);
+            setReconcilingSend(receiptReconciliations.current.size > 0);
+            return null;
           });
           startReceiptReconciliation(clientMessageId, lateReceipt);
         }
