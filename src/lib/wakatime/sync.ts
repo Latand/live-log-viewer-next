@@ -9,6 +9,8 @@ import { recentTurnWindowsFor, type RecentTurnWindows } from "@/lib/scanner/turn
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry, TurnBoundary } from "@/lib/types";
 
+import { acquireWakatimeSchedulerLease, type WakatimeSchedulerLease } from "./lease";
+
 const ENDPOINT = "https://api.wakatime.com/api/v1/users/current/heartbeats.bulk";
 const SAMPLE_INTERVAL_MS = 120_000;
 const TICK_INTERVAL_MS = 60_000;
@@ -37,6 +39,7 @@ export interface WakatimeHeartbeat {
 export interface WakatimeStateV1 {
   version: 1;
   enabledAtMs: number;
+  credentialGeneration: string | null;
   streams: Record<string, {
     entity: string;
     engine: "claude" | "codex";
@@ -95,6 +98,7 @@ export interface WakatimeSyncDependencies {
   scheduleInterval(callback: () => void, delayMs: number): TimerHandle;
   scheduleTimeout(callback: () => void, delayMs: number): TimerHandle;
   clearTimer(handle: TimerHandle): void;
+  acquireSchedulerLease(): WakatimeSchedulerLease | null;
   logger(event: string, fields: Readonly<Record<string, string | number | boolean | null>>): void;
   limits?: { maxPending?: number; maxStreams?: number };
 }
@@ -120,6 +124,7 @@ function freshState(now: number): WakatimeStateV1 {
   return {
     version: 1,
     enabledAtMs: now,
+    credentialGeneration: null,
     streams: {},
     pending: [],
     retry: { failures: 0, retryAtMs: 0, reason: null },
@@ -161,6 +166,9 @@ function stateFrom(value: unknown): WakatimeStateV1 | null {
   if (!record(value) || value.version !== 1 || !finite(value.enabledAtMs)
     || !record(value.streams) || !Array.isArray(value.pending)
     || !record(value.retry) || !record(value.counters)) return null;
+  const credentialGeneration = value.credentialGeneration ?? null;
+  if (!(credentialGeneration === null
+    || (typeof credentialGeneration === "string" && /^[a-f0-9]{64}$/.test(credentialGeneration)))) return null;
   const streams: WakatimeStateV1["streams"] = {};
   for (const [key, candidate] of Object.entries(value.streams)) {
     if (!/^[a-f0-9]{64}$/.test(key) || !record(candidate)
@@ -215,6 +223,7 @@ function stateFrom(value: unknown): WakatimeStateV1 | null {
   return {
     version: 1,
     enabledAtMs: value.enabledAtMs,
+    credentialGeneration,
     streams,
     pending,
     retry: { failures: retry.failures, retryAtMs: retry.retryAtMs, reason },
@@ -402,6 +411,10 @@ function base64(value: string): string {
   return Buffer.from(value, "utf8").toString("base64");
 }
 
+function credentialGeneration(sourceStamp: string): string {
+  return digest("llv-wakatime-credential-generation-v1", sourceStamp);
+}
+
 function bulkResponseStatuses(body: string, expected: number): number[] | null {
   let parsed: unknown;
   try {
@@ -436,7 +449,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
   let trailing = false;
   let stopped = false;
   let abortController: AbortController | null = null;
-  let credentialStamp: string | null = null;
+  let schedulerLease: WakatimeSchedulerLease | null = null;
   let missingCredential = false;
   const historyGapPaths = new Set<string>();
   const diagnostic = new Map<string, number>();
@@ -578,21 +591,25 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       missingCredential = false;
       report("credential_recovered", { pending: current.pending.length }, true);
     }
-    if (current.retry.reason === "auth" && credentialStamp !== null && credential.sourceStamp !== credentialStamp) {
-      current.retry = { failures: 0, retryAtMs: 0, reason: null };
+    const currentCredentialGeneration = credentialGeneration(credential.sourceStamp);
+    if (current.credentialGeneration !== currentCredentialGeneration) {
+      if (current.retry.reason === "auth") current.retry = { failures: 0, retryAtMs: 0, reason: null };
+      current.credentialGeneration = currentCredentialGeneration;
+      if (!await persist(current)) return;
     }
-    credentialStamp = credential.sourceStamp;
     if (current.retry.retryAtMs > deps.now()) return;
 
     const batch = current.pending.slice(0, MAX_BATCH);
-    abortController = new AbortController();
+    const controller = new AbortController();
+    abortController = controller;
     let timedOut = false;
     const timeout = deps.scheduleTimeout(() => {
       timedOut = true;
-      abortController?.abort();
+      controller.abort();
     }, REQUEST_TIMEOUT_MS);
     timeout.unref?.();
     let response: WakatimeResponse;
+    let responseBody: string | null = null;
     try {
       response = await deps.fetch(ENDPOINT, {
         method: "POST",
@@ -603,24 +620,20 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
           "User-Agent": "agent-log-viewer-wakatime/1",
         },
         body: JSON.stringify(batch.map((event) => event.heartbeat)),
-        signal: abortController.signal,
+        signal: controller.signal,
       });
+      if (response.status === 201 || response.status === 202) responseBody = await response.text();
     } catch {
       setRetry(current, timedOut ? "timeout" : "network");
       await persist(current);
       return;
     } finally {
       deps.clearTimer(timeout);
-      abortController = null;
+      if (abortController === controller) abortController = null;
     }
 
     if (response.status === 201 || response.status === 202) {
-      let statuses: number[] | null = null;
-      try {
-        statuses = bulkResponseStatuses(await response.text(), batch.length);
-      } catch {
-        statuses = null;
-      }
+      const statuses = bulkResponseStatuses(responseBody ?? "", batch.length);
       if (!statuses) {
         report("malformed_bulk_response", { status: response.status, expected: batch.length });
         setRetry(current, "server", 0, response.status);
@@ -666,6 +679,11 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
     }
     if (response.status === 401 || response.status === 403) {
       setRetry(current, "auth", 0, response.status);
+      await persist(current);
+      return;
+    }
+    if (response.status === 408 || response.status === 409 || response.status === 425) {
+      setRetry(current, "server", 0, response.status);
       await persist(current);
       return;
     }
@@ -715,6 +733,17 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
 
   const tick = (): Promise<void> => {
     if (stopped) return Promise.resolve();
+    try {
+      if (schedulerLease && !schedulerLease.isHeld()) {
+        schedulerLease.release();
+        schedulerLease = null;
+      }
+      schedulerLease ??= deps.acquireSchedulerLease();
+      if (!schedulerLease?.isHeld()) return Promise.resolve();
+    } catch {
+      report("scheduler_lease_failed");
+      return Promise.resolve();
+    }
     if (running) {
       trailing = true;
       return running;
@@ -751,6 +780,12 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       deps.clearTimer(initialTimer);
       deps.clearTimer(intervalTimer);
       abortController?.abort();
+      const releaseSchedulerLease = () => {
+        schedulerLease?.release();
+        schedulerLease = null;
+      };
+      if (running) void running.finally(releaseSchedulerLease);
+      else releaseSchedulerLease();
     },
   };
 }
@@ -817,6 +852,7 @@ function productionDependencies(): WakatimeSyncDependencies {
     scheduleInterval: (callback, delayMs) => setInterval(callback, delayMs),
     scheduleTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
     clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+    acquireSchedulerLease: () => acquireWakatimeSchedulerLease(statePath("wakatime-scheduler-owner.json")),
     logger: (event, fields) => console.error(`[wakatime] ${event}`, fields),
   };
 }

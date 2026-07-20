@@ -10,6 +10,7 @@ import {
   viewerAuthenticationTokenFromConfig,
   viewerCandidateDockerArgs,
   viewerCandidateTmuxEnvironment,
+  viewerComposeSnapshotWithoutWakatimeCredential,
   viewerComposeServiceFromConfig,
   viewerComposeServiceUid,
 } from "../src/runtime-host/candidateContainer";
@@ -18,8 +19,10 @@ import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandi
 import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
+import { withoutWakatimeCredential } from "../src/lib/wakatime/credential";
 
-const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-viewer/state";
+const defaultConfigDir = process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || "/home/user", ".config");
+const stateDir = process.env.LLV_STATE_DIR || path.join(defaultConfigDir, "agent-log-viewer", "state");
 const deploymentDir = path.join(stateDir, "deployments");
 const mirrorDir = path.join(deploymentDir, "canonical.git");
 const targetFile = process.env.LLV_VIEWER_DEPLOY_TARGET || path.join(stateDir, "viewer-release.json");
@@ -28,7 +31,11 @@ const runtimeSocket = process.env.LLV_RUNTIME_HOST_SOCKET || path.join(stateDir,
 const stableEndpoint = `http://127.0.0.1:${Number(process.env.LLV_VIEWER_PORT || 8898)}`;
 
 async function command(argv: string[]): Promise<string> {
-  const child = Bun.spawn(["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", ...argv], { stdout: "pipe", stderr: "pipe", env: process.env });
+  const child = Bun.spawn(["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", ...argv], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: withoutWakatimeCredential(process.env),
+  });
   const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   if (code !== 0) throw new Error((stderr.trim() || `${argv[0]} failed`).slice(0, 1000));
   return stdout.trim();
@@ -54,11 +61,12 @@ function composeConfigFile(container: string): string {
 }
 
 function writeComposeConfig(container: string, config: string): void {
-  viewerComposeServiceFromConfig(config);
+  const snapshot = viewerComposeSnapshotWithoutWakatimeCredential(config);
+  viewerComposeServiceFromConfig(snapshot);
   const filename = composeConfigFile(container);
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temporary, config, { mode: 0o600, flag: "wx" });
+  fs.writeFileSync(temporary, snapshot, { mode: 0o600, flag: "wx" });
   fs.renameSync(temporary, filename);
 }
 

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { WAKATIME_CREDENTIAL_ENV, withoutWakatimeCredential } from "../src/lib/wakatime/credential";
 import { viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 
 const root = path.resolve(import.meta.dir, "..");
@@ -31,7 +32,7 @@ exit 1
   const child = Bun.spawn([process.execPath, adapter, "current-release"], {
     cwd: root,
     env: {
-      ...process.env,
+      ...withoutWakatimeCredential(process.env),
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       FAKE_DOCKER_STATE: options.containerState ?? "running",
       LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1",
@@ -91,7 +92,7 @@ function composeSnapshot(): string {
         pid: "host",
         privileged: false,
         restart: "unless-stopped",
-        user: "1000:1000",
+        "user": "1000:1000",
         volumes: [],
         working_dir: "/app",
       },
@@ -104,6 +105,7 @@ async function runAction(options: {
   input: unknown;
   dockerScript: string;
   snapshots?: string[];
+  environment?: Record<string, string>;
 }) {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-release-lifecycle-adapter-"));
   const state = path.join(sandbox, "state");
@@ -121,12 +123,13 @@ async function runAction(options: {
   const child = Bun.spawn([process.execPath, adapter, options.action], {
     cwd: root,
     env: {
-      ...process.env,
+      ...withoutWakatimeCredential(process.env),
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       FAKE_DOCKER_LOG: dockerLog,
       LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1",
       LLV_STATE_DIR: state,
       LLV_VIEWER_PORT: "1",
+      ...options.environment,
     },
     stdin: "pipe",
     stdout: "pipe",
@@ -165,6 +168,24 @@ exit 1
   expect(result.dockerCalls).toContain("container stop --time 10 viewer-rollback");
   expect(result.dockerCalls).not.toContain("container stop --time 10 viewer-current");
   expect(result.dockerCalls).toContain("container rm -f viewer-obsolete");
+});
+
+test("deployment command children exclude the legacy WakaTime credential", async () => {
+  const credentialPlaceholder = ["legacy", "child", "placeholder"].join("-");
+  const result = await runAction({
+    action: "retain-only",
+    input: { releases: [release] },
+    environment: { [WAKATIME_CREDENTIAL_ENV]: credentialPlaceholder },
+    dockerScript: `#!/bin/sh
+set -eu
+if [ -n "\${WAKATIME_API_KEY+x}" ]; then exit 91; fi
+if [ "$1 $2" = "container ls" ]; then exit 0; fi
+exit 1
+`,
+  });
+
+  expect(result.code).toBe(0);
+  expect(JSON.stringify(result)).not.toContain(credentialPlaceholder);
 });
 
 test("rollback starts and health-checks the retained release before switching the stable target", async () => {

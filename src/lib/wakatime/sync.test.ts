@@ -136,6 +136,7 @@ function harness(overrides: Partial<WakatimeSyncDependencies> = {}) {
     scheduleInterval: () => ({ unref() {} }),
     scheduleTimeout: () => ({ unref() {} }),
     clearTimer: () => undefined,
+    acquireSchedulerLease: () => ({ isHeld: () => true, release() {} }),
     logger: (event, fields) => { logs.push({ event, fields }); },
     ...overrides,
   };
@@ -143,6 +144,59 @@ function harness(overrides: Partial<WakatimeSyncDependencies> = {}) {
 }
 
 describe("WakaTime activity sync", () => {
+  test("scheduler lease acquisition failures stay local", async () => {
+    const fixture = harness({
+      acquireSchedulerLease: () => { throw new Error("lease storage unavailable"); },
+    });
+
+    await expect(fixture.sync.tick()).resolves.toBeUndefined();
+    expect(fixture.writes).toHaveLength(0);
+    expect(fixture.requests).toHaveLength(0);
+    expect(fixture.logs.map((item) => item.event)).toContain("scheduler_lease_failed");
+    fixture.sync.stop();
+  });
+
+  test("a release waits for process-shared scheduler ownership", async () => {
+    let ownsScheduler = false;
+    const fixture = harness({
+      acquireSchedulerLease: () => ownsScheduler
+        ? { isHeld: () => true, release() {} }
+        : null,
+    });
+
+    await fixture.sync.tick();
+    expect(fixture.writes).toHaveLength(0);
+    expect(fixture.requests).toHaveLength(0);
+
+    ownsScheduler = true;
+    await fixture.sync.tick();
+    expect(fixture.writes.length).toBeGreaterThan(0);
+    fixture.sync.stop();
+  });
+
+  test("shutdown holds scheduler ownership until the active tick settles", async () => {
+    let requestStarted = false;
+    let released = false;
+    const fixture = harness({
+      acquireSchedulerLease: () => ({ isHeld: () => !released, release() { released = true; } }),
+      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
+      fetch: async (_url, init) => {
+        requestStarted = true;
+        return await new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        });
+      },
+    });
+
+    const tick = fixture.sync.tick();
+    while (!requestStarted) await Bun.sleep(0);
+    fixture.sync.stop();
+    expect(released).toBe(false);
+
+    await tick;
+    expect(released).toBe(true);
+  });
+
   test("production credential delivery accepts an exact 0600 key file", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-key-"));
     const filename = path.join(directory, "wakatime-api-key");
@@ -566,6 +620,9 @@ describe("WakaTime activity sync", () => {
     { name: "network failures", status: null, reason: "network" },
     { name: "redirect rate limits", status: 302, reason: "rate_limit" },
     { name: "explicit rate limits", status: 429, reason: "rate_limit" },
+    { name: "request timeout responses", status: 408, reason: "server" },
+    { name: "conflict responses", status: 409, reason: "server" },
+    { name: "too-early responses", status: 425, reason: "server" },
     { name: "server failures", status: 503, reason: "server" },
     { name: "unauthorized credentials", status: 401, reason: "auth" },
     { name: "forbidden credentials", status: 403, reason: "auth" },
@@ -611,6 +668,77 @@ describe("WakaTime activity sync", () => {
     expect(state()?.pending).toHaveLength(2);
     expect(state()?.retry.reason).toBe("timeout");
     sync.stop();
+  });
+
+  test("the request deadline remains active while the response body is consumed", async () => {
+    let deadlineActive = false;
+    let deadlineObservedDuringBody = false;
+    let fireDeadline = () => {};
+    let deadlineHandle: { unref(): void } | null = null;
+    const { sync, state } = harness({
+      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
+      scheduleTimeout: (callback, delayMs) => {
+        const handle = { unref() {} };
+        if (delayMs === 5_000) {
+          deadlineActive = true;
+          fireDeadline = callback;
+          deadlineHandle = handle;
+        }
+        return handle;
+      },
+      clearTimer: (handle) => {
+        if (handle === deadlineHandle) deadlineActive = false;
+      },
+      fetch: async (_url, init) => ({
+        status: 201,
+        headers: new Headers(),
+        text: async () => {
+          deadlineObservedDuringBody = deadlineActive;
+          if (deadlineActive) fireDeadline();
+          if (init.signal?.aborted) throw new DOMException("aborted", "AbortError");
+          return JSON.stringify({ responses: [] });
+        },
+      }),
+    });
+
+    await sync.tick();
+
+    expect(deadlineObservedDuringBody).toBe(true);
+    expect(state()?.pending).toHaveLength(2);
+    expect(state()?.retry.reason).toBe("timeout");
+    sync.stop();
+  });
+
+  test("shutdown aborts a stalled response body", async () => {
+    let bodyStarted = false;
+    let releaseBody = () => {};
+    const { sync } = harness({
+      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
+      fetch: async (_url, init) => ({
+        status: 202,
+        headers: new Headers(),
+        text: async () => await new Promise<string>((resolve, reject) => {
+          bodyStarted = true;
+          releaseBody = () => resolve(JSON.stringify({ responses: [] }));
+          if (init.signal?.aborted) reject(new DOMException("aborted", "AbortError"));
+          else init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        }),
+      }),
+    });
+
+    const tick = sync.tick();
+    while (!bodyStarted) await Bun.sleep(0);
+    sync.stop();
+    const settled = await Promise.race([
+      tick.then(() => true),
+      Bun.sleep(100).then(() => false),
+    ]);
+    if (!settled) {
+      releaseBody();
+      await tick;
+    }
+
+    expect(settled).toBe(true);
   });
 
   test("durable retry state prevents a restart request loop", async () => {
@@ -792,6 +920,36 @@ describe("WakaTime activity sync", () => {
     expect(state()?.retry.reason).toBeNull();
     expect(state()?.pending).toHaveLength(0);
     sync.stop();
+  });
+
+  test("restart detects credential replacement from a persisted nonsecret generation", async () => {
+    const firstStamp = ["file", "generation", "one"].join(":");
+    const replacementStamp = ["file", "generation", "two"].join(":");
+    const first = harness({
+      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: firstStamp }),
+      fetch: async () => ({ status: 401, headers: new Headers(), text: async () => "" }),
+    });
+
+    await first.sync.tick();
+    const persisted = structuredClone(first.state());
+    const persistedJson = JSON.stringify(persisted);
+    const generation = (JSON.parse(persistedJson) as Record<string, unknown>).credentialGeneration;
+    expect(generation).toMatch(/^[a-f0-9]{64}$/);
+    expect(persistedJson).not.toContain(TEST_CREDENTIAL);
+    expect(persistedJson).not.toContain(firstStamp);
+    first.sync.stop();
+
+    const restarted = harness({
+      readState: async () => persisted,
+      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: replacementStamp }),
+    });
+    await restarted.sync.tick();
+
+    expect(restarted.requests).toHaveLength(1);
+    expect(restarted.state()?.pending).toHaveLength(0);
+    expect(restarted.state()?.retry.reason).toBeNull();
+    expect(JSON.stringify(restarted.state())).not.toContain(replacementStamp);
+    restarted.sync.stop();
   });
 
   test("corrupt state recovers at the current privacy boundary without leaking input", async () => {

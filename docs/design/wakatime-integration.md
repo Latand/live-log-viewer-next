@@ -262,6 +262,7 @@ State lives at `statePath("wakatime-state.json")`:
 interface WakatimeStateV1 {
   version: 1;
   enabledAtMs: number;
+  credentialGeneration: string | null;
   streams: Record<string, {
     entity: string;
     engine: "claude" | "codex";
@@ -293,10 +294,12 @@ interface WakatimeStateV1 {
 }
 ```
 
-The file contains no credential, authorization header, raw conversation id,
-transcript path, cwd, title, prompt, response body, or file content. Project
-names are present because they are payload data awaiting delivery. The file is
-written with mode `0600`; its parent directory uses `0700`.
+The file contains a SHA-256 credential-generation marker derived from key-file
+metadata. It contains no credential, authorization header, raw credential
+source stamp, raw conversation id, transcript path, cwd, title, prompt,
+response body, or file content. Project names are present because they are
+payload data awaiting delivery. The file is written with mode `0600`; its
+parent directory uses `0700`.
 
 Persistence ordering is strict:
 
@@ -344,7 +347,7 @@ Request properties:
 - `Content-Type: application/json`;
 - `User-Agent: agent-log-viewer-wakatime/1`;
 - `redirect: "manual"` so a WakaTime 302 rate-limit response stays observable;
-- five-second abort deadline;
+- five-second abort deadline across headers and response-body consumption;
 - body is an array of at most 25 validated heartbeat objects.
 
 For outer `201` and `202` responses, the module validates the ordered
@@ -359,9 +362,10 @@ Failure policy:
 | missing key | retain outbox, skip fetch, emit one transition diagnostic |
 | timeout or network error | retain batch; exponential retry |
 | `302` or `429` | retain batch; honor valid `Retry-After`; exponential retry |
+| `408`, `409`, or `425` | retain batch; exponential retry |
 | `500`-`599` | retain batch; exponential retry |
-| `401` or `403` | retain batch; open a 15-minute auth circuit; retry immediately after a key-file source stamp changes |
-| `400` or another permanent `4xx` | remove the validated attempted batch, increment `permanentlyRejected`, and emit status plus count |
+| `401` or `403` | retain batch; open a 15-minute auth circuit; retry immediately after the key-file generation changes |
+| another permanent `4xx` | remove the validated attempted batch, increment `permanentlyRejected`, and emit status plus count |
 
 Retry delay starts at 30 seconds, doubles with 20 percent jitter, and caps at
 15 minutes. A valid `Retry-After` can extend the delay up to 24 hours. Success
@@ -386,14 +390,18 @@ if (process.env.LLV_WAKATIME_ENABLED === "1") {
 
 The dynamic import preserves the Node builtin isolation required by
 `src/instrumentation.ts`. Release candidates wait for traffic ownership before
-starting, so blue-green overlap cannot create two active schedulers against the
-shared state directory.
+starting. Every scheduler also holds a process-shared lease in the common state
+directory for its full active tick and lifetime. During promotion and rollback,
+the previous live process keeps the lease until its work settles and it exits;
+the successor retries lease acquisition on later ticks.
 
 The module installs no process signal handlers. The CLI and deployment runtime
 retain process ownership. Unref'd timers allow immediate process exit; the
-five-second request deadline bounds an in-flight call. Every outbound event was
-persisted before fetch, so restart resumes it. The documented 25-event replay
-window covers termination after remote acceptance.
+five-second request deadline remains active through response-body consumption.
+Shutdown aborts both header waits and body reads before releasing scheduler
+ownership. Every outbound event was persisted before fetch, so restart resumes
+it. The documented 25-event replay window covers termination after remote
+acceptance.
 
 `stop()` clears module-owned timers and aborts an in-flight test transport. It
 exists for deterministic tests and module replacement during development.
@@ -406,8 +414,12 @@ exists for deterministic tests and module replacement during development.
 | `~/.config/agent-log-viewer/wakatime-api-key` | Sole credential source through `configFilePath("wakatime-api-key")`; the file must open directly as a regular file with exact mode `0600`, symlinks are rejected, and the legacy app config path remains available through the existing resolver. |
 
 The key file is read at delivery time, so a drop-in or replacement can recover
-an auth circuit without restarting the viewer. Viewer entrypoints discard the
-unsupported `WAKATIME_API_KEY` environment variable without reading it.
+an auth circuit without restarting the viewer. A hashed generation marker from
+nonsecret file metadata preserves replacement detection across Viewer restarts.
+Viewer entrypoints discard the unsupported `WAKATIME_API_KEY` environment
+variable without reading it. Resolved Compose snapshots, deployment children,
+Docker arguments, and candidate container environments are scrubbed before
+persistence or launch.
 
 The implementation never reads `~/.wakatime.cfg`. That file belongs to
 WakaTime's CLI and editor plugins. The MVP also has a fixed HTTPS origin.

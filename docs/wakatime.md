@@ -29,8 +29,10 @@ HTTPS `Authorization` header for `api.wakatime.com`. Browser payloads, local
 state, request bodies, URLs, diagnostics, and transcripts exclude it. At
 startup the Viewer discards any legacy `WAKATIME_API_KEY` value without reading
 it, before any agent, reviewer, tmux pane, runtime host, or copied environment
-snapshot is created. Replacing the key file is detected on the next delivery
-tick.
+snapshot is created. Resolved Compose snapshots, deployment commands, and
+candidate container metadata also exclude the legacy variable. Replacing the
+key file is detected on the next delivery tick, including after a Viewer
+restart.
 
 ## Activity mapping
 
@@ -69,24 +71,33 @@ The Viewer persists work to
 `${XDG_CONFIG_HOME:-~/.config}/agent-log-viewer/state/wakatime-state.json`
 before sending it. The state directory uses mode `0700`; the state file uses
 mode `0600`. The outbox survives Viewer restarts and contains payload metadata,
-including project names and timestamps. It contains no credential or raw
-conversation identifier.
+including project names and timestamps. It also stores a nonsecret hashed
+credential-generation marker derived from key-file metadata. It contains no
+credential, raw key-file stamp, or raw conversation identifier.
 
 One scheduler tick sends up to 25 heartbeats. Each outer `201` or `202` bulk
 response is validated item by item. Successful items leave the outbox,
 transient item failures remain under backoff, permanent item failures increment
 the rejection count, and missing or malformed item lists retain the full batch.
-Response bodies and error details stay out of diagnostics and state. Network errors, five-second
-timeouts, WakaTime server failures, and rate limits retain the batch under
-durable exponential backoff. The scheduler honors `Retry-After` for HTTP 302
-and 429 responses. HTTP 401 and 403 open a 15-minute circuit; replacing the
-key file retries with the new key on the next tick. Permanent HTTP 4xx
-responses remove the attempted batch and increment a local count.
+Response bodies and error details stay out of diagnostics and state. The
+five-second request deadline covers headers and response-body consumption, and
+shutdown aborts either phase. Network errors, timeouts, WakaTime server
+failures, and rate limits retain the batch under durable exponential backoff.
+Outer HTTP 408, 409, and 425 responses also retain the full batch. The
+scheduler honors `Retry-After` for HTTP 302 and 429 responses. HTTP 401 and 403
+open a 15-minute circuit; replacing the key file retries with the new key on
+the next tick. Other permanent HTTP 4xx responses remove the attempted batch
+and increment a local count.
 
 The outbox retains at most 10,000 events and 5,000 streams. During a long
 outage, the Viewer compacts interior samples to ten-minute spacing and can
 drop the oldest whole streams to stay within those bounds. Scanner requests,
 agent execution, and browser responses do not wait for WakaTime delivery.
+
+Blue-green releases coordinate through a process-shared scheduler lease in the
+common state directory. The live owner retains that fence through promotion,
+rollback, active request shutdown, and final settlement. A successor begins
+work after it acquires the released or restart-recovered lease.
 
 WakaTime's Heartbeats endpoint provides no idempotency key. Delivery therefore
 has an at-least-once window: a process exit after WakaTime accepts a request
