@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useSyncExternalStore } from "react";
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { useImageAttachments } from "@/components/imageAttachments";
 import { useAutosizePinned } from "@/hooks/useAutosizePinned";
@@ -77,6 +77,33 @@ export function useComposer({ initialText, persistText, submit, disabled = false
   const [voiceSending, setVoiceSending] = useState(false);
   const [status, setStatus] = useState<ComposerStatus | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  /* IME-safe input across live board/feed refreshes (issue #272). While an IME
+     composition is in flight — every word on a mobile keyboard: CJK, Cyrillic,
+     autocorrect, emoji — the browser suppresses React's controlled-input change
+     event, so the `text` state falls behind the half-composed DOM value. A
+     background board/feed refresh then re-renders this controlled textarea, and
+     React re-asserts the stale `text` over the field: the composition is wiped
+     and the caret jumps to the end mid-word. Native composition listeners
+     mirror the field into the draft on every composition step (React's own
+     synthetic composition events are unreliable — some engines never deliver
+     them), so a refresh re-renders the identical text and never disturbs the
+     caret; `compositionend` is the authoritative commit some browsers omit a
+     trailing change for. The listeners outlive any single render, so they read
+     the latest `setText` through a ref kept current in an effect. */
+  const setTextRef = useRef(setText);
+  useLayoutEffect(() => { setTextRef.current = setText; });
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const sync = () => setTextRef.current(el.value);
+    el.addEventListener("compositionupdate", sync);
+    el.addEventListener("compositionend", sync);
+    return () => {
+      el.removeEventListener("compositionupdate", sync);
+      el.removeEventListener("compositionend", sync);
+    };
+  }, []);
 
   /* Grow ceiling: the desktop keeps its ~6-row cap; the phone tracks 40% of the
      live viewport height so the field can open into a tall multi-line input and
