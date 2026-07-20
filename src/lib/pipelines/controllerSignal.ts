@@ -1,6 +1,5 @@
-import { tickPipelines } from "./engine";
-
 type PipelineTick = () => Promise<void>;
+type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 interface PipelineSignalState {
   tick: PipelineTick | null;
@@ -11,9 +10,25 @@ const signalHost = globalThis as typeof globalThis & {
   __llvPipelineSignal?: PipelineSignalState;
 };
 
+export async function requestRemotePipelineTick(
+  fetcher: Fetcher = fetch,
+  env: Record<string, string | undefined> = process.env,
+): Promise<void> {
+  const baseUrl = env.LLV_VIEWER_CONTROL_URL?.trim() || "http://127.0.0.1:8898";
+  const response = await fetcher(new URL("/api/pipelines/tick", baseUrl), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: baseUrl,
+      "sec-fetch-site": "same-origin",
+    },
+    body: "{}",
+  });
+  if (!response.ok) throw new Error(`pipeline controller request failed with status ${response.status}`);
+}
+
 async function defaultPipelineTick(): Promise<void> {
-  await tickPipelines([]);
-  await tickPipelines([]);
+  await requestRemotePipelineTick();
 }
 
 const signal = signalHost.__llvPipelineSignal ??= { tick: defaultPipelineTick, scheduled: false };
