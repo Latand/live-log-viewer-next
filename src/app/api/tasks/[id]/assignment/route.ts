@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { agentRegistry } from "@/lib/agent/registry";
+import { headCwd } from "@/lib/agent/transcript";
+import { ensureTaskPipelineForAssignment } from "@/lib/pipelines/engine";
+import type { TaskPipelineSpawnParams } from "@/lib/pipelines/taskBinding";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { applyAssignmentPatches, assignmentRefFromBody, removeAssignment, type AssignmentPatch } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
-import { mutateTasks } from "@/lib/tasks/store";
+import { loadTasks, mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { ApiError } from "@/lib/types";
 
@@ -12,6 +16,35 @@ export const dynamic = "force-dynamic";
 
 type TaskRouteContext = {
   params: Promise<{ id: string }>;
+};
+
+interface AssignmentRouteDependencies {
+  loadTasks: typeof loadTasks;
+  mutateTasks: typeof mutateTasks;
+  spawnParamsForPath(pathname: string): TaskPipelineSpawnParams | null;
+  ensureTaskPipelineForAssignment: typeof ensureTaskPipelineForAssignment;
+}
+
+function spawnParamsForPath(pathname: string): TaskPipelineSpawnParams | null {
+  const registry = agentRegistry();
+  const conversation = registry.conversationForPath(pathname);
+  const profile = registry.launchProfileForPath(pathname);
+  const repoDir = profile?.cwd || headCwd(pathname);
+  if (!conversation || !repoDir) return null;
+  return {
+    repoDir,
+    engine: conversation.engine,
+    model: profile?.model ?? null,
+    effort: profile?.effort ?? null,
+    srcPath: pathname,
+  };
+}
+
+const productionDependencies: AssignmentRouteDependencies = {
+  loadTasks,
+  mutateTasks,
+  spawnParamsForPath,
+  ensureTaskPipelineForAssignment,
 };
 
 function pathFromBody(body: unknown): string | null {
@@ -25,7 +58,11 @@ function pathFromBody(body: unknown): string | null {
  * nothing was delivered. The assignment is a removable marker of where the
  * task went — never a claim that the agent received or ran it.
  */
-export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<NextResponse<{ ok: true; task: BoardTask } | ApiError>> {
+async function postAssignment(
+  req: NextRequest,
+  ctx: TaskRouteContext,
+  dependencies: AssignmentRouteDependencies = productionDependencies,
+): Promise<NextResponse<{ ok: true; task: BoardTask } | ApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
@@ -39,15 +76,31 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
   if (!path) return NextResponse.json({ error: "path is required" }, { status: 400 });
 
   const { id } = await ctx.params;
+  const task = dependencies.loadTasks().find((candidate) => candidate.id === id);
+  if (!task) return NextResponse.json({ error: "task not found" }, { status: 404 });
+  const existingAssignment = task.assignments.some((assignment) => assignment.path === path);
+  if (!existingAssignment) {
+    const spawnParams = dependencies.spawnParamsForPath(path);
+    if (!spawnParams) return NextResponse.json({ error: "assignment path does not resolve to an agent profile" }, { status: 400 });
+    const binding = await dependencies.ensureTaskPipelineForAssignment(task, spawnParams);
+    if (!binding.pipeline) {
+      return NextResponse.json({ error: binding.error ?? "could not bind task to a pipeline" }, { status: binding.status ?? 400 });
+    }
+  }
   const at = isoNow();
   const patch: AssignmentPatch = { path, panePid: null, state: "handoff", error: null, at };
-  const result = mutateTasks((tasks) => {
+  const result = dependencies.mutateTasks((tasks) => {
     const outcome = applyAssignmentPatches(tasks, id, [patch], at);
     return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
   return NextResponse.json({ ok: true, task: result.task });
 }
+
+export const POST = Object.assign(
+  async (req: NextRequest, ctx: TaskRouteContext): Promise<NextResponse<{ ok: true; task: BoardTask } | ApiError>> => await postAssignment(req, ctx),
+  { withDependencies: postAssignment },
+);
 
 /** Detaches one assignment from the task — the undo for a wrong handoff. */
 export async function DELETE(req: NextRequest, ctx: TaskRouteContext): Promise<NextResponse<{ ok: true; task: BoardTask } | ApiError>> {

@@ -78,6 +78,8 @@ The stage transcript artifact is the completion authority. When a durable read o
 
 Run stages use Viewer spawn receipts and conversation lineage. Stage zero descends from `src` when supplied. Later stages descend from the latest completed stage session. Each attempt persists its launch id, Viewer conversation id, transcript path, native session id, pane id, output, verdict, and timestamps. Pausing holds coordinator transitions while preserving the active session for inspection and resume.
 
+A task spawn reserves its linked draft pipeline after task admission and before pane actuation. The draft keeps a `task-spawn` creation intent keyed by task id and launch id, plus the reserved Viewer conversation id. Transcript settlement fills the creator path through the same idempotent ensure operation. Controller recovery can fill the path from the conversation registry when the route process stops after launch settlement. Replays reuse the receipt and the task's linked draft, preserving one pane and one active pipeline.
+
 Pipeline stages cannot create another pipeline. The stage-kind validator and the injected prompt contract enforce this one-level composition limit.
 
 ## Control

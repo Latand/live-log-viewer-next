@@ -3,6 +3,8 @@ import fs from "node:fs";
 import { NextRequest, NextResponse } from "next/server";
 
 import { attachmentPath, sweepAttachments } from "@/lib/tasks/attachments";
+import { loadPipelines } from "@/lib/pipelines/store";
+import { projectTaskPipelineIds, type TaskPipelineReadModel } from "@/lib/pipelines/taskBinding";
 import { createTask, type CreateTaskInput, type CreateTaskResult } from "@/lib/tasks/commands";
 import { loadTasks, mutateTasksFile } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -11,6 +13,14 @@ import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+export async function GET(): Promise<NextResponse<{ tasks: TaskPipelineReadModel[] } | ApiError>> {
+  try {
+    return NextResponse.json({ tasks: projectTaskPipelineIds(loadTasks(), loadPipelines()) });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "task read model unavailable" }, { status: 500 });
+  }
+}
 
 export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; task: BoardTask } | ApiError>> {
   const rejection = rejectCrossOrigin(req);

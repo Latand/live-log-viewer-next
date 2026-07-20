@@ -26,6 +26,7 @@ import type {
   PatchPipelineRequest,
   StageVerdictStatus,
 } from "@/lib/pipelines/types";
+import { latestOperationalStageAttempt } from "@/lib/pipelines/attemptSelection";
 
 import { PIPELINES_CHANGED_EVENT } from "./pipelineEvents";
 
@@ -190,7 +191,7 @@ export const STAGE_GLYPH: Record<StageChipState, string> = {
 };
 
 export function latestAttempt(pipeline: Pipeline, stageId: string): PipelineStageAttempt | null {
-  return pipeline.runs.find((run) => run.stageId === stageId)?.attempts.at(-1) ?? null;
+  return latestOperationalStageAttempt(pipeline, stageId);
 }
 
 export function stageAttempts(pipeline: Pipeline, stageId: string): PipelineStageAttempt[] {
@@ -529,7 +530,7 @@ export function stageHasNavigableHistory(
   if (!attempt) return false;
   const pathAvailable = (path: string) => !availablePaths || availablePaths.has(path);
   const attempts = stageAttempts(pipeline, stage.id);
-  if (attempts.some((prior) => prior.n < attempt.n && Boolean(prior.agentPath && pathAvailable(prior.agentPath)))) return true;
+  if (attempts.some((candidate) => candidate.n !== attempt.n && Boolean(candidate.agentPath && pathAvailable(candidate.agentPath)))) return true;
 
   const flowIds = new Set(attempts.flatMap((item) => item.flowId ? [item.flowId] : []));
   const attemptPaths = new Set(attempts.flatMap((item) => item.agentPath ? [item.agentPath] : []));
@@ -656,7 +657,7 @@ export type DraftStage = {
   model: string;
   effort: string;
   access: PipelineAccess;
-  prompt: string;
+  "prompt": string;
   roleParams: Record<string, string | number>;
   /** The operator edited engine/model/effort by hand, so role/param autofill must
       no longer clobber the runtime. Selecting a role preserves the pin (design
@@ -836,7 +837,7 @@ export function draftStagesToInput(drafts: DraftStage[]): PipelineStageInput[] {
           }
         : {}),
       ...(draft.kind === "review-loop" ? {} : { access: draft.access }),
-      prompt: draft.prompt,
+      "prompt": draft.prompt,
       next: ids[index + 1] ?? null,
     };
   });
@@ -915,7 +916,7 @@ export function templateStageInputs(template: PipelineTemplate): PipelineStageIn
       model: "",
       effort: "",
       access: stage.access,
-      prompt: stage.prompt,
+      "prompt": stage.prompt,
       roleParams: {},
     })),
   );
@@ -1031,7 +1032,10 @@ export function stageFailEdgeRoundsUsed(pipeline: Pipeline, stage: PipelineStage
   if (!stage.onFail) return 0;
   const target = pipeline.runs.find((run) => run.stageId === stage.onFail!.to);
   if (!target) return 0;
-  return target.attempts.filter((attempt) => attempt.activatedBy?.edge === "fail" && attempt.activatedBy.stageId === stage.id).length;
+  return target.attempts.filter((attempt) =>
+    !attempt.historical
+    && attempt.activatedBy?.edge === "fail"
+    && attempt.activatedBy.stageId === stage.id).length;
 }
 
 /**

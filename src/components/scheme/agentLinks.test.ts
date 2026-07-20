@@ -120,6 +120,29 @@ describe("derivePipelineLinks tones and hub", () => {
     ]);
   });
 
+  test("a historical child cannot replace the running graph vertex or link tone", () => {
+    const p = threeStagePipeline({
+      runs: [
+        { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed" }] },
+        { stageId: "build", attempts: [
+          { agentPath: "/build", state: "running" },
+          { agentPath: "/historical", state: "passed", historical: true },
+        ] },
+        { stageId: "verify", attempts: [{ agentPath: "/verify", state: "pending" }] },
+      ],
+    } as unknown as Partial<Pipeline>);
+    const withHistorical = (key: string) => (["/plan", "/build", "/historical", "/verify"].includes(key) ? key : null);
+
+    expect(derivePipelineLinks([p], withHistorical).map((link) => ({
+      from: link.from,
+      to: link.to,
+      tone: link.pipeline!.tone,
+    }))).toEqual([
+      { from: "/plan", to: "/build", tone: "active" },
+      { from: "/build", to: "/verify", tone: "dim" },
+    ]);
+  });
+
   test("exactly one edge — the one into the current stage — carries the hub", () => {
     const links = derivePipelineLinks([threeStagePipeline()], anchor);
     expect(links.filter((link) => link.pipeline!.hub).map((link) => link.pipeline!.toStageId)).toEqual(["build"]);

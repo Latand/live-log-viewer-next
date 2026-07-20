@@ -213,6 +213,13 @@ export interface DurableConversationMembership {
   stageOrder: number | null;
   round: number | null;
   parentConversationId: ViewerConversationId | null;
+  /** Child runtime captured at adoption admission so pipeline recovery can
+      parse the materialized transcript with its owning engine. */
+  runtime?: {
+    engine: Extract<AgentEngine, "claude" | "codex">;
+    model: string | null;
+    effort: string | null;
+  } | null;
   createdAt: string;
 }
 
@@ -222,6 +229,9 @@ export interface SpawnRequest {
   engine: AgentEngine;
   cwd: string;
   transport?: "tmux" | "structured" | null;
+  /** Persist the current process as owner of a pre-host actuation. A replay
+      may adopt the receipt after this owner exits. */
+  ownStartingActuation?: boolean;
   launchProfile?: Partial<LaunchProfile>;
   clientAttemptId?: string | null;
   requestDigest?: string | null;
@@ -1009,6 +1019,14 @@ function normalizeMemberships(value: unknown): RegistryFile["memberships"] {
         || typeof row.containerId !== "string" || !row.containerId
         || typeof row.role !== "string" || !row.role
         || typeof row.slot !== "string" || !row.slot) return [];
+      const runtime = row.runtime && typeof row.runtime === "object"
+        && (row.runtime.engine === "claude" || row.runtime.engine === "codex")
+        ? {
+            engine: row.runtime.engine,
+            model: typeof row.runtime.model === "string" ? row.runtime.model : null,
+            effort: typeof row.runtime.effort === "string" ? row.runtime.effort : null,
+          }
+        : null;
       return [{
         conversationId: conversationId as ViewerConversationId,
         kind: row.kind,
@@ -1021,6 +1039,7 @@ function normalizeMemberships(value: unknown): RegistryFile["memberships"] {
         parentConversationId: typeof row.parentConversationId === "string" && row.parentConversationId.startsWith("conversation_")
           ? row.parentConversationId as ViewerConversationId
           : null,
+        runtime,
         createdAt: typeof row.createdAt === "string" ? row.createdAt : now(),
       }];
     });
@@ -1670,6 +1689,7 @@ function recordMembership(
     stageOrder: Number.isInteger(input.stageOrder) ? input.stageOrder : null,
     round: Number.isInteger(input.round) ? input.round : null,
     parentConversationId,
+    runtime: input.runtime ? { ...input.runtime } : null,
     createdAt,
   };
   const rows = file.memberships[canonicalConversationId] ?? [];
@@ -2861,7 +2881,7 @@ export class AgentRegistry {
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
         transport: input.transport ?? null,
-        admissionOwner: input.transport === "structured"
+        admissionOwner: input.transport === "structured" || input.ownStartingActuation === true
           ? { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }
           : null,
         spawnCapabilityDigest: typeof input.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(input.spawnCapabilityDigest)
@@ -2945,13 +2965,16 @@ export class AgentRegistry {
     }
   }
 
-  /** Atomically adopts a structured receipt whose pre-host owner exited.
-      A live owner keeps responsibility for its process-local deferred work. */
-  claimStartingStructuredSpawn(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
+  private claimSpawnActuation(launchId: string, transport: "tmux" | "structured"): { claimed: boolean; receipt: SpawnReceipt } {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt) throw new Error("unknown spawn receipt");
-      if (receipt.transport !== "structured" || receipt.state !== "starting" || receipt.key || receipt.pane) {
+      const unbound = receipt.state === "starting" && !receipt.key && !receipt.pane;
+      const recoverablePane = transport === "tmux"
+        && (receipt.state === "pane-bound" || receipt.state === "host-verified")
+        && !receipt.key
+        && Boolean(receipt.pane);
+      if (receipt.transport !== transport || (!unbound && !recoverablePane)) {
         return { claimed: false, receipt: clone(receipt) };
       }
       if (receipt.admissionOwner && this.ownerAlive(receipt.admissionOwner)) {
@@ -2963,6 +2986,19 @@ export class AgentRegistry {
       };
       return { claimed: true, receipt: clone(receipt) };
     });
+  }
+
+  /** Atomically adopts a structured receipt whose pre-host owner exited.
+      A live owner keeps responsibility for its process-local deferred work. */
+  claimStartingStructuredSpawn(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
+    return this.claimSpawnActuation(launchId, "structured");
+  }
+
+  /** Atomically adopts an unbound, pane-bound, or host-verified tmux receipt
+      after its actuation owner exits. A bound claimant must continue inside
+      the persisted pane identity. */
+  claimTmuxSpawnActuation(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
+    return this.claimSpawnActuation(launchId, "tmux");
   }
 
   /** Compare-and-set release of a starting structured admission: only the

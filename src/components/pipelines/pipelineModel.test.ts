@@ -18,6 +18,7 @@ import {
   compactPipelineArtifactPaths,
   latestAttempt,
   resolvePipelineMemberPaths,
+  stageAttempts,
   stageDockCompact,
   compactStageOpenTarget,
   compactPipelineOpenTarget,
@@ -25,6 +26,7 @@ import {
   pipelineAnnouncement,
   pipelineStagePosition,
   stageFailEdgeFrozen,
+  stageFailEdgeRoundsUsed,
   pipelineBoardStripPath,
   pipelineCursorActive,
   pipelineNeedsAttention,
@@ -57,7 +59,7 @@ function stage(id: string, kind: PipelineStage["kind"] = "run", roleId?: string)
     id,
     kind,
     ...(roleId ? { role: { roleId: roleId as PipelineStage["role"] extends undefined ? never : NonNullable<PipelineStage["role"]>["roleId"] } } : {}),
-    prompt: "",
+    "prompt": "",
     next: null,
     effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: kind === "review-loop" ? "read-only" : "read-write", promptScaffold: null },
   } as PipelineStage;
@@ -131,6 +133,22 @@ describe("stageChipState", () => {
     expect(stageChipState(p, stages[1]!)).toBe("running");
     /* A stage the cursor has not reached stays pending even while paused. */
     expect(stageChipState(p, stages[2]!)).toBe("pending");
+  });
+
+  test("a passed historical child stays visible while the running attempt remains operational", () => {
+    const operational = { n: 1, state: "running", historical: false, agentPath: "/operational.jsonl" } as PipelineStageAttempt;
+    const historical = { n: 2, state: "passed", historical: true, agentPath: "/historical.jsonl" } as PipelineStageAttempt;
+    const p = pipeline({
+      stages,
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      runs: [{ stageId: "build", attempts: [operational, historical] }],
+    });
+
+    expect(stageAttempts(p, "build")).toEqual([operational, historical]);
+    expect(latestAttempt(p, "build")).toBe(operational);
+    expect(stageChipState(p, stages[1]!)).toBe("running");
+    expect(pipelineBoardStripPath(p)).toBe("/operational.jsonl");
+    expect(pipelineStagePosition(p)).toEqual({ k: 2, n: 3 });
   });
 });
 
@@ -487,6 +505,24 @@ describe("stageFailEdgeFrozen (#353)", () => {
     expect(stageFailEdgeFrozen(p, verify)).toBe(true);
   });
 
+  test("a historical child keeps fail-edge usage on the running operational round", () => {
+    const verify = { ...stage("verify"), onFail: { to: "build", maxRounds: 3 } };
+    const activation = { stageId: "verify", attempt: 1, edge: "fail" as const };
+    const p = pipeline({
+      stages: [stage("build"), verify],
+      runs: [
+        { stageId: "build", attempts: [
+          { n: 2, state: "running", activatedBy: activation } as never,
+          { n: 3, state: "passed", historical: true, activatedBy: activation } as never,
+        ] },
+        { stageId: "verify", attempts: [{ n: 1, state: "failed" } as never] },
+      ],
+    });
+
+    expect(stageFailEdgeRoundsUsed(p, verify)).toBe(1);
+    expect(stageFailEdgeFrozen(p, verify)).toBe(true);
+  });
+
   test("an untraversed fail edge stays editable", () => {
     const verify = { ...stage("verify"), onFail: { to: "build", maxRounds: 3 } };
     const p = pipeline({ stages: [stage("build"), verify], cursor: { stageId: "build", state: "pending", input: null, activatedBy: null } });
@@ -577,7 +613,7 @@ describe("draftStagesToInput", () => {
     model: "",
     effort: "",
     access: "read-write",
-    prompt: "do it",
+    "prompt": "do it",
     roleParams: {},
     ...over,
   });
@@ -1012,7 +1048,7 @@ describe("stageOverrideBody sends only changed fields (issue #118 Finding 4)", (
       id: "build",
       kind: "run",
       role: { roleId: "builder" },
-      prompt: "Build it",
+      "prompt": "Build it",
       next: null,
       effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", promptScaffold: null },
     } as PipelineStage;
@@ -1026,7 +1062,7 @@ describe("stageOverrideBody sends only changed fields (issue #118 Finding 4)", (
   test("an edited prompt travels; an unchanged one is omitted (issue #221 §5)", () => {
     expect(stageOverrideBody(editable(), { ...base, prompt: "{{task}}\n\nBuild it well" })).toEqual({
       stageId: "build",
-      prompt: "{{task}}\n\nBuild it well",
+      "prompt": "{{task}}\n\nBuild it well",
     });
   });
 

@@ -7,15 +7,16 @@ import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTransaction";
+import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
-import type { EffectivePipelineRole, Pipeline, PipelineEdgeActivation, PipelineStage } from "./types";
+import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
-export const PIPELINES_SCHEMA_VERSION = 3;
-/** v2 (linear 2–4 stage chains) is migrated in memory on load; the file is
-    rewritten as v3 by the next successful mutation, never by a read. */
-const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, PIPELINES_SCHEMA_VERSION]);
+export const PIPELINES_SCHEMA_VERSION = 4;
+/** Older registries are migrated in memory on load; the file is rewritten in
+    the current shape by the next successful mutation, never by a read. */
+const MIGRATABLE_SCHEMA_VERSIONS = new Set([2, 3, PIPELINES_SCHEMA_VERSION]);
 const pipelinesFile = () => statePath("pipelines.json");
 const artifactsRoot = () => statePath("pipelines");
 
@@ -84,6 +85,7 @@ function isAttempt(value: unknown, index: number): boolean {
   const attempt = value as Record<string, unknown>;
   return (
     attempt.n === index + 1 &&
+    (attempt.historical === undefined || typeof attempt.historical === "boolean") &&
     ["pending", "spawning", "running", "reviewing", "committing", "passed", "failed", "needs_decision", "skipped"].includes(String(attempt.state)) &&
     isEffectiveRole(attempt.effectiveRole) &&
     isNullableString(attempt.launchId) &&
@@ -118,6 +120,14 @@ function isFailEdge(value: unknown): boolean {
     (edge.maxRounds as number) >= 1 &&
     (edge.maxRounds as number) <= MAX_FAIL_EDGE_ROUNDS
   );
+}
+
+function isCreationIntent(value: unknown): value is PipelineCreationIntent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const intent = value as Partial<PipelineCreationIntent>;
+  return intent.kind === "task-spawn"
+    && typeof intent.taskId === "string" && Boolean(intent.taskId.trim())
+    && typeof intent.launchId === "string" && Boolean(intent.launchId.trim());
 }
 
 function isStage(value: unknown): value is PipelineStage {
@@ -205,6 +215,10 @@ function isPipeline(value: unknown): value is Pipeline {
   if (!(
     typeof pipeline.id === "string" &&
     typeof pipeline.task === "string" &&
+    Array.isArray(pipeline.taskIds) &&
+    pipeline.taskIds.every((taskId) => typeof taskId === "string") &&
+    new Set(pipeline.taskIds).size === pipeline.taskIds.length &&
+    (pipeline.creationIntent === undefined || isCreationIntent(pipeline.creationIntent)) &&
     (pipeline.spec === undefined || typeof pipeline.spec === "string") &&
     typeof pipeline.project === "string" &&
     typeof pipeline.repoDir === "string" &&
@@ -326,6 +340,11 @@ function migrateV2Pipeline(raw: unknown): unknown {
   return migrated;
 }
 
+function migrateTaskIds(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  return { taskIds: [], ...(raw as Record<string, unknown>) };
+}
+
 export function loadPipelines(): Pipeline[] {
   const raw = readJson(pipelinesFile());
   if (raw === null) return [];
@@ -335,10 +354,13 @@ export function loadPipelines(): Pipeline[] {
     throw new PipelineStoreError(`unsupported pipeline registry schema: ${String(file.schemaVersion)}`);
   }
   if (!Array.isArray(file.pipelines)) throw new PipelineStoreError("pipeline registry contains malformed records");
-  const records = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
+  const legacyRecords = file.schemaVersion === 2 ? file.pipelines.map(migrateV2Pipeline) : file.pipelines;
+  const records = file.schemaVersion < PIPELINES_SCHEMA_VERSION ? legacyRecords.map(migrateTaskIds) : legacyRecords;
   if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
   return records.map((pipeline) => ({
     ...pipeline,
+    taskIds: [...pipeline.taskIds],
+    creationIntent: pipeline.creationIntent ? { ...pipeline.creationIntent } : undefined,
     spec: typeof pipeline.spec === "string" ? pipeline.spec : undefined,
     baseBranch: pipeline.baseBranch ?? "",
     baseRef: pipeline.baseRef ?? "",
@@ -400,6 +422,25 @@ export function savePipelines(pipelines: Pipeline[]): void {
   withFileTransactionSync(pipelinesFile(), "pipeline state is busy", () => savePipelinesUnlocked(pipelines));
 }
 
+/** Validates durable task membership at the pipeline store seam. */
+export function pipelineTaskLinkError(
+  pipeline: Pick<Pipeline, "project">,
+  taskIds: readonly string[],
+  tasks: readonly BoardTask[],
+  options: { allowMissing?: boolean } = {},
+): string | null {
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  for (const taskId of taskIds) {
+    const task = tasksById.get(taskId);
+    if (!task) {
+      if (options.allowMissing) continue;
+      return `task not found: ${taskId}`;
+    }
+    if (task.project !== pipeline.project) return `task project does not match pipeline project: ${taskId}`;
+  }
+  return null;
+}
+
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "") || "task";
 }
@@ -415,6 +456,8 @@ export function pipelineIdentity(id: string, task: string, repoDir: string): Pic
 export function buildPipeline(input: {
   id: string;
   task: string;
+  taskIds?: string[];
+  creationIntent?: PipelineCreationIntent;
   spec?: string;
   project: string;
   repoDir: string;
@@ -428,6 +471,8 @@ export function buildPipeline(input: {
   return {
     id: input.id,
     task: input.task,
+    taskIds: [...new Set(input.taskIds ?? [])],
+    ...(input.creationIntent ? { creationIntent: { ...input.creationIntent } } : {}),
     ...(input.spec ? { spec: input.spec } : {}),
     project: input.project,
     repoDir: input.repoDir,

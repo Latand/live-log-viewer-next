@@ -70,9 +70,10 @@ export function VerdictPopover({
   const label = stageChipLabel(t, stage);
   const verdict = attempt.verdict;
   const parked = pipeline.state === "needs_decision" && pipeline.cursor?.stageId === stage.id;
-  /* Only attempts before the one in the header — the current attempt is already
-     represented above, so listing it here would duplicate its status (AC5). */
-  const priorAttempts = stageAttempts(pipeline, stage.id).filter((prior) => prior.n < attempt.n);
+  /* The header represents the operational attempt. Every other persisted
+     attempt remains navigable evidence, including adopted historical children
+     appended with a higher attempt number. */
+  const priorAttempts = stageAttempts(pipeline, stage.id).filter((candidate) => candidate.n !== attempt.n);
   const stageFlowIds = new Set(stageAttempts(pipeline, stage.id).flatMap((item) => item.flowId ? [item.flowId] : []));
   const attemptPaths = new Set(stageAttempts(pipeline, stage.id).flatMap((item) => item.agentPath ? [item.agentPath] : []));
   const seenReviewPaths = new Set<string>();
