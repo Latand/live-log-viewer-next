@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-label="Issue 499 acceptance state Live ready (en)">
-  <metadata id="provenance">{"classification":"synthetic","source":"deterministic-generator","generator":"docs/screenshots/issue-499/generate-stills.ts","sourceRevision":"a13d5c277bae65fbe09704d50f00b59819660685","capture":"rest-desktop-en-light","sourceCaptureSha256":"2eafe805f6ad62a9dbca57e5c4822a8807db98cefa5ba9f041c39514232ac18e","viewport":{"width":1440,"height":900},"capabilities":{"surface":"structured","send":"enabled","runtime":"enabled","images":"enabled"}}</metadata>
+  <metadata id="provenance">{"classification":"synthetic","source":"deterministic-generator","generator":"docs/screenshots/issue-499/generate-stills.ts","sourceRevision":"3adc6127801d060ae8c886754a477d6770206bc8","capture":"rest-desktop-en-light","sourceCaptureSha256":"2eafe805f6ad62a9dbca57e5c4822a8807db98cefa5ba9f041c39514232ac18e","viewport":{"width":1440,"height":900},"capabilities":{"surface":"structured","send":"enabled","runtime":"enabled","images":"enabled"}}</metadata>
   <rect x="0" y="0" width="1440" height="900" fill="#f3f4f6"/>
   <text x="16" y="26" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#1f2937">Issue 499 — Live ready</text>
-  <text x="16" y="44" font-family="ui-monospace, monospace" font-size="11" font-weight="500" fill="#8c95a3">1440×900 · synthetic fixture · rev a13d5c277bae</text>
+  <text x="16" y="44" font-family="ui-monospace, monospace" font-size="11" font-weight="500" fill="#8c95a3">1440×900 · synthetic fixture · rev 3adc6127801d</text>
   <rect x="358" y="714" width="724" height="172" fill="#dee2e9" rx="12"/>
   <rect x="360" y="716" width="720" height="168" fill="#ffffff" rx="10"/>
   <text x="376" y="740" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="500" fill="#8c95a3">…transcript…</text>
@@ -16,5 +16,5 @@
   <rect x="966" y="782" width="14" height="3" fill="#8c95a3"/>
   <path d="M 384 818 L 378 828 L 383 828 L 377 838 L 389 825 L 384 825 L 388 818 Z" fill="#6d5ef6"/>
   <text x="398" y="832" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2937">5.6-Sol · High ⌄</text>
-  <text x="376" y="874" font-family="ui-monospace, monospace" font-size="10" font-weight="500" fill="#8c95a3">synthetic · rev a13d5c277bae</text>
+  <text x="376" y="874" font-family="ui-monospace, monospace" font-size="10" font-weight="500" fill="#8c95a3">synthetic · rev 3adc6127801d</text>
 </svg>
