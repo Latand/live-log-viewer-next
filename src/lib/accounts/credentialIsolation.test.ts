@@ -31,8 +31,8 @@ afterAll(() => {
 });
 
 test("agent launch environments exclude the Viewer-owned WakaTime credential", () => {
-  const previous = process.env[WAKATIME_CREDENTIAL_ENV];
   const placeholder = ["fixture", "value"].join("-");
+  discardWakatimeEnvironmentCredential();
   Reflect.set(process.env, WAKATIME_CREDENTIAL_ENV, placeholder);
   try {
     const codex = accountManager.resolveSpawn("codex");
@@ -44,14 +44,13 @@ test("agent launch environments exclude the Viewer-owned WakaTime credential", (
     expect(claudeStatus[WAKATIME_CREDENTIAL_ENV]).toBeUndefined();
     expect(JSON.stringify({ codex: codex.env, claude: claude.env, claudeStatus })).not.toContain(placeholder);
   } finally {
-    if (previous === undefined) Reflect.deleteProperty(process.env, WAKATIME_CREDENTIAL_ENV);
-    else Reflect.set(process.env, WAKATIME_CREDENTIAL_ENV, previous);
+    discardWakatimeEnvironmentCredential();
   }
 });
 
 test("Codex app-server children exclude the Viewer-owned WakaTime credential", () => {
-  const previous = process.env[WAKATIME_CREDENTIAL_ENV];
   const placeholder = ["fixture", "value"].join("-");
+  discardWakatimeEnvironmentCredential();
   Reflect.set(process.env, WAKATIME_CREDENTIAL_ENV, placeholder);
   try {
     const env = codexAppServerEnvironment("/fixture/home");
@@ -59,8 +58,7 @@ test("Codex app-server children exclude the Viewer-owned WakaTime credential", (
     expect(JSON.stringify(env)).not.toContain(placeholder);
     expect(env.CODEX_HOME).toBe("/fixture/home");
   } finally {
-    if (previous === undefined) Reflect.deleteProperty(process.env, WAKATIME_CREDENTIAL_ENV);
-    else Reflect.set(process.env, WAKATIME_CREDENTIAL_ENV, previous);
+    discardWakatimeEnvironmentCredential();
   }
 });
 

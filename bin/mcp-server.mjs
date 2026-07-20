@@ -7,8 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   discardWakatimeEnvironmentCredential,
+  viewerChildProcessOptions,
   viewerServerBunRuntime,
-  withoutWakatimeCredential,
 } from "./server-runtime.mjs";
 
 discardWakatimeEnvironmentCredential();
@@ -18,7 +18,7 @@ const bundled = join(packageRoot, "dist", "mcp-server.mjs");
 const source = join(packageRoot, "src", "lib", "mcp", "entry.ts");
 
 async function runChild(runtime, entry) {
-  const child = spawn(runtime, [entry], { cwd: packageRoot, env: withoutWakatimeCredential(process.env), stdio: "inherit" });
+  const child = spawn(runtime, [entry], viewerChildProcessOptions({ cwd: packageRoot, stdio: "inherit" }));
   let childExited = false;
   const forwardInterrupt = () => {
     if (!childExited) child.kill("SIGINT");

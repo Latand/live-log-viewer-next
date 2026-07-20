@@ -188,13 +188,12 @@ describe("WakaTime activity sync", () => {
   test("production credential delivery ignores the legacy environment variable", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-file-only-"));
     const missingFile = path.join(directory, "missing-key");
-    const previous = process.env[WAKATIME_CREDENTIAL_ENV];
+    delete process.env[WAKATIME_CREDENTIAL_ENV];
     process.env[WAKATIME_CREDENTIAL_ENV] = TEST_CREDENTIAL;
     try {
       expect(readProductionWakatimeCredential(missingFile)).toBeNull();
     } finally {
-      if (previous === undefined) delete process.env[WAKATIME_CREDENTIAL_ENV];
-      else process.env[WAKATIME_CREDENTIAL_ENV] = previous;
+      delete process.env[WAKATIME_CREDENTIAL_ENV];
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
@@ -284,6 +283,59 @@ describe("WakaTime activity sync", () => {
     });
     await restarted.sync.tick();
     expect(restarted.state()?.pending).toHaveLength(3);
+    restarted.sync.stop();
+  });
+
+  test("restart durably records a distinct close boundary at an already-materialized 120-second sample", async () => {
+    let clock = NOW;
+    const first = harness({
+      now: () => clock,
+      scan: async () => ({ files: [entry({ activity: "live", activityReason: "jsonl_turn_open", proc: "running", pid: 42 })], complete: true }),
+      recentTurnWindows: () => ({
+        windows: [{ startedAt: NOW, endedAt: null }],
+        prefixTruncated: false,
+        complete: true,
+      }),
+    });
+    await first.sync.tick();
+    clock += 120_000;
+    await first.sync.tick();
+
+    const materialized = structuredClone(first.state());
+    first.sync.stop();
+    const closed = harness({
+      now: () => clock,
+      readState: async () => materialized,
+      scan: async () => ({ files: [entry({ mtime: clock / 1_000, activity: "recent", proc: "done", pid: null })], complete: true }),
+      recentTurnWindows: () => ({
+        windows: [{ startedAt: NOW, endedAt: clock }],
+        prefixTruncated: false,
+        complete: true,
+      }),
+    });
+    await closed.sync.tick();
+
+    expect(closed.state()?.pending.map((event) => ({ kind: event.kind, time: event.heartbeat.time }))).toEqual([
+      { kind: "activity", time: NOW / 1_000 },
+      { kind: "activity", time: clock / 1_000 },
+      { kind: "boundary", time: clock / 1_000 },
+    ]);
+
+    const persistedClose = structuredClone(closed.state());
+    closed.sync.stop();
+    const restarted = harness({
+      now: () => clock,
+      readState: async () => persistedClose,
+      scan: async () => ({ files: [entry({ mtime: clock / 1_000, activity: "recent", proc: "done", pid: null })], complete: true }),
+      recentTurnWindows: () => ({
+        windows: [{ startedAt: NOW, endedAt: clock }],
+        prefixTruncated: false,
+        complete: true,
+      }),
+    });
+    await restarted.sync.tick();
+
+    expect(restarted.state()?.pending).toEqual(persistedClose?.pending);
     restarted.sync.stop();
   });
 

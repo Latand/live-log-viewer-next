@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { detectTailscale, getToken, readStatus, serve as serveTailscale, TailscaleError } from "./tailscale.mjs";
 import {
   discardWakatimeEnvironmentCredential,
+  viewerChildProcessOptions,
   viewerServerBunRuntime,
   withoutWakatimeCredential,
 } from "./server-runtime.mjs";
@@ -282,11 +283,11 @@ function buildChildEnv(options, runtime) {
 }
 
 function startServer(server, options, runtime, tailscaleProcessRef) {
-  const child = spawn(server.command, server.args, {
+  const child = spawn(server.command, server.args, viewerChildProcessOptions({
     cwd: server.cwd,
     env: buildChildEnv(options, runtime),
     stdio: ["ignore", "inherit", "pipe"],
-  });
+  }));
 
   const state = {
     sawAddressInUse: false,
@@ -419,10 +420,10 @@ function openBrowser(url) {
     return;
   }
 
-  const child = spawn(opener, [url], {
+  const child = spawn(opener, [url], viewerChildProcessOptions({
     stdio: "ignore",
     detached: true,
-  });
+  }));
   child.unref();
 }
 

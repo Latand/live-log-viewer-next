@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 
 import {
   viewerServerBunRuntime,
+  viewerChildProcessOptions,
   WAKATIME_CREDENTIAL_ENV,
   withoutWakatimeCredential,
 } from "./server-runtime.mjs";
@@ -63,4 +64,21 @@ test("Viewer child processes receive no ambient WakaTime key material", () => {
   expect(probe.exitCode).toBe(0);
   expect(JSON.parse(probe.stdout.toString())).toEqual({ keep: "kept", key: null });
   expect(JSON.stringify(env)).not.toContain(placeholder);
+});
+
+test("published launcher child options capture no ambient WakaTime key material", () => {
+  const placeholder = ["launcher", "fixture", "value"].join("-");
+  const options = viewerChildProcessOptions({
+    cwd: "/viewer",
+    env: {
+      PATH: process.env.PATH,
+      KEEP_ME: "kept",
+      [WAKATIME_CREDENTIAL_ENV]: placeholder,
+    },
+    stdio: "ignore",
+  });
+
+  expect(options.env.KEEP_ME).toBe("kept");
+  expect(options.env[WAKATIME_CREDENTIAL_ENV]).toBeUndefined();
+  expect(JSON.stringify(options)).not.toContain(placeholder);
 });

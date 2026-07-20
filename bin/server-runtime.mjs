@@ -18,6 +18,16 @@ export function withoutWakatimeCredential(base) {
   return env;
 }
 
+/**
+ * @param {Record<string, unknown> & { env?: Readonly<Record<string, string | undefined>> }} options
+ */
+export function viewerChildProcessOptions(options = {}) {
+  return {
+    ...options,
+    env: withoutWakatimeCredential(options.env ?? process.env),
+  };
+}
+
 export function viewerServerBunRuntime(options = {}) {
   const env = options.env ?? process.env;
   const versions = options.versions ?? process.versions;

@@ -169,7 +169,6 @@ test("headless Codex launch closes stdin and excludes the WakaTime credential fr
   const capturePath = path.join(process.env.LLV_STATE_DIR!, "stdin-capture.json");
   const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-codex");
   const prompt = "Review line one.\nReview line two with unicode: Привіт.\n";
-  const previousWakatimeCredential = process.env[WAKATIME_CREDENTIAL_ENV];
   const wakatimePlaceholder = ["artifact", "fixture"].join("-");
   fs.writeFileSync(
     executablePath,
@@ -177,6 +176,7 @@ test("headless Codex launch closes stdin and excludes the WakaTime credential fr
     { mode: 0o700 },
   );
 
+  Reflect.deleteProperty(process.env, WAKATIME_CREDENTIAL_ENV);
   Reflect.set(process.env, WAKATIME_CREDENTIAL_ENV, wakatimePlaceholder);
   try {
     startHeadlessReview(
@@ -201,8 +201,7 @@ test("headless Codex launch closes stdin and excludes the WakaTime credential fr
     expect(artifact).not.toContain(wakatimePlaceholder);
   } finally {
     forgetHeadlessReview("flow-stdin-eof", 1);
-    if (previousWakatimeCredential === undefined) Reflect.deleteProperty(process.env, WAKATIME_CREDENTIAL_ENV);
-    else Reflect.set(process.env, WAKATIME_CREDENTIAL_ENV, previousWakatimeCredential);
+    Reflect.deleteProperty(process.env, WAKATIME_CREDENTIAL_ENV);
   }
 });
 
@@ -251,8 +250,8 @@ test("an owned reviewer stays running when process identity is briefly unavailab
 
 test("headless managed Codex reviewer fixes its account home and file credential store at launch", () => {
   process.env.LLV_TOKEN = "viewer-token";
-  const previousWakatimeCredential = process.env[WAKATIME_CREDENTIAL_ENV];
   const wakatimePlaceholder = ["fixture", "value"].join("-");
+  Reflect.deleteProperty(process.env, WAKATIME_CREDENTIAL_ENV);
   Reflect.set(process.env, WAKATIME_CREDENTIAL_ENV, wakatimePlaceholder);
   const built = reviewerCommand(
     { engine: "codex", model: null, effort: null },
@@ -271,8 +270,7 @@ test("headless managed Codex reviewer fixes its account home and file credential
   expect(JSON.stringify({ args: built.args, env: built.env })).not.toContain(wakatimePlaceholder);
   expect(built.env.LLV_SPAWN_CAPABILITY).toBe("B".repeat(43));
   delete process.env.LLV_TOKEN;
-  if (previousWakatimeCredential === undefined) Reflect.deleteProperty(process.env, WAKATIME_CREDENTIAL_ENV);
-  else Reflect.set(process.env, WAKATIME_CREDENTIAL_ENV, previousWakatimeCredential);
+  Reflect.deleteProperty(process.env, WAKATIME_CREDENTIAL_ENV);
 });
 
 test("headless claude reviewer launches with approval-free tool access", () => {

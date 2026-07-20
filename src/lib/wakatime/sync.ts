@@ -242,7 +242,7 @@ function sampleTimes(start: number, end: number, closed: boolean, last: number |
     if (last === null || sample > last) times.push(sample);
     sample += SAMPLE_INTERVAL_MS;
   }
-  if (closed && end > start && (last === null || end > last) && times.at(-1) !== end) times.push(end);
+  if (closed && end > start && (last === null || end >= last) && times.at(-1) !== end) times.push(end);
   return times;
 }
 
