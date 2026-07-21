@@ -10,8 +10,11 @@ import { AgentRegistry, agentRegistry } from "@/lib/agent/registry";
 
 import type { Flow } from "./types";
 
+let relayDeliveries = 0;
+let releaseRelayDeliveries: Array<() => void> = [];
+
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark, reserveReviewerSpawn } = await import("./engine");
+const { captureReviewHead, newRound, tickFlow, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark, reserveReviewerSpawn, setRelayDeliveryForTest } = await import("./engine");
 const { loadFlows, outputPathFor, saveFlows, stderrPathFor, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
@@ -1131,6 +1134,96 @@ function raceFlow(over: Partial<Flow>): Flow {
   } as unknown as Flow;
 }
 
+test("overlapping relay ticks deliver one review and settle the round once (#529)", async () => {
+  relayDeliveries = 0;
+  releaseRelayDeliveries = [];
+  const restoreDelivery = setRelayDeliveryForTest(async (flow) => {
+    relayDeliveries += 1;
+    await new Promise<void>((resolve) => { releaseRelayDeliveries.push(resolve); });
+    return flow.implementerPath;
+  });
+  const implementer = writeCodexEntry("relay-single-flight-implementer.jsonl", {
+    id: ["039f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nFix the relay race.\n");
+  const round = {
+    ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+    findingsPath,
+    verdict: "REQUEST_CHANGES" as const,
+    findingsCount: 1,
+    reviewedAt: "2026-07-21T16:16:05.000Z",
+    terminalAt: "2026-07-21T16:16:05.000Z",
+  };
+  const original = raceFlow({
+    id: "flow-relay-single-flight",
+    implementerPath: implementer.path,
+    state: "relaying",
+    rounds: [round],
+  });
+  saveFlows([original]);
+  const first = structuredClone(original);
+  const second = structuredClone(original);
+  const firstBase = flowTickBase([first]);
+  const secondBase = flowTickBase([second]);
+  const entriesByPath = new Map([[implementer.path, implementer]]);
+
+  try {
+    const firstTick = tickFlow(first, [implementer], entriesByPath, () => persistTickFlows([first], firstBase));
+    while (relayDeliveries < 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    const secondTick = tickFlow(second, [implementer], entriesByPath, () => persistTickFlows([second], secondBase));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(relayDeliveries).toBe(1);
+    fs.appendFileSync(implementer.path, `${JSON.stringify({
+      timestamp: new Date(Date.now() + 1_000).toISOString(),
+      type: "event_msg",
+      payload: { type: "task_complete", last_agent_message: "REVIEW_READY: repaired head" },
+    })}\n`);
+    saveFlows([{ ...loadFlows()[0]!, state: "paused", pausedState: "relaying" }]);
+    for (const release of releaseRelayDeliveries) release();
+    await Promise.all([firstTick, secondTick]);
+    persistTickFlows([first], firstBase);
+    persistTickFlows([second], secondBase);
+
+    expect(loadFlows()[0]).toMatchObject({
+      state: "paused",
+      pausedState: "relaying",
+      rounds: [{
+        n: 1,
+        relayDelivery: { path: implementer.path, deliveredAt: expect.any(String) },
+        relayedAt: expect.any(String),
+      }],
+    });
+
+    const stat = fs.statSync(implementer.path);
+    const repairedEntry = { ...implementer, size: stat.size, mtime: stat.mtimeMs / 1_000 };
+    const resumed = { ...loadFlows()[0]!, state: "relaying" as const, pausedState: null };
+    saveFlows([resumed]);
+    for (let pass = 0; pass < 2; pass += 1) {
+      const recovered = structuredClone(loadFlows()[0]!);
+      const recoveredBase = flowTickBase([recovered]);
+      await tickFlow(recovered, [repairedEntry], new Map([[repairedEntry.path, repairedEntry]]), () => {
+        persistTickFlows([recovered], recoveredBase);
+      });
+      persistTickFlows([recovered], recoveredBase);
+    }
+
+    expect(relayDeliveries).toBe(1);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "spawning",
+      rounds: [
+        { n: 1, reviewerBindingId: round.reviewerBindingId, findingsPath, verdict: "REQUEST_CHANGES" },
+        { n: 2, triggeredBy: "marker", readyNote: "repaired head", reviewHeadSha: null, reviewerBindingId: expect.any(String) },
+      ],
+    });
+  } finally {
+    for (const release of releaseRelayDeliveries) release();
+    restoreDelivery();
+  }
+});
+
 test("persistTickFlows respects a concurrent close instead of reopening the flow (issue #118 review)", () => {
   /* The tick started with the flow reviewing; the operator closed it during the
      tick's awaited spawn/relay. */
@@ -1147,6 +1240,35 @@ test("persistTickFlows respects a concurrent close instead of reopening the flow
   const after = loadFlows()[0]!;
   expect(after.state).toBe("closed");
   expect(after.closedAt).toBe("2026-05-05T01:00:00Z");
+});
+
+test("relay settlement does not contaminate a concurrently retried round", () => {
+  const round = {
+    ...newRound(raceFlow({ rounds: [] }), "marker", null),
+    verdict: "REQUEST_CHANGES" as const,
+  };
+  const started = raceFlow({ state: "relaying", rounds: [round] });
+  saveFlows([started]);
+  const clone = structuredClone(started);
+  const base = flowTickBase([clone]);
+  const retriedRound = {
+    ...round,
+    reviewerBindingId: crypto.randomUUID(),
+    relayStartedAt: null,
+    relayDelivery: null,
+    relayedAt: null,
+  };
+  saveFlows([raceFlow({ state: "paused", pausedState: "spawning", rounds: [retriedRound] })]);
+  clone.state = "fixing";
+  clone.rounds[0]!.relayDelivery = { path: "/impl", deliveredAt: "2026-07-21T17:00:00.000Z" };
+  clone.rounds[0]!.relayedAt = "2026-07-21T17:00:00.000Z";
+
+  persistTickFlows([clone], base);
+
+  expect(loadFlows()[0]).toMatchObject({
+    state: "paused",
+    rounds: [{ relayDelivery: null, relayedAt: null }],
+  });
 });
 
 test("persistTickFlows preserves a flow created during the tick (issue #118 review)", () => {
