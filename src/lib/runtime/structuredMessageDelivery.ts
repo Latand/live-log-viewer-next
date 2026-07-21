@@ -227,7 +227,7 @@ function holdDuringRuntimeSynchronization(
   const rejectedHold = supersededRejection(registry, owner.conversation);
   if (rejectedHold) return rejectedHold;
   if (owner.kind === "legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
-  const { conversation } = owner;
+  let { conversation } = owner;
   if (request.hasImages || request.images?.length) {
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }
@@ -235,11 +235,59 @@ function holdDuringRuntimeSynchronization(
     assertStructuredTextEnvelope(request.text);
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
     const refs = request.imageRefs ?? [];
-    if (refs.length) {
-      const content = structuredContent(request.text, refs);
-      registry.holdDelivery(conversation.id, content.content.text, idempotencyKey, "runtime-images", refs, content.contentDigest, commandInput(request));
-    } else {
-      registry.holdDelivery(conversation.id, request.text, idempotencyKey, "text", [], null, commandInput(request));
+    if (!request.text && refs.length === 0) throw new Error("held delivery must contain at most 32000 characters");
+    const content = refs.length ? structuredContent(request.text, refs) : null;
+    const deliveryText = content?.content.text ?? request.text;
+    const contentDigest = content?.contentDigest ?? null;
+    const payloadKind = refs.length ? "runtime-images" : "text";
+    /* Conflict and terminal replay outcomes remain side-effect free. Accepted
+       sends establish the durable account fence before reservation placement. */
+    const replay = registry.preflightDeliveryReservation(
+      conversation.id,
+      deliveryText,
+      idempotencyKey,
+      payloadKind,
+      refs,
+      contentDigest,
+      commandInput(request),
+    );
+    if (replay?.state === "delivered") {
+      return deliveredReservationReplay(replay, idempotencyKey, conversation.id, false);
+    }
+    if (replay?.state === "failed") {
+      return {
+        ok: false,
+        structured: true,
+        outcome: "failed",
+        error: replay.error || "delivery target is unavailable",
+        status: 409,
+      };
+    }
+    const generation = conversation.generations.at(-1);
+    const activeAccountId = registry.engineRouting(conversation.engine).activeAccountId;
+    if (activeAccountId && generation?.accountId && generation.accountId !== activeAccountId) {
+      conversation = registry.requestConversationMigrationToActiveAccount(conversation.id);
+    }
+    const reservation = registry.holdDelivery(
+      conversation.id,
+      deliveryText,
+      idempotencyKey,
+      payloadKind,
+      refs,
+      contentDigest,
+      commandInput(request),
+    );
+    if (reservation.state === "delivered") {
+      return deliveredReservationReplay(reservation, idempotencyKey, conversation.id, false);
+    }
+    if (reservation.state === "failed") {
+      return {
+        ok: false,
+        structured: true,
+        outcome: "failed",
+        error: reservation.error || "delivery target is unavailable",
+        status: 409,
+      };
     }
     requestTick();
     return {
