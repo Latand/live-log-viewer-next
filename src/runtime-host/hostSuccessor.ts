@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
 import { withoutWakatimeCredentialEntries } from "@/lib/wakatime/credential";
 
@@ -38,8 +40,9 @@ export interface RuntimeHostSuccessorPorts {
   wait?(milliseconds: number): Promise<void>;
 }
 
-export function runtimeHostSuccessorName(revision: string): string {
-  return `llv-runtime-host-${revision.slice(0, 12)}`;
+export function runtimeHostSuccessorName(revision: string, image: string): string {
+  const generation = createHash("sha256").update(image).digest("hex").slice(0, 12);
+  return `llv-runtime-host-${revision.slice(0, 12)}-${generation}`;
 }
 
 interface PredecessorTopology {
@@ -146,22 +149,27 @@ function successorStartIdentity(raw: string): SuccessorStartIdentity {
   };
 }
 
-function successorIsReady(raw: string, name: string, candidate: ViewerReleaseIdentity): boolean {
+function successorMatchesGeneration(raw: string, name: string, candidate: ViewerReleaseIdentity): boolean {
   const inspected = JSON.parse(raw) as Array<Record<string, unknown>>;
   const container = inspected[0] ?? {};
-  const state = (container.State ?? {}) as Record<string, unknown>;
   const config = (container.Config ?? {}) as Record<string, unknown>;
   const labels = (config.Labels ?? {}) as Record<string, unknown>;
   const environment = stringArray(config.Env);
-  return state.Status === "running"
-    && state.Running === true
-    && state.Restarting !== true
-    && config.Image === candidate.image
+  return config.Image === candidate.image
     && labels[RUNTIME_HOST_SUCCESSOR_LABEL] === "1"
     && labels["dev.live-log-viewer.revision"] === candidate.revision
     && environment.includes(`${RUNTIME_HOST_IMAGE_ENV}=${candidate.image}`)
     && environment.includes(`${RUNTIME_HOST_REVISION_ENV}=${candidate.revision}`)
     && environment.includes(`${RUNTIME_HOST_CONTAINER_ENV}=${name}`);
+}
+
+function successorIsReady(raw: string, name: string, candidate: ViewerReleaseIdentity): boolean {
+  const inspected = JSON.parse(raw) as Array<Record<string, unknown>>;
+  const state = (inspected[0]?.State ?? {}) as Record<string, unknown>;
+  return successorMatchesGeneration(raw, name, candidate)
+    && state.Status === "running"
+    && state.Running === true
+    && state.Restarting !== true;
 }
 
 /** Two identity-aware observations: both must report the ready running state,
@@ -248,7 +256,7 @@ export async function stageRuntimeHostSuccessorContainer(
 ): Promise<{ successorContainer: string }> {
   await ports.docker(["image", "inspect", candidate.image]);
   await ports.docker(["tag", candidate.image, runtimeHostImageTag]);
-  const name = runtimeHostSuccessorName(candidate.revision);
+  const name = runtimeHostSuccessorName(candidate.revision, candidate.image);
   const intent = ports.readHandoffIntent();
   if (intent && intent.revision === candidate.revision && intent.image === candidate.image && intent.successorContainer === name) {
     /* PR #521 crash recovery: the previous staging died between recording the
@@ -269,10 +277,14 @@ export async function stageRuntimeHostSuccessorContainer(
     await ports.docker(successorRunArgs(name, candidate, predecessor));
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
-    /* A same-revision leftover from an interrupted staging is reused: the
-       container name embeds the revision, so a conflict is always the same
-       successor generation. */
+    /* A same-attempt leftover may be reused only after its complete immutable
+       generation identity matches. A stale or foreign collision must stay
+       stopped so it can never acquire the singleton fence. */
     if (!/is already in use|Conflict/.test(message)) throw error;
+    const collision = await ports.docker(["container", "inspect", name]);
+    if (!successorMatchesGeneration(collision, name, candidate)) {
+      throw new Error("runtime-host successor container failed its identity or running-state gate");
+    }
     await ports.docker(["container", "start", name]);
   }
   await observeStableSuccessor(name, candidate, ports);

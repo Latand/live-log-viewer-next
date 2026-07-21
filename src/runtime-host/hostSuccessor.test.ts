@@ -26,6 +26,17 @@ const candidate: ViewerReleaseIdentity = {
   endpoint: "http://127.0.0.1:18001",
 };
 
+test("issue 521 review: separate deployments of the same revision receive distinct successor names", () => {
+  const repeatCandidate = {
+    ...candidate,
+    image: `${candidate.image}-repeat`,
+    container: `${candidate.container}-repeat`,
+  };
+
+  expect(runtimeHostSuccessorName(candidate.revision, candidate.image))
+    .not.toBe(runtimeHostSuccessorName(repeatCandidate.revision, repeatCandidate.image));
+});
+
 /* The unsupported credential as Docker would report it from the predecessor's
    environment. The value is a test placeholder, never a real credential. */
 const wakatimePlaceholderValue = "waka-credential-value-placeholder";
@@ -77,7 +88,7 @@ function harness(overrides: {
   const intents: RuntimeHostHandoffIntent[] = [];
   let storedIntent: RuntimeHostHandoffIntent | null = null;
   let successorInspection = 0;
-  const successorName = runtimeHostSuccessorName(revision);
+  const successorName = runtimeHostSuccessorName(revision, candidate.image);
   function successorInspect(state: string, stable: boolean): string {
     return JSON.stringify([{
       Id: "5ucce5501d5ucce5501d",
@@ -186,7 +197,7 @@ function crashWorld(): CrashWorld {
 
 function crashHarness(world: CrashWorld): { ports: RuntimeHostSuccessorPorts; calls: string[][] } {
   const calls: string[][] = [];
-  const successorName = runtimeHostSuccessorName(revision);
+  const successorName = runtimeHostSuccessorName(revision, candidate.image);
   function successorJson(): string {
     return JSON.stringify([{
       Id: SUCCESSOR_ID,
@@ -285,7 +296,7 @@ test("issue 518: staging creates a dockerd-owned successor from the candidate im
 
   const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports);
 
-  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision));
+  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision, candidate.image));
   /* The successor container boots exactly the deployed candidate image with
      the predecessor's topology, owned by dockerd with a restart policy — it
      survives the death of every initiating client process, including the
@@ -301,7 +312,7 @@ test("issue 518: staging creates a dockerd-owned successor from the candidate im
      after the successor is observably running. */
   expect(records).toEqual([{
     ...candidate,
-    container: runtimeHostSuccessorName(revision),
+    container: runtimeHostSuccessorName(revision, candidate.image),
     stagedAt: "2026-07-21T09:00:00.000Z",
   }]);
   /* The predecessor is never stopped, killed, or removed by staging: its own
@@ -334,9 +345,145 @@ test("issue 518: an interrupted prior staging of the same revision is reused ide
 
   const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports);
 
-  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision));
-  expect(calls).toContainEqual(["container", "start", runtimeHostSuccessorName(revision)]);
+  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision, candidate.image));
+  expect(calls).toContainEqual(["container", "start", runtimeHostSuccessorName(revision, candidate.image)]);
   expect(records).toHaveLength(1);
+});
+
+test("issue 521 review: A to B to A stages each deployment generation and never restarts the first A", async () => {
+  const candidates = [
+    candidate,
+    {
+      ...candidate,
+      revision: "c".repeat(40),
+      image: `agent-log-viewer:deploy-${"c".repeat(40)}-beef`,
+      container: "llv-deploy-b-generation",
+    },
+    {
+      ...candidate,
+      image: `agent-log-viewer:deploy-${revision}-f00d`,
+      container: "llv-deploy-a-repeat",
+    },
+  ];
+  type Container = {
+    id: string;
+    name: string;
+    image: string;
+    revision: string;
+    pid: number;
+    running: boolean;
+    restart: string;
+  };
+  const containers: Container[] = [{
+    id: "predecessor-zero",
+    name: "llv-runtime-host-initial",
+    image: "agent-log-viewer:node22",
+    revision: "0".repeat(40),
+    pid: 3970,
+    running: true,
+    restart: "unless-stopped",
+  }];
+  const starts: string[] = [];
+  const releases: RuntimeHostReleaseRecord[] = [];
+  let intent: RuntimeHostHandoffIntent | null = null;
+  let active = containers[0]!;
+
+  function inspect(container: Container): string {
+    return JSON.stringify([{
+      Id: container.id,
+      RestartCount: 0,
+      State: {
+        Status: container.running ? "running" : "exited",
+        Running: container.running,
+        Restarting: false,
+        StartedAt: `2026-07-21T09:00:0${containers.indexOf(container)}.000Z`,
+        Pid: container.running ? container.pid : 0,
+      },
+      Config: {
+        Image: container.image,
+        Cmd: ["bun-container", "run", "src/runtime-host/main.ts"],
+        Env: [
+          "LLV_RUNTIME_EVENTS=1",
+          `${RUNTIME_HOST_IMAGE_ENV}=${container.image}`,
+          `${RUNTIME_HOST_REVISION_ENV}=${container.revision}`,
+          `${RUNTIME_HOST_CONTAINER_ENV}=${container.name}`,
+        ],
+        Labels: {
+          [RUNTIME_HOST_SUCCESSOR_LABEL]: "1",
+          "dev.live-log-viewer.revision": container.revision,
+        },
+        "User": "1000:1000",
+        WorkingDir: "/app",
+      },
+      HostConfig: { Binds: [], GroupAdd: [], NetworkMode: "host", PidMode: "host", Privileged: true },
+    }]);
+  }
+
+  const ports: RuntimeHostSuccessorPorts = {
+    docker: async (argv) => {
+      if (argv[0] === "image" || argv[0] === "tag") return "";
+      if (argv[0] === "container" && argv[1] === "ls") {
+        return `${containers.filter((item) => item.running).map((item) => item.id).join("\n")}\n`;
+      }
+      if (argv[0] === "container" && argv[1] === "inspect") {
+        const found = containers.find((item) => item.id === argv[2] || item.name === argv[2]);
+        if (!found) throw new Error(`No such container: ${argv[2]}`);
+        return inspect(found);
+      }
+      if (argv[0] === "run") {
+        const name = argv[3]!;
+        if (containers.some((item) => item.name === name)) throw new Error(`Conflict. The container name "/${name}" is already in use`);
+        const imageEntry = argv.findLast((item) => item.startsWith(`${RUNTIME_HOST_IMAGE_ENV}=`));
+        const revisionEntry = argv.findLast((item) => item.startsWith(`${RUNTIME_HOST_REVISION_ENV}=`));
+        const created: Container = {
+          id: `successor-${containers.length}`,
+          name,
+          image: imageEntry!.slice(RUNTIME_HOST_IMAGE_ENV.length + 1),
+          revision: revisionEntry!.slice(RUNTIME_HOST_REVISION_ENV.length + 1),
+          pid: 4200 + containers.length,
+          running: true,
+          restart: "unless-stopped",
+        };
+        containers.push(created);
+        return created.id;
+      }
+      if (argv[0] === "container" && argv[1] === "start") {
+        starts.push(argv[2]!);
+        const found = containers.find((item) => item.id === argv[2] || item.name === argv[2]);
+        if (!found) throw new Error(`No such container: ${argv[2]}`);
+        found.running = true;
+        return "";
+      }
+      if (argv[0] === "container" && argv[1] === "update") {
+        const found = containers.find((item) => item.id === argv.at(-1) || item.name === argv.at(-1));
+        if (!found) throw new Error(`No such container: ${argv.at(-1)}`);
+        found.restart = "no";
+        return "";
+      }
+      return "";
+    },
+    writeRelease: (record) => { releases.push(record); },
+    readRelease: () => releases.at(-1) ?? null,
+    readHandoffIntent: () => intent,
+    writeHandoffIntent: (next) => { intent = next; },
+    clearHandoffIntent: () => { intent = null; },
+    fenceOwnerPid: () => active.pid,
+    now: () => "2026-07-21T09:00:00.000Z",
+    wait: async () => undefined,
+  };
+
+  for (const next of candidates) {
+    const staged = await stageRuntimeHostSuccessorContainer(next, "agent-log-viewer:node22", ports);
+    active.running = false;
+    active = containers.find((item) => item.name === staged.successorContainer)!;
+  }
+
+  const successorNames = candidates.map((item) => runtimeHostSuccessorName(item.revision, item.image));
+  expect(successorNames[0]).not.toBe(successorNames[2]);
+  expect(releases.map((item) => item.container)).toEqual(successorNames);
+  expect(starts).toEqual([]);
+  expect(containers.find((item) => item.name === successorNames[0])).toMatchObject({ running: false, restart: "no" });
+  expect(active).toMatchObject({ name: successorNames[2], running: true, restart: "unless-stopped" });
 });
 
 test("issue 518: a successor that is not running never becomes the durable release", async () => {
@@ -375,6 +522,7 @@ test("issue 518: a same-name container with the wrong image never becomes durabl
     .rejects.toThrow("runtime-host successor container failed its identity or running-state gate");
 
   expect(records).toEqual([]);
+  expect(calls.some((argv) => argv[0] === "container" && argv[1] === "start")).toBe(false);
   expect(calls.some((argv) => argv[0] === "container" && argv[1] === "update")).toBe(false);
 });
 
@@ -421,7 +569,7 @@ test("issue 521: recovery after a crash between restart-disable and publication 
   const retry = crashHarness(world);
   const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", retry.ports);
 
-  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision));
+  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision, candidate.image));
   /* Recovery never rediscovers a predecessor through the fence owner — the
      fence now belongs to the successor itself. */
   expect(retry.calls.some((argv) => argv[0] === "container" && argv[1] === "ls")).toBe(false);
@@ -434,7 +582,7 @@ test("issue 521: recovery after a crash between restart-disable and publication 
   /* Publication happens exactly once and binds the successor identity. */
   expect(world.releaseRecords).toEqual([{
     ...candidate,
-    container: runtimeHostSuccessorName(revision),
+    container: runtimeHostSuccessorName(revision, candidate.image),
     stagedAt: "2026-07-21T09:00:00.000Z",
   }]);
   expect(world.handoffIntent).toBeNull();
@@ -451,7 +599,7 @@ test("issue 521: a crash between publication and intent clearing never publishes
   const retry = crashHarness(world);
   const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", retry.ports);
 
-  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision));
+  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision, candidate.image));
   expect(world.releaseRecords).toHaveLength(1);
   expect(world.handoffIntent).toBeNull();
   expect(world.successorRestart).toBe("unless-stopped");
@@ -471,7 +619,7 @@ test("issue 521: recovery completes when the crashed predecessor container is al
   const retry = crashHarness(world);
   const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", retry.ports);
 
-  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision));
+  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision, candidate.image));
   expect(world.releaseRecords).toHaveLength(1);
   expect(world.successorRestart).toBe("unless-stopped");
   expect(world.handoffIntent).toBeNull();
