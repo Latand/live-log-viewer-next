@@ -3,12 +3,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { FileEntry } from "@/lib/types";
+import { useCoarsePointer } from "@/hooks/useCoarsePointer";
 import { useLocale } from "@/lib/i18n";
 
 import type { SchemeRect } from "./layout";
 import type { SubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
 import { layoutBadges } from "./subagentBadgeLayout";
 import { subagentsOf } from "./subagentBadgeModel";
+
+/* Rail pitch under a coarse pointer: the 30px circle plus this gap gives every
+   badge a non-overlapping 44px tap slot (30 + 14 = 44) — the hit extender
+   below can reach 7px past each circle without stealing a neighbor's taps.
+   Fine pointers keep the compact 6px gap (issue #474 follow-up). */
+const COARSE_BADGE_GAP = 14;
+const FINE_BADGE_GAP = 6;
 
 export interface SubagentBadgesProps {
   conversationId: string;
@@ -43,8 +51,12 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
   const foldLabel = (name: string) => t("subagentTray.fold", { name });
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const suppressTouchClick = useRef(false);
+  const coarse = useCoarsePointer();
   const children = useMemo(() => subagentsOf(conversationId, entries, exclude), [conversationId, entries, exclude]);
-  const positions = useMemo(() => layoutBadges(children, cardRect), [children, cardRect]);
+  const positions = useMemo(
+    () => layoutBadges(children, cardRect, 30, coarse ? COARSE_BADGE_GAP : FINE_BADGE_GAP),
+    [children, cardRect, coarse],
+  );
   const hasExpandedChild = expandedId !== null && children.some((child) => child.id === expandedId);
 
   useEffect(() => {
@@ -104,7 +116,9 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
               data-scheme-ui
               aria-label={foldLabel(child.title)}
               title={foldLabel(child.title)}
-              className="pointer-events-auto absolute z-[71] inline-flex h-5 w-5 items-center justify-center rounded-full border border-border bg-card text-[11px] text-muted shadow-1 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55"
+              /* 20px visual control; a coarse-pointer pseudo inset stretches
+                 the tap surface to 44px (20 + 2·12) without growing the pill. */
+              className="pointer-events-auto absolute z-[71] inline-flex h-5 w-5 items-center justify-center rounded-full border border-border bg-card text-[11px] text-muted shadow-1 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55 pointer-coarse:before:absolute pointer-coarse:before:-inset-3 pointer-coarse:before:content-['']"
               style={{ left: position.x - cardRect.x + 202, top: position.y - cardRect.y + 5 }}
               onClick={() => onFold(child.id, child.path)}
             >
@@ -128,7 +142,10 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
             aria-disabled={unavailable}
             aria-label={child.title}
             title={tooltip}
-            className={`pointer-events-auto absolute flex max-w-[220px] items-center overflow-hidden rounded-full border border-card bg-card text-left shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55 ${
+            /* The visual clip for the sliding title lives on the inner wrapper,
+               NOT here: the button must stay unclipped so the coarse-pointer
+               hit extender can reach past the 30px circle to a 44px target. */
+            className={`pointer-events-auto absolute flex max-w-[220px] items-center rounded-full border border-card bg-card text-left shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55 ${
               expanded ? "z-[70] w-[220px]" : "z-[6] w-[30px]"
             } ${dimmed ? "opacity-45 grayscale" : ""} ${unavailable ? "cursor-default" : "cursor-pointer hover:shadow-2"}`}
             style={{
@@ -155,20 +172,27 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
               if (!unavailable) onNavigate(child.path);
             }}
           >
-            <span
-              className="relative z-[1] inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full text-[9px] font-black tracking-[-0.04em] text-white"
-              style={{
-                background: `linear-gradient(135deg, oklch(72% 0.17 ${hue}), oklch(48% 0.2 ${(hue + 58) % 360}))`,
-              }}
-              aria-hidden
-            >
-              {initials(child.title)}
-              {child.state === "running" ? (
-                <span className="absolute inset-[-2px] rounded-full ring-2 ring-success/70 animate-pulse motion-reduce:animate-none" />
-              ) : null}
-            </span>
-            <span className={`min-w-0 truncate px-2.5 text-[11px] font-semibold text-primary ${expanded ? "opacity-100" : "opacity-0"}`}>
-              {child.title}
+            {/* Coarse-pointer tap surface: a non-layout span reaching 7px past
+                the circle on every side (30 + 2·7 = 44px), display-gated to
+                (pointer: coarse) so desktop hover geometry is untouched. */}
+            <span data-subagent-hit aria-hidden className="absolute -inset-[7px] hidden rounded-full pointer-coarse:block" />
+            <span className="flex h-full w-full min-w-0 items-center overflow-hidden rounded-full">
+              <span
+                data-subagent-avatar
+                className="relative z-[1] inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full text-[9px] font-black tracking-[-0.04em] text-white"
+                style={{
+                  background: `linear-gradient(135deg, oklch(72% 0.17 ${hue}), oklch(48% 0.2 ${(hue + 58) % 360}))`,
+                }}
+                aria-hidden
+              >
+                {initials(child.title)}
+                {child.state === "running" ? (
+                  <span className="absolute inset-[-2px] rounded-full ring-2 ring-success/70 animate-pulse motion-reduce:animate-none" />
+                ) : null}
+              </span>
+              <span className={`min-w-0 truncate px-2.5 text-[11px] font-semibold text-primary ${expanded ? "opacity-100" : "opacity-0"}`}>
+                {child.title}
+              </span>
             </span>
           </button>
           </span>

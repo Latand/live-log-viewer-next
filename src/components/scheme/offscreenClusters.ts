@@ -45,13 +45,24 @@ export interface ScreenRect {
   height: number;
 }
 
+/** Stable clearance gutter reserved around every fixed keep-out surface — the
+    circular subagent avatars/round stack and the composer/input/Send chrome. A
+    chip band or «+N» aggregate that merely *touches* an avatar reads as merged
+    with it and one flush against the composer intrudes on the input, so
+    admission tests against the box inflated by this gutter: every reveal keeps
+    at least this many screen pixels of separation (issue #474 follow-up). */
+export const KEEPOUT_CLEARANCE_PX = 12;
+
 /** Translate fixed board chrome — the subagent avatar/round stack and the
     composer/input area — from viewport space into the chip layer's local space
     (origin `base`, the board container's screen top-left) and keep only the
-    parts that actually fall inside the chip viewport. Feeding these to
-    {@link offscreenClusterChips} as obstacles makes an edge chip whose revealed
-    band would paint over one fold into its «+N» disclosure instead of covering
-    the avatars or the composer (operator overlap report, issue #474). */
+    parts that actually fall inside the chip viewport. Each box is inflated by
+    {@link KEEPOUT_CLEARANCE_PX} on all sides, so a chip/reveal/aggregate is
+    admitted only when it keeps a stable gutter from the avatars and composer —
+    never flush against them. Feeding these to {@link offscreenClusterChips} as
+    obstacles makes an edge chip whose revealed band would paint over (or merge
+    with) one fold into its «+N» disclosure instead (operator overlap report,
+    issue #474). */
 export function screenKeepoutObstacles(
   base: { left: number; top: number },
   rects: readonly ScreenRect[],
@@ -60,7 +71,12 @@ export function screenKeepoutObstacles(
   const out: SchemeRect[] = [];
   for (const rect of rects) {
     if (rect.width < 1 || rect.height < 1) continue;
-    const box: SchemeRect = { x: rect.left - base.left, y: rect.top - base.top, w: rect.width, h: rect.height };
+    const box: SchemeRect = {
+      x: rect.left - base.left - KEEPOUT_CLEARANCE_PX,
+      y: rect.top - base.top - KEEPOUT_CLEARANCE_PX,
+      w: rect.width + 2 * KEEPOUT_CLEARANCE_PX,
+      h: rect.height + 2 * KEEPOUT_CLEARANCE_PX,
+    };
     if (box.x + box.w <= 0 || box.y + box.h <= 0 || box.x >= vp.w || box.y >= vp.h) continue;
     out.push(box);
   }

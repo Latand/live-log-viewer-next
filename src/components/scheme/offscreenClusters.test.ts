@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { FileEntry } from "@/lib/types";
 
 import type { SchemeLayout } from "./layout";
-import { boardClusters, CHIP_MAX_W, chipObstacleRects, chipRevealWidth, offscreenClusterChips, OVERFLOW_TRIGGER, overflowAnchor, overflowListStyle, resolveOverflowPlacement, screenKeepoutObstacles, type BoardCluster, type ChipEdge } from "./offscreenClusters";
+import { boardClusters, CHIP_MAX_W, chipObstacleRects, chipRevealWidth, KEEPOUT_CLEARANCE_PX, offscreenClusterChips, OVERFLOW_TRIGGER, overflowAnchor, overflowListStyle, resolveOverflowPlacement, screenKeepoutObstacles, type BoardCluster, type ChipEdge } from "./offscreenClusters";
 
 const cam = { x: 0, y: 0, z: 1 };
 const vp = { w: 1_000, h: 700 };
@@ -490,18 +490,19 @@ describe("viewport-safe overflow disclosure list (issue #474: the opened «+N» 
 describe("fixed-chrome keep-out (issue #474: chips never paint over the subagent avatar/round stack or the composer)", () => {
   test("screenKeepoutObstacles translates viewport rects into chip-local space", () => {
     /* Board container's screen origin is (200, 80); a subagent avatar at screen
-       (210, 300) lands at chip-local (10, 220). */
+       (210, 300) lands at chip-local (10, 220) and carries its stable clearance
+       gutter on every side (issue #474 follow-up). */
     const local = screenKeepoutObstacles({ left: 200, top: 80 }, [{ left: 210, top: 300, width: 30, height: 120 }], vp);
-    expect(local).toEqual([{ x: 10, y: 220, w: 30, h: 120 }]);
+    expect(local).toEqual([{ x: 10 - KEEPOUT_CLEARANCE_PX, y: 220 - KEEPOUT_CLEARANCE_PX, w: 30 + 2 * KEEPOUT_CLEARANCE_PX, h: 120 + 2 * KEEPOUT_CLEARANCE_PX }]);
   });
 
   test("screenKeepoutObstacles drops zero-area and fully off-viewport chrome", () => {
     const local = screenKeepoutObstacles({ left: 200, top: 80 }, [
-      { left: 210, top: 300, width: 0, height: 120 }, // collapsed
-      { left: 100, top: 80, width: 40, height: 100 }, // entirely left of the board (x+w ≤ 0)
+      { left: 210, top: 300, width: 0, height: 120 }, // collapsed: no gutter for invisible chrome
+      { left: 60, top: 80, width: 40, height: 100 }, // entirely left of the board even with its gutter (x+w ≤ 0)
       { left: 210, top: 300, width: 30, height: 120 }, // real
     ], vp);
-    expect(local).toEqual([{ x: 10, y: 220, w: 30, h: 120 }]);
+    expect(local).toEqual([{ x: 10 - KEEPOUT_CLEARANCE_PX, y: 220 - KEEPOUT_CLEARANCE_PX, w: 30 + 2 * KEEPOUT_CLEARANCE_PX, h: 120 + 2 * KEEPOUT_CLEARANCE_PX }]);
   });
 
   test("a left chip whose revealed band overlaps the subagent avatar rail folds into overflow", () => {
@@ -529,5 +530,54 @@ describe("fixed-chrome keep-out (issue #474: chips never paint over the subagent
     const chips = offscreenClusterChips([cluster("right-task", 1_700, 300)], cam, vp, 4, keepout);
     expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["right-task"]);
     expect(chips.overflow).toHaveLength(0);
+  });
+});
+
+describe("stable keep-out clearance (issue #474 follow-up: a reveal never sits flush against an avatar or the composer)", () => {
+  test("every keep-out box is inflated by the clearance gutter on all four sides", () => {
+    /* A subagent avatar at screen (210, 300) reserves not just its own 30×120
+       box but a stable KEEPOUT_CLEARANCE_PX gutter around it, so an admitted
+       chip can never rest flush against the circle and visually merge with it. */
+    const local = screenKeepoutObstacles({ left: 200, top: 80 }, [{ left: 210, top: 300, width: 30, height: 120 }], vp);
+    expect(KEEPOUT_CLEARANCE_PX).toBeGreaterThanOrEqual(8);
+    expect(local).toEqual([{
+      x: 10 - KEEPOUT_CLEARANCE_PX,
+      y: 220 - KEEPOUT_CLEARANCE_PX,
+      w: 30 + 2 * KEEPOUT_CLEARANCE_PX,
+      h: 120 + 2 * KEEPOUT_CLEARANCE_PX,
+    }]);
+  });
+
+  test("a chip whose reveal band misses the avatar box but lands inside its clearance gutter folds", () => {
+    /* Left chip anchored at x=22, band 22..542 (CHIP_MAX_W reserved), centered
+       at y=350 (±22). An avatar column 8px past the band's end — clear of the
+       raw box but inside the gutter — must still fold the chip: flush-adjacent
+       reveals are exactly the "visually merges with the avatar" defect. */
+    const nearAvatar = screenKeepoutObstacles({ left: 0, top: 0 }, [{ left: 550, top: 300, width: 30, height: 120 }], vp);
+    const chips = offscreenClusterChips([cluster("left-task", -700, 300)], cam, vp, 4, nearAvatar);
+    expect(chips.visible).toHaveLength(0);
+    expect(chips.overflow.map((chip) => chip.cluster.key)).toEqual(["left-task"]);
+  });
+
+  test("a chip whose reveal band keeps more than the clearance gutter from the avatar stays visible", () => {
+    /* Same band, avatar 18px past its end — beyond the gutter, so the chip is
+       admitted: the clearance is a stable minimum, not a blanket suppression. */
+    const farAvatar = screenKeepoutObstacles({ left: 0, top: 0 }, [{ left: 542 + KEEPOUT_CLEARANCE_PX + 6, top: 300, width: 30, height: 120 }], vp);
+    const chips = offscreenClusterChips([cluster("left-task", -700, 300)], cam, vp, 4, farAvatar);
+    expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["left-task"]);
+    expect(chips.overflow).toHaveLength(0);
+  });
+
+  test("the «+N» aggregate docks clear of the gutter, never flush against composer chrome", () => {
+    /* A composer band whose raw box ends just above the bottom edge's docking
+       strip: without the gutter the trigger's midpoint slot touches it. The
+       anchor must slide to a slot whose 44px box clears the INFLATED band. */
+    const composer = screenKeepoutObstacles({ left: 0, top: 0 }, [{ left: 380, top: 700 - 10 - OVERFLOW_TRIGGER - 40, width: 240, height: 40 }], vp);
+    const anchor = overflowAnchor("bottom", vp, composer);
+    expect(anchor).not.toBeNull();
+    const trigger = { x: anchor!.x - OVERFLOW_TRIGGER / 2, y: 700 - 10 - OVERFLOW_TRIGGER, w: OVERFLOW_TRIGGER, h: OVERFLOW_TRIGGER };
+    const band = composer[0]!;
+    const overlaps = trigger.x < band.x + band.w && trigger.x + trigger.w > band.x && trigger.y < band.y + band.h && trigger.y + trigger.h > band.y;
+    expect(overlaps).toBe(false);
   });
 });

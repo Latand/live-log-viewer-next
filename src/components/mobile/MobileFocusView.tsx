@@ -40,6 +40,7 @@ import { layoutPipelineGroups, type PipelinePane } from "@/components/scheme/pip
 import { isPlacedTask, taskRect } from "@/components/scheme/taskGeometry";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
 import { MobileMapLite } from "./MobileMapLite";
+import { SUBAGENT_RAIL_MIN_BOTTOM_PX, subagentRailBottom } from "./subagentRailLift";
 
 /* Re-exported so existing importers (and tests) keep resolving it here after
    the component moved to its own module (issue #419). */
@@ -56,10 +57,12 @@ const SWIPE_MIN_X = 56;
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 /* Height of the phone's bottom-up subagent badge rail — the 12-badge hard cap
-   at 30px + 6px gaps. The rail anchors to the focused pane's left edge and lifts
-   clear of the composer, so a tap expands the title rightward inside the 390px
-   viewport with no horizontal overflow. */
-const SUBAGENT_RAIL_H = 12 * 36;
+   at the coarse-pointer 44px pitch (30px circle + 14px gap), so every badge
+   keeps its own non-overlapping ≥44px tap slot in a single column (issue #474
+   follow-up). The rail anchors to the focused pane's left edge and lifts clear
+   of the measured composer bounds, so a tap expands the title rightward inside
+   the 390px viewport with no horizontal overflow. */
+const SUBAGENT_RAIL_H = 12 * 44;
 
 interface Entry {
   key: string;
@@ -250,6 +253,50 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
   const activeNode = useMemo(() => layout.nodes.find((node) => node.file.path === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDeck = useMemo(() => layout.decks.find((deck) => deck.key === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDraft = useMemo(() => layout.drafts.find((draft) => draft.key === resolvedKey) ?? null, [layout, resolvedKey]);
+
+  /* The side agent rail must never enter the composer/input/Send bounds (issue
+     #474 follow-up): the phone composer grows to min(38dvh, 20rem), so a fixed
+     bottom offset lets it swallow the lowest badges and their tap reveals. The
+     rail's offset instead tracks the measured composer band plus the stable
+     clearance gutter — re-measured when the pane area's DOM changes (the
+     composer mounting, its textarea growing a style-driven row) or the window
+     resizes, coalesced to one measurement per frame. */
+  const paneAreaRef = useRef<HTMLDivElement | null>(null);
+  const [railBottom, setRailBottom] = useState(SUBAGENT_RAIL_MIN_BOTTOM_PX);
+  const activePanePath = activeNode?.file.path ?? null;
+  useEffect(() => {
+    const hostEl = paneAreaRef.current;
+    if (!hostEl || !activePanePath) return;
+    let frame = 0;
+    const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (cb: FrameRequestCallback) => window.setTimeout(() => cb(0), 16) as unknown as number;
+    const caf = typeof cancelAnimationFrame === "function" ? cancelAnimationFrame : (id: number) => window.clearTimeout(id);
+    const resize = typeof ResizeObserver === "function" ? new ResizeObserver(() => schedule()) : null;
+    let observedComposer: Element | null = null;
+    const measure = () => {
+      const composer = hostEl.querySelector('[data-testid="bounded-mobile-composer"]');
+      if (resize && composer !== observedComposer) {
+        if (observedComposer) resize.unobserve(observedComposer);
+        if (composer) resize.observe(composer);
+        observedComposer = composer;
+      }
+      const composerTop = composer ? composer.getBoundingClientRect().top : null;
+      setRailBottom(subagentRailBottom(hostEl.getBoundingClientRect().bottom, composerTop));
+    };
+    const schedule = () => {
+      if (frame) return;
+      frame = raf(() => { frame = 0; measure(); });
+    };
+    measure();
+    const observer = typeof MutationObserver === "function" ? new MutationObserver(schedule) : null;
+    observer?.observe(hostEl, { subtree: true, childList: true, attributes: true, attributeFilter: ["style", "class"] });
+    window.addEventListener("resize", schedule);
+    return () => {
+      if (frame) caf(frame);
+      observer?.disconnect();
+      resize?.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
+  }, [activePanePath]);
   /* Report the focused conversation up so the project shell can dock its handoff
      control in the footer shelf row (issue #177 item 5). Cleared on unmount so a
      switch to the list view drops the stale handoff target. */
@@ -470,7 +517,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
 
       {/* Even card gutters that also clear the notch/rounded corners (finding 8):
           the safe-area insets keep the pane off the screen edges symmetrically. */}
-      <div className="relative flex min-h-0 flex-1 flex-col pt-1 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
+      <div ref={paneAreaRef} className="relative flex min-h-0 flex-1 flex-col pt-1 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
         {activeNode ? (
           /* The handoff control for this pane docks in the footer shelf row
              (issue #177 item 5), so the focus view itself renders only the pane. */
@@ -551,16 +598,17 @@ export function MobileFocusView({ project, groups, manual, files, flows, reviewG
         )}
         {/* The subagent badge/anchor interaction on the phone (PR #441): the same
             30x30 bottom-up circles the desktop board carries, anchored to the
-            focused pane's left edge and lifted above the composer. A hover/tap
-            expands the title, a second tap navigates to the child's CURRENT
-            generation. The overlay is pointer-events-none so only the badges
-            themselves take taps; expansion grows rightward within the 390px
-            viewport, so it never adds horizontal overflow. */}
+            focused pane's left edge and lifted above the MEASURED composer
+            bounds plus the stable clearance gutter (issue #474 follow-up). A
+            hover/tap expands the title, a second tap navigates to the child's
+            CURRENT generation. The overlay is pointer-events-none so only the
+            badges themselves take taps; expansion grows rightward within the
+            390px viewport, so it never adds horizontal overflow. */}
         {activeNode ? (
           <div
             data-testid="mobile-subagent-rail"
-            className="pointer-events-none absolute bottom-20 left-2 z-[20]"
-            style={{ width: 0, height: SUBAGENT_RAIL_H }}
+            className="pointer-events-none absolute left-2 z-[20]"
+            style={{ width: 0, height: SUBAGENT_RAIL_H, bottom: railBottom }}
           >
             <SubagentBadges
               conversationId={conversationIdentity(activeNode.file)}

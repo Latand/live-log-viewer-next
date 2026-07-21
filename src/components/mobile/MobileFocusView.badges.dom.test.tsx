@@ -120,6 +120,30 @@ test("the focused conversation mounts its subagent badge at 390px", async () => 
   expect(badge!.className).toContain("pointer-events-auto");
 });
 
+test("the rail lifts above the live composer bounds instead of resting on a fixed offset (issue #474 follow-up)", async () => {
+  const host = await renderFocus([parent, childStale, childCurrent], "/parent.jsonl", () => undefined);
+  const rail = host.querySelector('[data-testid="mobile-subagent-rail"]') as HTMLElement;
+  expect(rail).not.toBeNull();
+  /* The static bottom-20 offset let a grown composer (up to min(38dvh, 20rem))
+     swallow the lowest badges; the offset is now a measured inline style. With
+     happy-dom's zero-height rects the measurement settles at the resting
+     minimum — the pre-#474 offset. */
+  expect(rail.className).not.toContain("bottom-20");
+  expect(rail.style.bottom).toBe("80px");
+
+  /* Stub real geometry — pane area bottom 800, composer top 640 — and force a
+     re-measure: the rail must clear the composer band plus the stable gutter. */
+  const paneArea = rail.parentElement as HTMLElement;
+  const rect = (over: Partial<DOMRect>) => () => ({ left: 0, top: 0, right: 390, bottom: 0, width: 390, height: 0, x: 0, y: 0, toJSON() {}, ...over }) as DOMRect;
+  paneArea.getBoundingClientRect = rect({ bottom: 800 });
+  const composer = paneArea.querySelector('[data-testid="bounded-mobile-composer"]') as HTMLElement;
+  expect(composer).not.toBeNull();
+  composer.getBoundingClientRect = rect({ top: 640, bottom: 800, height: 160 });
+  dom.window.dispatchEvent(new dom.Event("resize"));
+  for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(rail.style.bottom).toBe("172px"); // 160px composer band + 12px clearance
+});
+
 test("two taps navigate to the current non-archived generation, not the stale file-order entry", async () => {
   const selected: string[] = [];
   const host = await renderFocus([childStale, childCurrent, parent], "/parent.jsonl", (file) => selected.push(file.path));

@@ -76,7 +76,15 @@ const CONVERSATION_TITLES = [
   "Bounded off-screen edge chip progressive reveals", // 48
 ];
 
-function buildFixtureHome(): string {
+/* Two delegated subagent children seeded under the FIRST conversation — the
+   phone rail fixture (issue #474 follow-up: the side agent rail stays available
+   on mobile with 44px tap targets clear of the composer). Generic phrases only. */
+const RAIL_CHILD_TITLES = [
+  "Scoped verification worker for the capture pipeline",
+  "Focused regression worker for the geometry contract",
+];
+
+function buildFixtureHome(): { home: string; railParentSid: string } {
   const root = path.join(os.tmpdir(), "llv-issue-474-fixture");
   fs.rmSync(root, { recursive: true, force: true });
   const home = path.join(root, "home");
@@ -86,8 +94,11 @@ function buildFixtureHome(): string {
   fs.mkdirSync(claudeDir, { recursive: true });
   const at = (offsetSec: number) => new Date(now - offsetSec * 1000).toISOString();
 
+  let railParentSid = "";
   CONVERSATION_TITLES.forEach((title, index) => {
-    const file = path.join(claudeDir, `${randomUUID()}.jsonl`);
+    const sid = randomUUID();
+    if (index === 0) railParentSid = sid;
+    const file = path.join(claudeDir, `${sid}.jsonl`);
     fs.writeFileSync(
       file,
       jsonl([
@@ -99,11 +110,29 @@ function buildFixtureHome(): string {
     fs.utimesSync(file, mtime, mtime);
   });
 
+  /* Delegated children under the first conversation's `subagents/` tree — the
+     native Claude sidechain layout the scanner links to its parent — so the
+     phone focus view mounts a real side agent rail. */
+  const subDir = path.join(claudeDir, railParentSid, "subagents");
+  fs.mkdirSync(subDir, { recursive: true });
+  RAIL_CHILD_TITLES.forEach((title, index) => {
+    const file = path.join(subDir, `agent-${randomUUID()}.jsonl`);
+    fs.writeFileSync(
+      file,
+      jsonl([
+        { type: "user", isSidechain: true, uuid: randomUUID(), timestamp: at(200 + index), cwd, message: { role: "user", content: [{ type: "text", text: title }] } },
+        { type: "assistant", isSidechain: true, uuid: randomUUID(), timestamp: at(40 + index), cwd, message: { role: "assistant", model: "claude-opus-4-8", content: [{ type: "text", text: "Working — this delegated child anchors a rail badge." }] } },
+      ]),
+    );
+    const mtime = new Date(now - 25_000 - index * 1000);
+    fs.utimesSync(file, mtime, mtime);
+  });
+
   const uid = process.getuid?.() ?? 1000;
   for (const dir of [".config/agent-log-viewer/state", ".cache", "tmp", path.join("tmp", `claude-${uid}`)]) {
     fs.mkdirSync(path.join(home, dir), { recursive: true });
   }
-  return home;
+  return { home, railParentSid };
 }
 
 function serverEnv(home: string): NodeJS.ProcessEnv {
@@ -390,6 +419,15 @@ type KeepoutProbe = {
   fullEdge?: boolean;
 };
 const KEEPOUT_PROBES: KeepoutProbe[] = [
+  /* Stable clearance gutter (issue #474 follow-up): an avatar band that stops
+     8px SHORT of the chip — no raw overlap — still folds it, because admission
+     inflates every keep-out by the clearance so a reveal can never rest flush
+     against an avatar or the composer and visually merge with it. */
+  { id: "clearance-gutter", detail: "an avatar band 8px from the chip — clear of its raw box but inside the clearance gutter", band: (r, vw, vh) => {
+    const below = r.top + r.height + 8 + 40 <= vh - 4;
+    const top = below ? r.top + r.height + 8 : r.top - 8 - 40;
+    return { left: Math.round(r.left), top: Math.round(top), width: Math.round(Math.max(160, r.width)), height: 40 };
+  } },
   { id: "avatar-rail", detail: "a subagent avatar/round column poking in at the chip's edge", band: (r) => ({ left: Math.round(r.left), top: Math.round(r.top - 12), width: 44, height: Math.round(r.height + 44) }) },
   { id: "round-badge", detail: "a round/reasoning badge landing on the chip", band: (r) => ({ left: Math.round(r.left), top: Math.round(r.top), width: 40, height: 40 }) },
   { id: "composer", detail: "the composer/input band overlapping the chip", band: (r) => ({ left: Math.round(r.left - 40), top: Math.round(r.top - 6), width: 260, height: Math.round(r.height + 12) }) },
@@ -439,22 +477,39 @@ async function proveObstacleMatrix(page: any, outDir: string): Promise<void> {
     await Bun.sleep(500); // MutationObserver → re-measure → re-render
     const result = await page.evaluate((selector: string) => {
       const overlaps = (a: DOMRect, b: DOMRect) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+      /* Separation between two boxes: the largest per-axis gap (0 when they
+         touch or overlap on both axes). The clearance contract requires every
+         visible chip/aggregate to keep at least the stable gutter from every
+         keep-out surface — not merely avoid raw overlap (issue #474). */
+      const gap = (a: DOMRect, b: DOMRect) => Math.max(b.left - a.right, a.left - b.right, b.top - a.bottom, a.top - b.bottom, overlaps(a, b) ? -1 : 0);
       const keepouts = Array.from(document.querySelectorAll("[data-chip-keepout]")) as HTMLElement[];
+      const keepoutRects = keepouts.map((k) => k.getBoundingClientRect()).filter((kr) => kr.width > 0 && kr.height > 0);
       const overlapsKeepout = (el: HTMLElement): boolean => {
         const r = el.getBoundingClientRect();
         if (r.width <= 0) return false;
-        return keepouts.some((k) => { const kr = k.getBoundingClientRect(); return kr.width > 0 && kr.height > 0 && overlaps(r, kr); });
+        return keepoutRects.some((kr) => overlaps(r, kr));
+      };
+      const minGapOf = (els: HTMLElement[]): number => {
+        let min = Number.POSITIVE_INFINITY;
+        for (const el of els) {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0) continue;
+          for (const kr of keepoutRects) min = Math.min(min, gap(r, kr));
+        }
+        return min;
       };
       const chips = Array.from(document.querySelectorAll("[data-edge-chip]")) as HTMLElement[];
       const anyChipOverlap = chips.some(overlapsKeepout);
       const triggerEls = Array.from(document.querySelectorAll('nav[aria-label="Off-screen work"] button')).filter((b) => /^\+\d+$/.test((b.textContent || "").trim())) as HTMLElement[];
       const triggerOverlap = triggerEls.some(overlapsKeepout);
+      const minGap = minGapOf([...chips, ...triggerEls]);
       document.getElementById("llv-474-keepout-probe")?.remove();
-      return { chipGone: !document.querySelector(selector), anyChipOverlap, triggerCount: triggerEls.length, triggerOverlap };
+      return { chipGone: !document.querySelector(selector), anyChipOverlap, triggerCount: triggerEls.length, triggerOverlap, minGap };
     }, sel!);
     check(result.chipGone, `desktop-chip-folds-off-${probe.id}`, `a chip whose reserved reveal band meets ${probe.detail} folds into its «+N» disclosure instead of painting over it`);
     check(!result.anyChipOverlap, `desktop-chip-clears-${probe.id}`, `no visible edge chip overlaps the ${probe.id} keep-out surface`);
     check(!result.triggerOverlap, `desktop-aggregate-clears-${probe.id}`, `every folded «+N» aggregate trigger (${result.triggerCount}) docks clear of the ${probe.id} keep-out`);
+    check(result.minGap === Number.POSITIVE_INFINITY || result.minGap >= 11.5, `desktop-clearance-held-${probe.id}`, `every remaining chip and «+N» aggregate keeps the stable ≥12px clearance gutter from every keep-out surface (min gap ${result.minGap === Number.POSITIVE_INFINITY ? "n/a — none visible" : `${Math.round(result.minGap)}px`})`);
     if (probe.fullEdge) {
       /* The wall covers the entire blocked edge's docking strip, so a trigger
          clear of it (asserted above) is by construction not docking on the
