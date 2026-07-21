@@ -26,25 +26,25 @@ afterAll(() => {
 
 test("parseWorktreeGitdir resolves an absolute gitdir into repo + worktree name", () => {
   const info = parseWorktreeGitdir(
-    "/home/u/.agents/tools/live-log-viewer-attention-queue",
-    "gitdir: /home/u/.agents/tools/live-log-viewer-next/.git/worktrees/live-log-viewer-attention-queue\n",
+    "/home/user/.agents/tools/live-log-viewer-attention-queue",
+    "gitdir: /home/user/.agents/tools/live-log-viewer-next/.git/worktrees/live-log-viewer-attention-queue\n",
   );
   expect(info).toEqual({
-    repo: "/home/u/.agents/tools/live-log-viewer-next",
+    repo: "/home/user/.agents/tools/live-log-viewer-next",
     worktree: "live-log-viewer-attention-queue",
   });
 });
 
 test("parseWorktreeGitdir resolves a relative gitdir against the checkout cwd", () => {
-  const info = parseWorktreeGitdir("/home/u/wt", "gitdir: ../main/.git/worktrees/wt");
-  expect(info).toEqual({ repo: "/home/u/main", worktree: "wt" });
+  const info = parseWorktreeGitdir("/home/user/wt", "gitdir: ../main/.git/worktrees/wt");
+  expect(info).toEqual({ repo: "/home/user/main", worktree: "wt" });
 });
 
 test("parseWorktreeGitdir rejects gitdirs that are not linked worktrees", () => {
-  expect(parseWorktreeGitdir("/home/u/sub", "gitdir: /home/u/main/.git")).toBeNull();
-  expect(parseWorktreeGitdir("/home/u/sub", "not a git file")).toBeNull();
+  expect(parseWorktreeGitdir("/home/user/sub", "gitdir: /home/user/main/.git")).toBeNull();
+  expect(parseWorktreeGitdir("/home/user/sub", "not a git file")).toBeNull();
   /* "worktrees" segment without a .git parent is another repo layout, not a linked checkout */
-  expect(parseWorktreeGitdir("/home/u/sub", "gitdir: /home/u/worktrees/x")).toBeNull();
+  expect(parseWorktreeGitdir("/home/user/sub", "gitdir: /home/user/worktrees/x")).toBeNull();
 });
 
 test("an absent cwd cannot inherit the Viewer process project", () => {

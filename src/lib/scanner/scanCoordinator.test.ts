@@ -159,6 +159,25 @@ test("an exclusive caller keeps its own runner and never adopts a covering scan"
   expect((await pinned).files.map((file) => file.path)).toEqual(["/sessions/pinned.jsonl"]);
 });
 
+test("a catalog joiner never adopts a running exclusive generation", async () => {
+  const pinnedScans: RecordedScan[] = [];
+  const pinned = coordinatedFileScan({ exclusive: true, join: false }, recordingRunner(pinnedScans, "pinned"));
+  await Promise.resolve();
+  expect(pinnedScans).toHaveLength(1);
+
+  // The pinned scan's snapshot carries its private overlay; an ordinary
+  // catalog caller must wait for a shared generation instead of adopting it.
+  const scans: RecordedScan[] = [];
+  const joiner = coordinatedFileScan({}, recordingRunner(scans, "shared"));
+  pinnedScans[0]!.release();
+  await pinned;
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(scans).toHaveLength(1);
+  scans[0]!.release();
+  expect((await joiner).files.map((file) => file.path)).toEqual(["/sessions/shared.jsonl"]);
+});
+
 test("later callers never merge into a queued exclusive generation", async () => {
   const scans: RecordedScan[] = [];
   const shared = recordingRunner(scans, "shared");

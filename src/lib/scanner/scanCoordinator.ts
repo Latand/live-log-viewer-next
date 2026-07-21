@@ -45,6 +45,9 @@ export type CoordinatedScanRunner = (intent: ResolvedScanIntent) => Promise<File
 interface InflightGeneration {
   generation: number;
   intent: ResolvedScanIntent;
+  /** An exclusive generation's snapshot carries private scope (a pin overlay);
+      joiners must never adopt it as the shared catalog. */
+  exclusive: boolean;
   promise: Promise<FileCatalogScan>;
 }
 
@@ -86,7 +89,12 @@ const defaultRunner: CoordinatedScanRunner = (intent) => listFilesWithProjectCat
   ...(intent.fresh ? { fresh: true } : {}),
 });
 
-function startGeneration(state: CoordinatorState, intent: ResolvedScanIntent, runner: CoordinatedScanRunner): InflightGeneration {
+function startGeneration(
+  state: CoordinatorState,
+  intent: ResolvedScanIntent,
+  runner: CoordinatedScanRunner,
+  exclusive: boolean,
+): InflightGeneration {
   state.generation += 1;
   let scan: Promise<FileCatalogScan>;
   try {
@@ -97,6 +105,7 @@ function startGeneration(state: CoordinatorState, intent: ResolvedScanIntent, ru
   const inflight: InflightGeneration = {
     generation: state.generation,
     intent,
+    exclusive,
     promise: scan.finally(() => {
       if (state.inflight === inflight) state.inflight = undefined;
       scheduleStart(state);
@@ -117,7 +126,7 @@ function scheduleStart(state: CoordinatorState): void {
     if (state.inflight) return;
     const pending = state.queue.shift();
     if (!pending) return;
-    startGeneration(state, pending.intent, pending.runner).promise.then(pending.resolve, pending.reject);
+    startGeneration(state, pending.intent, pending.runner, pending.exclusive).promise.then(pending.resolve, pending.reject);
   });
 }
 
@@ -164,7 +173,7 @@ export async function coordinatedFileScan(
   const wanted: ResolvedScanIntent = { persist: intent.persist === true, fresh: intent.fresh === true };
   const exclusive = intent.exclusive === true;
   const inflight = state.inflight;
-  const snapshot = !exclusive && inflight && intent.join !== false && covers(inflight.intent, wanted)
+  const snapshot = !exclusive && inflight && !inflight.exclusive && intent.join !== false && covers(inflight.intent, wanted)
     ? await inflight.promise
     : await enqueue(state, wanted, runner, exclusive);
   return structuredClone(snapshot);
