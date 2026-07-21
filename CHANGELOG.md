@@ -7,6 +7,21 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 ## [Unreleased]
 
 ### Fixed
+- Multi-gigabyte active transcripts no longer starve the Viewer (#287). One
+  process-wide scan coordinator now owns every catalog generation: the HTTP
+  files cache, the pipeline watchdog, and the account controller join or queue
+  behind a single scan instead of multiplying corpus reads, with pinned
+  refreshes holding an exclusive lease so their pin overlay never leaks into
+  the shared catalog. The remaining open-ended readers honor hard byte
+  budgets — authorship proofs resume from persisted checkpoints at 4 MiB per
+  path inside a 32 MiB cycle budget, and lineage needle scans cap one
+  candidate at 1 MiB inside a 256 KiB generation budget — proven against
+  logical 3 GiB transcripts. Transcript-derived metadata now caches by file
+  identity alone, so project-state reconciliation recomputes only the
+  project/worktree overlay instead of evicting the corpus-wide cache. Runtime
+  host responses settle exactly once and every read-only host request carries
+  the caller's abort signal, ending the late `socket.end` writes
+  (`ERR_STREAM_ALREADY_FINISHED`) after client timeouts.
 - Two #507 final-review repairs. (1) An aged-idle passed stage on a
   cursor-bearing active pipeline stays the ONE real stage conversation card. The
   board ran two independent derivations over the same scan — the idle-worker
