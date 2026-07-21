@@ -59,6 +59,7 @@ test("a review round captures its clean commit immediately before launch", () =>
     const headSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).stdout.trim();
     const flow = {
       cwd: directory,
+      targetSha: headSha.toUpperCase(),
       roles: {
         implementer: { engine: "codex", model: null, effort: "high" },
         reviewer: { engine: "codex", model: null, effort: "xhigh" },

@@ -218,7 +218,7 @@ export function reserveReviewerSpawn(
 export function captureReviewHead(flow: Flow, round: Round): string {
   const headSha = resolveCleanFlowHead(flow.cwd);
   if (!headSha) throw new Error("review requires a clean committed HEAD");
-  if (round.n === 1 && flow.targetSha && headSha !== flow.targetSha) {
+  if (round.n === 1 && flow.targetSha && headSha.toLowerCase() !== flow.targetSha.toLowerCase()) {
     const detail = `review target changed before launch: expected ${flow.targetSha}, found ${headSha}`;
     markNeedsDecision(flow, detail);
     throw new Error(detail);

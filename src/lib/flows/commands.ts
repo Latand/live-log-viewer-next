@@ -94,8 +94,12 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   if (!normalizedSpec.ok) {
     return { error: "spec must be a string", status: 400 };
   }
-  if (req.targetSha !== undefined && !/^[0-9a-f]{40}$/i.test(req.targetSha.trim())) {
-    return { error: "targetSha must be an exact commit SHA", status: 400 };
+  let targetSha: string | null = null;
+  if (req.targetSha !== undefined) {
+    if (typeof req.targetSha !== "string" || !/^[0-9a-f]{40}$/i.test(req.targetSha.trim())) {
+      return { error: "targetSha must be an exact commit SHA", status: 400 };
+    }
+    targetSha = req.targetSha.trim().toLowerCase();
   }
   const roles = rolesFromRequest(req);
   if (!roles) return { error: "invalid flow roles or preset", status: 400 };
@@ -158,7 +162,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     roles,
     reviewerFallback: roles.reviewer.engine === "codex" ? configuredReviewerFallback() : null,
     baseRef: base.sha,
-    targetSha: req.targetSha?.trim() ?? null,
+    targetSha,
     ...(normalizedSpec.spec ? { spec: normalizedSpec.spec } : {}),
     baseMode,
     mode: req.mode === "manual" ? "manual" : "auto",

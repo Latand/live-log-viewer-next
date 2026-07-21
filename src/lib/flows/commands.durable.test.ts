@@ -9,7 +9,7 @@ process.env.LLV_STATE_DIR = sandbox;
 
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { createFlowFromRequest } = await import("./commands");
-const { saveFlows } = await import("./store");
+const { loadFlows, saveFlows } = await import("./store");
 
 const registry = new AgentRegistry(path.join(sandbox, "registry.json"), undefined, undefined, { sqliteMode: "off" });
 setAgentRegistryForTests(registry);
@@ -36,6 +36,7 @@ test("durable implementer identity creates a flow without scanner or live-host e
     },
     baseMode: "head",
     baseRef: "12ad73656844d3583d44ae718d003c7f2f2c6ace",
+    targetSha: "12AD73656844D3583D44AE718D003C7F2F2C6ACE",
     mode: "auto",
     reviewerMode: "headless",
     roundLimit: 5,
@@ -47,6 +48,33 @@ test("durable implementer identity creates a flow without scanner or live-host e
     implementerPath: transcript,
     implementerConversationId: implementer.id,
     kickoffDelivery: null,
+    targetSha: "12ad73656844d3583d44ae718d003c7f2f2c6ace",
     state: "waiting_ready",
   });
+});
+
+test("malformed target SHAs return 400 without persisting a flow (#522)", async () => {
+  const transcript = path.join(import.meta.dir, "fixtures", "codex-review-2026-07-12.jsonl");
+  const implementer = registry.ensureConversation("codex", transcript, null);
+  const request = {
+    implementerPath: transcript,
+    implementerConversationId: implementer.id,
+    deliverKickoff: false,
+    roles: {
+      implementer: { engine: "codex" as const, model: "gpt-5.6-sol", effort: "high" },
+      reviewer: { engine: "codex" as const, model: "gpt-5.6-sol", effort: "high" },
+    },
+    baseMode: "head" as const,
+    baseRef: "12ad73656844d3583d44ae718d003c7f2f2c6ace",
+    mode: "auto" as const,
+    reviewerMode: "headless" as const,
+    roundLimit: 5,
+  };
+
+  for (const targetSha of [null, 7, { sha: "a".repeat(40) }]) {
+    saveFlows([]);
+    const result = await createFlowFromRequest({ ...request, targetSha } as never, []);
+    expect(result).toEqual({ error: "targetSha must be an exact commit SHA", status: 400 });
+    expect(loadFlows()).toEqual([]);
+  }
 });
