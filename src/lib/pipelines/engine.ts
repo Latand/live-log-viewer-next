@@ -1889,15 +1889,15 @@ export async function patchPipeline(
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
+      const orphan = await orphanAgentPane(attempt, ports);
+      if (orphan) return orphan;
+      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
       const retryReviewHead = stage?.kind === "review-loop" ? synchronizePipelineRetryHead(pipeline, ports.exec) : null;
       if (retryReviewHead && !retryReviewHead.ok) {
         pipeline.stateDetail = retryReviewHead.error;
         persist();
         return { error: retryReviewHead.error, status: 409 };
       }
-      const orphan = await orphanAgentPane(attempt, ports);
-      if (orphan) return orphan;
-      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
       if (pipeline.runs.every((run) => run.attempts.length === 0)) {
         pipeline.state = "provisioning";
       } else if (stage?.kind === "review-loop") {
