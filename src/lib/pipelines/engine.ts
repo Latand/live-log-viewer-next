@@ -744,7 +744,8 @@ function commitPassedStage(
   attempt: PipelineStageAttempt,
   ports: PipelinePorts,
 ): void {
-  const result = commitPipelineStage(pipeline, stage.id, stage.kind === "review-loop" || attempt.effectiveRole.access === "read-write", ports.exec);
+  const allowCommit = stage.kind === "run" && attempt.effectiveRole.access === "read-write";
+  const result = commitPipelineStage(pipeline, stage.id, allowCommit, ports.exec);
   if (!result.ok) {
     park(pipeline, result.error, attempt);
     return;
@@ -1068,6 +1069,11 @@ async function tickReviewStage(
     : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
   if (attempt.state === "committing") {
+    const fenceError = reviewHeadFenceError(pipeline, attempt, ports);
+    if (fenceError) {
+      park(pipeline, fenceError, attempt);
+      return;
+    }
     commitPassedStage(pipeline, stage, attempt, ports);
     return;
   }
@@ -1170,17 +1176,9 @@ async function tickReviewStage(
     persist();
   }
   if (flow.state === "approved") {
-    const currentHead = currentPipelineBranchHead(pipeline, ports.exec);
-    if (!currentHead.ok) {
-      park(pipeline, `approved review flow could not verify the current pipeline head: ${currentHead.error}`, attempt);
-      return;
-    }
-    if (!capturedReviewHead || capturedReviewHead !== currentHead.sha) {
-      park(
-        pipeline,
-        `approved review flow head mismatch: reviewed ${capturedReviewHead ?? "no exact head"}, current pipeline head is ${currentHead.sha}`,
-        attempt,
-      );
+    const fenceError = reviewHeadFenceError(pipeline, attempt, ports);
+    if (fenceError) {
+      park(pipeline, fenceError, attempt);
       return;
     }
     attempt.output = `Review loop approved after ${flow.rounds.length} round(s).`;
@@ -1248,6 +1246,13 @@ const RECONCILABLE_BOUND_FLOW_ERRORS = [
   "review loop ended in ",
   "embedded review flow record disappeared",
 ] as const;
+
+function reviewHeadFenceError(pipeline: Pipeline, attempt: PipelineStageAttempt, ports: PipelinePorts): string | null {
+  const currentHead = currentPipelineBranchHead(pipeline, ports.exec);
+  if (!currentHead.ok) return `approved review flow could not verify the current pipeline head: ${currentHead.error}`;
+  if (attempt.reviewHeadSha === currentHead.sha) return null;
+  return `approved review flow head mismatch: reviewed ${attempt.reviewHeadSha ?? "no exact head"}, current pipeline head is ${currentHead.sha}`;
+}
 
 function terminalReviewFlowError(flow: Flow): string | null {
   if (flow.state !== "needs_decision" && flow.state !== "done_comment" && flow.state !== "closed") return null;

@@ -2315,6 +2315,82 @@ for (const terminalState of ["done_comment", "needs_decision"] as const) {
   });
 }
 
+async function persistedCommittingReview() {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const pipeline = loadPipelines()[0]!;
+  const attempt = pipeline.runs[1]!.attempts[0]!;
+  attempt.state = "committing";
+  attempt.reviewHeadSha = ORIGIN_MAIN_SHA;
+  attempt.output = "Review loop approved after 1 round(s).";
+  attempt.verdict = { status: "pass", confidence: 1 };
+  pipeline.cursor = { ...pipeline.cursor!, state: "committing" };
+  savePipelines([pipeline]);
+  return h;
+}
+
+test("a restarted committing review completes once when its clean head still matches (#526)", async () => {
+  const h = await persistedCommittingReview();
+
+  await tickPipelines([], h.ports);
+  const completed = loadPipelines()[0]!;
+  expect(completed.state).toBe("completed");
+  expect(completed.runs[1]!.attempts[0]).toMatchObject({ state: "passed", reviewHeadSha: ORIGIN_MAIN_SHA });
+
+  const afterCompletion = JSON.stringify(completed);
+  expect((await tickPipelines([], h.ports)).changed).toBe(false);
+  expect(JSON.stringify(loadPipelines()[0])).toBe(afterCompletion);
+});
+
+test("a restarted committing review parks when the branch head drifted after approval (#526)", async () => {
+  const h = await persistedCommittingReview();
+  const driftedHead = "d".repeat(40);
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+      return { code: 0, stdout: `${driftedHead}\n`, stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: expect.stringContaining(`current pipeline head is ${driftedHead}`),
+  });
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({ state: "needs_decision", reviewHeadSha: ORIGIN_MAIN_SHA });
+  expect(h.calls.some((call) => call.startsWith("git commit"))).toBe(false);
+});
+
+test("a restarted committing review parks without committing post-review changes (#526)", async () => {
+  const h = await persistedCommittingReview();
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "status") {
+      return { code: 0, stdout: " M post-review.txt\n", stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: expect.stringContaining("uncommitted changes"),
+  });
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({ state: "needs_decision", reviewHeadSha: ORIGIN_MAIN_SHA });
+  expect(h.calls.some((call) => call.startsWith("git add") || call.startsWith("git commit"))).toBe(false);
+});
+
 test("retrying a paused review with a live reviewer never mutates its checkout (#522)", async () => {
   const h = harness();
   const stages = [
