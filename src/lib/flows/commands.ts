@@ -275,7 +275,9 @@ export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: st
     const currentFlow = current.find((item) => item.id === id);
     if (!currentFlow) return { error: "flow not found", status: 404 };
     const currentRound = lastRound(currentFlow);
-    if (currentFlow.state !== "reviewing" || currentRound?.n !== round.n) {
+    if (currentFlow.state !== "reviewing"
+      || currentRound?.n !== round.n
+      || currentRound.reviewerBindingId !== round.reviewerBindingId) {
       return { error: "flow changed during reviewer teardown", status: 409 };
     }
     currentRound.error = "cancelled by user";
@@ -297,7 +299,9 @@ export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: stri
   const flow = flows.find((item) => item.id === id);
   if (!flow) return { error: "flow not found", status: 404 };
   const round = lastRound(flow);
-  const stoppedRound = round && round.verdict === null && !round.error ? round.n : null;
+  const stoppedRound = round && round.verdict === null && !round.error
+    ? { n: round.n, reviewerBindingId: round.reviewerBindingId }
+    : null;
   if (stoppedRound !== null) {
     if (!(await stopReviewer(flow, round!))) {
       return { error: "reviewer process group did not terminate", status: 409 };
@@ -308,7 +312,9 @@ export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: stri
     if (!currentFlow) return { error: "flow not found", status: 404 };
     if (currentFlow.state === "closed") return { flow: currentFlow };
     const currentRound = lastRound(currentFlow);
-    if (stoppedRound !== null && currentRound?.n !== stoppedRound) {
+    if (stoppedRound !== null
+      && (currentRound?.n !== stoppedRound.n
+        || currentRound.reviewerBindingId !== stoppedRound.reviewerBindingId)) {
       return { error: "flow changed during reviewer teardown", status: 409 };
     }
     if (stoppedRound !== null && currentRound && currentRound.verdict === null && !currentRound.error) {

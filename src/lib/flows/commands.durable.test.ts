@@ -55,7 +55,7 @@ test("durable implementer identity creates a flow without scanner or live-host e
   });
 });
 
-test("closeFlow preserves a flow created while reviewer teardown is waiting", async () => {
+test("closeFlow rejects a replacement reviewer binding while preserving concurrent flows", async () => {
   saveFlows([]);
   const executablePath = path.join(sandbox, "delayed-reviewer");
   fs.writeFileSync(executablePath, `#!${process.execPath}\nprocess.on("SIGTERM", () => setTimeout(() => process.exit(0), 100));\nsetInterval(() => {}, 1_000);\n`, { mode: 0o700 });
@@ -97,13 +97,19 @@ test("closeFlow preserves a flow created while reviewer teardown is waiting", as
   const closing = closeFlow(flow.id);
   await new Promise((resolve) => setTimeout(resolve, 20));
   const concurrent = { ...flow, id: "flow-concurrent", state: "waiting_ready", rounds: [], closedAt: null } as typeof flow;
-  saveFlows([...loadFlows(), concurrent]);
+  const duringTeardown = loadFlows();
+  duringTeardown.find((item) => item.id === flow.id)!.rounds.at(-1)!.reviewerBindingId = "replacement-close-binding";
+  saveFlows([...duringTeardown, concurrent]);
 
-  expect((await closing).error).toBeUndefined();
+  expect(await closing).toEqual({ error: "flow changed during reviewer teardown", status: 409 });
   expect(loadFlows().map((item) => item.id).sort()).toEqual([flow.id, concurrent.id].sort());
+  expect(loadFlows().find((item) => item.id === flow.id)).toMatchObject({
+    state: "reviewing",
+    rounds: [{ n: round.n, reviewerBindingId: "replacement-close-binding", error: null }],
+  });
 });
 
-test("cancelRound preserves a flow created while reviewer teardown is waiting", async () => {
+test("cancelRound rejects a replacement reviewer binding while preserving concurrent flows", async () => {
   saveFlows([]);
   const executablePath = path.join(sandbox, "delayed-reviewer-cancel");
   fs.writeFileSync(executablePath, `#!${process.execPath}\nprocess.on("SIGTERM", () => setTimeout(() => process.exit(0), 100));\nsetInterval(() => {}, 1_000);\n`, { mode: 0o700 });
@@ -135,10 +141,16 @@ test("cancelRound preserves a flow created while reviewer teardown is waiting", 
   const cancelling = cancelRound(flow.id);
   await new Promise((resolve) => setTimeout(resolve, 20));
   const concurrent = { ...flow, id: "flow-concurrent-cancel", state: "waiting_ready", rounds: [], closedAt: null } as typeof flow;
-  saveFlows([...loadFlows(), concurrent]);
+  const duringTeardown = loadFlows();
+  duringTeardown.find((item) => item.id === flow.id)!.rounds.at(-1)!.reviewerBindingId = "replacement-cancel-binding";
+  saveFlows([...duringTeardown, concurrent]);
 
-  expect((await cancelling).error).toBeUndefined();
+  expect(await cancelling).toEqual({ error: "flow changed during reviewer teardown", status: 409 });
   expect(loadFlows().map((item) => item.id).sort()).toEqual([flow.id, concurrent.id].sort());
+  expect(loadFlows().find((item) => item.id === flow.id)).toMatchObject({
+    state: "reviewing",
+    rounds: [{ n: round.n, reviewerBindingId: "replacement-cancel-binding", error: null }],
+  });
 });
 
 test("malformed target SHAs return 400 without persisting a flow (#522)", async () => {
