@@ -31,8 +31,8 @@ export function isRuntimeHostTransportFailure(error: unknown): boolean {
 }
 
 export interface RuntimeHostClient {
-  snapshot(): Promise<RuntimeSnapshot>;
-  events(after: number): Promise<RuntimeReplay>;
+  snapshot(signal?: AbortSignal): Promise<RuntimeSnapshot>;
+  events(after: number, signal?: AbortSignal): Promise<RuntimeReplay>;
   waitEvents(after: number, timeoutMs?: number, signal?: AbortSignal): Promise<RuntimeReplay>;
   append(event: RuntimeEventInput): Promise<unknown>;
   operation(event: RuntimeEventInput): Promise<unknown>;
@@ -58,8 +58,8 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
     private readonly snapshotTimeoutMs = RUNTIME_SNAPSHOT_REQUEST_TIMEOUT_MS,
   ) {}
 
-  snapshot(): Promise<RuntimeSnapshot> { return this.call("snapshot", undefined, this.snapshotTimeoutMs) as Promise<RuntimeSnapshot>; }
-  events(after: number): Promise<RuntimeReplay> { return this.call("events", { after }) as Promise<RuntimeReplay>; }
+  snapshot(signal?: AbortSignal): Promise<RuntimeSnapshot> { return this.call("snapshot", undefined, this.snapshotTimeoutMs, signal) as Promise<RuntimeSnapshot>; }
+  events(after: number, signal?: AbortSignal): Promise<RuntimeReplay> { return this.call("events", { after }, this.timeoutMs, signal) as Promise<RuntimeReplay>; }
   waitEvents(after: number, timeoutMs = 15_000, signal?: AbortSignal): Promise<RuntimeReplay> { return this.call("wait", { after, timeoutMs }, timeoutMs + 1_000, signal) as Promise<RuntimeReplay>; }
   append(event: RuntimeEventInput): Promise<unknown> { return this.call("append", { event }); }
   operation(event: RuntimeEventInput): Promise<unknown> { return this.call("operation", { event }); }

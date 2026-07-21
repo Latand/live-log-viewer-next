@@ -5,9 +5,10 @@ import { globalCache } from "./caches";
 interface NeedleEntry {
   hits: Record<string, boolean>;
   scanned: Record<string, number>;
+  sizes: Record<string, number>;
 }
 
-const needleCache = globalCache<NeedleEntry>("needle");
+const needleCache = globalCache<NeedleEntry>("needle-v2");
 const tailNeedleCache = globalCache<{ size: number; mtimeMs: number; hit: boolean }>("needle-tail-v1");
 type TailUuidIndex = {
   dev: number;
@@ -163,19 +164,31 @@ export function fileTailHasNeedle(needle: string, pathname: string): boolean {
   }
 }
 
+/** Shared hard byte allowance for one scan generation. Exhaustion leaves the
+    observation unresolved; the per-file scanned offsets resume the search in a
+    later generation instead of restarting it. */
+export interface NeedleScanBudget {
+  remaining: number;
+}
+
+/** A single candidate may consume at most this much of a generation budget in
+    one pass, so one multi-gigabyte transcript cannot starve its siblings. */
+const NEEDLE_CANDIDATE_PASS_BYTES = 1024 * 1024;
+
 /**
  * Incremental per-file needle scan: remembers how many bytes of each file were
  * already searched and only scans the appended suffix on later calls. A hit is
  * cached per (needle, file) pair, so different candidate files of the same
- * needle can be checked independently.
+ * needle can be checked independently. A budget bounds the fresh bytes one
+ * call may read; an exhausted budget returns false ("not proven yet") and the
+ * recorded offset makes the next generation continue where this one stopped.
  */
-export function fileHasNeedle(needle: string, pathname: string): boolean {
+export function fileHasNeedle(needle: string, pathname: string, budget?: NeedleScanBudget): boolean {
   let ent = needleCache.get(needle);
-  if (!ent || !ent.hits) {
-    ent = { hits: {}, scanned: ent?.scanned ?? {} };
+  if (!ent || !ent.hits || !ent.sizes) {
+    ent = { hits: ent?.hits ?? {}, scanned: ent?.scanned ?? {}, sizes: ent?.sizes ?? {} };
     needleCache.set(needle, ent);
   }
-  if (ent.hits[pathname]) return true;
   const nb = Buffer.from(needle);
   const pad = Math.max(0, nb.length - 1);
   let size: number;
@@ -184,8 +197,22 @@ export function fileHasNeedle(needle: string, pathname: string): boolean {
   } catch {
     return false;
   }
-  const done = ent.scanned[pathname] ?? 0;
+  let done = ent.scanned[pathname] ?? 0;
+  const observedSize = ent.sizes[pathname];
+  // Any shrink identifies a replacement generation, including one whose new
+  // end remains above the incremental checkpoint.
+  if (observedSize !== undefined && size < observedSize) {
+    done = 0;
+    ent.scanned[pathname] = 0;
+    delete ent.hits[pathname];
+  }
+  ent.sizes[pathname] = size;
+  if (ent.hits[pathname]) return true;
   if (size <= done) return false;
+  const allowance = budget === undefined
+    ? Number.POSITIVE_INFINITY
+    : Math.min(Math.max(0, budget.remaining), NEEDLE_CANDIDATE_PASS_BYTES);
+  if (allowance <= 0) return false;
   try {
     const fd = fs.openSync(pathname, "r");
     try {
@@ -193,11 +220,13 @@ export function fileHasNeedle(needle: string, pathname: string): boolean {
       let pos = start;
       let carry = Buffer.alloc(0);
       let hit = false;
-      while (pos < size) {
-        const len = Math.min(1 << 20, size - pos);
+      let consumed = 0;
+      while (pos < size && consumed < allowance) {
+        const len = Math.min(1 << 20, Math.ceil(allowance - consumed), size - pos);
         const chunk = Buffer.alloc(len);
         const read = fs.readSync(fd, chunk, 0, len, pos);
         if (!read) break;
+        consumed += read;
         const hay = Buffer.concat([carry, chunk.subarray(0, read)]);
         if (hay.includes(nb)) {
           hit = true;
@@ -206,7 +235,8 @@ export function fileHasNeedle(needle: string, pathname: string): boolean {
         carry = pad ? chunk.subarray(Math.max(0, read - pad), read) : Buffer.alloc(0);
         pos += read;
       }
-      ent.scanned[pathname] = size;
+      if (budget !== undefined && Number.isFinite(consumed)) budget.remaining -= consumed;
+      ent.scanned[pathname] = hit || pos >= size ? size : pos;
       if (hit) ent.hits[pathname] = true;
       return hit;
     } finally {
@@ -217,9 +247,25 @@ export function fileHasNeedle(needle: string, pathname: string): boolean {
   }
 }
 
-export function findNeedle(needle: string, paths: (string | null | undefined)[]): string | null {
+export function findNeedle(needle: string, paths: (string | null | undefined)[], budget?: NeedleScanBudget): string | null {
+  if (budget === undefined) {
+    for (const pathname of paths) {
+      if (pathname && fileHasNeedle(needle, pathname)) return pathname;
+    }
+    return null;
+  }
+
+  let remainingCandidates = paths.reduce((count, pathname) => count + (pathname ? 1 : 0), 0);
   for (const pathname of paths) {
-    if (pathname && fileHasNeedle(needle, pathname)) return pathname;
+    if (!pathname) continue;
+    const allowance = Math.ceil(Math.max(0, budget.remaining) / remainingCandidates);
+    const candidateBudget = { remaining: allowance };
+    const hit = fileHasNeedle(needle, pathname, candidateBudget);
+    if (Number.isFinite(allowance)) {
+      budget.remaining = Math.max(0, budget.remaining - (allowance - candidateBudget.remaining));
+    }
+    remainingCandidates -= 1;
+    if (hit) return pathname;
   }
   return null;
 }
