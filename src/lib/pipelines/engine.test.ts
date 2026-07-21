@@ -2266,6 +2266,55 @@ test("REQUEST_CHANGES recovery keeps the bound reviewer in the review slot and l
   });
 });
 
+for (const terminalState of ["done_comment", "needs_decision"] as const) {
+  test(`a later ${terminalState} outcome replaces stale startup evidence once across restart ticks (#526)`, async () => {
+    const h = harness();
+    await create(h.ports, [
+      { id: "build", kind: "run", prompt: "build", next: "review" },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    ] as never);
+    await tickPipelines([], h.ports);
+    await tickPipelines([], h.ports);
+    await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+    await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+    const flow = h.flows.get("flow-1")!;
+    flow.state = "paused";
+    flow.stateDetail = "startup transport unavailable";
+    await tickPipelines([], h.ports);
+    expect(loadPipelines()[0]!.runs[1]!.attempts[0]!.error)
+      .toBe("review flow paused during startup: startup transport unavailable");
+
+    flow.rounds.push({
+      n: 1,
+      verdict: terminalState === "done_comment" ? "COMMENT" : null,
+      reviewHeadSha: ORIGIN_MAIN_SHA,
+      reviewerPath: "/codex/reviewer.jsonl",
+      reviewerConversationId: "conversation_reviewer",
+    } as never);
+    flow.state = terminalState;
+    flow.stateDetail = terminalState === "done_comment" ? "reviewer left a comment" : "reviewer relay failed";
+
+    await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+    const reconciled = loadPipelines()[0]!;
+    const expectedError = `review loop ended in ${terminalState}: ${flow.stateDetail}`;
+    expect(reconciled).toMatchObject({ state: "needs_decision", stateDetail: expectedError });
+    expect(reconciled.runs[1]!.attempts).toHaveLength(1);
+    expect(reconciled.runs[1]!.attempts[0]).toMatchObject({
+      flowId: "flow-1",
+      state: "needs_decision",
+      error: expectedError,
+      reviewHeadSha: ORIGIN_MAIN_SHA,
+      agentPath: "/codex/reviewer.jsonl",
+      conversationId: "conversation_reviewer",
+    });
+
+    expect((await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports)).changed).toBe(false);
+    expect(loadPipelines()[0]!.runs[1]!.attempts).toHaveLength(1);
+    expect(loadPipelines()[0]!.stateDetail).toBe(expectedError);
+  });
+}
+
 test("retrying a paused review with a live reviewer never mutates its checkout (#522)", async () => {
   const h = harness();
   const stages = [

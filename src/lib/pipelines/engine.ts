@@ -1189,8 +1189,9 @@ async function tickReviewStage(
     setCursorState(pipeline, stage.id, "committing");
     persist();
     commitPassedStage(pipeline, stage, attempt, ports);
-  } else if (flow.state === "needs_decision" || flow.state === "done_comment" || flow.state === "closed") {
-    park(pipeline, `review loop ended in ${flow.state}: ${flow.stateDetail ?? "operator decision required"}`, attempt);
+  } else {
+    const terminalError = terminalReviewFlowError(flow);
+    if (terminalError) park(pipeline, terminalError, attempt);
   }
 }
 
@@ -1227,7 +1228,7 @@ async function tickPipeline(pipeline: Pipeline, entries: FileEntry[], ports: Pip
 }
 
 const tickStore = globalThis as unknown as { __llvPipelineTick?: boolean };
-const REOPENED_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
+const RECONCILABLE_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
   "waiting_ready",
   "spawn_pending",
   "spawning",
@@ -1236,6 +1237,9 @@ const REOPENED_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
   "relaying",
   "fixing",
   "approved",
+  "needs_decision",
+  "done_comment",
+  "closed",
 ]);
 const RECONCILABLE_BOUND_FLOW_ERRORS = [
   "review flow startup paused:",
@@ -1244,6 +1248,11 @@ const RECONCILABLE_BOUND_FLOW_ERRORS = [
   "review loop ended in ",
   "embedded review flow record disappeared",
 ] as const;
+
+function terminalReviewFlowError(flow: Flow): string | null {
+  if (flow.state !== "needs_decision" && flow.state !== "done_comment" && flow.state !== "closed") return null;
+  return `review loop ended in ${flow.state}: ${flow.stateDetail ?? "operator decision required"}`;
+}
 
 function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boolean {
   if (pipeline.state !== "needs_decision") return false;
@@ -1256,8 +1265,9 @@ function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boo
     !attemptError
     || !RECONCILABLE_BOUND_FLOW_ERRORS.some((prefix) => attemptError.startsWith(prefix))
     || !flow
-    || !REOPENED_REVIEW_FLOW_STATES.has(flow.state)
+    || !RECONCILABLE_REVIEW_FLOW_STATES.has(flow.state)
   ) return false;
+  if (attemptError === terminalReviewFlowError(flow)) return false;
   pipeline.state = "running";
   pipeline.stateDetail = null;
   attempt.state = "reviewing";
