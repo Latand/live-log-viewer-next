@@ -13,6 +13,7 @@ const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventSt
 const { reviewerPrompt } = await import("./prompts");
 const { outputPathFor, stdoutPathFor } = await import("./store");
 const { WAKATIME_CREDENTIAL_ENV } = await import("../wakatime/credential");
+const { registerPipelineTick } = await import("../pipelines/controllerSignal");
 
 afterAll(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
@@ -202,6 +203,42 @@ test("headless Codex launch closes stdin and excludes the WakaTime credential fr
   } finally {
     forgetHeadlessReview("flow-stdin-eof", 1);
     Reflect.deleteProperty(process.env, WAKATIME_CREDENTIAL_ENV);
+  }
+});
+
+test("a headless review exit schedules one flow and pipeline reconciliation", async () => {
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-completing-codex");
+  fs.writeFileSync(
+    executablePath,
+    `#!${process.execPath}\nawait Bun.stdin.text();\n`,
+    { mode: 0o700 },
+  );
+  let ticks = 0;
+  let markTicked = () => {};
+  const ticked = new Promise<void>((resolve) => { markTicked = resolve; });
+  const unregister = registerPipelineTick(async () => {
+    ticks += 1;
+    markTicked();
+  });
+
+  try {
+    startHeadlessReview(
+      "flow-completion-signal",
+      1,
+      { engine: "codex", model: null, effort: null },
+      process.cwd(),
+      "review prompt",
+      5_000,
+      null,
+      null,
+      { command: executablePath },
+    );
+    await ticked;
+    await Promise.resolve();
+    expect(ticks).toBe(1);
+  } finally {
+    unregister();
+    forgetHeadlessReview("flow-completion-signal", 1);
   }
 });
 

@@ -49,6 +49,7 @@ export class RuntimeHost {
     private readonly consumers?: RuntimeConsumerPorts,
     private readonly deployments?: ViewerDeploymentCoordinator,
     private readonly structuredHosts = process.env.LLV_STRUCTURED_HOSTS === "1",
+    private readonly signalFlowPipelineProgress?: () => void,
   ) {}
 
   async recoverConsumers(): Promise<number> {
@@ -118,7 +119,13 @@ export class RuntimeHost {
       );
       else if (request.method === "append" || request.method === "operation") {
         const event = request.params?.event as RuntimeEventInput;
+        const publishedBefore = this.journal.publishedSeq();
         const appended = this.journal.append(event);
+        const newlyPublished = appended.seq > publishedBefore;
+        if (newlyPublished && appended.kind === "turn-ended") {
+          try { this.signalFlowPipelineProgress?.(); }
+          catch { console.error("[flow pipeline controller] committed terminal wake failed"); }
+        }
         try { await this.consumeExclusive(appended); }
         catch { console.error("[runtime consumer] committed event will retry asynchronously"); }
         result = request.method === "operation" && event.operationId

@@ -5,6 +5,7 @@ discardWakatimeEnvironmentCredential();
 const { statePath } = await import("@/lib/configDir");
 const { procBackend } = await import("@/lib/proc");
 const { createServerRuntimeConsumers } = await import("@/lib/runtime/serverConsumers");
+const { requestPipelineTick } = await import("@/lib/pipelines/controllerSignal");
 const { RuntimeHost, RuntimeHostFence } = await import("./host");
 const { RuntimeJournal } = await import("./journal");
 const { createLegacyRuntimeScheduler } = await import("./legacyScheduler");
@@ -36,7 +37,7 @@ const deployments = deploymentAdapterPath
     { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) },
   )
   : undefined;
-const host = new RuntimeHost(journal, createServerRuntimeConsumers(), deployments);
+const host = new RuntimeHost(journal, createServerRuntimeConsumers(), deployments, undefined, requestPipelineTick);
 const deploymentProxy = deployments
   ? serveViewerDeploymentProxy(
     process.env.LLV_VIEWER_DEPLOY_TARGET || statePath("viewer-release.json"),

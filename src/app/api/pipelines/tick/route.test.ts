@@ -3,7 +3,7 @@ import { NextRequest } from "next/server";
 
 import { POST } from "./route";
 
-test("pipeline tick runs inside the live Viewer request process", async () => {
+test("pipeline tick joins one coalesced reconciliation inside the live Viewer process", async () => {
   let calls = 0;
   const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/pipelines/tick", {
     method: "POST",
@@ -14,9 +14,8 @@ test("pipeline tick runs inside the live Viewer request process", async () => {
     },
   }), async () => {
     calls += 1;
-    return { pipelines: [], changed: false };
   });
 
   expect(response.status).toBe(202);
-  expect(calls).toBe(2);
+  expect(calls).toBe(1);
 });
