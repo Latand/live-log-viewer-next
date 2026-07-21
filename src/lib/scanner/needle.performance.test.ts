@@ -157,3 +157,19 @@ test("a candidate that shrinks above its saved offset rescans replacement head c
   expect(fileHasNeedle(needle, pathname, { remaining: 0 })).toBe(false);
   expect(fileHasNeedle(needle, pathname, { remaining: MIB })).toBe(true);
 });
+
+test("a same-size replacement resets a partial needle offset", () => {
+  const pathname = path.join(SANDBOX, "same-size-replacement.jsonl");
+  const needle = "toolu_same_size_replacement";
+  fs.writeFileSync(pathname, Buffer.alloc(2 * MIB, 0x78));
+  expect(fileHasNeedle(needle, pathname, { remaining: MIB })).toBe(false);
+  const before = fs.statSync(pathname);
+
+  const replacement = Buffer.alloc(2 * MIB, 0x79);
+  replacement.write(needle, 32, "utf8");
+  fs.writeFileSync(pathname, replacement);
+  fs.utimesSync(pathname, before.atime, new Date(before.mtimeMs + 2_000));
+  expect(fs.statSync(pathname).ino).toBe(before.ino);
+
+  expect(fileHasNeedle(needle, pathname, { remaining: MIB })).toBe(true);
+});

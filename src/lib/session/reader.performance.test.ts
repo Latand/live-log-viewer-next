@@ -205,7 +205,7 @@ test("growth after a rewrite before the saved offset invalidates authorship evid
 
   const fd = fs.openSync(pathname, "r+");
   try {
-    fs.writeSync(fd, userRecord, checkpoint.offset - 32 * 1024, "utf8");
+    fs.writeSync(fd, userRecord, 2 * MIB, "utf8");
     fs.ftruncateSync(fd, 10 * MIB);
   } finally {
     fs.closeSync(fd);

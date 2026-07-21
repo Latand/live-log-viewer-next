@@ -133,9 +133,8 @@ export function terminateHeadlessReviewerGroup(
   } = {},
 ): void {
   const runtime = { ...defaultProcessGroupRuntime, ...options.runtime };
-  const owned = identity
-    ? runtime.pidAlive(pid) && runtime.processIdentity(pid) === identity
-    : options.ownedByLiveHandle === true;
+  const owned = options.ownedByLiveHandle === true
+    || Boolean(identity && runtime.pidAlive(pid) && runtime.processIdentity(pid) === identity);
   if (!owned) return;
   try {
     runtime.signalProcess(-pid, "SIGTERM");
@@ -168,9 +167,8 @@ export async function terminateHeadlessReviewerGroupAndWait(
   } = {},
 ): Promise<boolean> {
   const runtime = { ...defaultProcessGroupWaitRuntime, ...options.runtime };
-  const owned = identity
-    ? runtime.pidAlive(pid) && runtime.processIdentity(pid) === identity
-    : options.ownedByLiveHandle === true;
+  const owned = options.ownedByLiveHandle === true
+    || Boolean(identity && runtime.pidAlive(pid) && runtime.processIdentity(pid) === identity);
   if (!owned) return !runtime.processGroupAlive(pid);
 
   const signal = (value: NodeJS.Signals): void => {

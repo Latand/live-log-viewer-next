@@ -110,6 +110,29 @@ test("reviewer teardown waits for delayed process-group exit before reporting qu
   expect(signals).toEqual([{ pid: -4444, signal: "SIGTERM" }]);
 });
 
+test("reviewer teardown trusts its live handle after the identified leader exits", async () => {
+  let groupAlive = true;
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const stopped = await terminateHeadlessReviewerGroupAndWait(4545, "4545:start", {
+    ownedByLiveHandle: true,
+    leaderExited: true,
+    pollMs: 1,
+    runtime: {
+      pidAlive: () => false,
+      processIdentity: () => null,
+      processGroupAlive: () => groupAlive,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") groupAlive = false;
+      },
+      wait: async () => {},
+    },
+  });
+
+  expect(stopped).toBeTrue();
+  expect(signals).toEqual([{ pid: -4545, signal: "SIGTERM" }]);
+});
+
 test("reviewer group cleanup kills a real descendant after its detached leader exits", async () => {
   const childPidPath = path.join(process.env.LLV_STATE_DIR!, "exited-leader-child.pid");
   const leader = spawn("sh", ["-c", "(trap '' HUP TERM; while :; do sleep 1; done) & printf '%s' \"$!\" > \"$CHILD_PID_FILE\""], {

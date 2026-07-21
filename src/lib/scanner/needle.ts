@@ -6,6 +6,7 @@ interface NeedleEntry {
   hits: Record<string, boolean>;
   scanned: Record<string, number>;
   sizes: Record<string, number>;
+  observations: Record<string, { dev: number; ino: number; size: number; mtimeMs: number }>;
 }
 
 const needleCache = globalCache<NeedleEntry>("needle-v2");
@@ -177,7 +178,8 @@ const NEEDLE_CANDIDATE_PASS_BYTES = 1024 * 1024;
 
 /**
  * Incremental per-file needle scan: remembers how many bytes of each file were
- * already searched and only scans the appended suffix on later calls. A hit is
+ * already searched while the file identity stays unchanged. Size or mtime
+ * changes restart the candidate because append-only continuity is unprovable. A hit is
  * cached per (needle, file) pair, so different candidate files of the same
  * needle can be checked independently. A budget bounds the fresh bytes one
  * call may read; an exhausted budget returns false ("not proven yet") and the
@@ -186,22 +188,29 @@ const NEEDLE_CANDIDATE_PASS_BYTES = 1024 * 1024;
 export function fileHasNeedle(needle: string, pathname: string, budget?: NeedleScanBudget): boolean {
   let ent = needleCache.get(needle);
   if (!ent || !ent.hits || !ent.sizes) {
-    ent = { hits: ent?.hits ?? {}, scanned: ent?.scanned ?? {}, sizes: ent?.sizes ?? {} };
+    ent = { hits: ent?.hits ?? {}, scanned: ent?.scanned ?? {}, sizes: ent?.sizes ?? {}, observations: ent?.observations ?? {} };
     needleCache.set(needle, ent);
   }
   const nb = Buffer.from(needle);
   const pad = Math.max(0, nb.length - 1);
-  let size: number;
+  let stat: fs.Stats;
   try {
-    size = fs.statSync(pathname).size;
+    stat = fs.statSync(pathname);
   } catch {
     return false;
   }
+  const size = stat.size;
   let done = ent.scanned[pathname] ?? 0;
   const observedSize = ent.sizes[pathname];
+  const observation = ent.observations[pathname];
+  let reset = Boolean(done > 0 && !observation);
+  if (observation) {
+    reset ||= observation.dev !== stat.dev || observation.ino !== stat.ino;
+    reset ||= size !== observation.size || stat.mtimeMs !== observation.mtimeMs;
+  }
   // Any shrink identifies a replacement generation, including one whose new
   // end remains above the incremental checkpoint.
-  if (observedSize !== undefined && size < observedSize) {
+  if (reset || (observedSize !== undefined && size < observedSize)) {
     done = 0;
     ent.scanned[pathname] = 0;
     delete ent.hits[pathname];
@@ -237,6 +246,7 @@ export function fileHasNeedle(needle: string, pathname: string, budget?: NeedleS
       }
       if (budget !== undefined && Number.isFinite(consumed)) budget.remaining -= consumed;
       ent.scanned[pathname] = hit || pos >= size ? size : pos;
+      ent.observations[pathname] = { dev: stat.dev, ino: stat.ino, size, mtimeMs: stat.mtimeMs };
       if (hit) ent.hits[pathname] = true;
       return hit;
     } finally {

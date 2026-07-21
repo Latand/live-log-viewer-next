@@ -272,6 +272,9 @@ interface AuthorshipScanCheckpoint {
   boundaryOffset: number;
   boundaryBytes: number;
   boundaryFingerprint: string;
+  prefixSegments: Array<{ offset: number; length: number; fingerprint: string }>;
+  validation: { size: number; mtimeMs: number; index: number } | null;
+  validatedGrowth: { size: number; mtimeMs: number } | null;
   /** The scan reached EOF at `size`; only appended bytes remain unread. */
   done: boolean;
 }
@@ -427,14 +430,44 @@ export async function scanUserAuthoredMessagesCooperatively(
     if (checkpoint) {
       // Truncation, replacement, or an in-place rewrite resets the checkpoint:
       // the recorded offset no longer describes this file's content. A changed
-      // size may be an append and remains safe after head validation.
-      const appendNeedsBoundary = stat.size > checkpoint.size && checkpoint.offset > checkpoint.headBytes;
+      // size may be an append and remains safe after validating the scanned prefix.
+      const growing = stat.size > checkpoint.size;
+      const growthAlreadyValidated = checkpoint.validatedGrowth?.size === stat.size
+        && checkpoint.validatedGrowth.mtimeMs === stat.mtimeMs;
       let valid = checkpoint.dev === stat.dev
         && checkpoint.ino === stat.ino
         && stat.size >= checkpoint.offset
         && stat.size >= checkpoint.size
         && (stat.size !== checkpoint.size || stat.mtimeMs === checkpoint.mtimeMs)
-        && (!appendNeedsBoundary || (checkpoint.boundaryBytes > 0 && checkpoint.boundaryOffset >= 0 && Boolean(checkpoint.boundaryFingerprint)));
+        && (!growing || growthAlreadyValidated || Boolean(checkpoint.prefixSegments?.length));
+      if (valid && growing && !growthAlreadyValidated) {
+        const sameValidation = checkpoint.validation?.size === stat.size && checkpoint.validation.mtimeMs === stat.mtimeMs;
+        let index = sameValidation ? checkpoint.validation!.index : 0;
+        const segments = checkpoint.prefixSegments ?? [];
+        while (index < segments.length && valid) {
+          const segment = segments[index]!;
+          if (options.signal?.aborted || authorshipAllowance(options, charged) < segment.length) {
+            checkpoint.validation = { size: stat.size, mtimeMs: stat.mtimeMs, index };
+            return { count: checkpoint.count, complete: false };
+          }
+          const bytes = Buffer.allocUnsafe(segment.length);
+          const { bytesRead } = await file.read(bytes, 0, bytes.length, segment.offset);
+          charge(bytesRead);
+          valid = bytesRead === bytes.length && authorshipHeadFingerprint(bytes) === segment.fingerprint;
+          index += 1;
+        }
+        if (valid) {
+          const validatedStat = await file.stat();
+          valid = validatedStat.dev === stat.dev
+            && validatedStat.ino === stat.ino
+            && validatedStat.size === stat.size
+            && validatedStat.mtimeMs === stat.mtimeMs;
+          if (valid) {
+            checkpoint.validation = null;
+            checkpoint.validatedGrowth = { size: stat.size, mtimeMs: stat.mtimeMs };
+          }
+        }
+      }
       if (valid && checkpoint.headBytes > 0) {
         if (options.signal?.aborted) {
           return { count: checkpoint.count, complete: false };
@@ -486,6 +519,7 @@ export async function scanUserAuthoredMessagesCooperatively(
     let boundaryOffset = checkpoint?.boundaryOffset ?? 0;
     let boundaryBytes = checkpoint?.boundaryBytes ?? 0;
     let boundaryFingerprint = checkpoint?.boundaryFingerprint ?? "";
+    const prefixSegments = checkpoint?.prefixSegments ?? [];
     const save = (done: boolean) => {
       if (!options.resume) return;
       const state = scanner.state();
@@ -504,6 +538,9 @@ export async function scanUserAuthoredMessagesCooperatively(
         boundaryOffset,
         boundaryBytes,
         boundaryFingerprint,
+        prefixSegments,
+        validation: null,
+        validatedGrowth: null,
         done,
       });
     };
@@ -529,6 +566,7 @@ export async function scanUserAuthoredMessagesCooperatively(
       boundaryBytes = Math.min(bytesRead, AUTHORSHIP_CHECKPOINT_HEAD_BYTES);
       boundaryOffset = offset + bytesRead - boundaryBytes;
       boundaryFingerprint = authorshipHeadFingerprint(chunk.subarray(bytesRead - boundaryBytes, bytesRead));
+      prefixSegments.push({ offset, length: bytesRead, fingerprint: authorshipHeadFingerprint(chunk.subarray(0, bytesRead)) });
       offset += bytesRead;
       if (scanner.consume(chunk.subarray(0, bytesRead))) {
         save(false);
