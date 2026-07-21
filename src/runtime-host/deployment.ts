@@ -79,7 +79,6 @@ export class ViewerDeploymentCoordinator {
   private readonly ownerAlive: (owner: ViewerDeploymentOwner) => boolean;
   private readonly hostGeneration?: () => RuntimeHostGeneration;
   private readonly onHostHandoff?: (context: RuntimeHostHandoffContext) => void;
-  private hostHandoffStaged = false;
 
   constructor(
     private readonly journal: RuntimeJournal,
@@ -108,6 +107,11 @@ export class ViewerDeploymentCoordinator {
     const existing = this.journal.viewerDeploymentByIdempotencyKey(request.idempotencyKey);
     if (existing) {
       if (existing.requestedRevision !== requestedRevision) throw new RuntimeIdempotencyConflictError("idempotency key already belongs to another deployment");
+      if (!existing.terminal
+        && existing.owner.pid === this.owner.pid
+        && existing.owner.startIdentity === this.owner.startIdentity) {
+        this.start(existing);
+      }
       return { state: "accepted", deploymentId: existing.deploymentId, revision: existing.revision, replayed: true };
     }
     const active = this.journal.activeViewerDeployment();
@@ -155,28 +159,22 @@ export class ViewerDeploymentCoordinator {
       deployment previously left the singleton executing a stale generation
       (the pre-#389 broker kept failing promptless Claude resume adoption
       with "message content is required" for hours after the fix shipped).
-      After the blue-green promotion is terminal and healthy, a generation
+      After the blue-green promotion is healthy, a generation
       mismatch stages the freshly built candidate image as the successor
-      runtime-host release. Staging is durable before the handoff callback
-      fires, so the stale image can never restart; a staging failure keeps the
-      current process serving instead of bouncing it back onto the old image.
-      The already-succeeded deployment record is never failed by this step. */
-  private async stageDriftedHostSuccessor(status: ViewerDeploymentStatus): Promise<void> {
-    if (!this.hostGeneration || this.hostHandoffStaged || !status.candidate) return;
-    try {
-      const running = this.hostGeneration();
-      if (running.revision === status.revision) return;
-      await this.adapter.stageRuntimeHostSuccessor(status.candidate);
-      this.hostHandoffStaged = true;
-      this.onHostHandoff?.({
-        deploymentId: status.deploymentId,
-        revision: status.revision,
-        successor: status.candidate,
-        previous: running,
-      });
-    } catch (error) {
-      console.error(`[viewer deployment] runtime-host successor staging failed: ${safeError(error)}`);
-    }
+      runtime-host release. The deployment remains active in its durable
+      host-handoff phase until staging succeeds. Only then does it become
+      terminal and signal the predecessor to release the singleton fence. */
+  private async stageDriftedHostSuccessor(status: ViewerDeploymentStatus): Promise<RuntimeHostHandoffContext | null> {
+    if (!this.hostGeneration || !status.candidate) return null;
+    const running = this.hostGeneration();
+    if (running.revision === status.revision) return null;
+    await this.adapter.stageRuntimeHostSuccessor(status.candidate);
+    return {
+      deploymentId: status.deploymentId,
+      revision: status.revision,
+      successor: status.candidate,
+      previous: running,
+    };
   }
 
   private start(status: ViewerDeploymentStatus): void {
@@ -238,8 +236,12 @@ export class ViewerDeploymentCoordinator {
           if (evidence.ok) {
             if (!status.previous) throw new Error("previous release identity is missing");
             await this.adapter.retainOnly([status.candidate, status.previous]);
-            status = this.journal.updateViewerDeployment(status.deploymentId, { health, phase: "succeeded", terminal: true });
-            await this.stageDriftedHostSuccessor(status);
+            status = this.journal.updateViewerDeployment(status.deploymentId, {
+              error: null,
+              health,
+              phase: "host-handoff",
+              terminal: false,
+            });
             continue;
           }
           status = this.journal.updateViewerDeployment(status.deploymentId, {
@@ -247,6 +249,17 @@ export class ViewerDeploymentCoordinator {
             phase: "rolling-back",
             error: evidence.detail ?? "post-promotion health gate failed",
           });
+          continue;
+        }
+        if (status.phase === "host-handoff") {
+          if (!status.candidate) throw new Error("candidate identity is missing");
+          const handoff = await this.stageDriftedHostSuccessor(status);
+          status = this.journal.updateViewerDeployment(status.deploymentId, {
+            error: null,
+            phase: "succeeded",
+            terminal: true,
+          });
+          if (handoff) this.onHostHandoff?.(handoff);
           continue;
         }
         if (status.phase === "rolling-back") {
@@ -261,6 +274,14 @@ export class ViewerDeploymentCoordinator {
     } catch (error) {
       const message = safeError(error);
       const latest = this.journal.viewerDeployment(status.deploymentId) ?? status;
+      if (latest.phase === "host-handoff") {
+        this.journal.updateViewerDeployment(latest.deploymentId, {
+          error: message,
+          phase: "host-handoff",
+          terminal: false,
+        });
+        return;
+      }
       const promotionStarted = latest.phase === "promoting" || latest.phase === "post-promotion-health" || latest.phase === "rolling-back";
       if (promotionStarted && latest.previous && latest.candidate) {
         try {

@@ -5,6 +5,10 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
 
+export const RUNTIME_HOST_IMAGE_ENV = "LLV_RUNTIME_HOST_IMAGE";
+export const RUNTIME_HOST_REVISION_ENV = "LLV_RUNTIME_HOST_REVISION";
+export const RUNTIME_HOST_CONTAINER_ENV = "LLV_RUNTIME_HOST_CONTAINER";
+
 /** The durable runtime-host generation record (#518). Staging a successor
     writes it before any handoff, and the next runtime-host boot reads it to
     learn which deployed revision it is expected to be running. A missing or
@@ -30,6 +34,23 @@ export function readRuntimeHostRelease(filename = runtimeHostReleaseFile()): Run
     || typeof value.revision !== "string"
     || typeof value.stagedAt !== "string") return null;
   return value as RuntimeHostReleaseRecord;
+}
+
+/** A shared release record proves the current process generation only when
+    dockerd injected the same immutable identity into this container. Legacy
+    predecessors carry none of these values and therefore cannot claim a
+    successor record written while they were still serving. */
+export function currentRuntimeHostGeneration(
+  environment: NodeJS.ProcessEnv = process.env,
+  record: RuntimeHostReleaseRecord | null = readRuntimeHostRelease(),
+): { image: string | null; revision: string | null } {
+  if (!record
+    || environment[RUNTIME_HOST_IMAGE_ENV] !== record.image
+    || environment[RUNTIME_HOST_REVISION_ENV] !== record.revision
+    || environment[RUNTIME_HOST_CONTAINER_ENV] !== record.container) {
+    return { image: null, revision: null };
+  }
+  return { image: record.image, revision: record.revision };
 }
 
 export function writeRuntimeHostRelease(record: RuntimeHostReleaseRecord, filename = runtimeHostReleaseFile()): void {

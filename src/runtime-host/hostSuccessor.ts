@@ -1,6 +1,11 @@
 import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
 
-import type { RuntimeHostReleaseRecord } from "./hostRelease";
+import {
+  RUNTIME_HOST_CONTAINER_ENV,
+  RUNTIME_HOST_IMAGE_ENV,
+  RUNTIME_HOST_REVISION_ENV,
+  type RuntimeHostReleaseRecord,
+} from "./hostRelease";
 
 /** Environment variable read by main.ts: a successor boots while the
     predecessor still holds the singleton fence and must wait for it instead
@@ -19,6 +24,7 @@ export interface RuntimeHostSuccessorPorts {
       pid: host), or null when unreadable. */
   fenceOwnerPid(): number | null;
   now?(): string;
+  wait?(milliseconds: number): Promise<void>;
 }
 
 export function runtimeHostSuccessorName(revision: string): string {
@@ -98,9 +104,30 @@ function successorRunArgs(
     ...predecessor.binds.flatMap((bind) => ["-v", bind]),
     ...predecessor.env.flatMap((entry) => ["-e", entry]),
     "-e", `${RUNTIME_HOST_FENCE_WAIT_ENV}=${SUCCESSOR_FENCE_WAIT_MS}`,
+    "-e", `${RUNTIME_HOST_IMAGE_ENV}=${candidate.image}`,
+    "-e", `${RUNTIME_HOST_REVISION_ENV}=${candidate.revision}`,
+    "-e", `${RUNTIME_HOST_CONTAINER_ENV}=${name}`,
     candidate.image,
     ...predecessor.cmd,
   ];
+}
+
+function successorIsReady(raw: string, name: string, candidate: ViewerReleaseIdentity): boolean {
+  const inspected = JSON.parse(raw) as Array<Record<string, unknown>>;
+  const container = inspected[0] ?? {};
+  const state = (container.State ?? {}) as Record<string, unknown>;
+  const config = (container.Config ?? {}) as Record<string, unknown>;
+  const labels = (config.Labels ?? {}) as Record<string, unknown>;
+  const environment = stringArray(config.Env);
+  return state.Status === "running"
+    && state.Running === true
+    && state.Restarting !== true
+    && config.Image === candidate.image
+    && labels[RUNTIME_HOST_SUCCESSOR_LABEL] === "1"
+    && labels["dev.live-log-viewer.revision"] === candidate.revision
+    && environment.includes(`${RUNTIME_HOST_IMAGE_ENV}=${candidate.image}`)
+    && environment.includes(`${RUNTIME_HOST_REVISION_ENV}=${candidate.revision}`)
+    && environment.includes(`${RUNTIME_HOST_CONTAINER_ENV}=${name}`);
 }
 
 /** #518 runtime-host generation handoff, built exclusively from daemon-side
@@ -117,12 +144,14 @@ function successorRunArgs(
        the singleton fence, so both generations coexist without a second
        journal writer, and it survives the death of every initiating client
        process — this module never stops, kills, or removes the predecessor;
-    4. the durable release record binds successor image to revision only
-       after the successor container is observably running;
-    5. the predecessor's own restart policy is disabled last, so its later
-       graceful exit (the handoff) cannot resurrect the stale image.
-    A failure at any step throws before the record is written, leaving the
-    predecessor serving and the staging retryable on the next deployment. */
+    4. two identity-aware observations prove that the successor remains in its
+       running fence-wait state;
+    5. the predecessor's restart policy is disabled before publication, so a
+       stale generation can never boot and claim the candidate record;
+    6. the durable release record binds the successor image, revision, and
+       container identity after every prerequisite is complete.
+    A failure leaves the predecessor serving and the staging operation
+    retryable from its durable deployment phase. */
 export async function stageRuntimeHostSuccessorContainer(
   candidate: ViewerReleaseIdentity,
   runtimeHostImageTag: string,
@@ -143,15 +172,20 @@ export async function stageRuntimeHostSuccessorContainer(
     if (!/is already in use|Conflict/.test(message)) throw error;
     await ports.docker(["container", "start", name]);
   }
-  const state = (await ports.docker(["container", "inspect", "--format", "{{.State.Status}}", name])).trim();
-  if (state !== "running" && state !== "restarting") {
-    throw new Error(`runtime-host successor container is ${state || "unavailable"}`);
+  const firstEvidence = await ports.docker(["container", "inspect", name]);
+  if (!successorIsReady(firstEvidence, name, candidate)) {
+    throw new Error("runtime-host successor container failed its identity or running-state gate");
   }
+  await (ports.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(250);
+  const stableEvidence = await ports.docker(["container", "inspect", name]);
+  if (!successorIsReady(stableEvidence, name, candidate)) {
+    throw new Error("runtime-host successor container did not remain stably ready");
+  }
+  await ports.docker(["container", "update", "--restart", "no", predecessor.id]);
   ports.writeRelease({
     ...candidate,
     container: name,
     stagedAt: (ports.now ?? (() => new Date().toISOString()))(),
   });
-  await ports.docker(["container", "update", "--restart", "no", predecessor.id]);
   return { successorContainer: name };
 }

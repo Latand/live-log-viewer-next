@@ -13,7 +13,7 @@ const { serveRuntimeHost } = await import("./socket");
 const { ViewerDeploymentCoordinator } = await import("./deployment");
 const { HostCommandViewerDeploymentAdapter } = await import("./deploymentAdapter");
 const { serveViewerDeploymentProxy } = await import("./deploymentProxy");
-const { readRuntimeHostRelease } = await import("./hostRelease");
+const { currentRuntimeHostGeneration } = await import("./hostRelease");
 
 const socketPath = process.env.LLV_RUNTIME_HOST_SOCKET || statePath("runtime-host.sock");
 if (process.env.LLV_RUNTIME_EVENTS !== "1") throw new Error("runtime host activation requires LLV_RUNTIME_EVENTS=1");
@@ -48,8 +48,7 @@ if (deploymentsEnabled && !deploymentAdapterPath) {
    at boot. Bun loads modules exactly once, so a later deploy can only reach a
    successor process — a missing record is the legacy fixed-tag image and is
    never provably current. */
-const bootRelease = readRuntimeHostRelease();
-const bootGeneration = { image: bootRelease?.image ?? null, revision: bootRelease?.revision ?? null };
+const bootGeneration = currentRuntimeHostGeneration();
 const deployments = deploymentAdapterPath
   ? new ViewerDeploymentCoordinator(
     journal,

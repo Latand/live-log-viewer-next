@@ -263,12 +263,28 @@ test("issue 518: failed successor staging never hands the host back to the stale
   if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
   await coordinator.waitForDeployment(receipt.deploymentId);
 
-  /* The Viewer promotion stays succeeded — the stale host keeps serving the
-     durable queue until a later deploy stages its successor. No handoff may
-     fire without a durably staged successor: a restart without one would boot
-     the same stale image. */
-  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({ phase: "succeeded", terminal: true });
+  /* The healthy Viewer remains promoted while the deployment stays in its
+     durable retry phase. A replay resumes successor staging from that phase
+     without rebuilding or promoting another candidate. */
+  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({
+    phase: "host-handoff",
+    terminal: false,
+    error: "docker tag failed",
+  });
   expect(handoffs).toEqual([]);
+  const buildCalls = adapter.calls.filter((call) => call.startsWith("build:"));
+  adapter.stageHostFailure = null;
+  const replay = await coordinator.requestViewerDeployment({
+    idempotencyKey: "deploy-host-staging-failed",
+    revision: "b".repeat(40),
+  });
+  expect(replay).toMatchObject({ state: "accepted", replayed: true, deploymentId: receipt.deploymentId });
+  await coordinator.waitForDeployment(receipt.deploymentId);
+
+  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({ phase: "succeeded", terminal: true, error: null });
+  expect(adapter.calls.filter((call) => call.startsWith("build:"))).toEqual(buildCalls);
+  expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:"))).toHaveLength(2);
+  expect(handoffs).toEqual([receipt.deploymentId]);
   store.close();
 });
 
@@ -334,6 +350,55 @@ test("restart recovery reclaims a stale build lease and completes the deployment
 
   expect(status).toMatchObject({ phase: "succeeded", terminal: true, owner: { pid: 92, startIdentity: "92:new" } });
   expect(adapter.calls.filter((call) => call.startsWith("build:"))).toEqual([`build:${"b".repeat(40)}`]);
+  afterRestart.close();
+});
+
+test("issue 518: restart recovery resumes a durable host-handoff phase", async () => {
+  const filename = journalFile("host-handoff-recovery");
+  const beforeRestart = new RuntimeJournal(filename, { now: () => 1_000 });
+  const receipt = beforeRestart.admitViewerDeployment(
+    { idempotencyKey: "recover-host-handoff", requestedRevision: "origin/main", revision: "b".repeat(40) },
+    { pid: 91, startIdentity: "91:old" },
+  );
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  const previous = release("old", "old");
+  const candidate = release("b".repeat(40), receipt.deploymentId);
+  beforeRestart.updateViewerDeployment(receipt.deploymentId, {
+    phase: "host-handoff",
+    previous,
+    candidate,
+    health: [healthy(candidate.endpoint), healthy("http://127.0.0.1:8898")],
+  });
+  beforeRestart.close();
+
+  const afterRestart = new RuntimeJournal(filename, { now: () => 2_000 });
+  const adapter = new FakeDeploymentAdapter();
+  adapter.current = candidate;
+  const handoffs: string[] = [];
+  const coordinator = new ViewerDeploymentCoordinator(
+    afterRestart,
+    adapter,
+    { pid: 92, startIdentity: "92:new" },
+    {
+      ownerAlive: () => false,
+      hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
+      onHostHandoff: (context) => { handoffs.push(context.deploymentId); },
+    },
+  );
+
+  await coordinator.recover();
+  const status = await coordinator.waitForDeployment(receipt.deploymentId);
+
+  expect(status).toMatchObject({
+    phase: "succeeded",
+    terminal: true,
+    owner: { pid: 92, startIdentity: "92:new" },
+  });
+  expect(adapter.calls.filter((call) => call.startsWith("build:"))).toEqual([]);
+  expect(adapter.calls.filter((call) => call.startsWith("promote:"))).toEqual([]);
+  expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:")))
+    .toEqual([`stage-host-successor:${candidate.image}:${candidate.revision}`]);
+  expect(handoffs).toEqual([receipt.deploymentId]);
   afterRestart.close();
 });
 
