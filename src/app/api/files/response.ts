@@ -542,7 +542,6 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     backendMode: registryDiagnostics.backendMode,
     revision: registryDiagnostics.revision,
     transactionCount: registryDiagnostics.transactionCount,
-    writerRatePerSecond: registryDiagnostics.writerRatePerSecond,
     writerWaitP95Ms: registryDiagnostics.writerWaitP95Ms,
     transactionP95Ms: registryDiagnostics.transactionP95Ms,
     mirrorCheckpointAtMs: registryDiagnostics.mirrorCheckpointAtMs,

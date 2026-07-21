@@ -23,10 +23,11 @@ Every process with an enabled SQLite mode must run on Bun. The Docker Viewer use
 8. After that burn-in, restart every writer with `LLV_AGENT_REGISTRY_SQLITE=sqlite` to remove JSON rewrites from the operation path.
 9. Retain `agent-registry.json`, `agent-registry.sqlite`, and the SQLite WAL files throughout both burn-ins.
 
-`/api/files` reports the backend mode, revision, transaction count, writer rate and p95,
+`/api/files` reports the backend mode, revision, transaction count, transaction p95,
 writer-wait p95, rollback-mirror checkpoint timestamp, and dirty-checkpoint state under
 `systemHealth.registry`. The cached response exposes the stable mirror checkpoint
-timestamp; rollout probes derive its age at observation time. A rollout probe must
+timestamp and omits time-decaying writer rate; rollout probes derive both values at
+observation time. A rollout probe must
 observe one current release owner, a bounded mirror age in `read`, and a stable JSON
 mtime during `sqlite` streaming.
 
