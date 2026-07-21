@@ -122,8 +122,8 @@ function harness() {
       : pathname.includes("stage-1") ? "conversation_stage_1" : pathname.includes("stage-2") ? "conversation_stage_2" : null,
     pipelineAdoptionCandidates: () => [],
     createFlow: async (req) => {
-      calls.push(`flow:${req.implementerPath}:${req.baseRef}:${req.spec}`);
-      const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
+      calls.push(`flow:${req.implementerPath}:${req.baseRef}:${req.targetSha}:${req.spec}`);
+      const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, targetSha: req.targetSha, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
       flows.set(flow.id, flow);
       return { flow };
     },
@@ -1795,8 +1795,8 @@ test("pipeline 8fa12bb4 creates review flow from a terminal builder's durable id
   };
   h.setConversationActive(false);
   const pipeline = await create(h.ports, [
-    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
-    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
   ] as never);
 
   await tickPipelines([], h.ports);
@@ -1821,8 +1821,8 @@ test("pipeline 8fa12bb4 creates review flow from a terminal builder's durable id
 test("retrying a parked review-loop appends a fresh attempt and flow", async () => {
   const h = harness();
   const stages = [
-    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
-    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
   ] as const;
   const pipeline = await create(h.ports, stages as never);
   await tickPipelines([], h.ports);
@@ -1843,8 +1843,8 @@ test("retrying a parked review-loop appends a fresh attempt and flow", async () 
 test("retrying a parked review-loop fast-forwards to the pushed repair and records the reviewer SHA (#522)", async () => {
   const h = harness();
   const stages = [
-    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
-    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
   ] as const;
   let localHead = ORIGIN_MAIN_SHA;
   let remoteHead = ORIGIN_MAIN_SHA;
@@ -1883,17 +1883,39 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
 
   const review = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts[1]!;
   expect(localHead).toBe(repairHead);
-  expect(review.reviewHeadSha).toBe(repairHead);
+  expect(review.expectedReviewHeadSha).toBe(repairHead);
+  expect(review.reviewHeadSha).toBeNull();
   expect(fastForwarded).toBe(true);
-  expect(h.calls).toContain(`flow:/codex/stage-1.jsonl:${repairHead}:AC1`);
+  expect(h.calls).toContain(`flow:/codex/stage-1.jsonl:${ORIGIN_MAIN_SHA}:${repairHead}:AC1`);
   expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
+});
+
+test("a pipeline persists the immutable SHA captured by the launched review round (#522)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const actualReviewHead = "d".repeat(40);
+  h.flows.get("flow-1")!.rounds.push({ n: 1, reviewHeadSha: actualReviewHead } as never);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const attempt = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts[0]!;
+  expect(attempt.expectedReviewHeadSha).toBe(ORIGIN_MAIN_SHA);
+  expect(attempt.reviewHeadSha).toBe(actualReviewHead);
 });
 
 test("a divergent pipeline branch leaves a retried review parked with an actionable decision (#522)", async () => {
   const h = harness();
   const stages = [
-    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
-    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
   ] as const;
   let diverged = false;
   const localHead = "b".repeat(40);

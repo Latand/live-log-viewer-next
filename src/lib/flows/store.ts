@@ -129,6 +129,7 @@ function isFlow(value: unknown): value is Flow {
     typeof flow.cwd === "string" &&
     typeof flow.implementerPath === "string" &&
     typeof flow.baseRef === "string" &&
+    (flow.targetSha === undefined || flow.targetSha === null || typeof flow.targetSha === "string") &&
     (flow.spec === undefined || typeof flow.spec === "string") &&
     Array.isArray(flow.rounds)
   );
@@ -171,6 +172,7 @@ export function loadFlows(): Flow[] {
   const flows = Array.isArray(raw?.flows) ? raw.flows.filter(isFlow) : [];
   return flows.map((flow) => ({
     ...flow,
+    targetSha: flow.targetSha ?? null,
     implementerConversationId: flow.implementerConversationId ?? null,
     reviewerFallback: flow.reviewerFallback === undefined && flow.roles.reviewer.engine === "codex"
       ? configuredReviewerFallback()

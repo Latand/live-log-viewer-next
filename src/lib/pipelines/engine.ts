@@ -101,7 +101,7 @@ export interface PipelinePorts {
   patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
   closeFlow(id: string): Promise<unknown>;
   getFlow(id: string): Flow | null;
-  findFlow(implementerPath: string, implementerConversationId: string | null, baseRef: string): Flow | null;
+  findFlow(implementerPath: string, implementerConversationId: string | null, baseRef: string, targetSha: string): Flow | null;
   projectForCwd(cwd: string): string | null;
   now(): string;
 }
@@ -331,9 +331,10 @@ export function defaultPipelinePorts(): PipelinePorts {
     patchFlow: (id, action, note) => patchFlow(id, { action, ...(note ? { note } : {}) }),
     closeFlow,
     getFlow: (id) => loadFlows().find((flow) => flow.id === id) ?? null,
-    findFlow: (implementerPath, implementerConversationId, baseRef) => loadFlows()
+    findFlow: (implementerPath, implementerConversationId, baseRef, targetSha) => loadFlows()
       .filter((flow) =>
         flow.baseRef === baseRef
+        && flow.targetSha === targetSha
         && flow.closedAt === null
         && flow.state !== "closed"
         && (flow.implementerPath === implementerPath
@@ -499,6 +500,7 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAtte
     agentPath: null,
     paneId: null,
     flowId: null,
+    expectedReviewHeadSha: null,
     reviewHeadSha: null,
     startedAt: null,
     completedAt: null,
@@ -585,6 +587,7 @@ export function adoptAttempt(
     agentPath: conversationRef.agentPath,
     paneId: conversationRef.paneId,
     flowId: null,
+    expectedReviewHeadSha: null,
     reviewHeadSha: null,
     startedAt: conversationRef.startedAt,
     completedAt: null,
@@ -1077,17 +1080,17 @@ async function tickReviewStage(
   attempt.state = "reviewing";
   setCursorState(pipeline, stage.id, "reviewing");
 
-  if (!attempt.reviewHeadSha) {
+  if (!attempt.expectedReviewHeadSha) {
     if (!pipeline.lastPassedCommit) {
       park(pipeline, "review-loop stage requires a verified pipeline commit", attempt);
       return;
     }
-    attempt.reviewHeadSha = pipeline.lastPassedCommit;
+    attempt.expectedReviewHeadSha = pipeline.lastPassedCommit;
     persist();
   }
 
   if (!attempt.flowId) {
-    const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, attempt.reviewHeadSha);
+    const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, pipeline.baseRef, attempt.expectedReviewHeadSha);
     if (existing) {
       attachReviewFlowAttempt(attempt, existing);
       persist();
@@ -1110,7 +1113,8 @@ async function tickReviewStage(
       deliverKickoff: false,
       roles: { implementer: implementerRole, reviewer: reviewerRole },
       baseMode: "head",
-      baseRef: attempt.reviewHeadSha,
+      baseRef: pipeline.baseRef,
+      targetSha: attempt.expectedReviewHeadSha,
       spec: pipeline.spec ?? pipeline.task,
       mode: "auto",
       reviewerMode: "headless",
@@ -1160,6 +1164,11 @@ async function tickReviewStage(
     return;
   }
   attachReviewFlowAttempt(attempt, flow);
+  const capturedReviewHead = flow.rounds.find((round) => round.reviewHeadSha)?.reviewHeadSha ?? null;
+  if (!attempt.reviewHeadSha && capturedReviewHead) {
+    attempt.reviewHeadSha = capturedReviewHead;
+    persist();
+  }
   if (flow.state === "approved") {
     attempt.output = `Review loop approved after ${flow.rounds.length} round(s).`;
     attempt.verdict = { status: "pass", confidence: 1 };

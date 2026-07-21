@@ -94,6 +94,7 @@ function isAttempt(value: unknown, index: number): boolean {
     isNullableString(attempt.agentPath) &&
     isNullableString(attempt.paneId) &&
     isNullableString(attempt.flowId) &&
+    (attempt.expectedReviewHeadSha === undefined || isNullableString(attempt.expectedReviewHeadSha)) &&
     (attempt.reviewHeadSha === undefined || isNullableString(attempt.reviewHeadSha)) &&
     isNullableString(attempt.startedAt) &&
     isNullableString(attempt.completedAt) &&
@@ -388,6 +389,7 @@ export function loadPipelines(): Pipeline[] {
             agentPath: attempt.agentPath ?? null,
             paneId: attempt.paneId ?? null,
             flowId: attempt.flowId ?? null,
+            expectedReviewHeadSha: attempt.expectedReviewHeadSha ?? null,
             reviewHeadSha: attempt.reviewHeadSha ?? null,
             startedAt: attempt.startedAt ?? null,
             completedAt: attempt.completedAt ?? null,
