@@ -54,7 +54,7 @@ test("startup publishes the structured controller before transcript refresh sett
   });
   await refreshStartedPromise;
 
-  const sessionId = "abababab-abab-4aba-8aba-abababababab";
+  const sessionId = "early-controller-session";
   const artifactPath = path.join(directory, `${sessionId}.jsonl`);
   fs.writeFileSync(artifactPath, "");
   registry.upsert({
