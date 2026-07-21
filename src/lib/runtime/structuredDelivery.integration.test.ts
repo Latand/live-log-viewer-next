@@ -1982,13 +1982,15 @@ test("runtime recovery drains one durable synchronization hold into one engine c
   expect(recoveredDuplicate).toMatchObject({ ok: true, structured: true, outcome: "delivered" });
   expect(ledger.writes).toHaveLength(1);
 
+  const migrationTicksBeforeTerminalReplay = requestedDrains;
   const afterDeliveryDuplicate = await enqueueStructuredMessage(request, {
     enabled: () => true,
     client: () => null,
     registry: () => registry,
     requestMigrationTick: () => { requestedDrains += 1; },
   });
-  expect(afterDeliveryDuplicate).toMatchObject({ ok: true, structured: true, outcome: "held" });
+  expect(afterDeliveryDuplicate).toMatchObject({ ok: true, structured: true, outcome: "delivered" });
+  expect(requestedDrains).toBe(migrationTicksBeforeTerminalReplay);
   expect(ledger.writes).toHaveLength(1);
   expect(Object.values(registry.snapshot().heldDeliveries)
     .filter((delivery) => delivery.clientMessageId === request.clientMessageId)).toHaveLength(1);
