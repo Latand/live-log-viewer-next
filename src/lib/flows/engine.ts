@@ -38,8 +38,13 @@ import { chooseHeadlessReviewer, rateLimitStateDetail } from "./reviewerPolicy";
 const TERMINAL_STATES = new Set<FlowState>(["approved", "done_comment", "needs_decision", "closed"]);
 const READY_RE = /^REVIEW_READY:\s*(.*)$/m;
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-const store = globalThis as unknown as { __llvFlowTick?: boolean };
+const store = globalThis as unknown as {
+  __llvFlowTick?: boolean;
+  __llvFlowRelayLeases?: Map<string, Promise<void>>;
+};
 const relayStartedThisProcess = new Set<string>();
+const relayLeases = store.__llvFlowRelayLeases ??= new Map<string, Promise<void>>();
+let sendRelay: typeof sendToImplementer;
 const MAX_HEADLESS_NO_VERDICT_RETRIES = 1;
 const REVIEWER_LAUNCH_LEASE_MS = 60_000;
 const SYNTHETIC_LAUNCH_LOSS_DETAILS = new Set([
@@ -261,6 +266,13 @@ export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, F
   const outcome = await deliverToTranscriptHost({ entry, spec, payload: text });
   if (!outcome.ok) throw new Error(outcome.error);
   return entry.path;
+}
+
+sendRelay = sendToImplementer;
+
+export function setRelayDeliveryForTest(delivery: typeof sendToImplementer): () => void {
+  sendRelay = delivery;
+  return () => { sendRelay = sendToImplementer; };
 }
 
 function sessionIdFromHeadlessStdout(stdout: string): string | null {
@@ -618,7 +630,7 @@ async function relayFindings(flow: Flow, entriesByPath: Map<string, FileEntry>, 
   if (!round.findingsPath) throw new Error("round has no findings artifact");
   const findings = fs.readFileSync(round.findingsPath, "utf8");
   flow.state = "relaying";
-  const deliveryPath = await sendToImplementer(flow, entriesByPath, relayPrompt(round, findings));
+  const deliveryPath = await sendRelay(flow, entriesByPath, relayPrompt(round, findings));
   const deliveredAt = isoNow();
   round.relayDelivery = { path: deliveryPath, deliveredAt };
   round.relayedAt = deliveredAt;
@@ -651,7 +663,7 @@ export function relayFixOrPark(flow: Flow): void {
   }
 }
 
-async function tickFlow(
+export async function tickFlow(
   flow: Flow,
   entries: FileEntry[],
   entriesByPath: Map<string, FileEntry>,
@@ -811,20 +823,35 @@ async function tickFlow(
 
   if (flow.state === "relaying") {
     const relayKey = roundKey(flow, round);
+    const activeRelay = relayLeases.get(relayKey);
+    if (activeRelay) {
+      await activeRelay;
+      return JSON.stringify(flow) !== before;
+    }
     if (round.relayStartedAt && round.relayedAt === null && !relayStartedThisProcess.has(relayKey)) {
       markNeedsDecision(flow, "relay was interrupted; it may have been delivered twice");
       return JSON.stringify(flow) !== before;
     }
+    const lease = (async () => {
+      try {
+        round.relayStartedAt = isoNow();
+        relayStartedThisProcess.add(relayKey);
+        persistCheckpoint();
+        await relayFindings(flow, entriesByPath, round);
+        persistCheckpoint();
+      } catch (error) {
+        markRoundError(round, error instanceof Error ? error.message : String(error));
+        flow.state = "paused";
+        flow.pausedState = "relaying";
+        flow.stateDetail = round.error;
+        persistCheckpoint();
+      }
+    })();
+    relayLeases.set(relayKey, lease);
     try {
-      round.relayStartedAt = isoNow();
-      relayStartedThisProcess.add(relayKey);
-      persistCheckpoint();
-      await relayFindings(flow, entriesByPath, round);
-    } catch (error) {
-      markRoundError(round, error instanceof Error ? error.message : String(error));
-      flow.state = "paused";
-      flow.pausedState = "relaying";
-      flow.stateDetail = round.error;
+      await lease;
+    } finally {
+      if (relayLeases.get(relayKey) === lease) relayLeases.delete(relayKey);
     }
     return JSON.stringify(flow) !== before;
   }
