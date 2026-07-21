@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { StringDecoder } from "node:string_decoder";
 
 import { yieldToRuntime } from "@/lib/cooperative";
+import { globalCache } from "@/lib/scanner/caches";
 import type { Engine } from "@/lib/types";
 
 export type SessionRecordKind = "message" | "reasoning" | "tool_call" | "tool_result" | "trace";
@@ -214,7 +215,8 @@ export function readSession(pathname: string, engine: Extract<Engine, "claude" |
 }
 
 const AUTHORSHIP_SCAN_CHUNK_BYTES = 64 * 1024;
-const AUTHORSHIP_SCAN_MAX_RECORD_CHARS = 8 * 1024 * 1024;
+const AUTHORSHIP_SCAN_MAX_RECORD_BYTES = 8 * 1024 * 1024;
+const AUTHORSHIP_CHECKPOINT_HEAD_BYTES = 64 * 1024;
 
 function recordHasUserMessage(record: Record<string, unknown>, engine: Extract<Engine, "claude" | "codex">): boolean {
   if (engine === "claude") {
@@ -234,14 +236,67 @@ export interface AuthorshipScanResult {
   complete: boolean;
 }
 
-function createAuthorshipScanner(engine: Extract<Engine, "claude" | "codex">, limit: number) {
-  let count = 0;
-  let complete = true;
-  let pending = "";
-  let skippingRecord = false;
-  const decoder = new StringDecoder("utf8");
-  const consume = (line: string): boolean => {
-    const text = line.trim();
+/** Shared hard byte allowance across one controller generation. Exhaustion
+    returns `complete: false`; the persisted per-path checkpoint resumes the
+    scan in a later cycle instead of restarting a multi-gigabyte pass. */
+export interface AuthorshipScanBudget {
+  remaining: number;
+}
+
+export interface AuthorshipScanOptions {
+  /** Cooperative cancellation observed between 64 KiB chunks. */
+  signal?: AbortSignal;
+  /** Hard ceiling of bytes this call may read from the transcript. */
+  maxBytes?: number;
+  /** Shared cross-file allowance charged with every byte actually read. */
+  budget?: AuthorshipScanBudget;
+  /** Reuse and update the process-wide resumable checkpoint for this path. */
+  resume?: boolean;
+}
+
+interface AuthorshipScanCheckpoint {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  /** Absolute offset of the next unread byte. */
+  offset: number;
+  /** Raw bytes of the unterminated line preceding `offset`. */
+  carry: Buffer;
+  skippingRecord: boolean;
+  count: number;
+  parseComplete: boolean;
+  headBytes: number;
+  headFingerprint: string;
+  /** The scan reached EOF at `size`; only appended bytes remain unread. */
+  done: boolean;
+}
+
+const authorshipCheckpoints = globalCache<AuthorshipScanCheckpoint>("authorship-scan-checkpoint-v1");
+
+interface AuthorshipScannerState {
+  count: number;
+  carry: Buffer;
+  skippingRecord: boolean;
+  parseComplete: boolean;
+}
+
+/* Lines assemble at the byte level so a checkpoint can persist the exact
+   scanner state (offset + unterminated-line bytes) without decoder state.
+   Every complete line decodes independently — JSONL records never contain
+   raw newlines, so per-line UTF-8 decoding matches streaming decoding. */
+function createAuthorshipScanner(
+  engine: Extract<Engine, "claude" | "codex">,
+  limit: number,
+  initial?: AuthorshipScannerState,
+) {
+  let count = initial?.count ?? 0;
+  let complete = initial?.parseComplete ?? true;
+  let skippingRecord = initial?.skippingRecord ?? false;
+  let pending: Buffer[] = initial?.carry.length ? [Buffer.from(initial.carry)] : [];
+  let pendingBytes = initial?.carry.length ?? 0;
+  const consume = (line: Buffer): boolean => {
+    const text = line.toString("utf8").trim();
     if (!text) return false;
     try {
       const parsed = JSON.parse(text) as unknown;
@@ -252,38 +307,50 @@ function createAuthorshipScanner(engine: Extract<Engine, "claude" | "codex">, li
       return false;
     }
   };
-  const consumeDecoded = (decoded: string): boolean => {
-    let cursor = 0;
-    while (cursor < decoded.length) {
-      const newline = decoded.indexOf("\n", cursor);
-      const end = newline === -1 ? decoded.length : newline;
-      if (!skippingRecord) {
-        pending += decoded.slice(cursor, end);
-        if (pending.length > AUTHORSHIP_SCAN_MAX_RECORD_CHARS) {
-          pending = "";
-          skippingRecord = true;
-          complete = false;
-        }
-      }
-      if (newline === -1) return false;
-      if (!skippingRecord && consume(pending)) {
-        count += 1;
-        if (count >= limit) return true;
-      }
-      pending = "";
-      skippingRecord = false;
-      cursor = newline + 1;
-    }
-    return false;
+  const resetLine = () => {
+    pending = [];
+    pendingBytes = 0;
+    skippingRecord = false;
   };
   return {
-    consume(chunk: Uint8Array): boolean {
-      return consumeDecoded(decoder.write(chunk));
+    consume(chunk: Buffer): boolean {
+      let cursor = 0;
+      while (cursor <= chunk.length) {
+        const newline = chunk.indexOf(0x0a, cursor);
+        if (newline === -1) {
+          const rest = chunk.length - cursor;
+          if (!skippingRecord && rest > 0) {
+            if (pendingBytes + rest > AUTHORSHIP_SCAN_MAX_RECORD_BYTES) {
+              pending = [];
+              pendingBytes = 0;
+              skippingRecord = true;
+              complete = false;
+            } else {
+              pending.push(Buffer.from(chunk.subarray(cursor)));
+              pendingBytes += rest;
+            }
+          }
+          return false;
+        }
+        if (!skippingRecord) {
+          const segment = chunk.subarray(cursor, newline);
+          if (pendingBytes + segment.length > AUTHORSHIP_SCAN_MAX_RECORD_BYTES) {
+            complete = false;
+          } else if (consume(pendingBytes ? Buffer.concat([...pending, segment]) : segment)) {
+            count += 1;
+            if (count >= limit) {
+              resetLine();
+              return true;
+            }
+          }
+        }
+        resetLine();
+        cursor = newline + 1;
+      }
+      return false;
     },
     finish(): AuthorshipScanResult {
-      const tail = decoder.end();
-      if (tail && consumeDecoded(tail)) return { count, complete };
-      if (!skippingRecord && Boolean(pending) && consume(pending)) count += 1;
+      if (!skippingRecord && pendingBytes > 0 && consume(Buffer.concat(pending))) count += 1;
       return { count, complete };
     },
     result(): AuthorshipScanResult {
@@ -291,6 +358,14 @@ function createAuthorshipScanner(engine: Extract<Engine, "claude" | "codex">, li
     },
     failed(): AuthorshipScanResult {
       return { count, complete: false };
+    },
+    state(): AuthorshipScannerState {
+      return {
+        count,
+        carry: pendingBytes ? Buffer.concat(pending) : Buffer.alloc(0),
+        skippingRecord,
+        parseComplete: complete,
+      };
     },
   };
 }
@@ -318,30 +393,115 @@ export function scanUserAuthoredMessages(
   }
 }
 
+function authorshipHeadFingerprint(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("base64url");
+}
+
+/** Bytes this pass may still read under the caller's combined ceilings. */
+function authorshipAllowance(options: AuthorshipScanOptions, charged: number): number {
+  const perCall = (options.maxBytes ?? Number.POSITIVE_INFINITY) - charged;
+  const shared = options.budget === undefined ? Number.POSITIVE_INFINITY : options.budget.remaining;
+  return Math.min(perCall, shared);
+}
+
 export async function scanUserAuthoredMessagesCooperatively(
   pathname: string,
   engine: Extract<Engine, "claude" | "codex">,
   limit = Number.MAX_SAFE_INTEGER,
+  options: AuthorshipScanOptions = {},
 ): Promise<AuthorshipScanResult> {
-  const scanner = createAuthorshipScanner(engine, limit);
   let file: Awaited<ReturnType<typeof fs.promises.open>> | null = null;
+  let charged = 0;
+  const charge = (bytes: number) => {
+    charged += bytes;
+    if (options.budget) options.budget.remaining -= bytes;
+  };
   try {
     file = await fs.promises.open(pathname, "r");
+    const stat = await file.stat();
+    let checkpoint = options.resume ? authorshipCheckpoints.get(pathname) : undefined;
+    if (checkpoint) {
+      // Truncation, replacement, or a rewritten head resets the checkpoint:
+      // the recorded offset no longer describes this file's content.
+      let valid = checkpoint.dev === stat.dev && checkpoint.ino === stat.ino && stat.size >= checkpoint.offset;
+      if (valid && checkpoint.headBytes > 0) {
+        const head = Buffer.allocUnsafe(checkpoint.headBytes);
+        let filled = 0;
+        while (filled < head.length) {
+          const { bytesRead } = await file.read(head, filled, head.length - filled, filled);
+          if (bytesRead === 0) break;
+          filled += bytesRead;
+        }
+        charge(filled);
+        valid = filled === head.length && authorshipHeadFingerprint(head) === checkpoint.headFingerprint;
+      }
+      if (!valid) {
+        authorshipCheckpoints.delete(pathname);
+        checkpoint = undefined;
+      }
+    }
+    if (checkpoint && checkpoint.count >= limit) return { count: checkpoint.count, complete: checkpoint.parseComplete };
+    if (checkpoint?.done && checkpoint.size === stat.size && checkpoint.mtimeMs === stat.mtimeMs) {
+      return { count: checkpoint.count, complete: checkpoint.parseComplete };
+    }
+
+    const scanner = createAuthorshipScanner(engine, limit, checkpoint ?? undefined);
+    let offset = checkpoint?.offset ?? 0;
+    let headBytes = checkpoint?.headBytes ?? 0;
+    let headFingerprint = checkpoint?.headFingerprint ?? "";
+    const save = (done: boolean) => {
+      if (!options.resume) return;
+      const state = scanner.state();
+      authorshipCheckpoints.set(pathname, {
+        dev: stat.dev,
+        ino: stat.ino,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        offset,
+        carry: state.carry,
+        skippingRecord: state.skippingRecord,
+        count: state.count,
+        parseComplete: state.parseComplete,
+        headBytes,
+        headFingerprint,
+        done,
+      });
+    };
     const chunk = Buffer.allocUnsafe(AUTHORSHIP_SCAN_CHUNK_BYTES);
     let chunksSinceYield = 0;
     for (;;) {
-      const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
+      if (options.signal?.aborted) {
+        save(false);
+        return scanner.failed();
+      }
+      const allowance = authorshipAllowance(options, charged);
+      if (allowance <= 0) {
+        save(false);
+        return scanner.failed();
+      }
+      const { bytesRead } = await file.read(chunk, 0, Math.min(chunk.length, allowance), offset);
       if (bytesRead === 0) break;
-      if (scanner.consume(chunk.subarray(0, bytesRead))) return scanner.result();
+      charge(bytesRead);
+      if (offset === 0 && headBytes === 0) {
+        headBytes = Math.min(bytesRead, AUTHORSHIP_CHECKPOINT_HEAD_BYTES);
+        headFingerprint = authorshipHeadFingerprint(chunk.subarray(0, headBytes));
+      }
+      offset += bytesRead;
+      if (scanner.consume(chunk.subarray(0, bytesRead))) {
+        save(false);
+        return scanner.result();
+      }
       chunksSinceYield += 1;
       if (chunksSinceYield >= 8) {
         chunksSinceYield = 0;
         await yieldToRuntime();
       }
     }
-    return scanner.finish();
+    const finished = scanner.finish();
+    save(true);
+    return finished;
   } catch {
-    return scanner.failed();
+    return { count: 0, complete: false };
   } finally {
     await file?.close().catch(() => undefined);
   }

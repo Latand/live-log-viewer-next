@@ -48,6 +48,11 @@ const lineageStoreState = globalCache<{
 
 const CHAIN_HEAD_BYTES = 512 * 1024;
 const BACKGROUND_SCAN_BUDGET_BYTES = 256 * 1024;
+/* Nested Claude subagent ownership proofs scan sibling transcripts for a
+   tool-use needle. One generation may spend at most this many fresh bytes on
+   those forward scans; unresolved lineage keeps its path-derived parent and
+   the recorded offsets resume in a later generation (#287). */
+const NESTED_SUBAGENT_NEEDLE_BUDGET_BYTES = 256 * 1024;
 const BACKGROUND_SCAN_CHUNK_BYTES = 64 * 1024;
 const BACKGROUND_INDEX_ENTRY_CAP = 20_000;
 const BACKGROUND_COMMANDS_FILE = "bg-commands.json";
@@ -653,6 +658,7 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
   loadCompactChains();
   const limit = createLimiter(48);
   const backgroundReadBudget = { remaining: BACKGROUND_SCAN_BUDGET_BYTES };
+  const nestedNeedleBudget = { remaining: NESTED_SUBAGENT_NEEDLE_BUDGET_BYTES };
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   for (const entry of entries) {
     if (entry.root === "claude-projects") {
@@ -671,6 +677,7 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
           const found = findNeedle(
             toolUse,
             subs.filter((item) => item !== entry.path).concat(main ? [main] : []),
+            nestedNeedleBudget,
           );
           if (found) entry.parent = found;
         }
