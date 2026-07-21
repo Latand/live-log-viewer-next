@@ -1099,6 +1099,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineSlot.addAgentTitle": "Додати наступного агента після цього етапу",
   "pipelineSlot.addReview": "Цикл рев’ю",
   "pipelineSlot.addReviewTitle": "Прикріпити цикл рев’ю (жорстка зв’язка) після цього етапу",
+  "pipelineSlot.moveEarlier": "Перемістити {role} раніше в ланцюжку",
+  "pipelineSlot.moveLater": "Перемістити {role} пізніше в ланцюжку",
   "pipelineSlot.savePrompt": "Зберегти промпт",
   "pipelineSlot.promptAria": "Редактор промпту етапу",
   "pipelineSlot.connectHeading": "З'єднання",

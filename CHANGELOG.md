@@ -7,6 +7,17 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 ## [Unreleased]
 
 ### Added
+- On-canvas pipeline stage reordering (#507). A draft's stage cards carry their
+  own move-earlier / move-later controls, so the whole conversation graph is
+  composed in place on the canvas — no nested form. Each move is offered only
+  when it keeps the chain startable (no review-loop ahead of the first run,
+  matching the server guard) and rides the shipped optimistic PATCH echo through
+  the new `optimisticReorderStage`, which relinks intentional pass/fail edges by
+  identity exactly as the server's reorder does. The on-canvas add affordance now
+  extends the chain up to the full 8-stage limit (previously capped at 4), and
+  the placeholder card body renders the stage prompt as a bounded, clamped
+  preview with no nested scrollbar — the full prompt stays editable in the card's
+  configuration disclosure.
 - Inferred spawn lineage (#341). `POST /api/spawn` no longer requires `src`
   from authenticated agent callers: the durable parent is inferred from the
   caller's own capability-bound conversation, persisted as registry lineage

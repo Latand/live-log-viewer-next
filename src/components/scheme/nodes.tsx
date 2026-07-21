@@ -26,6 +26,7 @@ import { StageHistoryCard } from "@/components/pipelines/StageHistoryCard";
 import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, latestAttempt, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
+import { MAX_PIPELINE_STAGES } from "@/lib/pipelines/limits";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
@@ -1094,7 +1095,7 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
     next.splice(slot.index + 1, 0, kind);
     return next;
   };
-  const canAdd = draft && !lite && pipeline.stages.length < 4;
+  const canAdd = draft && !lite && pipeline.stages.length < MAX_PIPELINE_STAGES;
   const canAddReview = canAdd && reviewLoopChainValid(kindsWithInsert("review-loop"));
   const addAfter = (kind: "run" | "review-loop") => {
     if (busy) return;

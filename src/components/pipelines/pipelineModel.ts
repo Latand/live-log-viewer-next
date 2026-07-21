@@ -1351,6 +1351,28 @@ export function optimisticRemoveStage(pipeline: Pipeline, stageId: string): Pipe
   return { ...pipeline, stages: pruneStageEdges(stages) };
 }
 
+/** The pipeline as it will look once `reorder-stage` persists (#507 on-canvas
+    reorder). Moves the stage to its new chain slot and preserves every stage's
+    intentional pass/fail edge by id — matching the server's `replaceDraftStages`,
+    which relinks by identity rather than by array position — then prunes any edge
+    left dangling or self-referential. A review-loop floated to the entry demotes
+    to a run so the moved chain stays startable (mirrors `normalizeStageOrder`);
+    the on-canvas control only ever fires a move `reviewLoopChainValid` allows, so
+    this is a defensive floor, never the normal path. */
+export function optimisticReorderStage(pipeline: Pipeline, stageId: string, toIndex: number): Pipeline {
+  const from = pipeline.stages.findIndex((stage) => stage.id === stageId);
+  if (from < 0) return pipeline;
+  const stages = [...pipeline.stages];
+  const [moved] = stages.splice(from, 1);
+  const at = Math.max(0, Math.min(toIndex, stages.length));
+  stages.splice(at, 0, moved!);
+  const entry = stages[0];
+  const normalized = entry && entry.kind === "review-loop"
+    ? stages.map((stage, index) => (index === 0 ? { ...stage, kind: "run" as const } : stage))
+    : stages;
+  return { ...pipeline, stages: pruneStageEdges(normalized) };
+}
+
 /** The pipeline as it will look once `set-edge` persists (#353). */
 export function optimisticSetEdge(
   pipeline: Pipeline,

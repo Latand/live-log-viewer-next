@@ -1130,6 +1130,8 @@ export const en = {
   "pipelineSlot.addAgentTitle": "Add the next agent handoff after this stage",
   "pipelineSlot.addReview": "Review cycle",
   "pipelineSlot.addReviewTitle": "Attach a review cycle (hard link) after this stage",
+  "pipelineSlot.moveEarlier": "Move {role} earlier in the chain",
+  "pipelineSlot.moveLater": "Move {role} later in the chain",
   "pipelineSlot.savePrompt": "Save prompt",
   "pipelineSlot.promptAria": "Stage prompt editor",
   "pipelineSlot.connectHeading": "Connections",
