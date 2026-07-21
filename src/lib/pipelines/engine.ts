@@ -250,7 +250,7 @@ export function defaultPipelinePorts(): PipelinePorts {
     roleLookup: pipelineRoleLookup,
     spawnAgent: spawnPipelineAgent,
     spawnReceipt: (launchId) => {
-      const receipt = agentRegistry().snapshot().receipts[launchId];
+      const receipt = agentRegistry().readOnlySnapshot().receipts[launchId];
       if (!receipt) return null;
       return {
         state: receipt.state,
@@ -291,7 +291,7 @@ export function defaultPipelinePorts(): PipelinePorts {
     sourcePathAllowed: transcriptAllowed,
     conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
     pipelineAdoptionCandidates: (pipelineId) => {
-      const snapshot = agentRegistry().snapshot();
+      const snapshot = agentRegistry().readOnlySnapshot();
       const receipts = Object.values(snapshot.receipts);
       const candidates: PipelineAdoptionCandidate[] = [];
       for (const [conversationId, memberships] of Object.entries(snapshot.memberships)) {
