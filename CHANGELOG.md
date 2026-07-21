@@ -6,7 +6,54 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 
 ## [Unreleased]
 
+### Fixed
+- Two #507 final-review repairs. (1) An aged-idle passed stage on a
+  cursor-bearing active pipeline stays the ONE real stage conversation card. The
+  board ran two independent derivations over the same scan — the idle-worker
+  auto-collapse (#112) folding quiet pipeline-stage transcripts into the pipeline
+  stack, and the #507 F2 rule keeping every current stage's latest transcript
+  full-size — and they disagreed, so a passed stage's card could vanish or
+  duplicate beside the stack. `pipelineFullPanePaths` now exposes exactly the
+  active-pipeline full-pane set, and `ProjectDashboard` protects it from
+  collapse, so each stage projects one surface (a five-stage graph reads as five
+  real/placeholder cards) with no worker-stack duplicate; older retries and
+  completed/closed pipelines still compact. (2) The mobile stage editor is now a
+  real modal that owns keyboard focus. Opened above the phone pipeline dock
+  sheet, Tab and Shift+Tab stay inside the editor, Escape closes only the editor
+  and returns focus to its trigger, and the sheet beneath yields — coordinated
+  through a shared modal-layer stack (`useModalLayer`) so only the topmost layer
+  traps focus and answers Escape.
+
+### Changed
+- Completed the on-canvas pipeline editor visual contract (#507 review). Three
+  repairs finish the pivot to composing the whole pipeline on the canvas as real
+  cards: (1) desktop stage editing no longer has a nested form/scroller — the
+  pipeline group's override panel keeps only pipeline-level controls (draft
+  task/spec/repo, lifecycle, retry/skip) and points to the canvas, so every
+  per-stage edit (role, model, prompt, order, connections) happens on the real
+  conversation/placeholder cards. (2) A completed stage of an active pipeline now
+  stays a full conversation card inside the colored group — `compactPipelineArtifactPaths`
+  keeps every current stage's latest transcript full-size and folds only
+  superseded retries (and completed/closed pipeline history), and an idle
+  completed stage whose transcript is no longer surfaced as a live node stands in
+  as a full-size completed card that shows the prompt it ran and opens its
+  transcript. A five-stage graph now renders as five real/placeholder cards, not
+  one live pane beside compact history stubs. (3) The mobile stage editor now
+  portals above the phone pipeline dock sheet (z-[80] over the sheet's z-[70]),
+  so it is visible and usable at 390px instead of painting under the backdrop.
+
 ### Added
+- On-canvas pipeline stage reordering (#507). A draft's stage cards carry their
+  own move-earlier / move-later controls, so the whole conversation graph is
+  composed in place on the canvas — no nested form. Each move is offered only
+  when it keeps the chain startable (no review-loop ahead of the first run,
+  matching the server guard) and rides the shipped optimistic PATCH echo through
+  the new `optimisticReorderStage`, which relinks intentional pass/fail edges by
+  identity exactly as the server's reorder does. The on-canvas add affordance now
+  extends the chain up to the full 8-stage limit (previously capped at 4), and
+  the placeholder card body renders the stage prompt as a bounded, clamped
+  preview with no nested scrollbar — the full prompt stays editable in the card's
+  configuration disclosure.
 - Inferred spawn lineage (#341). `POST /api/spawn` no longer requires `src`
   from authenticated agent callers: the durable parent is inferred from the
   caller's own capability-bound conversation, persisted as registry lineage

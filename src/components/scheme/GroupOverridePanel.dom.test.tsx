@@ -193,35 +193,6 @@ const pipelineGroup: SchemeGroup = {
   } as unknown as Pipeline,
 };
 
-test("draft plan controls send additive stage and Start actions", async () => {
-  const draftGroup: SchemeGroup = {
-    ...pipelineGroup,
-    pipeline: {
-      ...pipelineGroup.pipeline!,
-      state: "draft",
-      repoDir: "/repo",
-      runs: pipelineGroup.pipeline!.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
-    } as Pipeline,
-  };
-  const addMount = mount(<GroupOverridePanel group={draftGroup} onClose={() => undefined} />);
-
-  const add = Array.from(addMount.host.querySelectorAll("button")).find((button) => button.textContent?.includes("Add stage")) as HTMLButtonElement;
-  flushSync(() => add.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  await Promise.resolve();
-  expect(calls.at(-1)?.body).toMatchObject({ action: "add-stage", index: 2, stage: { id: "stage-3", kind: "run" } });
-  flushSync(() => addMount.root.unmount());
-  addMount.host.remove();
-
-  const startMount = mount(<GroupOverridePanel group={draftGroup} onClose={() => undefined} />);
-  const start = Array.from(startMount.host.querySelectorAll("button")).find((button) => button.textContent?.includes("Start pipeline")) as HTMLButtonElement;
-  flushSync(() => start.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  await Promise.resolve();
-  expect(calls.at(-1)?.body).toEqual({ action: "start" });
-
-  flushSync(() => startMount.root.unmount());
-  startMount.host.remove();
-});
-
 function draftFixture(): SchemeGroup {
   return {
     ...pipelineGroup,
@@ -249,119 +220,56 @@ function emptyDraftFixture(): SchemeGroup {
   };
 }
 
-function reviewDraftFixture(): SchemeGroup {
-  const stages = [
-    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build", next: "review", effectiveRole: { engine: "claude", model: "fable", effort: "high", access: "read-write", roleId: "builder", promptScaffold: null } },
-    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "Review", next: null, effectiveRole: { engine: "claude", model: "fable", effort: "high", access: "read-only", roleId: "reviewer", promptScaffold: null } },
-  ];
-  return {
-    ...pipelineGroup,
-    pipeline: {
-      ...pipelineGroup.pipeline!,
-      state: "draft",
-      repoDir: "/repo",
-      stages,
-      runs: stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
-      cursor: { stageId: "build", state: "pending", input: null, activatedBy: null },
-    } as unknown as Pipeline,
-  };
-}
+/* Stage editing moved entirely onto the canvas conversation/placeholder cards
+   (#507 review F1): the override panel is now pipeline-scoped only. These tests
+   pin that contract — no nested stage form, no nested scroller — and that the
+   pipeline-level actions the panel alone owns still fire. Per-stage editing is
+   covered on its new home in StagePlaceholderPane.dom.test.tsx. */
 
-test("canvas builder: an empty draft shows no cards, disables Start and add-review (#136)", () => {
+test("the override panel keeps only pipeline-level controls and points stage edits to the canvas (#507 F1)", () => {
+  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
+  /* No per-stage editor: no draggable stage cards, no nested scroller, and no
+     stage role/engine/effort <select> (the draft form uses inputs + textarea only). */
+  expect(host.querySelectorAll("[data-stage-card]").length).toBe(0);
+  expect(host.querySelectorAll("select").length).toBe(0);
+  /* No nested stage scroller — the removed DraftStageCards used a max-h-[46vh]
+     overflow-y-auto list; only the panel's own outer scroll remains. */
+  expect(host.querySelector(".max-h-\\[46vh\\]")).toBeNull();
+  /* The operator is pointed at the canvas cards instead. */
+  const hint = host.querySelector("[data-pipeline-editor-canvas-hint]");
+  expect(hint?.textContent ?? "").toContain("Edit stages on their cards");
+  /* Pipeline-level controls remain: draft details, Start, Discard. */
+  expect(host.querySelector('input')).toBeTruthy();
+  expect(Array.from(host.querySelectorAll("button")).some((b) => b.textContent?.includes("Start pipeline"))).toBe(true);
+  expect(Array.from(host.querySelectorAll("button")).some((b) => b.textContent?.includes("Discard"))).toBe(true);
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("a draft's Start action posts start (#507 F1)", async () => {
+  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
+  const start = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Start pipeline")) as HTMLButtonElement;
+  expect(start.disabled).toBe(false);
+  flushSync(() => start.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  expect(calls.at(-1)?.body).toEqual({ action: "start" });
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("an empty draft has no stages, no canvas hint, and disables Start (#507 F1)", () => {
   const { host, root } = mount(<GroupOverridePanel group={emptyDraftFixture()} onClose={() => undefined} />);
   expect(host.querySelectorAll("[data-stage-card]").length).toBe(0);
+  /* No editable stage yet → no pointer to the canvas, and Start is blocked until
+     the first stage is added on the canvas. */
+  expect(host.querySelector("[data-pipeline-editor-canvas-hint]")).toBeNull();
   const start = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Start pipeline")) as HTMLButtonElement;
   expect(start.disabled).toBe(true);
-  /* A review loop needs a preceding run, so it cannot be the first stage added. */
-  const addReview = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Add review loop")) as HTMLButtonElement;
-  expect(addReview.disabled).toBe(true);
-  const addRun = Array.from(host.querySelectorAll("button")).find((b) => b.textContent === "Add stage" || /Add stage/.test(b.textContent || "")) as HTMLButtonElement;
-  expect(addRun.disabled).toBe(false);
   flushSync(() => root.unmount());
   host.remove();
 });
 
-test("canvas builder: controls that would orphan a review loop are disabled, and a bad drop is a no-op (#136)", async () => {
-  const { host, root } = mount(<GroupOverridePanel group={reviewDraftFixture()} onClose={() => undefined} />);
-  const reviewCard = host.querySelector('[data-stage-card="review"]') as HTMLElement;
-  const buildCard = host.querySelector('[data-stage-card="build"]') as HTMLElement;
-  /* Moving the review loop above its only run would break the chain → disabled. */
-  const reviewUp = Array.from(reviewCard.querySelectorAll("button")).find((b) => b.getAttribute("aria-label") === "Move up") as HTMLButtonElement;
-  expect(reviewUp.disabled).toBe(true);
-  /* Removing the sole preceding run would orphan the review loop → disabled. */
-  const buildRemove = Array.from(buildCard.querySelectorAll("button")).find((b) => b.getAttribute("aria-label") === "Remove stage") as HTMLButtonElement;
-  expect(buildRemove.disabled).toBe(true);
-  /* Dragging the review card onto the run card (index 0) must not PATCH. */
-  flushSync(() => reviewCard.dispatchEvent(new dom.Event("dragstart", { bubbles: true }) as unknown as Event));
-  flushSync(() => buildCard.dispatchEvent(new dom.Event("drop", { bubbles: true }) as unknown as Event));
-  await Promise.resolve();
-  expect(calls.some((call) => (call.body as { action?: string })?.action === "reorder-stage")).toBe(false);
-  flushSync(() => root.unmount());
-  host.remove();
-});
-
-test("canvas builder: adding a review loop posts add-stage with the review-loop kind (#136)", async () => {
-  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
-  const add = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Add review loop")) as HTMLButtonElement;
-  expect(add).toBeTruthy();
-  flushSync(() => add.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  await Promise.resolve();
-  expect(calls.at(-1)?.body).toMatchObject({ action: "add-stage", index: 2, stage: { id: "stage-3", kind: "review-loop" } });
-  flushSync(() => root.unmount());
-  host.remove();
-});
-
-test("canvas builder: dragging a stage card onto another posts reorder-stage to that slot (#136)", async () => {
-  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
-  const planCard = host.querySelector('[data-stage-card="plan"]') as HTMLElement;
-  const buildCard = host.querySelector('[data-stage-card="build"]') as HTMLElement;
-  expect(planCard && buildCard).toBeTruthy();
-  /* Drag the first card (plan, index 0) and drop it on the second (build, index 1). */
-  flushSync(() => planCard.dispatchEvent(new dom.Event("dragstart", { bubbles: true }) as unknown as Event));
-  flushSync(() => buildCard.dispatchEvent(new dom.Event("drop", { bubbles: true }) as unknown as Event));
-  await Promise.resolve();
-  expect(calls.at(-1)?.body).toEqual({ action: "reorder-stage", stageId: "plan", toIndex: 1 });
-  flushSync(() => root.unmount());
-  host.remove();
-});
-
-test("canvas builder: the move-down button posts reorder-stage to the next slot (#136)", async () => {
-  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
-  const planCard = host.querySelector('[data-stage-card="plan"]') as HTMLElement;
-  const down = Array.from(planCard.querySelectorAll("button")).find((b) => b.getAttribute("aria-label") === "Move down") as HTMLButtonElement;
-  flushSync(() => down.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  await Promise.resolve();
-  expect(calls.at(-1)?.body).toEqual({ action: "reorder-stage", stageId: "plan", toIndex: 1 });
-  flushSync(() => root.unmount());
-  host.remove();
-});
-
-test("canvas builder: editing a stage card inline posts override-stage for that stage (#136)", async () => {
-  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
-  const planCard = host.querySelector('[data-stage-card="plan"]') as HTMLElement;
-  /* Change the plan card's role architect → builder. The override must be scoped
-     to this exact card's stage id, carrying only the changed role plus the
-     always-sent prompt — proving each card is its own StageForm editor. */
-  const roleSelect = Array.from(planCard.querySelectorAll("select")).find((select) =>
-    Array.from(select.options).some((option) => option.value === "builder"),
-  ) as HTMLSelectElement;
-  expect(roleSelect.value).toBe("architect");
-  flushSync(() => {
-    Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!.call(roleSelect, "builder");
-    roleSelect.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
-  });
-  const apply = Array.from(planCard.querySelectorAll("button")).find((b) => b.textContent?.includes("Update stage")) as HTMLButtonElement;
-  flushSync(() => apply.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  await Promise.resolve();
-  /* Only the changed role travels — the untouched prompt is omitted so the
-     stored wiring is never rewritten by a role-only edit (issue #221 §5). */
-  const patch = calls.find((call) => call.url.includes("/api/pipelines/p1"));
-  expect(patch?.body).toEqual({ action: "override-stage", stageId: "plan", role: { roleId: "builder" } });
-  flushSync(() => root.unmount());
-  host.remove();
-});
-
-test("canvas builder: Discard posts delete on the draft (#136)", async () => {
+test("Discard posts delete on the draft (#507 F1)", async () => {
   const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
   const discard = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Discard")) as HTMLButtonElement;
   expect(discard).toBeTruthy();
@@ -372,117 +280,33 @@ test("canvas builder: Discard posts delete on the draft (#136)", async () => {
   host.remove();
 });
 
-test("an unchanged stage override submits no stale runtime or role (issue #118 review F4)", async () => {
+test("a running pipeline shows the canvas hint for its unrun stages and posts pause (#507 F1)", async () => {
   const { host, root } = mount(<GroupOverridePanel group={pipelineGroup} onClose={() => undefined} />);
-  /* The role select (the one offering "No role") seeds from the stage's role. */
-  const roleSelect = Array.from(host.querySelectorAll("select")).find((select) =>
-    Array.from(select.options).some((option) => option.value === "architect"),
-  ) as HTMLSelectElement;
-  expect(roleSelect?.value).toBe("architect");
-
-  const apply = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Update stage")) as HTMLButtonElement;
-  expect(apply).toBeTruthy();
-  flushSync(() => apply.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  /* The build stage has never run, so an on-canvas edit is still possible — the
+     panel points there rather than mounting a nested next-stage form. */
+  expect(host.querySelector("[data-pipeline-editor-canvas-hint]")).toBeTruthy();
+  expect(host.querySelectorAll("select").length).toBe(0);
+  const pause = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Pause")) as HTMLButtonElement;
+  flushSync(() => pause.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   await Promise.resolve();
-
-  /* Nothing was edited, so only the stageId travels — never the current
-     engine/model/effort/role/prompt as spurious pins that would defeat
-     role-reset or rewrite the stored wiring. */
-  const patch = calls.find((call) => call.url.includes("/api/pipelines/p1"));
-  expect(patch?.body).toEqual({ action: "override-stage", stageId: "build" });
-
+  expect(calls.at(-1)?.body).toEqual({ action: "pause" });
   flushSync(() => root.unmount());
   host.remove();
 });
 
-function effortOptions(host: HTMLElement): string[] {
-  /* The effort select is the one whose options are exactly the tier list. */
-  const select = Array.from(host.querySelectorAll("select")).find((s) =>
-    Array.from(s.options).some((o) => o.value === "xhigh"),
-  ) as HTMLSelectElement;
-  return Array.from(select.options).map((o) => o.value);
-}
-
-function selectByOption(host: HTMLElement, optionValue: string): HTMLSelectElement {
-  return Array.from(host.querySelectorAll("select")).find((s) =>
-    Array.from(s.options).some((o) => o.value === optionValue),
-  ) as HTMLSelectElement;
-}
-
-function setSelect(select: HTMLSelectElement, value: string): void {
-  const setter = Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!;
-  flushSync(() => {
-    setter.call(select, value);
-    select.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
-  });
-}
-
-function stagePipeline(effectiveRole: Record<string, unknown>): Pipeline {
-  return {
-    ...(pipelineGroup.pipeline as Pipeline),
-    stages: [
-      (pipelineGroup.pipeline as Pipeline).stages[0]!,
-      { ...(pipelineGroup.pipeline as Pipeline).stages[1]!, role: undefined, effectiveRole },
-    ],
-  } as unknown as Pipeline;
-}
-
-test("switching the engine clears the previous engine's model (issue #118 review F2, codex→claude)", () => {
-  const group = { ...pipelineGroup, pipeline: stagePipeline({ engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", roleId: null, promptScaffold: null }) };
-  const { host, root } = mount(<GroupOverridePanel group={group} onClose={() => undefined} />);
-  const modelInput = host.querySelector('input[placeholder]') as HTMLInputElement;
-  expect(modelInput.value).toBe("gpt-5.6");
-  setSelect(selectByOption(host, "codex"), "claude"); // the engine select offers codex
-  expect(modelInput.value).toBe(""); // the gpt model no longer rides along
+test("a parked pipeline offers retry and skip", async () => {
+  const parked: SchemeGroup = {
+    ...pipelineGroup,
+    pipeline: { ...pipelineGroup.pipeline!, state: "needs_decision" } as Pipeline,
+  };
+  const { host, root } = mount(<GroupOverridePanel group={parked} onClose={() => undefined} />);
+  const retry = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Retry")) as HTMLButtonElement;
+  const skip = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Skip")) as HTMLButtonElement;
+  expect(retry).toBeTruthy();
+  expect(skip).toBeTruthy();
+  flushSync(() => retry.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  expect((calls.at(-1)?.body as { action?: string })?.action).toBe("retry-stage");
   flushSync(() => root.unmount());
   host.remove();
-});
-
-test("switching the engine resets an incompatible effort (issue #118 review F2, claude→codex)", () => {
-  const group = { ...pipelineGroup, pipeline: stagePipeline({ engine: "claude", model: "opus", effort: "max", access: "read-write", roleId: null, promptScaffold: null }) };
-  const { host, root } = mount(<GroupOverridePanel group={group} onClose={() => undefined} />);
-  const effort = selectByOption(host, "xhigh");
-  expect(effort.value).toBe("max");
-  setSelect(selectByOption(host, "codex"), "codex"); // switch engine to codex
-  expect(effort.value).toBe(""); // codex has no max tier — cleared to default
-  flushSync(() => root.unmount());
-  host.remove();
-});
-
-test("the stage form re-seeds when an override resolves new effective runtime (issue #118 review F5)", () => {
-  const before = { ...pipelineGroup, pipeline: stagePipeline({ engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", roleId: null, promptScaffold: null }) };
-  const { host, root } = mount(<GroupOverridePanel group={before} onClose={() => undefined} />);
-  const modelInput = () => host.querySelector('input[placeholder]') as HTMLInputElement;
-  expect(modelInput().value).toBe("gpt-5.6");
-
-  /* The poll refetches after the override; the same stage id now carries the
-     role's resolved runtime. The form must remount and show the new value, not
-     the stale gpt-5.6 that a later prompt edit would otherwise re-submit. */
-  const after = { ...pipelineGroup, pipeline: stagePipeline({ engine: "claude", model: "fable", effort: "high", access: "read-write", roleId: "architect", promptScaffold: null }) };
-  flushSync(() => root.render(<GroupOverridePanel group={after} onClose={() => undefined} />));
-  expect(modelInput().value).toBe("fable");
-
-  flushSync(() => root.unmount());
-  host.remove();
-});
-
-test("the effort control offers only tiers the selected engine accepts (issue #118 review)", () => {
-  /* A codex stage must NOT offer max (resolvePipelineRole would 400 codex+max). */
-  const codexStage = {
-    ...(pipelineGroup.pipeline as Pipeline),
-    stages: [
-      (pipelineGroup.pipeline as Pipeline).stages[0]!,
-      { ...(pipelineGroup.pipeline as Pipeline).stages[1]!, effectiveRole: { engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", roleId: "builder", promptScaffold: null } },
-    ],
-  } as unknown as Pipeline;
-  const codex = mount(<GroupOverridePanel group={{ ...pipelineGroup, pipeline: codexStage }} onClose={() => undefined} />);
-  expect(effortOptions(codex.host)).toEqual(["", "low", "medium", "high", "xhigh"]);
-  flushSync(() => codex.root.unmount());
-  codex.host.remove();
-
-  /* The claude build stage in the base fixture does offer max. */
-  const claude = mount(<GroupOverridePanel group={pipelineGroup} onClose={() => undefined} />);
-  expect(effortOptions(claude.host)).toContain("max");
-  flushSync(() => claude.root.unmount());
-  claude.host.remove();
 });

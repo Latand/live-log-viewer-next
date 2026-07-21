@@ -88,6 +88,30 @@ test("planned stage configuration opens on demand and Escape restores the compac
   expect(dom.document.activeElement?.getAttribute("aria-label")).toBe("Configure stage Builder, state pending");
 });
 
+test("the stage configuration editor portals above the mobile dock sheet (#507 review F3)", async () => {
+  /* On a phone the strip lives inside MobilePipelineDockSheet (fixed z-[70]).
+     The configuration editor mounts through the AnchoredVerdict body portal, so
+     its portal layer must sit ABOVE 70 — a z-[60] layer painted under the
+     sheet's backdrop was invisible and unclickable at 390px. */
+  const element = dom.document.createElement("div");
+  dom.document.body.append(element);
+  const host = element as unknown as HTMLElement;
+  root = createRoot(host);
+  flushSync(() => root!.render(<PipelineStrip pipeline={draftPipeline()} mobile />));
+
+  const configure = host.querySelector<HTMLButtonElement>('[aria-label="Configure stage Builder, state pending"]');
+  flushSync(() => configure!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+
+  const body = dom.document.body as unknown as HTMLElement;
+  const dialog = body.querySelector<HTMLElement>('[role="dialog"][aria-label="Configuration for stage Builder"]');
+  expect(dialog).toBeTruthy();
+  const portal = dialog!.parentElement as HTMLElement;
+  const z = /z-\[(\d+)\]/.exec(portal.className)?.[1];
+  expect(z).toBeTruthy();
+  expect(Number(z)).toBeGreaterThan(70);
+});
+
 test("desktop history opens both durable bindings from one logical review round (#353)", async () => {
   const stage = {
     id: "review",

@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefO
 import { createPortal } from "react-dom";
 
 import { currentRound } from "@/components/scheme/agentLinks";
+import { useModalLayer } from "@/components/modalLayer";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline, PipelineAction, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
@@ -79,6 +80,13 @@ export function verdictPlacement(
  * measures the popover's own box and flips/clamps via {@link verdictPlacement}
  * so a strip near the page header never renders it off-screen. Recomputed on
  * scroll/resize.
+ *
+ * The portal sits at z-[80] — above the z-[70] mobile pipeline dock sheet
+ * (MobilePipelineDockSheet) that hosts the strip on a phone (#507 review F3).
+ * The verdict popover and the stage configuration editor both mount here, and a
+ * z-[60] portal painted UNDER the sheet's z-[70] backdrop was invisible and
+ * unclickable at 390px; z-[80] clears the sheet while staying below the
+ * AgentLink full-screen overlay (z-[95]).
  */
 function AnchoredVerdict({ anchorRef, children }: { anchorRef: RefObject<HTMLElement | null>; children: ReactNode }) {
   const contentRef = useRef<HTMLDivElement>(null);
@@ -109,7 +117,7 @@ function AnchoredVerdict({ anchorRef, children }: { anchorRef: RefObject<HTMLEle
   return createPortal(
     <div
       ref={contentRef}
-      className="fixed z-[60]"
+      className="fixed z-[80]"
       style={
         placement
           ? { left: placement.left, top: placement.top, transform: placement.below ? "translate(-50%, 0)" : "translate(-50%, -100%)" }
@@ -150,6 +158,54 @@ function AnchoredActionMenu({ anchorRef, children }: { anchorRef: RefObject<HTML
       {children}
     </span>,
     document.body,
+  );
+}
+
+/**
+ * The on-canvas stage editor as a real modal dialog (#507 review F3 portal +
+ * final F2 ownership). It mounts through the {@link AnchoredVerdict} body portal
+ * (z-[80], above the mobile dock sheet's z-[70]) and registers as a modal LAYER:
+ * Tab/Shift+Tab stay inside the editor, Escape closes it, and — because the
+ * layer stack hands ownership to the topmost layer — the underlying phone sheet
+ * yields its own trap/Escape while this editor is open. The autoFocus close
+ * button moves focus in; the opener StageChip restores focus to its trigger on
+ * unmount, so `manageFocus` stays off here. Not scroll-locked: on a phone the
+ * sheet beneath already locked the body.
+ */
+function StageConfigDialog({
+  label,
+  mobile,
+  slot,
+  onClose,
+}: {
+  label: string;
+  mobile: boolean;
+  slot: StageSlot;
+  onClose: () => void;
+}) {
+  const { t } = useLocale();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useModalLayer({ containerRef: dialogRef, onClose, lockScroll: false, manageFocus: false });
+  return (
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("pipelineStrip.configAria", { label })}
+      tabIndex={-1}
+      className={`relative h-[min(620px,calc(100vh-24px))] w-[min(600px,calc(100vw-24px))] rounded-surface bg-card shadow-3 focus-visible:outline-none ${mobile ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""}`}
+    >
+      <button
+        type="button"
+        autoFocus
+        onClick={onClose}
+        aria-label={t("pipelineStrip.closeConfig")}
+        className="absolute right-2 top-2 z-20 inline-flex h-7 w-7 items-center justify-center rounded-control border border-border bg-card text-muted shadow-1 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      >
+        <X className="h-3.5 w-3.5" aria-hidden />
+      </button>
+      <StagePlaceholderPane slot={slot} interactive />
+    </div>
   );
 }
 
@@ -462,28 +518,7 @@ function StageChip({
       ) : null}
       {configurationOpen ? (
         <AnchoredVerdict anchorRef={chipRef}>
-          <div
-            role="dialog"
-            aria-modal="false"
-            aria-label={t("pipelineStrip.configAria", { label })}
-            className={`relative h-[min(620px,calc(100vh-24px))] w-[min(600px,calc(100vw-24px))] rounded-surface bg-card shadow-3 ${mobile ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""}`}
-            onKeyDown={(event) => {
-              if (event.key !== "Escape") return;
-              event.stopPropagation();
-              onCloseConfiguration();
-            }}
-          >
-            <button
-              type="button"
-              autoFocus
-              onClick={onCloseConfiguration}
-              aria-label={t("pipelineStrip.closeConfig")}
-              className="absolute right-2 top-2 z-20 inline-flex h-7 w-7 items-center justify-center rounded-control border border-border bg-card text-muted shadow-1 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <X className="h-3.5 w-3.5" aria-hidden />
-            </button>
-            <StagePlaceholderPane slot={configurationSlot} interactive />
-          </div>
+          <StageConfigDialog label={label} mobile={mobile} slot={configurationSlot} onClose={onCloseConfiguration} />
         </AnchoredVerdict>
       ) : null}
     </li>

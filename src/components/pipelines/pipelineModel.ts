@@ -292,18 +292,23 @@ export function pipelinePlaceholderStages(
 
 /**
  * Transcript artifacts represented by compact, navigable stage history rather
- * than a full conversation pane (#353 review round 2).
+ * than a full conversation pane (#353 review round 2, revised by #507 review F2).
  *
- * Each declared stage projects into exactly ONE surface. Only the pipeline's
- * current live stage — the cursor's latest attempt — keeps a full conversation
- * pane. Every terminal or prior stage (a passed/failed/skipped attempt, an
- * all-historical stage, or an earlier retry) folds into compact navigable
- * history that stays out of the world scene (and so out of the minimap / Fit All
- * bounds) until it is opened; its verdict, duration, model, and every retry
- * transcript remain reachable through the stage's evidence controls. Future
- * stages hold conversation-shaped placeholders. Keeping only the cursor pane
- * full-size is what lets the halo read as one live conversation plus its
- * placeholders instead of a wall of equal cards.
+ * Each declared stage projects into exactly ONE surface. On an ACTIVE pipeline
+ * (running/paused/blocked — anything that still holds a cursor) every current
+ * stage keeps its own full conversation pane: the LATEST attempt of every stage
+ * is a real card inside the colored pipeline group, so a five-stage graph reads
+ * as five real/placeholder cards rather than one live pane beside a rail of
+ * compact history stubs (#507). Future stages hold conversation-shaped
+ * placeholders; completed run stages and the live/completed reviewer keep their
+ * transcript full-size beside them.
+ *
+ * Only genuinely superseded transcripts fold into compact navigable history that
+ * stays out of the world scene (and so out of the minimap / Fit All bounds)
+ * until opened: an EARLIER retry of a stage (any attempt that is not the stage's
+ * latest) and the prior-round reviewer bindings of a review loop. Their verdict,
+ * duration, model, and transcript remain reachable through the stage's evidence
+ * controls.
  *
  * For a live review-loop cursor the retained pane is the reviewer transcript
  * itself (`attempt.agentPath`) — the pipeline folds its flow's round deck out of
@@ -312,29 +317,39 @@ export function pipelinePlaceholderStages(
  * falls back to its flow implementer so the loop still shows a live pane.
  *
  * Completed and closed pipelines fold their full transcript chain — they have no
- * live stage and no future placeholders.
+ * live stage and no future placeholders, so the whole run collapses to history.
  */
-export function compactPipelineArtifactPaths(
-  pipelines: readonly Pipeline[],
-  flows: readonly Flow[],
-  files: readonly FileEntry[] = [],
-): Set<string> {
+/**
+ * The transcripts an ACTIVE (cursor-bearing, non-completed/closed/draft)
+ * pipeline keeps as full-size real stage conversation cards (#507 F2): the
+ * LATEST attempt of every current stage, plus the implementer a review cursor
+ * stands in for before its reviewer transcript materializes. These are exactly
+ * the paths {@link compactPipelineArtifactPaths} refuses to fold — extracted so
+ * the board can also protect them from the idle-worker auto-collapse (#112),
+ * which would otherwise fold an aged-idle passed stage into the pipeline worker
+ * stack and either drop its real card or duplicate it beside the stack (#507
+ * final review). Earlier retries and completed/closed pipeline history are
+ * absent here, so their compaction is preserved.
+ */
+export function pipelineFullPanePaths(pipelines: readonly Pipeline[], flows: readonly Flow[]): Set<string> {
   const flowsById = new Map(flows.map((flow) => [flow.id, flow] as const));
   const fullPanePaths = new Set<string>();
-
   for (const pipeline of pipelines) {
     if (!pipeline.cursor || pipeline.state === "completed" || pipeline.state === "closed" || pipeline.state === "draft") continue;
-    const stage = pipeline.stages.find((candidate) => candidate.id === pipeline.cursor!.stageId);
-    const attempt = stage ? latestAttempt(pipeline, stage.id) : null;
-    if (!stage || !attempt) continue;
-    if (attempt.agentPath) {
-      /* The cursor stage's own transcript — a run's session or the live
-         reviewer's transcript — is the single full pane. */
-      fullPanePaths.add(attempt.agentPath);
-    } else if (stage.kind === "review-loop") {
-      /* A review cursor that has not spawned its reviewer yet keeps the
-         implementer it reviews as the live pane: the flow's implementer, or the
-         most recent preceding passed run. */
+    /* Every current stage stays a full conversation card (#507 F2): keep each
+       stage's latest attempt transcript, not just the cursor's. Earlier retries
+       are excluded here (only `latestAttempt` is retained) so they still fold. */
+    for (const stage of pipeline.stages) {
+      const attempt = latestAttempt(pipeline, stage.id);
+      if (!attempt) continue;
+      if (attempt.agentPath) {
+        fullPanePaths.add(attempt.agentPath);
+        continue;
+      }
+      /* A review stage whose reviewer transcript has not materialized yet keeps
+         the implementer it reviews as its live pane: the flow's implementer, or
+         the most recent preceding passed run. */
+      if (stage.kind !== "review-loop") continue;
       const stageIndex = pipeline.stages.findIndex((candidate) => candidate.id === stage.id);
       const priorRunPath = pipeline.stages
         .slice(0, stageIndex)
@@ -351,6 +366,16 @@ export function compactPipelineArtifactPaths(
       if (implementerPath) fullPanePaths.add(implementerPath);
     }
   }
+  return fullPanePaths;
+}
+
+export function compactPipelineArtifactPaths(
+  pipelines: readonly Pipeline[],
+  flows: readonly Flow[],
+  files: readonly FileEntry[] = [],
+): Set<string> {
+  const flowsById = new Map(flows.map((flow) => [flow.id, flow] as const));
+  const fullPanePaths = pipelineFullPanePaths(pipelines, flows);
 
   const compact = new Set<string>();
   for (const pipeline of pipelines) {
@@ -1349,6 +1374,28 @@ export function optimisticRemoveStage(pipeline: Pipeline, stageId: string): Pipe
       onFail: stage.onFail?.to === stageId ? null : stage.onFail,
     }));
   return { ...pipeline, stages: pruneStageEdges(stages) };
+}
+
+/** The pipeline as it will look once `reorder-stage` persists (#507 on-canvas
+    reorder). Moves the stage to its new chain slot and preserves every stage's
+    intentional pass/fail edge by id — matching the server's `replaceDraftStages`,
+    which relinks by identity rather than by array position — then prunes any edge
+    left dangling or self-referential. A review-loop floated to the entry demotes
+    to a run so the moved chain stays startable (mirrors `normalizeStageOrder`);
+    the on-canvas control only ever fires a move `reviewLoopChainValid` allows, so
+    this is a defensive floor, never the normal path. */
+export function optimisticReorderStage(pipeline: Pipeline, stageId: string, toIndex: number): Pipeline {
+  const from = pipeline.stages.findIndex((stage) => stage.id === stageId);
+  if (from < 0) return pipeline;
+  const stages = [...pipeline.stages];
+  const [moved] = stages.splice(from, 1);
+  const at = Math.max(0, Math.min(toIndex, stages.length));
+  stages.splice(at, 0, moved!);
+  const entry = stages[0];
+  const normalized = entry && entry.kind === "review-loop"
+    ? stages.map((stage, index) => (index === 0 ? { ...stage, kind: "run" as const } : stage))
+    : stages;
+  return { ...pipeline, stages: pruneStageEdges(normalized) };
 }
 
 /** The pipeline as it will look once `set-edge` persists (#353). */

@@ -136,6 +136,29 @@ test("editing the effort + Apply PATCHes override-stage with ONLY the changed fi
   host.remove();
 });
 
+test("switching the engine on the card clears the previous engine's model (#118 F2, now canvas-owned)", async () => {
+  const patches: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
+    if (!init?.method || init.method !== "PATCH") return { ok: true, json: async () => ({ roles: [] }) };
+    patches.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+    return { ok: true, json: async () => ({}) };
+  }) as unknown as typeof fetch;
+
+  const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
+  openConfig(host);
+  /* The engine radios only exist inside the disclosed config, matching the live
+     window's own header. Switch claude → codex; the fable model must not ride
+     along (resolvePipelineRole would 400 a codex+fable pin). */
+  const radios = [...host.querySelectorAll('[role="radio"]')] as HTMLButtonElement[];
+  const codex = radios.find((r) => r.getAttribute("aria-checked") === "false") as HTMLButtonElement;
+  expect(codex.textContent?.toLowerCase()).toContain("codex");
+  flushSync(() => codex.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Bun.sleep(0);
+  expect(patches).toEqual([{ action: "override-stage", stageId: "architect", engine: "codex", model: null }]);
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
 test("editing the prompt saves on blur with ONLY the prompt", async () => {
   const patches: Array<Record<string, unknown>> = [];
   globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
@@ -189,6 +212,77 @@ test("placeholder runtime controls stay usable at 390px: the row wraps and every
   expect(apply.className).toContain("max-md:min-h-11");
   flushSync(() => root.unmount());
   host.remove();
+});
+
+function draftSlot(stages: PipelineStage[], index: number): StageSlot {
+  const pipeline = {
+    id: "p1", task: "Ship it", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main",
+    baseRef: "a", lastPassedCommit: "a", stages, runs: [], cursor: null, state: "draft", pausedState: null,
+    stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "1970", closedAt: null,
+  } as unknown as Pipeline;
+  const theStage = stages[index]!;
+  return { key: `slot::p1::${theStage.id}`, pipeline, stage: theStage, index, total: stages.length, presentation: "placeholder", x: 0, y: 0, w: 600, h: 460 };
+}
+
+test("on-canvas reorder: a middle draft card moves later with an optimistic reorder-stage PATCH (#507)", async () => {
+  const patches: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
+    if (!init?.method || init.method !== "PATCH") return { ok: true, json: async () => ({ roles: [] }) };
+    patches.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+    return { ok: true, json: async () => ({}) };
+  }) as unknown as typeof fetch;
+
+  const stages = [
+    stage({ id: "architect", next: "builder" }),
+    stage({ id: "builder", role: { roleId: "builder" }, next: "review" }),
+    stage({ id: "review", kind: "review-loop", role: { roleId: "reviewer" }, next: null }),
+  ];
+  const { host, root } = mount(<StagePlaceholderPane slot={draftSlot(stages, 1)} interactive />);
+  const later = host.querySelector('button[data-stage-move="later"]') as HTMLButtonElement;
+  expect(later.disabled).toBe(false);
+  flushSync(() => later.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Bun.sleep(0);
+  expect(patches).toEqual([{ action: "reorder-stage", stageId: "builder", toIndex: 2 }]);
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("on-canvas reorder: a run cannot swap behind the review-loop it feeds — the guard disables the illegal move (#507)", () => {
+  const stages = [
+    stage({ id: "architect", next: "review" }),
+    stage({ id: "review", kind: "review-loop", role: { roleId: "reviewer" }, next: null }),
+  ];
+  /* The lone run (index 0): earlier is off the front, and moving it later to
+     index 1 would front the review-loop — reviewLoopChainValid forbids it, so
+     both controls are disabled. */
+  const runCard = mount(<StagePlaceholderPane slot={draftSlot(stages, 0)} interactive />);
+  expect((runCard.host.querySelector('button[data-stage-move="earlier"]') as HTMLButtonElement).disabled).toBe(true);
+  expect((runCard.host.querySelector('button[data-stage-move="later"]') as HTMLButtonElement).disabled).toBe(true);
+  flushSync(() => runCard.root.unmount());
+  runCard.host.remove();
+
+  /* The review-loop (index 1): later is off the end, and moving it earlier to
+     index 0 would leave no preceding run — also forbidden. */
+  const reviewCard = mount(<StagePlaceholderPane slot={draftSlot(stages, 1)} interactive />);
+  expect((reviewCard.host.querySelector('button[data-stage-move="earlier"]') as HTMLButtonElement).disabled).toBe(true);
+  expect((reviewCard.host.querySelector('button[data-stage-move="later"]') as HTMLButtonElement).disabled).toBe(true);
+  flushSync(() => reviewCard.root.unmount());
+  reviewCard.host.remove();
+});
+
+test("on-canvas reorder controls are absent on a single-stage draft and on a started pipeline", () => {
+  const single = mount(<StagePlaceholderPane slot={slot()} interactive />);
+  expect(single.host.querySelector('button[data-stage-move]')).toBeNull();
+  flushSync(() => single.root.unmount());
+  single.host.remove();
+
+  const stages = [stage({ id: "architect", next: "builder" }), stage({ id: "builder", role: { roleId: "builder" }, next: null })];
+  const started = draftSlot(stages, 0);
+  (started.pipeline as { state: string }).state = "running";
+  const run = mount(<StagePlaceholderPane slot={started} interactive />);
+  expect(run.host.querySelector('button[data-stage-move]')).toBeNull();
+  flushSync(() => run.root.unmount());
+  run.host.remove();
 });
 
 test("the lite (map) variant renders a static runtime summary instead of pickers", () => {
