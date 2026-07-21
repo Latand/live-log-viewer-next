@@ -55,6 +55,12 @@ import path from "node:path";
 import { chromium, type Page } from "playwright-core";
 
 import { bootstrapDemoRuntime, demoPort } from "./demo-capture";
+import {
+  FOLDED_ACTIVE_PIPELINE_SENTINEL,
+  runFoldedNegativeControl,
+  waitForMobilePipelineReady,
+  type MobileReadinessDriver,
+} from "./capture-issue-507-gate";
 
 const OUT_DIR = process.env.E507_CAPTURE_OUT_DIR ?? "/tmp/llv-issue-507";
 const PROJECT = "atlas";
@@ -225,10 +231,32 @@ async function foldedPipelineIds(page: Page): Promise<string[]> {
 async function assertActivePipelineNotFolded(page: Page, pipelineId: string): Promise<void> {
   const folded = await foldedPipelineIds(page);
   if (folded.includes(pipelineId)) {
-    throw new Error(
-      "Finding 1 regression: the active pipeline's aged-idle stages folded into a worker stack (duplicate surface)",
-    );
+    throw new Error(FOLDED_ACTIVE_PIPELINE_SENTINEL);
   }
+}
+
+/** The mobile readiness driver bound to a live Playwright page: reads the seeded
+    pipeline count from the summary aria-label and the document layout metrics. */
+function mobileReadinessDriver(page: Page): MobileReadinessDriver {
+  return {
+    summaryPipelineCount: () =>
+      page.evaluate(() => {
+        const summary = document.querySelector('[data-testid="mobile-pipeline-summary"]');
+        if (!summary) return null;
+        /* Both summary variants lead their aria-label with the total count
+           ("Open pipelines (2)" / "2 pipelines · 1 active"), so the first integer
+           is the seeded total. */
+        const match = (summary.getAttribute("aria-label") ?? "").match(/\d+/);
+        return match ? Number.parseInt(match[0], 10) : null;
+      }),
+    layoutMetrics: () =>
+      page.evaluate(() => ({
+        scrollWidth: document.documentElement.scrollWidth,
+        scrollHeight: document.documentElement.scrollHeight,
+      })),
+    now: () => Date.now(),
+    sleep: (ms: number) => Bun.sleep(ms),
+  };
 }
 
 async function waitForServer(url: string, child: ChildProcess): Promise<void> {
@@ -387,24 +415,21 @@ async function main(): Promise<void> {
       const existing = (strip.getAttribute("data-worker-stack-pipeline-ids") ?? "").split(/\s+/).filter(Boolean);
       strip.setAttribute("data-worker-stack-pipeline-ids", [...existing, id].join(" "));
     }, MIXED_ID);
-    let negativeControlFired = false;
-    try {
-      await assertActivePipelineNotFolded(desktop, MIXED_ID);
-    } catch {
-      negativeControlFired = true;
-    }
-    if (!negativeControlFired) {
-      throw new Error(
-        "negative control failed: the gate did NOT detect a deliberately folded active pipeline — the acceptance check is blind",
-      );
-    }
+    /* Match ONLY the exact fold sentinel: an unrelated failure (a destroyed
+       execution context, a broken evaluate) must propagate, never be mistaken
+       for the gate tripping. */
+    await runFoldedNegativeControl(() => assertActivePipelineNotFolded(desktop, MIXED_ID));
     await desktop.screenshot({ path: path.join(outDir, "issue-507-editor-negative-control.png") });
     await desktop.close();
 
     /* ── Mobile 390x844 ───────────────────────────────────────────────────── */
     const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
     await openProject(mobile, baseUrl);
-    await mobile.waitForTimeout(3000);
+    /* Finding 2 (#507 final): replace the blind 3s delay with a deterministic
+       wait — both seeded pipelines must appear in the mobile summary and the
+       layout must settle before we measure overflow or photograph, so the 390px
+       shot never captures loading/empty UI even if the summary renders late. */
+    const readiness = await waitForMobilePipelineReady(mobileReadinessDriver(mobile), { expectedPipelines: 2 });
     const overflow = await mobile.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
       innerWidth: window.innerWidth,
@@ -488,7 +513,8 @@ async function main(): Promise<void> {
     console.log(
       `captured #507 evidence into ${outDir}: draft five-card editor + running real/placeholder mix at 1600x1000, ` +
         `active pipeline not folded (F1 gate live — negative control tripped on a deliberate fold); ` +
-        `390x844 overflow-safe (scrollWidth ${overflow.scrollWidth} <= innerWidth ${overflow.innerWidth}); ` +
+        `390x844 ready after ${readiness.waitedMs}ms (both pipelines summarized, layout settled), ` +
+        `overflow-safe (scrollWidth ${overflow.scrollWidth} <= innerWidth ${overflow.innerWidth}); ` +
         `mobile editor above sheet — ${editorEvidence}`,
     );
   } finally {
