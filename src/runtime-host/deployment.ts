@@ -167,7 +167,7 @@ export class ViewerDeploymentCoordinator {
   private async stageDriftedHostSuccessor(status: ViewerDeploymentStatus): Promise<RuntimeHostHandoffContext | null> {
     if (!this.hostGeneration || !status.candidate) return null;
     const running = this.hostGeneration();
-    if (running.revision === status.revision) return null;
+    if (running.revision === status.revision && running.image === status.candidate.image) return null;
     await this.adapter.stageRuntimeHostSuccessor(status.candidate);
     return {
       deploymentId: status.deploymentId,

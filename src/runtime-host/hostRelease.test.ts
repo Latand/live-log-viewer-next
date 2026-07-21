@@ -7,6 +7,7 @@ import {
   clearRuntimeHostHandoffIntent,
   currentRuntimeHostGeneration,
   readRuntimeHostHandoffIntent,
+  readRuntimeHostRelease,
   RUNTIME_HOST_CONTAINER_ENV,
   RUNTIME_HOST_IMAGE_ENV,
   RUNTIME_HOST_REVISION_ENV,
@@ -58,14 +59,42 @@ test("issue 521: the handoff intent round-trips durably and clears idempotently"
   }
 });
 
-test("issue 521: an invalid handoff intent reads as absent", () => {
+test("issue 521 review: malformed durable handoff intent fails closed", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-handoff-intent-"));
   try {
     const filename = path.join(dir, "runtime-host-handoff-intent.json");
     fs.writeFileSync(filename, JSON.stringify({ revision: record.revision, image: record.image }));
-    expect(readRuntimeHostHandoffIntent(filename)).toBeNull();
+    expect(() => readRuntimeHostHandoffIntent(filename)).toThrow("runtime-host handoff intent is invalid");
     fs.writeFileSync(filename, "{broken");
-    expect(readRuntimeHostHandoffIntent(filename)).toBeNull();
+    expect(() => readRuntimeHostHandoffIntent(filename)).toThrow("runtime-host handoff intent is invalid");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue 521 review: malformed or unreadable durable release state fails closed", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-host-release-"));
+  try {
+    const filename = path.join(dir, "runtime-host-release.json");
+    expect(readRuntimeHostRelease(filename)).toBeNull();
+    fs.writeFileSync(filename, "{broken");
+    expect(() => readRuntimeHostRelease(filename)).toThrow("runtime-host release is invalid");
+    fs.writeFileSync(filename, "null");
+    expect(() => readRuntimeHostRelease(filename)).toThrow("runtime-host release is invalid");
+    fs.rmSync(filename);
+    fs.mkdirSync(filename);
+    expect(() => readRuntimeHostRelease(filename)).toThrow("runtime-host release is unreadable");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue 521 review: unreadable durable handoff intent fails closed", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-handoff-intent-read-"));
+  try {
+    const filename = path.join(dir, "runtime-host-handoff-intent.json");
+    fs.mkdirSync(filename);
+    expect(() => readRuntimeHostHandoffIntent(filename)).toThrow("runtime-host handoff intent is unreadable");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

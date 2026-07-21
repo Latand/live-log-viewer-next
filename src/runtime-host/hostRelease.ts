@@ -11,8 +11,8 @@ export const RUNTIME_HOST_CONTAINER_ENV = "LLV_RUNTIME_HOST_CONTAINER";
 
 /** The durable runtime-host generation record (#518). Staging a successor
     writes it before any handoff, and the next runtime-host boot reads it to
-    learn which deployed revision it is expected to be running. A missing or
-    invalid record means the legacy fixed-tag image: never provably current. */
+    learn which deployed revision it is expected to be running. A missing
+    record means the legacy fixed-tag image: never provably current. */
 export interface RuntimeHostReleaseRecord extends ViewerReleaseIdentity {
   stagedAt: string;
 }
@@ -21,19 +21,36 @@ export function runtimeHostReleaseFile(): string {
   return process.env.LLV_RUNTIME_HOST_RELEASE_TARGET || statePath("runtime-host-release.json");
 }
 
-export function readRuntimeHostRelease(filename = runtimeHostReleaseFile()): RuntimeHostReleaseRecord | null {
-  let value: Partial<RuntimeHostReleaseRecord>;
+function readDurableJson(filename: string, label: string): unknown | undefined {
+  let raw: string;
   try {
-    value = JSON.parse(fs.readFileSync(filename, "utf8")) as Partial<RuntimeHostReleaseRecord>;
-  } catch {
-    return null;
+    raw = fs.readFileSync(filename, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new Error(`${label} is unreadable`, { cause: error });
   }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new Error(`${label} is invalid`, { cause: error });
+  }
+}
+
+function durableRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} is invalid`);
+  return value as Record<string, unknown>;
+}
+
+export function readRuntimeHostRelease(filename = runtimeHostReleaseFile()): RuntimeHostReleaseRecord | null {
+  const raw = readDurableJson(filename, "runtime-host release");
+  if (raw === undefined) return null;
+  const value = durableRecord(raw, "runtime-host release");
   if (typeof value.image !== "string"
     || typeof value.container !== "string"
     || typeof value.endpoint !== "string"
     || typeof value.revision !== "string"
-    || typeof value.stagedAt !== "string") return null;
-  return value as RuntimeHostReleaseRecord;
+    || typeof value.stagedAt !== "string") throw new Error("runtime-host release is invalid");
+  return value as unknown as RuntimeHostReleaseRecord;
 }
 
 /** A shared release record proves the current process generation only when
@@ -93,18 +110,15 @@ export function runtimeHostHandoffIntentFile(): string {
 }
 
 export function readRuntimeHostHandoffIntent(filename = runtimeHostHandoffIntentFile()): RuntimeHostHandoffIntent | null {
-  let value: Partial<RuntimeHostHandoffIntent>;
-  try {
-    value = JSON.parse(fs.readFileSync(filename, "utf8")) as Partial<RuntimeHostHandoffIntent>;
-  } catch {
-    return null;
-  }
+  const raw = readDurableJson(filename, "runtime-host handoff intent");
+  if (raw === undefined) return null;
+  const value = durableRecord(raw, "runtime-host handoff intent");
   if (typeof value.revision !== "string"
     || typeof value.image !== "string"
     || typeof value.successorContainer !== "string"
     || typeof value.predecessorId !== "string"
-    || typeof value.recordedAt !== "string") return null;
-  return value as RuntimeHostHandoffIntent;
+    || typeof value.recordedAt !== "string") throw new Error("runtime-host handoff intent is invalid");
+  return value as unknown as RuntimeHostHandoffIntent;
 }
 
 export function writeRuntimeHostHandoffIntent(intent: RuntimeHostHandoffIntent, filename = runtimeHostHandoffIntentFile()): void {

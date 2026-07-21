@@ -134,6 +134,7 @@ function harness(overrides: {
   fenceOwnerPid?: number | null;
   runFailure?: Error;
   runConflict?: boolean;
+  readIntentFailure?: Error;
   successorState?: string;
   stableSuccessorState?: string;
   stableRestartCount?: number;
@@ -203,7 +204,10 @@ function harness(overrides: {
       records.push(record);
     },
     readRelease: () => records[records.length - 1] ?? null,
-    readHandoffIntent: () => storedIntent,
+    readHandoffIntent: () => {
+      if (overrides.readIntentFailure) throw overrides.readIntentFailure;
+      return storedIntent;
+    },
     writeHandoffIntent: (intent) => {
       events.push("write-handoff-intent");
       intents.push(intent);
@@ -619,6 +623,17 @@ test("issue 518: staging without an identifiable predecessor fails observably", 
     .rejects.toThrow("runtime-host predecessor container is unavailable");
 
   expect(records).toEqual([]);
+});
+
+test("issue 521 review: unreadable durable intent blocks predecessor rediscovery and publication", async () => {
+  const { ports, calls, records } = harness({ readIntentFailure: new Error("runtime-host handoff intent is unreadable") });
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports))
+    .rejects.toThrow("runtime-host handoff intent is unreadable");
+
+  expect(records).toEqual([]);
+  expect(calls.some((argv) => argv[0] === "container")).toBe(false);
+  expect(calls.some((argv) => argv[0] === "run")).toBe(false);
 });
 
 /* PR #521 review, finding 1: a crash after the predecessor's restart policy

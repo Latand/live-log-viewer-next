@@ -230,12 +230,12 @@ test("issue 518: a succeeded exact-SHA deployment stages the candidate image as 
   store.close();
 });
 
-test("issue 518: a runtime host already on the deployed revision stages no successor", async () => {
+test("issue 518: a runtime host already on the deployed generation stages no successor", async () => {
   const store = journal("host-current");
   const adapter = new FakeDeploymentAdapter();
   const handoffs: string[] = [];
   const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
-    hostGeneration: () => ({ image: "agent-log-viewer:deploy-current", revision: "b".repeat(40) }),
+    hostGeneration: () => ({ image: `viewer:${"b".repeat(40)}`, revision: "b".repeat(40) }),
     onHostHandoff: (context) => { handoffs.push(context.deploymentId); },
   });
 
@@ -246,6 +246,38 @@ test("issue 518: a runtime host already on the deployed revision stages no succe
   expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({ phase: "succeeded", terminal: true });
   expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:"))).toEqual([]);
   expect(handoffs).toEqual([]);
+  store.close();
+});
+
+test("issue 521 review: consecutive same-revision deployments stage each distinct candidate image", async () => {
+  const store = journal("host-same-revision-image");
+  const adapter = new FakeDeploymentAdapter();
+  adapter.buildCandidate = async (deploymentId, candidateRevision) => {
+    adapter.calls.push(`build:${candidateRevision}`);
+    return {
+      ...release(candidateRevision, deploymentId),
+      image: `viewer:${candidateRevision}:${deploymentId}`,
+    };
+  };
+  let running = { image: "agent-log-viewer:node22", revision: null as string | null };
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    hostGeneration: () => running,
+    onHostHandoff: (context) => { running = { image: context.successor.image, revision: context.successor.revision }; },
+  });
+  const candidateRevision = "b".repeat(40);
+
+  const first = await coordinator.requestViewerDeployment({ idempotencyKey: "same-revision-one", revision: candidateRevision });
+  if (first.state !== "accepted") throw new Error("first deployment was not accepted");
+  const firstStatus = await coordinator.waitForDeployment(first.deploymentId);
+  const second = await coordinator.requestViewerDeployment({ idempotencyKey: "same-revision-two", revision: candidateRevision });
+  if (second.state !== "accepted") throw new Error("second deployment was not accepted");
+  const secondStatus = await coordinator.waitForDeployment(second.deploymentId);
+
+  expect(firstStatus?.candidate?.image).not.toBe(secondStatus?.candidate?.image);
+  expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:"))).toEqual([
+    `stage-host-successor:${firstStatus?.candidate?.image}:${candidateRevision}`,
+    `stage-host-successor:${secondStatus?.candidate?.image}:${candidateRevision}`,
+  ]);
   store.close();
 });
 
