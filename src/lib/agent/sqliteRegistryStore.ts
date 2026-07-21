@@ -68,6 +68,7 @@ export class SqliteAgentRegistryStore {
   private readonly db: BunDatabase;
   private readonly normalize: (value: unknown) => RegistryFile;
   private readonly onWriterWait: ((durationMs: number) => void) | undefined;
+  private readOnlyCache: SqliteRegistrySnapshot | null = null;
 
   constructor(readonly filename: string, options: SqliteRegistryStoreOptions) {
     fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
@@ -123,6 +124,17 @@ export class SqliteAgentRegistryStore {
     }
   }
 
+  revision(): number {
+    return Number(this.meta("revision") ?? 0);
+  }
+
+  readOnlySnapshot(): SqliteRegistrySnapshot {
+    const revision = this.revision();
+    if (this.readOnlyCache?.revision === revision) return this.readOnlyCache;
+    this.readOnlyCache = this.snapshot();
+    return this.readOnlyCache;
+  }
+
   mutate<T>(operation: (file: RegistryFile) => T, includeSnapshot = true): SqliteRegistryMutation<T> {
     for (;;) {
       this.db.exec("BEGIN");
@@ -155,6 +167,7 @@ export class SqliteAgentRegistryStore {
         throw error;
       }
       this.secureFiles();
+      this.readOnlyCache = null;
       if (includeSnapshot) {
         const committed = this.snapshot();
         return { result, file: committed.file, revision: committed.revision };
@@ -175,6 +188,7 @@ export class SqliteAgentRegistryStore {
       this.persistDiff(current.file, file, revision);
       this.db.exec("COMMIT");
       this.secureFiles();
+      this.readOnlyCache = null;
       return { file, revision, replaced: true };
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }

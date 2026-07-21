@@ -546,7 +546,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     pipelines,
     workflows,
     tasks: tasks.tasks,
-    systemHealth: { tmux: tmuxEndpointHealth() },
+    systemHealth: { tmux: tmuxEndpointHealth(), registry: registry.storageDiagnostics() },
     conversationAliases: registrySnapshot.conversationAliases,
     ...(pipelinesError ? { pipelinesError } : {}),
   } satisfies FilesResponse);

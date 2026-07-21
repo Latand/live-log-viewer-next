@@ -32,6 +32,7 @@ interface ViewerReleaseActivationOptions {
   pollMs?: number;
   schedule?: (callback: () => void, delayMs: number) => ActivationTimer;
   log?: (...args: unknown[]) => void;
+  onDemoted?: () => void | Promise<void>;
 }
 
 interface CurrentReleaseControllerLoaders {
@@ -74,10 +75,23 @@ export async function activateViewerRuntimeWhenCurrent(
   const schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
   const log = options.log ?? console.error;
   let started = false;
+  let demoted = false;
+  const monitor = () => {
+    if (demoted) return;
+    if (started && !isCurrent()) {
+      demoted = true;
+      void Promise.resolve(options.onDemoted?.()).catch((error) => {
+        log("[viewer release] demotion checkpoint failed", error);
+      });
+      return;
+    }
+    schedule(monitor, pollMs).unref?.();
+  };
   const start = async () => {
     if (started) return;
     started = true;
     await activate();
+    schedule(monitor, pollMs).unref?.();
   };
   if (isCurrent()) {
     await start();
@@ -204,5 +218,14 @@ export async function registerViewerRuntime(): Promise<void> {
       await runStructuredHostStartup(adoptStructuredHostsAtStartup);
     }
     await startCurrentReleaseControllers();
-  }, () => viewerReleaseOwnsTraffic());
+  }, () => viewerReleaseOwnsTraffic(), {
+    onDemoted: async () => {
+      try {
+        const { agentRegistry } = await import("@/lib/agent/registry");
+        agentRegistry().checkpointRollbackMirror();
+      } finally {
+        process.exit(0);
+      }
+    },
+  });
 }

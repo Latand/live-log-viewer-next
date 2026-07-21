@@ -130,7 +130,28 @@ test("passive candidate activates runtime startup exactly once after promotion",
   await Promise.resolve();
   await Promise.resolve();
   expect(activations).toBe(1);
-  expect(scheduled).toHaveLength(0);
+  expect(scheduled).toHaveLength(1);
+});
+
+test("a promoted release continuously relinquishes background ownership after demotion", async () => {
+  let current = true;
+  let activations = 0;
+  let demotions = 0;
+  const scheduled: Array<() => void> = [];
+  await activateViewerRuntimeWhenCurrent(
+    async () => { activations += 1; },
+    () => current,
+    {
+      pollMs: 1,
+      schedule: (callback) => { scheduled.push(callback); return { unref() {} }; },
+      onDemoted: () => { demotions += 1; },
+    },
+  );
+  expect(activations).toBe(1);
+  expect(scheduled).toHaveLength(1);
+  current = false;
+  scheduled.shift()!();
+  expect(demotions).toBe(1);
 });
 
 test("a restarted current release activates before register returns", async () => {
@@ -142,7 +163,7 @@ test("a restarted current release activates before register returns", async () =
     { schedule: (callback) => { scheduled.push(callback); return { unref() {} }; } },
   );
   expect(activations).toBe(1);
-  expect(scheduled).toHaveLength(0);
+  expect(scheduled).toHaveLength(1);
 });
 
 test("current release starts flow and pipeline recovery and watchdog while account migration is disabled", async () => {

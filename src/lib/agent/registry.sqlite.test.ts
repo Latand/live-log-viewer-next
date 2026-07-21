@@ -41,7 +41,7 @@ test("SQLite first boot imports JSON and preserves membership and capability dig
   if (begun.kind !== "created") throw new Error("expected a new receipt");
   const expected = legacy.snapshot();
 
-  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" });
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read", mirrorCheckpointMs: 0 });
 
   expect(fs.existsSync(path.join(directory, "agent-registry.sqlite"))).toBeTrue();
   expect(sqlite.snapshot()).toEqual(expected);
@@ -100,7 +100,7 @@ test("supersedence edges round-trip JSON ↔ SQLite with parity intact", () => {
   store.recordSupersedence(predecessor.id, successor.id, "recovery-spawn");
   const expected = store.snapshot();
 
-  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" });
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read", mirrorCheckpointMs: 0 });
   expect(sqlite.snapshot()).toEqual(expected);
   expect(sqlite.conversation(predecessor.id)?.supersededBy).toMatchObject({
     conversationId: successor.id,
@@ -743,6 +743,67 @@ test("SQLite-only operations avoid JSON rewrites and the read mode prepares roll
   const rollback = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot();
   expect(new AgentRegistry(filename).snapshot()).toEqual(rollback);
   expect(rollback.conversations[conversation.id]).toBeDefined();
+});
+
+test("read mode bounds rollback mirror writes and exposes checkpoint diagnostics", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-mirror-cadence-"));
+  const filename = path.join(directory, "agent-registry.json");
+  let now = 1_000;
+  const checkpoints: Array<() => void> = [];
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const registry = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "read",
+    mirrorCheckpointMs: 5_000,
+    now: () => now,
+    scheduleMirrorCheckpoint: (callback) => {
+      checkpoints.push(callback);
+      return { unref() {} };
+    },
+  });
+  const initialRevision = JSON.parse(fs.readFileSync(filename, "utf8"))._sqliteRevision;
+
+  registry.beginSpawn("codex", "/cursor-1");
+  registry.beginSpawn("codex", "/cursor-2");
+  expect(JSON.parse(fs.readFileSync(filename, "utf8"))._sqliteRevision).toBe(initialRevision);
+  expect(registry.storageDiagnostics()).toMatchObject({
+    backendMode: "read",
+    mirrorDirty: true,
+    mirrorAgeMs: 0,
+  });
+
+  now += 5_001;
+  expect(checkpoints).toHaveLength(1);
+  checkpoints.shift()!();
+  expect(JSON.parse(fs.readFileSync(filename, "utf8"))._sqliteRevision).toBeGreaterThan(initialRevision);
+  expect(registry.storageDiagnostics()).toMatchObject({ mirrorDirty: false, mirrorAgeMs: 0 });
+});
+
+test("SQLite snapshot cache follows external revisions and reports writer metrics", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-snapshot-cache-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const waits: number[] = [];
+  const first = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "sqlite",
+    onSqliteWriterWait: (duration) => waits.push(duration),
+  });
+  const second = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+
+  first.readOnlySnapshot();
+  second.beginSpawn("codex", "/external-writer");
+  expect(first.readOnlySnapshot().receipts).toEqual(expect.objectContaining(
+    Object.fromEntries(Object.entries(second.snapshot().receipts)),
+  ));
+  first.beginSpawn("codex", "/metric-writer");
+  expect(waits.length).toBeGreaterThan(0);
+  expect(first.storageDiagnostics()).toMatchObject({
+    backendMode: "sqlite",
+    revision: expect.any(Number),
+    transactionCount: expect.any(Number),
+    writerRatePerSecond: expect.any(Number),
+    writerWaitP95Ms: expect.any(Number),
+    transactionP95Ms: expect.any(Number),
+  });
 });
 
 test("SQLite adoption keeps structured-host writer epochs fenced across restarts", () => {

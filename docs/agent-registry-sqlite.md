@@ -4,7 +4,7 @@ The registry supports four values for `LLV_AGENT_REGISTRY_SQLITE`:
 
 - `off` keeps `agent-registry.json` authoritative. This is the default.
 - `dual-write` reads JSON, writes JSON and SQLite under the existing JSON writer lock, and verifies parity after every mutation.
-- `read` reads and transacts through `agent-registry.sqlite` in WAL mode, then refreshes `agent-registry.json` as the rollback mirror.
+- `read` reads and transacts through `agent-registry.sqlite` in WAL mode, then refreshes `agent-registry.json` on a bounded five-second checkpoint cadence. Startup and release demotion write a revision-stamped checkpoint.
 - `sqlite` uses SQLite for reads and writes after the parity burn-in. It refreshes the JSON mirror at process start and removes JSON serialization from registry operations.
 
 The first process that opens any gated SQLite mode creates `agent-registry.sqlite` and imports the normalized contents of `agent-registry.json` in one transaction. An interrupted import has no migration marker, so the next boot retries the complete import. Durable memberships, spawn receipts, capability digests, lineage, conversation generations, migration state, delivery receipts, and routing policy all migrate through the same snapshot.
@@ -19,6 +19,11 @@ Every process with an enabled SQLite mode must run on Bun. The Docker Viewer use
 4. Restart every registry writer with `LLV_AGENT_REGISTRY_SQLITE=read` for an SQLite-read burn-in with a continuously refreshed JSON rollback mirror.
 5. After that burn-in, restart every writer with `LLV_AGENT_REGISTRY_SQLITE=sqlite` to remove JSON rewrites from the operation path.
 6. Retain `agent-registry.json`, `agent-registry.sqlite`, and the SQLite WAL files throughout both burn-ins.
+
+`/api/files` reports the backend mode, revision, transaction count, writer rate and p95,
+writer-wait p95, rollback-mirror age, and dirty-checkpoint state under
+`systemHealth.registry`. A rollout probe must observe one current release owner,
+a bounded mirror age in `read`, and a stable JSON mtime during `sqlite` streaming.
 
 The `read` and `sqlite` paths bypass the whole-registry writer lock, its retry/backoff loop, stale-lock recovery, temp-file cleanup, and startup JSON compaction. Per-session operation locks remain active. They serialize host actuation independently of registry persistence.
 

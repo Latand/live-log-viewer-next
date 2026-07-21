@@ -117,7 +117,11 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   const etag = first.headers.get("etag");
   const second = await GET(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(first.status).toBe(200);
-  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } }, conversationAliases: {} });
+  expect(await first.json()).toMatchObject({
+    files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [],
+    systemHealth: { tmux: { status: "healthy" }, registry: { backendMode: expect.any(String) } },
+    conversationAliases: {},
+  });
   expect(second.status).toBe(304);
   expect(scans).toBe(1);
   expect(scanOptions).toEqual(expect.objectContaining({

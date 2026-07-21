@@ -2220,6 +2220,20 @@ export interface AgentRegistryStorageOptions {
   onSqliteWriterWait?: (durationMs: number) => void;
   beforeDualWriteStartupReplace?: () => void;
   beforeDualWriteMutationReplace?: () => void;
+  mirrorCheckpointMs?: number;
+  now?: () => number;
+  scheduleMirrorCheckpoint?: (callback: () => void, delayMs: number) => { unref?(): unknown };
+}
+
+export interface AgentRegistryStorageDiagnostics {
+  backendMode: AgentRegistrySqliteMode;
+  revision: number | null;
+  transactionCount: number;
+  writerRatePerSecond: number;
+  writerWaitP95Ms: number | null;
+  transactionP95Ms: number | null;
+  mirrorAgeMs: number | null;
+  mirrorDirty: boolean;
 }
 
 export class RegistryParityError extends Error {
@@ -2261,6 +2275,15 @@ export class AgentRegistry {
   private readonly sqliteStore: SqliteAgentRegistryStore | null;
   private readonly beforeDualWriteMutationReplace: (() => void) | undefined;
   private readOnlyCache: { signature: string; snapshot: RegistryFile } | null = null;
+  private readonly mirrorCheckpointMs: number;
+  private readonly now: () => number;
+  private readonly scheduleMirrorCheckpoint: (callback: () => void, delayMs: number) => { unref?(): unknown };
+  private mirrorCheckpointPending = false;
+  private lastMirrorAt: number | null = null;
+  private mirrorDirty = false;
+  private readonly writerWaits: number[] = [];
+  private readonly transactionDurations: number[] = [];
+  private firstTransactionAt: number | null = null;
 
   constructor(
     readonly filename = statePath("agent-registry.json"),
@@ -2270,13 +2293,20 @@ export class AgentRegistry {
     storage: AgentRegistryStorageOptions = {},
   ) {
     this.sqliteMode = storage.sqliteMode ?? sqliteModeFromEnvironment();
+    this.mirrorCheckpointMs = Math.max(0, storage.mirrorCheckpointMs ?? 5_000);
+    this.now = storage.now ?? Date.now;
+    this.scheduleMirrorCheckpoint = storage.scheduleMirrorCheckpoint
+      ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.beforeDualWriteMutationReplace = storage.beforeDualWriteMutationReplace;
     this.sqliteStore = this.sqliteMode === "off"
       ? null
       : new SqliteAgentRegistryStore(storage.sqliteFilename ?? defaultSqliteFilename(filename), {
           initialSnapshot: readFile(filename),
           normalize: normalizeRegistry,
-          onWriterWait: storage.onSqliteWriterWait,
+          onWriterWait: (duration) => {
+            this.recordMetric(this.writerWaits, duration);
+            storage.onSqliteWriterWait?.(duration);
+          },
         });
     if (this.sqliteMode === "off") {
       this.cleanupStaleTempFiles();
@@ -2314,9 +2344,55 @@ export class AgentRegistry {
     for (;;) {
       writeAtomic(this.filename, snapshot.file, snapshot.revision);
       const latest = this.sqliteStore!.snapshot();
-      if (latest.revision <= snapshot.revision) return;
+      if (latest.revision <= snapshot.revision) {
+        this.lastMirrorAt = this.now();
+        this.mirrorDirty = false;
+        return;
+      }
       snapshot = latest;
     }
+  }
+
+  private recordMetric(target: number[], value: number): void {
+    target.push(value);
+    if (target.length > 512) target.splice(0, target.length - 512);
+  }
+
+  private percentile(target: readonly number[]): number | null {
+    if (target.length === 0) return null;
+    const sorted = [...target].sort((left, right) => left - right);
+    return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]!;
+  }
+
+  storageDiagnostics(): AgentRegistryStorageDiagnostics {
+    const revision = this.sqliteStore?.revision() ?? null;
+    return {
+      backendMode: this.sqliteMode,
+      revision,
+      transactionCount: this.transactionDurations.length,
+      writerRatePerSecond: this.firstTransactionAt === null
+        ? 0
+        : this.transactionDurations.length / Math.max(0.001, (this.now() - this.firstTransactionAt) / 1_000),
+      writerWaitP95Ms: this.percentile(this.writerWaits),
+      transactionP95Ms: this.percentile(this.transactionDurations),
+      mirrorAgeMs: this.lastMirrorAt === null ? null : Math.max(0, this.now() - this.lastMirrorAt),
+      mirrorDirty: this.mirrorDirty,
+    };
+  }
+
+  checkpointRollbackMirror(): void {
+    if (!this.mirrorDirty || !this.sqliteStore) return;
+    this.mirrorSqliteSnapshot(this.sqliteStore.snapshot());
+  }
+
+  private scheduleRollbackMirror(): void {
+    if (this.mirrorCheckpointPending) return;
+    this.mirrorCheckpointPending = true;
+    this.scheduleMirrorCheckpoint(() => {
+      this.mirrorCheckpointPending = false;
+      try { this.checkpointRollbackMirror(); }
+      catch (error) { console.error("agent registry rollback checkpoint failed", error); }
+    }, this.mirrorCheckpointMs).unref?.();
   }
 
   private cleanupStaleTempFiles(): void {
@@ -2737,10 +2813,16 @@ export class AgentRegistry {
       return result;
     };
     if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
+      const startedAt = performance.now();
+      this.firstTransactionAt ??= this.now();
       const mutation = this.sqliteStore!.mutate(mutator, this.sqliteMode === "read");
+      this.recordMetric(this.transactionDurations, performance.now() - startedAt);
       if (this.sqliteMode === "read") {
         if (!mutation.file) throw new Error("SQLite read mode mutation is missing its rollback snapshot");
-        this.mirrorSqliteSnapshot({ file: mutation.file, revision: mutation.revision });
+        this.mirrorDirty = true;
+        if (this.lastMirrorAt === null || this.now() - this.lastMirrorAt >= this.mirrorCheckpointMs) {
+          this.mirrorSqliteSnapshot({ file: mutation.file, revision: mutation.revision });
+        } else this.scheduleRollbackMirror();
       }
       return mutation.result;
     }
@@ -2791,7 +2873,7 @@ export class AgentRegistry {
       objects. Atomic writers change the inode/signature, including writers in
       the runtime-host process, so the next reader reparses immediately. */
   readOnlySnapshot(): RegistryFile {
-    if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") return this.sqliteStore!.snapshot().file;
+    if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") return this.sqliteStore!.readOnlySnapshot().file;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const before = registryFileSignature(this.filename);
       if (this.readOnlyCache?.signature === before) return this.readOnlyCache.snapshot;
