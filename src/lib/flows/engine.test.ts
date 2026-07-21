@@ -114,6 +114,62 @@ test("a review round parks when clean HEAD advances past its synchronized target
   }
 });
 
+test("launch-time drift parks before reviewer process actuation (#522)", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-target-launch-"));
+  try {
+    expect(spawnSync("git", ["init", "-b", "main"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "flow@example.com"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd }).status).toBe(0);
+    fs.writeFileSync(path.join(cwd, "work.txt"), "synchronized\n");
+    expect(spawnSync("git", ["add", "work.txt"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "synchronized"], { cwd }).status).toBe(0);
+    const targetSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).stdout.trim();
+    fs.writeFileSync(path.join(cwd, "work.txt"), "drifted\n");
+    expect(spawnSync("git", ["add", "work.txt"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "drifted"], { cwd }).status).toBe(0);
+    const driftedSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).stdout.trim();
+    const implementer = writeCodexEntry("target-drift-implementer.jsonl", {
+      id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f131"].join("-"),
+      cwd,
+    }, Date.now() / 1_000);
+    const flow: Flow = {
+      id: "flow-target-drift",
+      template: "implement-review-loop",
+      project: "repo",
+      cwd,
+      implementerPath: implementer.path,
+      roles: {
+        implementer: { engine: "codex", model: null, effort: "high" },
+        reviewer: { engine: "codex", model: null, effort: "xhigh" },
+      },
+      reviewerFallback: null,
+      baseRef: targetSha,
+      targetSha,
+      baseMode: "head",
+      mode: "auto",
+      reviewerMode: "pane",
+      roundLimit: 5,
+      state: "spawning",
+      pausedState: null,
+      stateDetail: null,
+      rounds: [],
+      createdAt: new Date().toISOString(),
+      closedAt: null,
+    };
+    flow.rounds.push(newRound(flow, "button", null));
+    saveFlows([flow]);
+
+    await tickFlows([implementer]);
+
+    const parked = loadFlows()[0]!;
+    expect(parked.state).toBe("needs_decision");
+    expect(parked.stateDetail).toBe(`review target changed before launch: expected ${targetSha}, found ${driftedSha}`);
+    expect(parked.rounds[0]).toMatchObject({ reviewHeadSha: null, reviewerPane: null, reviewerPid: null });
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("a flow reviewer reserves the canonical review edge before process launch", () => {
   const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "review-lineage-registry.json"));
   const implementer = registry.ensureConversation("codex", "/sessions/implementer.jsonl", "terra");

@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-
 const engineModule = await import("./engine");
 const { adoptAttempt, defaultPipelinePorts, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reviewNote, tickPipelines } = engineModule;
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
+const { captureReviewHead, newRound } = await import("@/lib/flows/engine");
 const rawCreatePipelineFromRequest = engineModule.createPipelineFromRequest;
 const createPipelineFromRequest: typeof rawCreatePipelineFromRequest = async (request, ports, options) =>
   await rawCreatePipelineFromRequest({ src: "/codex/creator.jsonl", ...request }, ports, options);
@@ -1842,6 +1844,24 @@ test("retrying a parked review-loop appends a fresh attempt and flow", async () 
 
 test("retrying a parked review-loop fast-forwards to the pushed repair and records the reviewer SHA (#522)", async () => {
   const h = harness();
+  const reviewRepo = path.join(process.env.LLV_STATE_DIR!, "retry-review-repo");
+  fs.mkdirSync(reviewRepo, { recursive: true });
+  expect(spawnSync("git", ["init", "-b", "main"], { cwd: reviewRepo }).status).toBe(0);
+  expect(spawnSync("git", ["config", "user.email", "flow@example.com"], { cwd: reviewRepo }).status).toBe(0);
+  expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd: reviewRepo }).status).toBe(0);
+  fs.writeFileSync(path.join(reviewRepo, "repair.txt"), "repair\n");
+  expect(spawnSync("git", ["add", "repair.txt"], { cwd: reviewRepo }).status).toBe(0);
+  expect(spawnSync("git", ["commit", "-m", "repair"], { cwd: reviewRepo }).status).toBe(0);
+  const repairHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: reviewRepo, encoding: "utf8" }).stdout.trim();
+  const createFlow = h.ports.createFlow;
+  h.ports.createFlow = async (req, entries) => {
+    const created = await createFlow(req, entries);
+    if (created.flow) {
+      created.flow.cwd = reviewRepo;
+      created.flow.roles = req.roles!;
+    }
+    return created;
+  };
   const stages = [
     { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
     { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
@@ -1849,7 +1869,6 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
   let localHead = ORIGIN_MAIN_SHA;
   let remoteHead = ORIGIN_MAIN_SHA;
   let fastForwarded = false;
-  const repairHead = "a".repeat(40);
   const baseExec = h.ports.exec;
   h.ports.exec = (command, args, cwd) => {
     if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
@@ -1881,10 +1900,18 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
   await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
+  const launchedFlow = h.flows.get("flow-2")!;
+  const launchedRound = newRound(launchedFlow, "button", null);
+  captureReviewHead(launchedFlow, launchedRound);
+  launchedFlow.rounds.push(launchedRound);
+  expect(launchedFlow.targetSha).toBe(repairHead);
+  expect(launchedRound.reviewHeadSha).toBe(repairHead);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
   const review = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts[1]!;
   expect(localHead).toBe(repairHead);
   expect(review.expectedReviewHeadSha).toBe(repairHead);
-  expect(review.reviewHeadSha).toBeNull();
+  expect(review.reviewHeadSha).toBe(repairHead);
   expect(fastForwarded).toBe(true);
   expect(h.calls).toContain(`flow:/codex/stage-1.jsonl:${ORIGIN_MAIN_SHA}:${repairHead}:AC1`);
   expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
