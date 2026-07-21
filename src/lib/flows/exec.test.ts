@@ -9,7 +9,7 @@ import { procBackend } from "@/lib/proc";
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so exec/store load dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-exec-test-"));
-const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventStream, startHeadlessReview, terminateHeadlessReviewerGroup } = await import("./exec");
+const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventStream, startHeadlessReview, terminateHeadlessReviewerGroup, terminateHeadlessReviewerGroupAndWait } = await import("./exec");
 const { reviewerPrompt } = await import("./prompts");
 const { outputPathFor, stdoutPathFor } = await import("./store");
 const { WAKATIME_CREDENTIAL_ENV } = await import("../wakatime/credential");
@@ -80,6 +80,34 @@ test("reviewer group escalation survives an exited leader owned by its live hand
     { pid: -4343, signal: "SIGTERM" },
     { pid: -4343, signal: "SIGKILL" },
   ]);
+});
+
+test("reviewer teardown waits for delayed process-group exit before reporting quiescence", async () => {
+  let groupAlive = true;
+  let polls = 0;
+  const signals: Array<{ pid: number; signal: NodeJS.Signals | 0 }> = [];
+
+  const stopped = await terminateHeadlessReviewerGroupAndWait(4444, "4444:start", {
+    graceMs: 20,
+    killWaitMs: 20,
+    pollMs: 5,
+    runtime: {
+      pidAlive: () => true,
+      processIdentity: () => "4444:start",
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+      },
+      processGroupAlive: () => groupAlive,
+      wait: async () => {
+        polls += 1;
+        if (polls === 2) groupAlive = false;
+      },
+    },
+  });
+
+  expect(stopped).toBeTrue();
+  expect(polls).toBe(2);
+  expect(signals).toEqual([{ pid: -4444, signal: "SIGTERM" }]);
 });
 
 test("reviewer group cleanup kills a real descendant after its detached leader exits", async () => {

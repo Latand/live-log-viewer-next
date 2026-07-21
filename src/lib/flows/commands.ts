@@ -12,7 +12,7 @@ import { killPane, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
-import { clearHeadlessReviewArtifacts, forgetHeadlessReview } from "./exec";
+import { clearHeadlessReviewArtifacts, forgetHeadlessReview, stopHeadlessReviewAndWait } from "./exec";
 import { resolveBaseRef, resolveFlowMergeIdentity } from "./git";
 import { kickoffPrompt } from "./prompts";
 import { configuredReviewerFallback, loadFlows, loadPresets, saveFlows } from "./store";
@@ -233,9 +233,8 @@ function noteFieldFromRequest(req: PatchFlowRequest): string | null | undefined 
  * restart. The transcript lookup is the fallback for rounds persisted before
  * the handle existed.
  */
-async function stopReviewer(flow: Flow, round: Round): Promise<void> {
-  forgetHeadlessReview(flow.id, round.n, round);
-  if (flow.reviewerMode !== "pane") return;
+async function stopReviewer(flow: Flow, round: Round): Promise<boolean> {
+  if (flow.reviewerMode !== "pane") return await stopHeadlessReviewAndWait(flow.id, round.n, round);
   try {
     const pane = round.reviewerPane;
     if (pane) {
@@ -253,6 +252,7 @@ async function stopReviewer(flow: Flow, round: Round): Promise<void> {
   } catch {
     /* pane already closed */
   }
+  return true;
 }
 
 /**
@@ -268,7 +268,9 @@ export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: st
   if (flow.state !== "reviewing" || !round) {
     return { error: "no reviewer is running for this flow", status: 409 };
   }
-  await stopReviewer(flow, round);
+  if (!(await stopReviewer(flow, round))) {
+    return { error: "reviewer process group did not terminate", status: 409 };
+  }
   round.error = "cancelled by user";
   round.terminalAt = isoNow();
   flow.state = "needs_decision";
@@ -288,7 +290,9 @@ export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: stri
   if (!flow) return { error: "flow not found", status: 404 };
   const round = lastRound(flow);
   if (round && round.verdict === null && !round.error) {
-    await stopReviewer(flow, round);
+    if (!(await stopReviewer(flow, round))) {
+      return { error: "reviewer process group did not terminate", status: 409 };
+    }
     round.error = "flow closed by user";
     round.terminalAt = isoNow();
   }

@@ -99,7 +99,7 @@ export interface PipelinePorts {
   pipelineAdoptionCandidates(pipelineId: string): PipelineAdoptionCandidate[];
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
   patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
-  closeFlow(id: string): Promise<unknown>;
+  closeFlow(id: string): Promise<{ flow?: Flow; error?: string; status?: number } | void>;
   getFlow(id: string): Flow | null;
   findFlow(implementerPath: string, implementerConversationId: string | null, baseRef: string, targetSha: string): Flow | null;
   projectForCwd(cwd: string): string | null;
@@ -1891,7 +1891,14 @@ export async function patchPipeline(
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
-      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
+      if (flow && flow.state !== "closed") {
+        const closed = await ports.closeFlow(flow.id);
+        if (closed?.error) {
+          pipeline.stateDetail = closed.error;
+          persist();
+          return { error: closed.error, status: closed.status ?? 409 };
+        }
+      }
       const retryReviewHead = stage?.kind === "review-loop" ? synchronizePipelineRetryHead(pipeline, ports.exec) : null;
       if (retryReviewHead && !retryReviewHead.ok) {
         pipeline.stateDetail = retryReviewHead.error;

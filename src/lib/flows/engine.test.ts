@@ -6,7 +6,7 @@ import path from "node:path";
 
 import type { FileEntry } from "@/lib/types";
 import { procBackend } from "@/lib/proc";
-import { AgentRegistry } from "@/lib/agent/registry";
+import { AgentRegistry, agentRegistry } from "@/lib/agent/registry";
 
 import type { Flow } from "./types";
 
@@ -158,13 +158,21 @@ test("launch-time drift parks before reviewer process actuation (#522)", async (
     };
     flow.rounds.push(newRound(flow, "button", null));
     saveFlows([flow]);
+    const receiptsBefore = Object.keys(agentRegistry().snapshot().receipts);
 
     await tickFlows([implementer]);
 
     const parked = loadFlows()[0]!;
     expect(parked.state).toBe("needs_decision");
     expect(parked.stateDetail).toBe(`review target changed before launch: expected ${targetSha}, found ${driftedSha}`);
-    expect(parked.rounds[0]).toMatchObject({ reviewHeadSha: null, reviewerPane: null, reviewerPid: null });
+    expect(parked.rounds[0]).toMatchObject({
+      launchId: null,
+      reviewerConversationId: null,
+      reviewHeadSha: null,
+      reviewerPane: null,
+      reviewerPid: null,
+    });
+    expect(Object.keys(agentRegistry().snapshot().receipts)).toEqual(receiptsBefore);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

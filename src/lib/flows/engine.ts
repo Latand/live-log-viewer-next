@@ -502,7 +502,6 @@ async function launchReviewer(
   persistCheckpoint: () => void,
 ): Promise<void> {
   if (reservation.kind === "replay" && adoptReviewerReceipt(flow, round, reservation.receipt)) return;
-  captureReviewHead(flow, round);
   persistCheckpoint();
   const prompt = reviewerPrompt(flow, round);
   const { role, account } = prepared;
@@ -718,6 +717,7 @@ async function tickFlow(
     }
     try {
       const prepared = prepareReviewerLaunch(flow, round);
+      captureReviewHead(flow, round);
       round.spawnStartedAt = isoNow();
       const reservation = reserveReviewerSpawn(flow, round, prepared.role, prepared.account.accountId);
       round.launchLeaseUntil = new Date(Date.now() + REVIEWER_LAUNCH_LEASE_MS).toISOString();

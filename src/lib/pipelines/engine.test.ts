@@ -138,6 +138,7 @@ function harness() {
       calls.push(`flow-close:${id}`);
       const flow = flows.get(id);
       if (flow) flow.state = "closed";
+      return { flow };
     },
     getFlow: (id) => flows.get(id) ?? null,
     findFlow: () => null,
@@ -2178,6 +2179,45 @@ test("retrying a paused review with a live reviewer never mutates its checkout (
   expect(localHead).toBe(ORIGIN_MAIN_SHA);
   expect(h.calls).not.toContain(`git merge --ff-only refs/remotes/origin/${pipeline.branch}`);
   expect(h.calls).not.toContain("flow-close:flow-1");
+});
+
+test("retry parks without synchronizing when reviewer termination cannot be verified (#522)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+  ] as const;
+  const repairHead = "f".repeat(40);
+  let localHead = ORIGIN_MAIN_SHA;
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${repairHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${repairHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "merge-base") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "merge" && args[1] === "--ff-only") {
+      localHead = repairHead;
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  const pipeline = await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.flows.get("flow-1")!.state = "done_comment";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.ports.closeFlow = async () => ({ error: "reviewer process group did not terminate", status: 409 });
+
+  const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+
+  expect(retried).toEqual({ error: "reviewer process group did not terminate", status: 409 });
+  expect(localHead).toBe(ORIGIN_MAIN_SHA);
+  expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", stateDetail: "reviewer process group did not terminate" });
 });
 
 test("failed stages park and retry resets to the last passed commit", async () => {
