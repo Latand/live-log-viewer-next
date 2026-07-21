@@ -147,3 +147,102 @@ export async function waitForMobilePipelineReady(
     await driver.sleep(pollMs);
   }
 }
+
+/**
+ * A materialized real stage node the pipelines API reports: an attempt that has
+ * bound a REAL transcript — both a live conversation id AND its on-disk agent
+ * path. A placeholder stage (queued, nothing launched) has no launched attempt
+ * and so contributes no such node, which is exactly why a board carrying only
+ * placeholders can never satisfy the verify-stage gate below.
+ */
+export interface MaterializedStageNode {
+  pipelineId: string;
+  stageId: string;
+  conversationId: string;
+  agentPath: string;
+}
+
+/** The minimal, browser-free surface the scan-readiness gate drives: the backend
+    file scan's discovered paths and the pipelines API's materialized stage nodes,
+    plus a virtual clock. The capture script fulfils it against the live demo
+    server; unit tests fulfil it with scripted observations on a virtual clock. */
+export interface ScanReadinessDriver {
+  /** The file paths the backend file scan currently reports (from /api/files). */
+  discoveredPaths(): Promise<string[]>;
+  /** Every materialized real stage node the pipelines API currently reports. */
+  materializedStageNodes(): Promise<MaterializedStageNode[]>;
+  /** Monotonic clock in milliseconds. */
+  now(): number;
+  /** Resolve after roughly `ms` milliseconds (advancing `now`). */
+  sleep(ms: number): Promise<void>;
+}
+
+export interface VerifyStageReadinessOptions {
+  /** The materialized transcript path the verify stage must own on disk. */
+  verifyPath: string;
+  /** The active pipeline whose verify stage must be materialized. */
+  pipelineId: string;
+  /** The stage id that must own the materialized transcript (the running stage). */
+  stageId: string;
+  /** Overall budget before failing closed. */
+  timeoutMs?: number;
+  /** Poll cadence. */
+  pollMs?: number;
+}
+
+export interface VerifyStageReadinessResult {
+  waitedMs: number;
+  conversationId: string;
+}
+
+export const SCAN_READINESS_DEFAULTS = {
+  timeoutMs: 30_000,
+  pollMs: 500,
+} as const;
+
+/**
+ * Fail-closed scan-readiness gate for the #507 capture. Before any screenshot is
+ * taken, TWO things must be observably true at the same poll:
+ *   1. the backend file scan has DISCOVERED the verify transcript on disk
+ *      (`verifyPath` appears in the scan), and
+ *   2. the pipelines API reports that the active pipeline's verify stage OWNS a
+ *      materialized real stage node bound to exactly that transcript — a live
+ *      conversation id AND the same agent path — never a placeholder.
+ *
+ * If either condition is still unmet when the deadline passes this THROWS (fail
+ * closed): the prior loop merely broke after a fixed number of polls and captured
+ * anyway, so an undiscovered transcript or a placeholder-only board could pass off
+ * as real evidence. Because both conditions poll OBSERVED state rather than a
+ * fixed delay, a transcript that surfaces late is still awaited correctly.
+ */
+export async function waitForMaterializedVerifyStage(
+  driver: ScanReadinessDriver,
+  options: VerifyStageReadinessOptions,
+): Promise<VerifyStageReadinessResult> {
+  const timeoutMs = options.timeoutMs ?? SCAN_READINESS_DEFAULTS.timeoutMs;
+  const pollMs = options.pollMs ?? SCAN_READINESS_DEFAULTS.pollMs;
+  const start = driver.now();
+  const deadline = start + timeoutMs;
+
+  for (;;) {
+    const discovered = (await driver.discoveredPaths()).includes(options.verifyPath);
+    const owner = (await driver.materializedStageNodes()).find(
+      (node) =>
+        node.pipelineId === options.pipelineId &&
+        node.stageId === options.stageId &&
+        node.agentPath === options.verifyPath &&
+        node.conversationId.length > 0,
+    );
+    if (discovered && owner) {
+      return { waitedMs: driver.now() - start, conversationId: owner.conversationId };
+    }
+    if (driver.now() >= deadline) {
+      const reason = !discovered
+        ? `the verify transcript was never discovered by the file scan`
+        : `the file scan discovered the verify transcript but pipeline "${options.pipelineId}" stage "${options.stageId}" ` +
+          `never materialized a real node owning it (placeholder-only evidence)`;
+      throw new Error(`#507 scan-readiness gate failed closed: ${reason} within ${timeoutMs}ms`);
+    }
+    await driver.sleep(pollMs);
+  }
+}

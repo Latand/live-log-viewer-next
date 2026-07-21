@@ -4,10 +4,13 @@ import {
   FOLDED_ACTIVE_PIPELINE_SENTINEL,
   MOBILE_READINESS_DEFAULTS,
   NEGATIVE_CONTROL_BLIND,
+  SCAN_READINESS_DEFAULTS,
   isFoldedActivePipelineError,
   runFoldedNegativeControl,
+  waitForMaterializedVerifyStage,
   waitForMobilePipelineReady,
   type MobileReadinessDriver,
+  type ScanReadinessDriver,
 } from "./capture-issue-507-gate";
 
 describe("#507 F1 folded-pipeline negative control", () => {
@@ -129,5 +132,123 @@ describe("#507 F2 deterministic mobile readiness wait", () => {
     expect(MOBILE_READINESS_DEFAULTS.stableSamples).toBeGreaterThanOrEqual(2);
     expect(MOBILE_READINESS_DEFAULTS.pollMs).toBeGreaterThan(0);
     expect(MOBILE_READINESS_DEFAULTS.timeoutMs).toBeGreaterThan(3000);
+  });
+});
+
+describe("#507 High fail-closed materialized-stage scan-readiness gate", () => {
+  const VERIFY_PATH = "/tmp/e507-home/projects/x/verify.jsonl";
+  const PIPELINE_ID = "e507mixed";
+  const STAGE_ID = "verify";
+  const CONVERSATION_ID = "verify-convo";
+
+  /** A virtual-clock driver: the file scan reveals `verifyPath` only once the
+      clock passes `discoveredAt`, and the pipelines API reports a materialized
+      verify node only once the clock passes `materializedAt`. When either is
+      `Infinity`, that condition never becomes true. `nodeOverride` swaps in a
+      different materialized node to probe the ownership assertion (wrong path,
+      empty conversation id, …). `sleep` advances the clock instantly. */
+  function fakeScanDriver(script: {
+    discoveredAt: number;
+    materializedAt: number;
+    nodeOverride?: { pipelineId?: string; stageId?: string; agentPath?: string; conversationId?: string };
+  }) {
+    let clock = 0;
+    const node = {
+      pipelineId: script.nodeOverride?.pipelineId ?? PIPELINE_ID,
+      stageId: script.nodeOverride?.stageId ?? STAGE_ID,
+      agentPath: script.nodeOverride?.agentPath ?? VERIFY_PATH,
+      conversationId: script.nodeOverride?.conversationId ?? CONVERSATION_ID,
+    };
+    const driver: ScanReadinessDriver = {
+      async discoveredPaths() {
+        return clock >= script.discoveredAt ? [VERIFY_PATH] : [];
+      },
+      async materializedStageNodes() {
+        return clock >= script.materializedAt ? [node] : [];
+      },
+      now: () => clock,
+      async sleep(ms: number) {
+        clock += ms;
+      },
+    };
+    return { driver, clock: () => clock };
+  }
+
+  test("fails closed when discovery exceeds the deadline (transcript never scanned)", async () => {
+    /* The transcript is never discovered on disk within the budget — the retired
+       loop would have broken silently and captured placeholder-only UI as if it
+       were real. The gate must now throw a discovery-specific failure. */
+    const fake = fakeScanDriver({ discoveredAt: Number.POSITIVE_INFINITY, materializedAt: 0 });
+    await expect(
+      waitForMaterializedVerifyStage(fake.driver, {
+        verifyPath: VERIFY_PATH,
+        pipelineId: PIPELINE_ID,
+        stageId: STAGE_ID,
+        timeoutMs: 5_000,
+      }),
+    ).rejects.toThrow(/failed closed: the verify transcript was never discovered/);
+  });
+
+  test("resolves on delayed eventual success — transcript surfaces after several polls", async () => {
+    /* Both the scan and the materialized node appear only at 2s, well after the
+       first polls — a fixed short delay would have missed them, but observed-state
+       polling awaits them correctly and then passes with the real conversation. */
+    const fake = fakeScanDriver({ discoveredAt: 2_000, materializedAt: 2_000 });
+    const result = await waitForMaterializedVerifyStage(fake.driver, {
+      verifyPath: VERIFY_PATH,
+      pipelineId: PIPELINE_ID,
+      stageId: STAGE_ID,
+      timeoutMs: 30_000,
+      pollMs: 250,
+    });
+    expect(result.waitedMs).toBeGreaterThanOrEqual(2_000);
+    expect(result.conversationId).toBe(CONVERSATION_ID);
+  });
+
+  test("keeps placeholder-only evidence from passing — path scanned but no materialized node", async () => {
+    /* The file is on disk, but no stage ever materialized a real node owning it
+       (every stage is a queued placeholder). The gate must fail closed with the
+       materialization-specific reason, never mistake the bare file for evidence. */
+    const fake = fakeScanDriver({ discoveredAt: 0, materializedAt: Number.POSITIVE_INFINITY });
+    await expect(
+      waitForMaterializedVerifyStage(fake.driver, {
+        verifyPath: VERIFY_PATH,
+        pipelineId: PIPELINE_ID,
+        stageId: STAGE_ID,
+        timeoutMs: 5_000,
+      }),
+    ).rejects.toThrow(/failed closed:.*never materialized a real node owning it \(placeholder-only evidence\)/);
+  });
+
+  test("rejects a materialized node that owns a DIFFERENT transcript path", async () => {
+    /* A real node exists, but it is bound to another transcript — the verify stage
+       does not actually OWN the discovered file, so the gate must still fail. */
+    const fake = fakeScanDriver({ discoveredAt: 0, materializedAt: 0, nodeOverride: { agentPath: "/tmp/other.jsonl" } });
+    await expect(
+      waitForMaterializedVerifyStage(fake.driver, {
+        verifyPath: VERIFY_PATH,
+        pipelineId: PIPELINE_ID,
+        stageId: STAGE_ID,
+        timeoutMs: 5_000,
+      }),
+    ).rejects.toThrow(/placeholder-only evidence/);
+  });
+
+  test("rejects a materialized node with an empty conversation id", async () => {
+    /* An on-disk path with no live conversation is not a real materialized node. */
+    const fake = fakeScanDriver({ discoveredAt: 0, materializedAt: 0, nodeOverride: { conversationId: "" } });
+    await expect(
+      waitForMaterializedVerifyStage(fake.driver, {
+        verifyPath: VERIFY_PATH,
+        pipelineId: PIPELINE_ID,
+        stageId: STAGE_ID,
+        timeoutMs: 5_000,
+      }),
+    ).rejects.toThrow(/placeholder-only evidence/);
+  });
+
+  test("exposes sane scan-readiness defaults", () => {
+    expect(SCAN_READINESS_DEFAULTS.pollMs).toBeGreaterThan(0);
+    expect(SCAN_READINESS_DEFAULTS.timeoutMs).toBeGreaterThan(SCAN_READINESS_DEFAULTS.pollMs);
   });
 });

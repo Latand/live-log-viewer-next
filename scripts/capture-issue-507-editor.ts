@@ -58,8 +58,11 @@ import { bootstrapDemoRuntime, demoPort } from "./demo-capture";
 import {
   FOLDED_ACTIVE_PIPELINE_SENTINEL,
   runFoldedNegativeControl,
+  waitForMaterializedVerifyStage,
   waitForMobilePipelineReady,
+  type MaterializedStageNode,
   type MobileReadinessDriver,
+  type ScanReadinessDriver,
 } from "./capture-issue-507-gate";
 
 const OUT_DIR = process.env.E507_CAPTURE_OUT_DIR ?? "/tmp/llv-issue-507";
@@ -259,6 +262,43 @@ function mobileReadinessDriver(page: Page): MobileReadinessDriver {
   };
 }
 
+/** The scan-readiness driver bound to the live demo server: the backend file
+    scan's discovered paths (/api/files) and the pipelines API's materialized real
+    stage nodes (/api/pipelines) — every attempt that has bound both a live
+    conversation id and its on-disk agent path. A queued placeholder stage has no
+    such attempt, so it never contributes a node. */
+function scanReadinessDriver(baseUrl: string): ScanReadinessDriver {
+  return {
+    discoveredPaths: async () => {
+      const body = (await (await fetch(`${baseUrl}/api/files`)).json().catch(() => ({}))) as {
+        files?: Array<{ path: string }>;
+      };
+      return (body.files ?? []).map((file) => file.path);
+    },
+    materializedStageNodes: async () => {
+      const body = (await (await fetch(`${baseUrl}/api/pipelines`)).json().catch(() => ({}))) as {
+        pipelines?: Array<{
+          id: string;
+          runs?: Array<{ stageId: string; attempts?: Array<{ conversationId: string | null; agentPath: string | null }> }>;
+        }>;
+      };
+      const nodes: MaterializedStageNode[] = [];
+      for (const pipeline of body.pipelines ?? []) {
+        for (const run of pipeline.runs ?? []) {
+          for (const attempt of run.attempts ?? []) {
+            if (attempt.conversationId && attempt.agentPath) {
+              nodes.push({ pipelineId: pipeline.id, stageId: run.stageId, conversationId: attempt.conversationId, agentPath: attempt.agentPath });
+            }
+          }
+        }
+      }
+      return nodes;
+    },
+    now: () => Date.now(),
+    sleep: (ms: number) => Bun.sleep(ms),
+  };
+}
+
 async function waitForServer(url: string, child: ChildProcess): Promise<void> {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
@@ -294,11 +334,18 @@ async function main(): Promise<void> {
     await waitForServer(baseUrl, server);
     await seedPipelines(env);
     const verify = atlasStageMembers(env).verify;
-    for (let i = 0; i < 60; i += 1) {
-      const files = (await (await fetch(`${baseUrl}/api/files`)).json().catch(() => ({}))) as { files?: Array<{ path: string }> };
-      if (files.files?.some((file) => file.path === verify.path)) break;
-      await Bun.sleep(500);
-    }
+    /* Fail-closed scan-readiness gate (#507 PR #512 High): the capture must not
+       photograph until the file scan has DISCOVERED the verify transcript AND the
+       pipelines API confirms the running pipeline's verify stage OWNS a
+       materialized real node bound to exactly that transcript. The prior loop
+       merely broke after a fixed 60 polls and captured anyway, so an undiscovered
+       transcript or a placeholder-only board could silently pass as real evidence;
+       this now throws instead. */
+    const scan = await waitForMaterializedVerifyStage(scanReadinessDriver(baseUrl), {
+      verifyPath: verify.path,
+      pipelineId: MIXED_ID,
+      stageId: "verify",
+    });
 
     /* ── Desktop 1600x1000 ────────────────────────────────────────────────── */
     const desktop = await browser.newPage({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 1 });
@@ -512,6 +559,7 @@ async function main(): Promise<void> {
 
     console.log(
       `captured #507 evidence into ${outDir}: draft five-card editor + running real/placeholder mix at 1600x1000, ` +
+        `verify stage materialized (real node owns the discovered transcript after ${scan.waitedMs}ms — gate fails closed otherwise); ` +
         `active pipeline not folded (F1 gate live — negative control tripped on a deliberate fold); ` +
         `390x844 ready after ${readiness.waitedMs}ms (both pipelines summarized, layout settled), ` +
         `overflow-safe (scrollWidth ${overflow.scrollWidth} <= innerWidth ${overflow.innerWidth}); ` +
