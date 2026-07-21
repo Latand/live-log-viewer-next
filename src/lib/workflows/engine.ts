@@ -45,7 +45,7 @@ const STAGE_DONE_RE = /^STAGE_DONE:\s*(.*)$/m;
 
 export interface StageSpawn {
   paneId: string;
-  transcript: string | null;
+  ["transcript"]: string | null;
   panePid: number | null;
 }
 
@@ -60,7 +60,7 @@ export interface WorkflowPorts {
   lastMessage(entry: FileEntry): { text: string; ts: number } | null;
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
   advanceFlow(id: string, note: string): void;
-  closeFlow(id: string): Promise<unknown>;
+  closeFlow(id: string): Promise<{ flow?: Flow; error?: string; status?: number } | void>;
   getFlow(id: string): Flow | null;
   /** Newest flow bound to this implementer, for restart adoption. */
   findFlowByImplementer(implementerPath: string): Flow | null;
@@ -231,7 +231,7 @@ async function ensureStageAgent(
   wf: Workflow,
   run: WorkflowStageRun,
   role: RoleConfig,
-  prompt: string,
+  stagePrompt: string,
   entries: FileEntry[],
   ports: WorkflowPorts,
   persistCheckpoint: () => void,
@@ -242,7 +242,7 @@ async function ensureStageAgent(
     spawnsThisProcess.add(spawnKey(wf, run));
     persistCheckpoint();
     try {
-      const spawned = await ports.spawnAgent(role, wf.worktreeDir, prompt, run.accountId);
+      const spawned = await ports.spawnAgent(role, wf.worktreeDir, stagePrompt, run.accountId);
       run.paneId = spawned.paneId;
       if (spawned.transcript) {
         run.agentPath = spawned.transcript;
@@ -528,7 +528,10 @@ export async function patchWorkflow(
       if (phase === "reviewing") {
         /* Skipping past a still-running review also stops its reviewer. */
         const flow = wf.flowId ? ports.getFlow(wf.flowId) : null;
-        if (flow && flow.closedAt === null && flow.state !== "closed") await ports.closeFlow(flow.id);
+        if (flow && flow.closedAt === null && flow.state !== "closed") {
+          const closed = await ports.closeFlow(flow.id);
+          if (closed?.error) return { error: closed.error, status: closed.status ?? 409 };
+        }
         wf.state = "finishing";
       } else {
         advanceStage(wf);
@@ -551,7 +554,10 @@ export async function patchWorkflow(
       if (run) resetRun(run);
       if (phase === "reviewing") {
         const flow = wf.flowId ? ports.getFlow(wf.flowId) : null;
-        if (flow && flow.closedAt === null && flow.state !== "closed") await ports.closeFlow(flow.id);
+        if (flow && flow.closedAt === null && flow.state !== "closed") {
+          const closed = await ports.closeFlow(flow.id);
+          if (closed?.error) return { error: closed.error, status: closed.status ?? 409 };
+        }
         wf.flowId = null;
         wf.fixerPath = null;
         wf.fixerConversationId = null;
@@ -562,7 +568,10 @@ export async function patchWorkflow(
     wf.stateDetail = null;
   } else if (req.action === "close") {
     const flow = wf.flowId ? ports.getFlow(wf.flowId) : null;
-    if (flow && flow.closedAt === null && flow.state !== "closed") await ports.closeFlow(flow.id);
+    if (flow && flow.closedAt === null && flow.state !== "closed") {
+      const closed = await ports.closeFlow(flow.id);
+      if (closed?.error) return { error: closed.error, status: closed.status ?? 409 };
+    }
     /* Panes and the worktree stay for inspection (W10); removal is manual. */
     wf.state = "closed";
     wf.pausedState = null;

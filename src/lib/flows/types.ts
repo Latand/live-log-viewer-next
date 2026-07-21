@@ -127,6 +127,8 @@ export type Flow = {
   /** Configured cross-engine fallback for unattended reviewer launches. */
   reviewerFallback?: RoleConfig | null;
   baseRef: string; // resolved git SHA captured at creation
+  /** Expected clean HEAD for the first reviewer launch. The diff still starts at baseRef. */
+  targetSha?: string | null;
   /** Pinned task specification and acceptance criteria shown to every reviewer. */
   spec?: string;
   baseMode: "head" | "merge-base";
@@ -173,6 +175,8 @@ export type CreateFlowRequest = {
       workflow branch start here so every round reviews the whole workflow
       diff; when absent the base resolves from baseMode in the session cwd. */
   baseRef?: string;
+  /** Expected clean HEAD for the first reviewer launch, supplied by durable controllers. */
+  targetSha?: string;
   /** Optional pinned task specification and acceptance criteria for the flow. */
   spec?: string;
   mode: "auto" | "manual";

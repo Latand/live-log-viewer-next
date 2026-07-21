@@ -68,7 +68,7 @@ test("a 3 GiB ownerless transcript stops at the exact per-pass byte ceiling and 
   expect(second).toEqual({ count: 0, complete: false });
   // The resumed pass pays its 64 KiB head-fingerprint validation and then
   // continues forward; the first 4 MiB are never re-scanned.
-  expect(checkpointFor(pathname)!.offset).toBe(8 * MIB - 64 * 1024);
+  expect(checkpointFor(pathname)!.offset).toBe(8 * MIB - 128 * 1024);
   expect(budget.remaining).toBe(24 * MIB);
 });
 
@@ -164,27 +164,86 @@ test("a truncated transcript resets its checkpoint instead of replaying stale ev
   expect(second.count).toBe(1);
 });
 
-test("a same-inode shrink above the saved offset resets before scanning newly authored content", async () => {
-  const pathname = path.join(SANDBOX, "shrink-above-offset.jsonl");
-  fs.writeFileSync(pathname, Buffer.alloc(8 * MIB, 0x0a));
+test("a shrink above the saved offset invalidates the checkpoint and rescans earlier authorship", async () => {
+  const pathname = virtualTranscript("shrunk-above-offset.jsonl", 8 * MIB);
   const first = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, {
     resume: true,
     maxBytes: 4 * MIB,
   });
   expect(first).toEqual({ count: 0, complete: false });
   expect(checkpointFor(pathname)!.offset).toBe(4 * MIB);
+  const before = fs.statSync(pathname);
+  const userRecord = `\n${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "rescanned" } })}\n`;
 
-  const authored = Buffer.from(`${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "new owner content" } })}\n`);
   const fd = fs.openSync(pathname, "r+");
   try {
-    fs.writeSync(fd, authored, 0, authored.length, MIB);
+    fs.writeSync(fd, userRecord, 2 * MIB, "utf8");
     fs.ftruncateSync(fd, 6 * MIB);
   } finally {
     fs.closeSync(fd);
   }
+  const shrunk = fs.statSync(pathname);
+  expect(shrunk.ino).toBe(before.ino);
+  expect(shrunk.size).toBe(6 * MIB);
+  expect(shrunk.size).toBeGreaterThan(checkpointFor(pathname)!.offset);
 
-  const resumed = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
-  expect(resumed).toEqual({ count: 1, complete: true });
+  const second = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
+  expect(second.count).toBe(1);
+});
+
+test("growth after a rewrite before the saved offset invalidates authorship evidence", async () => {
+  const pathname = virtualTranscript("rewritten-then-grown.jsonl", 8 * MIB);
+  const first = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, {
+    resume: true,
+    maxBytes: 4 * MIB,
+  });
+  expect(first).toEqual({ count: 0, complete: false });
+  const checkpoint = checkpointFor(pathname)!;
+  expect(checkpoint.offset).toBe(4 * MIB);
+  const before = fs.statSync(pathname);
+  const userRecord = `\n${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "rewritten before append" } })}\n`;
+
+  const fd = fs.openSync(pathname, "r+");
+  try {
+    fs.writeSync(fd, userRecord, 2 * MIB, "utf8");
+    fs.ftruncateSync(fd, 10 * MIB);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const grown = fs.statSync(pathname);
+  expect(grown.ino).toBe(before.ino);
+  expect(grown.size).toBe(10 * MIB);
+
+  const second = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
+  expect(second.count).toBe(1);
+});
+
+test("a same-size in-place tail rewrite invalidates completed authorship evidence", async () => {
+  const pathname = path.join(SANDBOX, "same-size-rewrite.jsonl");
+  const prefix = `${JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "x".repeat(70 * 1024) } })}\n`;
+  const assistantTail = `${JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "done" } })}\n`;
+  const userTail = `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "hello" } })}\n`;
+  expect(userTail.length).toBe(assistantTail.length);
+  fs.writeFileSync(pathname, prefix + assistantTail);
+
+  const first = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
+  expect(first).toEqual({ count: 0, complete: true });
+  const before = fs.statSync(pathname);
+
+  const fd = fs.openSync(pathname, "r+");
+  try {
+    fs.writeSync(fd, userTail, before.size - Buffer.byteLength(assistantTail), "utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.utimesSync(pathname, before.atime, new Date(before.mtimeMs + 2_000));
+  const rewritten = fs.statSync(pathname);
+  expect(rewritten.ino).toBe(before.ino);
+  expect(rewritten.size).toBe(before.size);
+  expect(rewritten.mtimeMs).not.toBe(before.mtimeMs);
+
+  const second = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
+  expect(second).toEqual({ count: 1, complete: true });
 });
 
 test("a finished scan replays its verdict from the checkpoint without re-reading", async () => {

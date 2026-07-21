@@ -12,10 +12,10 @@ import { killPane, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
-import { clearHeadlessReviewArtifacts, forgetHeadlessReview } from "./exec";
+import { clearHeadlessReviewArtifacts, forgetHeadlessReview, stopHeadlessReviewAndWait } from "./exec";
 import { resolveBaseRef, resolveFlowMergeIdentity } from "./git";
 import { kickoffPrompt } from "./prompts";
-import { configuredReviewerFallback, loadFlows, loadPresets, saveFlows } from "./store";
+import { configuredReviewerFallback, loadFlows, loadPresets, saveFlows, withFlowMutation } from "./store";
 import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } from "./types";
 
 /**
@@ -94,6 +94,13 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   if (!normalizedSpec.ok) {
     return { error: "spec must be a string", status: 400 };
   }
+  let targetSha: string | null = null;
+  if (req.targetSha !== undefined) {
+    if (typeof req.targetSha !== "string" || !/^[0-9a-f]{40}$/i.test(req.targetSha.trim())) {
+      return { error: "targetSha must be an exact commit SHA", status: 400 };
+    }
+    targetSha = req.targetSha.trim().toLowerCase();
+  }
   const roles = rolesFromRequest(req);
   if (!roles) return { error: "invalid flow roles or preset", status: 400 };
   const registry = agentRegistry();
@@ -155,6 +162,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     roles,
     reviewerFallback: roles.reviewer.engine === "codex" ? configuredReviewerFallback() : null,
     baseRef: base.sha,
+    targetSha,
     ...(normalizedSpec.spec ? { spec: normalizedSpec.spec } : {}),
     baseMode,
     mode: req.mode === "manual" ? "manual" : "auto",
@@ -225,9 +233,8 @@ function noteFieldFromRequest(req: PatchFlowRequest): string | null | undefined 
  * restart. The transcript lookup is the fallback for rounds persisted before
  * the handle existed.
  */
-async function stopReviewer(flow: Flow, round: Round): Promise<void> {
-  forgetHeadlessReview(flow.id, round.n, round);
-  if (flow.reviewerMode !== "pane") return;
+async function stopReviewer(flow: Flow, round: Round): Promise<boolean> {
+  if (flow.reviewerMode !== "pane") return await stopHeadlessReviewAndWait(flow.id, round.n, round);
   try {
     const pane = round.reviewerPane;
     if (pane) {
@@ -245,6 +252,7 @@ async function stopReviewer(flow: Flow, round: Round): Promise<void> {
   } catch {
     /* pane already closed */
   }
+  return true;
 }
 
 /**
@@ -260,13 +268,23 @@ export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: st
   if (flow.state !== "reviewing" || !round) {
     return { error: "no reviewer is running for this flow", status: 409 };
   }
-  await stopReviewer(flow, round);
-  round.error = "cancelled by user";
-  round.terminalAt = isoNow();
-  flow.state = "needs_decision";
-  flow.stateDetail = "round cancelled by user";
-  saveFlows(flows);
-  return { flow };
+  if (!(await stopReviewer(flow, round))) {
+    return { error: "reviewer process group did not terminate", status: 409 };
+  }
+  return await withFlowMutation((current, persist) => {
+    const currentFlow = current.find((item) => item.id === id);
+    if (!currentFlow) return { error: "flow not found", status: 404 };
+    const currentRound = lastRound(currentFlow);
+    if (currentFlow.state !== "reviewing" || currentRound?.n !== round.n) {
+      return { error: "flow changed during reviewer teardown", status: 409 };
+    }
+    currentRound.error = "cancelled by user";
+    currentRound.terminalAt = isoNow();
+    currentFlow.state = "needs_decision";
+    currentFlow.stateDetail = "round cancelled by user";
+    persist();
+    return { flow: currentFlow };
+  });
 }
 
 /**
@@ -279,16 +297,30 @@ export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: stri
   const flow = flows.find((item) => item.id === id);
   if (!flow) return { error: "flow not found", status: 404 };
   const round = lastRound(flow);
-  if (round && round.verdict === null && !round.error) {
-    await stopReviewer(flow, round);
-    round.error = "flow closed by user";
-    round.terminalAt = isoNow();
+  const stoppedRound = round && round.verdict === null && !round.error ? round.n : null;
+  if (stoppedRound !== null) {
+    if (!(await stopReviewer(flow, round!))) {
+      return { error: "reviewer process group did not terminate", status: 409 };
+    }
   }
-  flow.state = "closed";
-  flow.closedAt = isoNow();
-  flow.stateDetail = null;
-  saveFlows(flows);
-  return { flow };
+  return await withFlowMutation((current, persist) => {
+    const currentFlow = current.find((item) => item.id === id);
+    if (!currentFlow) return { error: "flow not found", status: 404 };
+    if (currentFlow.state === "closed") return { flow: currentFlow };
+    const currentRound = lastRound(currentFlow);
+    if (stoppedRound !== null && currentRound?.n !== stoppedRound) {
+      return { error: "flow changed during reviewer teardown", status: 409 };
+    }
+    if (stoppedRound !== null && currentRound && currentRound.verdict === null && !currentRound.error) {
+      currentRound.error = "flow closed by user";
+      currentRound.terminalAt = isoNow();
+    }
+    currentFlow.state = "closed";
+    currentFlow.closedAt = isoNow();
+    currentFlow.stateDetail = null;
+    persist();
+    return { flow: currentFlow };
+  });
 }
 
 export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; error?: string; status?: number } {

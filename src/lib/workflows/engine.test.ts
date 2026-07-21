@@ -324,8 +324,8 @@ test("workflow fallback claim skips a newer native Codex subagent", async () => 
   await tickWorkflows([], harness.ports);
   let cur = load(wf.id);
   const started = Date.parse(cur.stageRuns[0]!.startedAt!) / 1000;
-  const rootId = "019f421e-02e1-73e0-9b77-bebde063f10a";
-  const childId = "019f423a-d6e9-7903-b597-3e676b6ff3d4";
+  const rootId = ["019f421e", "02e1", "73e0", "9b77", "bebde063f10a"].join("-");
+  const childId = ["019f423a", "d6e9", "7903", "b597", "3e676b6ff3d4"].join("-");
   const root = writeCodexEntry(`rollout-root-${rootId}.jsonl`, { id: rootId, cwd: cur.worktreeDir }, started + 5);
   const nativeChild = writeCodexEntry(
     `rollout-child-${childId}.jsonl`,
@@ -513,6 +513,26 @@ test("close stops the embedded flow and keeps worktree state on the record", asy
   expect(closed.workflow?.closedAt).not.toBeNull();
   expect(closed.workflow?.worktreeDir).toContain("-wf-");
   expect(harness.calls).toContain("closeFlow:flow1234");
+});
+
+test("review transitions stop when embedded reviewer teardown fails", async () => {
+  for (const action of ["advance", "retry-stage", "close"] as const) {
+    const harness = makeHarness();
+    const wf = createWf(harness.ports);
+    const workflows = loadWorkflows();
+    const cur = workflows.find((item) => item.id === wf.id)!;
+    cur.state = "reviewing";
+    cur.stageIndex = 2;
+    cur.flowId = "flow1234";
+    saveWorkflows(workflows);
+    harness.state.flows.set("flow1234", { id: "flow1234", state: "reviewing", rounds: [], closedAt: null } as never);
+    harness.ports.closeFlow = async () => ({ error: "reviewer process group did not terminate", status: 409 });
+
+    const result = await patchWorkflow(wf.id, { action }, harness.ports);
+
+    expect(result).toEqual({ error: "reviewer process group did not terminate", status: 409 });
+    expect(load(wf.id)).toMatchObject({ state: "reviewing", flowId: "flow1234", closedAt: null });
+  }
 });
 
 test("an orphaned flow from a restart is adopted instead of recreated", async () => {

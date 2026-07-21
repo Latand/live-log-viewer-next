@@ -120,6 +120,10 @@ export type PipelineStageAttempt = {
   agentPath: string | null;
   paneId: string | null;
   flowId: string | null;
+  /** Clean pipeline SHA expected when the first reviewer launches. */
+  expectedReviewHeadSha?: string | null;
+  /** Exact clean SHA captured by the first launched reviewer round. */
+  reviewHeadSha?: string | null;
   startedAt: string | null;
   completedAt: string | null;
   /** Exactly-once relay (#353): the `{{prev.output}}` payload persisted when the

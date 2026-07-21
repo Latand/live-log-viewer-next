@@ -5,6 +5,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import { forEachCooperatively } from "@/lib/cooperative";
+import { withFileTransaction } from "@/lib/state/fileTransaction";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
 import { resolveRole } from "@/lib/roles/registry";
 import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
@@ -129,6 +130,7 @@ function isFlow(value: unknown): value is Flow {
     typeof flow.cwd === "string" &&
     typeof flow.implementerPath === "string" &&
     typeof flow.baseRef === "string" &&
+    (flow.targetSha === undefined || flow.targetSha === null || typeof flow.targetSha === "string") &&
     (flow.spec === undefined || typeof flow.spec === "string") &&
     Array.isArray(flow.rounds)
   );
@@ -171,6 +173,7 @@ export function loadFlows(): Flow[] {
   const flows = Array.isArray(raw?.flows) ? raw.flows.filter(isFlow) : [];
   return flows.map((flow) => ({
     ...flow,
+    targetSha: flow.targetSha ?? null,
     implementerConversationId: flow.implementerConversationId ?? null,
     reviewerFallback: flow.reviewerFallback === undefined && flow.roles.reviewer.engine === "codex"
       ? configuredReviewerFallback()
@@ -309,6 +312,14 @@ export async function reconcileFlowConversationOwnershipCooperatively(registry: 
 
 export function saveFlows(flows: Flow[]): void {
   atomicWriteJson(flowsFile(), { schemaVersion: FLOWS_SCHEMA_VERSION, flows });
+}
+
+/** Re-read and mutate flow state under the process-shared state-file lock. */
+export async function withFlowMutation<T>(mutate: (flows: Flow[], persist: () => void) => T): Promise<T> {
+  return await withFileTransaction(flowsFile(), "flow state is busy", () => {
+    const flows = loadFlows();
+    return mutate(flows, () => saveFlows(flows));
+  });
 }
 
 export function loadPresets(): FlowPreset[] {

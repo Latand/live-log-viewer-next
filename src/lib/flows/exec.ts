@@ -95,11 +95,29 @@ interface HeadlessProcessGroupRuntime {
   setTimeout(callback: () => void, ms: number): ReturnType<typeof setTimeout>;
 }
 
+interface HeadlessProcessGroupWaitRuntime extends HeadlessProcessGroupRuntime {
+  processGroupAlive(pid: number): boolean;
+  wait(ms: number): Promise<void>;
+}
+
 const defaultProcessGroupRuntime: HeadlessProcessGroupRuntime = {
   pidAlive,
   processIdentity: (pid) => procBackend.processIdentity(pid),
   signalProcess: (pid, signal) => { process.kill(pid, signal); },
   setTimeout: (callback, ms) => setTimeout(callback, ms),
+};
+
+const defaultProcessGroupWaitRuntime: HeadlessProcessGroupWaitRuntime = {
+  ...defaultProcessGroupRuntime,
+  processGroupAlive: (pid) => {
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  wait: async (ms) => await new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
 /** Preserves the owned process-group id through the TERM-to-KILL grace period. */
@@ -115,9 +133,8 @@ export function terminateHeadlessReviewerGroup(
   } = {},
 ): void {
   const runtime = { ...defaultProcessGroupRuntime, ...options.runtime };
-  const owned = identity
-    ? runtime.pidAlive(pid) && runtime.processIdentity(pid) === identity
-    : options.ownedByLiveHandle === true;
+  const owned = options.ownedByLiveHandle === true
+    || Boolean(identity && runtime.pidAlive(pid) && runtime.processIdentity(pid) === identity);
   if (!owned) return;
   try {
     runtime.signalProcess(-pid, "SIGTERM");
@@ -132,6 +149,52 @@ export function terminateHeadlessReviewerGroup(
     catch { /* process group has exited */ }
   }, options.graceMs ?? 3_000);
   timer.unref?.();
+}
+
+/** Stops an owned reviewer group and resolves only after the whole group is
+    gone. The bounded KILL phase lets callers safely mutate its worktree. */
+export async function terminateHeadlessReviewerGroupAndWait(
+  pid: number,
+  identity: string | null,
+  options: {
+    ownedByLiveHandle?: boolean;
+    leaderExited?: boolean;
+    graceMs?: number;
+    killWaitMs?: number;
+    pollMs?: number;
+    fallbackLeader?: (signal: NodeJS.Signals) => void;
+    runtime?: Partial<HeadlessProcessGroupWaitRuntime>;
+  } = {},
+): Promise<boolean> {
+  const runtime = { ...defaultProcessGroupWaitRuntime, ...options.runtime };
+  const owned = options.ownedByLiveHandle === true
+    || Boolean(identity && runtime.pidAlive(pid) && runtime.processIdentity(pid) === identity);
+  if (!owned) return !runtime.processGroupAlive(pid);
+
+  const signal = (value: NodeJS.Signals): void => {
+    try {
+      runtime.signalProcess(-pid, value);
+    } catch {
+      if (!options.leaderExited) {
+        try { (options.fallbackLeader ?? ((fallback) => runtime.signalProcess(pid, fallback)))(value); }
+        catch { /* process group has exited */ }
+      }
+    }
+  };
+  const waitUntilGone = async (timeoutMs: number): Promise<boolean> => {
+    const pollMs = Math.max(1, options.pollMs ?? 25);
+    const attempts = Math.max(1, Math.ceil(timeoutMs / pollMs));
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (!runtime.processGroupAlive(pid)) return true;
+      await runtime.wait(pollMs);
+    }
+    return !runtime.processGroupAlive(pid);
+  };
+
+  signal("SIGTERM");
+  if (await waitUntilGone(options.graceMs ?? 3_000)) return true;
+  signal("SIGKILL");
+  return await waitUntilGone(options.killWaitMs ?? 1_000);
 }
 
 /** SIGTERM the reviewer's process group (detached spawn = group leader),
@@ -437,4 +500,31 @@ export function forgetHeadlessReview(
     killTree(pid, identity);
     return;
   }
+}
+
+/** Removes a headless run only after its process group has been observed dead. */
+export async function stopHeadlessReviewAndWait(
+  flowId: string,
+  round: number,
+  persisted: Pick<Round, "reviewerPid" | "reviewerIdentity"> = { reviewerPid: null, reviewerIdentity: null },
+): Promise<boolean> {
+  const key = runKey(flowId, round);
+  const run = runs.get(key);
+  const pid = run?.child.pid ?? persisted.reviewerPid ?? null;
+  const identity = run?.identity ?? persisted.reviewerIdentity ?? null;
+  if (!pid) {
+    runs.delete(key);
+    return true;
+  }
+  if (run) {
+    clearTimeout(run.timer);
+    run.terminationStarted = true;
+  }
+  const stopped = await terminateHeadlessReviewerGroupAndWait(pid, identity, {
+    ownedByLiveHandle: Boolean(run),
+    leaderExited: run?.exit !== null,
+    fallbackLeader: run ? (signal) => { run.child.kill(signal); } : undefined,
+  });
+  if (stopped) runs.delete(key);
+  return stopped;
 }

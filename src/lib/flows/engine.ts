@@ -218,6 +218,11 @@ export function reserveReviewerSpawn(
 export function captureReviewHead(flow: Flow, round: Round): string {
   const headSha = resolveCleanFlowHead(flow.cwd);
   if (!headSha) throw new Error("review requires a clean committed HEAD");
+  if (round.n === 1 && flow.targetSha && headSha.toLowerCase() !== flow.targetSha.toLowerCase()) {
+    const detail = `review target changed before launch: expected ${flow.targetSha}, found ${headSha}`;
+    markNeedsDecision(flow, detail);
+    throw new Error(detail);
+  }
   round.reviewHeadSha = headSha;
   return headSha;
 }
@@ -497,7 +502,6 @@ async function launchReviewer(
   persistCheckpoint: () => void,
 ): Promise<void> {
   if (reservation.kind === "replay" && adoptReviewerReceipt(flow, round, reservation.receipt)) return;
-  captureReviewHead(flow, round);
   persistCheckpoint();
   const prompt = reviewerPrompt(flow, round);
   const { role, account } = prepared;
@@ -713,6 +717,7 @@ async function tickFlow(
     }
     try {
       const prepared = prepareReviewerLaunch(flow, round);
+      captureReviewHead(flow, round);
       round.spawnStartedAt = isoNow();
       const reservation = reserveReviewerSpawn(flow, round, prepared.role, prepared.account.accountId);
       round.launchLeaseUntil = new Date(Date.now() + REVIEWER_LAUNCH_LEASE_MS).toISOString();

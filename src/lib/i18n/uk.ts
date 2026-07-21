@@ -1146,6 +1146,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineVerdict.fail": "провал",
   "pipelineVerdict.needsDecision": "рішення",
   "pipelineVerdict.confidence": "впевненість",
+  "pipelineVerdict.reviewerSha": "SHA ревʼюера {sha}",
   "pipelineVerdict.findings": { one: "{count} зауваження", few: "{count} зауваження", many: "{count} зауважень", other: "{count} зауважень" },
   "pipelineVerdict.noFindings": "зауважень немає",
   "pipelineVerdict.more": "+{count} ще",
