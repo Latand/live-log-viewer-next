@@ -29,7 +29,7 @@ interface PredecessorTopology {
   id: string;
   env: string[];
   cmd: string[];
-  user: string;
+  containerUser: string;
   workingDir: string;
   binds: string[];
   groupAdd: string[];
@@ -53,7 +53,7 @@ function parseTopology(id: string, raw: string): PredecessorTopology {
     id,
     env: stringArray(config.Env),
     cmd,
-    user: typeof config.User === "string" ? config.User : "",
+    containerUser: typeof config.User === "string" ? config.User : "",
     workingDir: typeof config.WorkingDir === "string" ? config.WorkingDir : "",
     binds: stringArray(hostConfig.Binds),
     groupAdd: stringArray(hostConfig.GroupAdd),
@@ -92,7 +92,7 @@ function successorRunArgs(
     "--network", predecessor.networkMode,
     "--pid", predecessor.pidMode,
     ...(predecessor.privileged ? ["--privileged"] : []),
-    ...(predecessor.user ? ["--user", predecessor.user] : []),
+    ...(predecessor.containerUser ? ["--user", predecessor.containerUser] : []),
     ...(predecessor.workingDir ? ["--workdir", predecessor.workingDir] : []),
     ...predecessor.groupAdd.flatMap((group) => ["--group-add", group]),
     ...predecessor.binds.flatMap((bind) => ["-v", bind]),

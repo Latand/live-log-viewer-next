@@ -23,7 +23,7 @@ const predecessorInspect = JSON.stringify([{
   Config: {
     Env: ["LLV_RUNTIME_EVENTS=1", "HOME=/home/user"],
     Cmd: ["bun-container", "run", "src/runtime-host/main.ts"],
-    User: "1000:1000",
+    "User": "1000:1000",
     WorkingDir: "/app",
   },
   HostConfig: {
