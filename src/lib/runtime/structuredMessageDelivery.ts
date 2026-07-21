@@ -7,6 +7,7 @@ import {
   type RegistryConversation,
 } from "@/lib/agent/registry";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
+import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
@@ -443,17 +444,6 @@ export async function enqueueStructuredMessage(
     );
   }
   const registry = (dependencies.registry ?? agentRegistry)();
-  try {
-    const refreshed = await refreshRepublishedSession(
-      session,
-      client,
-      dependencies.republish ?? republishStructuredDeliveryHost,
-    );
-    session = refreshed.session;
-    if (refreshed.republished && (session.host === "dead" || session.host === "unhosted")) return ownershipUnavailable();
-  } catch (error) {
-    return deliveryFailure(error);
-  }
   if (session.hostKind === "tmux-legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return ownershipUnavailable();
   try {
@@ -471,9 +461,34 @@ export async function enqueueStructuredMessage(
      recovery of a retired round would silently fork it (issue #383). */
   const rejected = supersededRejection(registry, registry.conversation(session.conversationId as ViewerConversationId));
   if (rejected) return rejected;
-  const conversation = registry.conversation(session.conversationId as ViewerConversationId);
+  let conversation = registry.conversation(session.conversationId as ViewerConversationId);
   if (!conversation) return ownershipUnavailable();
-  const recoveryRequired = requiresDeadConversationRecovery(session, registry, conversation);
+  const generation = conversation.generations.at(-1);
+  const activeAccountId = registry.engineRouting(conversation.engine).activeAccountId;
+  /* Request an active-account reseat before any predecessor host republish or
+     recovery. An accepted migration fence assigns this send to the successor. */
+  if (activeAccountId && generation?.accountId && generation.accountId !== activeAccountId) {
+    try {
+      conversation = registry.requestConversationMigrationToActiveAccount(conversation.id);
+    } catch (error) {
+      return deliveryFailure(error);
+    }
+  }
+  const migrationOwnsSend = deliveryFence(conversation) === "held";
+  if (!migrationOwnsSend) {
+    try {
+      const refreshed = await refreshRepublishedSession(
+        session,
+        client,
+        dependencies.republish ?? republishStructuredDeliveryHost,
+      );
+      session = refreshed.session;
+      if (refreshed.republished && (session.host === "dead" || session.host === "unhosted")) return ownershipUnavailable();
+    } catch (error) {
+      return deliveryFailure(error);
+    }
+  }
+  const recoveryRequired = !migrationOwnsSend && requiresDeadConversationRecovery(session, registry, conversation);
   const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
   if (recoveryRequired && !wantsImages) {
     try {
@@ -523,8 +538,10 @@ export async function enqueueStructuredMessage(
       /* The pre-recovery projection remains the conservative capability source. */
     }
   }
-  const imageCapability = activeSession.capabilities.imageInput
-    ?? runtimeImageCapability(activeSession.sessionKey.engine, false);
+  const imageCapability = migrationOwnsSend
+    ? runtimeImageCapability(activeSession.sessionKey.engine, true)
+    : activeSession.capabilities.imageInput
+      ?? runtimeImageCapability(activeSession.sessionKey.engine, false);
   if (wantsImages && !imageCapability.supported && activeSession.sessionKey.engine !== "codex") {
     return { ok: false, structured: true, outcome: "failed", error: imageCapability.reason ?? "structured image delivery is unavailable", status: 409 };
   }
