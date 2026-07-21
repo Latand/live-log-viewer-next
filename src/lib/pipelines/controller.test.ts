@@ -131,7 +131,7 @@ test("a phase deadline releases the controller and later watchdog ticks keep pip
   await first;
 
   expect(flowCalls).toBe(1);
-  expect(pipelineCalls).toBe(1);
+  expect(pipelineCalls).toBe(2);
   expect(heartbeats).toContainEqual(expect.objectContaining({
     phase: "flows",
     state: "timed-out",
@@ -147,12 +147,51 @@ test("a phase deadline releases the controller and later watchdog ticks keep pip
 
   await controller.poll();
   expect(flowCalls).toBe(1);
-  expect(pipelineCalls).toBe(2);
+  expect(pipelineCalls).toBe(4);
   expect(heartbeats).toContainEqual(expect.objectContaining({
     phase: "flows",
     state: "blocked",
     ageMs: 500,
   }));
+});
+
+test("a blocked flow phase still lets the completed scan feed pipeline settlement (#529)", async () => {
+  type ManualTimer = { active: boolean; callback: () => void };
+  const timers: ManualTimer[] = [];
+  const entry = { path: "/sessions/completed-builder.jsonl" } as never;
+  const pipelineEntries: unknown[][] = [];
+  let scans = 0;
+  let markFlowStarted = () => {};
+  const flowStarted = new Promise<void>((resolve) => { markFlowStarted = resolve; });
+  const wedged = new Promise<never>(() => {});
+  const controller = new FlowPipelineController({
+    scan: async () => {
+      scans += 1;
+      return { files: [entry], complete: true };
+    },
+    tickPipelines: async (entries) => {
+      pipelineEntries.push(entries);
+      return { changed: false };
+    },
+    tickFlows: async () => {
+      markFlowStarted();
+      return wedged;
+    },
+    scheduleTimeout: (callback) => {
+      const timer = { active: true, callback };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout: (timer) => { (timer as ManualTimer).active = false; },
+  }, { phaseDeadlineMs: 500 });
+
+  const tick = controller.tick("durable-pass-verdict");
+  await flowStarted;
+  timers.find((timer) => timer.active)!.callback();
+  await tick;
+
+  expect(scans).toBe(1);
+  expect(pipelineEntries).toEqual([[], [entry]]);
 });
 
 test("startup recovery and the watchdog converge a pending transition without duplicate effects", async () => {

@@ -178,7 +178,8 @@ export class FlowPipelineController {
         : flowOutcome?.state === "failed" ? flowOutcome.error : null;
       if (failure !== null) throw failure;
       const changed = (pipelineOutcome.state === "completed" && pipelineOutcome.value.changed)
-        || (flowOutcome?.state === "completed" && flowOutcome.value.changed);
+        || (flowOutcome?.state === "completed" && flowOutcome.value.changed)
+        || (scanOutcome?.state === "completed" && scanOutcome.value.complete);
       if (!changed) break;
     }
     const blocked = [...this.activePhases.entries()]
