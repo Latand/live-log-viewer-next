@@ -5158,7 +5158,7 @@ export class AgentRegistry {
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
       const migrationBlocksDelivery = conversation?.migration
-        && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
+        && ["waiting-turn", "requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
       const current = conversation?.generations.at(-1);
       const place = (delivery: HeldDelivery): HeldDelivery => {
         if (delivery.state === "delivered" || delivery.state === "delivery-uncertain") {
@@ -5305,7 +5305,7 @@ export class AgentRegistry {
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
       const migrationBlocksDelivery = conversation?.migration
-        && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
+        && ["waiting-turn", "requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
       if (migrationBlocksDelivery || conversation?.generations.at(-1)?.id !== generationId) return null;
       delivery.state = "delivery-uncertain";
       delivery.attempts += 1;

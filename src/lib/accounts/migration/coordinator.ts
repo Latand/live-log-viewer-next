@@ -718,7 +718,7 @@ export async function reconcileMigrations(
 
 export function deliveryFence(conversation: RegistryConversation): "deliver" | "held" | "recoverable" {
   if (!conversation.migration) return "deliver";
-  if (["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase)) return "held";
+  if (["waiting-turn", "requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase)) return "held";
   if (conversation.migration.phase === "failed-recoverable") return "recoverable";
   return "deliver";
 }

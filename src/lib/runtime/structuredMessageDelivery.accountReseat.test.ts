@@ -6,9 +6,9 @@ import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { advanceConversationMigration, drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
-import { emptyLaunchProfile, type SuccessorProviderPort } from "@/lib/accounts/migration/contracts";
+import { emptyLaunchProfile, type SuccessorProviderPort, type TurnState } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
-import type { RuntimeSnapshot } from "./contracts";
+import type { RuntimeSnapshot, RuntimeTurnAxis } from "./contracts";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import type { StructuredImageRef } from "./structuredContent";
 
@@ -21,14 +21,18 @@ let registryNumber = 0;
 
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
-function registryWithConversation(accountId = "seat-source", engine: "codex" | "claude" = "codex") {
+function registryWithConversation(
+  accountId = "seat-source",
+  engine: "codex" | "claude" = "codex",
+  turnState: Exclude<TurnState["state"], "terminal"> = "idle",
+) {
   const registry = new AgentRegistry(path.join(sandbox, `registry-${registryNumber += 1}.json`));
   registry.reconcileConversations([{
     engine,
     path: artifactPath,
     accountId,
     launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "project" }),
-    turn: { state: "idle", source: "empty", terminalAt: null },
+    turn: { state: turnState, source: turnState === "idle" ? "empty" : "assistant", terminalAt: null },
     observedAt: "2026-07-21T00:00:00.000Z",
   }]);
   return { registry, conversation: registry.conversationForPath(artifactPath)! };
@@ -38,6 +42,7 @@ function snapshot(
   conversationId: string,
   engine: "codex" | "claude" = "codex",
   host: "hosted" | "dead" = "hosted",
+  turn: RuntimeTurnAxis = "idle",
 ): RuntimeSnapshot {
   return {
     schemaVersion: 1,
@@ -51,7 +56,7 @@ function snapshot(
       sessionKey: { engine, sessionId: "native-source" },
       hostKind: engine === "codex" ? "codex-app-server" : "claude-broker",
       host,
-      turn: "idle",
+      turn,
       provenance: "structured",
       revision: 1,
       attentionIds: [],
@@ -67,7 +72,7 @@ function snapshot(
         structuredAttention: true,
         imageInput: runtimeImageCapability(engine, false),
       },
-      activeTurnId: null,
+      activeTurnId: turn === "running" ? "turn-source" : null,
     }],
     attentions: [],
     recentOperations: [],
@@ -79,9 +84,13 @@ function snapshot(
   };
 }
 
-function deliveredClient(conversationId: string, onCommand: () => void): RuntimeHostClient {
+function deliveredClient(
+  conversationId: string,
+  onCommand: () => void,
+  turn: RuntimeTurnAxis = "idle",
+): RuntimeHostClient {
   return {
-    snapshot: async () => snapshot(conversationId),
+    snapshot: async () => snapshot(conversationId, "codex", "hosted", turn),
     command: async (command: { operationId: string; idempotencyKey: string; conversationId: string }) => {
       onCommand();
       return {
@@ -100,6 +109,124 @@ function deliveredClient(conversationId: string, onCommand: () => void): Runtime
     },
   } as unknown as RuntimeHostClient;
 }
+
+async function expectWaitingTurnReseatRestart(turnState: Extract<TurnState["state"], "busy" | "unknown">) {
+  const { registry, conversation } = registryWithConversation("seat-source", "codex", turnState);
+  registry.setEngineRouting("codex", "seat-active");
+  const sourceGeneration = conversation.generations.at(-1)!;
+  let predecessorCommands = 0;
+  const runtimeTurn = turnState === "busy" ? "running" : "unknown";
+  const client = deliveredClient(conversation.id, () => { predecessorCommands += 1; }, runtimeTurn);
+  const clientMessageId = `${turnState}-account-reseat`;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId,
+    text: `deliver after ${turnState} turn account adoption`,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({ ok: true, structured: true, target: conversation.id, outcome: "held" });
+  expect(predecessorCommands).toBe(0);
+  expect(registry.conversation(conversation.id)).toMatchObject({
+    id: conversation.id,
+    migration: { targetId: "seat-active", phase: "waiting-turn" },
+    generations: [{ id: sourceGeneration.id, path: sourceGeneration.path, accountId: "seat-source" }],
+  });
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId,
+    state: "held",
+    generationId: null,
+  }]);
+
+  const restarted = new AgentRegistry(registry.filename);
+  const successorId = `native-successor-${turnState}`;
+  const successorPath = `/sessions/${successorId}.jsonl`;
+  let successorCreates = 0;
+  const provider: SuccessorProviderPort = {
+    virtualSource: true,
+    async create(input) {
+      successorCreates += 1;
+      expect(input).toMatchObject({
+        conversationId: conversation.id,
+        targetAccountId: "seat-active",
+        source: { id: sourceGeneration.id, path: sourceGeneration.path, accountId: "seat-source" },
+      });
+      return {
+        operationId: input.operationId,
+        nativeId: successorId,
+        path: successorPath,
+        continuityPaths: [successorPath],
+        historyHash: "synthetic-history",
+        host: {
+          kind: "codex-app-server",
+          identity: successorId,
+          epoch: 1,
+          verifiedAt: "2026-07-21T00:01:00.000Z",
+        },
+      };
+    },
+    async verify() {},
+  };
+  const successorDeliveries: string[] = [];
+  const delivery = {
+    async deliver(input: { delivery: { text: string }; path: string; clientMessageId: string }) {
+      successorDeliveries.push(input.clientMessageId);
+      expect(input).toMatchObject({ path: successorPath, clientMessageId });
+      return "delivered" as const;
+    },
+  };
+
+  await drainHeldDeliveries(conversation.id, delivery, restarted);
+  await advanceConversationMigration(conversation.id, restarted, provider, { deferBoardRepair: true });
+  expect({ predecessorCommands, successorCreates, successorDeliveries }).toEqual({
+    predecessorCommands: 0,
+    successorCreates: 0,
+    successorDeliveries: [],
+  });
+  expect(restarted.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
+  expect(restarted.pendingDeliveries(conversation.id)).toMatchObject([{ clientMessageId, state: "held", generationId: null }]);
+
+  restarted.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "seat-source",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "project" }),
+    turn: { state: "idle", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-21T00:02:00.000Z",
+  }]);
+  await advanceConversationMigration(conversation.id, restarted, provider, { deferBoardRepair: true });
+  await drainHeldDeliveries(conversation.id, delivery, restarted);
+  await drainHeldDeliveries(conversation.id, delivery, restarted);
+
+  expect({ predecessorCommands, successorCreates, successorDeliveries }).toEqual({
+    predecessorCommands: 0,
+    successorCreates: 1,
+    successorDeliveries: [clientMessageId],
+  });
+  expect(restarted.conversation(conversation.id)).toMatchObject({
+    id: conversation.id,
+    migration: { targetId: "seat-active", phase: "committed" },
+    generations: [
+      { id: sourceGeneration.id, path: sourceGeneration.path, accountId: "seat-source", archivedAt: expect.any(String) },
+      { id: successorId, path: successorPath, accountId: "seat-active", archivedAt: null },
+    ],
+  });
+}
+
+test("a newly admitted busy-turn reseat stays held through restart and drains once to the successor", async () => {
+  await expectWaitingTurnReseatRestart("busy");
+});
+
+test("a newly admitted unknown-turn reseat stays held through restart and drains once to the successor", async () => {
+  await expectWaitingTurnReseatRestart("unknown");
+});
 
 test("a live structured send starts an active-account reseat and holds the operator message", async () => {
   const { registry, conversation } = registryWithConversation();
