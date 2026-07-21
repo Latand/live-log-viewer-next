@@ -19,7 +19,7 @@ import {
 } from "./registry";
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationResult } from "./contracts";
-import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
+import { bindStructuredDeliveryQueue, completeStructuredDeliveryQueueStartup } from "./structuredDeliveryController";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { recoverPendingStructuredSpawns } from "./structuredSpawn";
 
@@ -343,6 +343,7 @@ function structuredStartupAdoptionFilter(
 export interface StructuredStartupDependencies {
   registry?: AgentRegistry;
   client?: RuntimeHostClient | null;
+  refreshTranscriptState?: (registry: AgentRegistry) => Promise<void>;
   adopt?: typeof adoptCodexRegistryHosts;
   adoptClaude?: typeof adoptClaudeRegistryHosts;
   resolveCodexOwner?: (entry: AgentRegistryEntry) => { home: string; kind: "legacy" | "managed" } | null;
@@ -360,10 +361,18 @@ export async function adoptStructuredHostsAtStartup(
 ): Promise<AdoptedStructuredHost[]> {
   assertDarwinStructuredRuntime();
   const registry = dependencies.registry ?? agentRegistry();
-  await refreshStructuredTranscriptState(registry);
+  const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
+  const controllerBoundEarly = client !== null;
+  if (client) {
+    await bindStructuredDeliveryQueue([], {
+      registry: dependencies.registry,
+      client,
+      deferStartupWork: true,
+    });
+  }
+  await (dependencies.refreshTranscriptState ?? refreshStructuredTranscriptState)(registry);
   let nextAdoptedHosts = await revalidateRetainedStartupHosts(registry, retryAdoptedHosts);
   retryAdoptedHosts = nextAdoptedHosts;
-  const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   const signals = await structuredStartupSignals(registry, client);
   const shouldAdopt = structuredStartupAdoptionFilter(registry, signals);
   const resolveCodexOwner = dependencies.resolveCodexOwner ?? ((entry: AgentRegistryEntry) =>
@@ -443,7 +452,11 @@ export async function adoptStructuredHostsAtStartup(
   const finalCodexHosts = nextAdoptedHosts.filter(
     (item): item is AdoptedCodexHost => item.key.engine === "codex",
   );
-  await bindStructuredDeliveryQueue(nextAdoptedHosts, { registry: dependencies.registry, client });
+  if (controllerBoundEarly) {
+    await completeStructuredDeliveryQueueStartup(nextAdoptedHosts);
+  } else {
+    await bindStructuredDeliveryQueue(nextAdoptedHosts, { registry: dependencies.registry, client });
+  }
   if (client) {
     await enqueueInterruptedCodexContinuations(
       registry,

@@ -37,6 +37,7 @@ interface ControllerState {
   republishActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   releaseActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   terminateActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
+  completeActive: ((adopted: readonly StructuredDeliveryHost[]) => Promise<void>) | null;
   stopActive: () => void;
 }
 const controllerStore = process as typeof process & { __llvStructuredDeliveryController?: ControllerState };
@@ -47,6 +48,7 @@ const state: ControllerState = controllerStore.__llvStructuredDeliveryController
   republishActiveHost: null,
   releaseActiveHost: null,
   terminateActiveHost: null,
+  completeActive: null,
   stopActive: () => {},
 };
 
@@ -206,6 +208,7 @@ export async function bindStructuredDeliveryQueue(
     registry?: AgentRegistry;
     client?: RuntimeHostClient | null;
     recover?: StructuredConversationRecovery;
+    deferStartupWork?: boolean;
   } = {},
 ): Promise<void> {
   state.stopActive();
@@ -216,6 +219,7 @@ export async function bindStructuredDeliveryQueue(
   state.republishActiveHost = null;
   state.releaseActiveHost = null;
   state.terminateActiveHost = null;
+  state.completeActive = null;
   setStructuredDeliveryKick(null);
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   if (!client) return;
@@ -560,24 +564,32 @@ export async function bindStructuredDeliveryQueue(
       state.republishActiveHost = null;
       state.releaseActiveHost = null;
       state.terminateActiveHost = null;
+      state.completeActive = null;
       setStructuredDeliveryKick(null);
     }
   };
-  for (const item of adopted) {
-    await register(item);
-  }
-  const startupSnapshot = registry.snapshot();
-  for (const conversation of Object.values(startupSnapshot.conversations)) {
-    const generation = conversation.generations.at(-1);
-    if (!generation) continue;
-    const id = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
-    if (registrations.has(id)) continue;
-    const entry = startupSnapshot.entries[id];
-    if (!entry?.structuredHost && entry?.host?.kind !== "tmux") continue;
-    await publishCurrentFallback(conversation.id);
-  }
-  await reconcileTerminalDeliveries(registry, client, () => !stopped && state.activeQueue === queue);
-  await queue.drain();
+  let completion = Promise.resolve();
+  const complete = (items: readonly StructuredDeliveryHost[]) => {
+    completion = completion.then(async () => {
+      if (stopped || state.activeQueue !== queue) return;
+      for (const item of items) await register(item);
+      const startupSnapshot = registry.snapshot();
+      for (const conversation of Object.values(startupSnapshot.conversations)) {
+        const generation = conversation.generations.at(-1);
+        if (!generation) continue;
+        const id = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
+        if (registrations.has(id)) continue;
+        const entry = startupSnapshot.entries[id];
+        if (!entry?.structuredHost && entry?.host?.kind !== "tmux") continue;
+        await publishCurrentFallback(conversation.id);
+      }
+      await reconcileTerminalDeliveries(registry, client, () => !stopped && state.activeQueue === queue);
+      await queue.drain();
+    });
+    return completion;
+  };
+  state.completeActive = complete;
+  if (!dependencies.deferStartupWork) await complete(adopted);
 }
 
 export function hasStructuredDeliveryHost(key: SessionKey): boolean {
@@ -590,6 +602,13 @@ export async function publishStructuredDeliveryHost(
 ): Promise<() => Promise<void>> {
   if (!state.registerActiveHost) throw new Error("structured delivery controller is unavailable");
   return state.registerActiveHost(item, ownsOperation);
+}
+
+export async function completeStructuredDeliveryQueueStartup(
+  adopted: readonly StructuredDeliveryHost[],
+): Promise<void> {
+  if (!state.completeActive) throw new Error("structured delivery controller is unavailable");
+  await state.completeActive(adopted);
 }
 
 export async function republishStructuredDeliveryHost(key: SessionKey): Promise<boolean> {
