@@ -41,13 +41,13 @@ export function OutputPreview({
 }) {
   const [all, setAll] = useState(false);
   const label = heading ? (
-    <div className={`mb-1 text-[10.5px] font-semibold uppercase tracking-wide ${tone === "err" ? "text-danger" : "text-muted"}`}>{heading}</div>
+    <div className={`mb-0.5 text-[10.5px] font-semibold uppercase tracking-wide ${tone === "err" ? "text-danger" : "text-muted"}`}>{heading}</div>
   ) : null;
   if (!output.trim()) {
     return (
       <div className="mt-1.5">
         {label}
-        <span className="inline-flex items-center rounded-md bg-sunken px-2 py-0.5 text-[11px] text-muted" title={emptyTip ?? tr("tools.noOutputTip")}>
+        <span className="text-[11px] text-muted" title={emptyTip ?? tr("tools.noOutputTip")}>
           {emptyLabel ?? tr("tools.noOutput")}
         </span>
       </div>
@@ -56,21 +56,23 @@ export function OutputPreview({
   const lines = output.split("\n");
   const overflow = lines.length > PREVIEW_LINES || output.length > PREVIEW_CHARS;
   const shown = all ? output : lines.slice(0, PREVIEW_LINES).join("\n").slice(0, PREVIEW_CHARS);
-  const border = tone === "err" ? "border-danger/40" : "border-border";
+  /* stderr keeps a thin danger left-edge so the failing stream stays scannable
+     without wrapping the whole block in its own bordered card. */
+  const edge = tone === "err" ? "border-l-2 border-danger/50 pl-2" : "";
   return (
     <div className="group/out relative mt-1.5">
       {label}
       {all && lang ? (
         <CodeBlock code={shown} lang={lang} />
       ) : (
-        <pre className={`max-h-[420px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-[10px] border ${border} bg-sunken px-3 py-2 font-mono text-[12px]`}>
+        <pre className={`max-h-[420px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] pr-8 font-mono text-[12px] text-secondary ${edge}`}>
           {shown}
         </pre>
       )}
       <CopyButton
         text={output}
         label={copyLabel ?? tr("tools.copyOutput")}
-        className={`absolute right-1.5 opacity-0 transition-opacity motion-reduce:transition-none focus-visible:opacity-100 group-hover/out:opacity-100 [@media(hover:none)]:opacity-60 ${heading ? "top-6" : "top-1.5"}`}
+        className={`absolute right-0 opacity-0 transition-opacity motion-reduce:transition-none focus-visible:opacity-100 group-hover/out:opacity-100 [@media(hover:none)]:opacity-60 ${heading ? "top-5" : "top-0"}`}
       />
       {overflow ? (
         <button
