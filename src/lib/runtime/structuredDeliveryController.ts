@@ -258,9 +258,10 @@ export async function bindStructuredDeliveryQueue(
     drainTimer.unref?.();
     return true;
   };
-  const drainWithRetry = async (): Promise<void> => {
+  const drainWithRetry = async (afterAdmission = false): Promise<void> => {
     try {
-      await queue.drain();
+      if (afterAdmission) await queue.drainAfterAdmission();
+      else await queue.drain();
       drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;
     } catch (error) {
       if (stopped) return;
@@ -524,7 +525,7 @@ export async function bindStructuredDeliveryQueue(
     if (stopped) return;
     if (drainTimer) clearTimeout(drainTimer);
     drainTimer = null;
-    return drainWithRetry();
+    return drainWithRetry(true);
   });
   state.stopActive = () => {
     stopped = true;
