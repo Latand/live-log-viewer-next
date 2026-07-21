@@ -2,10 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import readline from "node:readline";
 
-type JsonObject = Record<string, unknown>;
-
-function record(value: unknown): JsonObject | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
+function record(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
 
 const sessionId = process.env.LLV_FIXTURE_SESSION_ID ?? "";

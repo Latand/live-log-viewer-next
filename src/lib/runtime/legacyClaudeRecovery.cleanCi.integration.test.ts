@@ -353,7 +353,9 @@ test("production acceptance recovers a lifecycle-busy legacy Fable tail from a s
         spawn: (input) => spawnStructuredConversation(input, {
           startHost: async () => {
             brokerStarts += 1;
-            const fixture = path.join(import.meta.dir, "fixtures", "claude-stream-json-recovery.ts");
+            const fixture = path.join(import.meta.dir, "fixtures", "claude-stream-json-recovery.mjs");
+            const fixtureRunner = Bun.which("node");
+            if (!fixtureRunner) throw new Error("Node fixture runner is unavailable");
             const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
               cwd: workspace,
               claudeConfigDir: accountHome,
@@ -373,7 +375,7 @@ test("production acceptance recovers a lifecycle-busy legacy Fable tail from a s
               }),
               spawnProcess: (_command: string, args: string[], options: SpawnOptionsWithoutStdio) => {
                 const marker = args.indexOf("--resume");
-                return spawn(Bun.which("bun") ?? "bun", [fixture], {
+                return spawn(fixtureRunner, [fixture], {
                   ...options,
                   env: {
                     ...options.env,
