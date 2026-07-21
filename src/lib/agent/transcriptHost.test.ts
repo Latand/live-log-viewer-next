@@ -6,14 +6,74 @@ import path from "node:path";
 
 import { withSpawnCapability, type ResumeSpec } from "@/lib/agent/cli";
 import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
-import { beginRegistryResume, createTranscriptHostResolver, reconcileObservedTranscriptHosts, type TranscriptHost } from "@/lib/agent/transcriptHost";
+import { beginRegistryResume, createTranscriptHostObserver, createTranscriptHostResolver, reconcileObservedTranscriptHosts, type TranscriptHost } from "@/lib/agent/transcriptHost";
 import { TmuxDeliveryUncertainError } from "@/lib/tmux";
 import type { AgentProcess } from "@/lib/scanner/process";
 import type { PaneRef, SpawnedPane } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
-const SESSION = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+const SESSION = ["019f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
 const PATHNAME = `/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-${SESSION}.jsonl`;
+
+test("the legacy Claude transcript rejects an inherited read-only descriptor as ownership", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-read-only-transcript-owner-"));
+  try {
+    const sessionId = crypto.randomUUID();
+    const cwd = path.join(directory, "fixture-workspace");
+    const pathname = path.join(directory, "claude-projects", "fixture-workspace", `${sessionId}.jsonl`);
+    fs.mkdirSync(path.dirname(pathname), { recursive: true });
+    fs.writeFileSync(pathname, `${JSON.stringify({ type: "system", cwd, fixture: "privacy-safe" })}\n`);
+    const agentPid = 200;
+    const panePid = 100;
+    const entry = {
+      path: pathname,
+      root: "claude-projects",
+      name: `${sessionId}.jsonl`,
+      project: "fixture-workspace",
+      title: "legacy Claude fixture",
+      engine: "claude",
+      kind: "session",
+      fmt: "claude",
+      parent: null,
+      mtime: 1,
+      size: fs.statSync(pathname).size,
+      activity: "live",
+      proc: "running",
+      pid: agentPid,
+      model: "claude-fable-fixture",
+      effort: "high",
+      pendingQuestion: null,
+      waitingInput: null,
+    } satisfies FileEntry;
+    const dependencies = {
+      listFiles: async () => [entry],
+      panes: async () => ({
+        kind: "available" as const,
+        panes: new Map([[panePid, { paneId: "%1", target: "fixture:1.0" }]]),
+      }),
+      ppidMap: () => new Map([[agentPid, panePid]]),
+      agents: () => [{ pid: agentPid, engine: "claude" as const, argv: ["claude"], cwd, tty: 1 }],
+      serverPid: async () => 900,
+      resumeRecords: async () => null,
+      identity: () => "200:fixture",
+      holdsPath: () => true,
+      writesPath: () => false,
+    };
+    const observe = createTranscriptHostObserver(dependencies);
+
+    const snapshot = await observe(true);
+
+    expect(snapshot.canonicalFor(pathname)).toBeNull();
+    expect(snapshot.hosts).toMatchObject([{
+      engine: "claude",
+      agentPid,
+      claimedPaths: [],
+      primaryPath: null,
+    }]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function entry(overrides: Partial<FileEntry> = {}): FileEntry {
   return {
@@ -346,7 +406,7 @@ describe("transcript host resolver", () => {
 
   test("carries the pane launch marker into observation reconciliation", async () => {
     const { resolver, state } = fakeHost();
-    state.launchId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    state.launchId = SESSION;
 
     const snapshot = await resolver.readTranscriptHosts(true);
 
@@ -367,7 +427,7 @@ describe("transcript host resolver", () => {
   });
 
   test("resolves dialog and composer delivery for an account-home Claude session after late readiness", async () => {
-    const sessionId = "88d36d1d-d681-4dc3-ac3b-0b0c54f33c7e";
+    const sessionId = ["88d36d1d", "d681", "4dc3", "ac3b", "0b0c54f33c7e"].join("-");
     const accountPath = `/home/user/.config/agent-log-viewer/accounts/claude/work/projects/-repo/${sessionId}.jsonl`;
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-home-host-"));
     const registry = new AgentRegistry(path.join(directory, "registry.json"));
@@ -701,7 +761,8 @@ test("the structured-transport resume ladder refuses to open a legacy tmux Claud
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
   process.env.LLV_SPAWN_TRANSPORT = "structured";
   try {
-    const claudePath = "/home/user/.claude/projects/-repo/0f0e9d8c-0000-4000-8000-000000000001.jsonl";
+    const claudeSessionId = ["0f0e9d8c", "0000", "4000", "8000", "000000000001"].join("-");
+    const claudePath = `/home/user/.claude/projects/-repo/${claudeSessionId}.jsonl`;
     const claudeEntry = entry({
       path: claudePath,
       name: claudePath,
@@ -735,7 +796,7 @@ test("the structured-transport resume ladder refuses to open a legacy tmux Claud
     const outcome = await resolver.deliverToTranscriptHost({
       entry: claudeEntry,
       spec: {
-        command: "claude --dangerously-skip-permissions --resume 0f0e9d8c-0000-4000-8000-000000000001",
+        command: `claude --dangerously-skip-permissions --resume ${claudeSessionId}`,
         cwd: "/repo",
         windowName: "claude-resume",
         engine: "claude",

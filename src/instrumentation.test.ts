@@ -10,10 +10,16 @@ import {
   initializeOperatorSpawnCapabilityAtStartup,
   runStructuredHostStartup,
   scheduleAccountMigrationController,
+  startCurrentReleaseControllers,
   startWakatimeIntegrationIfEnabled,
   viewerReleaseOwnsTraffic,
 } from "@/lib/viewerInstrumentation";
 import { operatorSpawnCapabilityPath } from "@/lib/agent/operatorCapability";
+import {
+  FLOW_PIPELINE_WATCHDOG_MS,
+  FlowPipelineController,
+  startFlowPipelineControllerRuntime,
+} from "@/lib/pipelines/controller";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { didStructuredHostStartupFail, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
@@ -137,6 +143,47 @@ test("a restarted current release activates before register returns", async () =
   );
   expect(activations).toBe(1);
   expect(scheduled).toHaveLength(0);
+});
+
+test("current release starts flow and pipeline recovery and watchdog while account migration is disabled", async () => {
+  const starts: string[] = [];
+  const watchdogs: Array<{ callback: () => void; delayMs: number }> = [];
+  const controller = {
+    tick: async () => undefined,
+    recover: async () => { starts.push("startup"); },
+    poll: async () => { starts.push("watchdog"); },
+  } as unknown as FlowPipelineController;
+  const startFlowPipelineController = () => startFlowPipelineControllerRuntime(controller, {}, {
+    registerTick: () => () => undefined,
+    scheduleInterval: (callback, delayMs) => {
+      const watchdog = { callback, delayMs, unref: () => undefined };
+      watchdogs.push(watchdog);
+      return watchdog;
+    },
+    log: () => undefined,
+  });
+
+  await startCurrentReleaseControllers(
+    { LLV_ACCOUNT_CONTROLLER_DISABLED: "1" },
+    {
+      loadFlowPipelineController: async () => ({
+        startFlowPipelineController,
+      }),
+      loadAccountMigrationController: async () => {
+        starts.push("account-loaded");
+        return { startAccountMigrationController: async () => { starts.push("account"); } };
+      },
+    },
+  );
+  await Promise.resolve();
+
+  expect(starts).toEqual(["startup"]);
+  expect(watchdogs).toHaveLength(1);
+  expect(watchdogs[0]!.delayMs).toBe(FLOW_PIPELINE_WATCHDOG_MS);
+
+  watchdogs[0]!.callback();
+  await Promise.resolve();
+  expect(starts).toEqual(["startup", "watchdog"]);
 });
 
 test("cold boot enables the controller while readiness receives the first runtime turn", async () => {
