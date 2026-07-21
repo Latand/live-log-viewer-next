@@ -351,14 +351,24 @@ export async function demoteSkippedStructuredRegistryHosts(
       await registry.withOperationLock(entry.key, owner, async () => {
         const current = registry.snapshot().entries[sessionKeyId(entry.key)];
         if (!current?.structuredHost || shouldAdopt(current)) return;
-        let claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
+        /* A PID-only claim cannot prove ownership across reboot. Runtime and
+           transcript signals already excluded this row from adoption, so the
+           startup demotion may replace that unverifiable owner and settle the
+           retained receipt through the ordinary terminal path. */
+        let claimed = registry.claimStructuredHost(entry.key, owner, {
+          allowUnhosted: true,
+          reclaimUnverifiedOwner: true,
+        });
         if (!claimed) {
           const current = registry.snapshot().entries[sessionKeyId(entry.key)];
           const orphan = current?.structuredHost?.kind === "claude-broker"
             ? current.structuredHost.process
             : null;
           if (orphan && await terminateVerifiedClaudeOrphan(orphan, current?.claimOwner ?? null)) {
-            claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
+            claimed = registry.claimStructuredHost(entry.key, owner, {
+              allowUnhosted: true,
+              reclaimUnverifiedOwner: true,
+            });
           }
         }
         if (!claimed?.structuredHost || !claimed.claimOwner) return;
