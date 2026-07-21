@@ -7,6 +7,7 @@ import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { primeTranscriptTurnEvidence } from "@/lib/scanner/activity";
 import { globalCache } from "@/lib/scanner/caches";
 import { primePersistedLineageFacts } from "@/lib/scanner/links";
+import { coordinatedFileScan } from "@/lib/scanner/scanCoordinator";
 import type { FileEntry, PendingQuestion } from "@/lib/types";
 import type { TurnState } from "@/lib/accounts/migration/contracts";
 
@@ -379,13 +380,18 @@ function fileScanRefreshPromise(
 ): Promise<FileScanSnapshot> {
   const fresh = slot.freshObservationGeneration !== undefined
     && generation >= slot.freshObservationGeneration;
+  /* Ordinary and cold refreshes may adopt the process-wide in-flight scan
+     generation (a controller usually started it); revision-, generation- and
+     freshness-fenced refreshes require a scan started after their request and
+     merge into the single trailing generation instead (#287). */
+  const join = reason === "ordinary" || reason === "cold";
   return instrumentFileScan(slot, generation, reason, async () => {
-    const snapshot = await listFilesWithProjectCatalog(undefined, {
-      persist: false,
+    const snapshot = await coordinatedFileScan({ fresh, join }, (intent) => listFilesWithProjectCatalog(undefined, {
+      persist: intent.persist,
       persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
-      ...(fresh ? { fresh: true } : {}),
+      ...(intent.fresh ? { fresh: true } : {}),
       ...(onResourceSnapshot ? { onResourceSnapshot, resourceBaseline: slot.snapshot } : {}),
-    });
+    }));
     if (!snapshot.complete) throw new Error("filesystem scan incomplete");
     if (process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1") writePersistedFileScanSnapshot(snapshot);
     slot.snapshot = snapshot;
@@ -456,14 +462,17 @@ function beginPinnedFileScanRefresh(
   const fresh = slot.freshObservationGeneration !== undefined
     && generation >= slot.freshObservationGeneration;
   return installStagedFileScanRefresh(slot, generation, (publish) => instrumentFileScan(slot, generation, reason, async () => {
-    const pinnedSnapshot = await listFilesWithProjectCatalog(undefined, {
-      persist: false,
+    /* A pin changes the scan scope, so this generation never serves joiners'
+       fences and never adopts a running scan; it still holds the process-wide
+       single-generation lease through the coordinator (#287). */
+    const pinnedSnapshot = await coordinatedFileScan({ fresh, join: false }, (intent) => listFilesWithProjectCatalog(undefined, {
+      persist: intent.persist,
       persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
       pin: pinnedPath,
-      ...(fresh ? { fresh: true } : {}),
+      ...(intent.fresh ? { fresh: true } : {}),
       onResourceSnapshot: publish,
       resourceBaseline: slot.snapshot,
-    });
+    }));
     if (!pinnedSnapshot.complete) throw new Error("filesystem scan incomplete");
     const pinOverlayPaths = pinnedSnapshot.pinOverlayPaths ?? [];
     const overlayPathSet = new Set(pinOverlayPaths);
