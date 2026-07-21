@@ -1,5 +1,3 @@
-import { spawn } from "node:child_process";
-import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,6 +16,7 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 import { ClaudeStreamBrokerHost, FileClaudeDeliveryLedger } from "./claudeStreamBrokerHost";
 import type { RuntimeHostClient } from "./client";
 import { FileRuntimeEventStore } from "./eventStore";
+import { spawnClaudeRecoveryFixture } from "./fixtures/claude-stream-json-recovery";
 import { bindStructuredDeliveryQueue, republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -353,9 +352,6 @@ test("production acceptance recovers a lifecycle-busy legacy Fable tail from a s
         spawn: (input) => spawnStructuredConversation(input, {
           startHost: async () => {
             brokerStarts += 1;
-            const fixture = path.join(import.meta.dir, "fixtures", "claude-stream-json-recovery.mjs");
-            const fixtureRunner = Bun.which("node");
-            if (!fixtureRunner) throw new Error("Node fixture runner is unavailable");
             const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
               cwd: workspace,
               claudeConfigDir: accountHome,
@@ -373,17 +369,11 @@ test("production acceptance recovers a lifecycle-busy legacy Fable tail from a s
                 subscriptionType: "fixture",
                 version: "fixture-v1",
               }),
-              spawnProcess: (_command: string, args: string[], options: SpawnOptionsWithoutStdio) => {
+              signalProcess: () => { throw new Error("recovery fixture has no process group"); },
+              spawnProcess: (_command, args) => {
                 const marker = args.indexOf("--resume");
-                return spawn(fixtureRunner, [fixture], {
-                  ...options,
-                  env: {
-                    ...options.env,
-                    LLV_FIXTURE_SESSION_ID: args[marker + 1] ?? "",
-                    LLV_FIXTURE_DELIVERY_LOG: deliveryLog,
-                  } as NodeJS.ProcessEnv,
-                  stdio: ["pipe", "pipe", "pipe"],
-                }) as ChildProcessWithoutNullStreams;
+                expect(args[marker + 1]).toBe(sessionId);
+                return spawnClaudeRecoveryFixture(sessionId, deliveryLog);
               },
             });
             brokers.push(host);
@@ -444,6 +434,12 @@ test("production acceptance recovers a lifecycle-busy legacy Fable tail from a s
         .some((event) => event.kind === "delta" && event.text === "RECOVERY_OK"),
       "the recovered Claude turn did not return RECOVERY_OK",
     );
+    await waitFor(
+      () => journal.snapshot().sessions.some((session) =>
+        session.conversationId === conversationId && session.host === "hosted" && session.turn === "idle"),
+      "the recovered Claude host projection did not settle idle",
+    );
+    expect(await republishStructuredDeliveryHost(key)).toBe(true);
 
     expect(brokerStarts).toBe(1);
     expect(Object.values(registry.snapshot().receipts).filter((receipt) =>
