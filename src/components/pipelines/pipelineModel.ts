@@ -319,14 +319,21 @@ export function pipelinePlaceholderStages(
  * Completed and closed pipelines fold their full transcript chain — they have no
  * live stage and no future placeholders, so the whole run collapses to history.
  */
-export function compactPipelineArtifactPaths(
-  pipelines: readonly Pipeline[],
-  flows: readonly Flow[],
-  files: readonly FileEntry[] = [],
-): Set<string> {
+/**
+ * The transcripts an ACTIVE (cursor-bearing, non-completed/closed/draft)
+ * pipeline keeps as full-size real stage conversation cards (#507 F2): the
+ * LATEST attempt of every current stage, plus the implementer a review cursor
+ * stands in for before its reviewer transcript materializes. These are exactly
+ * the paths {@link compactPipelineArtifactPaths} refuses to fold — extracted so
+ * the board can also protect them from the idle-worker auto-collapse (#112),
+ * which would otherwise fold an aged-idle passed stage into the pipeline worker
+ * stack and either drop its real card or duplicate it beside the stack (#507
+ * final review). Earlier retries and completed/closed pipeline history are
+ * absent here, so their compaction is preserved.
+ */
+export function pipelineFullPanePaths(pipelines: readonly Pipeline[], flows: readonly Flow[]): Set<string> {
   const flowsById = new Map(flows.map((flow) => [flow.id, flow] as const));
   const fullPanePaths = new Set<string>();
-
   for (const pipeline of pipelines) {
     if (!pipeline.cursor || pipeline.state === "completed" || pipeline.state === "closed" || pipeline.state === "draft") continue;
     /* Every current stage stays a full conversation card (#507 F2): keep each
@@ -359,6 +366,16 @@ export function compactPipelineArtifactPaths(
       if (implementerPath) fullPanePaths.add(implementerPath);
     }
   }
+  return fullPanePaths;
+}
+
+export function compactPipelineArtifactPaths(
+  pipelines: readonly Pipeline[],
+  flows: readonly Flow[],
+  files: readonly FileEntry[] = [],
+): Set<string> {
+  const flowsById = new Map(flows.map((flow) => [flow.id, flow] as const));
+  const fullPanePaths = pipelineFullPanePaths(pipelines, flows);
 
   const compact = new Set<string>();
   for (const pipeline of pipelines) {

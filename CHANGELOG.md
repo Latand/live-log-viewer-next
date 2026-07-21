@@ -6,6 +6,24 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 
 ## [Unreleased]
 
+### Fixed
+- Two #507 final-review repairs. (1) An aged-idle passed stage on a
+  cursor-bearing active pipeline stays the ONE real stage conversation card. The
+  board ran two independent derivations over the same scan — the idle-worker
+  auto-collapse (#112) folding quiet pipeline-stage transcripts into the pipeline
+  stack, and the #507 F2 rule keeping every current stage's latest transcript
+  full-size — and they disagreed, so a passed stage's card could vanish or
+  duplicate beside the stack. `pipelineFullPanePaths` now exposes exactly the
+  active-pipeline full-pane set, and `ProjectDashboard` protects it from
+  collapse, so each stage projects one surface (a five-stage graph reads as five
+  real/placeholder cards) with no worker-stack duplicate; older retries and
+  completed/closed pipelines still compact. (2) The mobile stage editor is now a
+  real modal that owns keyboard focus. Opened above the phone pipeline dock
+  sheet, Tab and Shift+Tab stay inside the editor, Escape closes only the editor
+  and returns focus to its trigger, and the sheet beneath yields — coordinated
+  through a shared modal-layer stack (`useModalLayer`) so only the topmost layer
+  traps focus and answers Escape.
+
 ### Changed
 - Completed the on-canvas pipeline editor visual contract (#507 review). Three
   repairs finish the pivot to composing the whole pipeline on the canvas as real

@@ -91,6 +91,7 @@ const ctx = (over: Partial<Parameters<typeof shouldCollapseWorker>[1]> = {}) => 
   nowMs: NOW,
   idleMs: DEFAULT_WORKER_COLLAPSE_IDLE_MS,
   pinnedPaths: new Set<string>(),
+  protectedPaths: new Set<string>(),
   ...over,
 });
 
@@ -383,6 +384,29 @@ describe("collapsibleWorkerFiles — subtree guard", () => {
     const quietChild = stale({ path: "/p/c", kind: "subagent", parent: "/p" });
     const paths = collapsibleWorkerFiles({ files: [parent, quietChild], project: "demo", flows: [], pinnedPaths: new Set(), nowMs: NOW }).map((f) => f.path);
     expect(new Set(paths)).toEqual(new Set(["/p", "/p/c"]));
+  });
+
+  test("never folds an active pipeline's protected full-pane stage, but still folds its superseded retry (#507 final)", () => {
+    /* Both transcripts are aged-idle pipeline-stage workers. The latest attempt
+       (/stage-latest) is a protected full-pane card on the cursor-bearing
+       pipeline, so it stays a real card; the superseded earlier retry
+       (/stage-retry) is absent from the protected set and still folds. */
+    const latest = stale({ path: "/stage-latest" });
+    const retry = stale({ path: "/stage-retry" });
+    const pipelines = [{
+      id: "pl", runs: [{ attempts: [{ agentPath: "/stage-retry" }, { agentPath: "/stage-latest" }] }],
+    }] as unknown as Pipeline[];
+    const paths = collapsibleWorkerFiles({
+      files: [latest, retry],
+      project: "demo",
+      flows: [],
+      pipelines,
+      pinnedPaths: new Set(),
+      protectedPaths: new Set(["/stage-latest"]),
+      nowMs: NOW,
+    }).map((f) => f.path);
+    expect(paths).not.toContain("/stage-latest");
+    expect(paths).toContain("/stage-retry");
   });
 });
 

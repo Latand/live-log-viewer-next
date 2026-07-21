@@ -25,10 +25,17 @@
  *
  *   $OUT/issue-507-editor-desktop-1600.png — 1600x1000 desktop: both colored
  *     pipeline groups, the draft editor exposing five conversation cards with
- *     their on-canvas controls, and the running pipeline's real + placeholder mix.
+ *     their on-canvas controls, and the running pipeline's real + placeholder
+ *     mix. Its completed stages are AGED-IDLE against the frozen capture clock,
+ *     so this shot doubles as the #507 final F1 evidence: each stays exactly one
+ *     real card, never folded into a worker stack.
  *   $OUT/issue-507-editor-mobile-390.png — 390x844 phone shell, asserted at
  *     capture time to keep scrollWidth <= innerWidth (no horizontal overflow),
  *     chat-first with the pipelines reachable through the bounded bottom sheet.
+ *   $OUT/issue-507-editor-mobile-390-editor.png — the stage editor opened ABOVE
+ *     the dock sheet at 390px with its role / model·effort / prompt controls
+ *     expanded, a real aria-modal dialog clearing the sheet z-index and fully
+ *     on-screen (#507 final F2 modal ownership).
  *
  * The pipelines are seeded through the shipped store (so they pass the real
  * schema) and reference only existing synthetic atlas transcripts. The private
@@ -293,6 +300,22 @@ async function main(): Promise<void> {
     if (historyStubs) throw new Error(`completed stages must be full cards, found ${historyStubs} compact history stubs`);
     const mixedCompleted = await desktop.locator(`[data-pipeline-stage-card="${MIXED_ID}::architect"], [data-pipeline-stage-card="${MIXED_ID}::builder"]`).count();
     if (mixedCompleted < 2) throw new Error(`running pipeline: expected both completed stages as real cards, found ${mixedCompleted}`);
+    /* Finding 1 (#507 final): the running pipeline's completed stages are bound
+       to real atlas transcripts whose mtime is decades before the frozen 2100
+       capture clock — so they are AGED-IDLE and, without the full-pane
+       protection, the idle-worker auto-collapse would fold them into the
+       pipeline worker stack (dropping the real card or duplicating it). Each
+       completed stage must be exactly ONE card, and the active pipeline must not
+       appear as a folded worker stack. */
+    for (const stageId of ["architect", "builder"]) {
+      const cards = await desktop.locator(`[data-pipeline-stage-card="${MIXED_ID}::${stageId}"]`).count();
+      if (cards !== 1) throw new Error(`aged-idle passed stage ${stageId}: expected exactly one real card, found ${cards}`);
+    }
+    const foldedActive = await desktop.evaluate((task) => {
+      const stacks = document.querySelector('[data-testid="worker-stacks"]');
+      return stacks ? (stacks.textContent ?? "").includes(task) : false;
+    }, "Materialize stages in place");
+    if (foldedActive) throw new Error("Finding 1 regression: the active pipeline's aged-idle stages folded into a worker stack (duplicate surface)");
     await desktop.evaluate(() => {
       const fit = Array.from(document.querySelectorAll("button")).find((button) =>
         (button.getAttribute("title") || "").startsWith("Fit all content"),
@@ -374,9 +397,29 @@ async function main(): Promise<void> {
       if (!check.onScreen) {
         throw new Error(`stage editor spills off the 390px viewport (right ${check.right} > innerWidth ${check.innerWidth})`);
       }
+      /* #507 final F2: expand the editor's role / model·effort / prompt controls
+         so the 390px capture shows the full on-canvas editor usable inside the
+         sheet, not just its header. */
+      await mobile.locator('[role="dialog"][aria-label^="Configuration for stage"] button[aria-label="Update stage"]').first().click();
+      await mobile.waitForSelector('[role="dialog"][aria-label^="Configuration for stage"] textarea', { state: "visible", timeout: 20_000 });
+      const expanded = await mobile.evaluate(() => {
+        const dialog = document.querySelector('[role="dialog"][aria-label^="Configuration for stage"]');
+        if (!dialog) return null;
+        const rect = dialog.getBoundingClientRect();
+        return {
+          hasRole: Boolean(dialog.querySelector("select")),
+          hasPrompt: Boolean(dialog.querySelector("textarea")),
+          modal: dialog.getAttribute("aria-modal"),
+          onScreen: rect.left >= 0 && rect.right <= window.innerWidth && rect.width > 0,
+        };
+      });
+      if (!expanded) throw new Error("editor vanished while expanding its controls");
+      if (!expanded.hasRole || !expanded.hasPrompt) throw new Error("editor did not expose role and prompt controls when expanded");
+      if (expanded.modal !== "true") throw new Error(`editor must be a real modal (aria-modal="true"), got ${expanded.modal}`);
+      if (!expanded.onScreen) throw new Error("editor spilled off the 390px viewport with controls expanded");
       await mobile.waitForTimeout(300);
       await mobile.screenshot({ path: path.join(outDir, "issue-507-editor-mobile-390-editor.png") });
-      editorEvidence = `editorZ ${check.editorZ} > sheetZ ${check.sheetZ}, on-screen (right ${check.right} <= ${check.innerWidth})`;
+      editorEvidence = `aria-modal=true, editorZ ${check.editorZ} > sheetZ ${check.sheetZ}, role+model+prompt expanded, on-screen (right ${check.right} <= ${check.innerWidth})`;
     } catch (error) {
       await mobile.close();
       throw new Error(`mobile stage-editor evidence failed: ${error instanceof Error ? error.message : String(error)}`);
