@@ -18,6 +18,7 @@ export const RUNTIME_HOST_FENCE_WAIT_ENV = "LLV_RUNTIME_HOST_FENCE_WAIT_MS";
 const SUCCESSOR_FENCE_WAIT_MS = 10 * 60_000;
 const DOCKER_RESTART_POLICY_STABILITY_MS = 11_000;
 export const RUNTIME_HOST_SUCCESSOR_LABEL = "dev.live-log-viewer.runtime-host-successor";
+export const RUNTIME_HOST_PREDECESSOR_LABEL = "dev.live-log-viewer.runtime-host-predecessor";
 const RUNTIME_HOST_GENERATION_ENV = [
   RUNTIME_HOST_FENCE_WAIT_ENV,
   RUNTIME_HOST_IMAGE_ENV,
@@ -163,6 +164,7 @@ function successorRunArgs(
        fence and survives every client-process death, including this one. */
     "--restart", "unless-stopped",
     "--label", `${RUNTIME_HOST_SUCCESSOR_LABEL}=1`,
+    "--label", `${RUNTIME_HOST_PREDECESSOR_LABEL}=${predecessor.id}`,
     "--label", `dev.live-log-viewer.revision=${candidate.revision}`,
     "--network", predecessor.networkMode,
     "--pid", predecessor.pidMode,
@@ -215,6 +217,18 @@ function successorMatchesGeneration(raw: string, name: string, candidate: Viewer
     && hasSingleEntry(RUNTIME_HOST_IMAGE_ENV, candidate.image)
     && hasSingleEntry(RUNTIME_HOST_REVISION_ENV, candidate.revision)
     && hasSingleEntry(RUNTIME_HOST_CONTAINER_ENV, name);
+}
+
+function encodedPredecessorId(raw: string, successorName: string): string | null {
+  const container = ((JSON.parse(raw) as Array<Record<string, unknown>>)[0] ?? {}) as Record<string, unknown>;
+  const config = (container.Config ?? {}) as Record<string, unknown>;
+  const labels = (config.Labels ?? {}) as Record<string, unknown>;
+  const predecessorId = labels[RUNTIME_HOST_PREDECESSOR_LABEL];
+  if (typeof predecessorId !== "string"
+    || predecessorId.length === 0
+    || predecessorId === container.Id
+    || predecessorId === successorName) return null;
+  return predecessorId;
 }
 
 function successorIsReady(raw: string, name: string, candidate: ViewerReleaseIdentity): boolean {
@@ -287,10 +301,12 @@ function publishReleaseOnce(name: string, candidate: ViewerReleaseIdentity, port
     2. the service tag is repointed at the candidate image, so any future
        (re)creation of the compose service boots the deployed revision;
     3. the successor container is created and started by dockerd with a
-       restart policy, cloned from the predecessor's topology. It waits for
-       the singleton fence, so both generations coexist without a second
-       journal writer, and it survives the death of every initiating client
-       process — this module never stops, kills, or removes the predecessor;
+       restart policy, cloned from the predecessor's topology. Its immutable
+       labels bind the original predecessor before the successor can outlive
+       the staging process. It waits for the singleton fence, so both
+       generations coexist without a second journal writer, and it survives
+       the death of every initiating client process — this module never stops,
+       kills, or removes the predecessor;
     4. two identity-aware observations prove that the successor remains in its
        running fence-wait state without restarting in between;
     5. the durable handoff intent records the successor and predecessor
@@ -335,6 +351,7 @@ export async function stageRuntimeHostSuccessorContainer(
   }
   const predecessor = await findPredecessor(ports);
   if (!predecessor) throw new Error("runtime-host predecessor container is unavailable for successor staging");
+  let predecessorId = predecessor.id;
   try {
     await ports.docker(successorRunArgs(name, candidate, predecessor));
   } catch (error) {
@@ -347,6 +364,9 @@ export async function stageRuntimeHostSuccessorContainer(
     if (!successorMatchesGeneration(collision, name, candidate)) {
       throw new Error("runtime-host successor container failed its identity or running-state gate");
     }
+    const encoded = encodedPredecessorId(collision, name);
+    if (!encoded) throw new Error("runtime-host successor container lacks durable predecessor identity");
+    predecessorId = encoded;
     await ports.docker(["container", "start", name]);
   }
   await observeStableSuccessor(name, candidate, ports);
@@ -354,10 +374,10 @@ export async function stageRuntimeHostSuccessorContainer(
     revision: candidate.revision,
     image: candidate.image,
     successorContainer: name,
-    predecessorId: predecessor.id,
+    predecessorId,
     recordedAt: (ports.now ?? (() => new Date().toISOString()))(),
   });
-  await disablePredecessorRestart(predecessor.id, ports);
+  await disablePredecessorRestart(predecessorId, ports);
   publishReleaseOnce(name, candidate, ports);
   return { successorContainer: name };
 }

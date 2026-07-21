@@ -13,6 +13,7 @@ import {
 import {
   completeRuntimeHostHandoff,
   RUNTIME_HOST_FENCE_WAIT_ENV,
+  RUNTIME_HOST_PREDECESSOR_LABEL,
   RUNTIME_HOST_SUCCESSOR_LABEL,
   runtimeHostSuccessorName,
   stageRuntimeHostSuccessorContainer,
@@ -167,6 +168,7 @@ function harness(overrides: {
         Image: overrides.successorImage ?? candidate.image,
         Labels: {
           [RUNTIME_HOST_SUCCESSOR_LABEL]: "1",
+          [RUNTIME_HOST_PREDECESSOR_LABEL]: "abc123",
           "dev.live-log-viewer.revision": candidate.revision,
         },
         Env: [
@@ -238,7 +240,9 @@ interface CrashWorld {
   predecessorRunning: boolean;
   predecessorRestart: string;
   successorExists: boolean;
+  successorPredecessorId: string | null;
   successorRestart: string | null;
+  crashDuringWait: boolean;
   crashAfterRestartDisable: boolean;
   crashAfterPublish: boolean;
   releaseRecords: RuntimeHostReleaseRecord[];
@@ -252,7 +256,9 @@ function crashWorld(): CrashWorld {
     predecessorRunning: true,
     predecessorRestart: "unless-stopped",
     successorExists: false,
+    successorPredecessorId: null,
     successorRestart: null,
+    crashDuringWait: false,
     crashAfterRestartDisable: false,
     crashAfterPublish: false,
     releaseRecords: [],
@@ -285,6 +291,9 @@ function crashHarness(world: CrashWorld): { ports: RuntimeHostSuccessorPorts; ca
         Labels: {
           [RUNTIME_HOST_SUCCESSOR_LABEL]: "1",
           "dev.live-log-viewer.revision": candidate.revision,
+          ...(world.successorPredecessorId
+            ? { [RUNTIME_HOST_PREDECESSOR_LABEL]: world.successorPredecessorId }
+            : {}),
         },
       },
       HostConfig: { Binds: [], GroupAdd: [], NetworkMode: "host", PidMode: "host", Privileged: false },
@@ -310,6 +319,8 @@ function crashHarness(world: CrashWorld): { ports: RuntimeHostSuccessorPorts; ca
       }
       if (argv[0] === "run") {
         if (world.successorExists) throw new Error(`docker: Error response from daemon: Conflict. The container name "/${successorName}" is already in use`);
+        const predecessorLabel = argv.find((item) => item.startsWith(`${RUNTIME_HOST_PREDECESSOR_LABEL}=`));
+        world.successorPredecessorId = predecessorLabel?.split("=", 2)[1] ?? null;
         world.successorExists = true;
         world.successorRestart = "unless-stopped";
         return SUCCESSOR_ID;
@@ -353,7 +364,12 @@ function crashHarness(world: CrashWorld): { ports: RuntimeHostSuccessorPorts; ca
     clearHandoffIntent: () => { world.handoffIntent = null; },
     fenceOwnerPid: () => world.fenceOwnerPid,
     now: () => "2026-07-21T09:00:00.000Z",
-    wait: async () => undefined,
+    wait: async () => {
+      if (world.crashDuringWait) {
+        world.crashDuringWait = false;
+        throw new Error("simulated pre-intent staging crash");
+      }
+    },
   };
   return { ports, calls };
 }
@@ -676,6 +692,30 @@ test("issue 521 review: a foreign durable intent blocks staging before Docker mu
   expect(records).toEqual([]);
   expect(intents).toEqual([]);
   expect(JSON.stringify(storedIntent())).toBe(originalBytes);
+});
+
+test("issue 521 review: reboot recovery before durable intent retains the original predecessor", async () => {
+  const world = crashWorld();
+  world.crashDuringWait = true;
+  const first = crashHarness(world);
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", first.ports))
+    .rejects.toThrow("simulated pre-intent staging crash");
+  expect(world.handoffIntent).toBeNull();
+  expect(world.successorExists).toBe(true);
+
+  world.predecessorRunning = false;
+  world.fenceOwnerPid = SUCCESSOR_PID;
+  const recovered = crashHarness(world);
+  await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", recovered.ports);
+
+  expect(world.handoffIntent).toMatchObject({
+    predecessorId: "abc123",
+    successorContainer: runtimeHostSuccessorName(revision, candidate.image),
+  });
+  expect(world.predecessorRestart).toBe("no");
+  expect(world.successorRestart).toBe("unless-stopped");
+  expect(world.releaseRecords).toHaveLength(1);
 });
 
 /* PR #521 review, finding 1: a crash after the predecessor's restart policy
