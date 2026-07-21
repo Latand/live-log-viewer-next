@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
 import { withoutWakatimeCredentialEntries } from "@/lib/wakatime/credential";
 
+import { AGENT_REGISTRY_SQLITE_ENV, type AgentRegistryBackendMode } from "./candidateContainer";
+
 import {
   RUNTIME_HOST_CONTAINER_ENV,
   RUNTIME_HOST_IMAGE_ENV,
@@ -59,6 +61,10 @@ export interface RuntimeHostGenerationIdentity {
   image: string;
   revision: string;
   container: string;
+}
+
+export interface RuntimeHostSuccessorOptions {
+  registryBackendMode?: AgentRegistryBackendMode;
 }
 
 export function runtimeHostSuccessorName(revision: string, image: string): string {
@@ -156,7 +162,11 @@ function successorRunArgs(
   name: string,
   candidate: ViewerReleaseIdentity,
   predecessor: PredecessorTopology,
+  options: RuntimeHostSuccessorOptions,
 ): string[] {
+  const inheritedEnvironment = options.registryBackendMode === undefined
+    ? predecessor.env
+    : predecessor.env.filter((entry) => !isEnvironmentEntry(entry, AGENT_REGISTRY_SQLITE_ENV));
   return [
     "run", "-d",
     "--name", name,
@@ -173,7 +183,10 @@ function successorRunArgs(
     ...(predecessor.workingDir ? ["--workdir", predecessor.workingDir] : []),
     ...predecessor.groupAdd.flatMap((group) => ["--group-add", group]),
     ...predecessor.binds.flatMap((bind) => ["-v", bind]),
-    ...predecessor.env.flatMap((entry) => ["-e", entry]),
+    ...inheritedEnvironment.flatMap((entry) => ["-e", entry]),
+    ...(options.registryBackendMode === undefined
+      ? []
+      : ["-e", `${AGENT_REGISTRY_SQLITE_ENV}=${options.registryBackendMode}`]),
     "-e", `${RUNTIME_HOST_FENCE_WAIT_ENV}=${SUCCESSOR_FENCE_WAIT_MS}`,
     "-e", `${RUNTIME_HOST_IMAGE_ENV}=${candidate.image}`,
     "-e", `${RUNTIME_HOST_REVISION_ENV}=${candidate.revision}`,
@@ -203,7 +216,12 @@ function successorStartIdentity(raw: string): SuccessorStartIdentity {
   };
 }
 
-function successorMatchesGeneration(raw: string, name: string, candidate: ViewerReleaseIdentity): boolean {
+function successorMatchesGeneration(
+  raw: string,
+  name: string,
+  candidate: ViewerReleaseIdentity,
+  options: RuntimeHostSuccessorOptions,
+): boolean {
   const inspected = JSON.parse(raw) as Array<Record<string, unknown>>;
   const container = inspected[0] ?? {};
   const config = (container.Config ?? {}) as Record<string, unknown>;
@@ -216,7 +234,9 @@ function successorMatchesGeneration(raw: string, name: string, candidate: Viewer
     && labels["dev.live-log-viewer.revision"] === candidate.revision
     && hasSingleEntry(RUNTIME_HOST_IMAGE_ENV, candidate.image)
     && hasSingleEntry(RUNTIME_HOST_REVISION_ENV, candidate.revision)
-    && hasSingleEntry(RUNTIME_HOST_CONTAINER_ENV, name);
+    && hasSingleEntry(RUNTIME_HOST_CONTAINER_ENV, name)
+    && (options.registryBackendMode === undefined
+      || hasSingleEntry(AGENT_REGISTRY_SQLITE_ENV, options.registryBackendMode));
 }
 
 function encodedPredecessorId(raw: string, successorName: string): string | null {
@@ -231,10 +251,15 @@ function encodedPredecessorId(raw: string, successorName: string): string | null
   return predecessorId;
 }
 
-function successorIsReady(raw: string, name: string, candidate: ViewerReleaseIdentity): boolean {
+function successorIsReady(
+  raw: string,
+  name: string,
+  candidate: ViewerReleaseIdentity,
+  options: RuntimeHostSuccessorOptions,
+): boolean {
   const inspected = JSON.parse(raw) as Array<Record<string, unknown>>;
   const state = (inspected[0]?.State ?? {}) as Record<string, unknown>;
-  return successorMatchesGeneration(raw, name, candidate)
+  return successorMatchesGeneration(raw, name, candidate, options)
     && state.Status === "running"
     && state.Running === true
     && state.Restarting !== true;
@@ -249,14 +274,15 @@ async function observeStableSuccessor(
   name: string,
   candidate: ViewerReleaseIdentity,
   ports: RuntimeHostSuccessorPorts,
+  options: RuntimeHostSuccessorOptions,
 ): Promise<void> {
   const firstEvidence = await ports.docker(["container", "inspect", name]);
-  if (!successorIsReady(firstEvidence, name, candidate)) {
+  if (!successorIsReady(firstEvidence, name, candidate, options)) {
     throw new Error("runtime-host successor container failed its identity or running-state gate");
   }
   await (ports.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(DOCKER_RESTART_POLICY_STABILITY_MS);
   const stableEvidence = await ports.docker(["container", "inspect", name]);
-  if (!successorIsReady(stableEvidence, name, candidate)) {
+  if (!successorIsReady(stableEvidence, name, candidate, options)) {
     throw new Error("runtime-host successor container did not remain stably ready");
   }
   const first = successorStartIdentity(firstEvidence);
@@ -325,6 +351,7 @@ export async function stageRuntimeHostSuccessorContainer(
   candidate: ViewerReleaseIdentity,
   runtimeHostImageTag: string,
   ports: RuntimeHostSuccessorPorts,
+  options: RuntimeHostSuccessorOptions = {},
 ): Promise<{ successorContainer: string }> {
   const name = runtimeHostSuccessorName(candidate.revision, candidate.image);
   const intent = ports.readHandoffIntent();
@@ -344,7 +371,7 @@ export async function stageRuntimeHostSuccessorContainer(
        predecessor discovery is forbidden here — it would select, disable,
        and exit the successor itself. Both identities come from the intent. */
     await ports.docker(["container", "start", name]);
-    await observeStableSuccessor(name, candidate, ports);
+    await observeStableSuccessor(name, candidate, ports, options);
     await disablePredecessorRestart(intent.predecessorId, ports);
     publishReleaseOnce(name, candidate, ports);
     return { successorContainer: name };
@@ -353,7 +380,7 @@ export async function stageRuntimeHostSuccessorContainer(
   if (!predecessor) throw new Error("runtime-host predecessor container is unavailable for successor staging");
   let predecessorId = predecessor.id;
   try {
-    await ports.docker(successorRunArgs(name, candidate, predecessor));
+    await ports.docker(successorRunArgs(name, candidate, predecessor, options));
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     /* A same-attempt leftover may be reused only after its complete immutable
@@ -361,7 +388,7 @@ export async function stageRuntimeHostSuccessorContainer(
        stopped so it can never acquire the singleton fence. */
     if (!/is already in use|Conflict/.test(message)) throw error;
     const collision = await ports.docker(["container", "inspect", name]);
-    if (!successorMatchesGeneration(collision, name, candidate)) {
+    if (!successorMatchesGeneration(collision, name, candidate, options)) {
       throw new Error("runtime-host successor container failed its identity or running-state gate");
     }
     const encoded = encodedPredecessorId(collision, name);
@@ -369,7 +396,7 @@ export async function stageRuntimeHostSuccessorContainer(
     predecessorId = encoded;
     await ports.docker(["container", "start", name]);
   }
-  await observeStableSuccessor(name, candidate, ports);
+  await observeStableSuccessor(name, candidate, ports, options);
   ports.writeHandoffIntent({
     revision: candidate.revision,
     image: candidate.image,

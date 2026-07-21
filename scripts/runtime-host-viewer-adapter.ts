@@ -13,6 +13,7 @@ import {
   viewerComposeSnapshotWithoutWakatimeCredential,
   viewerComposeServiceFromConfig,
   viewerComposeServiceUid,
+  viewerRegistryBackendMode,
 } from "../src/runtime-host/candidateContainer";
 import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
@@ -28,7 +29,13 @@ import {
   writeRuntimeHostRelease,
 } from "../src/runtime-host/hostRelease";
 import { completeRuntimeHostHandoff, stageRuntimeHostSuccessorContainer } from "../src/runtime-host/hostSuccessor";
-import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
+import {
+  hasViewerDeploymentCapability,
+  viewerDeploymentRegistryBackendMode,
+  viewerHealthRequestPlan,
+  waitForViewerReadiness,
+  type ViewerCandidateContainerState,
+} from "../src/runtime-host/deploymentHealth";
 import { withoutWakatimeCredential } from "../src/lib/wakatime/credential";
 
 const defaultConfigDir = process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || "/home/user", ".config");
@@ -241,6 +248,11 @@ async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, e
   const unauthorized = requests.unauthorized ? await fetchStatus(requests.unauthorized.url, requests.unauthorized.headers) : null;
   const capability = await fetchStatus(requests.capability.url, requests.capability.headers);
   const deploymentCapable = hasViewerDeploymentCapability(capability.status, capability.text);
+  const expectedRegistryBackendMode = viewerRegistryBackendMode(
+    viewerComposeServiceFromConfig(fs.readFileSync(composeConfigFile(candidate.container), "utf8")),
+  );
+  const observedRegistryBackendMode = viewerDeploymentRegistryBackendMode(capability.status, capability.text);
+  const registryBackendMatches = observedRegistryBackendMode === expectedRegistryBackendMode;
   const html = authenticated?.status === 200 ? authenticated.text : root.text;
   const paths = referencedAssets(html);
   const assets = await Promise.all(paths.map(async (asset) => ({ path: asset, status: (await fetchStatus(`${endpoint}${asset}`)).status })));
@@ -258,6 +270,7 @@ async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, e
     && assets.length > 0
     && assets.every((asset) => asset.status === 200)
     && deploymentCapable
+    && registryBackendMatches
     && expectedAssetsMatch;
   return {
     checkedAt: new Date().toISOString(), endpoint, processReady, rootStatus: root.status,
@@ -265,6 +278,8 @@ async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, e
     ...(ok ? {} : {
       detail: !deploymentCapable
         ? "Viewer deployment capability gate failed"
+        : !registryBackendMatches
+          ? `Viewer registry backend mode mismatch: expected ${expectedRegistryBackendMode}, observed ${observedRegistryBackendMode ?? "unavailable"}`
         : expectedAssetsMatch
           ? "Viewer health or referenced asset gate failed"
           : "stable listener does not serve the candidate asset set",
@@ -328,6 +343,9 @@ function switchTarget(target: ViewerReleaseIdentity): void {
     needs to survive that exit. Only the runtime-host generation changes —
     Viewer containers and the engine processes they own are never signalled. */
 async function stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<void> {
+  const registryBackendMode = viewerRegistryBackendMode(
+    viewerComposeServiceFromConfig(fs.readFileSync(composeConfigFile(candidate.container), "utf8")),
+  );
   await stageRuntimeHostSuccessorContainer(candidate, runtimeHostImageTag, {
     docker: (argv) => command(["docker", ...argv]),
     writeRelease: (record) => writeRuntimeHostRelease(record, runtimeHostReleaseFile()),
@@ -343,7 +361,7 @@ async function stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Prom
         return null;
       }
     },
-  });
+  }, { registryBackendMode });
 }
 
 async function main(): Promise<unknown> {

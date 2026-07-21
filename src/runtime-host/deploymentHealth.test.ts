@@ -5,7 +5,12 @@ import type { ViewerHealthEvidence } from "@/lib/runtime/contracts";
 import { proxy } from "@/proxy";
 import { GET as deploymentCapability } from "@/app/api/runtime/deployments/capabilities/v1/route";
 
-import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness } from "./deploymentHealth";
+import {
+  hasViewerDeploymentCapability,
+  viewerDeploymentRegistryBackendMode,
+  viewerHealthRequestPlan,
+  waitForViewerReadiness,
+} from "./deploymentHealth";
 
 const originalToken = process.env.LLV_TOKEN;
 afterEach(() => {
@@ -77,9 +82,16 @@ test("health request plan exercises remote authorization and rejection", () => {
 
 test("deployment capability requires the candidate-owned versioned endpoint", async () => {
   const response = deploymentCapability();
+  const body = await response.text();
 
   expect(hasViewerDeploymentCapability(404, "")).toBe(false);
   expect(hasViewerDeploymentCapability(200, JSON.stringify({ deployments: [] }))).toBe(false);
   expect(response.status).toBe(200);
-  expect(hasViewerDeploymentCapability(response.status, await response.text())).toBe(true);
+  expect(hasViewerDeploymentCapability(response.status, body)).toBe(true);
+  expect(viewerDeploymentRegistryBackendMode(response.status, body)).toBe("off");
+  expect(viewerDeploymentRegistryBackendMode(200, JSON.stringify({
+    capability: "viewer-deployments",
+    version: 1,
+    registryBackendMode: "invalid",
+  }))).toBeNull();
 });

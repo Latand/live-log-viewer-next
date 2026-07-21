@@ -35,6 +35,17 @@ export interface ViewerCandidateContainerOverrides {
   tmuxTmpdir: string;
 }
 
+export const AGENT_REGISTRY_SQLITE_ENV = "LLV_AGENT_REGISTRY_SQLITE";
+export type AgentRegistryBackendMode = "off" | "dual-write" | "read" | "sqlite";
+
+export function viewerRegistryBackendMode(service: Pick<ViewerComposeService, "environment">): AgentRegistryBackendMode {
+  const configured = service.environment[AGENT_REGISTRY_SQLITE_ENV] ?? "off";
+  if (configured === "off" || configured === "dual-write" || configured === "read" || configured === "sqlite") {
+    return configured;
+  }
+  throw new Error("LLV_AGENT_REGISTRY_SQLITE must be off, dual-write, read, or sqlite");
+}
+
 const SERVICE_KEYS = new Set([
   "build", "command", "entrypoint", "environment", "image", "labels", "network_mode",
   "pid", "privileged", "profiles", "restart", "user", "volumes", "working_dir",
@@ -178,8 +189,10 @@ export function viewerCandidateDockerArgs(
   overrides: ViewerCandidateContainerOverrides,
 ): string[] {
   const endpoint = new URL(candidate.endpoint);
+  const registryBackendMode = viewerRegistryBackendMode(service);
   const environment = withoutWakatimeCredential({
     ...service.environment,
+    [AGENT_REGISTRY_SQLITE_ENV]: registryBackendMode,
     PORT: endpoint.port,
     LLV_RUNTIME_EVENTS: "1",
     LLV_RUNTIME_HOST_SOCKET: overrides.runtimeSocket,
