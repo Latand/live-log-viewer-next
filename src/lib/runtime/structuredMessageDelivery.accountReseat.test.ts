@@ -139,6 +139,124 @@ test("a live structured send starts an active-account reseat and holds the opera
     text: "continue after migration",
     state: "held",
   }]);
+  expect(Object.values(registry.snapshot().heldDeliveries)).toHaveLength(1);
+});
+
+test("a mismatched-account image rejection leaves migration state untouched", async () => {
+  const { registry, conversation } = registryWithConversation();
+  registry.setEngineRouting("codex", "seat-active");
+  const before = registry.snapshot();
+  const imageRef: StructuredImageRef = { sha256: "a".repeat(64), mime: "image/png", bytes: 67 };
+  let migrationTicks = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "rejected-account-reseat-image",
+    text: "ambiguous image payload",
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
+    imageRefs: [imageRef],
+  }, {
+    enabled: () => true,
+    client: () => ({ snapshot: async () => snapshot(conversation.id) }) as unknown as RuntimeHostClient,
+    registry: () => registry,
+    requestMigrationTick: () => { migrationTicks += 1; },
+  });
+
+  expect(result).toMatchObject({
+    ok: false,
+    outcome: "failed",
+    error: "structured image payload is ambiguous",
+  });
+  expect(migrationTicks).toBe(0);
+  expect(registry.snapshot()).toEqual(before);
+});
+
+test("a mismatched-account idempotency conflict leaves migration state untouched", async () => {
+  const { registry, conversation } = registryWithConversation();
+  registry.setEngineRouting("codex", "seat-active");
+  registry.holdDelivery(conversation.id, "original payload", "conflicting-account-reseat");
+  const before = registry.snapshot();
+  let migrationTicks = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "conflicting-account-reseat",
+    text: "changed payload",
+  }, {
+    enabled: () => true,
+    client: () => ({ snapshot: async () => snapshot(conversation.id) }) as unknown as RuntimeHostClient,
+    registry: () => registry,
+    requestMigrationTick: () => { migrationTicks += 1; },
+  });
+
+  expect(result).toMatchObject({
+    ok: false,
+    outcome: "failed",
+    status: 409,
+    error: "client message id is already reserved for another request",
+  });
+  expect(migrationTicks).toBe(0);
+  expect(registry.snapshot()).toEqual(before);
+});
+
+test("mismatched-account terminal replays leave migration state untouched", async () => {
+  for (const terminalState of ["delivered", "failed"] as const) {
+    const { registry, conversation } = registryWithConversation();
+    const operationId = `terminal-account-reseat-operation-${terminalState}`;
+    const clientMessageId = `terminal-account-reseat-client-${terminalState}`;
+    const terminal = registry.holdDelivery(
+      conversation.id,
+      `already ${terminalState}`,
+      clientMessageId,
+      "text",
+      [],
+      null,
+      { operationId },
+    );
+    registry.beginDeliveryAttempt(terminal.id, terminal.generationId!);
+    registry.recordDeliveryOutcome(terminal.id, terminalState);
+    const compacted = registry.snapshot();
+    delete compacted.heldDeliveries[terminal.id];
+    fs.writeFileSync(registry.filename, JSON.stringify(compacted));
+
+    const restarted = new AgentRegistry(registry.filename);
+    restarted.setEngineRouting("codex", "seat-active");
+    const before = restarted.snapshot();
+    let migrationTicks = 0;
+
+    const result = await enqueueStructuredMessage({
+      path: artifactPath,
+      conversationId: conversation.id,
+      clientMessageId,
+      operationId,
+      text: `already ${terminalState}`,
+    }, {
+      enabled: () => true,
+      client: () => ({ snapshot: async () => snapshot(conversation.id) }) as unknown as RuntimeHostClient,
+      registry: () => restarted,
+      requestMigrationTick: () => { migrationTicks += 1; },
+    });
+
+    if (terminalState === "delivered") {
+      expect(result).toMatchObject({
+        ok: true,
+        outcome: "delivered",
+        operationId,
+        receipt: { status: "delivered" },
+      });
+    } else {
+      expect(result).toMatchObject({
+        ok: false,
+        outcome: "failed",
+        status: 409,
+        error: "delivery failed",
+      });
+    }
+    expect(migrationTicks).toBe(0);
+    expect(restarted.snapshot()).toEqual(before);
+  }
 });
 
 test("a dead structured send is durable before predecessor recovery", async () => {

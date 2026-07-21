@@ -1292,6 +1292,99 @@ function syncDeliveryOperationOwnerState(file: RegistryFile, delivery: HeldDeliv
   if (owner?.deliveryId === delivery.id) owner.terminalState = terminalDeliveryState(delivery);
 }
 
+interface DeliveryReservationInspection {
+  canonicalId: ViewerConversationId;
+  existing: HeldDelivery | undefined;
+  requestDigest: string;
+  terminalOperationRetry: DeliveryOperationOwner | null;
+}
+
+function inspectDeliveryReservation(
+  file: RegistryFile,
+  conversationId: ViewerConversationId,
+  text: string,
+  clientMessageId: string | null,
+  contentDigest: string | null,
+  commandInput: HeldDeliveryCommandInput,
+): DeliveryReservationInspection {
+  const canonicalId = resolveConversationAlias(file, conversationId);
+  const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) =>
+    resolveConversationAlias(file, item.conversationId) === canonicalId
+    && item.clientMessageId === clientMessageId) : undefined;
+  const requestedCommand = canonicalHeldDeliveryCommand(commandInput, existing?.id ?? "pending-delivery");
+  const requestDigest = heldDeliveryRequestDigest(canonicalId, text, requestedCommand);
+  const requestedDigests = heldDeliveryRequestDigests(file, canonicalId, text, requestedCommand);
+  if (existing?.requestDigest && !requestedDigests.has(existing.requestDigest)) {
+    throw new DeliveryReservationConflictError();
+  }
+  if (existing?.contentDigest && contentDigest && contentDigest !== existing.contentDigest) {
+    throw new DeliveryReservationConflictError();
+  }
+  let terminalOperationRetry: DeliveryOperationOwner | null = null;
+  if (!existing && commandInput.operationId) {
+    const ownedDelivery = Object.values(file.heldDeliveries).find((item) =>
+      item.command.operationId === requestedCommand.operationId);
+    const operationOwner = file.deliveryOperationOwners[requestedCommand.operationId]
+      ?? (ownedDelivery?.requestDigest ? {
+        conversationId: ownedDelivery.conversationId,
+        runtimeConversationId: ownedDelivery.runtimeConversationId,
+        clientMessageId: ownedDelivery.clientMessageId,
+        deliveryId: ownedDelivery.id,
+        command: ownedDelivery.command,
+        requestDigest: ownedDelivery.requestDigest,
+        contentDigest: ownedDelivery.contentDigest,
+        createdAt: ownedDelivery.createdAt,
+        terminalState: terminalDeliveryState(ownedDelivery),
+      } : null);
+    const matchingOwner = operationOwner
+      && resolveConversationAlias(file, operationOwner.conversationId) === canonicalId
+      && operationOwner.clientMessageId === clientMessageId
+      && requestedDigests.has(operationOwner.requestDigest)
+      && (!operationOwner.contentDigest || !contentDigest || operationOwner.contentDigest === contentDigest);
+    if (operationOwner && !matchingOwner) {
+      throw new DeliveryReservationConflictError("operation id is already reserved for another client message");
+    }
+    if (matchingOwner && operationOwner.terminalState) terminalOperationRetry = clone(operationOwner);
+  }
+  return { canonicalId, existing, requestDigest, terminalOperationRetry };
+}
+
+function terminalDeliveryReplay(
+  inspection: DeliveryReservationInspection,
+  text: string,
+  clientMessageId: string | null,
+  payloadKind: HeldDelivery["payloadKind"],
+  runtimeImages: readonly StructuredImageRef[],
+  contentDigest: string | null,
+): HeldDelivery | null {
+  if (inspection.existing?.state === "delivered"
+    || inspection.existing?.error === CORRUPT_HELD_DELIVERY_IMAGES_ERROR) {
+    return clone(inspection.existing);
+  }
+  const retry = inspection.terminalOperationRetry;
+  if (!retry?.terminalState) return null;
+  return {
+    id: retry.deliveryId,
+    conversationId: inspection.canonicalId,
+    runtimeConversationId: retry.runtimeConversationId,
+    text,
+    createdAt: retry.createdAt,
+    clientMessageId,
+    payloadKind,
+    runtimeImages: runtimeImages.map((image) => ({ ...image })),
+    contentDigest,
+    artifactPaths: [],
+    command: retry.command,
+    requestDigest: retry.requestDigest,
+    state: retry.terminalState,
+    generationId: null,
+    attempts: 0,
+    assignedAt: null,
+    deliveredAt: retry.terminalState === "delivered" ? retry.createdAt : null,
+    error: retry.terminalState === "failed" ? "delivery failed" : null,
+  };
+}
+
 function normalizeDeliveryOperationOwners(
   value: unknown,
   heldDeliveries: RegistryFile["heldDeliveries"],
@@ -5052,42 +5145,15 @@ export class AgentRegistry {
     /* One UTF-8 bound covers every payload kind, including image captions. */
     assertStructuredTextEnvelope(text);
     return this.mutate((file) => {
-      const canonicalId = resolveConversationAlias(file, conversationId);
-      const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) =>
-        resolveConversationAlias(file, item.conversationId) === canonicalId
-        && item.clientMessageId === clientMessageId) : undefined;
-      const requestedCommand = canonicalHeldDeliveryCommand(commandInput, existing?.id ?? "pending-delivery");
-      const requestDigest = heldDeliveryRequestDigest(canonicalId, text, requestedCommand);
-      const requestedDigests = heldDeliveryRequestDigests(file, canonicalId, text, requestedCommand);
-      let terminalOperationRetry: DeliveryOperationOwner | null = null;
-      if (existing?.requestDigest && !requestedDigests.has(existing.requestDigest)) {
-        throw new DeliveryReservationConflictError();
-      }
-      if (!existing && commandInput.operationId) {
-        const ownedDelivery = Object.values(file.heldDeliveries).find((item) =>
-          item.command.operationId === requestedCommand.operationId);
-        const operationOwner = file.deliveryOperationOwners[requestedCommand.operationId]
-          ?? (ownedDelivery?.requestDigest ? {
-            conversationId: ownedDelivery.conversationId,
-            runtimeConversationId: ownedDelivery.runtimeConversationId,
-            clientMessageId: ownedDelivery.clientMessageId,
-            deliveryId: ownedDelivery.id,
-            command: ownedDelivery.command,
-            requestDigest: ownedDelivery.requestDigest,
-            contentDigest: ownedDelivery.contentDigest,
-            createdAt: ownedDelivery.createdAt,
-            terminalState: terminalDeliveryState(ownedDelivery),
-          } : null);
-        const matchingOwner = operationOwner
-          && resolveConversationAlias(file, operationOwner.conversationId) === canonicalId
-          && operationOwner.clientMessageId === clientMessageId
-          && requestedDigests.has(operationOwner.requestDigest)
-          && (!operationOwner.contentDigest || !contentDigest || operationOwner.contentDigest === contentDigest);
-        if (operationOwner && !matchingOwner) {
-          throw new DeliveryReservationConflictError("operation id is already reserved for another client message");
-        }
-        if (matchingOwner && operationOwner.terminalState) terminalOperationRetry = clone(operationOwner);
-      }
+      const inspection = inspectDeliveryReservation(
+        file,
+        conversationId,
+        text,
+        clientMessageId,
+        contentDigest,
+        commandInput,
+      );
+      const { canonicalId, existing, requestDigest } = inspection;
       const conversation = file.conversations[canonicalId];
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
@@ -5120,41 +5186,20 @@ export class AgentRegistry {
         return clone(delivery);
       };
       if (existing) {
-        /* Same client message id with different content is a reservation
-           conflict. The typed error maps to HTTP 409 and the original
-           reservation stays authoritative. */
-        if (existing.contentDigest && contentDigest && contentDigest !== existing.contentDigest) {
-          throw new DeliveryReservationConflictError();
-        }
         /* A corrupt-image reservation stays a visible recoverable failure.
            Exact replay preserves that failed state. */
         if (existing.error === CORRUPT_HELD_DELIVERY_IMAGES_ERROR) return clone(existing);
         return place(existing);
       }
-      if (terminalOperationRetry) {
-        const terminalState = terminalOperationRetry.terminalState;
-        if (terminalState === null) throw new Error("terminal operation replay state is missing");
-        return {
-          id: terminalOperationRetry.deliveryId,
-          conversationId: canonicalId,
-          runtimeConversationId: terminalOperationRetry.runtimeConversationId,
-          text,
-          createdAt: terminalOperationRetry.createdAt,
-          clientMessageId,
-          payloadKind,
-          runtimeImages: runtimeImages.map((image) => ({ ...image })),
-          contentDigest,
-          artifactPaths: [],
-          command: terminalOperationRetry.command,
-          requestDigest: terminalOperationRetry.requestDigest,
-          state: terminalState,
-          generationId: null,
-          attempts: 0,
-          assignedAt: null,
-          deliveredAt: terminalState === "delivered" ? terminalOperationRetry.createdAt : null,
-          error: terminalState === "failed" ? "delivery failed" : null,
-        };
-      }
+      const terminalReplay = terminalDeliveryReplay(
+        inspection,
+        text,
+        clientMessageId,
+        payloadKind,
+        runtimeImages,
+        contentDigest,
+      );
+      if (terminalReplay) return terminalReplay;
       const deliveryId = crypto.randomUUID();
       const held: HeldDelivery = {
         id: deliveryId,
@@ -5197,27 +5242,27 @@ export class AgentRegistry {
     });
   }
 
-  /** Read-only preflight of holdDelivery's same-key conflict checks: true when
-      admitting this payload under the client message id would raise a
-      reservation conflict. Lets callers reject a changed payload BEFORE
-      publishing blobs, keeping write-before-reference for first admissions. */
-  deliveryReservationConflict(
+  /** Resolves conflicts and terminal replays without mutating the registry.
+      Callers can complete admission before publishing blobs or changing
+      account-migration ownership. */
+  preflightDeliveryReservation(
     conversationId: ViewerConversationId,
     text: string,
-    clientMessageId: string,
+    clientMessageId: string | null,
+    payloadKind: HeldDelivery["payloadKind"],
+    runtimeImages: readonly StructuredImageRef[],
     contentDigest: string | null,
     commandInput: HeldDeliveryCommandInput = {},
-  ): boolean {
+  ): HeldDelivery | null {
     const snapshot = this.readOnlySnapshot();
-    const canonicalId = resolveConversationAlias(snapshot, conversationId);
-    const existing = Object.values(snapshot.heldDeliveries)
-      .find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId);
-    if (!existing) return false;
-    const requestedCommand = canonicalHeldDeliveryCommand(commandInput, existing.id);
-    if (existing.requestDigest && !heldDeliveryRequestDigests(snapshot, canonicalId, text, requestedCommand).has(existing.requestDigest)) {
-      return true;
-    }
-    return Boolean(existing.contentDigest && contentDigest && contentDigest !== existing.contentDigest);
+    return terminalDeliveryReplay(
+      inspectDeliveryReservation(snapshot, conversationId, text, clientMessageId, contentDigest, commandInput),
+      text,
+      clientMessageId,
+      payloadKind,
+      runtimeImages,
+      contentDigest,
+    );
   }
 
   pendingDeliveries(conversationId: ViewerConversationId): HeldDelivery[] {
