@@ -3229,8 +3229,10 @@ describe("durable account migration coordinator", () => {
        ends in a structured `authentication_failed` API-error record and no
        host remains to append a `result` record. The reseat must read that
        record as the terminal turn, create exactly one successor, and send the
-       held stable clientMessageId to the successor once — across registry
-       restarts and repeated ticks, never to the predecessor. */
+       held stable clientMessageId to the successor once — even when the
+       process crashes right after the terminal inventory is persisted, so the
+       whole release runs through a reopened registry — and repeated ticks
+       stay stable, never sending to the predecessor. */
     const store = registry();
     const pathname = path.join(path.dirname(store.filename), "oauth-dead-source.jsonl");
     const successorPath = "/oauth-successor.jsonl";
@@ -3271,7 +3273,15 @@ describe("durable account migration coordinator", () => {
       activityReason: undefined,
     });
     const counts = { create: 0, verify: 0 };
-    const migrationProvider = provider([successorPath], counts);
+    const baseProvider = provider([successorPath], counts);
+    const createdOperations: string[] = [];
+    const migrationProvider: SuccessorProviderPort = {
+      ...baseProvider,
+      async create(input) {
+        createdOperations.push(input.operationId);
+        return baseProvider.create(input);
+      },
+    };
     const sends: { path: string; clientMessageId: string }[] = [];
     const deliveryPort = {
       async deliver(input: { path: string; clientMessageId: string }) {
@@ -3282,22 +3292,35 @@ describe("durable account migration coordinator", () => {
 
     await reconcileMigrationInventory(store, [entry]);
     expect(store.conversation(conversation.id)?.turn.state).toBe("terminal");
-    await reconcileMigrations(migrationProvider, deliveryPort, store);
-    const committed = store.conversation(conversation.id)!;
+    const operationId = store.conversation(conversation.id)!.migration!.operationId;
+
+    /* Crash boundary: the process dies right after the terminal inventory is
+       persisted — before migration reconciliation, successor commit, or
+       delivery. Every recovery pass runs through the reopened registry. */
+    const restarted = new AgentRegistry(store.filename);
+    expect(restarted.conversation(conversation.id)?.turn.state).toBe("terminal");
+    await reconcileMigrations(migrationProvider, deliveryPort, restarted);
+    const committed = restarted.conversation(conversation.id)!;
     expect(committed.migration?.phase).toBe("committed");
+    expect(committed.migration?.operationId).toBe(operationId);
+    expect(createdOperations).toEqual([operationId]);
     expect(counts.create).toBe(1);
     expect(committed.generations).toHaveLength(2);
     expect(committed.generations.at(-1)?.path).toBe(successorPath);
     expect(sends).toEqual([{ path: successorPath, clientMessageId: "oauth-held-client" }]);
-    expect(store.pendingDeliveries(conversation.id)).toEqual([]);
+    expect(sends.filter((send) => send.path === pathname)).toHaveLength(0);
+    expect(restarted.snapshot().migrationIntents[committed.migration!.intentId]).toMatchObject({ scope: "conversation", state: "complete" });
+    expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
 
-    const restarted = new AgentRegistry(store.filename);
     await reconcileMigrations(migrationProvider, deliveryPort, restarted);
+    await drainHeldDeliveries(conversation.id, deliveryPort, restarted);
     await reconcileMigrations(migrationProvider, deliveryPort, restarted);
     await advanceConversationMigration(conversation.id, restarted, migrationProvider);
     expect(counts.create).toBe(1);
+    expect(createdOperations).toEqual([operationId]);
     expect(sends).toEqual([{ path: successorPath, clientMessageId: "oauth-held-client" }]);
     expect(restarted.conversation(conversation.id)?.migration?.phase).toBe("committed");
+    expect(restarted.conversation(conversation.id)?.migration?.operationId).toBe(operationId);
     expect(restarted.conversation(conversation.id)?.generations).toHaveLength(2);
     expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
   });
