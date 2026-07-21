@@ -26,7 +26,7 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
-import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase } from "./git";
+import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import {
   DEFAULT_FAIL_EDGE_ROUNDS,
   MAX_FAIL_EDGE_ROUNDS,
@@ -499,6 +499,7 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAtte
     agentPath: null,
     paneId: null,
     flowId: null,
+    reviewHeadSha: null,
     startedAt: null,
     completedAt: null,
     /* The activation's persisted relay record becomes the attempt's durable
@@ -584,6 +585,7 @@ export function adoptAttempt(
     agentPath: conversationRef.agentPath,
     paneId: conversationRef.paneId,
     flowId: null,
+    reviewHeadSha: null,
     startedAt: conversationRef.startedAt,
     completedAt: null,
     input: source.input,
@@ -1075,8 +1077,17 @@ async function tickReviewStage(
   attempt.state = "reviewing";
   setCursorState(pipeline, stage.id, "reviewing");
 
+  if (!attempt.reviewHeadSha) {
+    if (!pipeline.lastPassedCommit) {
+      park(pipeline, "review-loop stage requires a verified pipeline commit", attempt);
+      return;
+    }
+    attempt.reviewHeadSha = pipeline.lastPassedCommit;
+    persist();
+  }
+
   if (!attempt.flowId) {
-    const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, pipeline.baseRef);
+    const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, attempt.reviewHeadSha);
     if (existing) {
       attachReviewFlowAttempt(attempt, existing);
       persist();
@@ -1099,7 +1110,7 @@ async function tickReviewStage(
       deliverKickoff: false,
       roles: { implementer: implementerRole, reviewer: reviewerRole },
       baseMode: "head",
-      baseRef: pipeline.baseRef,
+      baseRef: attempt.reviewHeadSha,
       spec: pipeline.spec ?? pipeline.task,
       mode: "auto",
       reviewerMode: "headless",
@@ -1869,11 +1880,20 @@ export async function patchPipeline(
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
+      const retryReviewHead = stage?.kind === "review-loop" ? synchronizePipelineRetryHead(pipeline, ports.exec) : null;
+      if (retryReviewHead && !retryReviewHead.ok) {
+        pipeline.stateDetail = retryReviewHead.error;
+        persist();
+        return { error: retryReviewHead.error, status: 409 };
+      }
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
       if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
       if (pipeline.runs.every((run) => run.attempts.length === 0)) {
         pipeline.state = "provisioning";
+      } else if (stage?.kind === "review-loop") {
+        pipeline.lastPassedCommit = retryReviewHead!.sha;
+        pipeline.state = "running";
       } else if (pipeline.lastPassedCommit) {
         const reset = resetPipelineStage(pipeline, ports.exec);
         if (!reset.ok) return { error: reset.error, status: 409 };

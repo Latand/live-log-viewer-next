@@ -141,6 +141,13 @@ export function VerdictPopover({
         </div>
       ) : null}
 
+      {attempt.reviewHeadSha ? (
+        <div className="flex items-center gap-1.5">
+          <span className="shrink-0 text-label font-semibold text-secondary">{t("pipelineVerdict.reviewerSha", { sha: attempt.reviewHeadSha.slice(0, 8) })}</span>
+          <code className="min-w-0 truncate font-mono text-[10px] text-primary" title={attempt.reviewHeadSha}>{attempt.reviewHeadSha}</code>
+        </div>
+      ) : null}
+
       {findings.length ? (
         <div className="flex max-h-40 flex-col gap-1 overflow-y-auto">
           <span className="text-label font-semibold text-secondary">{t("pipelineVerdict.findings", { count: findings.length })}</span>
