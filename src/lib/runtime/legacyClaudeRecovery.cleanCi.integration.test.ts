@@ -1,26 +1,25 @@
-import { spawn } from "node:child_process";
-import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { expect, test } from "bun:test";
-import { NextRequest } from "next/server";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { createTranscriptHostObserver, reconcileObservedTranscriptHosts } from "@/lib/agent/transcriptHost";
+import { viewerMcpBindings } from "@/lib/mcp/bindings";
 import type { FileEntry } from "@/lib/types";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import { ClaudeStreamBrokerHost, FileClaudeDeliveryLedger } from "./claudeStreamBrokerHost";
 import type { RuntimeHostClient } from "./client";
 import { FileRuntimeEventStore } from "./eventStore";
-import { handleRuntimeRetry } from "./http";
+import { spawnClaudeRecoveryFixture } from "./fixtures/claude-stream-json-recovery";
 import { bindStructuredDeliveryQueue, republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
+import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { spawnStructuredConversation } from "./structuredSpawn";
 import { structuredContent } from "./structuredContent";
@@ -61,7 +60,13 @@ function noClaimCounts(registry: AgentRegistry, journal: RuntimeJournal) {
   };
 }
 
-test("clean CI recovers a read-only legacy Fable tail through one broker and one UI retry delivery", async () => {
+function providerDeliveries(filename: string): Array<Record<string, unknown>> {
+  return fs.readFileSync(filename, "utf8").trim().split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+test("production acceptance recovers a lifecycle-busy legacy Fable tail from a stale registering projection through MCP", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-clean-ci-legacy-fable-"));
   const workspace = path.join(directory, "fixture-workspace");
   const projectsRoot = path.join(directory, "claude-projects");
@@ -74,9 +79,10 @@ test("clean CI recovers a read-only legacy Fable tail through one broker and one
   const sessionId = crypto.randomUUID();
   const parentConversationId = `conversation_${crypto.randomUUID()}` as const;
   const artifactPath = claudeTranscriptPath(workspace, sessionId, projectsRoot);
-  const originalOperationId = `operation_${crypto.randomUUID()}`;
   const originalIdempotencyKey = `message_${crypto.randomUUID()}`;
-  const message = "continue the privacy-safe recovery fixture";
+  const mcpClientRequestId = `mcp_probe_${crypto.randomUUID()}`;
+  const message = " \tReturn RECOVERY_OK for this privacy-safe recovery probe.\nПривіт, світе 🌍\n ";
+  const messageSha256 = crypto.createHash("sha256").update(message).digest("hex");
   const profile = emptyLaunchProfile({
     cwd: workspace,
     model: "claude-fable-fixture",
@@ -184,48 +190,43 @@ test("clean CI recovers a read-only legacy Fable tail through one broker and one
       "text",
       [],
       content.contentDigest,
-      { operationId: originalOperationId, kind: "send", policy: "queue", turnId: null },
     );
     registry.beginDeliveryAttempt(retrySource.id, retrySource.generationId!);
     registry.recordDeliveryOutcome(retrySource.id, "failed", "dead-host");
+    const originalOperationId = retrySource.command.operationId;
 
     journal.append({
       scope: { type: "session", id: conversationId },
       kind: "session-status",
       payload: {
         conversationId,
-        sessionKey: key,
+        sessionKey: { engine: "claude", sessionId: conversationId },
         hostKind: "claude-broker",
-        host: "hosted",
-        turn: "running",
+        host: "registering",
+        turn: "unknown",
         provenance: "structured",
         accountId: "fixture-account-before-switch",
         cwd: workspace,
-        artifactPath,
+        artifactPath: null,
         capabilities: { steer: false, structuredAttention: true },
-        activeTurnId: "turn-before-restart",
+        activeTurnId: null,
       },
     });
-    journal.append({ scope: { type: "session", id: conversationId }, kind: "host.disconnected", payload: { conversationId } });
     const originalRuntimeReceipt = journal.executeOperation({
       kind: "send",
       operationId: originalOperationId,
       idempotencyKey: originalIdempotencyKey,
       conversationId,
       text: message,
-      policy: "queue",
+      contentDigest: content.contentDigest,
+      policy: "interrupt-active",
     }).receipt;
     expect(originalRuntimeReceipt).toMatchObject({ status: "rejected", reason: "no-claim" });
-    journal.append({ scope: { type: "session", id: conversationId }, kind: "turn.interrupted", payload: { conversationId, turnId: "turn-before-restart" } });
-    journal.append({ scope: { type: "session", id: conversationId }, kind: "host.degraded", payload: { conversationId } });
-    journal.append({ scope: { type: "session", id: conversationId }, kind: "turn.started", payload: { conversationId, turnId: "turn-after-restart" } });
-    journal.append({ scope: { type: "session", id: conversationId }, kind: "session-status", payload: { conversationId, host: "dead" } });
-    expect(journal.replay(0).events.slice(-4).map((event) => event.kind)).toEqual([
-      "turn-ended",
-      "session-status",
-      "turn-started",
-      "session-status",
-    ]);
+    expect(journal.snapshot().sessions).toContainEqual(expect.objectContaining({
+      conversationId,
+      host: "registering",
+      artifactPath: null,
+    }));
     const baselineNoClaimCounts = noClaimCounts(registry, journal);
     expect(baselineNoClaimCounts).toEqual({ registry: 1, journal: 1 });
 
@@ -287,14 +288,51 @@ test("clean CI recovers a read-only legacy Fable tail through one broker and one
       path: artifactPath,
       accountId: "fixture-account-after-switch",
       launchProfile: profile,
-      turn: { state: "busy", source: "assistant", terminalAt: null },
+      turn: { state: "busy", source: "lifecycle", terminalAt: null },
       observedAt: "2026-07-20T20:05:00.000Z",
     }]);
     expect(registry.conversation(conversationId)?.generations.at(-1)?.accountId)
       .toBe("fixture-account-after-switch");
+    expect(registry.conversation(conversationId)?.turn).toMatchObject({
+      state: "busy",
+      source: "lifecycle",
+      terminalAt: null,
+    });
+    expect(registry.snapshot().entries[`claude:${sessionId}`]).toMatchObject({
+      status: "dead",
+      host: null,
+      structuredHost: { process: null },
+    });
+    expect(journal.snapshot().sessions).toContainEqual(expect.objectContaining({
+      conversationId,
+      host: "registering",
+      artifactPath: null,
+    }));
     const historicalSpawnReceipt = structuredClone(registry.snapshot().receipts[original.receipt.launchId]);
 
     await bindStructuredDeliveryQueue([], { registry, client });
+    journal.append({
+      scope: { type: "session", id: conversationId },
+      kind: "session-status",
+      payload: {
+        conversationId,
+        sessionKey: { engine: "claude", sessionId: conversationId },
+        hostKind: "claude-broker",
+        host: "registering",
+        turn: "unknown",
+        provenance: "structured",
+        accountId: "fixture-account-after-switch",
+        cwd: workspace,
+        artifactPath: null,
+        capabilities: { steer: false, structuredAttention: true },
+        activeTurnId: null,
+      },
+    });
+    expect(journal.snapshot().sessions).toContainEqual(expect.objectContaining({
+      conversationId,
+      host: "registering",
+      artifactPath: null,
+    }));
     const recover = (request: { path: string; conversationId?: string | null }) =>
       recoverDeadStructuredConversation(request, {
         registry,
@@ -314,7 +352,6 @@ test("clean CI recovers a read-only legacy Fable tail through one broker and one
         spawn: (input) => spawnStructuredConversation(input, {
           startHost: async () => {
             brokerStarts += 1;
-            const fixture = path.join(import.meta.dir, "fixtures", "claude-stream-json-recovery.ts");
             const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
               cwd: workspace,
               claudeConfigDir: accountHome,
@@ -332,17 +369,11 @@ test("clean CI recovers a read-only legacy Fable tail through one broker and one
                 subscriptionType: "fixture",
                 version: "fixture-v1",
               }),
-              spawnProcess: (_command: string, args: string[], options: SpawnOptionsWithoutStdio) => {
+              signalProcess: () => { throw new Error("recovery fixture has no process group"); },
+              spawnProcess: (_command, args) => {
                 const marker = args.indexOf("--resume");
-                return spawn(Bun.which("bun") ?? "bun", [fixture], {
-                  ...options,
-                  env: {
-                    ...options.env,
-                    LLV_FIXTURE_SESSION_ID: args[marker + 1] ?? "",
-                    LLV_FIXTURE_DELIVERY_LOG: deliveryLog,
-                  } as NodeJS.ProcessEnv,
-                  stdio: ["pipe", "pipe", "pipe"],
-                }) as ChildProcessWithoutNullStreams;
+                expect(args[marker + 1]).toBe(sessionId);
+                return spawnClaudeRecoveryFixture(sessionId, deliveryLog);
               },
             });
             brokers.push(host);
@@ -351,36 +382,76 @@ test("clean CI recovers a read-only legacy Fable tail through one broker and one
         }),
         requestDeliveryDrain: () => { void kickStructuredDeliveryQueue(); },
       });
-    const retryRequest = () => new NextRequest(
-      `http://127.0.0.1/api/runtime/operations/${originalOperationId}`,
-      { method: "POST", headers: { host: "127.0.0.1" } },
-    );
-    const retryDependencies = {
-      enabled: () => true,
-      client: () => client,
-      recover,
-      republish: async () => republishStructuredDeliveryHost(key),
-      kick: () => { void kickStructuredDeliveryQueue(); },
-    };
+    const mcpBodies: Record<string, unknown>[] = [];
+    const bindings = viewerMcpBindings(undefined, {
+      post: async (pathname, body) => {
+        expect(pathname).toBe("/api/tmux");
+        mcpBodies.push(structuredClone(body));
+        const outcome = await enqueueStructuredMessage({
+          path: typeof body.path === "string" ? body.path : "",
+          conversationId: typeof body.conversationId === "string" ? body.conversationId : null,
+          clientMessageId: typeof body.clientMessageId === "string" ? body.clientMessageId : null,
+          text: typeof body.text === "string" ? body.text : "",
+          images: [],
+        }, {
+          enabled: () => true,
+          client: () => client,
+          registry: () => registry,
+          recover: (request) => recover(request),
+          republish: async () => republishStructuredDeliveryHost(key),
+          kick: () => kickStructuredDeliveryQueue(),
+        });
+        if (!outcome) throw new Error("structured MCP delivery was unavailable");
+        if (!outcome.ok) throw new Error(outcome.error);
+        await kickStructuredDeliveryQueue();
+        return outcome as unknown as Record<string, unknown>;
+      },
+    });
+    const sendProbe = () => bindings.send_message({
+      clientRequestId: mcpClientRequestId,
+      conversationId,
+      text: message,
+    });
     const [firstRetry, concurrentRetry] = await Promise.all([
-      handleRuntimeRetry(retryRequest(), originalOperationId, retryDependencies),
-      handleRuntimeRetry(retryRequest(), originalOperationId, retryDependencies),
+      sendProbe(),
+      sendProbe(),
     ]);
-    expect([firstRetry.status, concurrentRetry.status]).toEqual([202, 202]);
-    const retryBodies = await Promise.all([firstRetry.json(), concurrentRetry.json()]) as Array<{ operationId: string }>;
-    expect(new Set(retryBodies.map((body) => body.operationId)).size).toBe(1);
-    const retryOperationId = retryBodies[0]!.operationId;
+    expect(mcpBodies).toHaveLength(2);
+    expect(mcpBodies).toEqual(mcpBodies.map(() => expect.objectContaining({
+      conversationId,
+      clientMessageId: mcpClientRequestId,
+      text: message,
+      images: [],
+    })));
+    expect(new Set([firstRetry.operationId, concurrentRetry.operationId]).size).toBe(1);
+    const retryOperationId = String(firstRetry.operationId);
     await waitFor(
       () => journal.operationResult(retryOperationId)?.receipt.status === "delivered",
-      "the real Claude broker did not settle the UI retry",
+      "the real Claude broker did not settle the MCP retry",
     );
+    await waitFor(
+      () => brokerEventStore.load(sessionId)
+        .some((event) => event.kind === "delta" && event.text === "RECOVERY_OK"),
+      "the recovered Claude turn did not return RECOVERY_OK",
+    );
+    await waitFor(
+      () => journal.snapshot().sessions.some((session) =>
+        session.conversationId === conversationId && session.host === "hosted" && session.turn === "idle"),
+      "the recovered Claude host projection did not settle idle",
+    );
+    expect(await republishStructuredDeliveryHost(key)).toBe(true);
 
     expect(brokerStarts).toBe(1);
     expect(Object.values(registry.snapshot().receipts).filter((receipt) =>
       receipt.conversationId === conversationId && receipt.purpose === "resume-successor")).toHaveLength(1);
     expect(brokerDeliveryLedger.load(sessionId).filter((delivery) => delivery.delivered)).toHaveLength(1);
-    expect(fs.readFileSync(deliveryLog, "utf8").trim().split("\n")).toHaveLength(1);
-    expect(registry.snapshot().heldDeliveries[retrySource.id]).toMatchObject({ state: "delivered", text: "", error: null });
+    expect(providerDeliveries(deliveryLog)).toEqual([{ sessionId, deliveryCount: 1, textSha256: messageSha256 }]);
+    expect(brokerEventStore.load(sessionId).filter((event) => event.kind === "delta" && event.text === "RECOVERY_OK"))
+      .toHaveLength(1);
+    const mcpProbe = Object.values(registry.snapshot().heldDeliveries)
+      .find((delivery) => delivery.clientMessageId === mcpClientRequestId);
+    expect(mcpProbe).toMatchObject({ state: "delivered", text: "", error: null });
+    expect(registry.snapshot().heldDeliveries[retrySource.id]).toMatchObject({ state: "failed", error: "dead-host" });
     expect(registry.snapshot().heldDeliveries[historicalNoClaim.id]).toMatchObject({ state: "failed", error: "no-claim" });
     expect(registry.snapshot().receipts[original.receipt.launchId]).toEqual(historicalSpawnReceipt);
     expect(journal.operationResult(originalOperationId)?.receipt).toEqual(originalRuntimeReceipt);
@@ -397,12 +468,20 @@ test("clean CI recovers a read-only legacy Fable tail through one broker and one
     await bindStructuredDeliveryQueue([{ key, host: brokers[0]! }], { registry, client });
     await kickStructuredDeliveryQueue();
 
-    const deployedReplay = await handleRuntimeRetry(retryRequest(), originalOperationId, retryDependencies);
-    expect(deployedReplay.status).toBe(200);
-    expect(await deployedReplay.json()).toMatchObject({ operationId: retryOperationId, receipt: { status: "delivered" } });
+    const deployedReplay = await sendProbe();
+    expect(deployedReplay).toMatchObject({ operationId: retryOperationId, outcome: "delivered" });
+    expect(mcpBodies).toHaveLength(3);
+    expect(mcpBodies).toEqual(mcpBodies.map(() => expect.objectContaining({
+      conversationId,
+      clientMessageId: mcpClientRequestId,
+      text: message,
+      images: [],
+    })));
     expect(brokerStarts).toBe(1);
     expect(brokerDeliveryLedger.load(sessionId).filter((delivery) => delivery.delivered)).toHaveLength(1);
-    expect(fs.readFileSync(deliveryLog, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(providerDeliveries(deliveryLog)).toEqual([{ sessionId, deliveryCount: 1, textSha256: messageSha256 }]);
+    expect(brokerEventStore.load(sessionId).filter((event) => event.kind === "delta" && event.text === "RECOVERY_OK"))
+      .toHaveLength(1);
     expect(noClaimCounts(registry, journal)).toEqual(baselineNoClaimCounts);
     expect(registry.snapshot().receipts[original.receipt.launchId]).toEqual(historicalSpawnReceipt);
     expect(journal.operationResult(originalOperationId)?.receipt).toEqual(originalRuntimeReceipt);

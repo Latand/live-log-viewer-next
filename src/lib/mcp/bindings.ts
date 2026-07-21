@@ -75,6 +75,12 @@ function required(args: McpToolArgs, key: string): string {
   return value;
 }
 
+function requiredMessageText(args: McpToolArgs): string {
+  const value = args.text;
+  if (typeof value !== "string" || !value.trim()) throw new Error("text is required");
+  return value;
+}
+
 function requestId(args: McpToolArgs): string {
   return required(args, "clientRequestId");
 }
@@ -110,7 +116,7 @@ async function sendMessage(args: McpToolArgs, control: ViewerControlDependencies
   const conversationId = text(args.conversationId);
   const transcriptPath = text(args.transcriptPath) || text(args.path);
   if (!conversationId && !transcriptPath) throw new Error("conversationId or transcriptPath is required");
-  const message = required(args, "text");
+  const message = requiredMessageText(args);
   const outcome = await control.post("/api/tmux", {
     pid: null,
     path: transcriptPath,

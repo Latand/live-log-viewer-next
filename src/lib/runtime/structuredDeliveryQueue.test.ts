@@ -1064,6 +1064,58 @@ test("overlapping queue kicks share one drain", async () => {
   expect(sends).toBe(1);
 });
 
+test("a post-admission barrier starts a fresh pass after an active drain", async () => {
+  let releasePreAdmissionPass!: () => void;
+  const preAdmissionPass = new Promise<void>((resolve) => { releasePreAdmissionPass = resolve; });
+  let preAdmissionPassStarted!: () => void;
+  const preAdmissionPassEntered = new Promise<void>((resolve) => { preAdmissionPassStarted = resolve; });
+  let passes = 0;
+  let initialDrainSettled = false;
+  let pending = false;
+  let sends = 0;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => {
+      const pendingAtPassStart = pending;
+      passes += 1;
+      if (passes === 1) {
+        preAdmissionPassStarted();
+        await preAdmissionPass;
+      }
+      return pendingAtPassStart ? [{
+        id: "effect:post-admission",
+        kind: "runtime.send",
+        eventSeq: 1,
+        payload: {
+          kind: "send",
+          operationId: "post-admission",
+          conversationId: "conversation-one",
+          text: "recover",
+          idempotencyKey: "post-admission",
+          policy: "queue",
+        },
+      }] : [];
+    },
+    transition: async (_operationId, status) => {
+      if (status === "delivered") pending = false;
+    },
+  }, () => host(async () => {
+    expect(initialDrainSettled).toBe(true);
+    sends += 1;
+    return { outcome: "turn-started", turnId: "turn-recovered" };
+  }));
+
+  const initialDrain = queue.drain();
+  void initialDrain.then(() => { initialDrainSettled = true; });
+  await preAdmissionPassEntered;
+  pending = true;
+  const settled = queue.drainAfterAdmission();
+  releasePreAdmissionPass();
+  await Promise.all([initialDrain, settled]);
+
+  expect(passes).toBe(2);
+  expect(sends).toBe(1);
+});
+
 test("an answer reaches the host command channel before queued messages", async () => {
   const calls: string[] = [];
   const transitions: Array<[string, string]> = [];

@@ -280,6 +280,15 @@ export class StructuredDeliveryQueue {
     return this.activeDrain;
   }
 
+  /** Guarantees a drain pass whose journal read starts after this request. */
+  async drainAfterAdmission(): Promise<void> {
+    const precedingDrain = this.activeDrain;
+    /* The preceding drain owner reports its own failure. This barrier still
+       evaluates the journal state created by the completed admission. */
+    if (precedingDrain) await precedingDrain.catch(() => undefined);
+    await this.drain();
+  }
+
   private async drainUntilSettled(): Promise<void> {
     do {
       this.rerun = false;

@@ -277,6 +277,24 @@ async function refreshRepublishedSession(
   };
 }
 
+function requiresDeadConversationRecovery(
+  session: RuntimeSession,
+  registry: AgentRegistry,
+  conversation: RegistryConversation,
+): boolean {
+  if (session.host === "dead" || session.host === "unhosted") return true;
+  if (session.host !== "registering" || session.artifactPath !== null) return false;
+  const generation = conversation.generations.at(-1);
+  if (!generation) return false;
+  const entry = registry.snapshot().entries[`${conversation.engine}:${generation.id}`];
+  /* Production #389 retained a pre-artifact runtime placeholder after the
+     durable current generation had already lost its host and process. */
+  return entry?.status === "dead"
+    && entry.host === null
+    && entry.pendingAction === null
+    && entry.structuredHost?.process === null;
+}
+
 function requestMigrationProgress(
   registry: AgentRegistry,
   conversationId: ViewerConversationId,
@@ -455,8 +473,9 @@ export async function enqueueStructuredMessage(
   if (rejected) return rejected;
   const conversation = registry.conversation(session.conversationId as ViewerConversationId);
   if (!conversation) return ownershipUnavailable();
+  const recoveryRequired = requiresDeadConversationRecovery(session, registry, conversation);
   const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
-  if ((session.host === "dead" || session.host === "unhosted") && !wantsImages) {
+  if (recoveryRequired && !wantsImages) {
     try {
       const content = structuredContent(request.text, []);
       registry.holdDelivery(
@@ -477,7 +496,7 @@ export async function enqueueStructuredMessage(
      carries no image capability, and judging the payload against it would 409
      a session whose recovered host advertises image input. */
   let activeSession = session;
-  if (session.host === "dead" || session.host === "unhosted") {
+  if (recoveryRequired) {
     let recovered;
     try {
       recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({

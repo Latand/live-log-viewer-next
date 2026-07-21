@@ -71,11 +71,17 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
     cwd: "/repo",
     ["prompt"]: "implement",
   });
+  const exactMessage = " \tcontinue\nПривіт 🌍\n ";
   await bindings.send_message({
     clientRequestId: "send-http-control",
     conversationId: "conversation_http_control",
-    text: "continue",
+    text: exactMessage,
   });
+  await expect(bindings.send_message({
+    clientRequestId: "send-empty-http-control",
+    conversationId: "conversation_http_control",
+    text: " \t\n ",
+  })).rejects.toThrow("text is required");
   await bindings.deploy_exact_sha({
     clientRequestId: "deploy-http-control",
     confirm: "deploy",
@@ -89,6 +95,7 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
   ]);
   expect(requests[0]?.body.clientAttemptId).toBe("spawn-http-control");
   expect(requests[1]?.body.clientMessageId).toBe("send-http-control");
+  expect(requests[1]?.body.text).toBe(exactMessage);
   expect(requests[2]?.body.idempotencyKey).toBe("deploy-http-control");
 });
 
