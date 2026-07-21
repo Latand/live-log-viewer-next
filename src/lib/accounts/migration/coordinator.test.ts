@@ -2678,6 +2678,29 @@ describe("durable account migration coordinator", () => {
     expect(store.requeueHeldDelivery(queued.id)).toMatchObject({ state: "held", generationId: null });
   });
 
+  test("a waiting-turn migration that wins before delivery actuation fences the predecessor", () => {
+    for (const turnState of ["busy", "unknown"] as const) {
+      const store = registry();
+      const pathname = `/delivery-race-${turnState}.jsonl`;
+      store.reconcileConversations([observation(pathname, "a", turnState)]);
+      const conversation = store.conversationForPath(pathname)!;
+      const queued = store.holdDelivery(conversation.id, `race ${turnState}`, `delivery-race-${turnState}`);
+      expect(queued.state).toBe("assigned");
+      store.commitMigrationIntent({
+        engine: "codex",
+        targetId: "b",
+        origin: "manual",
+        requestId: `migration-wins-${turnState}`,
+        expectedRevision: store.engineRouting("codex").revision,
+        scope: "all",
+      });
+
+      expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
+      expect(store.beginDeliveryAttempt(queued.id, queued.generationId!)).toBeNull();
+      expect(store.requeueHeldDelivery(queued.id)).toMatchObject({ state: "held", generationId: null });
+    }
+  });
+
   test("a delivery attempt that wins first keeps migration waiting until its outcome is durable", async () => {
     const store = registry();
     store.reconcileConversations([observation("/delivery-first.jsonl", "a", "idle")]);

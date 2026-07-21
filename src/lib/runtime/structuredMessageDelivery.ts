@@ -7,6 +7,7 @@ import {
   type RegistryConversation,
 } from "@/lib/agent/registry";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
+import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
@@ -226,7 +227,7 @@ function holdDuringRuntimeSynchronization(
   const rejectedHold = supersededRejection(registry, owner.conversation);
   if (rejectedHold) return rejectedHold;
   if (owner.kind === "legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
-  const { conversation } = owner;
+  let { conversation } = owner;
   if (request.hasImages || request.images?.length) {
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }
@@ -234,11 +235,59 @@ function holdDuringRuntimeSynchronization(
     assertStructuredTextEnvelope(request.text);
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
     const refs = request.imageRefs ?? [];
-    if (refs.length) {
-      const content = structuredContent(request.text, refs);
-      registry.holdDelivery(conversation.id, content.content.text, idempotencyKey, "runtime-images", refs, content.contentDigest, commandInput(request));
-    } else {
-      registry.holdDelivery(conversation.id, request.text, idempotencyKey, "text", [], null, commandInput(request));
+    if (!request.text && refs.length === 0) throw new Error("held delivery must contain at most 32000 characters");
+    const content = refs.length ? structuredContent(request.text, refs) : null;
+    const deliveryText = content?.content.text ?? request.text;
+    const contentDigest = content?.contentDigest ?? null;
+    const payloadKind = refs.length ? "runtime-images" : "text";
+    /* Conflict and terminal replay outcomes remain side-effect free. Accepted
+       sends establish the durable account fence before reservation placement. */
+    const replay = registry.preflightDeliveryReservation(
+      conversation.id,
+      deliveryText,
+      idempotencyKey,
+      payloadKind,
+      refs,
+      contentDigest,
+      commandInput(request),
+    );
+    if (replay?.state === "delivered") {
+      return deliveredReservationReplay(replay, idempotencyKey, conversation.id, false);
+    }
+    if (replay?.state === "failed") {
+      return {
+        ok: false,
+        structured: true,
+        outcome: "failed",
+        error: replay.error || "delivery target is unavailable",
+        status: 409,
+      };
+    }
+    const generation = conversation.generations.at(-1);
+    const activeAccountId = registry.engineRouting(conversation.engine).activeAccountId;
+    if (activeAccountId && generation?.accountId && generation.accountId !== activeAccountId) {
+      conversation = registry.requestConversationMigrationToActiveAccount(conversation.id);
+    }
+    const reservation = registry.holdDelivery(
+      conversation.id,
+      deliveryText,
+      idempotencyKey,
+      payloadKind,
+      refs,
+      contentDigest,
+      commandInput(request),
+    );
+    if (reservation.state === "delivered") {
+      return deliveredReservationReplay(reservation, idempotencyKey, conversation.id, false);
+    }
+    if (reservation.state === "failed") {
+      return {
+        ok: false,
+        structured: true,
+        outcome: "failed",
+        error: reservation.error || "delivery target is unavailable",
+        status: 409,
+      };
     }
     requestTick();
     return {
@@ -443,17 +492,6 @@ export async function enqueueStructuredMessage(
     );
   }
   const registry = (dependencies.registry ?? agentRegistry)();
-  try {
-    const refreshed = await refreshRepublishedSession(
-      session,
-      client,
-      dependencies.republish ?? republishStructuredDeliveryHost,
-    );
-    session = refreshed.session;
-    if (refreshed.republished && (session.host === "dead" || session.host === "unhosted")) return ownershipUnavailable();
-  } catch (error) {
-    return deliveryFailure(error);
-  }
   if (session.hostKind === "tmux-legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return ownershipUnavailable();
   try {
@@ -466,18 +504,77 @@ export async function enqueueStructuredMessage(
   if (request.hasImages && rawImages.length === 0 && suppliedRefs.length === 0) {
     return { ok: false, structured: true, outcome: "failed", error: "structured image payload is unavailable", status: 409 };
   }
+  if (rawImages.length > 0 && suppliedRefs.length > 0) {
+    return deliveryFailure(new Error("structured image payload is ambiguous"));
+  }
   if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
   /* The superseded guard runs BEFORE dead-host recovery below: an implicit
      recovery of a retired round would silently fork it (issue #383). */
   const rejected = supersededRejection(registry, registry.conversation(session.conversationId as ViewerConversationId));
   if (rejected) return rejected;
-  const conversation = registry.conversation(session.conversationId as ViewerConversationId);
+  let conversation = registry.conversation(session.conversationId as ViewerConversationId);
   if (!conversation) return ownershipUnavailable();
-  const recoveryRequired = requiresDeadConversationRecovery(session, registry, conversation);
   const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
+  let refs: StructuredImageRef[];
+  let content: ReturnType<typeof structuredContent>;
+  let terminalReplay: HeldDelivery | null;
+  try {
+    refs = suppliedRefs.length > 0
+      ? suppliedRefs
+      : (dependencies.previewImageRefs ?? runtimeImageRefsForUploads)(rawImages);
+    content = structuredContent(request.text, refs);
+    terminalReplay = registry.preflightDeliveryReservation(
+      conversation.id,
+      content.content.text,
+      idempotencyKey,
+      refs.length ? "runtime-images" : "text",
+      refs,
+      content.contentDigest,
+      commandInput(request),
+    );
+  } catch (error) {
+    return deliveryFailure(error);
+  }
+  if (terminalReplay?.state === "delivered") {
+    return deliveredReservationReplay(terminalReplay, idempotencyKey, conversation.id, false);
+  }
+  if (terminalReplay?.state === "failed") {
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: terminalReplay.error || "delivery target is unavailable",
+      status: 409,
+    };
+  }
+  const generation = conversation.generations.at(-1);
+  const activeAccountId = registry.engineRouting(conversation.engine).activeAccountId;
+  /* Request an active-account reseat before any predecessor host republish or
+     recovery. An accepted migration fence assigns this send to the successor. */
+  if (activeAccountId && generation?.accountId && generation.accountId !== activeAccountId) {
+    try {
+      conversation = registry.requestConversationMigrationToActiveAccount(conversation.id);
+    } catch (error) {
+      return deliveryFailure(error);
+    }
+  }
+  const migrationOwnsSend = deliveryFence(conversation) === "held";
+  if (!migrationOwnsSend) {
+    try {
+      const refreshed = await refreshRepublishedSession(
+        session,
+        client,
+        dependencies.republish ?? republishStructuredDeliveryHost,
+      );
+      session = refreshed.session;
+      if (refreshed.republished && (session.host === "dead" || session.host === "unhosted")) return ownershipUnavailable();
+    } catch (error) {
+      return deliveryFailure(error);
+    }
+  }
+  const recoveryRequired = !migrationOwnsSend && requiresDeadConversationRecovery(session, registry, conversation);
   if (recoveryRequired && !wantsImages) {
     try {
-      const content = structuredContent(request.text, []);
       registry.holdDelivery(
         conversation.id,
         content.content.text,
@@ -523,8 +620,10 @@ export async function enqueueStructuredMessage(
       /* The pre-recovery projection remains the conservative capability source. */
     }
   }
-  const imageCapability = activeSession.capabilities.imageInput
-    ?? runtimeImageCapability(activeSession.sessionKey.engine, false);
+  const imageCapability = migrationOwnsSend
+    ? runtimeImageCapability(activeSession.sessionKey.engine, true)
+    : activeSession.capabilities.imageInput
+      ?? runtimeImageCapability(activeSession.sessionKey.engine, false);
   if (wantsImages && !imageCapability.supported && activeSession.sessionKey.engine !== "codex") {
     return { ok: false, structured: true, outcome: "failed", error: imageCapability.reason ?? "structured image delivery is unavailable", status: 409 };
   }
@@ -533,24 +632,25 @@ export async function enqueueStructuredMessage(
     return { ok: false, structured: true, outcome: "failed", error: "runtime image request encoding is too large", status: 413 };
   }
   try {
-    if (rawImages.length > 0 && suppliedRefs.length > 0) throw new Error("structured image payload is ambiguous");
     /* Conflict preflight computes candidate refs and digest before writing.
        A changed payload under an existing client message id rejects with zero
        blob publication, GC, or registry effects. First admissions publish
        before the reservation references them. */
-    const refs = suppliedRefs.length > 0
-      ? suppliedRefs
-      : (dependencies.previewImageRefs ?? runtimeImageRefsForUploads)(rawImages);
-    const content = structuredContent(request.text, refs);
     const admissionKey = request.clientMessageId?.trim()
       ? `${conversation.id} ${request.clientMessageId.trim()}`
       : null;
     let reservation = await withAdmissionSection(admissionKey, async () => {
       const admit = () => {
-        if (admissionKey
-          && registry.deliveryReservationConflict(conversation.id, content.content.text, idempotencyKey, content.contentDigest, commandInput(request))) {
-          throw new DeliveryReservationConflictError();
-        }
+        const replay = registry.preflightDeliveryReservation(
+          conversation.id,
+          content.content.text,
+          idempotencyKey,
+          refs.length ? "runtime-images" : "text",
+          refs,
+          content.contentDigest,
+          commandInput(request),
+        );
+        if (replay) return replay;
         if (rawImages.length > 0) {
           (dependencies.storeImages ?? ((images) => runtimeImageStore().putMany(images)))(rawImages);
         }
