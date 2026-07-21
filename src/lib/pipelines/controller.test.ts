@@ -7,7 +7,9 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { AccountMigrationController } from "@/lib/accounts/migration/controller";
 
 import {
+  FLOW_PIPELINE_WATCHDOG_MS,
   FlowPipelineController,
+  startFlowPipelineControllerRuntime,
   type FlowPipelineControllerHeartbeat,
   type FlowPipelineControllerPorts,
   writeFlowPipelineControllerHeartbeat,
@@ -171,6 +173,54 @@ test("startup recovery and the watchdog converge a pending transition without du
   await controller.poll();
 
   expect(transitions).toBe(1);
+});
+
+test("controller runtime registers startup recovery and one deterministic watchdog", async () => {
+  const calls: string[] = [];
+  const signals: Array<() => Promise<void>> = [];
+  const watchdogs: Array<{ callback: () => void; delayMs: number; unrefCalls: number }> = [];
+  let unregisterCalls = 0;
+  const controller = {
+    tick: async (trigger: string) => { calls.push(trigger); },
+    recover: async () => { calls.push("startup"); },
+    poll: async () => { calls.push("watchdog"); },
+  } as unknown as FlowPipelineController;
+  const state = {};
+  const start = () => startFlowPipelineControllerRuntime(controller, state, {
+    registerTick: (tick) => {
+      signals.push(tick);
+      return () => { unregisterCalls += 1; };
+    },
+    scheduleInterval: (callback, delayMs) => {
+      const watchdog = {
+        callback,
+        delayMs,
+        unrefCalls: 0,
+        unref() { this.unrefCalls += 1; },
+      };
+      watchdogs.push(watchdog);
+      return watchdog;
+    },
+    log: () => undefined,
+  });
+
+  start();
+  await Promise.resolve();
+  expect(calls).toEqual(["startup"]);
+  expect(watchdogs).toHaveLength(1);
+  expect(watchdogs[0]).toMatchObject({ delayMs: FLOW_PIPELINE_WATCHDOG_MS, unrefCalls: 1 });
+
+  watchdogs[0]!.callback();
+  await Promise.resolve();
+  await signals[0]!();
+  expect(calls).toEqual(["startup", "watchdog", "signal"]);
+
+  start();
+  await Promise.resolve();
+  expect(unregisterCalls).toBe(1);
+  expect(signals).toHaveLength(2);
+  expect(watchdogs).toHaveLength(1);
+  expect(calls).toEqual(["startup", "watchdog", "signal", "startup"]);
 });
 
 test("pipeline settlement leads the cycle and one scanner snapshot feeds every flow pass", async () => {

@@ -122,12 +122,12 @@ export class RuntimeHost {
         const publishedBefore = this.journal.publishedSeq();
         const appended = this.journal.append(event);
         const newlyPublished = appended.seq > publishedBefore;
-        try { await this.consumeExclusive(appended); }
-        catch { console.error("[runtime consumer] committed event will retry asynchronously"); }
         if (newlyPublished && appended.kind === "turn-ended") {
           try { this.signalFlowPipelineProgress?.(); }
           catch { console.error("[flow pipeline controller] committed terminal wake failed"); }
         }
+        try { await this.consumeExclusive(appended); }
+        catch { console.error("[runtime consumer] committed event will retry asynchronously"); }
         result = request.method === "operation" && event.operationId
           ? { operationId: event.operationId, state: "accepted", seq: appended.seq, revision: appended.revision }
           : appended;

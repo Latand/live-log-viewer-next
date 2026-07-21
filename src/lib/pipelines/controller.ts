@@ -271,6 +271,39 @@ export class FlowPipelineController {
   }
 }
 
+interface FlowPipelineWatchdogHandle {
+  unref?(): unknown;
+}
+
+interface FlowPipelineControllerRuntimePorts {
+  registerTick: (tick: () => Promise<void>) => () => void;
+  scheduleInterval: (callback: () => void, delayMs: number) => FlowPipelineWatchdogHandle;
+  log: (message: string, error: unknown) => void;
+}
+
+interface FlowPipelineControllerRuntimeState {
+  __llvFlowPipelineWatchdog?: FlowPipelineWatchdogHandle;
+  __llvFlowPipelineUnregister?: () => void;
+}
+
+export function startFlowPipelineControllerRuntime(
+  controller: FlowPipelineController,
+  state: FlowPipelineControllerRuntimeState,
+  ports: FlowPipelineControllerRuntimePorts,
+): void {
+  state.__llvFlowPipelineUnregister?.();
+  state.__llvFlowPipelineUnregister = ports.registerTick(() => controller.tick("signal"));
+  if (!state.__llvFlowPipelineWatchdog) {
+    state.__llvFlowPipelineWatchdog = ports.scheduleInterval(() => void controller.poll().catch((error) => {
+      ports.log("[flow pipeline controller] watchdog reconciliation failed", error);
+    }), FLOW_PIPELINE_WATCHDOG_MS);
+    state.__llvFlowPipelineWatchdog.unref?.();
+  }
+  void controller.recover().catch((error) => {
+    ports.log("[flow pipeline controller] startup reconciliation failed", error);
+  });
+}
+
 const controllerHost = globalThis as typeof globalThis & {
   __llvFlowPipelineController?: FlowPipelineController;
   __llvFlowPipelineWatchdog?: ReturnType<typeof setInterval>;
@@ -282,17 +315,13 @@ export function flowPipelineController(): FlowPipelineController {
 }
 
 export function startFlowPipelineController(): void {
-  const controller = flowPipelineController();
-  controllerHost.__llvFlowPipelineUnregister?.();
-  controllerHost.__llvFlowPipelineUnregister = registerPipelineTick(() => controller.tick("signal"));
-  if (!controllerHost.__llvFlowPipelineWatchdog) {
-    const watchdog = setInterval(() => void controller.poll().catch(() => {
-      console.error("[flow pipeline controller] watchdog reconciliation failed");
-    }), FLOW_PIPELINE_WATCHDOG_MS);
-    watchdog.unref?.();
-    controllerHost.__llvFlowPipelineWatchdog = watchdog;
-  }
-  void controller.recover().catch((error) => {
-    console.error("[flow pipeline controller] startup reconciliation failed", error);
-  });
+  startFlowPipelineControllerRuntime(
+    flowPipelineController(),
+    controllerHost,
+    {
+      registerTick: registerPipelineTick,
+      scheduleInterval: (callback, delayMs) => setInterval(callback, delayMs),
+      log: (message, error) => console.error(message, error),
+    },
+  );
 }

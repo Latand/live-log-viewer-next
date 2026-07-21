@@ -1290,6 +1290,49 @@ test("runtime host advances and publishes a flow from a terminal event without f
   journal.close();
 });
 
+test("a newly committed terminal event wakes promptly once while flow delivery is pending", async () => {
+  const journal = new RuntimeJournal(path.join(sandbox("terminal-wake-before-consumer"), "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  let releaseFlowReady = () => {};
+  let markFlowReadyStarted = () => {};
+  const flowReadyStarted = new Promise<void>((resolve) => { markFlowReadyStarted = resolve; });
+  const flowReadyGate = new Promise<void>((resolve) => { releaseFlowReady = resolve; });
+  let progressSignals = 0;
+  const host = new RuntimeHost(journal, {
+    flowReady: async (flowId) => {
+      markFlowReadyStarted();
+      await flowReadyGate;
+      return { id: flowId, state: "spawn_pending" } as unknown as Flow;
+    },
+    workflowStageCompleted: () => undefined,
+    taskDeliveryAcknowledged: () => undefined,
+  }, undefined, false, () => { progressSignals += 1; });
+  const request = {
+    method: "append" as const,
+    params: {
+      event: {
+        scope: runtimeScope("session", "implementer"),
+        kind: "turn.completed" as const,
+        producerKey: "terminal-wake-before-consumer",
+        payload: { flowId: "flow-one", readyNote: "REVIEW_READY: finished" },
+      },
+    },
+  };
+
+  const first = host.handle({ id: "request-one", ...request });
+  await flowReadyStarted;
+  const duplicate = host.handle({ id: "request-two", ...request });
+  await Promise.resolve();
+  const signalsWhilePending = progressSignals;
+  releaseFlowReady();
+  const responses = await Promise.all([first, duplicate]);
+
+  expect(responses.every((response) => response.ok)).toBe(true);
+  expect(signalsWhilePending).toBe(1);
+  expect(progressSignals - signalsWhilePending).toBe(0);
+  expect(progressSignals).toBe(1);
+  journal.close();
+});
+
 test("a failed terminal wake keeps the committed runtime acknowledgement successful", async () => {
   const journal = new RuntimeJournal(path.join(sandbox("terminal-wake-failure"), "events.sqlite"), { maxEvents: 100, now: () => 100 });
   const host = new RuntimeHost(journal, undefined, undefined, false, () => {

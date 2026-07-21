@@ -34,6 +34,11 @@ interface ViewerReleaseActivationOptions {
   log?: (...args: unknown[]) => void;
 }
 
+interface CurrentReleaseControllerLoaders {
+  loadFlowPipelineController: () => Promise<{ startFlowPipelineController: () => void }>;
+  loadAccountMigrationController: () => Promise<{ startAccountMigrationController: () => Promise<void> }>;
+}
+
 /** Candidate containers share production state while their health gate runs.
  * The durable proxy target grants authority to the endpoint currently serving
  * traffic. A missing target keeps local development and first boot active. */
@@ -104,6 +109,20 @@ export function scheduleAccountMigrationController(start: () => Promise<void>, d
     else setTimeout(run, 0).unref?.();
   }, delayMs);
   timer.unref?.();
+}
+
+export async function startCurrentReleaseControllers(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  loaders: CurrentReleaseControllerLoaders = {
+    loadFlowPipelineController: () => import("@/lib/pipelines/controller"),
+    loadAccountMigrationController: () => import("@/lib/accounts/migration/controller"),
+  },
+): Promise<void> {
+  const { startFlowPipelineController } = await loaders.loadFlowPipelineController();
+  startFlowPipelineController();
+  if (env.LLV_ACCOUNT_CONTROLLER_DISABLED === "1") return;
+  const { startAccountMigrationController } = await loaders.loadAccountMigrationController();
+  scheduleAccountMigrationController(startAccountMigrationController, accountControllerDelayMs(env));
 }
 
 export async function initializeOperatorSpawnCapabilityAtStartup(
@@ -184,11 +203,6 @@ export async function registerViewerRuntime(): Promise<void> {
       const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
       await runStructuredHostStartup(adoptStructuredHostsAtStartup);
     }
-    if (process.env.LLV_ACCOUNT_CONTROLLER_DISABLED !== "1") {
-      const { startFlowPipelineController } = await import("@/lib/pipelines/controller");
-      startFlowPipelineController();
-      const { startAccountMigrationController } = await import("@/lib/accounts/migration/controller");
-      scheduleAccountMigrationController(startAccountMigrationController, accountControllerDelayMs());
-    }
+    await startCurrentReleaseControllers();
   }, () => viewerReleaseOwnsTraffic());
 }
