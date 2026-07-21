@@ -63,12 +63,13 @@ test("host adapter exposes fixed actions and carries structured release data", a
   await adapter.verifyPromoted(candidate);
   await adapter.rollback(release, candidate);
   await adapter.stageRuntimeHostSuccessor(candidate);
+  await adapter.completeRuntimeHostHandoff({ image: candidate.image, revision: candidate.revision, container: "runtime-host-successor" });
 
   expect(calls.map((call) => call.action)).toEqual([
-    "resolve-revision", "build-candidate", "start-candidate", "verify-candidate", "promote", "verify-promoted", "rollback", "stage-host-successor",
+    "resolve-revision", "build-candidate", "start-candidate", "verify-candidate", "promote", "verify-promoted", "rollback", "stage-host-successor", "complete-host-handoff",
   ]);
   expect(calls[1]?.input).toEqual({ deploymentId: "deploy-1", revision: "a".repeat(40) });
-  expect(calls.at(-1)?.input).toEqual({ candidate });
+  expect(calls.at(-1)?.input).toEqual({ generation: { image: candidate.image, revision: candidate.revision, container: "runtime-host-successor" } });
   expect(calls.every((call) => !Object.hasOwn(call.input, "command") && !Object.hasOwn(call.input, "args"))).toBe(true);
 });
 

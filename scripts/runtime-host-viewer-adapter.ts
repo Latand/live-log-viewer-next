@@ -27,7 +27,7 @@ import {
   writeRuntimeHostHandoffIntent,
   writeRuntimeHostRelease,
 } from "../src/runtime-host/hostRelease";
-import { stageRuntimeHostSuccessorContainer } from "../src/runtime-host/hostSuccessor";
+import { completeRuntimeHostHandoff, stageRuntimeHostSuccessorContainer } from "../src/runtime-host/hostSuccessor";
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 import { withoutWakatimeCredential } from "../src/lib/wakatime/credential";
 
@@ -104,6 +104,15 @@ function release(value: unknown): ViewerReleaseIdentity {
     throw new Error("release identity is invalid");
   }
   return item as ViewerReleaseIdentity;
+}
+
+function runtimeHostGeneration(value: unknown): { image: string; revision: string; container: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("runtime-host generation is invalid");
+  const generation = value as Record<string, unknown>;
+  if (typeof generation.image !== "string" || typeof generation.revision !== "string" || typeof generation.container !== "string") {
+    throw new Error("runtime-host generation is invalid");
+  }
+  return { image: generation.image, revision: generation.revision, container: generation.container };
 }
 
 async function buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity> {
@@ -377,6 +386,15 @@ async function main(): Promise<unknown> {
   if (action === "stage-host-successor") {
     const candidate = release(input.candidate);
     await stageRuntimeHostSuccessor(candidate);
+    return {};
+  }
+  if (action === "complete-host-handoff") {
+    const generation = runtimeHostGeneration(input.generation);
+    await completeRuntimeHostHandoff(generation, {
+      docker: (argv) => command(["docker", ...argv]),
+      readHandoffIntent: () => readRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
+      clearHandoffIntent: () => clearRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
+    });
     return {};
   }
   if (action === "retire") { await retireRelease(release(input.release)); return {}; }

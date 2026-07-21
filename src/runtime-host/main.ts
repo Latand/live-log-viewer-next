@@ -13,7 +13,10 @@ const { serveRuntimeHost } = await import("./socket");
 const { ViewerDeploymentCoordinator } = await import("./deployment");
 const { HostCommandViewerDeploymentAdapter } = await import("./deploymentAdapter");
 const { serveViewerDeploymentProxy } = await import("./deploymentProxy");
-const { currentRuntimeHostGeneration } = await import("./hostRelease");
+const {
+  currentRuntimeHostGeneration,
+  RUNTIME_HOST_CONTAINER_ENV,
+} = await import("./hostRelease");
 
 const socketPath = process.env.LLV_RUNTIME_HOST_SOCKET || statePath("runtime-host.sock");
 if (process.env.LLV_RUNTIME_EVENTS !== "1") throw new Error("runtime host activation requires LLV_RUNTIME_EVENTS=1");
@@ -49,10 +52,21 @@ if (deploymentsEnabled && !deploymentAdapterPath) {
    successor process — a missing record is the legacy fixed-tag image and is
    never provably current. */
 const bootGeneration = currentRuntimeHostGeneration();
-const deployments = deploymentAdapterPath
+const deploymentAdapter = deploymentAdapterPath
+  ? HostCommandViewerDeploymentAdapter.fromExecutable(deploymentAdapterPath)
+  : undefined;
+const bootContainer = process.env[RUNTIME_HOST_CONTAINER_ENV];
+if (deploymentAdapter && bootGeneration.image && bootGeneration.revision && bootContainer) {
+  await deploymentAdapter.completeRuntimeHostHandoff({
+    image: bootGeneration.image,
+    revision: bootGeneration.revision,
+    container: bootContainer,
+  });
+}
+const deployments = deploymentAdapter
   ? new ViewerDeploymentCoordinator(
     journal,
-    HostCommandViewerDeploymentAdapter.fromExecutable(deploymentAdapterPath),
+    deploymentAdapter,
     { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) },
     {
       hostGeneration: () => bootGeneration,

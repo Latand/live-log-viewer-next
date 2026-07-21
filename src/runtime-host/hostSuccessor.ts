@@ -29,7 +29,8 @@ export interface RuntimeHostSuccessorPorts {
   readRelease(): RuntimeHostReleaseRecord | null;
   /** The durable intermediate successor identity (PR #521): written after the
       successor is observably stable and before the predecessor's restart
-      policy is disabled, cleared only after publication. */
+      policy is disabled. The fenced successor clears it after removing the
+      predecessor container. */
   readHandoffIntent(): RuntimeHostHandoffIntent | null;
   writeHandoffIntent(intent: RuntimeHostHandoffIntent): void;
   clearHandoffIntent(): void;
@@ -40,9 +41,48 @@ export interface RuntimeHostSuccessorPorts {
   wait?(milliseconds: number): Promise<void>;
 }
 
+export interface RuntimeHostHandoffCleanupPorts {
+  docker(argv: string[]): Promise<string>;
+  readHandoffIntent(): RuntimeHostHandoffIntent | null;
+  clearHandoffIntent(): void;
+}
+
+export interface RuntimeHostGenerationIdentity {
+  image: string;
+  revision: string;
+  container: string;
+}
+
 export function runtimeHostSuccessorName(revision: string, image: string): string {
   const generation = createHash("sha256").update(image).digest("hex").slice(0, 12);
   return `llv-runtime-host-${revision.slice(0, 12)}-${generation}`;
+}
+
+/** Complete cleanup only from the successor generation after it owns the
+    singleton fence. The durable intent retains the predecessor container id
+    across both process exits and machine restarts. */
+export async function completeRuntimeHostHandoff(
+  generation: RuntimeHostGenerationIdentity,
+  ports: RuntimeHostHandoffCleanupPorts,
+): Promise<boolean> {
+  const intent = ports.readHandoffIntent();
+  if (!intent
+    || intent.image !== generation.image
+    || intent.revision !== generation.revision
+    || intent.successorContainer !== generation.container) return false;
+  const successorInspection = JSON.parse(await ports.docker(["container", "inspect", generation.container])) as Array<Record<string, unknown>>;
+  const successorId = successorInspection[0]?.Id;
+  if (intent.predecessorId === generation.container || intent.predecessorId === successorId) {
+    throw new Error("runtime-host handoff predecessor matches the active successor");
+  }
+  try {
+    await ports.docker(["container", "rm", "-f", intent.predecessorId]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (!/No such container|No such object/i.test(message)) throw error;
+  }
+  ports.clearHandoffIntent();
+  return true;
 }
 
 interface PredecessorTopology {
@@ -246,7 +286,8 @@ function publishReleaseOnce(name: string, candidate: ViewerReleaseIdentity, port
        stale generation can never boot and claim the candidate record;
     7. the durable release record binds the successor image, revision, and
        container identity after every prerequisite is complete — exactly once;
-    8. the handoff intent is cleared.
+    8. after the predecessor exits and the successor acquires the fence, the
+       successor removes the recorded predecessor and clears the intent.
     A failure leaves the predecessor serving and the staging operation
     retryable from its durable deployment phase. */
 export async function stageRuntimeHostSuccessorContainer(
@@ -268,7 +309,6 @@ export async function stageRuntimeHostSuccessorContainer(
     await observeStableSuccessor(name, candidate, ports);
     await disablePredecessorRestart(intent.predecessorId, ports);
     publishReleaseOnce(name, candidate, ports);
-    ports.clearHandoffIntent();
     return { successorContainer: name };
   }
   const predecessor = await findPredecessor(ports);
@@ -297,6 +337,5 @@ export async function stageRuntimeHostSuccessorContainer(
   });
   await disablePredecessorRestart(predecessor.id, ports);
   publishReleaseOnce(name, candidate, ports);
-  ports.clearHandoffIntent();
   return { successorContainer: name };
 }

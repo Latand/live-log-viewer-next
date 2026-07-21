@@ -101,10 +101,11 @@ function composeSnapshot(): string {
 }
 
 async function runAction(options: {
-  action: "retain-only" | "rollback";
+  action: "retain-only" | "rollback" | "complete-host-handoff";
   input: unknown;
   dockerScript: string;
   snapshots?: string[];
+  handoffIntent?: Record<string, unknown>;
   environment?: Record<string, string>;
 }) {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-release-lifecycle-adapter-"));
@@ -113,6 +114,9 @@ async function runAction(options: {
   const dockerLog = path.join(sandbox, "docker.log");
   fs.mkdirSync(path.join(state, "deployments", "compose"), { recursive: true });
   fs.mkdirSync(bin, { recursive: true });
+  if (options.handoffIntent) {
+    fs.writeFileSync(path.join(state, "runtime-host-handoff-intent.json"), JSON.stringify(options.handoffIntent));
+  }
   for (const container of options.snapshots ?? []) {
     fs.writeFileSync(
       path.join(state, "deployments", "compose", viewerComposeSnapshotName(container)),
@@ -143,9 +147,42 @@ async function runAction(options: {
   const dockerCalls = fs.existsSync(dockerLog) ? fs.readFileSync(dockerLog, "utf8").trim().split("\n") : [];
   const targetFile = path.join(state, "viewer-release.json");
   const target = fs.existsSync(targetFile) ? JSON.parse(fs.readFileSync(targetFile, "utf8")) as unknown : null;
+  const handoffIntentExists = fs.existsSync(path.join(state, "runtime-host-handoff-intent.json"));
   fs.rmSync(sandbox, { recursive: true, force: true });
-  return { code, stdout, stderr, dockerCalls, target };
+  return { code, stdout, stderr, dockerCalls, target, handoffIntentExists };
 }
+
+test("fenced successor cleanup removes its predecessor and clears the durable handoff intent", async () => {
+  const generation = {
+    image: "agent-log-viewer:deploy-cleanup",
+    revision: "d".repeat(40),
+    container: "llv-runtime-host-cleanup",
+  };
+  const result = await runAction({
+    action: "complete-host-handoff",
+    input: { generation },
+    handoffIntent: {
+      ...generation,
+      successorContainer: generation.container,
+      predecessorId: "runtime-host-predecessor",
+      recordedAt: "2026-07-21T09:00:00.000Z",
+    },
+    dockerScript: `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [ "$1 $2" = "container inspect" ]; then printf '[{"Id":"successor-id"}]\n'; exit 0; fi
+if [ "$1 $2" = "container rm" ]; then exit 0; fi
+exit 1
+`,
+  });
+
+  expect(result.code).toBe(0);
+  expect(result.dockerCalls).toEqual([
+    "container inspect llv-runtime-host-cleanup",
+    "container rm -f runtime-host-predecessor",
+  ]);
+  expect(result.handoffIntentExists).toBe(false);
+});
 
 test("retention stops the immediate rollback container and removes obsolete releases", async () => {
   const previous = { ...release, container: "viewer-rollback", image: "viewer:rollback" };
