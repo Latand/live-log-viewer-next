@@ -61,6 +61,12 @@ function noClaimCounts(registry: AgentRegistry, journal: RuntimeJournal) {
   };
 }
 
+function providerDeliveries(filename: string): Array<Record<string, unknown>> {
+  return fs.readFileSync(filename, "utf8").trim().split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 test("production acceptance recovers a lifecycle-busy legacy Fable tail from a stale registering projection through MCP", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-clean-ci-legacy-fable-"));
   const workspace = path.join(directory, "fixture-workspace");
@@ -76,7 +82,8 @@ test("production acceptance recovers a lifecycle-busy legacy Fable tail from a s
   const artifactPath = claudeTranscriptPath(workspace, sessionId, projectsRoot);
   const originalIdempotencyKey = `message_${crypto.randomUUID()}`;
   const mcpClientRequestId = `mcp_probe_${crypto.randomUUID()}`;
-  const message = "Return RECOVERY_OK for this privacy-safe recovery probe.";
+  const message = " \tReturn RECOVERY_OK for this privacy-safe recovery probe.\nПривіт, світе 🌍\n ";
+  const messageSha256 = crypto.createHash("sha256").update(message).digest("hex");
   const profile = emptyLaunchProfile({
     cwd: workspace,
     model: "claude-fable-fixture",
@@ -400,10 +407,11 @@ test("production acceptance recovers a lifecycle-busy legacy Fable tail from a s
           registry: () => registry,
           recover: (request) => recover(request),
           republish: async () => republishStructuredDeliveryHost(key),
-          kick: () => { void kickStructuredDeliveryQueue(); },
+          kick: () => kickStructuredDeliveryQueue(),
         });
         if (!outcome) throw new Error("structured MCP delivery was unavailable");
         if (!outcome.ok) throw new Error(outcome.error);
+        await kickStructuredDeliveryQueue();
         return outcome as unknown as Record<string, unknown>;
       },
     });
@@ -439,7 +447,7 @@ test("production acceptance recovers a lifecycle-busy legacy Fable tail from a s
     expect(Object.values(registry.snapshot().receipts).filter((receipt) =>
       receipt.conversationId === conversationId && receipt.purpose === "resume-successor")).toHaveLength(1);
     expect(brokerDeliveryLedger.load(sessionId).filter((delivery) => delivery.delivered)).toHaveLength(1);
-    expect(fs.readFileSync(deliveryLog, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(providerDeliveries(deliveryLog)).toEqual([{ sessionId, deliveryCount: 1, textSha256: messageSha256 }]);
     expect(brokerEventStore.load(sessionId).filter((event) => event.kind === "delta" && event.text === "RECOVERY_OK"))
       .toHaveLength(1);
     const mcpProbe = Object.values(registry.snapshot().heldDeliveries)
@@ -465,9 +473,15 @@ test("production acceptance recovers a lifecycle-busy legacy Fable tail from a s
     const deployedReplay = await sendProbe();
     expect(deployedReplay).toMatchObject({ operationId: retryOperationId, outcome: "delivered" });
     expect(mcpBodies).toHaveLength(3);
+    expect(mcpBodies).toEqual(mcpBodies.map(() => expect.objectContaining({
+      conversationId,
+      clientMessageId: mcpClientRequestId,
+      text: message,
+      images: [],
+    })));
     expect(brokerStarts).toBe(1);
     expect(brokerDeliveryLedger.load(sessionId).filter((delivery) => delivery.delivered)).toHaveLength(1);
-    expect(fs.readFileSync(deliveryLog, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(providerDeliveries(deliveryLog)).toEqual([{ sessionId, deliveryCount: 1, textSha256: messageSha256 }]);
     expect(brokerEventStore.load(sessionId).filter((event) => event.kind === "delta" && event.text === "RECOVERY_OK"))
       .toHaveLength(1);
     expect(noClaimCounts(registry, journal)).toEqual(baselineNoClaimCounts);

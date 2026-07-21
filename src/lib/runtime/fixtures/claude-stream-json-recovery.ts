@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import readline from "node:readline";
 
@@ -25,8 +26,14 @@ for await (const line of input) {
     || !Array.isArray(content)) {
     throw new Error("recovery fixture received an invalid user frame");
   }
+  const text = content.map((block) => {
+    const candidate = record(block);
+    return candidate?.type === "text" && typeof candidate.text === "string" ? candidate.text : "";
+  }).join("");
+  if (!text.trim()) throw new Error("recovery fixture received an empty user frame");
   deliveryCount += 1;
-  fs.appendFileSync(deliveryLog, `${JSON.stringify({ sessionId, deliveryCount })}\n`);
+  const textSha256 = crypto.createHash("sha256").update(text).digest("hex");
+  fs.appendFileSync(deliveryLog, `${JSON.stringify({ sessionId, deliveryCount, textSha256 })}\n`);
   process.stdout.write(`${JSON.stringify({
     type: "user",
     isReplay: true,
