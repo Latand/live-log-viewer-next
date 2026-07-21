@@ -88,6 +88,18 @@ test("budgeted scanning resumes deterministically and proves lineage once reache
   expect(fileHasNeedle(needle, pathname, { remaining: 0 })).toBe(true);
 });
 
+test("an append between budgeted passes preserves needle scan progress", () => {
+  const pathname = path.join(SANDBOX, "append-between-passes.jsonl");
+  const needle = "toolu_append_progress";
+  const transcript = Buffer.alloc(600 * 1024, 0x78);
+  transcript.write(needle, 300 * 1024, "utf8");
+  fs.writeFileSync(pathname, transcript);
+
+  expect(fileHasNeedle(needle, pathname, { remaining: 256 * 1024 })).toBe(false);
+  fs.appendFileSync(pathname, "\n");
+  expect(fileHasNeedle(needle, pathname, { remaining: 256 * 1024 })).toBe(true);
+});
+
 test("findNeedle shares one generation budget across candidate files", () => {
   const first = virtualTranscript("shared-a.jsonl", 4 * MIB);
   const second = virtualTranscript("shared-b.jsonl", 4 * MIB);
