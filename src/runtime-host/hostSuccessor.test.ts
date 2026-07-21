@@ -132,6 +132,7 @@ interface Harness {
 
 function harness(overrides: {
   fenceOwnerPid?: number | null;
+  handoffIntent?: RuntimeHostHandoffIntent;
   runFailure?: Error;
   runConflict?: boolean;
   readIntentFailure?: Error;
@@ -146,7 +147,7 @@ function harness(overrides: {
   const events: string[] = [];
   const records: RuntimeHostReleaseRecord[] = [];
   const intents: RuntimeHostHandoffIntent[] = [];
-  let storedIntent: RuntimeHostHandoffIntent | null = null;
+  let storedIntent: RuntimeHostHandoffIntent | null = overrides.handoffIntent ?? null;
   let successorInspection = 0;
   const successorName = runtimeHostSuccessorName(revision, candidate.image);
   function successorInspect(state: string, stable: boolean): string {
@@ -634,6 +635,27 @@ test("issue 521 review: unreadable durable intent blocks predecessor rediscovery
   expect(records).toEqual([]);
   expect(calls.some((argv) => argv[0] === "container")).toBe(false);
   expect(calls.some((argv) => argv[0] === "run")).toBe(false);
+});
+
+test("issue 521 review: a foreign durable intent blocks staging before Docker mutation", async () => {
+  const existingIntent: RuntimeHostHandoffIntent = {
+    revision: "foreign-revision",
+    image: "agent-log-viewer:foreign-generation",
+    successorContainer: "llv-runtime-host-foreign-generation",
+    predecessorId: "foreign-predecessor",
+    recordedAt: "2026-07-21T08:00:00.000Z",
+  };
+  const originalBytes = JSON.stringify(existingIntent);
+  const { ports, calls, events, records, intents, storedIntent } = harness({ handoffIntent: existingIntent });
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports))
+    .rejects.toThrow("runtime-host handoff intent is owned by another generation");
+
+  expect(calls).toEqual([]);
+  expect(events).toEqual([]);
+  expect(records).toEqual([]);
+  expect(intents).toEqual([]);
+  expect(JSON.stringify(storedIntent())).toBe(originalBytes);
 });
 
 /* PR #521 review, finding 1: a crash after the predecessor's restart policy

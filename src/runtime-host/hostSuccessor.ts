@@ -295,11 +295,18 @@ export async function stageRuntimeHostSuccessorContainer(
   runtimeHostImageTag: string,
   ports: RuntimeHostSuccessorPorts,
 ): Promise<{ successorContainer: string }> {
-  await ports.docker(["image", "inspect", candidate.image]);
-  await ports.docker(["tag", candidate.image, runtimeHostImageTag]);
   const name = runtimeHostSuccessorName(candidate.revision, candidate.image);
   const intent = ports.readHandoffIntent();
-  if (intent && intent.revision === candidate.revision && intent.image === candidate.image && intent.successorContainer === name) {
+  const exactIntent = intent
+    && intent.revision === candidate.revision
+    && intent.image === candidate.image
+    && intent.successorContainer === name;
+  if (intent && !exactIntent) {
+    throw new Error("runtime-host handoff intent is owned by another generation");
+  }
+  await ports.docker(["image", "inspect", candidate.image]);
+  await ports.docker(["tag", candidate.image, runtimeHostImageTag]);
+  if (exactIntent) {
     /* PR #521 crash recovery: the previous staging died between recording the
        intent and clearing it. The predecessor may have exited and the
        successor may already own the singleton fence, so fence-owner
