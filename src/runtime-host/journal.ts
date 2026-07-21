@@ -35,6 +35,8 @@ import { runtimeImageCapability } from "@/lib/runtime/runtimeImageStore";
 
 export class RuntimeJournalFault extends Error {}
 
+export const RUNTIME_SNAPSHOT_INACTIVE_SESSION_LIMIT = 128;
+
 type EventRow = {
   seq: number;
   event_id: string;
@@ -674,7 +676,7 @@ export class RuntimeJournal {
         serverTime: new Date(this.now()).toISOString(),
         runtime: { hostEpoch: Number(this.meta("host_epoch")), health: this.meta("health") },
         filesRevision: Number(this.meta("files_revision")),
-        sessions: this.entityValues<RuntimeSession>("session").map((session) => ({
+        sessions: this.snapshotSessionValues().map((session) => ({
           ...session,
           recentReceipts: visibleReceipts(session.recentReceipts).map(runtimePresentationReceipt),
         })),
@@ -1603,6 +1605,30 @@ export class RuntimeJournal {
 
   private entityValues<T>(kind: string): T[] {
     return this.db.query<{ state_json: string }, [string]>("SELECT state_json FROM entities WHERE kind = ? ORDER BY id").all(kind).map((row) => JSON.parse(row.state_json) as T);
+  }
+
+  private snapshotSessionValues(): RuntimeSession[] {
+    const active = this.db.query<{ state_json: string }, [string, string, string]>(`
+      SELECT state_json
+      FROM entities
+      WHERE kind = ?
+        AND (
+          json_extract(state_json, '$.host') IS NULL
+          OR json_extract(state_json, '$.host') NOT IN (?, ?)
+        )
+      ORDER BY id
+    `).all("session", "dead", "unhosted");
+    const inactive = this.db.query<{ state_json: string }, [string, string, string, number]>(`
+      SELECT state_json
+      FROM entities
+      WHERE kind = ?
+        AND json_extract(state_json, '$.host') IN (?, ?)
+      ORDER BY checkpoint_seq DESC, id DESC
+      LIMIT ?
+    `).all("session", "dead", "unhosted", RUNTIME_SNAPSHOT_INACTIVE_SESSION_LIMIT);
+    return [...active, ...inactive]
+      .map((row) => JSON.parse(row.state_json) as RuntimeSession)
+      .sort((left, right) => left.conversationId.localeCompare(right.conversationId));
   }
 
   private recentEntityValues<T>(kind: string, limit: number): T[] {

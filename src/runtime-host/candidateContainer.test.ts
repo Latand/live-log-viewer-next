@@ -7,6 +7,7 @@ import { runtimeEventsEnabled, runtimeHostSocket } from "@/lib/runtime/flags";
 import { WAKATIME_CREDENTIAL_ENV, withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import {
+  AGENT_REGISTRY_SQLITE_ENV,
   obsoleteManagedViewerContainers,
   viewerAuthenticationTokenFromConfig,
   viewerCandidateDockerArgs,
@@ -112,6 +113,7 @@ test("promoted candidate derives its runtime contract from Compose", () => {
   expect(environment.LLV_DOCKER_NSENTER_SHIMS).toBe("1");
   expect(environment.GIT_SSH_COMMAND).toBe("ssh compose-config");
   expect(environment.LLV_ALLOW_LEGACY_VIEWER).toBe("1");
+  expect(environment[AGENT_REGISTRY_SQLITE_ENV]).toBe("off");
   expect(valuesAfter(args, "--label")).toEqual([
     "compose.viewer=production",
     "dev.live-log-viewer.managed=1",
@@ -128,6 +130,29 @@ test("promoted candidate derives its runtime contract from Compose", () => {
   expect(args[args.indexOf("--user") + 1]).toBe("1000:1000");
   expect(args[args.indexOf("--workdir") + 1]).toBe("/app");
   expect(args).toContain("--privileged");
+});
+
+test("promoted candidate validates and pins the operator registry backend mode", () => {
+  const configured = {
+    ...composeService,
+    environment: { ...composeService.environment, [AGENT_REGISTRY_SQLITE_ENV]: "dual-write" },
+  } satisfies ViewerComposeService;
+  const args = viewerCandidateDockerArgs(candidate, configured, {
+    runtimeSocket: "/state/runtime-host.sock",
+    legacyTmuxExternal: "1",
+    tmuxTmpdir: "/run/user/1000/agent-log-viewer",
+  });
+
+  expect(valuesAfter(args, "-e").filter((entry) => entry.startsWith(`${AGENT_REGISTRY_SQLITE_ENV}=`)))
+    .toEqual([`${AGENT_REGISTRY_SQLITE_ENV}=dual-write`]);
+  expect(() => viewerCandidateDockerArgs(candidate, {
+    ...configured,
+    environment: { ...configured.environment, [AGENT_REGISTRY_SQLITE_ENV]: "invalid" },
+  }, {
+    runtimeSocket: "/state/runtime-host.sock",
+    legacyTmuxExternal: "1",
+    tmuxTmpdir: "/run/user/1000/agent-log-viewer",
+  })).toThrow("LLV_AGENT_REGISTRY_SQLITE must be off, dual-write, read, or sqlite");
 });
 
 test("candidate artifacts exclude the legacy WakaTime credential", () => {
@@ -182,7 +207,12 @@ test("actual Viewer Compose keys remain covered by the candidate generator", () 
   });
   const environment = environmentFromArgs(args);
   expect(Object.keys(environment).sort()).toEqual([
-    ...new Set([...Object.keys(service.environment), "LLV_RUNTIME_EVENTS", "LLV_RUNTIME_HOST_SOCKET"]),
+    ...new Set([
+      ...Object.keys(service.environment),
+      AGENT_REGISTRY_SQLITE_ENV,
+      "LLV_RUNTIME_EVENTS",
+      "LLV_RUNTIME_HOST_SOCKET",
+    ]),
   ].sort());
   const mounts = valuesAfter(args, "--mount");
   const externalTmpdir = "/run/user/1000/agent-log-viewer";

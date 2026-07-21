@@ -40,6 +40,19 @@ export function hasViewerDeploymentCapability(status: number, body: string): boo
   }
 }
 
+export function viewerDeploymentRegistryBackendMode(
+  status: number,
+  body: string,
+): "off" | "dual-write" | "read" | "sqlite" | null {
+  if (!hasViewerDeploymentCapability(status, body)) return null;
+  try {
+    const mode = (JSON.parse(body) as { registryBackendMode?: unknown }).registryBackendMode;
+    return mode === "off" || mode === "dual-write" || mode === "read" || mode === "sqlite" ? mode : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface ViewerReadinessProbe {
   endpoint: string;
   inspect(): Promise<ViewerCandidateContainerState>;

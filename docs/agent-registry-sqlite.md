@@ -11,6 +11,14 @@ The first process that opens any gated SQLite mode creates `agent-registry.sqlit
 
 Every process with an enabled SQLite mode must run on Bun. The Docker Viewer uses `bun-container --bun`, and the published CLI selects Bun automatically when the gate is enabled. For a source checkout, launch Next with `bun --bun node_modules/.bin/next start`.
 
+Managed releases read the mode from the Viewer Compose environment. Set one
+`LLV_AGENT_REGISTRY_SQLITE=<mode>` entry in the service environment before a
+deployment starts. The immutable Viewer candidate receives that validated
+value, its deployment capability response reports the opened registry mode,
+and the runtime-host successor receives the same value after predecessor
+environment deduplication. Candidate health fails when the configured and
+observed modes differ, so promotion cannot publish a split registry fleet.
+
 ## Rollout
 
 1. Stop every Viewer and runtime-host process that can mutate the registry. Confirm that no registry writer remains before changing backend files.
@@ -27,7 +35,9 @@ Every process with an enabled SQLite mode must run on Bun. The Docker Viewer use
 writer-wait p95, rollback-mirror checkpoint timestamp, and dirty-checkpoint state under
 `systemHealth.registry`. The cached response exposes the stable mirror checkpoint
 timestamp and omits time-decaying writer rate; rollout probes derive both values at
-observation time. A rollout probe must
+observation time. `/api/runtime/deployments/capabilities/v1` reports
+`registryBackendMode` from the registry instance opened by that Viewer process.
+A rollout probe must
 observe one current release owner, a bounded mirror age in `read`, and a stable JSON
 mtime during `sqlite` streaming.
 
