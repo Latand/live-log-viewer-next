@@ -26,7 +26,7 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
-import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase } from "./git";
+import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import {
   DEFAULT_FAIL_EDGE_ROUNDS,
   MAX_FAIL_EDGE_ROUNDS,
@@ -99,9 +99,9 @@ export interface PipelinePorts {
   pipelineAdoptionCandidates(pipelineId: string): PipelineAdoptionCandidate[];
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
   patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
-  closeFlow(id: string): Promise<unknown>;
+  closeFlow(id: string): Promise<{ flow?: Flow; error?: string; status?: number } | void>;
   getFlow(id: string): Flow | null;
-  findFlow(implementerPath: string, implementerConversationId: string | null, baseRef: string): Flow | null;
+  findFlow(implementerPath: string, implementerConversationId: string | null, baseRef: string, targetSha: string): Flow | null;
   projectForCwd(cwd: string): string | null;
   now(): string;
 }
@@ -331,9 +331,10 @@ export function defaultPipelinePorts(): PipelinePorts {
     patchFlow: (id, action, note) => patchFlow(id, { action, ...(note ? { note } : {}) }),
     closeFlow,
     getFlow: (id) => loadFlows().find((flow) => flow.id === id) ?? null,
-    findFlow: (implementerPath, implementerConversationId, baseRef) => loadFlows()
+    findFlow: (implementerPath, implementerConversationId, baseRef, targetSha) => loadFlows()
       .filter((flow) =>
         flow.baseRef === baseRef
+        && flow.targetSha === targetSha
         && flow.closedAt === null
         && flow.state !== "closed"
         && (flow.implementerPath === implementerPath
@@ -499,6 +500,8 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAtte
     agentPath: null,
     paneId: null,
     flowId: null,
+    expectedReviewHeadSha: null,
+    reviewHeadSha: null,
     startedAt: null,
     completedAt: null,
     /* The activation's persisted relay record becomes the attempt's durable
@@ -584,6 +587,8 @@ export function adoptAttempt(
     agentPath: conversationRef.agentPath,
     paneId: conversationRef.paneId,
     flowId: null,
+    expectedReviewHeadSha: null,
+    reviewHeadSha: null,
     startedAt: conversationRef.startedAt,
     completedAt: null,
     input: source.input,
@@ -1075,8 +1080,17 @@ async function tickReviewStage(
   attempt.state = "reviewing";
   setCursorState(pipeline, stage.id, "reviewing");
 
+  if (!attempt.expectedReviewHeadSha) {
+    if (!pipeline.lastPassedCommit) {
+      park(pipeline, "review-loop stage requires a verified pipeline commit", attempt);
+      return;
+    }
+    attempt.expectedReviewHeadSha = pipeline.lastPassedCommit;
+    persist();
+  }
+
   if (!attempt.flowId) {
-    const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, pipeline.baseRef);
+    const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, pipeline.baseRef, attempt.expectedReviewHeadSha);
     if (existing) {
       attachReviewFlowAttempt(attempt, existing);
       persist();
@@ -1100,6 +1114,7 @@ async function tickReviewStage(
       roles: { implementer: implementerRole, reviewer: reviewerRole },
       baseMode: "head",
       baseRef: pipeline.baseRef,
+      targetSha: attempt.expectedReviewHeadSha,
       spec: pipeline.spec ?? pipeline.task,
       mode: "auto",
       reviewerMode: "headless",
@@ -1149,6 +1164,11 @@ async function tickReviewStage(
     return;
   }
   attachReviewFlowAttempt(attempt, flow);
+  const capturedReviewHead = flow.rounds.find((round) => round.reviewHeadSha)?.reviewHeadSha ?? null;
+  if (!attempt.reviewHeadSha && capturedReviewHead) {
+    attempt.reviewHeadSha = capturedReviewHead;
+    persist();
+  }
   if (flow.state === "approved") {
     attempt.output = `Review loop approved after ${flow.rounds.length} round(s).`;
     attempt.verdict = { status: "pass", confidence: 1 };
@@ -1871,9 +1891,25 @@ export async function patchPipeline(
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
-      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
+      if (flow && flow.state !== "closed") {
+        const closed = await ports.closeFlow(flow.id);
+        if (closed?.error) {
+          pipeline.stateDetail = closed.error;
+          persist();
+          return { error: closed.error, status: closed.status ?? 409 };
+        }
+      }
+      const retryReviewHead = stage?.kind === "review-loop" ? synchronizePipelineRetryHead(pipeline, ports.exec) : null;
+      if (retryReviewHead && !retryReviewHead.ok) {
+        pipeline.stateDetail = retryReviewHead.error;
+        persist();
+        return { error: retryReviewHead.error, status: 409 };
+      }
       if (pipeline.runs.every((run) => run.attempts.length === 0)) {
         pipeline.state = "provisioning";
+      } else if (stage?.kind === "review-loop") {
+        pipeline.lastPassedCommit = retryReviewHead!.sha;
+        pipeline.state = "running";
       } else if (pipeline.lastPassedCommit) {
         const reset = resetPipelineStage(pipeline, ports.exec);
         if (!reset.ok) return { error: reset.error, status: 409 };
@@ -1890,7 +1926,14 @@ export async function patchPipeline(
       if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
-      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
+      if (flow && flow.state !== "closed") {
+        const closed = await ports.closeFlow(flow.id);
+        if (closed?.error) {
+          pipeline.stateDetail = closed.error;
+          persist();
+          return { error: closed.error, status: closed.status ?? 409 };
+        }
+      }
       if (!pipeline.lastPassedCommit) return { error: "pipeline worktree has not been provisioned", status: 409 };
       const reset = resetPipelineStage(pipeline, ports.exec);
       if (!reset.ok) return { error: reset.error, status: 409 };
@@ -1994,7 +2037,14 @@ export async function patchPipeline(
         persist();
         return { pipeline };
       }
-      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
+      if (flow && flow.state !== "closed") {
+        const closed = await ports.closeFlow(flow.id);
+        if (closed?.error) {
+          pipeline.stateDetail = closed.error;
+          persist();
+          return { error: closed.error, status: closed.status ?? 409 };
+        }
+      }
       /* A cursor can rest at state pending before its round's attempt
          materializes: the initial stage right after provisioning, the next stage
          in the window after an advance, or a fail-edge target whose latest attempt

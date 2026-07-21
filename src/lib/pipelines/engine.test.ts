@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-
 const engineModule = await import("./engine");
 const { adoptAttempt, defaultPipelinePorts, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reviewNote, tickPipelines } = engineModule;
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
+const { captureReviewHead, newRound } = await import("@/lib/flows/engine");
 const rawCreatePipelineFromRequest = engineModule.createPipelineFromRequest;
 const createPipelineFromRequest: typeof rawCreatePipelineFromRequest = async (request, ports, options) =>
   await rawCreatePipelineFromRequest({ src: "/codex/creator.jsonl", ...request }, ports, options);
@@ -84,6 +86,7 @@ function harness() {
       if (args[0] === "rev-parse" && args[1] === "--git-dir") return { code: 0, stdout: ".git\n", stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return { code: 0, stdout: "main\n", stderr: "" };
+      if (args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]?.branch ?? ""}\n`, stderr: "" };
       if (args[0] === "rev-parse") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
@@ -121,8 +124,8 @@ function harness() {
       : pathname.includes("stage-1") ? "conversation_stage_1" : pathname.includes("stage-2") ? "conversation_stage_2" : null,
     pipelineAdoptionCandidates: () => [],
     createFlow: async (req) => {
-      calls.push(`flow:${req.implementerPath}:${req.baseRef}:${req.spec}`);
-      const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
+      calls.push(`flow:${req.implementerPath}:${req.baseRef}:${req.targetSha}:${req.spec}`);
+      const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, targetSha: req.targetSha, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
       flows.set(flow.id, flow);
       return { flow };
     },
@@ -131,7 +134,12 @@ function harness() {
       if (note) calls.push(`flow-note:${note}`);
       return {};
     },
-    closeFlow: async (id) => { const flow = flows.get(id); if (flow) flow.state = "closed"; },
+    closeFlow: async (id) => {
+      calls.push(`flow-close:${id}`);
+      const flow = flows.get(id);
+      if (flow) flow.state = "closed";
+      return { flow };
+    },
     getFlow: (id) => flows.get(id) ?? null,
     findFlow: () => null,
     projectForCwd: () => "viewer",
@@ -1794,8 +1802,8 @@ test("pipeline 8fa12bb4 creates review flow from a terminal builder's durable id
   };
   h.setConversationActive(false);
   const pipeline = await create(h.ports, [
-    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
-    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
   ] as never);
 
   await tickPipelines([], h.ports);
@@ -1820,8 +1828,8 @@ test("pipeline 8fa12bb4 creates review flow from a terminal builder's durable id
 test("retrying a parked review-loop appends a fresh attempt and flow", async () => {
   const h = harness();
   const stages = [
-    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
-    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
   ] as const;
   const pipeline = await create(h.ports, stages as never);
   await tickPipelines([], h.ports);
@@ -1837,6 +1845,140 @@ test("retrying a parked review-loop appends a fresh attempt and flow", async () 
   const reviewRun = loadPipelines()[0]!.runs[1]!;
   expect(reviewRun.attempts).toHaveLength(2);
   expect(reviewRun.attempts[1]!.flowId).toBe("flow-2");
+});
+
+test("retrying a parked review-loop fast-forwards to the pushed repair and records the reviewer SHA (#522)", async () => {
+  const h = harness();
+  const reviewRepo = path.join(process.env.LLV_STATE_DIR!, "retry-review-repo");
+  fs.mkdirSync(reviewRepo, { recursive: true });
+  expect(spawnSync("git", ["init", "-b", "main"], { cwd: reviewRepo }).status).toBe(0);
+  expect(spawnSync("git", ["config", "user.email", "flow@example.com"], { cwd: reviewRepo }).status).toBe(0);
+  expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd: reviewRepo }).status).toBe(0);
+  fs.writeFileSync(path.join(reviewRepo, "repair.txt"), "repair\n");
+  expect(spawnSync("git", ["add", "repair.txt"], { cwd: reviewRepo }).status).toBe(0);
+  expect(spawnSync("git", ["commit", "-m", "repair"], { cwd: reviewRepo }).status).toBe(0);
+  const repairHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: reviewRepo, encoding: "utf8" }).stdout.trim();
+  const createFlow = h.ports.createFlow;
+  h.ports.createFlow = async (req, entries) => {
+    const created = await createFlow(req, entries);
+    if (created.flow) {
+      created.flow.cwd = reviewRepo;
+      created.flow.roles = req.roles!;
+    }
+    return created;
+  };
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+  ] as const;
+  let localHead = ORIGIN_MAIN_SHA;
+  let remoteHead = ORIGIN_MAIN_SHA;
+  let fastForwarded = false;
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${remoteHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${remoteHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "merge-base") return { code: localHead === ORIGIN_MAIN_SHA && remoteHead === repairHead ? 0 : 1, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "merge" && args[1] === "--ff-only") {
+      h.calls.push(`${command} ${args.join(" ")}`);
+      localHead = remoteHead;
+      fastForwarded = true;
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  const pipeline = await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.flows.get("flow-1")!.state = "done_comment";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+
+  /* An operator's additive repair has landed on the pipeline branch after the
+     reviewer finding. The retry must review this repair head. */
+  remoteHead = repairHead;
+  await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const launchedFlow = h.flows.get("flow-2")!;
+  const launchedRound = newRound(launchedFlow, "button", null);
+  captureReviewHead(launchedFlow, launchedRound);
+  launchedFlow.rounds.push(launchedRound);
+  expect(launchedFlow.targetSha).toBe(repairHead);
+  expect(launchedRound.reviewHeadSha).toBe(repairHead);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const review = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts[1]!;
+  expect(localHead).toBe(repairHead);
+  expect(review.expectedReviewHeadSha).toBe(repairHead);
+  expect(review.reviewHeadSha).toBe(repairHead);
+  expect(fastForwarded).toBe(true);
+  expect(h.calls).toContain(`flow:/codex/stage-1.jsonl:${ORIGIN_MAIN_SHA}:${repairHead}:AC1`);
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
+  expect(h.calls.indexOf("flow-close:flow-1")).toBeLessThan(h.calls.indexOf(`git merge --ff-only refs/remotes/origin/${pipeline.branch}`));
+});
+
+test("a pipeline persists the immutable SHA captured by the launched review round (#522)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const actualReviewHead = "d".repeat(40);
+  h.flows.get("flow-1")!.rounds.push({ n: 1, reviewHeadSha: actualReviewHead } as never);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const attempt = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts[0]!;
+  expect(attempt.expectedReviewHeadSha).toBe(ORIGIN_MAIN_SHA);
+  expect(attempt.reviewHeadSha).toBe(actualReviewHead);
+});
+
+test("a divergent pipeline branch leaves a retried review parked with an actionable decision (#522)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+  ] as const;
+  let diverged = false;
+  const localHead = "b".repeat(40);
+  const remoteHead = "c".repeat(40);
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${diverged ? localHead : ORIGIN_MAIN_SHA}\n`, stderr: "" };
+    if (!diverged) return baseExec(command, args, cwd);
+    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${remoteHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${remoteHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "merge-base") return { code: 1, stdout: "", stderr: "" };
+    return baseExec(command, args, cwd);
+  };
+
+  const pipeline = await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.flows.get("flow-1")!.state = "done_comment";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  diverged = true;
+  const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+
+  expect(retried).toMatchObject({ status: 409, error: expect.stringContaining("diverged") });
+  expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", stateDetail: expect.stringContaining("diverged") });
 });
 
 test("reopening an embedded review flow resumes its parked pipeline attempt", async () => {
@@ -1993,6 +2135,98 @@ test("a paused review flow parks its pipeline", async () => {
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
   expect(loadPipelines()[0]!.stateDetail).toContain("kickoff delivery failed");
+});
+
+test("retrying a paused review with a live reviewer never mutates its checkout (#522)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+  ] as const;
+  const repairHead = "e".repeat(40);
+  let localHead = ORIGIN_MAIN_SHA;
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${repairHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${repairHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "merge-base") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "merge" && args[1] === "--ff-only") {
+      localHead = repairHead;
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  const pipeline = await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  const flow = h.flows.get("flow-1")!;
+  flow.rounds.push({ n: 1, reviewerPane: { paneId: "%reviewer", windowName: "reviewer" } } as never);
+  flow.state = "reviewing";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  flow.state = "paused";
+  flow.stateDetail = "reviewer paused";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+
+  expect(retried).toMatchObject({ status: 409, error: expect.stringContaining("still be running") });
+  expect(localHead).toBe(ORIGIN_MAIN_SHA);
+  expect(h.calls).not.toContain(`git merge --ff-only refs/remotes/origin/${pipeline.branch}`);
+  expect(h.calls).not.toContain("flow-close:flow-1");
+});
+
+test("retry parks without synchronizing when reviewer termination cannot be verified (#522)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", ["prompt"]: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, ["prompt"]: "review", next: null },
+  ] as const;
+  const repairHead = "f".repeat(40);
+  let localHead = ORIGIN_MAIN_SHA;
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${repairHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${repairHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "merge-base") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "merge" && args[1] === "--ff-only") {
+      localHead = repairHead;
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  const pipeline = await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.flows.get("flow-1")!.state = "done_comment";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.ports.closeFlow = async () => ({ error: "reviewer process group did not terminate", status: 409 });
+
+  const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+
+  expect(retried).toEqual({ error: "reviewer process group did not terminate", status: 409 });
+  expect(localHead).toBe(ORIGIN_MAIN_SHA);
+  expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", stateDetail: "reviewer process group did not terminate" });
+
+  const skipped = await patchPipeline(pipeline.id, { action: "skip-stage" }, h.ports);
+  expect(skipped).toEqual({ error: "reviewer process group did not terminate", status: 409 });
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBeFalse();
+  expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", stateDetail: "reviewer process group did not terminate" });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+  expect(closed).toEqual({ error: "reviewer process group did not terminate", status: 409 });
+  expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", closedAt: null, stateDetail: "reviewer process group did not terminate" });
 });
 
 test("failed stages park and retry resets to the last passed commit", async () => {

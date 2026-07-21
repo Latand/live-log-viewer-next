@@ -139,6 +139,7 @@ test("flow specs persist in the versioned state file and legacy flow entries loa
     fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({ flows: [flow] }));
     expect(loadFlows()).toEqual([{
       ...flow,
+      targetSha: null,
       implementerConversationId: null,
       reviewerFallback: configuredReviewerFallback(),
       pausedState: null,
@@ -172,6 +173,7 @@ test("flow bindings follow active conversation generations", () => {
       implementerConversationId: implementer.id,
       roles: { implementer: { engine: "codex", model: null, effort: "high" }, reviewer: { engine: "codex", model: null, effort: "xhigh" } },
       baseRef: "base",
+      targetSha: null,
       baseMode: "head",
       mode: "manual",
       reviewerMode: "headless",

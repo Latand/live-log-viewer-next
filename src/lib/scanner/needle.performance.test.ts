@@ -88,6 +88,18 @@ test("budgeted scanning resumes deterministically and proves lineage once reache
   expect(fileHasNeedle(needle, pathname, { remaining: 0 })).toBe(true);
 });
 
+test("an append between budgeted passes preserves needle scan progress", () => {
+  const pathname = path.join(SANDBOX, "append-between-passes.jsonl");
+  const needle = "toolu_append_progress";
+  const transcript = Buffer.alloc(600 * 1024, 0x78);
+  transcript.write(needle, 300 * 1024, "utf8");
+  fs.writeFileSync(pathname, transcript);
+
+  expect(fileHasNeedle(needle, pathname, { remaining: 256 * 1024 })).toBe(false);
+  fs.appendFileSync(pathname, "\n");
+  expect(fileHasNeedle(needle, pathname, { remaining: 256 * 1024 })).toBe(true);
+});
+
 test("findNeedle shares one generation budget across candidate files", () => {
   const first = virtualTranscript("shared-a.jsonl", 4 * MIB);
   const second = virtualTranscript("shared-b.jsonl", 4 * MIB);
@@ -155,5 +167,21 @@ test("a candidate that shrinks above its saved offset rescans replacement head c
   expect(fs.statSync(pathname).size).toBeGreaterThan(MIB);
 
   expect(fileHasNeedle(needle, pathname, { remaining: 0 })).toBe(false);
+  expect(fileHasNeedle(needle, pathname, { remaining: MIB })).toBe(true);
+});
+
+test("a same-size replacement resets a partial needle offset", () => {
+  const pathname = path.join(SANDBOX, "same-size-replacement.jsonl");
+  const needle = "toolu_same_size_replacement";
+  fs.writeFileSync(pathname, Buffer.alloc(2 * MIB, 0x78));
+  expect(fileHasNeedle(needle, pathname, { remaining: MIB })).toBe(false);
+  const before = fs.statSync(pathname);
+
+  const replacement = Buffer.alloc(2 * MIB, 0x79);
+  replacement.write(needle, 32, "utf8");
+  fs.writeFileSync(pathname, replacement);
+  fs.utimesSync(pathname, before.atime, new Date(before.mtimeMs + 2_000));
+  expect(fs.statSync(pathname).ino).toBe(before.ino);
+
   expect(fileHasNeedle(needle, pathname, { remaining: MIB })).toBe(true);
 });
