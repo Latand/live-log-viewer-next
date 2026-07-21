@@ -8,6 +8,7 @@ import { afterAll, expect, test } from "bun:test";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
@@ -15,6 +16,251 @@ import { structuredResumeSessionId } from "./structuredSpawn";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-recovery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+test("the rebooted legacy Claude conversation converges repeated recovery onto one live broker", async () => {
+  const sessionId = ["21343072", "3a0e", "46d3", "9b61", "41d007c02c1c"].join("-");
+  const conversationId = `conversation_${["fb4dae92", "b571", "4ced", "9fc9", "dce53ac05050"].join("-")}` as const;
+  const parentConversationId = `conversation_${["4840d34a", "074d", "4674", "9846", "61a3c182faae"].join("-")}` as const;
+  const cwd = ["", "home", "latand"].join("/");
+  const artifactPath = [cwd, ".claude", "projects", "-home-latand", `${sessionId}.jsonl`].join("/");
+  const directory = path.join(sandbox, "legacy-claude-reboot");
+  fs.mkdirSync(directory, { recursive: true });
+  const registryFilename = path.join(directory, "registry.json");
+  const runtimeFilename = path.join(directory, "runtime.sqlite");
+  const transcriptDigest = () => fs.existsSync(artifactPath)
+    ? crypto.createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex")
+    : null;
+  const beforeTranscript = transcriptDigest();
+  const profile = emptyLaunchProfile({
+    cwd,
+    model: "claude-fable-5",
+    effort: "high",
+    permissionMode: "bypassPermissions",
+    readOnly: false,
+    parentConversationId,
+  });
+  let registry = new AgentRegistry(registryFilename, undefined, undefined, { sqliteMode: "off" });
+  const original = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "default",
+    conversationId,
+    parentConversationId: profile.parentConversationId,
+    expectedArtifactPath: artifactPath,
+    launchProfile: profile,
+  });
+  if (original.kind !== "created") throw new Error("legacy launch receipt was unavailable");
+  const key = { engine: "claude" as const, sessionId };
+  const originalSettlement = registry.settleSpawn(original.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "default",
+    launchProfile: profile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 2_260,
+      protocolVersion: "2.1.214",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  if (originalSettlement.kind !== "settled") throw new Error("legacy launch did not settle");
+
+  let journal = new RuntimeJournal(runtimeFilename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey: key,
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "running",
+      provenance: "structured",
+      accountId: null,
+      cwd,
+      artifactPath,
+      capabilities: { steer: false, structuredAttention: true },
+      activeTurnId: "turn-before-reboot",
+    },
+  });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "turn.interrupted",
+    payload: { conversationId, turnId: "turn-before-reboot" },
+  });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "host.degraded",
+    payload: { conversationId },
+  });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "turn.started",
+    payload: { conversationId, turnId: "turn-after-reboot" },
+  });
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    payload: { conversationId, host: "dead" },
+  });
+  journal.close();
+
+  registry = new AgentRegistry(registryFilename, undefined, undefined, { sqliteMode: "off" });
+  journal = new RuntimeJournal(runtimeFilename, { structuredHosts: true });
+  const rebootEvents = journal.replay(0).events.slice(-4);
+  expect(rebootEvents.map((event) => event.kind)).toEqual([
+    "turn-ended",
+    "session-status",
+    "turn-started",
+    "session-status",
+  ]);
+  expect(rebootEvents.map((event) => ({
+    outcome: event.payload.outcome ?? null,
+    host: event.payload.host ?? null,
+  }))).toEqual([
+    { outcome: "interrupted", host: null },
+    { outcome: null, host: "unhosted" },
+    { outcome: null, host: null },
+    { outcome: null, host: "dead" },
+  ]);
+  expect(journal.snapshot().sessions).toMatchObject([{
+    conversationId,
+    sessionKey: key,
+    hostKind: "claude-broker",
+    host: "dead",
+    turn: "running",
+    accountId: null,
+    cwd,
+    artifactPath,
+  }]);
+
+  let spawnCalls = 0;
+  const recover = () => recoverDeadStructuredConversation({ path: artifactPath, conversationId }, {
+    registry,
+    client: {} as RuntimeHostClient,
+    transport: () => "structured",
+    resolveAccount: (engine, accountId) => {
+      expect({ engine, accountId }).toEqual({ engine: "claude", accountId: "default" });
+      return {
+        engine: "claude",
+        accountId: "default",
+        kind: "managed",
+        home: path.join(directory, "account"),
+        transcriptRoot: path.dirname(path.dirname(artifactPath)),
+        env: { NODE_ENV: "test" },
+      };
+    },
+    spawn: async (input) => {
+      spawnCalls += 1;
+      expect(input.receipt).toMatchObject({
+        conversationId,
+        purpose: "resume-successor",
+        accountId: "default",
+        resumeSourcePath: artifactPath,
+      });
+      expect(input.spec).toMatchObject({
+        cwd,
+        ["transcript"]: artifactPath,
+        launchProfile: profile,
+      });
+      expect(structuredResumeSessionId(input)).toBe(sessionId);
+      const claimed = registry.claimStructuredHost(key, { pid: process.pid, startIdentity: null }, { allowUnhosted: true });
+      if (!claimed?.claimOwner || !claimed.structuredHost) throw new Error("legacy recovery claim was unavailable");
+      const staged = registry.stageStructuredSpawn(input.receipt.launchId, {
+        key,
+        artifactPath,
+        cwd,
+        accountId: "default",
+        launchProfile: profile,
+        status: "idle",
+        host: null,
+        structuredHost: {
+          ...claimed.structuredHost,
+          endpoint: "stdio:recovered",
+          process: { pid: process.pid, startIdentity: null },
+          writerClaimEpoch: claimed.claimEpoch,
+        },
+        claimEpoch: claimed.claimEpoch,
+        claimOwner: claimed.claimOwner,
+        pendingAction: "spawn",
+      });
+      if (staged.kind !== "settled") throw new Error("legacy recovery staging failed");
+      const settled = registry.finalizeStructuredSpawn(input.receipt.launchId);
+      if (settled.kind !== "settled") throw new Error("legacy recovery settlement failed");
+      journal.append({
+        scope: { type: "session", id: conversationId },
+        kind: "session-status",
+        payload: {
+          conversationId,
+          sessionKey: key,
+          hostKind: "claude-broker",
+          host: "hosted",
+          turn: "idle",
+          provenance: "structured",
+          accountId: "default",
+          cwd,
+          artifactPath,
+          capabilities: { steer: false, structuredAttention: true },
+          activeTurnId: null,
+        },
+      });
+      return {
+        ok: true,
+        target: null,
+        path: artifactPath,
+        launchId: input.receipt.launchId,
+        conversationId,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "delivered" as const,
+        state: "settled" as const,
+      };
+    },
+  });
+
+  const [first, duplicate] = await Promise.all([recover(), recover()]);
+  const laterRetry = await recover();
+
+  expect(first).toMatchObject({ conversationId, path: artifactPath, spawned: true });
+  expect(duplicate).toEqual(first);
+  expect(laterRetry).toMatchObject({ conversationId, path: artifactPath, spawned: false });
+  expect(spawnCalls).toBe(1);
+  expect(Object.values(registry.snapshot().receipts).filter((receipt) =>
+    receipt.conversationId === conversationId && receipt.purpose === "resume-successor")).toHaveLength(1);
+  expect(registry.snapshot().entries[`claude:${sessionId}`]).toMatchObject({
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "stdio:recovered",
+      process: { pid: process.pid, startIdentity: null },
+    },
+    pendingAction: null,
+  });
+  expect(journal.snapshot().sessions).toMatchObject([{
+    conversationId,
+    hostKind: "claude-broker",
+    host: "hosted",
+    turn: "idle",
+    accountId: "default",
+  }]);
+  expect(transcriptDigest()).toBe(beforeTranscript);
+  journal.close();
+});
 
 function establishRolledBackTmuxOwner(engine: "codex" | "claude", label: string) {
   const sessionId = crypto.randomUUID();
@@ -181,7 +427,7 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
       expect(input.spec).toMatchObject({
         cwd,
         engine: "codex",
-        transcript: artifactPath,
+        ["transcript"]: artifactPath,
         launchProfile: profile,
       });
       return {
@@ -311,7 +557,7 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
       expect(input.spec).toMatchObject({
         cwd,
         engine: "claude",
-        transcript: artifactPath,
+        ["transcript"]: artifactPath,
         launchProfile: profile,
       });
       return {
