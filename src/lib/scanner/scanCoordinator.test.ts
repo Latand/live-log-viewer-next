@@ -135,6 +135,60 @@ test("a fenced caller never adopts a running generation and waits for a trailing
   expect((await fenced).complete).toBe(true);
 });
 
+test("an exclusive caller keeps its own runner and never adopts a covering scan", async () => {
+  const scans: RecordedScan[] = [];
+  const shared = recordingRunner(scans, "shared");
+
+  const leader = coordinatedFileScan({ persist: true, fresh: true }, shared);
+  await Promise.resolve();
+  expect(scans).toHaveLength(1);
+
+  // The running generation covers the intent, but the exclusive runner owns a
+  // private scope (a pinned path) only it can produce.
+  const pinnedScans: RecordedScan[] = [];
+  const pinned = coordinatedFileScan({ exclusive: true, join: false }, recordingRunner(pinnedScans, "pinned"));
+  await Promise.resolve();
+  expect(pinnedScans).toHaveLength(0);
+
+  scans[0]!.release();
+  await leader;
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(pinnedScans).toHaveLength(1);
+  pinnedScans[0]!.release();
+  expect((await pinned).files.map((file) => file.path)).toEqual(["/sessions/pinned.jsonl"]);
+});
+
+test("later callers never merge into a queued exclusive generation", async () => {
+  const scans: RecordedScan[] = [];
+  const shared = recordingRunner(scans, "shared");
+
+  const leader = coordinatedFileScan({}, shared);
+  await Promise.resolve();
+  expect(scans).toHaveLength(1);
+
+  const pinnedScans: RecordedScan[] = [];
+  const pinned = coordinatedFileScan({ exclusive: true, join: false }, recordingRunner(pinnedScans, "pinned"));
+  // The fenced catalog caller queues its own shared generation behind the
+  // exclusive one instead of receiving the pinned runner's snapshot.
+  const fenced = coordinatedFileScan({ join: false }, shared);
+
+  scans[0]!.release();
+  await leader;
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(pinnedScans).toHaveLength(1);
+  expect(scans).toHaveLength(1);
+
+  pinnedScans[0]!.release();
+  expect((await pinned).files.map((file) => file.path)).toEqual(["/sessions/pinned.jsonl"]);
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(scans).toHaveLength(2);
+  scans[1]!.release();
+  expect((await fenced).files.map((file) => file.path)).toEqual(["/sessions/shared.jsonl"]);
+});
+
 test("a failed generation rejects its joiners and the next request scans again", async () => {
   resetFileScanCoordinatorForTests();
   let failures = 0;

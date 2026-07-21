@@ -27,6 +27,12 @@ export interface FileScanIntent {
       contract requires a scan that STARTED after the request, so they merge
       into the single trailing generation instead. */
   join?: boolean;
+  /** The caller's runner carries private scan scope (a pinned path, a staged
+      resource publisher) that other callers' runners cannot reproduce. An
+      exclusive generation never merges with other pending callers and other
+      callers never merge into it — it still holds the process-wide
+      single-generation lease and queues behind the running scan. */
+  exclusive?: boolean;
 }
 
 interface ResolvedScanIntent {
@@ -45,6 +51,7 @@ interface InflightGeneration {
 interface PendingGeneration {
   intent: ResolvedScanIntent;
   runner: CoordinatedScanRunner;
+  exclusive: boolean;
   promise: Promise<FileCatalogScan>;
   resolve: (snapshot: FileCatalogScan) => void;
   reject: (error: unknown) => void;
@@ -53,7 +60,9 @@ interface PendingGeneration {
 interface CoordinatorState {
   generation: number;
   inflight?: InflightGeneration;
-  pending?: PendingGeneration;
+  /** FIFO of generations waiting for the single-generation lease. At most one
+      entry is shared (non-exclusive); every other entry owns a private scope. */
+  queue: PendingGeneration[];
   startScheduled: boolean;
 }
 
@@ -65,7 +74,7 @@ const coordinatorHost = globalThis as typeof globalThis & {
 };
 
 function coordinatorState(): CoordinatorState {
-  return coordinatorHost.__llvFileScanCoordinator ??= { generation: 0, startScheduled: false };
+  return coordinatorHost.__llvFileScanCoordinator ??= { generation: 0, queue: [], startScheduled: false };
 }
 
 function covers(running: ResolvedScanIntent, wanted: ResolvedScanIntent): boolean {
@@ -105,21 +114,32 @@ function scheduleStart(state: CoordinatorState): void {
   state.startScheduled = true;
   queueMicrotask(() => {
     state.startScheduled = false;
-    if (state.inflight || !state.pending) return;
-    const pending = state.pending;
-    state.pending = undefined;
+    if (state.inflight) return;
+    const pending = state.queue.shift();
+    if (!pending) return;
     startGeneration(state, pending.intent, pending.runner).promise.then(pending.resolve, pending.reject);
   });
 }
 
-function enqueue(state: CoordinatorState, intent: ResolvedScanIntent, runner: CoordinatedScanRunner): Promise<FileCatalogScan> {
-  const pending = state.pending;
-  if (pending) {
-    pending.intent = {
-      persist: pending.intent.persist || intent.persist,
-      fresh: pending.intent.fresh || intent.fresh,
-    };
-    return pending.promise;
+function enqueue(
+  state: CoordinatorState,
+  intent: ResolvedScanIntent,
+  runner: CoordinatedScanRunner,
+  exclusive: boolean,
+): Promise<FileCatalogScan> {
+  if (!exclusive) {
+    /* Only the shared pending generation accepts extra callers: an exclusive
+       pending runs a runner whose scope (pin, staged publisher) would not
+       satisfy them, and merging INTO an exclusive one would widen its scan
+       past what its owner requested. */
+    const shared = state.queue.find((pending) => !pending.exclusive);
+    if (shared) {
+      shared.intent = {
+        persist: shared.intent.persist || intent.persist,
+        fresh: shared.intent.fresh || intent.fresh,
+      };
+      return shared.promise;
+    }
   }
   let resolve!: (snapshot: FileCatalogScan) => void;
   let reject!: (error: unknown) => void;
@@ -127,7 +147,7 @@ function enqueue(state: CoordinatorState, intent: ResolvedScanIntent, runner: Co
     resolve = res;
     reject = rej;
   });
-  state.pending = { intent, runner, promise, resolve, reject };
+  state.queue.push({ intent, runner, exclusive, promise, resolve, reject });
   scheduleStart(state);
   return promise;
 }
@@ -142,10 +162,11 @@ export async function coordinatedFileScan(
 ): Promise<FileCatalogScan> {
   const state = coordinatorState();
   const wanted: ResolvedScanIntent = { persist: intent.persist === true, fresh: intent.fresh === true };
+  const exclusive = intent.exclusive === true;
   const inflight = state.inflight;
-  const snapshot = inflight && intent.join !== false && covers(inflight.intent, wanted)
+  const snapshot = !exclusive && inflight && intent.join !== false && covers(inflight.intent, wanted)
     ? await inflight.promise
-    : await enqueue(state, wanted, runner);
+    : await enqueue(state, wanted, runner, exclusive);
   return structuredClone(snapshot);
 }
 

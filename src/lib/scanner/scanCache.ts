@@ -7,7 +7,7 @@ import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { primeTranscriptTurnEvidence } from "@/lib/scanner/activity";
 import { globalCache } from "@/lib/scanner/caches";
 import { primePersistedLineageFacts } from "@/lib/scanner/links";
-import { coordinatedFileScan } from "@/lib/scanner/scanCoordinator";
+import { coordinatedFileScan, resetFileScanCoordinatorForTests } from "@/lib/scanner/scanCoordinator";
 import type { FileEntry, PendingQuestion } from "@/lib/types";
 import type { TurnState } from "@/lib/accounts/migration/contracts";
 
@@ -463,9 +463,10 @@ function beginPinnedFileScanRefresh(
     && generation >= slot.freshObservationGeneration;
   return installStagedFileScanRefresh(slot, generation, (publish) => instrumentFileScan(slot, generation, reason, async () => {
     /* A pin changes the scan scope, so this generation never serves joiners'
-       fences and never adopts a running scan; it still holds the process-wide
-       single-generation lease through the coordinator (#287). */
-    const pinnedSnapshot = await coordinatedFileScan({ fresh, join: false }, (intent) => listFilesWithProjectCatalog(undefined, {
+       fences, never adopts a running scan, and never merges with other pending
+       callers (their runners cannot reproduce the pin overlay); it still holds
+       the process-wide single-generation lease through the coordinator (#287). */
+    const pinnedSnapshot = await coordinatedFileScan({ fresh, join: false, exclusive: true }, (intent) => listFilesWithProjectCatalog(undefined, {
       persist: intent.persist,
       persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
       pin: pinnedPath,
@@ -813,4 +814,8 @@ export async function currentResourceFileScan(): Promise<CachedFileScan> {
 
 export function resetFilesRouteCacheForTests(): void {
   fileScanCache().clear();
+  /* The coordinator's single-generation lease lives on globalThis alongside
+     this cache. A test that leaves a gated scan unfinished would otherwise
+     wedge every later test's generations behind it. */
+  resetFileScanCoordinatorForTests();
 }

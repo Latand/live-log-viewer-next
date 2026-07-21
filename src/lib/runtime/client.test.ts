@@ -92,5 +92,5 @@ test("a healthy response resolves once and ignores the pending timeout", async (
     socket.end(JSON.stringify({ id: request.id, ok: true, result: { revision: 7 } }) + "\n");
   });
   const client = new UnixRuntimeHostClient(socketPath, 5_000, 5_000, 5_000);
-  expect(await client.snapshot()).toEqual({ revision: 7 });
+  expect(await client.snapshot() as unknown).toEqual({ revision: 7 });
 });
