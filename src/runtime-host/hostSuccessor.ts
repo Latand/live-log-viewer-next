@@ -16,6 +16,7 @@ import {
     of failing its container. */
 export const RUNTIME_HOST_FENCE_WAIT_ENV = "LLV_RUNTIME_HOST_FENCE_WAIT_MS";
 const SUCCESSOR_FENCE_WAIT_MS = 10 * 60_000;
+const DOCKER_RESTART_POLICY_STABILITY_MS = 11_000;
 export const RUNTIME_HOST_SUCCESSOR_LABEL = "dev.live-log-viewer.runtime-host-successor";
 const RUNTIME_HOST_GENERATION_ENV = [
   RUNTIME_HOST_FENCE_WAIT_ENV,
@@ -226,9 +227,10 @@ function successorIsReady(raw: string, name: string, candidate: ViewerReleaseIde
 }
 
 /** Two identity-aware observations: both must report the ready running state,
-    and the successor's start identity must not change between them — a
-    crash-looping container can report "running" to both probes while dockerd
-    restarts it in between (PR #521). */
+    and the successor's start identity must stay unchanged beyond Docker's
+    10-second restart-policy activation threshold. The additional second is a
+    scheduling margin. A crash-looping container can report "running" to both
+    probes while dockerd restarts it in between (PR #521). */
 async function observeStableSuccessor(
   name: string,
   candidate: ViewerReleaseIdentity,
@@ -238,7 +240,7 @@ async function observeStableSuccessor(
   if (!successorIsReady(firstEvidence, name, candidate)) {
     throw new Error("runtime-host successor container failed its identity or running-state gate");
   }
-  await (ports.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(250);
+  await (ports.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(DOCKER_RESTART_POLICY_STABILITY_MS);
   const stableEvidence = await ports.docker(["container", "inspect", name]);
   if (!successorIsReady(stableEvidence, name, candidate)) {
     throw new Error("runtime-host successor container did not remain stably ready");

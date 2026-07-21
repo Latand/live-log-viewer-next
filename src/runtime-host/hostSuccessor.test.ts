@@ -142,6 +142,7 @@ function harness(overrides: {
   stableStartedAt?: string;
   successorImage?: string;
   updateFailure?: Error;
+  wait?: (milliseconds: number) => Promise<void>;
 } = {}): Harness {
   const calls: string[][] = [];
   const events: string[] = [];
@@ -220,7 +221,7 @@ function harness(overrides: {
     },
     fenceOwnerPid: () => overrides.fenceOwnerPid === undefined ? 3970 : overrides.fenceOwnerPid,
     now: () => "2026-07-21T09:00:00.000Z",
-    wait: async () => undefined,
+    wait: overrides.wait ?? (async () => undefined),
   };
   return { ports, calls, events, records, intents, storedIntent: () => storedIntent };
 }
@@ -597,6 +598,23 @@ test("issue 518: a successor that restarts between readiness probes never become
 
   expect(records).toEqual([]);
   expect(calls.some((argv) => argv[0] === "container" && argv[1] === "update")).toBe(false);
+});
+
+test("issue 521 review: a failure before Docker arms restart policy leaves the predecessor restartable", async () => {
+  const waits: number[] = [];
+  const { ports, calls, records, intents } = harness({
+    stableSuccessorState: "exited",
+    wait: async (milliseconds) => { waits.push(milliseconds); },
+  });
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports))
+    .rejects.toThrow("runtime-host successor container did not remain stably ready");
+
+  expect(waits).toHaveLength(1);
+  expect(waits[0]).toBeGreaterThan(10_000);
+  expect(calls.some((argv) => argv[0] === "container" && argv[1] === "update")).toBe(false);
+  expect(records).toEqual([]);
+  expect(intents).toEqual([]);
 });
 
 test("issue 518: a same-name container with the wrong image never becomes durable", async () => {
