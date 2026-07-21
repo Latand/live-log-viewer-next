@@ -8,7 +8,7 @@ interface NeedleEntry {
   sizes: Record<string, number>;
 }
 
-const needleCache = globalCache<NeedleEntry>("needle");
+const needleCache = globalCache<NeedleEntry>("needle-v2");
 const tailNeedleCache = globalCache<{ size: number; mtimeMs: number; hit: boolean }>("needle-tail-v1");
 type TailUuidIndex = {
   dev: number;
@@ -248,8 +248,24 @@ export function fileHasNeedle(needle: string, pathname: string, budget?: NeedleS
 }
 
 export function findNeedle(needle: string, paths: (string | null | undefined)[], budget?: NeedleScanBudget): string | null {
+  if (budget === undefined) {
+    for (const pathname of paths) {
+      if (pathname && fileHasNeedle(needle, pathname)) return pathname;
+    }
+    return null;
+  }
+
+  let remainingCandidates = paths.reduce((count, pathname) => count + (pathname ? 1 : 0), 0);
   for (const pathname of paths) {
-    if (pathname && fileHasNeedle(needle, pathname, budget)) return pathname;
+    if (!pathname) continue;
+    const allowance = Math.ceil(Math.max(0, budget.remaining) / remainingCandidates);
+    const candidateBudget = { remaining: allowance };
+    const hit = fileHasNeedle(needle, pathname, candidateBudget);
+    if (Number.isFinite(allowance)) {
+      budget.remaining = Math.max(0, budget.remaining - (allowance - candidateBudget.remaining));
+    }
+    remainingCandidates -= 1;
+    if (hit) return pathname;
   }
   return null;
 }

@@ -96,9 +96,41 @@ test("findNeedle shares one generation budget across candidate files", () => {
 
   expect(findNeedle("toolu_shared_budget", [first, second], budget)).toBe(null);
 
-  // First candidate consumed its 1 MiB pass cap, the second the remainder.
+  // Both candidates consume an equal share of the generation allowance.
   expect(observedBytes).toBe(1.5 * MIB);
   expect(budget.remaining).toBe(0);
+});
+
+test("findNeedle reserves production-budget bytes for a later sibling proof", () => {
+  const first = virtualTranscript("fair-production-a.jsonl", MIB);
+  const second = path.join(SANDBOX, "fair-production-b.jsonl");
+  const needle = "toolu_fair_proof";
+  fs.writeFileSync(second, `${needle}\n`);
+  const budget: NeedleScanBudget = { remaining: 256 * 1024 };
+  instrumentReads();
+
+  expect(findNeedle(needle, [first, second], budget)).toBe(second);
+  expect(observedBytes).toBeLessThanOrEqual(256 * 1024);
+  expect(budget.remaining).toBeGreaterThanOrEqual(0);
+});
+
+test("a legacy needle cache entry cannot preserve a stale replacement offset", () => {
+  const pathname = path.join(SANDBOX, "legacy-cache-replacement.jsonl");
+  const needle = "toolu_legacy_replacement";
+  const replacement = Buffer.alloc(2 * MIB, 0x79);
+  replacement.write(needle, 32, "utf8");
+  fs.writeFileSync(pathname, replacement);
+  const cacheStore = globalThis as typeof globalThis & {
+    __llvCaches?: Record<string, Map<string, unknown>>;
+  };
+  cacheStore.__llvCaches ??= {};
+  cacheStore.__llvCaches.needle ??= new Map();
+  cacheStore.__llvCaches.needle.set(needle, {
+    hits: {},
+    scanned: { [pathname]: MIB },
+  });
+
+  expect(fileHasNeedle(needle, pathname, { remaining: MIB })).toBe(true);
 });
 
 test("a truncated candidate restarts its observation instead of skipping content", () => {
