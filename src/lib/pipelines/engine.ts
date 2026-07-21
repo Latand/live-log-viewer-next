@@ -26,7 +26,7 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
-import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
+import { commitPipelineStage, currentPipelineBranchHead, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import {
   DEFAULT_FAIL_EDGE_ROUNDS,
   MAX_FAIL_EDGE_ROUNDS,
@@ -1164,12 +1164,25 @@ async function tickReviewStage(
     return;
   }
   attachReviewFlowAttempt(attempt, flow);
-  const capturedReviewHead = flow.rounds.find((round) => round.reviewHeadSha)?.reviewHeadSha ?? null;
-  if (!attempt.reviewHeadSha && capturedReviewHead) {
+  const capturedReviewHead = flow.rounds.findLast((round) => round.reviewHeadSha)?.reviewHeadSha ?? null;
+  if (capturedReviewHead && attempt.reviewHeadSha !== capturedReviewHead) {
     attempt.reviewHeadSha = capturedReviewHead;
     persist();
   }
   if (flow.state === "approved") {
+    const currentHead = currentPipelineBranchHead(pipeline, ports.exec);
+    if (!currentHead.ok) {
+      park(pipeline, `approved review flow could not verify the current pipeline head: ${currentHead.error}`, attempt);
+      return;
+    }
+    if (!capturedReviewHead || capturedReviewHead !== currentHead.sha) {
+      park(
+        pipeline,
+        `approved review flow head mismatch: reviewed ${capturedReviewHead ?? "no exact head"}, current pipeline head is ${currentHead.sha}`,
+        attempt,
+      );
+      return;
+    }
     attempt.output = `Review loop approved after ${flow.rounds.length} round(s).`;
     attempt.verdict = { status: "pass", confidence: 1 };
     attempt.state = "committing";
@@ -1224,18 +1237,32 @@ const REOPENED_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
   "fixing",
   "approved",
 ]);
+const RECONCILABLE_BOUND_FLOW_ERRORS = [
+  "review flow startup paused:",
+  "review flow paused during startup:",
+  "advancing the review flow failed:",
+  "review loop ended in ",
+  "embedded review flow record disappeared",
+] as const;
 
-function resumeReopenedReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boolean {
+function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boolean {
   if (pipeline.state !== "needs_decision") return false;
   const stage = currentStage(pipeline);
   if (stage?.kind !== "review-loop") return false;
   const attempt = currentAttempt(pipeline, stage.id);
+  const attemptError = attempt?.error;
   const flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
-  if (!attempt?.error?.startsWith("review loop ended in ") || !flow || !REOPENED_REVIEW_FLOW_STATES.has(flow.state)) return false;
+  if (
+    !attemptError
+    || !RECONCILABLE_BOUND_FLOW_ERRORS.some((prefix) => attemptError.startsWith(prefix))
+    || !flow
+    || !REOPENED_REVIEW_FLOW_STATES.has(flow.state)
+  ) return false;
   pipeline.state = "running";
   pipeline.stateDetail = null;
   attempt.state = "reviewing";
   attempt.error = null;
+  attachReviewFlowAttempt(attempt, flow);
   setCursorState(pipeline, stage.id, "reviewing");
   return true;
 }
@@ -1251,7 +1278,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         let pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports);
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
-        pipelineChanged = resumeReopenedReviewFlow(pipeline, ports) || pipelineChanged;
+        pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
           pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
         }

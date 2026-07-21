@@ -1773,6 +1773,7 @@ test("review-loop stage delegates to one regular flow and maps approval", async 
   expect(h.calls.filter((call) => call.startsWith("flow:")).length).toBe(1);
   expect(h.calls).toContain("flow-patch:flow-1:advance");
   expect(h.calls.some((call) => call.includes("Reviewer guidance"))).toBe(true);
+  h.flows.get("flow-1")!.rounds.push({ n: 1, reviewHeadSha: ORIGIN_MAIN_SHA } as never);
   h.flows.get("flow-1")!.state = "approved";
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
   expect(loadPipelines()[0]!.state).toBe("completed");
@@ -2135,6 +2136,134 @@ test("a paused review flow parks its pipeline", async () => {
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
   expect(loadPipelines()[0]!.stateDetail).toContain("kickoff delivery failed");
+});
+
+test("a later exact-head approval replaces a stale startup pause and completes after controller restart (#526)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.state = "paused";
+  flow.stateDetail = "paused by user";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    flowId: "flow-1",
+    state: "needs_decision",
+    error: "review flow paused during startup: paused by user",
+  });
+
+  flow.rounds.push({
+    n: 1,
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+    launchId: "review-launch",
+    sessionId: "review-session",
+    reviewerPath: "/codex/reviewer.jsonl",
+    reviewerConversationId: "conversation_reviewer",
+  } as never);
+  flow.state = "approved";
+  flow.stateDetail = null;
+
+  /* A fresh controller process sees only durable pipeline + flow state. */
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  const completed = loadPipelines()[0]!;
+  expect(completed.state).toBe("completed");
+  expect(completed.stateDetail).toBeNull();
+  expect(completed.runs[1]!.attempts).toHaveLength(1);
+  expect(completed.runs[1]!.attempts[0]).toMatchObject({
+    flowId: "flow-1",
+    state: "passed",
+    error: null,
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+    agentPath: "/codex/reviewer.jsonl",
+    conversationId: "conversation_reviewer",
+  });
+
+  const afterCompletion = JSON.stringify(completed);
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  expect(JSON.stringify(loadPipelines()[0])).toBe(afterCompletion);
+});
+
+test("a later approval stays parked when its reviewed head differs from the current pipeline head (#526)", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.state = "paused";
+  flow.stateDetail = "transient controller restart";
+  await tickPipelines([], h.ports);
+  flow.rounds.push({ n: 1, reviewHeadSha: "f".repeat(40) } as never);
+  flow.state = "approved";
+  flow.stateDetail = null;
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("approved review flow head mismatch");
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    reviewHeadSha: "f".repeat(40),
+    error: expect.stringContaining(`current pipeline head is ${ORIGIN_MAIN_SHA}`),
+  });
+  expect((await tickPipelines([], h.ports)).changed).toBe(false);
+  expect(loadPipelines()[0]!.stateDetail).toBe(parked.stateDetail);
+});
+
+test("REQUEST_CHANGES recovery keeps the bound reviewer in the review slot and lets the flow relay continue (#526)", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.state = "paused";
+  flow.stateDetail = "relay controller unavailable";
+  await tickPipelines([], h.ports);
+  flow.rounds.push({
+    n: 1,
+    verdict: "REQUEST_CHANGES",
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+    launchId: "review-launch",
+    sessionId: "review-session",
+    reviewerPath: "/codex/reviewer.jsonl",
+    reviewerConversationId: "conversation_reviewer",
+  } as never);
+  flow.state = "relay_pending";
+  flow.stateDetail = null;
+
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  const relaying = loadPipelines()[0]!;
+  expect(relaying.state).toBe("running");
+  expect(relaying.stateDetail).toBeNull();
+  expect(relaying.runs[1]!.attempts).toHaveLength(1);
+  expect(relaying.runs[1]!.attempts[0]).toMatchObject({
+    flowId: "flow-1",
+    state: "reviewing",
+    error: null,
+    agentPath: "/codex/reviewer.jsonl",
+    conversationId: "conversation_reviewer",
+  });
 });
 
 test("retrying a paused review with a live reviewer never mutates its checkout (#522)", async () => {
@@ -3120,6 +3249,7 @@ test("consecutive reviews cross a migration boundary and resume positional imple
   await tickPipelines([], ports); // spawn build
   await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "built")], ports); // build → review1
   await tickPipelines([entry("/codex/stage-1.jsonl")], ports); // review1 opens flow-1
+  h.flows.get("flow-1")!.rounds.push({ n: 1, reviewHeadSha: ORIGIN_MAIN_SHA } as never);
   h.flows.get("flow-1")!.state = "approved";
   await tickPipelines([entry("/codex/stage-1.jsonl")], ports); // review1 approves → review2
 
