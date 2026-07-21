@@ -108,6 +108,29 @@ test("an exhausted shared budget preserves a resumable checkpoint without valida
   expect(checkpointFor(pathname)).toEqual(checkpoint);
 });
 
+test("a pre-aborted resumed scan preserves its checkpoint without validating its head", async () => {
+  const pathname = virtualTranscript("resumed-pre-aborted.jsonl", 16 * MIB);
+  await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, {
+    resume: true,
+    maxBytes: 4 * MIB,
+  });
+  const checkpoint = checkpointFor(pathname)!;
+  const budget: AuthorshipScanBudget = { remaining: 128 * 1024 };
+  const abort = new AbortController();
+  abort.abort();
+
+  const resumed = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, {
+    resume: true,
+    maxBytes: 4 * MIB,
+    budget,
+    signal: abort.signal,
+  });
+
+  expect(resumed).toEqual({ count: checkpoint.count, complete: false });
+  expect(budget.remaining).toBe(128 * 1024);
+  expect(checkpointFor(pathname)).toEqual(checkpoint);
+});
+
 test("cancellation lands on a 64 KiB chunk boundary and keeps the checkpoint resumable", async () => {
   const pathname = virtualTranscript("aborted.jsonl");
   const abort = new AbortController();
