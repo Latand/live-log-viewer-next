@@ -441,6 +441,7 @@ test("issue 521 review: A to B to A stages each deployment generation and never 
     name: string;
     image: string;
     revision: string;
+    env: string[];
     pid: number;
     running: boolean;
     restart: string;
@@ -450,6 +451,7 @@ test("issue 521 review: A to B to A stages each deployment generation and never 
     name: "llv-runtime-host-initial",
     image: "agent-log-viewer:node22",
     revision: "0".repeat(40),
+    env: ["LLV_RUNTIME_EVENTS=1"],
     pid: 3970,
     running: true,
     restart: "unless-stopped",
@@ -474,12 +476,7 @@ test("issue 521 review: A to B to A stages each deployment generation and never 
       Config: {
         Image: container.image,
         Cmd: ["bun-container", "run", "src/runtime-host/main.ts"],
-        Env: [
-          "LLV_RUNTIME_EVENTS=1",
-          `${RUNTIME_HOST_IMAGE_ENV}=${container.image}`,
-          `${RUNTIME_HOST_REVISION_ENV}=${container.revision}`,
-          `${RUNTIME_HOST_CONTAINER_ENV}=${container.name}`,
-        ],
+        Env: container.env,
         Labels: {
           [RUNTIME_HOST_SUCCESSOR_LABEL]: "1",
           "dev.live-log-viewer.revision": container.revision,
@@ -507,11 +504,13 @@ test("issue 521 review: A to B to A stages each deployment generation and never 
         if (containers.some((item) => item.name === name)) throw new Error(`Conflict. The container name "/${name}" is already in use`);
         const imageEntry = argv.findLast((item) => item.startsWith(`${RUNTIME_HOST_IMAGE_ENV}=`));
         const revisionEntry = argv.findLast((item) => item.startsWith(`${RUNTIME_HOST_REVISION_ENV}=`));
+        const env = argv.flatMap((item, index) => argv[index - 1] === "-e" ? [item] : []);
         const created: Container = {
           id: `successor-${nextContainerId}`,
           name,
           image: imageEntry!.slice(RUNTIME_HOST_IMAGE_ENV.length + 1),
           revision: revisionEntry!.slice(RUNTIME_HOST_REVISION_ENV.length + 1),
+          env,
           pid: 4200 + containers.length,
           running: true,
           restart: "unless-stopped",
@@ -564,6 +563,9 @@ test("issue 521 review: A to B to A stages each deployment generation and never 
   expect(releases.map((item) => item.container)).toEqual(successorNames);
   expect(starts).toEqual([]);
   expect(active).toMatchObject({ name: successorNames[2], running: true, restart: "unless-stopped" });
+  for (const key of [RUNTIME_HOST_FENCE_WAIT_ENV, RUNTIME_HOST_IMAGE_ENV, RUNTIME_HOST_REVISION_ENV, RUNTIME_HOST_CONTAINER_ENV]) {
+    expect(active.env.filter((entry) => entry.startsWith(`${key}=`))).toHaveLength(1);
+  }
   expect(containers).toHaveLength(1);
   expect(intent).toBeNull();
 });

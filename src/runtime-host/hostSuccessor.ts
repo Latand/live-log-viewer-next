@@ -17,6 +17,12 @@ import {
 export const RUNTIME_HOST_FENCE_WAIT_ENV = "LLV_RUNTIME_HOST_FENCE_WAIT_MS";
 const SUCCESSOR_FENCE_WAIT_MS = 10 * 60_000;
 export const RUNTIME_HOST_SUCCESSOR_LABEL = "dev.live-log-viewer.runtime-host-successor";
+const RUNTIME_HOST_GENERATION_ENV = [
+  RUNTIME_HOST_FENCE_WAIT_ENV,
+  RUNTIME_HOST_IMAGE_ENV,
+  RUNTIME_HOST_REVISION_ENV,
+  RUNTIME_HOST_CONTAINER_ENV,
+] as const;
 
 export interface RuntimeHostSuccessorPorts {
   /** Short-lived CLI call against the host Docker daemon. Every mutation this
@@ -102,6 +108,10 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string") ? value as string[] : [];
 }
 
+function isEnvironmentEntry(entry: string, key: string): boolean {
+  return entry === key || entry.startsWith(`${key}=`);
+}
+
 function parseTopology(id: string, raw: string): PredecessorTopology {
   const inspected = JSON.parse(raw) as Array<Record<string, unknown>>;
   const container = inspected[0] ?? {};
@@ -111,10 +121,11 @@ function parseTopology(id: string, raw: string): PredecessorTopology {
   if (cmd.length === 0) throw new Error("predecessor runtime-host command is unavailable");
   return {
     id,
-    /* PR #521: the inspected predecessor environment may carry the unsupported
-       credential; drop the entry before its name or value can reach `docker
-       run` arguments or successor metadata. */
-    env: withoutWakatimeCredentialEntries(stringArray(config.Env)),
+    /* PR #521: keep unsupported credentials and predecessor-owned generation
+       markers outside the cloned environment. The successor appends one
+       authoritative value for every reserved generation key below. */
+    env: withoutWakatimeCredentialEntries(stringArray(config.Env))
+      .filter((entry) => !RUNTIME_HOST_GENERATION_ENV.some((key) => isEnvironmentEntry(entry, key))),
     cmd,
     containerUser: typeof config.User === "string" ? config.User : "",
     workingDir: typeof config.WorkingDir === "string" ? config.WorkingDir : "",
@@ -195,12 +206,14 @@ function successorMatchesGeneration(raw: string, name: string, candidate: Viewer
   const config = (container.Config ?? {}) as Record<string, unknown>;
   const labels = (config.Labels ?? {}) as Record<string, unknown>;
   const environment = stringArray(config.Env);
+  const hasSingleEntry = (key: string, value: string) => environment.filter((entry) => isEnvironmentEntry(entry, key)).length === 1
+    && environment.includes(`${key}=${value}`);
   return config.Image === candidate.image
     && labels[RUNTIME_HOST_SUCCESSOR_LABEL] === "1"
     && labels["dev.live-log-viewer.revision"] === candidate.revision
-    && environment.includes(`${RUNTIME_HOST_IMAGE_ENV}=${candidate.image}`)
-    && environment.includes(`${RUNTIME_HOST_REVISION_ENV}=${candidate.revision}`)
-    && environment.includes(`${RUNTIME_HOST_CONTAINER_ENV}=${name}`);
+    && hasSingleEntry(RUNTIME_HOST_IMAGE_ENV, candidate.image)
+    && hasSingleEntry(RUNTIME_HOST_REVISION_ENV, candidate.revision)
+    && hasSingleEntry(RUNTIME_HOST_CONTAINER_ENV, name);
 }
 
 function successorIsReady(raw: string, name: string, candidate: ViewerReleaseIdentity): boolean {
