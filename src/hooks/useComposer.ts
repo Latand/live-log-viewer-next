@@ -84,24 +84,38 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      event, so the `text` state falls behind the half-composed DOM value. A
      background board/feed refresh then re-renders this controlled textarea, and
      React re-asserts the stale `text` over the field: the composition is wiped
-     and the caret jumps to the end mid-word. Native composition listeners
-     mirror the field into the draft on every composition step (React's own
-     synthetic composition events are unreliable — some engines never deliver
-     them), so a refresh re-renders the identical text and never disturbs the
-     caret; `compositionend` is the authoritative commit some browsers omit a
-     trailing change for. The listeners outlive any single render, so they read
-     the latest `setText` through a ref kept current in an effect. */
+     and the caret jumps to the end mid-word.
+
+     The mirror must read the field in the browser's own order. `compositionupdate`
+     fires BEFORE the engine applies that step's composed value to the field, so
+     reading `el.value` there captures the previous value and still lags a step
+     behind (the exact clobber). The native `input` event — which every engine
+     fires on each composition step, unlike the unreliable synthetic
+     composition events — fires AFTER the value is applied, so reading `el.value`
+     there mirrors the true half-composed DOM value into the draft. A refresh
+     then re-renders identical text and never disturbs the caret. Outside a
+     composition React's own onChange already owns the value, so the input
+     listener is gated on an in-flight composition to avoid double-persisting
+     each keystroke; `compositionend` does the authoritative final sync some
+     engines omit a trailing change for and clears the gate. The listeners
+     outlive any single render, so they read the latest `setText` through a ref
+     kept current in an effect. */
   const setTextRef = useRef(setText);
   useLayoutEffect(() => { setTextRef.current = setText; });
   useLayoutEffect(() => {
     const el = inputRef.current;
     if (!el) return;
-    const sync = () => setTextRef.current(el.value);
-    el.addEventListener("compositionupdate", sync);
-    el.addEventListener("compositionend", sync);
+    let composing = false;
+    const onCompositionStart = () => { composing = true; };
+    const onInput = () => { if (composing) setTextRef.current(el.value); };
+    const onCompositionEnd = () => { composing = false; setTextRef.current(el.value); };
+    el.addEventListener("compositionstart", onCompositionStart);
+    el.addEventListener("input", onInput);
+    el.addEventListener("compositionend", onCompositionEnd);
     return () => {
-      el.removeEventListener("compositionupdate", sync);
-      el.removeEventListener("compositionend", sync);
+      el.removeEventListener("compositionstart", onCompositionStart);
+      el.removeEventListener("input", onInput);
+      el.removeEventListener("compositionend", onCompositionEnd);
     };
   }, []);
 
