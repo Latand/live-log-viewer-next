@@ -4,7 +4,7 @@ import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/li
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
-import { runtimeSettingsCapability, type RuntimeEventInput } from "./contracts";
+import { runtimeSettingsCapability, type RuntimeEventInput, type RuntimeSession } from "./contracts";
 import type { EngineHost, HostState } from "./engineHost";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { applyStructuredReconfigure } from "./structuredReconfigure";
@@ -350,7 +350,10 @@ export async function bindStructuredDeliveryQueue(
     }
     return republished;
   };
-  const publishCurrentFallback = async (conversationId: string): Promise<void> => {
+  const publishCurrentFallback = async (
+    conversationId: string,
+    current?: RuntimeSession,
+  ): Promise<void> => {
     const conversation = registry.conversation(conversationId as `conversation_${string}`);
     const generation = conversation?.generations.at(-1);
     if (!conversation || !generation) return;
@@ -363,6 +366,23 @@ export async function bindStructuredDeliveryQueue(
         ? "hosted"
         : "unhosted";
     const turn = entry?.status === "live" ? "running" : entry?.status === "idle" ? "idle" : "unknown";
+    const hostKind = entry?.structuredHost?.kind ?? (legacy ? "tmux-legacy" : "unhosted");
+    const provenance = entry?.structuredHost ? "structured" : "derived";
+    const accountId = entry?.accountId ?? generation.accountId;
+    const parentConversationId = generation.launchProfile.parentConversationId ?? null;
+    const cwd = entry?.cwd ?? generation.launchProfile.cwd;
+    if (current
+      && current.sessionKey.engine === key.engine
+      && current.sessionKey.sessionId === key.sessionId
+      && current.hostKind === hostKind
+      && current.host === (entry?.structuredHost && entry.status === "dead" ? "dead" : host)
+      && current.turn === turn
+      && current.provenance === provenance
+      && current.accountId === accountId
+      && current.parentConversationId === parentConversationId
+      && current.cwd === cwd
+      && current.artifactPath === generation.path
+      && current.activeTurnId === null) return;
     projectionRevision += 1;
     await client.append({
       scope: { type: "session", id: conversationId },
@@ -374,13 +394,13 @@ export async function bindStructuredDeliveryQueue(
       payload: {
         conversationId,
         sessionKey: key,
-        hostKind: entry?.structuredHost?.kind ?? (legacy ? "tmux-legacy" : "unhosted"),
+        hostKind,
         host: entry?.structuredHost && entry.status === "dead" ? "dead" : host,
         turn,
-        provenance: entry?.structuredHost ? "structured" : "derived",
-        accountId: entry?.accountId ?? generation.accountId,
-        parentConversationId: generation.launchProfile.parentConversationId,
-        cwd: entry?.cwd ?? generation.launchProfile.cwd,
+        provenance,
+        accountId,
+        parentConversationId,
+        cwd,
         artifactPath: generation.path,
         capabilities: entry?.structuredHost
           ? {
@@ -574,6 +594,12 @@ export async function bindStructuredDeliveryQueue(
       if (stopped || state.activeQueue !== queue) return;
       for (const item of items) await register(item);
       const startupSnapshot = registry.snapshot();
+      const runtimeSnapshot = typeof client.snapshot === "function"
+        ? await client.snapshot().catch(() => null)
+        : null;
+      const runtimeSessions = new Map(
+        (runtimeSnapshot?.sessions ?? []).map((session) => [session.conversationId, session]),
+      );
       for (const conversation of Object.values(startupSnapshot.conversations)) {
         const generation = conversation.generations.at(-1);
         if (!generation) continue;
@@ -581,7 +607,7 @@ export async function bindStructuredDeliveryQueue(
         if (registrations.has(id)) continue;
         const entry = startupSnapshot.entries[id];
         if (!entry?.structuredHost && entry?.host?.kind !== "tmux") continue;
-        await publishCurrentFallback(conversation.id);
+        await publishCurrentFallback(conversation.id, runtimeSessions.get(conversation.id));
       }
       await reconcileTerminalDeliveries(registry, client, () => !stopped && state.activeQueue === queue);
       await queue.drain();
