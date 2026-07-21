@@ -254,6 +254,14 @@ function renderMobileFocus(root: Root, file: FileEntry): void {
 function textareaIn(host: HTMLElement): HTMLTextAreaElement {
   return host.querySelector("textarea") as HTMLTextAreaElement;
 }
+/* The composer's runtime pill (issue #390) advertises the resolved model +
+   reasoning face as its accessible name (`⚡ 5.6-Terra · High`, aria-labelled
+   "… — GPT-5.6-Terra, High"). Reading that rendered accessible name — not the
+   raw localStorage record — is what proves the persisted choice actually
+   reaches the operator, and lets either a model OR a reasoning reversion fail. */
+function runtimePillLabel(scope: HTMLElement): string {
+  return scope.querySelector("[data-runtime-pill]")?.getAttribute("aria-label") ?? "";
+}
 function compose(el: HTMLTextAreaElement, type: string): void {
   flushSync(() => el.dispatchEvent(new dom.CompositionEvent(type, { bubbles: true }) as unknown as Event));
 }
@@ -348,9 +356,13 @@ for (const mobile of [false, true]) {
     const draft = "hello brave new world";
     sessionStorage.setItem(`llvDraft:${conversationId}`, draft);
     /* A committed model/reasoning choice the refresh must not revert (issue
-       #499 fixed a persist-on-render that reverted it during resolution). */
+       #499 fixed a persist-on-render that reverted it during resolution). It is
+       a VALID, non-default catalog selection — `gpt-5.6-terra` (the default is
+       `gpt-5.6-sol`) at `high` (the default is `low`) — so the pill actually
+       hydrates and renders it; an unsupported id would be dropped to defaults on
+       read and the rendered-face assertion below would have no teeth. */
     const runtimeKey = storageKey(fileFor({ path: "/refresh.jsonl", conversationId }));
-    localStorage.setItem(runtimeKey, JSON.stringify({ model: "gpt-5.1-codex", effort: "high" }));
+    localStorage.setItem(runtimeKey, JSON.stringify({ model: "gpt-5.6-terra", effort: "high" }));
     const entry = (mtime: number, activity: FileEntry["activity"]) =>
       fileFor({ path: "/refresh.jsonl", conversationId, mtime, activity });
 
@@ -381,8 +393,25 @@ for (const mobile of [false, true]) {
     expect(after.selectionEnd).toBe(11);
     expect(after.value).toBe(draft);
     expect(host.querySelectorAll("img")).toHaveLength(1);
-    /* The runtime model/reasoning choice rode the resolution untouched. */
-    expect(JSON.parse(localStorage.getItem(runtimeKey)!)).toEqual({ model: "gpt-5.1-codex", effort: "high" });
+
+    /* Wait for the pill's persisted-state hydration: the surface resolution
+       mounts the runtime strip, and the pill's load effect reads the
+       identity-scoped runtime draft — swapping the initial synthesized default
+       face for the stored `GPT-5.6-Terra, High`. */
+    for (let attempt = 0; attempt < 50 && !runtimePillLabel(host).includes("GPT-5.6-Terra"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    /* The runtime model/reasoning choice rode the resolution untouched — the
+       RENDERED accessible face, not just the storage record. Reverting EITHER
+       axis makes this RED: a model reversion drops "GPT-5.6-Terra" (→ the
+       "GPT-5.6-Sol" default) and a reasoning reversion drops "High" (→ the
+       "Light" default). */
+    const label = runtimePillLabel(host);
+    expect(label).toContain("GPT-5.6-Terra");
+    expect(label).toContain("High");
+    expect(label).not.toContain("GPT-5.6-Sol");
+    expect(label).not.toContain("Light");
+    expect(JSON.parse(localStorage.getItem(runtimeKey)!)).toEqual({ model: "gpt-5.6-terra", effort: "high" });
   });
 }
 
