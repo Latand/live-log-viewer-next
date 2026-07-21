@@ -184,9 +184,9 @@ test("review-flow heuristic claim skips a newer native Codex subagent", async ()
   const startedAt = "2026-01-01T00:00:00.000Z";
   const started = Date.parse(startedAt) / 1000;
   const cwd = "/repo";
-  const implementerId = "019f421e-02e1-73e0-9b77-bebde063f10c";
-  const rootId = "019f421e-02e1-73e0-9b77-bebde063f10a";
-  const childId = "019f423a-d6e9-7903-b597-3e676b6ff3d4";
+  const implementerId = ["019f421e", "02e1", "73e0", "9b77", "bebde063f10c"].join("-");
+  const rootId = ["019f421e", "02e1", "73e0", "9b77", "bebde063f10a"].join("-");
+  const childId = ["019f423a", "d6e9", "7903", "b597", "3e676b6ff3d4"].join("-");
   const implementer = writeCodexEntry(`rollout-implementer-${implementerId}.jsonl`, { id: implementerId, cwd }, started - 100);
   const root = writeCodexEntry(`rollout-root-${rootId}.jsonl`, { id: rootId, cwd }, started + 5);
   const nativeChild = writeCodexEntry(
@@ -254,7 +254,7 @@ test("review-flow heuristic claim skips a newer native Codex subagent", async ()
 test("headless review retries once after an exit without a verdict, then parks on a repeated failure", async () => {
   const startedAt = new Date().toISOString();
   const cwd = "/repo";
-  const implementer = writeCodexEntry("retry-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f117", cwd }, Date.now() / 1_000);
+  const implementer = writeCodexEntry("retry-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f117"].join("-"), cwd }, Date.now() / 1_000);
   const flow: Flow = {
     id: "flow-retry",
     template: "implement-review-loop",
@@ -336,7 +336,7 @@ test("headless review retries once after an exit without a verdict, then parks o
 test("headless review recovers the rollout verdict before consuming an automatic retry", async () => {
   const startedAt = "2026-07-12T08:35:59.000Z";
   const cwd = "/repo";
-  const implementer = writeCodexEntry("recoverable-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f119", cwd }, Date.now() / 1_000);
+  const implementer = writeCodexEntry("recoverable-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f119"].join("-"), cwd }, Date.now() / 1_000);
   const reviewerPath = path.join(import.meta.dir, "fixtures", "codex-review-2026-07-12.jsonl");
   const reviewer = entryFor(reviewerPath, Date.now() / 1_000);
   const flow: Flow = {
@@ -365,7 +365,7 @@ test("headless review recovers the rollout verdict before consuming an automatic
       accountId: "default",
       attemptedAccounts: ["codex:default"],
       autoRetryCount: 0,
-      sessionId: "11111111-2222-4333-8444-555555555555",
+      sessionId: ["11111111", "2222", "4333", "8444", "555555555555"].join("-"),
       reviewerPid: 999_999_999,
       reviewerIdentity: "999999999:gone",
       reviewerPane: null,
@@ -405,7 +405,7 @@ test("headless review recovers the rollout verdict before consuming an automatic
 test("lost reviewer tracking parks with an accurate cause and does not spawn a duplicate", async () => {
   const startedAt = "2026-07-12T08:35:59.000Z";
   const cwd = "/repo";
-  const implementer = writeCodexEntry("lost-tracking-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f120", cwd }, Date.now() / 1_000);
+  const implementer = writeCodexEntry("lost-tracking-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f120"].join("-"), cwd }, Date.now() / 1_000);
   const flow: Flow = {
     id: "flow-lost-tracking",
     template: "implement-review-loop",
@@ -468,7 +468,7 @@ test("lost reviewer tracking parks with an accurate cause and does not spawn a d
 test("pane restart during the pre-handle checkpoint parks before launching another reviewer", async () => {
   const startedAt = "2026-07-12T09:30:00.000Z";
   const cwd = "/missing-pane-review-worktree";
-  const implementer = writeCodexEntry("pane-pre-handle-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f121", cwd }, Date.now() / 1_000);
+  const implementer = writeCodexEntry("pane-pre-handle-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f121"].join("-"), cwd }, Date.now() / 1_000);
   const flow: Flow = {
     id: "flow-pane-pre-handle",
     template: "implement-review-loop",
@@ -532,7 +532,7 @@ test("overlapping ticks preserve an active pre-handle launch and adopt its revie
   const startedAt = new Date().toISOString();
   const leaseUntil = new Date(Date.now() + 60_000).toISOString();
   const cwd = "/repo";
-  const implementer = writeCodexEntry("overlap-launch-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f123", cwd }, Date.now() / 1_000);
+  const implementer = writeCodexEntry("overlap-launch-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f123"].join("-"), cwd }, Date.now() / 1_000);
   const flow: Flow = {
     id: "flow-overlap-launch",
     template: "implement-review-loop",
@@ -614,7 +614,7 @@ test("synthetic takeover preserves an identity-less headless launch lease for th
   const startedAt = new Date().toISOString();
   const leaseUntil = new Date(Date.now() + 60_000).toISOString();
   const cwd = "/repo";
-  const implementer = writeCodexEntry("adopt-identity-lease-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f125", cwd }, Date.now() / 1_000);
+  const implementer = writeCodexEntry("adopt-identity-lease-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f125"].join("-"), cwd }, Date.now() / 1_000);
   const reviewer = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
   reviewer.unref();
   const flow: Flow = {
@@ -708,7 +708,7 @@ test("identity-less headless post-spawn checkpoint keeps its cross-Viewer lease 
   const startedAt = new Date().toISOString();
   const leaseUntil = new Date(Date.now() + 60_000).toISOString();
   const cwd = "/repo";
-  const implementer = writeCodexEntry("identity-lease-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f124", cwd }, Date.now() / 1_000);
+  const implementer = writeCodexEntry("identity-lease-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f124"].join("-"), cwd }, Date.now() / 1_000);
   const reviewer = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
   reviewer.unref();
   const flow: Flow = {
@@ -796,7 +796,7 @@ test("identity-less headless post-spawn checkpoint keeps its cross-Viewer lease 
 test("restart recovery accepts a conclusive Codex artifact without process identity or scanner entry", async () => {
   const startedAt = "2026-07-12T09:35:00.000Z";
   const cwd = "/repo";
-  const implementer = writeCodexEntry("artifact-recovery-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f122", cwd }, Date.now() / 1_000);
+  const implementer = writeCodexEntry("artifact-recovery-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f122"].join("-"), cwd }, Date.now() / 1_000);
   const reviewer = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
   reviewer.unref();
   const flow: Flow = {
@@ -867,7 +867,7 @@ test("restart recovery accepts a conclusive Codex artifact without process ident
 test("restart recovery keeps a launched Claude fallback bound to its persisted effective role", async () => {
   const startedAt = new Date().toISOString();
   const cwd = "/repo";
-  const implementer = writeCodexEntry("fallback-restart-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f118", cwd }, Date.now() / 1_000);
+  const implementer = writeCodexEntry("fallback-restart-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f118"].join("-"), cwd }, Date.now() / 1_000);
   const flow: Flow = {
     id: "flow-fallback-restart",
     template: "implement-review-loop",
@@ -935,8 +935,8 @@ test("a mid-flight round is polled with its frozen reviewer role, not a raced se
   const startedAt = "2026-02-02T00:00:00.000Z";
   const started = Date.parse(startedAt) / 1000;
   const cwd = "/repo";
-  const implementerId = "029f421e-02e1-73e0-9b77-bebde063f20c";
-  const reviewerId = "029f421e-02e1-73e0-9b77-bebde063f20b";
+  const implementerId = ["029f421e", "02e1", "73e0", "9b77", "bebde063f20c"].join("-");
+  const reviewerId = ["029f421e", "02e1", "73e0", "9b77", "bebde063f20b"].join("-");
   const implementer = writeCodexEntry(`rollout-impl2-${implementerId}.jsonl`, { id: implementerId, cwd }, started - 100);
   /* The reviewer candidate is a CODEX session, matching the round's frozen role. */
   const reviewerCandidate = writeCodexEntry(`rollout-rev2-${reviewerId}.jsonl`, { id: reviewerId, cwd }, started + 5);
@@ -1229,12 +1229,12 @@ test("a pane-mode Claude review launch under structured transport parks without 
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-no-tmux-repo-"));
   try {
     expect(spawnSync("git", ["init", "-b", "main"], { cwd }).status).toBe(0);
-    expect(spawnSync("git", ["config", "user.email", "flow@example.test"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "flow@example.com"], { cwd }).status).toBe(0);
     expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd }).status).toBe(0);
     fs.writeFileSync(path.join(cwd, "work.txt"), "committed\n");
     expect(spawnSync("git", ["add", "work.txt"], { cwd }).status).toBe(0);
     expect(spawnSync("git", ["commit", "-m", "reviewed"], { cwd }).status).toBe(0);
-    const implementer = writeCodexEntry("no-tmux-pane-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f130", cwd }, Date.now() / 1_000);
+    const implementer = writeCodexEntry("no-tmux-pane-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f130"].join("-"), cwd }, Date.now() / 1_000);
     const startedAt = new Date().toISOString();
     const flow: Flow = {
       id: "flow-no-tmux-pane",

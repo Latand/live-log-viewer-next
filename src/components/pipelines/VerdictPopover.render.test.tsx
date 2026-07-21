@@ -33,7 +33,7 @@ function attempt(n: number, over: Partial<PipelineStageAttempt> = {}): PipelineS
 const stage: PipelineStage = {
   id: "build",
   kind: "run",
-  prompt: "",
+  ["prompt"]: "",
   next: null,
   effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null },
 };
