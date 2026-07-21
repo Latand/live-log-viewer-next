@@ -634,6 +634,10 @@ async function relayFindings(flow: Flow, entriesByPath: Map<string, FileEntry>, 
   const deliveredAt = isoNow();
   round.relayDelivery = { path: deliveryPath, deliveredAt };
   round.relayedAt = deliveredAt;
+  completeRelayTransition(flow, round);
+}
+
+function completeRelayTransition(flow: Flow, round: Round): void {
   if (round.verdict === "APPROVE") {
     flow.state = "approved";
     flow.closedAt = isoNow();
@@ -823,6 +827,10 @@ export async function tickFlow(
 
   if (flow.state === "relaying") {
     const relayKey = roundKey(flow, round);
+    if (round.relayedAt !== null) {
+      completeRelayTransition(flow, round);
+      return JSON.stringify(flow) !== before;
+    }
     const activeRelay = relayLeases.get(relayKey);
     if (activeRelay) {
       await activeRelay;
@@ -886,7 +894,8 @@ export function flowTickBase(flows: Flow[]): Map<string, FlowTickBase> {
  *     operator edit (e.g. set-roles updating a spawn_pending round's frozen
  *     reviewerRole) is never clobbered by the tick's stale clone;
  *   - a flow whose disk state/rounds/closedAt diverged from the tick's base was
- *     taken over by the operator — the operator wins (a close is never reopened);
+ *     taken over by the operator; pause/close retain their lifecycle state while
+ *     accepting exact-round successful relay settlement, and other takeovers win;
  *   - otherwise the tick's result lands, but operator-owned fields are taken from
  *     disk: top-level roles/roundLimit/mode, and each unstarted round's
  *     reviewerRole (the tick never edits an unspawned round's snapshot — only
@@ -906,7 +915,29 @@ export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>)
       diskFlow.state !== start.state ||
       diskFlow.rounds.length !== start.roundsLen ||
       diskFlow.closedAt !== start.closedAt;
-    if (takenOver) return diskFlow;
+    if (takenOver) {
+      if (diskFlow.state !== "paused" && diskFlow.state !== "closed") return diskFlow;
+      const baseFlow = JSON.parse(start.snapshot) as Flow;
+      const settledByRound = new Map(tick.rounds.flatMap((round) => {
+        const baseRound = baseFlow.rounds.find((item) => item.n === round.n);
+        return baseRound?.relayedAt == null && round.relayDelivery && round.relayedAt
+          ? [[round.n, round] as const]
+          : [];
+      }));
+      if (settledByRound.size === 0) return diskFlow;
+      return {
+        ...diskFlow,
+        rounds: diskFlow.rounds.map((diskRound) => {
+          const settled = settledByRound.get(diskRound.n);
+          return settled && settled.reviewerBindingId === diskRound.reviewerBindingId ? {
+            ...diskRound,
+            relayStartedAt: settled.relayStartedAt,
+            relayDelivery: settled.relayDelivery,
+            relayedAt: settled.relayedAt,
+          } : diskRound;
+        }),
+      };
+    }
     /* Fence an unstarted round's reviewer snapshot to the disk value ONLY when the
        tick did not itself change it (comparing to the pre-tick base): then a
        difference on disk is a concurrent set-roles that must survive. When the tick
