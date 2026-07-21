@@ -3224,6 +3224,84 @@ describe("durable account migration coordinator", () => {
     expect(advanced.migration?.phase).toBe("committed");
   });
 
+  test("a dead null-host Claude OAuth failure releases the waiting-turn reseat exactly once", async () => {
+    /* Issue #516: the Claude CLI died on an OAuth failure — the transcript
+       ends in a structured `authentication_failed` API-error record and no
+       host remains to append a `result` record. The reseat must read that
+       record as the terminal turn, create exactly one successor, and send the
+       held stable clientMessageId to the successor once — across registry
+       restarts and repeated ticks, never to the predecessor. */
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "oauth-dead-source.jsonl");
+    const successorPath = "/oauth-successor.jsonl";
+    fs.writeFileSync(pathname, JSON.stringify({
+      type: "user",
+      timestamp: "2026-07-17T15:00:00.000Z",
+      message: { role: "user", content: [{ type: "text", text: "continue" }] },
+    }) + "\n");
+    store.reconcileConversations([{
+      ...observation(pathname, "expired", "busy"),
+      engine: "claude",
+    }]);
+    const conversation = store.conversationForPath(pathname)!;
+    expect(conversation.generations.at(-1)?.host ?? null).toBeNull();
+    expect(store.requestConversationReseat(conversation.id, "healthy").migration?.phase).toBe("waiting-turn");
+    const held = store.holdDelivery(conversation.id, "continue after reseat", "oauth-held-client");
+    expect(held).toMatchObject({ state: "held", generationId: null, clientMessageId: "oauth-held-client" });
+
+    fs.appendFileSync(pathname, JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-07-17T15:00:01.000Z",
+      isApiErrorMessage: true,
+      error: "authentication_failed",
+      message: {
+        role: "assistant",
+        model: "<synthetic>",
+        stop_reason: "stop_sequence",
+        stop_sequence: "",
+        content: [{ type: "text", text: "OAuth authentication failed · run /login" }],
+      },
+    }) + "\n");
+    const entry = inventoryEntry(pathname, {
+      root: "claude-projects",
+      engine: "claude",
+      fmt: "claude",
+      model: "claude-fable-5",
+      activity: "stalled",
+      activityReason: undefined,
+    });
+    const counts = { create: 0, verify: 0 };
+    const migrationProvider = provider([successorPath], counts);
+    const sends: { path: string; clientMessageId: string }[] = [];
+    const deliveryPort = {
+      async deliver(input: { path: string; clientMessageId: string }) {
+        sends.push({ path: input.path, clientMessageId: input.clientMessageId });
+        return "delivered" as const;
+      },
+    };
+
+    await reconcileMigrationInventory(store, [entry]);
+    expect(store.conversation(conversation.id)?.turn.state).toBe("terminal");
+    await reconcileMigrations(migrationProvider, deliveryPort, store);
+    const committed = store.conversation(conversation.id)!;
+    expect(committed.migration?.phase).toBe("committed");
+    expect(counts.create).toBe(1);
+    expect(committed.generations).toHaveLength(2);
+    expect(committed.generations.at(-1)?.path).toBe(successorPath);
+    expect(sends).toEqual([{ path: successorPath, clientMessageId: "oauth-held-client" }]);
+    expect(store.pendingDeliveries(conversation.id)).toEqual([]);
+
+    const restarted = new AgentRegistry(store.filename);
+    await reconcileMigrations(migrationProvider, deliveryPort, restarted);
+    await reconcileMigrations(migrationProvider, deliveryPort, restarted);
+    await advanceConversationMigration(conversation.id, restarted, migrationProvider);
+    expect(counts.create).toBe(1);
+    expect(sends).toEqual([{ path: successorPath, clientMessageId: "oauth-held-client" }]);
+    expect(restarted.conversation(conversation.id)?.migration?.phase).toBe("committed");
+    expect(restarted.conversation(conversation.id)?.generations).toHaveLength(2);
+    expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
+  });
+
   test("a conversation reseat completes without booking the engine auto-balance outcome or cooldown", async () => {
     const store = registry();
     store.reconcileConversations([
