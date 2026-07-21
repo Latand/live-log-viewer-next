@@ -44,9 +44,10 @@ function exitLabel(event: ToolEvent): string | null {
   return null;
 }
 
-/* One quiet metadata row over the command: cwd, wall-clock span, duration, and
-   exit status — the auditable header a terminal client shows. Renders nothing
-   when a call carries none of them (a plain non-shell tool). */
+/* One quiet metadata row over the command: exit status, duration, wall-clock
+   span, and cwd — the auditable header a terminal client shows, folded into a
+   single wrapping line so it never stacks into its own multi-row card. Renders
+   nothing when a call carries none of them (a plain non-shell tool). */
 function ToolMeta({ event }: { event: ToolEvent }) {
   const start = hhmm(event.ts);
   const end = event.endTs !== undefined ? hhmm(event.endTs) : "";
@@ -55,47 +56,47 @@ function ToolMeta({ event }: { event: ToolEvent }) {
   const exit = exitLabel(event);
   if (!event.cwd && !span && !duration && !exit) return null;
   return (
-    <div className="mb-1.5 flex flex-col gap-1 text-[11px] text-muted">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        {exit ? (
-          <span className={`inline-flex items-center gap-1 font-semibold ${statusClass(event.status)}`}>
-            <StatusIcon status={event.status} className="h-3 w-3" />
-            {exit}
-          </span>
-        ) : null}
-        {duration ? (
-          <span className="inline-flex items-center gap-1 tabular-nums">
-            <AlarmClock className="h-3 w-3" aria-hidden />
-            {duration}
-          </span>
-        ) : null}
-        {span ? <span className="tabular-nums">{span}</span> : null}
-      </div>
+    <div className="mb-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted">
+      {exit ? (
+        <span className={`inline-flex items-center gap-1 font-semibold ${statusClass(event.status)}`}>
+          <StatusIcon status={event.status} className="h-3 w-3" />
+          {exit}
+        </span>
+      ) : null}
+      {duration ? (
+        <span className="inline-flex items-center gap-1 tabular-nums">
+          <AlarmClock className="h-3 w-3" aria-hidden />
+          {duration}
+        </span>
+      ) : null}
+      {span ? <span className="tabular-nums">{span}</span> : null}
       {event.cwd ? (
-        <div className="flex min-w-0 items-center gap-1">
-          <span className="shrink-0 uppercase tracking-wide text-[10px]">{tr("tools.cwd")}</span>
-          <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-secondary" title={event.cwd}>
+        <span className="inline-flex min-w-0 max-w-full items-center gap-1">
+          <code className="min-w-0 truncate font-mono text-[11px] text-secondary" title={event.cwd}>
             {event.cwd}
           </code>
           <CopyButton text={event.cwd} label={tr("tools.copyCwd")} className="shrink-0 p-0.5" />
-        </div>
+        </span>
       ) : null}
     </div>
   );
 }
 
-/* The full redacted command with a copy control, wrapped instead of scrolled so
-   a long line never forces document-level horizontal overflow on 390px. */
+/* The full redacted command, the hero of the block: bare monospace on the
+   shared sunken well (no nested card/border — those only stacked chrome the
+   user did not open), wrapped instead of scrolled so a long line stays fully
+   visible and never forces document-level horizontal overflow on 390px. */
 function CommandBlock({ command }: { command: string }) {
   return (
     <div className="group/cmd relative">
-      <pre className="max-w-full whitespace-pre-wrap [overflow-wrap:anywhere] rounded-control border border-border bg-card py-1.5 pl-3 pr-10 font-mono text-ui">
-        {"$ " + command}
+      <pre className="max-w-full whitespace-pre-wrap [overflow-wrap:anywhere] py-0.5 pr-10 font-mono text-ui text-primary">
+        <span className="select-none text-muted">$ </span>
+        {command}
       </pre>
       <CopyButton
         text={command}
         label={tr("tools.copyCommand")}
-        className="absolute right-1.5 top-1.5 opacity-0 transition-opacity motion-reduce:transition-none focus-visible:opacity-100 group-hover/cmd:opacity-100 [@media(hover:none)]:opacity-60"
+        className="absolute right-0 top-0 opacity-0 transition-opacity motion-reduce:transition-none focus-visible:opacity-100 group-hover/cmd:opacity-100 [@media(hover:none)]:opacity-60"
       />
     </div>
   );
@@ -128,9 +129,9 @@ function RawRecord({ event }: { event: ToolEvent }) {
         <CopyButton text={event.id} label={tr("tools.copyId")} className="p-0.5" />
       </div>
       {record ? (
-        <pre className="max-h-[300px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-[10px] border border-border bg-sunken px-3 py-2 font-mono text-[11px]">{record}</pre>
+        <pre className="max-h-[300px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-t border-border pt-1.5 font-mono text-[11px]">{record}</pre>
       ) : (
-        <span className="inline-flex items-center rounded-md bg-sunken px-2 py-0.5 text-[11px] text-muted">{tr("tools.noRawRecord")}</span>
+        <span className="text-[11px] text-muted">{tr("tools.noRawRecord")}</span>
       )}
     </div>
   );
@@ -150,7 +151,7 @@ export function ToolBody({ event }: { event: ToolEvent }) {
   const emptyPoll = isCollapsiblePoll(event);
   const showOutput = !emptyFollowUp && (!hasDiff || Boolean(event.outputPreview.trim()));
   return (
-    <div className="mb-1 mt-1 rounded-surface bg-sunken px-3 py-2.5">
+    <div className="mb-1 mt-1 rounded-surface bg-sunken px-2.5 py-2">
       <ToolChips chips={event.chips} />
       <ToolMeta event={event} />
       {event.command ? <CommandBlock command={event.command} /> : null}
