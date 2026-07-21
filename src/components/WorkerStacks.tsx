@@ -150,6 +150,18 @@ export function WorkerStacks({
   const [open, setOpen] = useState(false);
   const total = useMemo(() => stacks.reduce((sum, stack) => sum + stack.items.length, 0), [stacks]);
   const titleByPath = useMemo(() => new Map(files.map((file) => [file.path, file.title] as const)), [files]);
+  /* Stable, privacy-safe identity of the pipelines currently FOLDED into this
+     strip, exposed on the closed DOM (issue #507 evidence gate). The disclosure
+     renders its stack rows only when open, so a folded active pipeline's label
+     is absent from the collapsed strip — a capture reading `textContent` of the
+     closed strip could never see it. The pipeline id is an opaque identifier
+     (already surfaced as `data-pipeline-group-header`), never a conversation
+     title or transcript, so it is safe to publish and is asserted regardless of
+     the open/closed state. An active pipeline must never appear here. */
+  const foldedPipelineIds = useMemo(
+    () => stacks.filter((stack) => stack.kind === "pipeline").map((stack) => stack.id).join(" "),
+    [stacks],
+  );
   if (!stacks.length) return null;
 
   const labelFor = (stack: WorkerStack): string => {
@@ -177,7 +189,7 @@ export function WorkerStacks({
   };
 
   return (
-    <div className="shrink-0 border-t border-border bg-canvas" data-testid="worker-stacks">
+    <div className="shrink-0 border-t border-border bg-canvas" data-testid="worker-stacks" data-worker-stack-pipeline-ids={foldedPipelineIds}>
       <SectionHeader
         open={open}
         onToggle={() => setOpen((value) => !value)}

@@ -29,6 +29,12 @@
  *     mix. Its completed stages are AGED-IDLE against the frozen capture clock,
  *     so this shot doubles as the #507 final F1 evidence: each stays exactly one
  *     real card, never folded into a worker stack.
+ *   $OUT/issue-507-editor-negative-control.png — the SAME desktop board after
+ *     the active pipeline is deliberately folded into the closed worker-stacks
+ *     identity: proof the F1 gate is live and fails on a folded active pipeline
+ *     rather than silently passing (its prior text read of the collapsed strip
+ *     could never see a fold). The capture aborts if this negative control does
+ *     not trip the gate.
  *   $OUT/issue-507-editor-mobile-390.png — 390x844 phone shell, asserted at
  *     capture time to keep scrollWidth <= innerWidth (no horizontal overflow),
  *     chat-first with the pipelines reachable through the bounded bottom sheet.
@@ -200,6 +206,31 @@ async function openProject(page: Page, baseUrl: string): Promise<void> {
   await page.evaluate((project) => { location.hash = `#p=${project}`; }, PROJECT);
 }
 
+/**
+ * #507 final F1 gate: an ACTIVE pipeline must never appear as a folded worker
+ * stack. Reads the stable, privacy-safe folded-pipeline identity that
+ * WorkerStacks publishes on its ROOT element (`data-worker-stack-pipeline-ids`,
+ * a space-joined list of pipeline ids) — present whether the disclosure is open
+ * or closed, so a folded active pipeline can never hide inside a collapsed
+ * strip. Returns the folded id set for the negative control to inspect.
+ */
+async function foldedPipelineIds(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const strip = document.querySelector('[data-testid="worker-stacks"]');
+    if (!strip) return [];
+    return (strip.getAttribute("data-worker-stack-pipeline-ids") ?? "").split(/\s+/).filter(Boolean);
+  });
+}
+
+async function assertActivePipelineNotFolded(page: Page, pipelineId: string): Promise<void> {
+  const folded = await foldedPipelineIds(page);
+  if (folded.includes(pipelineId)) {
+    throw new Error(
+      "Finding 1 regression: the active pipeline's aged-idle stages folded into a worker stack (duplicate surface)",
+    );
+  }
+}
+
 async function waitForServer(url: string, child: ChildProcess): Promise<void> {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
@@ -311,11 +342,7 @@ async function main(): Promise<void> {
       const cards = await desktop.locator(`[data-pipeline-stage-card="${MIXED_ID}::${stageId}"]`).count();
       if (cards !== 1) throw new Error(`aged-idle passed stage ${stageId}: expected exactly one real card, found ${cards}`);
     }
-    const foldedActive = await desktop.evaluate((task) => {
-      const stacks = document.querySelector('[data-testid="worker-stacks"]');
-      return stacks ? (stacks.textContent ?? "").includes(task) : false;
-    }, "Materialize stages in place");
-    if (foldedActive) throw new Error("Finding 1 regression: the active pipeline's aged-idle stages folded into a worker stack (duplicate surface)");
+    await assertActivePipelineNotFolded(desktop, MIXED_ID);
     await desktop.evaluate(() => {
       const fit = Array.from(document.querySelectorAll("button")).find((button) =>
         (button.getAttribute("title") || "").startsWith("Fit all content"),
@@ -340,6 +367,38 @@ async function main(): Promise<void> {
     } catch (error) {
       console.warn("close-up capture skipped:", error instanceof Error ? error.message : String(error));
     }
+
+    /* ── Negative control: a deliberately folded active pipeline MUST fail. ──
+       The gate above passes because the running pipeline's stages are full-pane
+       protected and never fold. To prove the gate is not a no-op (the prior
+       version read `textContent` of the CLOSED strip and could never observe a
+       fold), deliberately fold the active pipeline: publish its id in the
+       collapsed WorkerStacks identity — exactly the shape the product exposes
+       when protection fails — WITHOUT opening the disclosure. The same gate must
+       now throw; if it does not, the acceptance check is blind and the whole
+       capture fails. */
+    await desktop.evaluate((id) => {
+      let strip = document.querySelector('[data-testid="worker-stacks"]');
+      if (!strip) {
+        strip = document.createElement("div");
+        strip.setAttribute("data-testid", "worker-stacks");
+        document.body.appendChild(strip);
+      }
+      const existing = (strip.getAttribute("data-worker-stack-pipeline-ids") ?? "").split(/\s+/).filter(Boolean);
+      strip.setAttribute("data-worker-stack-pipeline-ids", [...existing, id].join(" "));
+    }, MIXED_ID);
+    let negativeControlFired = false;
+    try {
+      await assertActivePipelineNotFolded(desktop, MIXED_ID);
+    } catch {
+      negativeControlFired = true;
+    }
+    if (!negativeControlFired) {
+      throw new Error(
+        "negative control failed: the gate did NOT detect a deliberately folded active pipeline — the acceptance check is blind",
+      );
+    }
+    await desktop.screenshot({ path: path.join(outDir, "issue-507-editor-negative-control.png") });
     await desktop.close();
 
     /* ── Mobile 390x844 ───────────────────────────────────────────────────── */
@@ -428,6 +487,7 @@ async function main(): Promise<void> {
 
     console.log(
       `captured #507 evidence into ${outDir}: draft five-card editor + running real/placeholder mix at 1600x1000, ` +
+        `active pipeline not folded (F1 gate live — negative control tripped on a deliberate fold); ` +
         `390x844 overflow-safe (scrollWidth ${overflow.scrollWidth} <= innerWidth ${overflow.innerWidth}); ` +
         `mobile editor above sheet — ${editorEvidence}`,
     );

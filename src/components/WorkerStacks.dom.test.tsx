@@ -190,6 +190,25 @@ test("a terminal direct review group's stack row carries the final verdict and a
   expect(managed.host.querySelector("[data-review-group-expand]")).toBeNull();
 });
 
+test("publishes folded pipeline ids on the CLOSED strip (issue #507 evidence gate)", () => {
+  const stageWorker = entry({ path: "/stage", kind: "subagent", parent: "/root", title: "aged pipeline stage" });
+  const stacks: WorkerStack[] = [
+    { key: "wstack::pipeline::pipe-9", kind: "pipeline", id: "pipe-9", items: [stageWorker] },
+    { key: "wstack::worktree::feat-x", kind: "worktree", id: "feat-x", items: [stageWorker] },
+  ];
+  const { host } = mount(<WorkerStacks stacks={stacks} files={[stageWorker]} flows={[]} onSelect={() => {}} />);
+
+  /* The strip starts collapsed — its stack rows (and their labels) are not even
+     rendered — yet the folded PIPELINE identity is exposed on the root so a
+     folded active pipeline can never hide inside a closed disclosure. Only
+     pipeline-kind stacks contribute (worktree/flow/origin ids are omitted). */
+  const strip = host.querySelector('[data-testid="worker-stacks"]') as HTMLElement;
+  const header = strip.querySelector("button") as HTMLButtonElement;
+  expect(header.getAttribute("aria-expanded")).toBe("false");
+  const ids = (strip.getAttribute("data-worker-stack-pipeline-ids") ?? "").split(/\s+/).filter(Boolean);
+  expect(ids).toEqual(["pipe-9"]);
+});
+
 test("labels a worktree stack by its worktree name", () => {
   const worker = entry({ path: "/w", kind: "subagent", parent: "/root", worktree: "feat-x", title: "spawned worker" });
   const stacks: WorkerStack[] = [{ key: "wstack::worktree::feat-x", kind: "worktree", id: "feat-x", items: [worker] }];
