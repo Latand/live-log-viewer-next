@@ -19,7 +19,11 @@ import {
 } from "./registry";
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationResult } from "./contracts";
-import { bindStructuredDeliveryQueue, completeStructuredDeliveryQueueStartup } from "./structuredDeliveryController";
+import {
+  bindStructuredDeliveryQueue,
+  completeStructuredDeliveryQueueStartup,
+  hasStructuredDeliveryController,
+} from "./structuredDeliveryController";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { recoverPendingStructuredSpawns } from "./structuredSpawn";
 
@@ -363,9 +367,9 @@ export async function adoptStructuredHostsAtStartup(
   const registry = dependencies.registry ?? agentRegistry();
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   const controllerBoundEarly = client !== null;
-  if (client) {
+  if (client && !hasStructuredDeliveryController(registry)) {
     await bindStructuredDeliveryQueue([], {
-      registry: dependencies.registry,
+      registry,
       client,
       deferStartupWork: true,
     });
@@ -455,7 +459,7 @@ export async function adoptStructuredHostsAtStartup(
   if (controllerBoundEarly) {
     await completeStructuredDeliveryQueueStartup(nextAdoptedHosts);
   } else {
-    await bindStructuredDeliveryQueue(nextAdoptedHosts, { registry: dependencies.registry, client });
+    await bindStructuredDeliveryQueue(nextAdoptedHosts, { registry, client });
   }
   if (client) {
     await enqueueInterruptedCodexContinuations(
