@@ -1,6 +1,6 @@
 import type { ReviewCardItem, ReviewSeverity } from "@/lib/review";
 
-import { Ban, CircleCheck, Command, MessageCircle } from "../../icons";
+import { Ban, ChevronRight, CircleCheck, Command, MessageCircle } from "../../icons";
 import { hhmm } from "../../utils";
 import { md, mdBlocks } from "../markdown";
 import { tr } from "../parse";
@@ -34,12 +34,12 @@ export function ReviewCard({ item }: { item: ReviewCardItem }) {
   const findingCount = item.findings.length;
   const visibleFindings = item.findings.slice(0, 12);
   return (
-    <div className="my-3.5 ml-9 overflow-hidden rounded-[14px] border border-codex/20 bg-card shadow-1">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border px-3.5 py-2.5">
-        <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-codex-soft text-codex">
-          <Command className="h-4 w-4" aria-hidden />
+    <div className="my-3 ml-9 overflow-hidden rounded-surface border border-codex/20 bg-card">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-codex-soft text-codex">
+          <Command className="h-3.5 w-3.5" aria-hidden />
         </span>
-        <span className="text-[13.5px] font-bold">Codex review</span>
+        <span className="text-[13px] font-bold">Codex review</span>
         {item.verdict ? (
           <span className={`rounded-full border px-2.5 py-0.5 text-[11.5px] font-extrabold ${verdictClass(item.verdict)}`}>
             <VerdictLabel verdict={item.verdict} />
@@ -50,14 +50,14 @@ export function ReviewCard({ item }: { item: ReviewCardItem }) {
         </span>
         {hhmm(item.ts) ? <span className="ml-auto text-label tabular-nums text-muted">{hhmm(item.ts)}</span> : null}
       </div>
-      <div className="px-3.5 py-2.5">
+      <div className="px-3 py-2">
         {item.summary.length ? (
           <div className="mb-2 whitespace-pre-wrap break-words text-[13px] text-secondary">{mdBlocks(item.summary.join("\n"))}</div>
         ) : null}
         {visibleFindings.length ? (
-          <div className="space-y-2">
+          <div className="divide-y divide-border">
             {visibleFindings.map((finding, idx) => (
-              <div key={idx} className="rounded-[10px] border border-border bg-sunken px-3 py-2">
+              <div key={idx} className="py-2 first:pt-0 last:pb-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className={`rounded-full border px-2 py-0.5 text-[10.5px] font-extrabold ${severityClass(finding.severity)}`}>
                     {finding.severity}
@@ -78,9 +78,12 @@ export function ReviewCard({ item }: { item: ReviewCardItem }) {
         {item.findings.length > visibleFindings.length ? (
           <div className="mt-2 text-[12px] text-muted">{tr("render.moreFindings", { count: item.findings.length - visibleFindings.length })}</div>
         ) : null}
-        <details className="mt-2 rounded-[10px] border border-border bg-sunken text-[12px]">
-          <summary className="cursor-pointer list-none px-3 py-1.5 font-semibold text-muted">raw review text</summary>
-          <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap border-t border-border px-3 py-2 font-mono text-[11.5px] text-secondary">
+        <details className="group/raw mt-2 text-[12px]">
+          <summary className="inline-flex cursor-pointer list-none items-center gap-1 font-semibold text-muted hover:text-accent [&::-webkit-details-marker]:hidden">
+            <ChevronRight className="h-3 w-3 transition-transform group-open/raw:rotate-90" aria-hidden />
+            raw review text
+          </summary>
+          <pre className="mt-1 max-h-[320px] overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-t border-border pt-1.5 font-mono text-[11.5px] text-secondary">
             {item.raw}
           </pre>
         </details>
