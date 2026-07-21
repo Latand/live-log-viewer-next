@@ -164,6 +164,33 @@ test("a truncated transcript resets its checkpoint instead of replaying stale ev
   expect(second.count).toBe(1);
 });
 
+test("a shrink above the saved offset invalidates the checkpoint and rescans earlier authorship", async () => {
+  const pathname = virtualTranscript("shrunk-above-offset.jsonl", 8 * MIB);
+  const first = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, {
+    resume: true,
+    maxBytes: 4 * MIB,
+  });
+  expect(first).toEqual({ count: 0, complete: false });
+  expect(checkpointFor(pathname)!.offset).toBe(4 * MIB);
+  const before = fs.statSync(pathname);
+  const userRecord = `\n${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "rescanned" } })}\n`;
+
+  const fd = fs.openSync(pathname, "r+");
+  try {
+    fs.writeSync(fd, userRecord, 2 * MIB, "utf8");
+    fs.ftruncateSync(fd, 6 * MIB);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const shrunk = fs.statSync(pathname);
+  expect(shrunk.ino).toBe(before.ino);
+  expect(shrunk.size).toBe(6 * MIB);
+  expect(shrunk.size).toBeGreaterThan(checkpointFor(pathname)!.offset);
+
+  const second = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
+  expect(second.count).toBe(1);
+});
+
 test("a same-size in-place tail rewrite invalidates completed authorship evidence", async () => {
   const pathname = path.join(SANDBOX, "same-size-rewrite.jsonl");
   const prefix = `${JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "x".repeat(70 * 1024) } })}\n`;

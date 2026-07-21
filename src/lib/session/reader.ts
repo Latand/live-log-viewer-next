@@ -427,6 +427,7 @@ export async function scanUserAuthoredMessagesCooperatively(
       let valid = checkpoint.dev === stat.dev
         && checkpoint.ino === stat.ino
         && stat.size >= checkpoint.offset
+        && stat.size >= checkpoint.size
         && (stat.size !== checkpoint.size || stat.mtimeMs === checkpoint.mtimeMs);
       if (valid && checkpoint.headBytes > 0) {
         if (options.signal?.aborted) {
