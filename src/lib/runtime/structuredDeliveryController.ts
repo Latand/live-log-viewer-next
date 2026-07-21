@@ -23,6 +23,8 @@ export interface StructuredDeliveryHost {
 
 const DELIVERY_DRAIN_COALESCE_MS = 25;
 const DELIVERY_DRAIN_MAX_BACKOFF_MS = 1_000;
+const TERMINAL_RECONCILIATION_PAGE_SIZE = 16;
+const TERMINAL_RECONCILIATION_SETTLEMENT_BATCH_SIZE = 256;
 
 /* Next standalone can evaluate instrumentation and route handlers in separate
    bundle realms inside one Node process. Realm-local globals cannot carry the
@@ -49,7 +51,7 @@ const state: ControllerState = controllerStore.__llvStructuredDeliveryController
 };
 
 function entryForHost(registry: AgentRegistry, adopted: StructuredDeliveryHost): AgentRegistryEntry | null {
-  return registry.snapshot().entries[sessionKeyId(adopted.key)] ?? null;
+  return registry.readOnlySnapshot().entries[sessionKeyId(adopted.key)] ?? null;
 }
 
 function conversationIdForEntry(registry: AgentRegistry, entry: AgentRegistryEntry): string | null {
@@ -82,6 +84,66 @@ function hostResolver(
     if (!conversation || !generation) return null;
     return hosts.get(sessionKeyId({ engine: conversation.engine, sessionId: generation.id })) ?? null;
   };
+}
+
+async function yieldControllerTurn(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
+async function reconcileTerminalDeliveries(
+  registry: AgentRegistry,
+  client: RuntimeHostClient,
+  isCurrent: () => boolean,
+): Promise<void> {
+  const unsettledDeliveries = Object.values(registry.snapshot().heldDeliveries)
+    .filter((delivery) => delivery.state === "delivery-uncertain" || delivery.state === "failed");
+  const pendingOutcomes: Parameters<AgentRegistry["recordDeliveryOutcomesForOperations"]>[0][number][] = [];
+  const flushOutcomes = () => {
+    if (pendingOutcomes.length === 0) return;
+    registry.recordDeliveryOutcomesForOperations(pendingOutcomes.splice(0));
+  };
+  for (let offset = 0; offset < unsettledDeliveries.length && isCurrent(); offset += TERMINAL_RECONCILIATION_PAGE_SIZE) {
+    const page = unsettledDeliveries.slice(offset, offset + TERMINAL_RECONCILIATION_PAGE_SIZE);
+    const outcomes = (await Promise.all(page.map(async (delivery) => {
+      try {
+        const result = await client.operationStatus(delivery.command.operationId, { currentRetryLeaf: true });
+        if (!result) return null;
+        const status = result.receipt.status;
+        if (status !== "delivered" && status !== "failed" && status !== "rejected") return null;
+        const receiptConversationId = result.receipt.conversationId;
+        if (!receiptConversationId.startsWith("conversation_")
+          || registry.canonicalConversationId(receiptConversationId as `conversation_${string}`)
+            !== registry.canonicalConversationId(delivery.conversationId)) {
+          console.error("[structured delivery] terminal receipt conversation mismatch", {
+            operationId: delivery.command.operationId,
+            deliveryConversationId: delivery.conversationId,
+            receiptConversationId,
+          });
+          return null;
+        }
+        const state = status === "delivered" ? "delivered" as const : "failed" as const;
+        if (delivery.state === "failed" && state === "failed") return null;
+        return {
+          conversationId: receiptConversationId as `conversation_${string}`,
+          operationId: result.receipt.presentationOperationId ?? delivery.command.operationId,
+          state,
+          error: result.receipt.reason ?? null,
+        };
+      } catch (error) {
+        console.error("[structured delivery] terminal receipt reconciliation failed", {
+          operationId: delivery.command.operationId,
+          conversationId: delivery.conversationId,
+          error,
+        });
+        return null;
+      }
+    }))).filter((outcome): outcome is NonNullable<typeof outcome> => outcome !== null);
+    if (!isCurrent()) return;
+    pendingOutcomes.push(...outcomes);
+    if (pendingOutcomes.length >= TERMINAL_RECONCILIATION_SETTLEMENT_BATCH_SIZE) flushOutcomes();
+    await yieldControllerTurn();
+  }
+  if (isCurrent()) flushOutcomes();
 }
 
 async function publishHostState(
@@ -158,39 +220,6 @@ export async function bindStructuredDeliveryQueue(
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   if (!client) return;
   const registry = dependencies.registry ?? agentRegistry();
-  const unsettledDeliveries = Object.values(registry.snapshot().heldDeliveries)
-    .filter((delivery) => delivery.state === "delivery-uncertain" || delivery.state === "failed");
-  for (const delivery of unsettledDeliveries) {
-    try {
-      const result = await client.operationStatus(delivery.command.operationId, { currentRetryLeaf: true });
-      if (!result) continue;
-      const status = result.receipt.status;
-      if (status !== "delivered" && status !== "failed" && status !== "rejected") continue;
-      const receiptConversationId = result.receipt.conversationId;
-      if (!receiptConversationId.startsWith("conversation_")
-        || registry.canonicalConversationId(receiptConversationId as `conversation_${string}`)
-          !== registry.canonicalConversationId(delivery.conversationId)) {
-        console.error("[structured delivery] terminal receipt conversation mismatch", {
-          operationId: delivery.command.operationId,
-          deliveryConversationId: delivery.conversationId,
-          receiptConversationId,
-        });
-        continue;
-      }
-      registry.recordDeliveryOutcomeForOperation(
-        delivery.conversationId,
-        result.receipt.presentationOperationId ?? delivery.command.operationId,
-        status === "delivered" ? "delivered" : "failed",
-        result.receipt.reason ?? null,
-      );
-    } catch (error) {
-      console.error("[structured delivery] terminal receipt reconciliation failed", {
-        operationId: delivery.command.operationId,
-        conversationId: delivery.conversationId,
-        error,
-      });
-    }
-  }
   const hosts = new Map<string, EngineHost>();
   let scheduleAutomaticRetry = () => {};
   let requestDrain = () => {};
@@ -322,7 +351,7 @@ export async function bindStructuredDeliveryQueue(
     const generation = conversation?.generations.at(-1);
     if (!conversation || !generation) return;
     const key = { engine: conversation.engine, sessionId: generation.id } as const;
-    const entry = registry.snapshot().entries[sessionKeyId(key)] ?? null;
+    const entry = registry.readOnlySnapshot().entries[sessionKeyId(key)] ?? null;
     const legacy = entry?.host?.kind === "tmux";
     const host = entry?.status === "dead"
       ? "dead"
@@ -487,7 +516,7 @@ export async function bindStructuredDeliveryQueue(
     const id = sessionKeyId(key);
     const registered = registrations.get(id);
     if (!registered) {
-      const discardedEntry = registry.snapshot().entries[id] ?? null;
+      const discardedEntry = registry.readOnlySnapshot().entries[id] ?? null;
       await refreshCurrentProjection(discardedEntry ? conversationIdForEntry(registry, discardedEntry) : null);
       return false;
     }
@@ -507,19 +536,6 @@ export async function bindStructuredDeliveryQueue(
     await unregisterHost(id, registered.host);
     return true;
   };
-  for (const item of adopted) {
-    await register(item);
-  }
-  const startupSnapshot = registry.snapshot();
-  for (const conversation of Object.values(startupSnapshot.conversations)) {
-    const generation = conversation.generations.at(-1);
-    if (!generation) continue;
-    const id = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
-    if (registrations.has(id)) continue;
-    const entry = startupSnapshot.entries[id];
-    if (!entry?.structuredHost && entry?.host?.kind !== "tmux") continue;
-    await publishCurrentFallback(conversation.id);
-  }
   state.activeQueue = queue;
   setStructuredDeliveryKick(() => {
     if (stopped) return;
@@ -547,6 +563,20 @@ export async function bindStructuredDeliveryQueue(
       setStructuredDeliveryKick(null);
     }
   };
+  for (const item of adopted) {
+    await register(item);
+  }
+  const startupSnapshot = registry.snapshot();
+  for (const conversation of Object.values(startupSnapshot.conversations)) {
+    const generation = conversation.generations.at(-1);
+    if (!generation) continue;
+    const id = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
+    if (registrations.has(id)) continue;
+    const entry = startupSnapshot.entries[id];
+    if (!entry?.structuredHost && entry?.host?.kind !== "tmux") continue;
+    await publishCurrentFallback(conversation.id);
+  }
+  await reconcileTerminalDeliveries(registry, client, () => !stopped && state.activeQueue === queue);
   await queue.drain();
 }
 

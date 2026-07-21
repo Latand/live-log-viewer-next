@@ -13,7 +13,7 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 import type { RuntimeHostClient } from "./client";
 import type { EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
-import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
+import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -2054,6 +2054,202 @@ test("queue binding settles an uncertain reservation from a terminal journal rec
     text: "",
     error: null,
   });
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+});
+
+test("production backlog reconciliation publishes the controller before a historical status read settles", async () => {
+  const sessionId = "bcbcbcbc-bcbc-\x34bcb-8bcb-bcbcbcbcbcbc";
+  const directory = path.join(sandbox, "controller-ready-before-backlog-reconciliation");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-21T20:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const operationId = "operation-blocked-historical-status";
+  const held = registry.holdDelivery(
+    conversation.id,
+    "historical status remains in flight",
+    "blocked-historical-status",
+    "text",
+    [],
+    null,
+    { operationId, kind: "send", policy: "queue", turnId: null },
+  );
+  registry.beginDeliveryAttempt(held.id, held.generationId!);
+  let statusStarted!: () => void;
+  const statusStartedPromise = new Promise<void>((resolve) => { statusStarted = resolve; });
+  let releaseStatus!: () => void;
+  const statusRelease = new Promise<void>((resolve) => { releaseStatus = resolve; });
+  const client = {
+    operationStatus: async () => {
+      statusStarted();
+      await statusRelease;
+      return {
+        operationId,
+        replayed: true,
+        receipt: {
+          operationId,
+          idempotencyKey: "blocked-historical-status",
+          conversationId: conversation.id,
+          kind: "send" as const,
+          status: "delivered" as const,
+        },
+      };
+    },
+    append: async () => ({}),
+    producerCursor: async () => 0,
+    effectBatch: async () => [],
+    transitionOperation: async () => { throw new Error("unexpected transition"); },
+  } as unknown as RuntimeHostClient;
+  const binding = bindStructuredDeliveryQueue([], { registry, client });
+  await statusStartedPromise;
+  const key = { engine: "codex" as const, sessionId: "controller-ready-during-reconciliation" };
+  const host = observableFakeHost(new FakeEngineHost(createFakeDeliveryLedger()));
+  let publicationError: unknown = null;
+  let unregister: (() => Promise<void>) | null = null;
+  try {
+    unregister = await publishStructuredDeliveryHost({ key, host });
+  } catch (error) {
+    publicationError = error;
+  } finally {
+    releaseStatus();
+    await binding;
+  }
+
+  expect(publicationError).toBeNull();
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+  await unregister?.();
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+});
+
+test("production backlog reconciliation bounds status concurrency and skips terminal no-op writes", async () => {
+  const sessionId = "cdcdcdcd-cdcd-\x34dcd-8dcd-cdcdcdcdcdcd";
+  const directory = path.join(sandbox, "bounded-terminal-reconciliation-pages");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-21T20:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const deliveries = Array.from({ length: 35 }, (_, index) => {
+    const operationId = `bounded-terminal-operation-${index}`;
+    const held = registry.holdDelivery(
+      conversation.id,
+      `historical delivery ${index}`,
+      `bounded-terminal-client-${index}`,
+      "text",
+      [],
+      null,
+      { operationId, kind: "send", policy: "queue", turnId: null },
+    );
+    registry.beginDeliveryAttempt(held.id, held.generationId!);
+    if (index < 33) registry.recordDeliveryOutcome(held.id, "failed", "old terminal failure");
+    return held;
+  });
+  const before = registry.storageDiagnostics().transactionCount;
+  let active = 0;
+  let maxActive = 0;
+  let statusReads = 0;
+  const client = {
+    operationStatus: async (operationId: string) => {
+      statusReads += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await Bun.sleep(1);
+      active -= 1;
+      return {
+        operationId,
+        replayed: true,
+        receipt: {
+          operationId,
+          idempotencyKey: operationId,
+          conversationId: conversation.id,
+          kind: "send" as const,
+          status: "failed" as const,
+          reason: "old terminal failure",
+        },
+      };
+    },
+    effectBatch: async () => [],
+  } as unknown as RuntimeHostClient;
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect(statusReads).toBe(deliveries.length);
+  expect(maxActive).toBe(16);
+  expect(registry.storageDiagnostics().transactionCount).toBe(before + 1);
+  expect(deliveries.slice(33).every((delivery) =>
+    registry.snapshot().heldDeliveries[delivery.id]?.state === "failed")).toBe(true);
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+});
+
+test("startup fallback projection reuses one registry snapshot across a production conversation set", async () => {
+  const directory = path.join(sandbox, "startup-fallback-snapshot-reuse");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const conversations = Array.from({ length: 24 }, (_, index) => {
+    const sessionId = `dededede-dede-\x34ded-8ded-${String(index).padStart(12, "0")}`;
+    const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+    const profile = emptyLaunchProfile({ cwd: directory });
+    registry.reconcileConversations([{
+      engine: "codex",
+      path: artifactPath,
+      accountId: "default",
+      launchProfile: profile,
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-21T20:00:00.000Z",
+    }]);
+    registry.upsert({
+      key: { engine: "codex", sessionId },
+      artifactPath,
+      cwd: directory,
+      accountId: "default",
+      launchProfile: profile,
+      status: "dead",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: `fake:startup-${index}`,
+        process: null,
+        eventCursor: 0,
+        protocolVersion: "fake-v1",
+        writerClaimEpoch: 0,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    return sessionId;
+  });
+  const readSnapshot = registry.snapshot.bind(registry);
+  let snapshotReads = 0;
+  registry.snapshot = () => {
+    snapshotReads += 1;
+    return readSnapshot();
+  };
+  let projections = 0;
+  const client = {
+    append: async () => { projections += 1; return {}; },
+    effectBatch: async () => [],
+  } as unknown as RuntimeHostClient;
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect(projections).toBe(conversations.length);
+  expect(snapshotReads).toBe(2);
   await bindStructuredDeliveryQueue([], { registry, client: null });
 });
 
