@@ -824,7 +824,14 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       const queuedAt = delivery.queuedAt ? Date.parse(delivery.queuedAt) : Number.NEGATIVE_INFINITY;
       const index = unmatched.findIndex((user) => {
         const timestamp = user.timestamp ? Date.parse(user.timestamp) : Number.POSITIVE_INFINITY;
-        const digest = user.contentDigest ?? structuredContent(user.text, []).contentDigest;
+        /* A real Claude transcript ends a tool-using turn with a `user` role
+           message that carries only a `tool_result` block — no text, no image,
+           no content digest. It can never match a queued delivery (every entry
+           carries content), so it is skipped rather than digested: computing a
+           digest from its empty text threw "message content is required" inside
+           adopt() and failed the resume-successor spawn (production #389). */
+        const digest = user.contentDigest ?? (user.text.trim() ? structuredContent(user.text, []).contentDigest : null);
+        if (digest === null) return false;
         return matchesClaudeUserContent(delivery.entry, {
           contentDigest: digest,
           text: user.text,

@@ -1041,6 +1041,78 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test("adopts a resume successor whose transcript carries a tool-result user turn with a pending delivery", async () => {
+    /* Production #389: the real Claude transcript for any tool-using turn ends
+       with a `user` role message that carries only a `tool_result` block — no
+       text, no image. Reconciling a pending delivery against that turn parsed
+       an empty content digest and threw "message content is required" inside
+       adopt(), failing the resume-successor spawn. Because the spawn carries a
+       session id, the runtime kept the placeholder host=registering with a null
+       artifactPath, so every UI/MCP send rejected no-claim forever. */
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-toolresult-adopt-"));
+    try {
+      const projectsDir = path.join(directory, "projects");
+      const sessionId = "toolresult-resume-session";
+      const transcript = path.join(projectsDir, "-repo", `${sessionId}.jsonl`);
+      fs.mkdirSync(path.dirname(transcript), { recursive: true });
+      fs.writeFileSync(transcript, [
+        JSON.stringify({
+          type: "user",
+          uuid: "toolresult-user-text",
+          timestamp: "2026-07-20T20:00:00.000Z",
+          message: { role: "user", content: [{ type: "text", text: "run the privacy-safe tool" }] },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          uuid: "toolresult-assistant",
+          timestamp: "2026-07-20T20:00:01.000Z",
+          message: { role: "assistant", content: [{ type: "tool_use", id: "tool-1", name: "Bash", input: {} }] },
+        }),
+        JSON.stringify({
+          type: "user",
+          uuid: "toolresult-user-result",
+          timestamp: "2026-07-20T20:00:02.000Z",
+          message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "done" }] },
+        }),
+      ].join("\n") + "\n");
+      const beforeTranscript = fs.readFileSync(transcript);
+
+      const ledger = new RecordingDeliveryLedger();
+      ledger.recordQueued(sessionId, { id: "pending-entry", text: "resend after recovery" }, "turn-started");
+      const child = new FakeClaude(ledger);
+      const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
+        cwd: "/repo",
+        claudeProjectsDir: projectsDir,
+        deliveryLedger: ledger,
+        eventStore: new MemoryEventStore(),
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+        spawnProcess: fakeSpawn(child, {}),
+      });
+
+      /* Adoption survives the empty tool-result turn, the pending delivery is
+         not falsely confirmed, and the transcript bytes are untouched. */
+      expect((await host.health()).status).toBe("idle");
+      expect(ledger.load(sessionId).filter((delivery) => delivery.delivered)).toHaveLength(0);
+      expect(fs.readFileSync(transcript)).toEqual(beforeTranscript);
+
+      /* The held message still actuates exactly once against the resumed host. */
+      const delivered = host.send({ id: "pending-entry", text: "resend after recovery" });
+      await Bun.sleep(0);
+      child.emitJson({
+        type: "user",
+        session_id: sessionId,
+        uuid: "resend-echo",
+        message: { role: "user", content: [{ type: "text", text: "resend after recovery" }] },
+      });
+      expect(await delivered).toEqual({ outcome: "turn-started", turnId: "pending-entry" });
+      expect(child.inputs.filter((input) => input.type === "user")).toHaveLength(1);
+      expect(ledger.load(sessionId).filter((delivery) => delivery.delivered)).toHaveLength(1);
+      await host.release();
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("uses explicit control messages for interrupt and attention answers", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);
