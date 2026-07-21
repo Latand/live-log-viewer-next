@@ -1,11 +1,13 @@
 import { expect, test } from "bun:test";
 
 import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
+import { WAKATIME_CREDENTIAL_ENV } from "@/lib/wakatime/credential";
 
 import {
   RUNTIME_HOST_CONTAINER_ENV,
   RUNTIME_HOST_IMAGE_ENV,
   RUNTIME_HOST_REVISION_ENV,
+  type RuntimeHostHandoffIntent,
   type RuntimeHostReleaseRecord,
 } from "./hostRelease";
 import {
@@ -24,10 +26,18 @@ const candidate: ViewerReleaseIdentity = {
   endpoint: "http://127.0.0.1:18001",
 };
 
+/* The unsupported credential as Docker would report it from the predecessor's
+   environment. The value is a test placeholder, never a real credential. */
+const wakatimePlaceholderValue = "waka-credential-value-placeholder";
+
 const predecessorInspect = JSON.stringify([{
   State: { Pid: 3970 },
   Config: {
-    Env: ["LLV_RUNTIME_EVENTS=1", "HOME=/home/user"],
+    Env: [
+      "LLV_RUNTIME_EVENTS=1",
+      "HOME=/home/user",
+      `${WAKATIME_CREDENTIAL_ENV}=${wakatimePlaceholderValue}`,
+    ],
     Cmd: ["bun-container", "run", "src/runtime-host/main.ts"],
     "User": "1000:1000",
     WorkingDir: "/app",
@@ -46,6 +56,8 @@ interface Harness {
   calls: string[][];
   events: string[];
   records: RuntimeHostReleaseRecord[];
+  intents: RuntimeHostHandoffIntent[];
+  storedIntent: () => RuntimeHostHandoffIntent | null;
 }
 
 function harness(overrides: {
@@ -54,20 +66,29 @@ function harness(overrides: {
   runConflict?: boolean;
   successorState?: string;
   stableSuccessorState?: string;
+  stableRestartCount?: number;
+  stableStartedAt?: string;
   successorImage?: string;
   updateFailure?: Error;
 } = {}): Harness {
   const calls: string[][] = [];
   const events: string[] = [];
   const records: RuntimeHostReleaseRecord[] = [];
+  const intents: RuntimeHostHandoffIntent[] = [];
+  let storedIntent: RuntimeHostHandoffIntent | null = null;
   let successorInspection = 0;
   const successorName = runtimeHostSuccessorName(revision);
-  function successorInspect(state: string): string {
+  function successorInspect(state: string, stable: boolean): string {
     return JSON.stringify([{
+      Id: "5ucce5501d5ucce5501d",
+      RestartCount: stable ? overrides.stableRestartCount ?? 0 : 0,
       State: {
         Status: state,
         Running: state === "running",
         Restarting: state === "restarting",
+        StartedAt: stable
+          ? overrides.stableStartedAt ?? "2026-07-21T08:59:58.000Z"
+          : "2026-07-21T08:59:58.000Z",
       },
       Config: {
         Image: overrides.successorImage ?? candidate.image,
@@ -96,10 +117,11 @@ function harness(overrides: {
       }
       if (argv[0] === "container" && argv[1] === "inspect" && argv[2] === successorName) {
         successorInspection += 1;
-        const state = successorInspection === 1
-          ? overrides.successorState ?? "running"
-          : overrides.stableSuccessorState ?? overrides.successorState ?? "running";
-        return successorInspect(state);
+        const stable = successorInspection > 1;
+        const state = stable
+          ? overrides.stableSuccessorState ?? overrides.successorState ?? "running"
+          : overrides.successorState ?? "running";
+        return successorInspect(state, stable);
       }
       if (argv[0] === "container" && argv[1] === "update" && overrides.updateFailure) {
         throw overrides.updateFailure;
@@ -110,11 +132,148 @@ function harness(overrides: {
       events.push("write-release");
       records.push(record);
     },
+    readRelease: () => records[records.length - 1] ?? null,
+    readHandoffIntent: () => storedIntent,
+    writeHandoffIntent: (intent) => {
+      events.push("write-handoff-intent");
+      intents.push(intent);
+      storedIntent = intent;
+    },
+    clearHandoffIntent: () => {
+      events.push("clear-handoff-intent");
+      storedIntent = null;
+    },
     fenceOwnerPid: () => overrides.fenceOwnerPid === undefined ? 3970 : overrides.fenceOwnerPid,
     now: () => "2026-07-21T09:00:00.000Z",
     wait: async () => undefined,
   };
-  return { ports, calls, events, records };
+  return { ports, calls, events, records, intents, storedIntent: () => storedIntent };
+}
+
+/* A stateful Docker world that survives across staging attempts, for
+   deterministic crash injection: the initiating client process dies between
+   daemon-side atomic calls, and a later retry must recover. */
+const SUCCESSOR_PID = 4200;
+const SUCCESSOR_ID = "5ucce5501d5ucce5501d";
+
+interface CrashWorld {
+  fenceOwnerPid: number | null;
+  predecessorExists: boolean;
+  predecessorRunning: boolean;
+  predecessorRestart: string;
+  successorExists: boolean;
+  successorRestart: string | null;
+  crashAfterRestartDisable: boolean;
+  crashAfterPublish: boolean;
+  releaseRecords: RuntimeHostReleaseRecord[];
+  handoffIntent: RuntimeHostHandoffIntent | null;
+}
+
+function crashWorld(): CrashWorld {
+  return {
+    fenceOwnerPid: 3970,
+    predecessorExists: true,
+    predecessorRunning: true,
+    predecessorRestart: "unless-stopped",
+    successorExists: false,
+    successorRestart: null,
+    crashAfterRestartDisable: false,
+    crashAfterPublish: false,
+    releaseRecords: [],
+    handoffIntent: null,
+  };
+}
+
+function crashHarness(world: CrashWorld): { ports: RuntimeHostSuccessorPorts; calls: string[][] } {
+  const calls: string[][] = [];
+  const successorName = runtimeHostSuccessorName(revision);
+  function successorJson(): string {
+    return JSON.stringify([{
+      Id: SUCCESSOR_ID,
+      RestartCount: 0,
+      State: {
+        Status: "running",
+        Running: true,
+        Restarting: false,
+        StartedAt: "2026-07-21T08:59:58.000Z",
+        Pid: SUCCESSOR_PID,
+      },
+      Config: {
+        Image: candidate.image,
+        Cmd: ["bun-container", "run", "src/runtime-host/main.ts"],
+        Env: [
+          `${RUNTIME_HOST_IMAGE_ENV}=${candidate.image}`,
+          `${RUNTIME_HOST_REVISION_ENV}=${candidate.revision}`,
+          `${RUNTIME_HOST_CONTAINER_ENV}=${successorName}`,
+        ],
+        Labels: {
+          [RUNTIME_HOST_SUCCESSOR_LABEL]: "1",
+          "dev.live-log-viewer.revision": candidate.revision,
+        },
+      },
+      HostConfig: { Binds: [], GroupAdd: [], NetworkMode: "host", PidMode: "host", Privileged: false },
+    }]);
+  }
+  const ports: RuntimeHostSuccessorPorts = {
+    docker: async (argv) => {
+      calls.push([...argv]);
+      if (argv[0] === "container" && argv[1] === "ls") {
+        const listed = [
+          ...(world.predecessorExists && world.predecessorRunning ? ["abc123"] : []),
+          ...(world.successorExists ? [SUCCESSOR_ID] : []),
+        ];
+        return `${listed.join("\n")}\n`;
+      }
+      if (argv[0] === "container" && argv[1] === "inspect" && argv[2] === "abc123") {
+        if (!world.predecessorExists) throw new Error("Error: No such container: abc123");
+        return predecessorInspect;
+      }
+      if (argv[0] === "container" && argv[1] === "inspect" && (argv[2] === SUCCESSOR_ID || argv[2] === successorName)) {
+        if (!world.successorExists) throw new Error(`Error: No such container: ${argv[2]}`);
+        return successorJson();
+      }
+      if (argv[0] === "run") {
+        if (world.successorExists) throw new Error(`docker: Error response from daemon: Conflict. The container name "/${successorName}" is already in use`);
+        world.successorExists = true;
+        world.successorRestart = "unless-stopped";
+        return SUCCESSOR_ID;
+      }
+      if (argv[0] === "container" && argv[1] === "start") {
+        if (!world.successorExists) throw new Error(`Error: No such container: ${argv[2]}`);
+        return "";
+      }
+      if (argv[0] === "container" && argv[1] === "update") {
+        const target = argv[argv.length - 1];
+        if (target === "abc123") {
+          if (!world.predecessorExists) throw new Error("Error: No such container: abc123");
+          world.predecessorRestart = "no";
+        } else if (target === SUCCESSOR_ID || target === successorName) {
+          world.successorRestart = "no";
+        }
+        if (world.crashAfterRestartDisable) {
+          world.crashAfterRestartDisable = false;
+          throw new Error("simulated staging crash");
+        }
+        return "";
+      }
+      return "";
+    },
+    writeRelease: (record) => {
+      world.releaseRecords.push(record);
+      if (world.crashAfterPublish) {
+        world.crashAfterPublish = false;
+        throw new Error("simulated staging crash");
+      }
+    },
+    readRelease: () => world.releaseRecords[world.releaseRecords.length - 1] ?? null,
+    readHandoffIntent: () => world.handoffIntent,
+    writeHandoffIntent: (intent) => { world.handoffIntent = intent; },
+    clearHandoffIntent: () => { world.handoffIntent = null; },
+    fenceOwnerPid: () => world.fenceOwnerPid,
+    now: () => "2026-07-21T09:00:00.000Z",
+    wait: async () => undefined,
+  };
+  return { ports, calls };
 }
 
 /* Production #518: the runtime-host ran a stale baked image for hours after
@@ -235,4 +394,133 @@ test("issue 518: staging without an identifiable predecessor fails observably", 
     .rejects.toThrow("runtime-host predecessor container is unavailable");
 
   expect(records).toEqual([]);
+});
+
+/* PR #521 review, finding 1: a crash after the predecessor's restart policy
+   was disabled but before the release record became durable used to leave the
+   retry with only the fence owner to identify the predecessor. Once the
+   predecessor exits and the successor takes the fence, that retry selected
+   the successor itself as "predecessor", disabled its restart policy, and
+   published a second release bound to it — recovery would then exit the
+   successor. The durable handoff intent pins both identities across the
+   crash boundary. */
+test("issue 521: recovery after a crash between restart-disable and publication never selects or disables the successor", async () => {
+  const world = crashWorld();
+  world.crashAfterRestartDisable = true;
+  const first = crashHarness(world);
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", first.ports))
+    .rejects.toThrow("simulated staging crash");
+  expect(world.releaseRecords).toEqual([]);
+  expect(world.predecessorRestart).toBe("no");
+
+  /* The predecessor exits gracefully; the staged successor acquires the
+     singleton fence and becomes the fence owner before the retry runs. */
+  world.predecessorRunning = false;
+  world.fenceOwnerPid = SUCCESSOR_PID;
+
+  const retry = crashHarness(world);
+  const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", retry.ports);
+
+  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision));
+  /* Recovery never rediscovers a predecessor through the fence owner — the
+     fence now belongs to the successor itself. */
+  expect(retry.calls.some((argv) => argv[0] === "container" && argv[1] === "ls")).toBe(false);
+  /* The successor stays restartable: no restart-policy mutation ever targets
+     it, across both the crashed attempt and the recovery. */
+  expect(world.successorRestart).toBe("unless-stopped");
+  const updates = [...first.calls, ...retry.calls].filter((argv) => argv[0] === "container" && argv[1] === "update");
+  expect(updates.length).toBeGreaterThan(0);
+  expect(updates.every((argv) => argv[argv.length - 1] === "abc123")).toBe(true);
+  /* Publication happens exactly once and binds the successor identity. */
+  expect(world.releaseRecords).toEqual([{
+    ...candidate,
+    container: runtimeHostSuccessorName(revision),
+    stagedAt: "2026-07-21T09:00:00.000Z",
+  }]);
+  expect(world.handoffIntent).toBeNull();
+});
+
+test("issue 521: a crash between publication and intent clearing never publishes a second release", async () => {
+  const world = crashWorld();
+  world.crashAfterPublish = true;
+  const first = crashHarness(world);
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", first.ports))
+    .rejects.toThrow("simulated staging crash");
+  expect(world.releaseRecords).toHaveLength(1);
+
+  const retry = crashHarness(world);
+  const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", retry.ports);
+
+  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision));
+  expect(world.releaseRecords).toHaveLength(1);
+  expect(world.handoffIntent).toBeNull();
+  expect(world.successorRestart).toBe("unless-stopped");
+});
+
+test("issue 521: recovery completes when the crashed predecessor container is already gone", async () => {
+  const world = crashWorld();
+  world.crashAfterRestartDisable = true;
+  const first = crashHarness(world);
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", first.ports))
+    .rejects.toThrow("simulated staging crash");
+
+  world.predecessorRunning = false;
+  world.predecessorExists = false;
+  world.fenceOwnerPid = SUCCESSOR_PID;
+
+  const retry = crashHarness(world);
+  const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", retry.ports);
+
+  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision));
+  expect(world.releaseRecords).toHaveLength(1);
+  expect(world.successorRestart).toBe("unless-stopped");
+  expect(world.handoffIntent).toBeNull();
+});
+
+/* PR #521 review, finding 3: both readiness inspections can report "running"
+   while dockerd restarts a crash-looping successor in between. The probes
+   must reject any restart-count or start-identity change. */
+test("issue 521: a successor crash-looping across two running inspections never becomes durable", async () => {
+  const { ports, calls, records, intents } = harness({
+    stableRestartCount: 1,
+    stableStartedAt: "2026-07-21T08:59:59.750Z",
+  });
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports))
+    .rejects.toThrow("restarted between readiness probes");
+
+  expect(records).toEqual([]);
+  expect(intents).toEqual([]);
+  expect(calls.some((argv) => argv[0] === "container" && argv[1] === "update")).toBe(false);
+});
+
+test("issue 521: a start-identity change alone between running inspections never becomes durable", async () => {
+  const { ports, calls, records, intents } = harness({ stableStartedAt: "2026-07-21T08:59:59.750Z" });
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports))
+    .rejects.toThrow("restarted between readiness probes");
+
+  expect(records).toEqual([]);
+  expect(intents).toEqual([]);
+  expect(calls.some((argv) => argv[0] === "container" && argv[1] === "update")).toBe(false);
+});
+
+/* PR #521 review, finding 2: the Docker-inspected predecessor environment was
+   cloned verbatim into the successor's `docker run` arguments, so the
+   unsupported credential's name and value leaked into the successor's
+   metadata. Neither may ever reach a Docker call or a durable record. */
+test("issue 521: the predecessor's unsupported credential never reaches Docker calls or successor metadata", async () => {
+  const { ports, calls, records, intents } = harness();
+
+  await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports);
+
+  const dockerArguments = calls.flat();
+  expect(dockerArguments.some((argument) => argument.includes(WAKATIME_CREDENTIAL_ENV))).toBe(false);
+  expect(dockerArguments.some((argument) => argument.includes(wakatimePlaceholderValue))).toBe(false);
+  expect(JSON.stringify(records)).not.toContain(WAKATIME_CREDENTIAL_ENV);
+  expect(JSON.stringify(records)).not.toContain(wakatimePlaceholderValue);
+  expect(JSON.stringify(intents)).not.toContain(WAKATIME_CREDENTIAL_ENV);
+  expect(JSON.stringify(intents)).not.toContain(wakatimePlaceholderValue);
+  /* Supported predecessor environment entries still clone. */
+  expect(calls.find((argv) => argv[0] === "run")?.join(" ")).toContain("-e LLV_RUNTIME_EVENTS=1");
 });

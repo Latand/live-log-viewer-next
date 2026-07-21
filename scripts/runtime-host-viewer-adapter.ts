@@ -18,7 +18,15 @@ import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
 import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
-import { runtimeHostReleaseFile, writeRuntimeHostRelease } from "../src/runtime-host/hostRelease";
+import {
+  clearRuntimeHostHandoffIntent,
+  readRuntimeHostHandoffIntent,
+  readRuntimeHostRelease,
+  runtimeHostHandoffIntentFile,
+  runtimeHostReleaseFile,
+  writeRuntimeHostHandoffIntent,
+  writeRuntimeHostRelease,
+} from "../src/runtime-host/hostRelease";
 import { stageRuntimeHostSuccessorContainer } from "../src/runtime-host/hostSuccessor";
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 import { withoutWakatimeCredential } from "../src/lib/wakatime/credential";
@@ -314,6 +322,10 @@ async function stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Prom
   await stageRuntimeHostSuccessorContainer(candidate, runtimeHostImageTag, {
     docker: (argv) => command(["docker", ...argv]),
     writeRelease: (record) => writeRuntimeHostRelease(record, runtimeHostReleaseFile()),
+    readRelease: () => readRuntimeHostRelease(runtimeHostReleaseFile()),
+    readHandoffIntent: () => readRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
+    writeHandoffIntent: (intent) => writeRuntimeHostHandoffIntent(intent, runtimeHostHandoffIntentFile()),
+    clearHandoffIntent: () => clearRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
     fenceOwnerPid: () => {
       try {
         const owner = JSON.parse(fs.readFileSync(`${runtimeSocket}.lock`, "utf8")) as { pid?: unknown };

@@ -53,17 +53,71 @@ export function currentRuntimeHostGeneration(
   return { image: record.image, revision: record.revision };
 }
 
-export function writeRuntimeHostRelease(record: RuntimeHostReleaseRecord, filename = runtimeHostReleaseFile()): void {
+function writeDurableJson(filename: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
   const fd = fs.openSync(temporary, "wx", 0o600);
   try {
-    fs.writeFileSync(fd, JSON.stringify(record));
+    fs.writeFileSync(fd, JSON.stringify(value));
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
   }
   fs.renameSync(temporary, filename);
   const directory = fs.openSync(path.dirname(filename), "r");
+  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+}
+
+export function writeRuntimeHostRelease(record: RuntimeHostReleaseRecord, filename = runtimeHostReleaseFile()): void {
+  writeDurableJson(filename, record);
+}
+
+/** PR #521: the durable intermediate identity of an in-flight successor
+    handoff. Written only after the successor container is observably stable,
+    before the predecessor's restart policy is disabled, and cleared only
+    after the release record is published. A staging retry that finds this
+    intent must resume from it instead of rediscovering a predecessor through
+    the singleton-fence owner — after the crash boundary the fence may already
+    belong to the successor, and fence-owner discovery would select, disable,
+    and exit the successor itself. */
+export interface RuntimeHostHandoffIntent {
+  revision: string;
+  image: string;
+  successorContainer: string;
+  predecessorId: string;
+  recordedAt: string;
+}
+
+export function runtimeHostHandoffIntentFile(): string {
+  return process.env.LLV_RUNTIME_HOST_HANDOFF_INTENT_TARGET || statePath("runtime-host-handoff-intent.json");
+}
+
+export function readRuntimeHostHandoffIntent(filename = runtimeHostHandoffIntentFile()): RuntimeHostHandoffIntent | null {
+  let value: Partial<RuntimeHostHandoffIntent>;
+  try {
+    value = JSON.parse(fs.readFileSync(filename, "utf8")) as Partial<RuntimeHostHandoffIntent>;
+  } catch {
+    return null;
+  }
+  if (typeof value.revision !== "string"
+    || typeof value.image !== "string"
+    || typeof value.successorContainer !== "string"
+    || typeof value.predecessorId !== "string"
+    || typeof value.recordedAt !== "string") return null;
+  return value as RuntimeHostHandoffIntent;
+}
+
+export function writeRuntimeHostHandoffIntent(intent: RuntimeHostHandoffIntent, filename = runtimeHostHandoffIntentFile()): void {
+  writeDurableJson(filename, intent);
+}
+
+export function clearRuntimeHostHandoffIntent(filename = runtimeHostHandoffIntentFile()): void {
+  fs.rmSync(filename, { force: true });
+  let directory: number;
+  try {
+    directory = fs.openSync(path.dirname(filename), "r");
+  } catch {
+    return;
+  }
   try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
 }

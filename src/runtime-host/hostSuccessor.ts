@@ -1,9 +1,11 @@
 import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
+import { withoutWakatimeCredentialEntries } from "@/lib/wakatime/credential";
 
 import {
   RUNTIME_HOST_CONTAINER_ENV,
   RUNTIME_HOST_IMAGE_ENV,
   RUNTIME_HOST_REVISION_ENV,
+  type RuntimeHostHandoffIntent,
   type RuntimeHostReleaseRecord,
 } from "./hostRelease";
 
@@ -20,6 +22,15 @@ export interface RuntimeHostSuccessorPorts {
       process may die between calls without losing the successor. */
   docker(argv: string[]): Promise<string>;
   writeRelease(record: RuntimeHostReleaseRecord): void;
+  /** The current durable release record, or null. Recovery reads it to keep
+      publication exactly-once across a crash boundary (PR #521). */
+  readRelease(): RuntimeHostReleaseRecord | null;
+  /** The durable intermediate successor identity (PR #521): written after the
+      successor is observably stable and before the predecessor's restart
+      policy is disabled, cleared only after publication. */
+  readHandoffIntent(): RuntimeHostHandoffIntent | null;
+  writeHandoffIntent(intent: RuntimeHostHandoffIntent): void;
+  clearHandoffIntent(): void;
   /** The singleton fence owner (host pid — the runtime-host service runs with
       pid: host), or null when unreadable. */
   fenceOwnerPid(): number | null;
@@ -57,7 +68,10 @@ function parseTopology(id: string, raw: string): PredecessorTopology {
   if (cmd.length === 0) throw new Error("predecessor runtime-host command is unavailable");
   return {
     id,
-    env: stringArray(config.Env),
+    /* PR #521: the inspected predecessor environment may carry the unsupported
+       credential; drop the entry before its name or value can reach `docker
+       run` arguments or successor metadata. */
+    env: withoutWakatimeCredentialEntries(stringArray(config.Env)),
     cmd,
     containerUser: typeof config.User === "string" ? config.User : "",
     workingDir: typeof config.WorkingDir === "string" ? config.WorkingDir : "",
@@ -112,6 +126,26 @@ function successorRunArgs(
   ];
 }
 
+/** The successor's start identity. A crash-looping container can present two
+    "running" snapshots while dockerd restarts it in between (PR #521), so the
+    stability gate compares the container id, its restart count, and its
+    StartedAt timestamp across the two observations. */
+interface SuccessorStartIdentity {
+  id: string;
+  restartCount: number | null;
+  startedAt: string | null;
+}
+
+function successorStartIdentity(raw: string): SuccessorStartIdentity {
+  const container = ((JSON.parse(raw) as Array<Record<string, unknown>>)[0] ?? {}) as Record<string, unknown>;
+  const state = (container.State ?? {}) as Record<string, unknown>;
+  return {
+    id: typeof container.Id === "string" ? container.Id : "",
+    restartCount: typeof container.RestartCount === "number" ? container.RestartCount : null,
+    startedAt: typeof state.StartedAt === "string" ? state.StartedAt : null,
+  };
+}
+
 function successorIsReady(raw: string, name: string, candidate: ViewerReleaseIdentity): boolean {
   const inspected = JSON.parse(raw) as Array<Record<string, unknown>>;
   const container = inspected[0] ?? {};
@@ -130,6 +164,56 @@ function successorIsReady(raw: string, name: string, candidate: ViewerReleaseIde
     && environment.includes(`${RUNTIME_HOST_CONTAINER_ENV}=${name}`);
 }
 
+/** Two identity-aware observations: both must report the ready running state,
+    and the successor's start identity must not change between them — a
+    crash-looping container can report "running" to both probes while dockerd
+    restarts it in between (PR #521). */
+async function observeStableSuccessor(
+  name: string,
+  candidate: ViewerReleaseIdentity,
+  ports: RuntimeHostSuccessorPorts,
+): Promise<void> {
+  const firstEvidence = await ports.docker(["container", "inspect", name]);
+  if (!successorIsReady(firstEvidence, name, candidate)) {
+    throw new Error("runtime-host successor container failed its identity or running-state gate");
+  }
+  await (ports.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(250);
+  const stableEvidence = await ports.docker(["container", "inspect", name]);
+  if (!successorIsReady(stableEvidence, name, candidate)) {
+    throw new Error("runtime-host successor container did not remain stably ready");
+  }
+  const first = successorStartIdentity(firstEvidence);
+  const stable = successorStartIdentity(stableEvidence);
+  if (first.id !== stable.id || first.restartCount !== stable.restartCount || first.startedAt !== stable.startedAt) {
+    throw new Error("runtime-host successor container restarted between readiness probes");
+  }
+}
+
+async function disablePredecessorRestart(predecessorId: string, ports: RuntimeHostSuccessorPorts): Promise<void> {
+  try {
+    await ports.docker(["container", "update", "--restart", "no", predecessorId]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    /* Recovery may run after the crashed predecessor already exited and was
+       removed; a missing container can never restart, which is the goal
+       state of this step. */
+    if (!/No such container|No such object/i.test(message)) throw error;
+  }
+}
+
+/** Publication is exactly-once across crash boundaries: a retry that finds
+    the release record already bound to this successor generation must not
+    write it again (PR #521). */
+function publishReleaseOnce(name: string, candidate: ViewerReleaseIdentity, ports: RuntimeHostSuccessorPorts): void {
+  const current = ports.readRelease();
+  if (current && current.image === candidate.image && current.revision === candidate.revision && current.container === name) return;
+  ports.writeRelease({
+    ...candidate,
+    container: name,
+    stagedAt: (ports.now ?? (() => new Date().toISOString()))(),
+  });
+}
+
 /** #518 runtime-host generation handoff, built exclusively from daemon-side
     atomic Docker operations. The runtime-host container runs a baked image
     and Bun loads modules once at boot, so only a successor container created
@@ -145,11 +229,16 @@ function successorIsReady(raw: string, name: string, candidate: ViewerReleaseIde
        journal writer, and it survives the death of every initiating client
        process — this module never stops, kills, or removes the predecessor;
     4. two identity-aware observations prove that the successor remains in its
-       running fence-wait state;
-    5. the predecessor's restart policy is disabled before publication, so a
+       running fence-wait state without restarting in between;
+    5. the durable handoff intent records the successor and predecessor
+       identities (PR #521) — from here on a crash is recovered from the
+       intent, never by rediscovering a predecessor through the fence owner,
+       which may already be the successor itself;
+    6. the predecessor's restart policy is disabled before publication, so a
        stale generation can never boot and claim the candidate record;
-    6. the durable release record binds the successor image, revision, and
-       container identity after every prerequisite is complete.
+    7. the durable release record binds the successor image, revision, and
+       container identity after every prerequisite is complete — exactly once;
+    8. the handoff intent is cleared.
     A failure leaves the predecessor serving and the staging operation
     retryable from its durable deployment phase. */
 export async function stageRuntimeHostSuccessorContainer(
@@ -159,9 +248,23 @@ export async function stageRuntimeHostSuccessorContainer(
 ): Promise<{ successorContainer: string }> {
   await ports.docker(["image", "inspect", candidate.image]);
   await ports.docker(["tag", candidate.image, runtimeHostImageTag]);
+  const name = runtimeHostSuccessorName(candidate.revision);
+  const intent = ports.readHandoffIntent();
+  if (intent && intent.revision === candidate.revision && intent.image === candidate.image && intent.successorContainer === name) {
+    /* PR #521 crash recovery: the previous staging died between recording the
+       intent and clearing it. The predecessor may have exited and the
+       successor may already own the singleton fence, so fence-owner
+       predecessor discovery is forbidden here — it would select, disable,
+       and exit the successor itself. Both identities come from the intent. */
+    await ports.docker(["container", "start", name]);
+    await observeStableSuccessor(name, candidate, ports);
+    await disablePredecessorRestart(intent.predecessorId, ports);
+    publishReleaseOnce(name, candidate, ports);
+    ports.clearHandoffIntent();
+    return { successorContainer: name };
+  }
   const predecessor = await findPredecessor(ports);
   if (!predecessor) throw new Error("runtime-host predecessor container is unavailable for successor staging");
-  const name = runtimeHostSuccessorName(candidate.revision);
   try {
     await ports.docker(successorRunArgs(name, candidate, predecessor));
   } catch (error) {
@@ -172,20 +275,16 @@ export async function stageRuntimeHostSuccessorContainer(
     if (!/is already in use|Conflict/.test(message)) throw error;
     await ports.docker(["container", "start", name]);
   }
-  const firstEvidence = await ports.docker(["container", "inspect", name]);
-  if (!successorIsReady(firstEvidence, name, candidate)) {
-    throw new Error("runtime-host successor container failed its identity or running-state gate");
-  }
-  await (ports.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(250);
-  const stableEvidence = await ports.docker(["container", "inspect", name]);
-  if (!successorIsReady(stableEvidence, name, candidate)) {
-    throw new Error("runtime-host successor container did not remain stably ready");
-  }
-  await ports.docker(["container", "update", "--restart", "no", predecessor.id]);
-  ports.writeRelease({
-    ...candidate,
-    container: name,
-    stagedAt: (ports.now ?? (() => new Date().toISOString()))(),
+  await observeStableSuccessor(name, candidate, ports);
+  ports.writeHandoffIntent({
+    revision: candidate.revision,
+    image: candidate.image,
+    successorContainer: name,
+    predecessorId: predecessor.id,
+    recordedAt: (ports.now ?? (() => new Date().toISOString()))(),
   });
+  await disablePredecessorRestart(predecessor.id, ports);
+  publishReleaseOnce(name, candidate, ports);
+  ports.clearHandoffIntent();
   return { successorContainer: name };
 }
