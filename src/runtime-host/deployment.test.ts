@@ -53,9 +53,14 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   buildGate: Promise<void> | null = null;
   candidateHealth = healthy("http://127.0.0.1/candidate");
   promotedHealth = healthy("http://127.0.0.1:8898");
+  stageHostFailure: Error | null = null;
   calls: string[] = [];
 
   async reconcile(): Promise<void> { this.calls.push("reconcile"); }
+  async stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<void> {
+    this.calls.push(`stage-host-successor:${candidate.image}:${candidate.revision}`);
+    if (this.stageHostFailure) throw this.stageHostFailure;
+  }
   async resolveRevision(revision: string): Promise<string> {
     this.calls.push(`resolve:${revision}`);
     await this.resolveGate;
@@ -171,6 +176,119 @@ test("a post-promotion failure restores the previous healthy release", async () 
   expect(adapter.calls.findIndex((call) => call.startsWith("promote:"))).toBeLessThan(adapter.calls.findIndex((call) => call.startsWith("rollback:")));
   expect(adapter.calls).toContain(`retire:${status?.candidate?.container}`);
   expect(status?.health).toHaveLength(2);
+  store.close();
+});
+
+/* Production #518: the runtime-host container runs a baked image and its Bun
+   process loads modules once at boot. PID 3970 kept executing a stale image
+   (no #389 broker guard), so promptless Claude resume adoption kept failing
+   with "message content is required" for hours after the fixed revision was
+   deployed. /app is not live-mounted, so a same-image restart would boot the
+   identical stale generation — the exact-SHA contract must instead stage the
+   freshly built candidate image as the successor runtime-host generation. */
+test("issue 518: a succeeded exact-SHA deployment stages the candidate image as the runtime-host successor", async () => {
+  const store = journal("host-successor");
+  const adapter = new FakeDeploymentAdapter();
+  const handoffs: Array<Record<string, unknown>> = [];
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
+    onHostHandoff: (context) => {
+      handoffs.push({
+        ...context,
+        terminalAtHandoff: store.viewerDeployment(context.deploymentId)?.terminal ?? null,
+        stagedBeforeHandoff: adapter.calls.some((call) => call.startsWith("stage-host-successor:")),
+      });
+    },
+  });
+
+  const receipt = await coordinator.requestViewerDeployment({ idempotencyKey: "deploy-host-successor", revision: "b".repeat(40) });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  await coordinator.waitForDeployment(receipt.deploymentId);
+
+  const status = store.viewerDeployment(receipt.deploymentId);
+  expect(status).toMatchObject({ phase: "succeeded", terminal: true });
+  /* The staged runtime-host generation IS the deployed candidate: its image
+     and revision equal the promoted exact SHA, so the next host boot cannot
+     resurrect the stale image. */
+  expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:")))
+    .toEqual([`stage-host-successor:${status?.candidate?.image}:${"b".repeat(40)}`]);
+  /* Durable ordering: the successor staging lands before the handoff signal,
+     and the handoff follows the terminal blue-green success, so the promoted
+     Viewer is healthy and the queue state durable before any host replacement. */
+  expect(handoffs).toEqual([{
+    deploymentId: receipt.deploymentId,
+    revision: "b".repeat(40),
+    successor: status?.candidate,
+    previous: { image: "agent-log-viewer:node22", revision: null },
+    terminalAtHandoff: true,
+    stagedBeforeHandoff: true,
+  }]);
+  /* The handoff never tears down promoted releases: engine hosts owned by
+     Viewer processes keep running through the runtime-host replacement. */
+  expect(adapter.calls.filter((call) => call.startsWith("rollback:"))).toEqual([]);
+  expect(adapter.calls.filter((call) => call.startsWith("retire:"))).toEqual([]);
+  store.close();
+});
+
+test("issue 518: a runtime host already on the deployed revision stages no successor", async () => {
+  const store = journal("host-current");
+  const adapter = new FakeDeploymentAdapter();
+  const handoffs: string[] = [];
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    hostGeneration: () => ({ image: "agent-log-viewer:deploy-current", revision: "b".repeat(40) }),
+    onHostHandoff: (context) => { handoffs.push(context.deploymentId); },
+  });
+
+  const receipt = await coordinator.requestViewerDeployment({ idempotencyKey: "deploy-host-current", revision: "b".repeat(40) });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  await coordinator.waitForDeployment(receipt.deploymentId);
+
+  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({ phase: "succeeded", terminal: true });
+  expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:"))).toEqual([]);
+  expect(handoffs).toEqual([]);
+  store.close();
+});
+
+test("issue 518: failed successor staging never hands the host back to the stale image", async () => {
+  const store = journal("host-staging-failed");
+  const adapter = new FakeDeploymentAdapter();
+  adapter.stageHostFailure = new Error("docker tag failed");
+  const handoffs: string[] = [];
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
+    onHostHandoff: (context) => { handoffs.push(context.deploymentId); },
+  });
+
+  const receipt = await coordinator.requestViewerDeployment({ idempotencyKey: "deploy-host-staging-failed", revision: "b".repeat(40) });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  await coordinator.waitForDeployment(receipt.deploymentId);
+
+  /* The Viewer promotion stays succeeded — the stale host keeps serving the
+     durable queue until a later deploy stages its successor. No handoff may
+     fire without a durably staged successor: a restart without one would boot
+     the same stale image. */
+  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({ phase: "succeeded", terminal: true });
+  expect(handoffs).toEqual([]);
+  store.close();
+});
+
+test("issue 518: a failed candidate never stages a runtime-host successor", async () => {
+  const store = journal("host-failed-candidate");
+  const adapter = new FakeDeploymentAdapter();
+  adapter.candidateHealth = { ...healthy("http://127.0.0.1/candidate"), ok: false, detail: "candidate health gate failed" };
+  const handoffs: string[] = [];
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
+    onHostHandoff: (context) => { handoffs.push(context.deploymentId); },
+  });
+
+  const receipt = await coordinator.requestViewerDeployment({ idempotencyKey: "deploy-host-failed-candidate" });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  await coordinator.waitForDeployment(receipt.deploymentId);
+
+  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({ phase: "failed", terminal: true });
+  expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:"))).toEqual([]);
+  expect(handoffs).toEqual([]);
   store.close();
 });
 

@@ -11,7 +11,7 @@ import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 import type { ViewerDeploymentAdapter } from "./deployment";
 
 type CommandRunner = (action: string, input: Record<string, unknown>) => Promise<unknown>;
-type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only";
+type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor";
 
 const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "resolve-revision": 110_000,
@@ -24,6 +24,7 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   rollback: 90_000,
   retire: 60_000,
   "retain-only": 60_000,
+  "stage-host-successor": 60_000,
 };
 
 interface AdapterProcessRecord {
@@ -260,5 +261,9 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
 
   async retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
     await this.run("retain-only", { releases });
+  }
+
+  async stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<void> {
+    await this.run("stage-host-successor", { candidate });
   }
 }
