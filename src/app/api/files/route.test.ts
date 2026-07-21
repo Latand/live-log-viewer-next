@@ -147,6 +147,58 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
 });
 
+test("production-sized SQLite registry keeps cold and warm files probes within budget", async () => {
+  const filename = path.join(registryRoot, "production-registry.json");
+  const seed = new AgentRegistry(filename);
+  const template = seed.beginSpawn("codex", "/production-seed");
+  const production = seed.snapshot();
+  for (let index = 1; index < 18_000; index += 1) {
+    const launchId = `production-seed-${String(index).padStart(5, "0")}`;
+    production.receipts[launchId] = {
+      ...structuredClone(template),
+      launchId,
+      state: "failed",
+      artifactLifecycle: "deleted",
+      error: "fixture-terminal",
+    };
+  }
+  const payload = JSON.stringify(production);
+  expect(Buffer.byteLength(payload)).toBeGreaterThanOrEqual(14_660_822);
+  fs.writeFileSync(filename, payload);
+  setAgentRegistryForTests(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" }));
+
+  const writerReady = path.join(registryRoot, "production-writer.ready");
+  const writerStart = path.join(registryRoot, "production-writer.start");
+  const writerResult = path.join(registryRoot, "production-writer.json");
+  const writer = Bun.spawn([
+    process.execPath,
+    path.resolve(import.meta.dir, "../../../lib/agent/registry.sqliteChild.ts"),
+    "writer-mixed",
+    filename,
+    writerReady,
+    writerStart,
+    "files-probe-writer",
+    "12",
+    writerResult,
+  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+  while (!fs.existsSync(writerReady)) await Bun.sleep(1);
+  fs.writeFileSync(writerStart, "start");
+
+  const coldStartedAt = performance.now();
+  const cold = await GET(new Request("http://127.0.0.1/api/files"));
+  const coldDuration = performance.now() - coldStartedAt;
+  const warmStartedAt = performance.now();
+  const warm = await GET(new Request("http://127.0.0.1/api/files"));
+  const warmDuration = performance.now() - warmStartedAt;
+  expect(await writer.exited).toBe(0);
+  expect(await new Response(writer.stderr).text()).toBe("");
+
+  expect(cold.status).toBe(200);
+  expect(warm.status).toBe(200);
+  expect(coldDuration).toBeLessThan(1_000);
+  expect(warmDuration).toBeLessThan(500);
+});
+
 test("files API surfaces degraded tmux endpoint health", async () => {
   tmuxHealth = {
     status: "degraded",

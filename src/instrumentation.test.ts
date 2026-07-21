@@ -95,6 +95,17 @@ test("deployment candidates stay passive until their endpoint owns the durable r
   expect(viewerReleaseOwnsTraffic({ PORT: "19115" }, () => target)).toBe(false);
 });
 
+test("exact-SHA release probe grants background ownership to one serving endpoint", () => {
+  const target = JSON.stringify({
+    sha: "fixture-sha",
+    endpoint: "http://127.0.0.1:19892",
+    previous: { sha: "fixture-previous", endpoint: "http://127.0.0.1:19115" },
+  });
+  const owners = ["19892", "19115", "18888"]
+    .filter((port) => viewerReleaseOwnsTraffic({ PORT: port }, () => target));
+  expect(owners).toEqual(["19892"]);
+});
+
 test("release ownership keeps local boot active and fails closed on an unreadable durable target", () => {
   const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
   expect(viewerReleaseOwnsTraffic({}, () => { throw missing; })).toBe(true);

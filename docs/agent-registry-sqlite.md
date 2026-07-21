@@ -25,6 +25,14 @@ writer-wait p95, rollback-mirror age, and dirty-checkpoint state under
 `systemHealth.registry`. A rollout probe must observe one current release owner,
 a bounded mirror age in `read`, and a stable JSON mtime during `sqlite` streaming.
 
+The release gate uses a registry of at least 14,660,822 bytes with ten mixed
+structured-host lanes and a concurrent reader. Registry mutation p95 must stay
+below 250 ms, SQLite writer-wait p95 below 100 ms, reader p95 below 100 ms,
+the cold `/api/files` probe below 1,000 ms, and its warm probe below 500 ms.
+The measured revision delta must equal the admitted material and coalesced
+cursor transactions, and the JSON mirror inode metadata must remain unchanged
+through steady-state `sqlite` traffic.
+
 The `read` and `sqlite` paths bypass the whole-registry writer lock, its retry/backoff loop, stale-lock recovery, temp-file cleanup, and startup JSON compaction. Per-session operation locks remain active. They serialize host actuation independently of registry persistence.
 
 ## Rollback

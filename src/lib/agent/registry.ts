@@ -2223,6 +2223,7 @@ export interface AgentRegistryStorageOptions {
   mirrorCheckpointMs?: number;
   now?: () => number;
   scheduleMirrorCheckpoint?: (callback: () => void, delayMs: number) => { unref?(): unknown };
+  afterMirrorWrite?: () => void;
 }
 
 export interface AgentRegistryStorageDiagnostics {
@@ -2278,12 +2279,14 @@ export class AgentRegistry {
   private readonly mirrorCheckpointMs: number;
   private readonly now: () => number;
   private readonly scheduleMirrorCheckpoint: (callback: () => void, delayMs: number) => { unref?(): unknown };
+  private readonly afterMirrorWrite: (() => void) | undefined;
   private mirrorCheckpointPending = false;
   private lastMirrorAt: number | null = null;
   private mirrorDirty = false;
   private readonly writerWaits: number[] = [];
   private readonly transactionDurations: number[] = [];
-  private firstTransactionAt: number | null = null;
+  private transactionCount = 0;
+  private readonly transactionRateBuckets = new Map<number, number>();
 
   constructor(
     readonly filename = statePath("agent-registry.json"),
@@ -2297,6 +2300,7 @@ export class AgentRegistry {
     this.now = storage.now ?? Date.now;
     this.scheduleMirrorCheckpoint = storage.scheduleMirrorCheckpoint
       ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+    this.afterMirrorWrite = storage.afterMirrorWrite;
     this.beforeDualWriteMutationReplace = storage.beforeDualWriteMutationReplace;
     this.sqliteStore = this.sqliteMode === "off"
       ? null
@@ -2340,17 +2344,12 @@ export class AgentRegistry {
   }
 
   private mirrorSqliteSnapshot(initial: SqliteRegistrySnapshot): void {
-    let snapshot = initial;
-    for (;;) {
-      writeAtomic(this.filename, snapshot.file, snapshot.revision);
-      const latest = this.sqliteStore!.snapshot();
-      if (latest.revision <= snapshot.revision) {
-        this.lastMirrorAt = this.now();
-        this.mirrorDirty = false;
-        return;
-      }
-      snapshot = latest;
-    }
+    writeAtomic(this.filename, initial.file, initial.revision);
+    this.afterMirrorWrite?.();
+    const latestRevision = this.sqliteStore!.revision();
+    this.lastMirrorAt = this.now();
+    this.mirrorDirty = latestRevision > initial.revision;
+    if (this.mirrorDirty) this.scheduleRollbackMirror();
   }
 
   private recordMetric(target: number[], value: number): void {
@@ -2366,13 +2365,17 @@ export class AgentRegistry {
 
   storageDiagnostics(): AgentRegistryStorageDiagnostics {
     const revision = this.sqliteStore?.revision() ?? null;
+    const currentSecond = Math.floor(this.now() / 1_000);
+    for (const second of this.transactionRateBuckets.keys()) {
+      if (second <= currentSecond - 60) this.transactionRateBuckets.delete(second);
+    }
+    const rollingTransactions = [...this.transactionRateBuckets.values()]
+      .reduce((total, count) => total + count, 0);
     return {
       backendMode: this.sqliteMode,
       revision,
-      transactionCount: this.transactionDurations.length,
-      writerRatePerSecond: this.firstTransactionAt === null
-        ? 0
-        : this.transactionDurations.length / Math.max(0.001, (this.now() - this.firstTransactionAt) / 1_000),
+      transactionCount: this.transactionCount,
+      writerRatePerSecond: rollingTransactions / 60,
       writerWaitP95Ms: this.percentile(this.writerWaits),
       transactionP95Ms: this.percentile(this.transactionDurations),
       mirrorAgeMs: this.lastMirrorAt === null ? null : Math.max(0, this.now() - this.lastMirrorAt),
@@ -2803,6 +2806,19 @@ export class AgentRegistry {
   }
 
   private mutate<T>(fn: (file: RegistryFile) => T): T {
+    const startedAt = performance.now();
+    const result = this.mutateStorage(fn);
+    this.transactionCount += 1;
+    this.recordMetric(this.transactionDurations, performance.now() - startedAt);
+    const second = Math.floor(this.now() / 1_000);
+    this.transactionRateBuckets.set(second, (this.transactionRateBuckets.get(second) ?? 0) + 1);
+    for (const candidate of this.transactionRateBuckets.keys()) {
+      if (candidate <= second - 60) this.transactionRateBuckets.delete(candidate);
+    }
+    return result;
+  }
+
+  private mutateStorage<T>(fn: (file: RegistryFile) => T): T {
     /* Every mutation sweeps the staged supersedence edges (issue #383) after
        its own writes, so whichever transition marks a predecessor host dead —
        terminate, recovery, reconcile — retires its round in that same
@@ -2813,10 +2829,7 @@ export class AgentRegistry {
       return result;
     };
     if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
-      const startedAt = performance.now();
-      this.firstTransactionAt ??= this.now();
       const mutation = this.sqliteStore!.mutate(mutator, this.sqliteMode === "read");
-      this.recordMetric(this.transactionDurations, performance.now() - startedAt);
       if (this.sqliteMode === "read") {
         if (!mutation.file) throw new Error("SQLite read mode mutation is missing its rollback snapshot");
         this.mirrorDirty = true;

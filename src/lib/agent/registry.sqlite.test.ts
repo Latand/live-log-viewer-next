@@ -780,6 +780,36 @@ test("read mode bounds rollback mirror writes and exposes checkpoint diagnostics
   expect(registry.storageDiagnostics()).toMatchObject({ mirrorDirty: false, mirrorAgeMs: 0 });
 });
 
+test("one rollback checkpoint publishes one coherent snapshot under sustained writers", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-bounded-checkpoint-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const writer = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  const scheduled: Array<() => void> = [];
+  let concurrentWrites = false;
+  let mirrorWrites = 0;
+  const checkpoint = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "read",
+    mirrorCheckpointMs: 60_000,
+    scheduleMirrorCheckpoint: (callback) => { scheduled.push(callback); return { unref() {} }; },
+    afterMirrorWrite: () => {
+      mirrorWrites += 1;
+      if (concurrentWrites) writer.beginSpawn("codex", `/concurrent-${mirrorWrites}`);
+    },
+  });
+  checkpoint.beginSpawn("codex", "/dirty");
+  concurrentWrites = true;
+  const startedAt = performance.now();
+  checkpoint.checkpointRollbackMirror();
+
+  expect(mirrorWrites).toBe(2); // startup plus this checkpoint
+  expect(performance.now() - startedAt).toBeLessThan(100);
+  expect(checkpoint.storageDiagnostics().mirrorDirty).toBeTrue();
+  expect(scheduled).toHaveLength(1);
+  const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision: number };
+  expect(mirror._sqliteRevision).toBeLessThan(writer.storageDiagnostics().revision!);
+});
+
 test("SQLite snapshot cache follows external revisions and reports writer metrics", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-snapshot-cache-"));
   const filename = path.join(directory, "agent-registry.json");
@@ -807,6 +837,32 @@ test("SQLite snapshot cache follows external revisions and reports writer metric
     transactionP95Ms: expect.any(Number),
   });
 });
+
+test.each(["off", "dual-write", "read", "sqlite"] as const)(
+  "%s diagnostics keep cumulative counts and a rolling rate beyond the percentile sample cap",
+  (sqliteMode) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-metrics-${sqliteMode}-`));
+    const filename = path.join(directory, "agent-registry.json");
+    let clock = 0;
+    const registry = new AgentRegistry(filename, undefined, undefined, {
+      sqliteMode,
+      now: () => clock,
+      mirrorCheckpointMs: 60_000,
+    });
+    for (let index = 0; index < 650; index += 1) {
+      registry.beginSpawn("codex", `/metric-${index}`);
+      clock += 100;
+    }
+
+    expect(registry.storageDiagnostics()).toMatchObject({
+      backendMode: sqliteMode,
+      transactionCount: 650,
+      writerRatePerSecond: expect.closeTo(9.83, 1),
+      transactionP95Ms: expect.any(Number),
+    });
+  },
+  30_000,
+);
 
 test("SQLite adoption keeps structured-host writer epochs fenced across restarts", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-adoption-"));
@@ -855,31 +911,37 @@ test("SQLite adoption keeps structured-host writer epochs fenced across restarts
   )).toMatchObject({ status: "idle", claimOwner: null, structuredHost: { eventCursor: 5 } });
 });
 
-test("synthetic ten-lane load records JSON and SQLite registry operation p95", async () => {
-  async function measure(mode: "json" | "sqlite"): Promise<{
+test("production-sized SQLite registry bounds ten-lane writes, concurrent reads, and JSON rewrites", async () => {
+  const PRODUCTION_BYTES = 14_660_822;
+  async function measure(): Promise<{
     operationP95: number;
-    writerWaitP95: number | null;
+    writerWaitP95: number;
+    readerP95: number;
   }> {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-${mode}-ten-lane-`));
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-production-ten-lane-"));
     const filename = path.join(directory, "agent-registry.json");
     const seed = new AgentRegistry(filename);
     const template = seed.beginSpawn("codex", "/benchmark-seed");
     const productionShape = seed.snapshot();
-    for (let index = 1; index < 5_000; index += 1) {
+    for (let index = 1; index < 18_000; index += 1) {
       const launchId = `benchmark-seed-${String(index).padStart(5, "0")}`;
       productionShape.receipts[launchId] = { ...structuredClone(template), launchId };
     }
-    fs.writeFileSync(filename, JSON.stringify(productionShape));
-    if (mode === "sqlite") new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    const payload = JSON.stringify(productionShape);
+    expect(Buffer.byteLength(payload)).toBeGreaterThanOrEqual(PRODUCTION_BYTES);
+    fs.writeFileSync(filename, payload);
+    new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    const revisionBefore = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" })
+      .storageDiagnostics().revision!;
     const start = path.join(directory, "start");
     const children = Array.from({ length: 10 }, (_, lane) => {
-      const label = `${mode}-lane-${lane}`;
+      const label = `sqlite-lane-${lane}`;
       const ready = path.join(directory, `${label}.ready`);
       const result = path.join(directory, `${label}.json`);
       const child = Bun.spawn([
         process.execPath,
         CHILD,
-        mode === "sqlite" ? "writer-sqlite" : "writer-json",
+        "writer-mixed",
         filename,
         ready,
         start,
@@ -889,10 +951,19 @@ test("synthetic ten-lane load records JSON and SQLite registry operation p95", a
       ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       return { child, ready, result };
     });
+    const readerReady = path.join(directory, "reader.ready");
+    const readerResult = path.join(directory, "reader.json");
+    const reader = Bun.spawn([
+      process.execPath, CHILD, "reader-sqlite", filename, readerReady, start, "reader", "40", readerResult,
+    ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
     for (const { ready } of children) waitFor(ready);
+    waitFor(readerReady);
+    const jsonBefore = fs.statSync(filename);
     fs.writeFileSync(start, "start");
     expect(await Promise.all(children.map(({ child }) => child.exited))).toEqual(Array(10).fill(0));
+    expect(await reader.exited).toBe(0);
     expect(await Promise.all(children.map(({ child }) => new Response(child.stderr).text()))).toEqual(Array(10).fill(""));
+    expect(await new Response(reader.stderr).text()).toBe("");
     const measurements = children.map(({ result }) => JSON.parse(fs.readFileSync(result, "utf8")) as {
       durations: number[];
       writerWaits: number[];
@@ -900,21 +971,27 @@ test("synthetic ten-lane load records JSON and SQLite registry operation p95", a
     const durations = measurements.flatMap((measurement) => measurement.durations);
     expect(durations).toHaveLength(120);
     const writerWaits = measurements.flatMap((measurement) => measurement.writerWaits);
-    if (mode === "sqlite") expect(writerWaits.length).toBeGreaterThanOrEqual(durations.length);
+    expect(writerWaits.length).toBeGreaterThanOrEqual(durations.length);
+    const readerDurations = (JSON.parse(fs.readFileSync(readerResult, "utf8")) as { durations: number[] }).durations;
+    const jsonAfter = fs.statSync(filename);
+    expect(jsonAfter.mtimeMs).toBe(jsonBefore.mtimeMs);
+    expect(jsonAfter.size).toBe(jsonBefore.size);
+    expect(jsonAfter.ino).toBe(jsonBefore.ino);
+    const finalRegistry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    expect(finalRegistry.storageDiagnostics().revision! - revisionBefore).toBe(140);
     return {
       operationP95: percentile(durations, 0.95),
-      writerWaitP95: writerWaits.length > 0 ? percentile(writerWaits, 0.95) : null,
+      writerWaitP95: percentile(writerWaits, 0.95),
+      readerP95: percentile(readerDurations, 0.95),
     };
   }
 
-  const json = await measure("json");
-  const sqlite = await measure("sqlite");
+  const sqlite = await measure();
   console.info(
-    `[agent registry benchmark] ten-lane p95: operation JSON=${json.operationP95.toFixed(1)}ms `
-    + `SQLite=${sqlite.operationP95.toFixed(1)}ms; SQLite writer wait=${sqlite.writerWaitP95?.toFixed(1)}ms`,
+    `[agent registry benchmark] production ten-lane p95: operation=${sqlite.operationP95.toFixed(1)}ms `
+    + `writer wait=${sqlite.writerWaitP95.toFixed(1)}ms; reader=${sqlite.readerP95.toFixed(1)}ms`,
   );
-  expect(json.operationP95).toBeGreaterThan(0);
-  expect(sqlite.operationP95).toBeGreaterThan(0);
-  expect(sqlite.writerWaitP95).not.toBeNull();
-  expect(sqlite.operationP95).toBeLessThan(json.operationP95);
-}, 30_000);
+  expect(sqlite.operationP95).toBeLessThan(250);
+  expect(sqlite.writerWaitP95).toBeLessThan(100);
+  expect(sqlite.readerP95).toBeLessThan(100);
+}, 60_000);
