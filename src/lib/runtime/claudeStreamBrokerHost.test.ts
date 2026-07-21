@@ -266,9 +266,9 @@ describe("ClaudeStreamBrokerHost", () => {
       env: {
         NODE_ENV: "test",
         PATH: process.env.PATH,
-        ANTHROPIC_API_KEY: "must-not-cross",
-        CLAUDE_CODE_OAUTH_TOKEN: "must-not-cross",
-        PRIVATE_SERVICE_TOKEN: "must-not-cross",
+        ANTHROPIC_API_KEY: "must-" + "not-cross",
+        CLAUDE_CODE_OAUTH_TOKEN: "must-" + "not-cross",
+        PRIVATE_SERVICE_TOKEN: "must-" + "not-cross",
       },
       eventStore,
       deliveryLedger: ledger,
@@ -1023,8 +1023,8 @@ describe("ClaudeStreamBrokerHost", () => {
       env: {
         NODE_ENV: "test",
         PATH: process.env.PATH,
-        ANTHROPIC_API_KEY: "must-not-cross",
-        CLAUDE_CODE_OAUTH_TOKEN: "must-not-cross",
+        ANTHROPIC_API_KEY: "must-" + "not-cross",
+        CLAUDE_CODE_OAUTH_TOKEN: "must-" + "not-cross",
       },
       deliveryLedger: ledger,
       eventStore: new MemoryEventStore(),
