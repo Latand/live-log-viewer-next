@@ -2225,6 +2225,46 @@ test("a later approval stays parked when its reviewed head differs from the curr
   expect(loadPipelines()[0]!.stateDetail).toBe(parked.stateDetail);
 });
 
+test("an approval parks when the clean head advances during final settlement (#526)", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.rounds.push({ n: 1, reviewHeadSha: ORIGIN_MAIN_SHA } as never);
+  flow.state = "approved";
+  const newerHead = "e".repeat(40);
+  let headReads = 0;
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+      headReads += 1;
+      return { code: 0, stdout: `${headReads === 1 ? ORIGIN_MAIN_SHA : newerHead}\n`, stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(headReads).toBe(2);
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: expect.stringContaining(`settled ${newerHead}`),
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
+  expect(parked.cursor?.stageId).toBe("review");
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+  });
+});
+
 test("REQUEST_CHANGES recovery keeps the bound reviewer in the review slot and lets the flow relay continue (#526)", async () => {
   const h = harness();
   await create(h.ports, [
@@ -2369,6 +2409,34 @@ test("a restarted committing review parks when the branch head drifted after app
   });
   expect(parked.runs[1]!.attempts[0]).toMatchObject({ state: "needs_decision", reviewHeadSha: ORIGIN_MAIN_SHA });
   expect(h.calls.some((call) => call.startsWith("git commit"))).toBe(false);
+});
+
+test("a restarted committing review parks when the clean head advances during final settlement (#526)", async () => {
+  const h = await persistedCommittingReview();
+  const newerHead = "c".repeat(40);
+  let headReads = 0;
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+      headReads += 1;
+      return { code: 0, stdout: `${headReads === 1 ? ORIGIN_MAIN_SHA : newerHead}\n`, stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(headReads).toBe(2);
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: expect.stringContaining(`settled ${newerHead}`),
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
+  expect(parked.cursor?.stageId).toBe("review");
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+  });
 });
 
 test("a restarted committing review parks without committing post-review changes (#526)", async () => {

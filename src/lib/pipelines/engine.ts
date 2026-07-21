@@ -750,6 +750,14 @@ function commitPassedStage(
     park(pipeline, result.error, attempt);
     return;
   }
+  if (stage.kind === "review-loop" && result.sha !== attempt.reviewHeadSha) {
+    park(
+      pipeline,
+      `approved review flow head mismatch during settlement: reviewed ${attempt.reviewHeadSha ?? "no exact head"}, settled ${result.sha}`,
+      attempt,
+    );
+    return;
+  }
   pipeline.lastPassedCommit = result.sha;
   attempt.state = "passed";
   attempt.completedAt = ports.now();
