@@ -421,9 +421,13 @@ export async function scanUserAuthoredMessagesCooperatively(
     const stat = await file.stat();
     let checkpoint = options.resume ? authorshipCheckpoints.get(pathname) : undefined;
     if (checkpoint) {
-      // Truncation, replacement, or a rewritten head resets the checkpoint:
-      // the recorded offset no longer describes this file's content.
-      let valid = checkpoint.dev === stat.dev && checkpoint.ino === stat.ino && stat.size >= checkpoint.offset;
+      // Truncation, replacement, or an in-place rewrite resets the checkpoint:
+      // the recorded offset no longer describes this file's content. A changed
+      // size may be an append and remains safe after head validation.
+      let valid = checkpoint.dev === stat.dev
+        && checkpoint.ino === stat.ino
+        && stat.size >= checkpoint.offset
+        && (stat.size !== checkpoint.size || stat.mtimeMs === checkpoint.mtimeMs);
       if (valid && checkpoint.headBytes > 0) {
         if (options.signal?.aborted) {
           return { count: checkpoint.count, complete: false };

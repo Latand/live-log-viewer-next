@@ -164,6 +164,34 @@ test("a truncated transcript resets its checkpoint instead of replaying stale ev
   expect(second.count).toBe(1);
 });
 
+test("a same-size in-place tail rewrite invalidates completed authorship evidence", async () => {
+  const pathname = path.join(SANDBOX, "same-size-rewrite.jsonl");
+  const prefix = `${JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "x".repeat(70 * 1024) } })}\n`;
+  const assistantTail = `${JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "done" } })}\n`;
+  const userTail = `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "hello" } })}\n`;
+  expect(userTail.length).toBe(assistantTail.length);
+  fs.writeFileSync(pathname, prefix + assistantTail);
+
+  const first = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
+  expect(first).toEqual({ count: 0, complete: true });
+  const before = fs.statSync(pathname);
+
+  const fd = fs.openSync(pathname, "r+");
+  try {
+    fs.writeSync(fd, userTail, before.size - Buffer.byteLength(assistantTail), "utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.utimesSync(pathname, before.atime, new Date(before.mtimeMs + 2_000));
+  const rewritten = fs.statSync(pathname);
+  expect(rewritten.ino).toBe(before.ino);
+  expect(rewritten.size).toBe(before.size);
+  expect(rewritten.mtimeMs).not.toBe(before.mtimeMs);
+
+  const second = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
+  expect(second).toEqual({ count: 1, complete: true });
+});
+
 test("a finished scan replays its verdict from the checkpoint without re-reading", async () => {
   const pathname = path.join(SANDBOX, "finished.jsonl");
   fs.writeFileSync(pathname, `${JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "done" } })}\n`);
