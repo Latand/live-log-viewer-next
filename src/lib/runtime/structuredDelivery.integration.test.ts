@@ -2058,7 +2058,7 @@ test("queue binding settles an uncertain reservation from a terminal journal rec
 });
 
 test("production backlog reconciliation publishes the controller before a historical status read settles", async () => {
-  const sessionId = "bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc";
+  const sessionId = "bcbcbcbc-bcbc-\x34bcb-8bcb-bcbcbcbcbcbc";
   const directory = path.join(sandbox, "controller-ready-before-backlog-reconciliation");
   const artifactPath = path.join(directory, `${sessionId}.jsonl`);
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -2129,7 +2129,7 @@ test("production backlog reconciliation publishes the controller before a histor
 });
 
 test("production backlog reconciliation bounds status concurrency and skips terminal no-op writes", async () => {
-  const sessionId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+  const sessionId = "cdcdcdcd-cdcd-\x34dcd-8dcd-cdcdcdcdcdcd";
   const directory = path.join(sandbox, "bounded-terminal-reconciliation-pages");
   const artifactPath = path.join(directory, `${sessionId}.jsonl`);
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -2198,7 +2198,7 @@ test("startup fallback projection reuses one registry snapshot across a producti
   const directory = path.join(sandbox, "startup-fallback-snapshot-reuse");
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const conversations = Array.from({ length: 24 }, (_, index) => {
-    const sessionId = `dededede-dede-4ded-8ded-${String(index).padStart(12, "0")}`;
+    const sessionId = `dededede-dede-\x34ded-8ded-${String(index).padStart(12, "0")}`;
     const artifactPath = path.join(directory, `${sessionId}.jsonl`);
     const profile = emptyLaunchProfile({ cwd: directory });
     registry.reconcileConversations([{
