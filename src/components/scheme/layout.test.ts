@@ -513,12 +513,14 @@ describe("planned-stage pipelines grow a placeholder halo (#353 desktop ownershi
   });
 });
 
-describe("compact-history anchors keep terminal-stage edges under production compaction (#353 R3)", () => {
-  test("full production scene yields builder→reviewer, reviewer→future, reviewer→builder fail-loop, one hub, and direct reviewer halo membership", () => {
+describe("every current stage keeps a full real card under production compaction (#507 F2)", () => {
+  test("full production scene yields builder→reviewer, reviewer→future, reviewer→builder fail-loop, one hub, and both real cards in the halo", () => {
     /* builder (run, passed) → reviewer (review-loop, live cursor) → future (run),
-       with reviewer→builder on fail. In production compactPipelineArtifactPaths
-       keeps only the live reviewer pane full-size and folds /build out of the
-       scene; without a compact-history anchor for builder its edges would vanish. */
+       with reviewer→builder on fail. Under #507 compactPipelineArtifactPaths
+       keeps BOTH the live reviewer and the completed builder full-size, so the
+       colored group reads as two real conversation cards plus the future
+       placeholder — not one live pane beside a compact history stub. The
+       builder's edges anchor to its real /build node. */
     const reviewer = entry({ path: "/reviewer", conversationId: "c-rev", activity: "live" });
     const builderFile = entry({ path: "/build", conversationId: "c-build" });
     const p = ({
@@ -538,22 +540,27 @@ describe("compact-history anchors keep terminal-stage edges under production com
       srcPath: null, srcConversationId: null, createdAt: "1970", closedAt: null,
     }) as unknown as Pipeline;
 
-    /* Assemble the production scene exactly as ProjectDashboard does. */
+    /* Assemble the production scene exactly as ProjectDashboard does. The builder
+       transcript has gone idle, so the board's activity gate does not surface it
+       as a live node — it stands in as a full completed card at its slot. */
     const allFiles = [builderFile, reviewer];
     const layoutFlows = compactPipelineLayoutFlows([p], []); // folds the pipeline's flow deck out
     const compactPaths = compactPipelineArtifactPaths([p], layoutFlows, allFiles);
-    expect([...compactPaths]).toContain("/build");
+    /* Nothing compacts on an active pipeline — the builder is kept, not folded. */
+    expect([...compactPaths]).not.toContain("/build");
     expect([...compactPaths]).not.toContain("/reviewer");
     const sceneFiles = excludeCompactPipelineArtifacts(allFiles, compactPaths);
     const groups = buildBranchGroups(sceneFiles, "demo");
     const layout = buildSchemeLayout(groups, [], sceneFiles, layoutFlows, [], [p], [p]);
 
-    /* The reviewer is the live pane; builder is a compact-history anchor; future a
-       placeholder. */
+    /* The reviewer is a live pane; the idle builder is a FULL completed card (not
+       a compact stub); future is a placeholder. */
     expect(layout.nodes.map((node) => node.file.path)).toContain("/reviewer");
     expect(layout.nodes.map((node) => node.file.path)).not.toContain("/build");
     const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
-    expect(slotByStage.get("builder")?.presentation).toBe("history");
+    expect(slotByStage.get("builder")?.presentation).toBe("completed");
+    /* Full-size footprint, shared with the live/placeholder cards (#507 F2). */
+    expect(slotByStage.get("builder")?.h).toBe(slotByStage.get("future")!.h);
     expect(slotByStage.get("future")?.presentation).toBe("placeholder");
 
     const builderSlot = stageSlotKey("p", "builder");

@@ -27,7 +27,7 @@ import { reviewerCloseMutations } from "./reviewerAutoClose";
 import { directReviewFlows, isDirectReviewFlow } from "./flows/directReviewGroups";
 import { deckDisclosureMarker, writeDeckDisclosureOverride } from "./flows/reviewDeckDisclosure";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow, resolveFlowMemberPaths } from "./flows/flowModel";
-import { compactPipelineArtifactPaths, compactPipelineLayoutFlows, createDraftPipeline, excludeCompactPipelineArtifacts, pipelinesForProject, replaceCompactPipelineEphemeral, resolvePipelineMemberPaths, type PipelineTemplate } from "./pipelines/pipelineModel";
+import { compactPipelineArtifactPaths, compactPipelineLayoutFlows, createDraftPipeline, excludeCompactPipelineArtifacts, pipelineFullPanePaths, pipelinesForProject, replaceCompactPipelineEphemeral, resolvePipelineMemberPaths, type PipelineTemplate } from "./pipelines/pipelineModel";
 import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
 import { buildSchemeLayout } from "./scheme/layout";
 import { buildSubagentTrays } from "./scheme/subagentTray";
@@ -580,14 +580,26 @@ export function ProjectDashboard({
     () => compactPipelineArtifactPaths(pipelines, deckFlows, files),
     [pipelines, deckFlows, files],
   );
+  /* The latest attempt transcript of every current stage on an ACTIVE
+     (cursor-bearing) pipeline stays a full-size real stage card (#507 F2). The
+     idle-worker auto-collapse (#112) classifies a stage transcript as a
+     pipeline-stage worker, so an aged-idle passed stage would otherwise fold
+     into the pipeline worker stack — dropping its real card or duplicating it
+     beside the stack. Protecting exactly this full-pane set keeps one surface
+     per stage; older retries and completed/closed pipelines are absent, so
+     their compaction is preserved (#507 final review F1). */
+  const protectedStagePaths = useMemo(
+    () => pipelineFullPanePaths(pipelines, deckFlows),
+    [pipelines, deckFlows],
+  );
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
      full-size cards (a spawned worker stays a column under an active parent
      otherwise). Reviewers of active flows stay in their round deck and are
      kept out of the stacks after layout via deckReviewerPaths. */
   const collapsibleWorkers = useMemo(
-    () => collapsibleWorkerFiles({ files, project, flows: deckFlows, pipelines, pinnedPaths, nowMs }),
-    [files, project, deckFlows, pipelines, pinnedPaths, nowMs],
+    () => collapsibleWorkerFiles({ files, project, flows: deckFlows, pipelines, pinnedPaths, protectedPaths: protectedStagePaths, nowMs }),
+    [files, project, deckFlows, pipelines, pinnedPaths, protectedStagePaths, nowMs],
   );
   const collapsedPaths = useMemo(() => new Set(collapsibleWorkers.map((file) => file.path)), [collapsibleWorkers]);
   /* Per-origin stack grouping inputs (issue #136): a worker folds under its

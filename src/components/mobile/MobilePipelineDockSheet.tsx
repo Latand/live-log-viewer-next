@@ -1,9 +1,10 @@
 "use client";
 
 import { ChevronDown, ChevronRight, ListTree } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import { X } from "@/components/icons";
+import { useModalLayer } from "@/components/modalLayer";
 import { useLocale } from "@/lib/i18n";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -110,59 +111,14 @@ export function MobilePipelineDockSheet({
   const ongoing = pipelines.filter((pipeline) => pipeline.state !== "completed");
   const completed = pipelines.filter((pipeline) => pipeline.state === "completed");
 
-  /* Complete modal semantics (PR #431): focus moves into the sheet on open,
-     Tab cycles inside it in both directions, Escape closes it, and focus
-     returns to the opener (the summary row) on close. Body scroll locks like
-     the runtime sheet so the page behind never pans under the modal. Mount-only
-     — the parent re-renders on every poll, and re-running this would yank focus
-     back to the sheet root mid-interaction. */
-  useEffect(() => {
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    sheetRef.current?.focus();
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      if (opener?.isConnected) opener.focus();
-    };
-  }, []);
-
-  /* The key listener re-binds per `onClose` identity; attaching/detaching a
-     window listener has no focus side effects, so poll re-renders stay quiet. */
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const sheet = sheetRef.current;
-      if (!sheet) return;
-      const focusables = [...sheet.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      )].filter((el) => !el.hasAttribute("disabled"));
-      if (!focusables.length) {
-        event.preventDefault();
-        sheet.focus();
-        return;
-      }
-      const first = focusables[0]!;
-      const last = focusables[focusables.length - 1]!;
-      const active = document.activeElement;
-      const inside = active instanceof HTMLElement && sheet.contains(active);
-      if (event.shiftKey) {
-        if (!inside || active === first || active === sheet) {
-          event.preventDefault();
-          last.focus();
-        }
-      } else if (!inside || active === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  /* Complete modal semantics (PR #431): focus moves into the sheet on open, Tab
+     cycles inside it both directions, Escape closes it, focus returns to the
+     opener on close, and body scroll locks so the page behind never pans under
+     the modal. Registered as a modal LAYER (#507 final F2): when a stage editor
+     opens above the sheet the editor becomes the top layer and owns Tab/Escape,
+     so the sheet yields until the editor closes — no more trap yanking focus
+     out of the editor or Escape closing the wrong surface. */
+  useModalLayer({ containerRef: sheetRef, onClose });
 
   const dock = (pipeline: Pipeline) => (
     <MobilePipelineDock

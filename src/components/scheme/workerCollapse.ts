@@ -146,6 +146,14 @@ export interface CollapseContext extends WorkerLineage {
   idleMs: number;
   /** Paths the user manually placed/expanded — a durable pin against collapse. */
   pinnedPaths: ReadonlySet<string>;
+  /** Transcripts an ACTIVE pipeline keeps as full-size real stage cards (#507
+      F2 full-pane set): the latest attempt of every current stage. They must
+      never fold into the idle-worker stack — an aged-idle passed stage on a
+      cursor-bearing pipeline stays the one real conversation card, with no
+      worker-stack duplicate. Older retries and completed/closed pipelines are
+      absent from this set, so their compaction is preserved (#507 final review).
+      Optional: an absent set means no extra protection (the pre-#507 behavior). */
+  protectedPaths?: ReadonlySet<string>;
 }
 
 /**
@@ -166,6 +174,9 @@ export function isCollapseExempt(file: FileEntry, context: CollapseContext): boo
   if (file.pendingQuestion || file.waitingInput) return true;
   if (file.migration && file.migration.phase !== "committed" && file.migration.phase !== "rolled-back") return true;
   if (context.pinnedPaths.has(file.path)) return true;
+  /* An active pipeline's live stage card (#507 F2): its transcript is a real
+     conversation card in the colored group, so idle age must not fold it. */
+  if (context.protectedPaths?.has(file.path)) return true;
   return false;
 }
 
@@ -387,9 +398,15 @@ export interface CollapsibleInput {
   pipelines?: readonly Pipeline[];
   /** Durable manual placements/expansions — pinned against collapse. */
   pinnedPaths: ReadonlySet<string>;
+  /** Active-pipeline full-pane transcripts protected from collapse (#507 F2);
+      see {@link CollapseContext.protectedPaths}. Optional — an empty set means
+      no protection, matching the pre-#507-final behavior. */
+  protectedPaths?: ReadonlySet<string>;
   nowMs: number;
   idleMs?: number;
 }
+
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 function collapseContext(input: CollapsibleInput): CollapseContext {
   return {
@@ -398,6 +415,7 @@ function collapseContext(input: CollapsibleInput): CollapseContext {
     nowMs: input.nowMs,
     idleMs: input.idleMs ?? workerCollapseIdleMs(),
     pinnedPaths: input.pinnedPaths,
+    protectedPaths: input.protectedPaths ?? EMPTY_PATHS,
   };
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Loader2, SlidersHorizontal } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Loader2, SlidersHorizontal } from "lucide-react";
 import { useState } from "react";
 
 import { RuntimeControlsView, type RuntimeApplyState, type RuntimeDraft } from "@/components/AgentRuntimeControls";
@@ -21,6 +21,7 @@ import {
   STAGE_TONES,
   buildStagePrompt,
   optimisticRemoveStage,
+  optimisticReorderStage,
   patchPipeline,
   reviewLoopChainValid,
   stageAttempts,
@@ -201,6 +202,31 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
       setBusy(false);
     });
   };
+  /* On-canvas reorder (#507): a draft's stage cards carry their own move
+     controls so the whole graph is composed in place — no nested form. The
+     chain grows left→right, so "earlier"/"later" step the stage one slot along
+     that axis. A move is offered only when it keeps the chain startable
+     (reviewLoopChainValid: no review-loop ahead of the first run), matching the
+     guard the server enforces, and rides the same optimistic echo. */
+  const reorderable = draft && interactive && pipeline.stages.length > 1;
+  const kinds = pipeline.stages.map((item) => item.kind);
+  const orderAfterMove = (toIndex: number) => {
+    const next = [...kinds];
+    const [moved] = next.splice(slot.index, 1);
+    next.splice(toIndex, 0, moved!);
+    return next;
+  };
+  const canMoveTo = (toIndex: number) =>
+    reorderable && toIndex >= 0 && toIndex < pipeline.stages.length && toIndex !== slot.index && reviewLoopChainValid(orderAfterMove(toIndex));
+  const moveTo = (toIndex: number) => {
+    if (busy || !canMoveTo(toIndex)) return;
+    setBusy(true);
+    setError(null);
+    void patchPipeline(pipeline.id, "reorder-stage", { stageId: stage.id, toIndex }, optimisticReorderStage(pipeline, stage.id, toIndex)).then((fail) => {
+      if (fail) setError(fail);
+      setBusy(false);
+    });
+  };
 
   const tint = engineTintOf(engine);
   const active = state !== "pending" && state !== "skipped";
@@ -245,6 +271,30 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
         <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold uppercase tracking-wide text-muted">
           {review ? `⟳ ${t("groupOverride.reviewKind")}` : t("groupOverride.runKind")}
         </span>
+        {reorderable ? (
+          <span className="flex shrink-0 items-center gap-0.5" role="group" aria-label={t("groupOverride.stagesHeading")}>
+            <button
+              type="button"
+              data-stage-move="earlier"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-control border border-border bg-card/80 text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+              aria-label={t("pipelineSlot.moveEarlier", { role: label })}
+              disabled={busy || !canMoveTo(slot.index - 1)}
+              onClick={() => moveTo(slot.index - 1)}
+            >
+              <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+            </button>
+            <button
+              type="button"
+              data-stage-move="later"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-control border border-border bg-card/80 text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+              aria-label={t("pipelineSlot.moveLater", { role: label })}
+              disabled={busy || !canMoveTo(slot.index + 1)}
+              onClick={() => moveTo(slot.index + 1)}
+            >
+              <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </span>
+        ) : null}
         {interactive ? (
           <button
             type="button"
@@ -325,7 +375,11 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
         <StageEdgeControls pipeline={pipeline} stage={stage} disabled={busy} />
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3">
+      {/* The placeholder body is self-contained — no nested scrollbar (#507 AC):
+          the prompt renders as a bounded PREVIEW (clamped), and the card clips
+          rather than scrolls. The full prompt stays editable in the config
+          textarea below, so nothing is lost. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-3">
         <div className="mb-3 flex items-center justify-between gap-2">
           <span className="rounded-full px-3 py-1 text-body font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
             {t(`pipelineChipState.${state}`)}
@@ -334,9 +388,9 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
             {observedModelLabel}{effectiveEffort ? ` · ${effortTierLabel(t, effectiveEffort)}` : ""}
           </span>
         </div>
-        <div className="ml-auto max-w-[88%] rounded-[14px] rounded-br-[4px] bg-accent/10 px-3 py-2.5 text-ui leading-5 text-primary shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_18%,transparent)]">
+        <div className="ml-auto max-w-[88%] min-h-0 overflow-hidden rounded-[14px] rounded-br-[4px] bg-accent/10 px-3 py-2.5 text-ui leading-5 text-primary shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_18%,transparent)]">
           <p className="mb-1 text-caption font-bold uppercase tracking-wide text-accent">{t("pipelineSlot.promptLabel")}</p>
-          <p className="whitespace-pre-wrap break-words">{promptPreview}</p>
+          <p className="line-clamp-[12] whitespace-pre-wrap break-words">{promptPreview}</p>
         </div>
         <div className="mt-auto pt-3 text-center text-ui leading-5 text-muted">{hint}</div>
       </div>
