@@ -108,6 +108,7 @@ afterAll(() => {
 });
 
 const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
+const { controllerFileScan } = await import("@/lib/pipelines/controller");
 const { allowedKillTarget, buildResourceSnapshot, lastResourceTargetRefs, noteSessionTargets, readResourceFileSnapshot } = await import("@/lib/resources");
 const { GET } = await import("./route");
 
@@ -274,6 +275,33 @@ test("a restart serves the persisted completed snapshot while revalidating", asy
   expect(scans).toBe(1);
   const next = await cachedFileScan();
   expect(next.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/refreshed.jsonl"]);
+});
+
+test("the pipeline controller warm-starts from the persisted completed snapshot while revalidating", async () => {
+  fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
+    version: 1,
+    schemaVersion: 9,
+    snapshot: {
+      files: [file("/sessions/persisted-controller.jsonl")],
+      projectCatalog: [],
+      complete: true,
+    },
+  }));
+  resetFilesRouteCacheForTests();
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [file("/sessions/refreshed-controller.jsonl")];
+
+  const started = performance.now();
+  const snapshot = await controllerFileScan();
+
+  expect(performance.now() - started).toBeLessThan(300);
+  expect(snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/persisted-controller.jsonl"]);
+  expect(scans).toBe(0);
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(scans).toBe(1);
+  release();
 });
 
 test("a current scan joins restart revalidation before publishing transcript metadata", async () => {
