@@ -425,6 +425,9 @@ export async function scanUserAuthoredMessagesCooperatively(
       // the recorded offset no longer describes this file's content.
       let valid = checkpoint.dev === stat.dev && checkpoint.ino === stat.ino && stat.size >= checkpoint.offset;
       if (valid && checkpoint.headBytes > 0) {
+        if (authorshipAllowance(options, charged) < checkpoint.headBytes) {
+          return { count: checkpoint.count, complete: false };
+        }
         const head = Buffer.allocUnsafe(checkpoint.headBytes);
         let filled = 0;
         while (filled < head.length) {
