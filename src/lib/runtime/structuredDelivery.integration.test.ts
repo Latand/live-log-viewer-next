@@ -2194,7 +2194,7 @@ test("production backlog reconciliation bounds status concurrency and skips term
   await bindStructuredDeliveryQueue([], { registry, client: null });
 });
 
-test("startup fallback projection reuses one registry snapshot across a production conversation set", async () => {
+test("startup fallback projection reads one runtime snapshot and publishes only drift across a production conversation set", async () => {
   const directory = path.join(sandbox, "startup-fallback-snapshot-reuse");
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const conversations = Array.from({ length: 24 }, (_, index) => {
@@ -2209,6 +2209,7 @@ test("startup fallback projection reuses one registry snapshot across a producti
       turn: { state: "idle", source: "empty", terminalAt: null },
       observedAt: "2026-07-21T20:00:00.000Z",
     }]);
+    const conversation = registry.conversationForPath(artifactPath)!;
     registry.upsert({
       key: { engine: "codex", sessionId },
       artifactPath,
@@ -2232,7 +2233,7 @@ test("startup fallback projection reuses one registry snapshot across a producti
       claimOwner: null,
       pendingAction: null,
     });
-    return sessionId;
+    return { sessionId, conversationId: conversation.id, artifactPath };
   });
   const readSnapshot = registry.snapshot.bind(registry);
   let snapshotReads = 0;
@@ -2241,14 +2242,34 @@ test("startup fallback projection reuses one registry snapshot across a producti
     return readSnapshot();
   };
   let projections = 0;
+  let runtimeSnapshots = 0;
   const client = {
     append: async () => { projections += 1; return {}; },
+    snapshot: async () => {
+      runtimeSnapshots += 1;
+      return {
+        sessions: conversations.map((conversation, index) => ({
+          conversationId: conversation.conversationId,
+          sessionKey: { engine: "codex" as const, sessionId: conversation.sessionId },
+          hostKind: "codex-app-server" as const,
+          host: index === 0 ? "hosted" as const : "dead" as const,
+          turn: "unknown" as const,
+          provenance: "structured" as const,
+          accountId: "default",
+          parentConversationId: null,
+          cwd: directory,
+          artifactPath: conversation.artifactPath,
+          activeTurnId: null,
+        })),
+      };
+    },
     effectBatch: async () => [],
   } as unknown as RuntimeHostClient;
 
   await bindStructuredDeliveryQueue([], { registry, client });
 
-  expect(projections).toBe(conversations.length);
+  expect(projections).toBe(1);
+  expect(runtimeSnapshots).toBe(1);
   expect(snapshotReads).toBe(2);
   await bindStructuredDeliveryQueue([], { registry, client: null });
 });
