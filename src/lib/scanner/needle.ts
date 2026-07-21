@@ -5,6 +5,7 @@ import { globalCache } from "./caches";
 interface NeedleEntry {
   hits: Record<string, boolean>;
   scanned: Record<string, number>;
+  sizes: Record<string, number>;
 }
 
 const needleCache = globalCache<NeedleEntry>("needle");
@@ -184,11 +185,10 @@ const NEEDLE_CANDIDATE_PASS_BYTES = 1024 * 1024;
  */
 export function fileHasNeedle(needle: string, pathname: string, budget?: NeedleScanBudget): boolean {
   let ent = needleCache.get(needle);
-  if (!ent || !ent.hits) {
-    ent = { hits: {}, scanned: ent?.scanned ?? {} };
+  if (!ent || !ent.hits || !ent.sizes) {
+    ent = { hits: ent?.hits ?? {}, scanned: ent?.scanned ?? {}, sizes: ent?.sizes ?? {} };
     needleCache.set(needle, ent);
   }
-  if (ent.hits[pathname]) return true;
   const nb = Buffer.from(needle);
   const pad = Math.max(0, nb.length - 1);
   let size: number;
@@ -198,9 +198,15 @@ export function fileHasNeedle(needle: string, pathname: string, budget?: NeedleS
     return false;
   }
   let done = ent.scanned[pathname] ?? 0;
-  // A shrunken file was truncated or replaced: the recorded offset no longer
-  // describes this content, so the observation restarts from byte zero.
-  if (size < done) done = 0;
+  const observedSize = ent.sizes[pathname];
+  // Any shrink identifies a replacement generation, including one whose new
+  // end remains above the incremental checkpoint.
+  if (observedSize !== undefined && size < observedSize) {
+    done = 0;
+    delete ent.hits[pathname];
+  }
+  ent.sizes[pathname] = size;
+  if (ent.hits[pathname]) return true;
   if (size <= done) return false;
   const allowance = budget === undefined
     ? Number.POSITIVE_INFINITY

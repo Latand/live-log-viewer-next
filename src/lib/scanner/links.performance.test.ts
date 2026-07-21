@@ -247,6 +247,76 @@ test("background command recovery advances within one bounded read budget", asyn
   }
 });
 
+test("background command recovery rescans replacement head after shrink above its offset", async () => {
+  const projectRoot = path.join(SANDBOX, "shrunken-background-projects");
+  const taskRoot = path.join(SANDBOX, "shrunken-background-tasks");
+  const previousProjectRoot = ROOTS["claude-projects"];
+  const previousTaskRoot = ROOTS["claude-tasks"];
+  ROOTS["claude-projects"] = projectRoot;
+  ROOTS["claude-tasks"] = taskRoot;
+  const slug = "-repo-shrunken-background";
+  const sid = "session-shrunken-background";
+  const tid = "task-shrunken-background";
+  const toolUseId = "toolu_shrunken_background";
+  const mainPath = path.join(projectRoot, slug, `${sid}.jsonl`);
+  const taskPath = path.join(taskRoot, slug, sid, "tasks", `${tid}.output`);
+  fs.mkdirSync(path.dirname(mainPath), { recursive: true });
+  fs.mkdirSync(path.dirname(taskPath), { recursive: true });
+  fs.writeFileSync(mainPath, Buffer.alloc(512 * 1024, 0x78));
+  fs.writeFileSync(taskPath, "complete\n");
+  const main = entry(mainPath, `fixture/${slug}/${sid}.jsonl`, 1);
+  const task: FileEntry = {
+    ...entry(taskPath, `${slug}/${sid}/tasks/${tid}.output`, 2),
+    root: "claude-tasks",
+    engine: "shell",
+    fmt: "plain",
+    kind: "task",
+  };
+
+  try {
+    await linkEntries([main, task], { persist: false });
+    expect(task.cmd).toBe("");
+
+    const proof = [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{
+          type: "tool_use",
+          id: toolUseId,
+          name: "Bash",
+          input: { command: "bun run replacement-worker", description: "Run replacement worker" },
+        }] },
+      }),
+      JSON.stringify({
+        type: "user",
+        tool_use_id: toolUseId,
+        message: { content: [{
+          type: "tool_result",
+          tool_use_id: toolUseId,
+          content: `background with ID: ${tid}`,
+        }] },
+      }),
+      "",
+    ].join("\n");
+    const replacement = Buffer.alloc(384 * 1024, 0x20);
+    replacement.write(proof, 0, "utf8");
+    fs.writeFileSync(mainPath, replacement);
+    main.size = replacement.length;
+    main.mtime = fs.statSync(mainPath).mtimeMs / 1000;
+
+    await linkEntries([main, task], { persist: false });
+    expect(task).toMatchObject({
+      parent: mainPath,
+      cmd: "bun run replacement-worker",
+      cmdDesc: "Run replacement worker",
+      title: "Run replacement worker",
+    });
+  } finally {
+    ROOTS["claude-projects"] = previousProjectRoot;
+    ROOTS["claude-tasks"] = previousTaskRoot;
+  }
+});
+
 test("background command recovery reserves a bounded fair share for later candidates", async () => {
   const projectRoot = path.join(SANDBOX, "fair-background-projects");
   const taskRoot = path.join(SANDBOX, "fair-background-tasks");

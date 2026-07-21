@@ -109,3 +109,18 @@ test("a truncated candidate restarts its observation instead of skipping content
   fs.writeFileSync(pathname, `prefix toolu_truncated suffix\n`);
   expect(fileHasNeedle("toolu_truncated", pathname)).toBe(true);
 });
+
+test("a candidate that shrinks above its saved offset rescans replacement head content", () => {
+  const pathname = path.join(SANDBOX, "shrunken-above-offset.jsonl");
+  const needle = "toolu_replacement_head";
+  fs.writeFileSync(pathname, Buffer.alloc(3 * MIB, 0x78));
+
+  expect(fileHasNeedle(needle, pathname, { remaining: MIB })).toBe(false);
+
+  const replacement = Buffer.alloc(2 * MIB, 0x79);
+  replacement.write(needle, 32, "utf8");
+  fs.writeFileSync(pathname, replacement);
+  expect(fs.statSync(pathname).size).toBeGreaterThan(MIB);
+
+  expect(fileHasNeedle(needle, pathname, { remaining: MIB })).toBe(true);
+});

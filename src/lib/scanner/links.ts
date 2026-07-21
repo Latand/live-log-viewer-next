@@ -442,7 +442,7 @@ function indexedBackgroundCommand(tid: string, source: string, budget: ReadBudge
     return null;
   }
   let index = backgroundIndexCache.get(source);
-  if (!index || stat.size < index.offset || (stat.size === index.size && stat.mtimeMs !== index.mtimeMs)) {
+  if (!index || stat.size < index.size || (stat.size === index.size && stat.mtimeMs !== index.mtimeMs)) {
     index = freshBackgroundIndex(stat.size, stat.mtimeMs);
     backgroundIndexCache.set(source, index);
   } else {
