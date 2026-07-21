@@ -116,10 +116,10 @@ test("a staged pending supersedence edge round-trips JSON ↔ SQLite with parity
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-pending-"));
   const filename = path.join(directory, "agent-registry.json");
   const store = new AgentRegistry(filename);
-  const predecessorPath = "/repo/819f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const predecessorPath = "/repo/fixture-predecessor.jsonl";
   const predecessor = store.ensureConversation("codex", predecessorPath, "a");
   store.upsert({
-    key: { engine: "codex", sessionId: "819f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    key: { engine: "codex", sessionId: "fixture-predecessor" },
     artifactPath: predecessorPath,
     cwd: "/repo",
     accountId: "a",
@@ -132,8 +132,8 @@ test("a staged pending supersedence edge round-trips JSON ↔ SQLite with parity
   const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id, supersedesReason: "stage-retry" });
   if (begun.kind !== "created") throw new Error("expected create");
   store.settleSpawn(begun.receipt.launchId, {
-    key: { engine: "codex", sessionId: "919f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
-    artifactPath: "/sessions/919f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+    key: { engine: "codex", sessionId: "fixture-successor" },
+    artifactPath: "/sessions/fixture-successor.jsonl",
     cwd: "/repo",
     accountId: "a",
     status: "live",
