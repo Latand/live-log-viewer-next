@@ -37,7 +37,7 @@ for await (const line of input) {
   process.stdout.write(`${JSON.stringify({
     type: "assistant",
     session_id: sessionId,
-    message: { role: "assistant", content: [{ type: "text", text: "fixture delivery acknowledged" }] },
+    message: { role: "assistant", content: [{ type: "text", text: "RECOVERY_OK" }] },
   })}\n`);
   process.stdout.write(`${JSON.stringify({
     type: "result",
