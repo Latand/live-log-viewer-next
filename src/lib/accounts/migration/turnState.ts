@@ -9,6 +9,18 @@ function timestamp(record: RecordLike): string | null {
   return typeof value === "string" ? value : null;
 }
 
+/** Structured API-error verdicts after which the Claude CLI surrenders the
+    turn for good: no `result` record will ever follow, so the flagged record
+    itself is the terminal lifecycle evidence (issue #516). Other error codes
+    keep the busy projection because the CLI may retry within the same turn. */
+const TERMINAL_API_ERRORS = new Set(["authentication_failed", "rate_limit"]);
+
+function terminalApiError(record: RecordLike): boolean {
+  return record.isApiErrorMessage === true
+    && typeof record.error === "string"
+    && TERMINAL_API_ERRORS.has(record.error);
+}
+
 /** The newest authoritative lifecycle or tool event wins. Assistant prose
     cannot close an active turn because it commonly precedes tool work. */
 export function turnStateFromRecords(records: RecordLike[], codex: boolean, authoritative = false): TurnState {
@@ -77,7 +89,9 @@ export function turnStateFromRecords(records: RecordLike[], codex: boolean, auth
       } else if (record.type === "user") {
         state = { state: "busy", source: "lifecycle", terminalAt: null };
       } else if (record.type === "assistant") {
-        state = { state: "busy", source: "assistant", terminalAt: null };
+        state = terminalApiError(record)
+          ? { state: "terminal", source: "lifecycle", terminalAt: timestamp(record) }
+          : { state: "busy", source: "assistant", terminalAt: null };
       }
     }
     return state;
@@ -85,6 +99,7 @@ export function turnStateFromRecords(records: RecordLike[], codex: boolean, auth
 
   for (const record of [...records].reverse()) {
     if (record.type === "assistant") {
+      if (terminalApiError(record)) return { state: "terminal", source: "lifecycle", terminalAt: timestamp(record) };
       const stop = stringValue((recordValue(record.message) ?? {}).stop_reason);
       if (stop === "end_turn" || stop === "stop_sequence") return { state: "terminal", source: "lifecycle", terminalAt: timestamp(record) };
       return { state: "busy", source: "assistant", terminalAt: null };

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 
 import { turnStateFromRecords } from "./turnState";
 
@@ -78,5 +78,114 @@ test("Claude migration waits for a top-level result event", () => {
     state: "terminal",
     source: "lifecycle",
     terminalAt: "2026-07-10T00:00:02Z",
+  });
+});
+
+describe("issue 516 — structured Claude API-error records project the terminal turn", () => {
+  const user = (timestamp: string) => ({
+    type: "user",
+    timestamp,
+    message: { role: "user", content: [{ type: "text", text: "continue" }] },
+  });
+  const workingAssistant = (timestamp: string) => ({
+    type: "assistant",
+    timestamp,
+    message: { role: "assistant", stop_reason: null, content: [{ type: "text", text: "working" }] },
+  });
+  const apiError = (timestamp: string, error: string | null, flagged = true, stop: string | null = "stop_sequence") => ({
+    type: "assistant",
+    timestamp,
+    isApiErrorMessage: flagged,
+    ...(error === null ? {} : { error }),
+    message: { role: "assistant", model: "<synthetic>", stop_reason: stop, content: [{ type: "text", text: "API Error" }] },
+  });
+  const result = (timestamp: string) => ({ type: "result", timestamp, subtype: "success" });
+
+  const authoritativeCases: {
+    name: string;
+    records: Record<string, unknown>[];
+    expected: { state: string; source: string; terminalAt: string | null };
+  }[] = [
+    {
+      name: "an authentication_failed API error closes the turn as lifecycle-terminal",
+      records: [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", "authentication_failed")],
+      expected: { state: "terminal", source: "lifecycle", terminalAt: "2026-07-17T15:00:01Z" },
+    },
+    {
+      name: "a rate_limit API error closes the turn as lifecycle-terminal",
+      records: [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", "rate_limit")],
+      expected: { state: "terminal", source: "lifecycle", terminalAt: "2026-07-17T15:00:01Z" },
+    },
+    {
+      name: "an unknown API error code keeps the busy-assistant projection",
+      records: [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", "model_not_found")],
+      expected: { state: "busy", source: "assistant", terminalAt: null },
+    },
+    {
+      name: "a flagged API error without a structured code keeps the busy-assistant projection",
+      records: [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", null)],
+      expected: { state: "busy", source: "assistant", terminalAt: null },
+    },
+    {
+      name: "a terminal error code on an unflagged assistant record keeps the busy-assistant projection",
+      records: [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", "authentication_failed", false)],
+      expected: { state: "busy", source: "assistant", terminalAt: null },
+    },
+    {
+      name: "a newer user record reopens the turn after a terminal API error",
+      records: [
+        user("2026-07-17T15:00:00Z"),
+        apiError("2026-07-17T15:00:01Z", "authentication_failed"),
+        user("2026-07-17T15:00:02Z"),
+      ],
+      expected: { state: "busy", source: "lifecycle", terminalAt: null },
+    },
+    {
+      name: "a newer ordinary assistant record reopens the turn after a terminal API error",
+      records: [
+        user("2026-07-17T15:00:00Z"),
+        apiError("2026-07-17T15:00:01Z", "rate_limit"),
+        workingAssistant("2026-07-17T15:00:02Z"),
+      ],
+      expected: { state: "busy", source: "assistant", terminalAt: null },
+    },
+    {
+      name: "a later result record stays terminal at its own timestamp",
+      records: [
+        user("2026-07-17T15:00:00Z"),
+        apiError("2026-07-17T15:00:01Z", "authentication_failed"),
+        result("2026-07-17T15:00:02Z"),
+      ],
+      expected: { state: "terminal", source: "lifecycle", terminalAt: "2026-07-17T15:00:02Z" },
+    },
+  ];
+
+  for (const { name, records, expected } of authoritativeCases) {
+    test(`authoritative: ${name}`, () => {
+      expect(turnStateFromRecords(records, false, true)).toEqual(expected as ReturnType<typeof turnStateFromRecords>);
+    });
+  }
+
+  test("activity: a terminal API error without a stop reason closes the turn", () => {
+    const records = [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", "authentication_failed", true, null)];
+    expect(turnStateFromRecords(records, false)).toEqual({
+      state: "terminal",
+      source: "lifecycle",
+      terminalAt: "2026-07-17T15:00:01Z",
+    });
+  });
+
+  test("activity: an unknown API error without a stop reason keeps the busy-assistant projection", () => {
+    const records = [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", "model_not_found", true, null)];
+    expect(turnStateFromRecords(records, false)).toEqual({ state: "busy", source: "assistant", terminalAt: null });
+  });
+
+  test("activity: an ordinary stop_sequence assistant record keeps its terminal projection", () => {
+    const records = [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", null, false)];
+    expect(turnStateFromRecords(records, false)).toEqual({
+      state: "terminal",
+      source: "lifecycle",
+      terminalAt: "2026-07-17T15:00:01Z",
+    });
   });
 });
