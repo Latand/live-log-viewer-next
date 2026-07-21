@@ -2218,6 +2218,15 @@ test("retry parks without synchronizing when reviewer termination cannot be veri
   expect(retried).toEqual({ error: "reviewer process group did not terminate", status: 409 });
   expect(localHead).toBe(ORIGIN_MAIN_SHA);
   expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", stateDetail: "reviewer process group did not terminate" });
+
+  const skipped = await patchPipeline(pipeline.id, { action: "skip-stage" }, h.ports);
+  expect(skipped).toEqual({ error: "reviewer process group did not terminate", status: 409 });
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBeFalse();
+  expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", stateDetail: "reviewer process group did not terminate" });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+  expect(closed).toEqual({ error: "reviewer process group did not terminate", status: 409 });
+  expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", closedAt: null, stateDetail: "reviewer process group did not terminate" });
 });
 
 test("failed stages park and retry resets to the last passed commit", async () => {

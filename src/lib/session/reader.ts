@@ -268,6 +268,10 @@ interface AuthorshipScanCheckpoint {
   parseComplete: boolean;
   headBytes: number;
   headFingerprint: string;
+  /** Fingerprint window immediately preceding offset, proving append continuity. */
+  boundaryOffset: number;
+  boundaryBytes: number;
+  boundaryFingerprint: string;
   /** The scan reached EOF at `size`; only appended bytes remain unread. */
   done: boolean;
 }
@@ -424,11 +428,13 @@ export async function scanUserAuthoredMessagesCooperatively(
       // Truncation, replacement, or an in-place rewrite resets the checkpoint:
       // the recorded offset no longer describes this file's content. A changed
       // size may be an append and remains safe after head validation.
+      const appendNeedsBoundary = stat.size > checkpoint.size && checkpoint.offset > checkpoint.headBytes;
       let valid = checkpoint.dev === stat.dev
         && checkpoint.ino === stat.ino
         && stat.size >= checkpoint.offset
         && stat.size >= checkpoint.size
-        && (stat.size !== checkpoint.size || stat.mtimeMs === checkpoint.mtimeMs);
+        && (stat.size !== checkpoint.size || stat.mtimeMs === checkpoint.mtimeMs)
+        && (!appendNeedsBoundary || (checkpoint.boundaryBytes > 0 && checkpoint.boundaryOffset >= 0 && Boolean(checkpoint.boundaryFingerprint)));
       if (valid && checkpoint.headBytes > 0) {
         if (options.signal?.aborted) {
           return { count: checkpoint.count, complete: false };
@@ -446,6 +452,23 @@ export async function scanUserAuthoredMessagesCooperatively(
         charge(filled);
         valid = filled === head.length && authorshipHeadFingerprint(head) === checkpoint.headFingerprint;
       }
+      if (valid && checkpoint.boundaryBytes > 0 && checkpoint.boundaryOffset > 0) {
+        if (options.signal?.aborted) {
+          return { count: checkpoint.count, complete: false };
+        }
+        if (authorshipAllowance(options, charged) < checkpoint.boundaryBytes) {
+          return { count: checkpoint.count, complete: false };
+        }
+        const boundary = Buffer.allocUnsafe(checkpoint.boundaryBytes);
+        let filled = 0;
+        while (filled < boundary.length) {
+          const { bytesRead } = await file.read(boundary, filled, boundary.length - filled, checkpoint.boundaryOffset + filled);
+          if (bytesRead === 0) break;
+          filled += bytesRead;
+        }
+        charge(filled);
+        valid = filled === boundary.length && authorshipHeadFingerprint(boundary) === checkpoint.boundaryFingerprint;
+      }
       if (!valid) {
         authorshipCheckpoints.delete(pathname);
         checkpoint = undefined;
@@ -460,6 +483,9 @@ export async function scanUserAuthoredMessagesCooperatively(
     let offset = checkpoint?.offset ?? 0;
     let headBytes = checkpoint?.headBytes ?? 0;
     let headFingerprint = checkpoint?.headFingerprint ?? "";
+    let boundaryOffset = checkpoint?.boundaryOffset ?? 0;
+    let boundaryBytes = checkpoint?.boundaryBytes ?? 0;
+    let boundaryFingerprint = checkpoint?.boundaryFingerprint ?? "";
     const save = (done: boolean) => {
       if (!options.resume) return;
       const state = scanner.state();
@@ -475,6 +501,9 @@ export async function scanUserAuthoredMessagesCooperatively(
         parseComplete: state.parseComplete,
         headBytes,
         headFingerprint,
+        boundaryOffset,
+        boundaryBytes,
+        boundaryFingerprint,
         done,
       });
     };
@@ -497,6 +526,9 @@ export async function scanUserAuthoredMessagesCooperatively(
         headBytes = Math.min(bytesRead, AUTHORSHIP_CHECKPOINT_HEAD_BYTES);
         headFingerprint = authorshipHeadFingerprint(chunk.subarray(0, headBytes));
       }
+      boundaryBytes = Math.min(bytesRead, AUTHORSHIP_CHECKPOINT_HEAD_BYTES);
+      boundaryOffset = offset + bytesRead - boundaryBytes;
+      boundaryFingerprint = authorshipHeadFingerprint(chunk.subarray(bytesRead - boundaryBytes, bytesRead));
       offset += bytesRead;
       if (scanner.consume(chunk.subarray(0, bytesRead))) {
         save(false);

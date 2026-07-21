@@ -1926,7 +1926,14 @@ export async function patchPipeline(
       if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
-      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
+      if (flow && flow.state !== "closed") {
+        const closed = await ports.closeFlow(flow.id);
+        if (closed?.error) {
+          pipeline.stateDetail = closed.error;
+          persist();
+          return { error: closed.error, status: closed.status ?? 409 };
+        }
+      }
       if (!pipeline.lastPassedCommit) return { error: "pipeline worktree has not been provisioned", status: 409 };
       const reset = resetPipelineStage(pipeline, ports.exec);
       if (!reset.ok) return { error: reset.error, status: 409 };
@@ -2030,7 +2037,14 @@ export async function patchPipeline(
         persist();
         return { pipeline };
       }
-      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
+      if (flow && flow.state !== "closed") {
+        const closed = await ports.closeFlow(flow.id);
+        if (closed?.error) {
+          pipeline.stateDetail = closed.error;
+          persist();
+          return { error: closed.error, status: closed.status ?? 409 };
+        }
+      }
       /* A cursor can rest at state pending before its round's attempt
          materializes: the initial stage right after provisioning, the next stage
          in the window after an advance, or a fail-edge target whose latest attempt

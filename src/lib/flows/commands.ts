@@ -15,7 +15,7 @@ import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
 import { clearHeadlessReviewArtifacts, forgetHeadlessReview, stopHeadlessReviewAndWait } from "./exec";
 import { resolveBaseRef, resolveFlowMergeIdentity } from "./git";
 import { kickoffPrompt } from "./prompts";
-import { configuredReviewerFallback, loadFlows, loadPresets, saveFlows } from "./store";
+import { configuredReviewerFallback, loadFlows, loadPresets, saveFlows, withFlowMutation } from "./store";
 import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } from "./types";
 
 /**
@@ -271,12 +271,20 @@ export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: st
   if (!(await stopReviewer(flow, round))) {
     return { error: "reviewer process group did not terminate", status: 409 };
   }
-  round.error = "cancelled by user";
-  round.terminalAt = isoNow();
-  flow.state = "needs_decision";
-  flow.stateDetail = "round cancelled by user";
-  saveFlows(flows);
-  return { flow };
+  return await withFlowMutation((current, persist) => {
+    const currentFlow = current.find((item) => item.id === id);
+    if (!currentFlow) return { error: "flow not found", status: 404 };
+    const currentRound = lastRound(currentFlow);
+    if (currentFlow.state !== "reviewing" || currentRound?.n !== round.n) {
+      return { error: "flow changed during reviewer teardown", status: 409 };
+    }
+    currentRound.error = "cancelled by user";
+    currentRound.terminalAt = isoNow();
+    currentFlow.state = "needs_decision";
+    currentFlow.stateDetail = "round cancelled by user";
+    persist();
+    return { flow: currentFlow };
+  });
 }
 
 /**
@@ -289,18 +297,30 @@ export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: stri
   const flow = flows.find((item) => item.id === id);
   if (!flow) return { error: "flow not found", status: 404 };
   const round = lastRound(flow);
-  if (round && round.verdict === null && !round.error) {
-    if (!(await stopReviewer(flow, round))) {
+  const stoppedRound = round && round.verdict === null && !round.error ? round.n : null;
+  if (stoppedRound !== null) {
+    if (!(await stopReviewer(flow, round!))) {
       return { error: "reviewer process group did not terminate", status: 409 };
     }
-    round.error = "flow closed by user";
-    round.terminalAt = isoNow();
   }
-  flow.state = "closed";
-  flow.closedAt = isoNow();
-  flow.stateDetail = null;
-  saveFlows(flows);
-  return { flow };
+  return await withFlowMutation((current, persist) => {
+    const currentFlow = current.find((item) => item.id === id);
+    if (!currentFlow) return { error: "flow not found", status: 404 };
+    if (currentFlow.state === "closed") return { flow: currentFlow };
+    const currentRound = lastRound(currentFlow);
+    if (stoppedRound !== null && currentRound?.n !== stoppedRound) {
+      return { error: "flow changed during reviewer teardown", status: 409 };
+    }
+    if (stoppedRound !== null && currentRound && currentRound.verdict === null && !currentRound.error) {
+      currentRound.error = "flow closed by user";
+      currentRound.terminalAt = isoNow();
+    }
+    currentFlow.state = "closed";
+    currentFlow.closedAt = isoNow();
+    currentFlow.stateDetail = null;
+    persist();
+    return { flow: currentFlow };
+  });
 }
 
 export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; error?: string; status?: number } {

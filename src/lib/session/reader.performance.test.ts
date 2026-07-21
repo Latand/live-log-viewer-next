@@ -68,7 +68,7 @@ test("a 3 GiB ownerless transcript stops at the exact per-pass byte ceiling and 
   expect(second).toEqual({ count: 0, complete: false });
   // The resumed pass pays its 64 KiB head-fingerprint validation and then
   // continues forward; the first 4 MiB are never re-scanned.
-  expect(checkpointFor(pathname)!.offset).toBe(8 * MIB - 64 * 1024);
+  expect(checkpointFor(pathname)!.offset).toBe(8 * MIB - 128 * 1024);
   expect(budget.remaining).toBe(24 * MIB);
 });
 
@@ -186,6 +186,33 @@ test("a shrink above the saved offset invalidates the checkpoint and rescans ear
   expect(shrunk.ino).toBe(before.ino);
   expect(shrunk.size).toBe(6 * MIB);
   expect(shrunk.size).toBeGreaterThan(checkpointFor(pathname)!.offset);
+
+  const second = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
+  expect(second.count).toBe(1);
+});
+
+test("growth after a rewrite before the saved offset invalidates authorship evidence", async () => {
+  const pathname = virtualTranscript("rewritten-then-grown.jsonl", 8 * MIB);
+  const first = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, {
+    resume: true,
+    maxBytes: 4 * MIB,
+  });
+  expect(first).toEqual({ count: 0, complete: false });
+  const checkpoint = checkpointFor(pathname)!;
+  expect(checkpoint.offset).toBe(4 * MIB);
+  const before = fs.statSync(pathname);
+  const userRecord = `\n${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "rewritten before append" } })}\n`;
+
+  const fd = fs.openSync(pathname, "r+");
+  try {
+    fs.writeSync(fd, userRecord, checkpoint.offset - 32 * 1024, "utf8");
+    fs.ftruncateSync(fd, 10 * MIB);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const grown = fs.statSync(pathname);
+  expect(grown.ino).toBe(before.ino);
+  expect(grown.size).toBe(10 * MIB);
 
   const second = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
   expect(second.count).toBe(1);
