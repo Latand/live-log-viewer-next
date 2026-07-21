@@ -144,20 +144,20 @@ export function McpCallCard({
     <article
       data-testid="mcp-call-card"
       data-state={state}
-      className={`relative my-3 ml-9 overflow-hidden rounded-[14px] border bg-card shadow-1 ${
+      className={`relative my-2.5 ml-9 overflow-hidden rounded-surface border bg-card ${
         state === "error" ? "border-danger/40" : state === "success" ? "border-success/25" : "border-accent/35"
       }`}
     >
       {state === "pending" ? (
         <div data-testid="mcp-call-progress" className="absolute inset-x-0 top-0 h-0.5 animate-pulse bg-gradient-to-r from-transparent via-accent to-transparent" />
       ) : null}
-      <div className="flex items-start gap-3 px-3.5 py-3">
+      <div className="flex items-start gap-2.5 px-3 py-2.5">
         <span
-          className={`relative mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[11px] ${
+          className={`relative mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
             state === "error" ? "bg-danger-soft text-danger" : state === "success" ? "bg-success-soft text-success" : "bg-accent-soft text-accent"
           }`}
         >
-          <Icon className={`h-[18px] w-[18px] ${state === "pending" ? "animate-pulse" : ""}`} aria-hidden />
+          <Icon className={`h-4 w-4 ${state === "pending" ? "animate-pulse" : ""}`} aria-hidden />
           {state === "pending" ? <span className="absolute -bottom-1 -right-1 h-2.5 w-2.5 animate-ping rounded-full bg-accent/70" aria-hidden /> : null}
         </span>
         <div className="min-w-0 flex-1">
@@ -186,7 +186,7 @@ export function McpCallCard({
             <summary className="inline-flex min-h-6 cursor-pointer list-none items-center font-semibold hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [&::-webkit-details-marker]:hidden">
               Details
             </summary>
-            <pre className="mt-1 max-h-[320px] max-w-full overflow-auto whitespace-pre rounded-[10px] border border-border bg-sunken px-3 py-2 font-mono text-[10.5px] text-secondary">{payload}</pre>
+            <pre className="mt-1 max-h-[320px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-t border-border pt-1.5 font-mono text-[10.5px] text-secondary">{payload}</pre>
           </details>
         </div>
       </div>

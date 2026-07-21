@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { useLocale } from "@/lib/i18n";
 import { wakeupPhase } from "@/lib/wakeup";
 
-import { GlyphIcon } from "../../icons";
+import { ChevronRight, GlyphIcon } from "../../icons";
 import { fmtWakeClock, fmtWakeRelative } from "../../wakeupFormat";
 import { mdBlocks } from "../markdown";
 import { type ToolEvent, type WakeupEventInfo } from "../parse";
@@ -68,10 +68,10 @@ export function WakeupCard({ event, wakeup }: { event: ToolEvent; wakeup: Wakeup
   const iconTone = active ? "bg-warning-soft text-warning" : failed ? "bg-danger-soft text-danger" : "bg-sunken text-muted";
 
   return (
-    <details className={`group/wake my-2.5 ml-9 overflow-hidden rounded-[14px] border shadow-1 ${cardTone}`} open={active || failed}>
-      <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2.5 px-3.5 py-2">
-        <span className={`flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg ${iconTone}`}>
-          <GlyphIcon name="clock" className="h-4 w-4" />
+    <details className={`group/wake my-2.5 ml-9 overflow-hidden rounded-surface border ${cardTone}`} open={active || failed}>
+      <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2.5 px-3 py-2">
+        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg ${iconTone}`}>
+          <GlyphIcon name="clock" className="h-3.5 w-3.5" />
         </span>
         <span className="flex min-w-0 flex-1 flex-col">
           <span className="truncate text-[12.5px] font-semibold" title={reason || headline}>
@@ -83,7 +83,7 @@ export function WakeupCard({ event, wakeup }: { event: ToolEvent; wakeup: Wakeup
           <span className={`shrink-0 text-[11px] font-bold tabular-nums ${badge.tone}`}>{badge.text}</span>
         ) : null}
       </summary>
-      <div className="border-t border-border px-3.5 py-2.5">
+      <div className="border-t border-border px-3 py-2">
         <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-muted">
           <span className={`font-semibold ${failed ? "text-danger" : "text-primary"}`}>{headline}</span>
           {relative ? <span>· {relative}</span> : null}
@@ -97,11 +97,12 @@ export function WakeupCard({ event, wakeup }: { event: ToolEvent; wakeup: Wakeup
           </div>
         ) : null}
         {prompt ? (
-          <details className="group/plan rounded-[10px] border border-border bg-sunken">
-            <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold text-muted">
+          <details className="group/plan">
+            <summary className="inline-flex min-h-[44px] cursor-pointer list-none items-center gap-1.5 text-[11.5px] font-semibold text-muted hover:text-accent [&::-webkit-details-marker]:hidden">
+              <ChevronRight className="h-3 w-3 transition-transform group-open/plan:rotate-90" aria-hidden />
               {t("wakeup.plan")}
             </summary>
-            <div className="border-t border-border px-3 py-2 text-[12.5px] leading-snug">{mdBlocks(prompt)}</div>
+            <div className="border-t border-border pt-2 text-[12.5px] leading-snug">{mdBlocks(prompt)}</div>
           </details>
         ) : (
           <span className="text-[11.5px] text-muted">{t("wakeup.noPlan")}</span>

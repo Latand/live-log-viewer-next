@@ -17,7 +17,7 @@ export function SysMsgCard({ label, text }: { label: string; text: string }) {
       </summary>
       <div className="mb-1 mt-1">
         <span className="mb-1 inline-flex items-center rounded-control bg-sunken px-1.5 py-0.5 font-mono text-caption text-muted">{label}</span>
-        <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-surface border border-border bg-sunken px-3 py-2 font-mono text-label text-secondary">
+        <pre className="mt-1 max-h-[320px] overflow-auto whitespace-pre-wrap break-words border-t border-border pt-1.5 font-mono text-label text-secondary">
           {text}
         </pre>
       </div>
