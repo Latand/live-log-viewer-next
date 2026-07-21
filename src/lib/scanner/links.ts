@@ -660,6 +660,13 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
   const backgroundReadBudget = { remaining: BACKGROUND_SCAN_BUDGET_BYTES };
   const nestedNeedleBudget = { remaining: NESTED_SUBAGENT_NEEDLE_BUDGET_BYTES };
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
+  const backgroundTasks = new Map<FileEntry, [string, string, string]>();
+  for (const entry of entries) {
+    if (entry.root !== "claude-tasks") continue;
+    const parts = taskParts(ROOTS["claude-tasks"], entry.path);
+    if (parts) backgroundTasks.set(entry, parts);
+  }
+  let remainingBackgroundTasks = backgroundTasks.size;
   for (const entry of entries) {
     if (entry.root === "claude-projects") {
       // Both the direct `subagents/agent-*.jsonl` layout and the nested Workflow
@@ -683,16 +690,24 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
         }
       }
     } else if (entry.root === "claude-tasks") {
-      const parts = taskParts(ROOTS["claude-tasks"], entry.path);
+      const parts = backgroundTasks.get(entry);
       if (!parts) continue;
       const [slug, sid, tid] = parts;
       const [main, subs] = await sessionTranscripts(sid, limit, slug);
+      /* Reserve each pending task a share of this generation's remaining
+         allowance. An unresolved transcript advances only to its share, so
+         later candidates retain bytes for their first proof attempt. Cached
+         hits consume no share and leave those bytes for unresolved tasks. */
+      const allowance = Math.ceil(backgroundReadBudget.remaining / remainingBackgroundTasks);
+      const taskBudget = { remaining: allowance };
       const info = bgCommand(
         tid,
         (main ? [main] : []).concat(subs),
         slugMainTranscripts(slug, sid),
-        backgroundReadBudget,
+        taskBudget,
       );
+      backgroundReadBudget.remaining -= allowance - taskBudget.remaining;
+      remainingBackgroundTasks -= 1;
       if (info) {
         entry.parent = info.source;
         entry.cmd = info.command;
