@@ -16,56 +16,63 @@ const SESSION = ["019f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
 const PATHNAME = `/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-${SESSION}.jsonl`;
 
 test("the legacy Claude transcript rejects an inherited read-only descriptor as ownership", async () => {
-  const sessionId = ["21343072", "3a0e", "46d3", "9b61", "41d007c02c1c"].join("-");
-  const cwd = ["", "home", "latand"].join("/");
-  const pathname = [cwd, ".claude", "projects", "-home-latand", `${sessionId}.jsonl`].join("/");
-  const agentPid = 200;
-  const panePid = 100;
-  const entry = {
-    path: pathname,
-    root: "claude-projects",
-    name: `${sessionId}.jsonl`,
-    project: "latand",
-    title: "legacy Claude conversation",
-    engine: "claude",
-    kind: "session",
-    fmt: "claude",
-    parent: null,
-    mtime: 1,
-    size: 1,
-    activity: "live",
-    proc: "running",
-    pid: agentPid,
-    model: "claude-fable-5",
-    effort: "high",
-    pendingQuestion: null,
-    waitingInput: null,
-  } satisfies FileEntry;
-  const dependencies = {
-    listFiles: async () => [entry],
-    panes: async () => ({
-      kind: "available" as const,
-      panes: new Map([[panePid, { paneId: "%1", target: "agents:1.0" }]]),
-    }),
-    ppidMap: () => new Map([[agentPid, panePid]]),
-    agents: () => [{ pid: agentPid, engine: "claude" as const, argv: ["claude"], cwd, tty: 1 }],
-    serverPid: async () => 900,
-    resumeRecords: async () => null,
-    identity: () => "200:one",
-    holdsPath: () => true,
-    writesPath: () => false,
-  };
-  const observe = createTranscriptHostObserver(dependencies);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-read-only-transcript-owner-"));
+  try {
+    const sessionId = crypto.randomUUID();
+    const cwd = path.join(directory, "fixture-workspace");
+    const pathname = path.join(directory, "claude-projects", "fixture-workspace", `${sessionId}.jsonl`);
+    fs.mkdirSync(path.dirname(pathname), { recursive: true });
+    fs.writeFileSync(pathname, `${JSON.stringify({ type: "system", cwd, fixture: "privacy-safe" })}\n`);
+    const agentPid = 200;
+    const panePid = 100;
+    const entry = {
+      path: pathname,
+      root: "claude-projects",
+      name: `${sessionId}.jsonl`,
+      project: "fixture-workspace",
+      title: "legacy Claude fixture",
+      engine: "claude",
+      kind: "session",
+      fmt: "claude",
+      parent: null,
+      mtime: 1,
+      size: fs.statSync(pathname).size,
+      activity: "live",
+      proc: "running",
+      pid: agentPid,
+      model: "claude-fable-fixture",
+      effort: "high",
+      pendingQuestion: null,
+      waitingInput: null,
+    } satisfies FileEntry;
+    const dependencies = {
+      listFiles: async () => [entry],
+      panes: async () => ({
+        kind: "available" as const,
+        panes: new Map([[panePid, { paneId: "%1", target: "fixture:1.0" }]]),
+      }),
+      ppidMap: () => new Map([[agentPid, panePid]]),
+      agents: () => [{ pid: agentPid, engine: "claude" as const, argv: ["claude"], cwd, tty: 1 }],
+      serverPid: async () => 900,
+      resumeRecords: async () => null,
+      identity: () => "200:fixture",
+      holdsPath: () => true,
+      writesPath: () => false,
+    };
+    const observe = createTranscriptHostObserver(dependencies);
 
-  const snapshot = await observe(true);
+    const snapshot = await observe(true);
 
-  expect(snapshot.canonicalFor(pathname)).toBeNull();
-  expect(snapshot.hosts).toMatchObject([{
-    engine: "claude",
-    agentPid,
-    claimedPaths: [],
-    primaryPath: null,
-  }]);
+    expect(snapshot.canonicalFor(pathname)).toBeNull();
+    expect(snapshot.hosts).toMatchObject([{
+      engine: "claude",
+      agentPid,
+      claimedPaths: [],
+      primaryPath: null,
+    }]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 function entry(overrides: Partial<FileEntry> = {}): FileEntry {

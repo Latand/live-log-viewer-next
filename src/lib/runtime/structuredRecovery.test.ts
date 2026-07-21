@@ -17,19 +17,24 @@ import { structuredResumeSessionId } from "./structuredSpawn";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-recovery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
-test("the rebooted legacy Claude conversation converges repeated recovery onto one live broker", async () => {
-  const sessionId = ["21343072", "3a0e", "46d3", "9b61", "41d007c02c1c"].join("-");
-  const conversationId = `conversation_${["fb4dae92", "b571", "4ced", "9fc9", "dce53ac05050"].join("-")}` as const;
-  const parentConversationId = `conversation_${["4840d34a", "074d", "4674", "9846", "61a3c182faae"].join("-")}` as const;
-  const cwd = ["", "home", "latand"].join("/");
-  const artifactPath = [cwd, ".claude", "projects", "-home-latand", `${sessionId}.jsonl`].join("/");
-  const directory = path.join(sandbox, "legacy-claude-reboot");
+test("the recovery reservation converges repeated calls onto one successor spawn", async () => {
+  const sessionId = crypto.randomUUID();
+  const conversationId = `conversation_${crypto.randomUUID()}` as const;
+  const parentConversationId = `conversation_${crypto.randomUUID()}` as const;
+  const directory = path.join(sandbox, `legacy-claude-reboot-${sessionId}`);
+  const cwd = path.join(directory, "fixture-workspace");
+  const artifactPath = path.join(directory, "claude-projects", "fixture-workspace", `${sessionId}.jsonl`);
   fs.mkdirSync(directory, { recursive: true });
+  fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+  fs.writeFileSync(artifactPath, `${JSON.stringify({
+    type: "assistant",
+    cwd,
+    sessionId,
+    message: { role: "assistant", content: [{ type: "text", text: "privacy-safe recovery fixture" }] },
+  })}\n`);
   const registryFilename = path.join(directory, "registry.json");
   const runtimeFilename = path.join(directory, "runtime.sqlite");
-  const transcriptDigest = () => fs.existsSync(artifactPath)
-    ? crypto.createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex")
-    : null;
+  const transcriptDigest = () => crypto.createHash("sha256").update(fs.readFileSync(artifactPath)).digest("hex");
   const beforeTranscript = transcriptDigest();
   const profile = emptyLaunchProfile({
     cwd,
