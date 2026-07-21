@@ -18,6 +18,7 @@ function attempt(n: number, over: Partial<PipelineStageAttempt> = {}): PipelineS
     agentPath: `/stage-${n}.jsonl`,
     paneId: null,
     flowId: null,
+    reviewHeadSha: null,
     startedAt: null,
     completedAt: null,
     input: null,
@@ -100,6 +101,17 @@ test("a review-loop verdict keeps direct transcript and flow navigation", () => 
   );
   expect(html).toContain("Open transcript");
   expect(html).toContain("Open review");
+});
+
+test("a review-loop verdict displays the exact SHA supplied to its reviewer (#522)", () => {
+  const reviewStage: PipelineStage = { ...stage, id: "review", kind: "review-loop" };
+  const sha = "a".repeat(40);
+  const only = attempt(1, { reviewHeadSha: sha, verdict: { status: "fail", findings: [] } });
+  const html = renderToStaticMarkup(
+    <VerdictPopover pipeline={pipeline([only])} stage={reviewStage} attempt={only} onClose={() => {}} />,
+  );
+  expect(html).toContain("Reviewer SHA aaaaaaaa");
+  expect(html).toContain(sha);
 });
 
 test("Open transcript is withheld when the run transcript left the scan", () => {

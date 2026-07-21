@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase } from "./git";
+import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import type { Pipeline } from "./types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
@@ -174,4 +174,26 @@ test("pass commits a dirty stage and retry resets plus cleans", () => {
   expect(calls).toContain("git add -A");
   expect(calls).toContain("git reset --hard base");
   expect(calls).toContain("git clean -fd");
+});
+
+test("review retry preserves a local additive repair that is ahead of origin (#522)", () => {
+  const subject = pipeline();
+  const remoteHead = "a".repeat(40);
+  const localRepair = "b".repeat(40);
+  const calls: string[] = [];
+  const exec: ExecPort = (command, args) => {
+    calls.push(`${command} ${args.join(" ")}`);
+    if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "branch") return { code: 0, stdout: `${subject.branch}\n`, stderr: "" };
+    if (args[0] === "ls-remote") return { code: 0, stdout: `${remoteHead}\trefs/heads/${subject.branch}\n`, stderr: "" };
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${localRepair}\n`, stderr: "" };
+    if (args[0] === "rev-parse") return { code: 0, stdout: `${remoteHead}\n`, stderr: "" };
+    if (args[0] === "merge-base" && args[2] === remoteHead) return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "merge-base") return { code: 1, stdout: "", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  expect(synchronizePipelineRetryHead(subject, exec)).toEqual({ ok: true, sha: localRepair });
+  expect(calls.some((call) => call.startsWith("git merge --ff-only"))).toBe(false);
+  expect(calls.some((call) => call.includes("reset --hard"))).toBe(false);
 });

@@ -84,6 +84,7 @@ function harness() {
       if (args[0] === "rev-parse" && args[1] === "--git-dir") return { code: 0, stdout: ".git\n", stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return { code: 0, stdout: "main\n", stderr: "" };
+      if (args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]?.branch ?? ""}\n`, stderr: "" };
       if (args[0] === "rev-parse") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
@@ -1837,6 +1838,91 @@ test("retrying a parked review-loop appends a fresh attempt and flow", async () 
   const reviewRun = loadPipelines()[0]!.runs[1]!;
   expect(reviewRun.attempts).toHaveLength(2);
   expect(reviewRun.attempts[1]!.flowId).toBe("flow-2");
+});
+
+test("retrying a parked review-loop fast-forwards to the pushed repair and records the reviewer SHA (#522)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  let localHead = ORIGIN_MAIN_SHA;
+  let remoteHead = ORIGIN_MAIN_SHA;
+  let fastForwarded = false;
+  const repairHead = "a".repeat(40);
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${remoteHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${remoteHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "merge-base") return { code: localHead === ORIGIN_MAIN_SHA && remoteHead === repairHead ? 0 : 1, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "merge" && args[1] === "--ff-only") {
+      localHead = remoteHead;
+      fastForwarded = true;
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  const pipeline = await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.flows.get("flow-1")!.state = "done_comment";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+
+  /* An operator's additive repair has landed on the pipeline branch after the
+     reviewer finding. The retry must review this repair head. */
+  remoteHead = repairHead;
+  await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const review = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts[1]!;
+  expect(localHead).toBe(repairHead);
+  expect(review.reviewHeadSha).toBe(repairHead);
+  expect(fastForwarded).toBe(true);
+  expect(h.calls).toContain(`flow:/codex/stage-1.jsonl:${repairHead}:AC1`);
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
+});
+
+test("a divergent pipeline branch leaves a retried review parked with an actionable decision (#522)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  let diverged = false;
+  const localHead = "b".repeat(40);
+  const remoteHead = "c".repeat(40);
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${diverged ? localHead : ORIGIN_MAIN_SHA}\n`, stderr: "" };
+    if (!diverged) return baseExec(command, args, cwd);
+    if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${remoteHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && String(args[1]).startsWith("refs/remotes/origin/")) return { code: 0, stdout: `${remoteHead}\n`, stderr: "" };
+    if (command === "git" && args[0] === "merge-base") return { code: 1, stdout: "", stderr: "" };
+    return baseExec(command, args, cwd);
+  };
+
+  const pipeline = await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  h.flows.get("flow-1")!.state = "done_comment";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  diverged = true;
+  const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+
+  expect(retried).toMatchObject({ status: 409, error: expect.stringContaining("diverged") });
+  expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision", stateDetail: expect.stringContaining("diverged") });
 });
 
 test("reopening an embedded review flow resumes its parked pipeline attempt", async () => {

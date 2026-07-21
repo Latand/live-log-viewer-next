@@ -172,7 +172,7 @@ test("a v2 registry migrates in memory preserving all attempt history (#353)", (
     const loaded = loadPipelines();
     expect(loaded).toHaveLength(2);
     /* Every historical attempt field survives; the new fields are truthful nulls. */
-    expect(loaded[0]!.runs[0]!.attempts[0]).toEqual({ ...attempt, input: null, activatedBy: null } as never);
+    expect(loaded[0]!.runs[0]!.attempts[0]).toEqual({ ...attempt, reviewHeadSha: null, input: null, activatedBy: null } as never);
     expect(loaded[0]!.stages.every((stage) => stage.onFail === null)).toBe(true);
     expect(loaded[0]!.cursor).toEqual({ stageId: "verify", state: "pending", input: null, activatedBy: null });
     /* The empty draft shell is seeded with the default implement action. */

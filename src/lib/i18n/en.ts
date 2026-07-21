@@ -1177,6 +1177,7 @@ export const en = {
   "pipelineVerdict.fail": "fail",
   "pipelineVerdict.needsDecision": "needs decision",
   "pipelineVerdict.confidence": "confidence",
+  "pipelineVerdict.reviewerSha": "Reviewer SHA {sha}",
   "pipelineVerdict.findings": { one: "{count} finding", other: "{count} findings" },
   "pipelineVerdict.noFindings": "no findings recorded",
   "pipelineVerdict.more": "+{count} more",
