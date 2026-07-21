@@ -185,6 +185,8 @@ export async function registerViewerRuntime(): Promise<void> {
       await runStructuredHostStartup(adoptStructuredHostsAtStartup);
     }
     if (process.env.LLV_ACCOUNT_CONTROLLER_DISABLED !== "1") {
+      const { startFlowPipelineController } = await import("@/lib/pipelines/controller");
+      startFlowPipelineController();
       const { startAccountMigrationController } = await import("@/lib/accounts/migration/controller");
       scheduleAccountMigrationController(startAccountMigrationController, accountControllerDelayMs());
     }

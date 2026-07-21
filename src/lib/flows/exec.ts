@@ -7,6 +7,7 @@ import { resolveBinary } from "@/lib/agent/cli";
 import { claudeManagedEnvironment, claudeSettingsPath } from "@/lib/accounts/claude";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt } from "@/lib/agent/spawnPolicy";
+import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { procBackend } from "@/lib/proc";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
@@ -313,15 +314,23 @@ export function startHeadlessReview(
   };
   run.timer.unref();
   runs.set(key, run);
+  let completionSignaled = false;
+  const signalCompletion = () => {
+    if (completionSignaled) return;
+    completionSignaled = true;
+    requestPipelineTick();
+  };
   child.on("error", () => {
     clearTimeout(run.timer);
     run.exit = { code: null, signal: null };
     killOwnedRun(run);
+    signalCompletion();
   });
   child.on("close", (code, signal) => {
     clearTimeout(run.timer);
     run.exit = { code, signal };
     killOwnedRun(run);
+    signalCompletion();
   });
   return { pid: child.pid ?? null, identity, sessionId: built.sessionId, reviewerPath: built.reviewerPath };
 }

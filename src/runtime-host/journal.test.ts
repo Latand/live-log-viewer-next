@@ -1233,6 +1233,7 @@ test("runtime host advances and publishes a flow from a terminal event without f
   const dir = sandbox("flow-consumer");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
   const calls: string[] = [];
+  let progressSignals = 0;
   const host = new RuntimeHost(journal, {
     flowReady: (flowId, note) => {
       calls.push(`${flowId}:${note}`);
@@ -1240,7 +1241,7 @@ test("runtime host advances and publishes a flow from a terminal event without f
     },
     workflowStageCompleted: () => undefined,
     taskDeliveryAcknowledged: () => undefined,
-  });
+  }, undefined, false, () => { progressSignals += 1; });
   await host.handle({
     id: "session-claim",
     method: "append",
@@ -1284,7 +1285,32 @@ test("runtime host advances and publishes a flow from a terminal event without f
   });
   expect(response.ok).toBe(true);
   expect(calls).toEqual(["flow-one:REVIEW_READY: finished"]);
+  expect(progressSignals).toBe(1);
   expect(journal.snapshot().flows[0]).toMatchObject({ revision: 1, value: { id: "flow-one", state: "spawn_pending" } });
+  journal.close();
+});
+
+test("a failed terminal wake keeps the committed runtime acknowledgement successful", async () => {
+  const journal = new RuntimeJournal(path.join(sandbox("terminal-wake-failure"), "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  const host = new RuntimeHost(journal, undefined, undefined, false, () => {
+    throw new Error("wake transport failed");
+  });
+
+  const response = await host.handle({
+    id: "terminal-wake-request",
+    method: "append",
+    params: {
+      event: {
+        scope: runtimeScope("session", "worker"),
+        kind: "turn.completed",
+        producerKey: "terminal-wake-failure",
+        payload: {},
+      },
+    },
+  });
+
+  expect(response.ok).toBe(true);
+  expect(journal.replay(0).events).toHaveLength(1);
   journal.close();
 });
 
