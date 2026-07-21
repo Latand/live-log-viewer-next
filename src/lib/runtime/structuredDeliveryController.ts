@@ -32,6 +32,7 @@ const TERMINAL_RECONCILIATION_SETTLEMENT_BATCH_SIZE = 256;
    object is shared by the realms, so it owns the process-scoped controller. */
 interface ControllerState {
   activeQueue: StructuredDeliveryQueue | null;
+  activeRegistry: AgentRegistry | null;
   activeHosts: Map<string, EngineHost> | null;
   registerActiveHost: ((item: StructuredDeliveryHost, ownsOperation?: () => Promise<boolean>) => Promise<() => Promise<void>>) | null;
   republishActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
@@ -43,6 +44,7 @@ interface ControllerState {
 const controllerStore = process as typeof process & { __llvStructuredDeliveryController?: ControllerState };
 const state: ControllerState = controllerStore.__llvStructuredDeliveryController ??= {
   activeQueue: null,
+  activeRegistry: null,
   activeHosts: null,
   registerActiveHost: null,
   republishActiveHost: null,
@@ -214,6 +216,7 @@ export async function bindStructuredDeliveryQueue(
   state.stopActive();
   state.stopActive = () => {};
   state.activeQueue = null;
+  state.activeRegistry = null;
   state.activeHosts = null;
   state.registerActiveHost = null;
   state.republishActiveHost = null;
@@ -561,6 +564,7 @@ export async function bindStructuredDeliveryQueue(
     return true;
   };
   state.activeQueue = queue;
+  state.activeRegistry = registry;
   setStructuredDeliveryKick(() => {
     if (stopped) return;
     if (drainTimer) clearTimeout(drainTimer);
@@ -579,6 +583,7 @@ export async function bindStructuredDeliveryQueue(
     hosts.clear();
     if (state.activeQueue === queue) {
       state.activeQueue = null;
+      state.activeRegistry = null;
       state.activeHosts = null;
       state.registerActiveHost = null;
       state.republishActiveHost = null;
@@ -590,7 +595,7 @@ export async function bindStructuredDeliveryQueue(
   };
   let completion = Promise.resolve();
   const complete = (items: readonly StructuredDeliveryHost[]) => {
-    completion = completion.then(async () => {
+    completion = completion.catch(() => {}).then(async () => {
       if (stopped || state.activeQueue !== queue) return;
       for (const item of items) await register(item);
       const startupSnapshot = registry.snapshot();
@@ -616,6 +621,13 @@ export async function bindStructuredDeliveryQueue(
   };
   state.completeActive = complete;
   if (!dependencies.deferStartupWork) await complete(adopted);
+}
+
+export function hasStructuredDeliveryController(registry: AgentRegistry): boolean {
+  return state.activeQueue !== null
+    && state.activeRegistry === registry
+    && state.registerActiveHost !== null
+    && state.completeActive !== null;
 }
 
 export function hasStructuredDeliveryHost(key: SessionKey): boolean {
