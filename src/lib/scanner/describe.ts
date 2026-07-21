@@ -999,6 +999,25 @@ function resolveProjectOverlay(
   return overlay;
 }
 
+/** Refresh state-backed project attribution from a durable complete summary.
+    A resolver-version migration can reuse transcript metadata while deriving
+    the current project, worktree, and canonical root. */
+export function reprojectFileDescription(
+  rootName: RootKey,
+  root: string,
+  pathname: string,
+  description: FileDescription,
+  stateKey = projectResolutionStateKey(),
+): FileDescription {
+  const overlay = resolveProjectOverlay(rootName, root, pathname, description.cwd, true, stateKey);
+  return {
+    ...description,
+    project: overlay.project,
+    worktree: overlay.worktree,
+    projectRoot: overlay.projectRoot,
+  };
+}
+
 export function describeFile(
   rootName: RootKey,
   root: string,

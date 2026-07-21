@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 
 import type { RootKey } from "../types";
 import { discoverFilesWithProjectCatalog } from "./discover";
+import { PROJECT_RESOLUTION_VERSION } from "./projectState";
 
 const LARGE_CATALOG_SIZE = 800;
 const EVENT_LOOP_BUDGET_MS = 100;
@@ -122,7 +123,10 @@ test("pipeline status churn keeps a 100 MB growing transcript scan incremental a
     fs.ftruncateSync(activeFd, 100 * 1024 * 1024);
     fs.writeSync(activeFd, "\n", 100 * 1024 * 1024 - 1, "utf8");
     fs.closeSync(activeFd);
-    const stableTranscript = `${sessionMeta}${JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } })}\n`;
+    const stableTranscript = `${sessionMeta}${JSON.stringify({
+      type: "event_msg",
+      payload: { type: "agent_message", message: "x".repeat(8 * 1024) },
+    })}\n${JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } })}\n`;
     await Promise.all(Array.from({ length: LARGE_CATALOG_SIZE - 1 }, (_, index) => writeFile(
       path.join(roots["codex-sessions"], `rollout-stable-${String(index).padStart(4, "0")}.jsonl`),
       stableTranscript,
@@ -130,6 +134,14 @@ test("pipeline status churn keeps a 100 MB growing transcript scan incremental a
 
     const initial = await discoverFilesWithProjectCatalog(roots, undefined, { persist: true });
     expect(initial.projectCatalog.reduce((total, project) => total + project.conversations, 0)).toBe(LARGE_CATALOG_SIZE);
+    const catalogPath = path.join(stateDir, "project-catalog.json");
+    const legacyCatalog = JSON.parse(fs.readFileSync(catalogPath, "utf8")) as {
+      resolutionVersion: number;
+      files: Record<string, { stateKey: string }>;
+    };
+    legacyCatalog.resolutionVersion = 2;
+    for (const file of Object.values(legacyCatalog.files)) file.stateKey = "legacy-raw-controller-key";
+    fs.writeFileSync(catalogPath, JSON.stringify(legacyCatalog) + "\n");
     writeControllerState("needs_decision", 200);
     fs.appendFileSync(active, `${JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "continued" } })}\n`);
     const scannerCaches = (globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> }).__llvCaches;
@@ -161,13 +173,16 @@ test("pipeline status churn keeps a 100 MB growing transcript scan incremental a
 
     const startedAt = performance.now();
     const lags = await eventLoopLagsWhile(async () => {
-      const scan = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
+      const scan = await discoverFilesWithProjectCatalog(roots, undefined, { persist: true });
       expect(scan.projectCatalog.reduce((total, project) => total + project.conversations, 0)).toBe(LARGE_CATALOG_SIZE);
+      expect(scan.files.every((entry) => entry.project === "large-catalog")).toBe(true);
     });
     const durationMs = performance.now() - startedAt;
+    const migratedCatalog = JSON.parse(fs.readFileSync(catalogPath, "utf8")) as { resolutionVersion: number };
 
     expect(bytesRead).toBeLessThanOrEqual(2 * 1024 * 1024);
     expect(durationMs).toBeLessThan(15_000);
+    expect(migratedCatalog.resolutionVersion).toBe(PROJECT_RESOLUTION_VERSION);
     expect(percentile(lags, 0.95)).toBeLessThan(EVENT_LOOP_BUDGET_MS);
     expect(Math.max(...lags)).toBeLessThan(EVENT_LOOP_BUDGET_MS);
   } finally {
