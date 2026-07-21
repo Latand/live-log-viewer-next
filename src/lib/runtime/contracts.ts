@@ -381,6 +381,7 @@ export type ViewerDeploymentPhase =
   | "candidate-health"
   | "promoting"
   | "post-promotion-health"
+  | "host-handoff"
   | "rolling-back"
   | "succeeded"
   | "rolled-back"

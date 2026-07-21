@@ -114,6 +114,23 @@ test("production acceptance recovers a lifecycle-busy legacy Fable tail from a s
         stop_reason: null,
       },
     }),
+    /* Production #518 tail shape: the dead conversation ends with a `user`
+       role record carrying only a `tool_result` block — no text, no image, no
+       content digest. The stale pre-#389 runtime-host image failed promptless
+       resume adoption on exactly this row with "message content is required";
+       the promptless recovery below must adopt through it with zero synthetic
+       user sends. */
+    JSON.stringify({
+      type: "user",
+      uuid: "fixture-tool-result-before-restart",
+      timestamp: "2026-07-20T20:00:02.000Z",
+      cwd: workspace,
+      sessionId,
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "fixture-tool-use", content: [{ type: "text", text: "privacy-safe tool output" }] }],
+      },
+    }),
   ].join("\n") + "\n");
   fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });

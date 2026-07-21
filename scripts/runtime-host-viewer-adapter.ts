@@ -18,6 +18,16 @@ import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
 import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
+import {
+  clearRuntimeHostHandoffIntent,
+  readRuntimeHostHandoffIntent,
+  readRuntimeHostRelease,
+  runtimeHostHandoffIntentFile,
+  runtimeHostReleaseFile,
+  writeRuntimeHostHandoffIntent,
+  writeRuntimeHostRelease,
+} from "../src/runtime-host/hostRelease";
+import { stageRuntimeHostSuccessorContainer } from "../src/runtime-host/hostSuccessor";
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 import { withoutWakatimeCredential } from "../src/lib/wakatime/credential";
 
@@ -29,6 +39,7 @@ const targetFile = process.env.LLV_VIEWER_DEPLOY_TARGET || path.join(stateDir, "
 const canonicalRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE || "https://github.com/Latand/live-log-viewer-next.git";
 const runtimeSocket = process.env.LLV_RUNTIME_HOST_SOCKET || path.join(stateDir, "runtime-host.sock");
 const stableEndpoint = `http://127.0.0.1:${Number(process.env.LLV_VIEWER_PORT || 8898)}`;
+const runtimeHostImageTag = process.env.LLV_RUNTIME_HOST_IMAGE_TAG || "agent-log-viewer:node22";
 
 async function command(argv: string[]): Promise<string> {
   const child = Bun.spawn(["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", ...argv], {
@@ -301,6 +312,31 @@ function switchTarget(target: ViewerReleaseIdentity): void {
   try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
 }
 
+/** #518 runtime-host generation handoff (see hostSuccessor.ts for the
+    ordering contract). Every mutation is a short-lived CLI call against the
+    host Docker daemon, so the successor container exists daemon-side before
+    the predecessor generation is allowed to exit; this adapter process never
+    needs to survive that exit. Only the runtime-host generation changes —
+    Viewer containers and the engine processes they own are never signalled. */
+async function stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<void> {
+  await stageRuntimeHostSuccessorContainer(candidate, runtimeHostImageTag, {
+    docker: (argv) => command(["docker", ...argv]),
+    writeRelease: (record) => writeRuntimeHostRelease(record, runtimeHostReleaseFile()),
+    readRelease: () => readRuntimeHostRelease(runtimeHostReleaseFile()),
+    readHandoffIntent: () => readRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
+    writeHandoffIntent: (intent) => writeRuntimeHostHandoffIntent(intent, runtimeHostHandoffIntentFile()),
+    clearHandoffIntent: () => clearRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
+    fenceOwnerPid: () => {
+      try {
+        const owner = JSON.parse(fs.readFileSync(`${runtimeSocket}.lock`, "utf8")) as { pid?: unknown };
+        return Number.isInteger(owner.pid) && (owner.pid as number) > 0 ? owner.pid as number : null;
+      } catch {
+        return null;
+      }
+    },
+  });
+}
+
 async function main(): Promise<unknown> {
   if (process.env.LLV_DEPLOYMENT_ADAPTER_PROTOCOL !== "1") throw new Error("deployment adapter protocol is required");
   const action = process.argv[2];
@@ -337,6 +373,11 @@ async function main(): Promise<unknown> {
     if (!evidence.ok) throw new Error(evidence.detail ?? "rollback release health gate failed");
     switchTarget(previous);
     return { health: evidence };
+  }
+  if (action === "stage-host-successor") {
+    const candidate = release(input.candidate);
+    await stageRuntimeHostSuccessor(candidate);
+    return {};
   }
   if (action === "retire") { await retireRelease(release(input.release)); return {}; }
   if (action === "retain-only") {
