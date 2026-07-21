@@ -125,6 +125,20 @@ export function scheduleAccountMigrationController(start: () => Promise<void>, d
   timer.unref?.();
 }
 
+export async function completeViewerReleaseDemotion(
+  checkpoint: () => void | Promise<void>,
+  exit: (code: number) => unknown = (code) => process.exit(code),
+  log: (...args: unknown[]) => void = console.error,
+): Promise<void> {
+  try {
+    await checkpoint();
+    exit(0);
+  } catch (error) {
+    log("[viewer release] demotion checkpoint failed", error);
+    exit(1);
+  }
+}
+
 export async function startCurrentReleaseControllers(
   env: Readonly<Record<string, string | undefined>> = process.env,
   loaders: CurrentReleaseControllerLoaders = {
@@ -219,13 +233,9 @@ export async function registerViewerRuntime(): Promise<void> {
     }
     await startCurrentReleaseControllers();
   }, () => viewerReleaseOwnsTraffic(), {
-    onDemoted: async () => {
-      try {
+    onDemoted: () => completeViewerReleaseDemotion(async () => {
         const { agentRegistry } = await import("@/lib/agent/registry");
         agentRegistry().checkpointRollbackMirror();
-      } finally {
-        process.exit(0);
-      }
-    },
+    }),
   });
 }

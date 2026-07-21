@@ -60,6 +60,7 @@ test("SQLite first boot imports JSON and preserves membership and capability dig
     round: null,
     parentConversationId: null,
   });
+  sqlite.checkpointRollbackMirror();
 
   expect(new AgentRegistry(filename).snapshot()).toEqual(sqlite.snapshot());
 });
@@ -109,6 +110,7 @@ test("supersedence edges round-trip JSON ↔ SQLite with parity intact", () => {
 
   sqlite.clearSupersedence(predecessor.id);
   expect(sqlite.conversation(predecessor.id)?.supersededBy).toBeNull();
+  sqlite.checkpointRollbackMirror();
   expect(new AgentRegistry(filename).conversation(predecessor.id)?.supersededBy).toBeNull();
 });
 
@@ -766,6 +768,25 @@ test("SQLite demotion checkpoint publishes every revision without streaming mirr
   expect(registry.storageDiagnostics().mirrorDirty).toBeFalse();
 });
 
+test("dual-write release demotion leaves the authoritative JSON handoff untouched", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-dual-write-handoff-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  let rollbackWrites = 0;
+  const retiring = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "dual-write",
+    afterMirrorWrite: () => { rollbackWrites += 1; },
+  });
+  const successor = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+
+  retiring.checkpointRollbackMirror();
+  successor.beginSpawn("codex", "/successor");
+
+  expect(rollbackWrites).toBe(0);
+  expect(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot())
+    .toEqual(successor.snapshot());
+});
+
 test("read mode bounds rollback mirror writes and exposes checkpoint diagnostics", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-mirror-cadence-"));
   const filename = path.join(directory, "agent-registry.json");
@@ -797,6 +818,29 @@ test("read mode bounds rollback mirror writes and exposes checkpoint diagnostics
   checkpoints.shift()!();
   expect(JSON.parse(fs.readFileSync(filename, "utf8"))._sqliteRevision).toBeGreaterThan(initialRevision);
   expect(registry.storageDiagnostics()).toMatchObject({ mirrorDirty: false, mirrorAgeMs: 0 });
+});
+
+test("read mode schedules only the remaining rollback checkpoint interval", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-mirror-boundary-"));
+  const filename = path.join(directory, "agent-registry.json");
+  let now = 1_000;
+  const delays: number[] = [];
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const registry = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "read",
+    mirrorCheckpointMs: 5_000,
+    now: () => now,
+    scheduleMirrorCheckpoint: (_callback, delayMs) => {
+      delays.push(delayMs);
+      return { unref() {} };
+    },
+  });
+
+  now += 4_999;
+  registry.beginSpawn("codex", "/boundary");
+
+  expect(registry.storageDiagnostics().mirrorAgeMs).toBe(4_999);
+  expect(delays).toEqual([1]);
 });
 
 test("one rollback checkpoint publishes one coherent snapshot under sustained writers", () => {
@@ -838,6 +882,7 @@ test("failed rollback checkpoints retry with bounded backoff until the mirror co
   const registry = new AgentRegistry(filename, undefined, undefined, {
     sqliteMode: "read",
     mirrorCheckpointMs: 5_000,
+    now: () => 1_000,
     scheduleMirrorCheckpoint: (callback, delayMs) => {
       scheduled.push({ callback, delayMs });
       return { unref() {} };
@@ -874,9 +919,16 @@ test("production-sized read burn-in defers full snapshot loading until its check
   expect(Buffer.byteLength(payload)).toBeGreaterThanOrEqual(14_660_822);
   fs.writeFileSync(filename, payload);
   let snapshotLoads = 0;
+  let now = 1_000;
+  const checkpoints: Array<() => void> = [];
   const registry = new AgentRegistry(filename, undefined, undefined, {
     sqliteMode: "read",
     mirrorCheckpointMs: 60_000,
+    now: () => now,
+    scheduleMirrorCheckpoint: (callback) => {
+      checkpoints.push(callback);
+      return { unref() {} };
+    },
     onSqliteSnapshotLoad: () => { snapshotLoads += 1; },
   });
   const startupLoads = snapshotLoads;
@@ -890,6 +942,17 @@ test("production-sized read burn-in defers full snapshot loading until its check
   expect(snapshotLoads).toBe(startupLoads);
   expect(percentile(durations, 0.95)).toBeLessThan(250);
   expect(registry.storageDiagnostics().mirrorDirty).toBeTrue();
+
+  now += 60_000;
+  const dueStartedAt = performance.now();
+  registry.ensureConversation("codex", "/sessions/read-due.jsonl", "read-burn-in");
+  const dueMutationMs = performance.now() - dueStartedAt;
+  expect(dueMutationMs).toBeLessThan(250);
+  expect(snapshotLoads).toBe(startupLoads);
+
+  checkpoints.shift()!();
+  expect(snapshotLoads).toBe(startupLoads + 1);
+  expect(registry.storageDiagnostics().mirrorDirty).toBeFalse();
 });
 
 test("SQLite snapshot cache follows external revisions and reports writer metrics", () => {

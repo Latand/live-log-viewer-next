@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 import {
   accountControllerDelayMs,
   activateViewerRuntimeWhenCurrent,
+  completeViewerReleaseDemotion,
   initializeOperatorSpawnCapabilityAtStartup,
   runStructuredHostStartup,
   scheduleAccountMigrationController,
@@ -163,6 +164,29 @@ test("a promoted release continuously relinquishes background ownership after de
   current = false;
   scheduled.shift()!();
   expect(demotions).toBe(1);
+});
+
+test("release demotion reports checkpoint failure before exiting with failure status", async () => {
+  const events: Array<[string, unknown?]> = [];
+  await completeViewerReleaseDemotion(
+    () => { throw new Error("injected fsync failure"); },
+    (code) => { events.push(["exit", code]); },
+    (...args) => { events.push([String(args[0]), args[1]]); },
+  );
+
+  expect(events[0]?.[0]).toBe("[viewer release] demotion checkpoint failed");
+  expect(events[0]?.[1]).toBeInstanceOf(Error);
+  expect(events[1]).toEqual(["exit", 1]);
+});
+
+test("release demotion exits successfully after its checkpoint", async () => {
+  const exits: number[] = [];
+  await completeViewerReleaseDemotion(
+    () => undefined,
+    (code) => { exits.push(code); },
+    () => undefined,
+  );
+  expect(exits).toEqual([0]);
 });
 
 test("a restarted current release activates before register returns", async () => {

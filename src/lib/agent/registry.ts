@@ -2392,7 +2392,7 @@ export class AgentRegistry {
   }
 
   checkpointRollbackMirror(): void {
-    if (!this.sqliteStore) return;
+    if (!this.sqliteStore || this.sqliteMode === "dual-write") return;
     const currentRevision = this.sqliteStore.revision();
     if (!this.mirrorDirty && this.lastMirroredRevision !== null && currentRevision <= this.lastMirroredRevision) return;
     this.mirrorSqliteSnapshot(this.sqliteStore.snapshot());
@@ -2412,6 +2412,11 @@ export class AgentRegistry {
         this.scheduleRollbackMirror(retryMs);
       }
     }, delayMs).unref?.();
+  }
+
+  private scheduleRollbackMirrorForCadence(): void {
+    const elapsedMs = this.lastMirrorAt === null ? this.mirrorCheckpointMs : Math.max(0, this.now() - this.lastMirrorAt);
+    this.scheduleRollbackMirror(Math.max(0, this.mirrorCheckpointMs - elapsedMs));
   }
 
   private cleanupStaleTempFiles(): void {
@@ -2845,15 +2850,10 @@ export class AgentRegistry {
       return result;
     };
     if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
-      const checkpointDue = this.sqliteMode === "read"
-        && (this.lastMirrorAt === null || this.now() - this.lastMirrorAt >= this.mirrorCheckpointMs);
-      const mutation = this.sqliteStore!.mutate(mutator, checkpointDue);
+      const mutation = this.sqliteStore!.mutate(mutator, false);
       if (this.sqliteMode === "read") {
         this.mirrorDirty = true;
-        if (checkpointDue) {
-          if (!mutation.file) throw new Error("SQLite read mode checkpoint is missing its rollback snapshot");
-          this.mirrorSqliteSnapshot({ file: mutation.file, revision: mutation.revision });
-        } else this.scheduleRollbackMirror();
+        this.scheduleRollbackMirrorForCadence();
       }
       if (this.sqliteMode === "sqlite") this.mirrorDirty = true;
       return mutation.result;

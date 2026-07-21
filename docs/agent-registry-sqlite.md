@@ -13,12 +13,15 @@ Every process with an enabled SQLite mode must run on Bun. The Docker Viewer use
 
 ## Rollout
 
-1. Preserve a copy of the current state directory.
-2. Start every Bun-hosted Viewer and runtime-host process with `LLV_AGENT_REGISTRY_SQLITE=dual-write`.
-3. Treat `RegistryParityError` as a rollout stop. Keep JSON authoritative while investigating any mismatch.
-4. Restart every registry writer with `LLV_AGENT_REGISTRY_SQLITE=read` for an SQLite-read burn-in with a continuously refreshed JSON rollback mirror.
-5. After that burn-in, restart every writer with `LLV_AGENT_REGISTRY_SQLITE=sqlite` to remove JSON rewrites from the operation path.
-6. Retain `agent-registry.json`, `agent-registry.sqlite`, and the SQLite WAL files throughout both burn-ins.
+1. Stop every Viewer and runtime-host process that can mutate the registry. Confirm that no registry writer remains before changing backend files.
+2. Preserve a copy of the current state directory. Archive the known stale `agent-registry.sqlite`, `agent-registry.sqlite-wal`, and `agent-registry.sqlite-shm` together under distinct inactive names, retaining their timestamps and permissions as diagnostic evidence.
+3. Keep the current `agent-registry.json` at its active path and clear only the three active SQLite paths after the archive is verified.
+4. Start exactly one Bun-hosted process with `LLV_AGENT_REGISTRY_SQLITE=dual-write`. Its first boot creates SQLite and imports the authoritative JSON in one transaction. Verify parity and stop this importer before allowing the writer fleet to start.
+5. Start every Bun-hosted Viewer and runtime-host process with `LLV_AGENT_REGISTRY_SQLITE=dual-write`.
+6. Treat `RegistryParityError` as a rollout stop. Keep JSON authoritative while investigating any mismatch.
+7. Restart every registry writer with `LLV_AGENT_REGISTRY_SQLITE=read` for an SQLite-read burn-in with a continuously refreshed JSON rollback mirror.
+8. After that burn-in, restart every writer with `LLV_AGENT_REGISTRY_SQLITE=sqlite` to remove JSON rewrites from the operation path.
+9. Retain `agent-registry.json`, `agent-registry.sqlite`, and the SQLite WAL files throughout both burn-ins.
 
 `/api/files` reports the backend mode, revision, transaction count, writer rate and p95,
 writer-wait p95, rollback-mirror age, and dirty-checkpoint state under
