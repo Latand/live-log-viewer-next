@@ -11,6 +11,7 @@ import { replaceConversationCatalog, type ConversationCatalogEntry } from "./con
 import {
   describeFile,
   fileDescriptionIdentity,
+  reprojectFileDescription,
   type FileDescription,
 } from "./describe";
 import type { RawEntry } from "./discover";
@@ -217,9 +218,74 @@ function fallbackTitle(raw: RawEntry, kind: string): string {
   return "Background task " + filename.split(".")[0];
 }
 
+function storeCachedFile(state: ProjectCatalogState, file: ProjectCatalogFile): void {
+  state.files[file.path] = {
+    summaryVersion: file.summaryVersion,
+    summaryIncomplete: file.summaryIncomplete,
+    rootName: file.rootName,
+    size: file.size,
+    mtimeMs: file.mtimeMs,
+    sidecarSize: file.sidecarSize,
+    sidecarMtimeMs: file.sidecarMtimeMs,
+    stateKey: file.stateKey,
+    project: file.project,
+    projectRoot: file.projectRoot,
+    kind: file.kind,
+    session: file.session,
+    worktree: file.worktree,
+    cwd: file.cwd ?? null,
+    sessionStartedAt: file.sessionStartedAt ?? null,
+    nativeParentThreadId: file.nativeParentThreadId ?? null,
+    title: file.titleCached ? file.title : undefined,
+    engine: file.engine,
+    fmt: file.fmt,
+  };
+}
+
 function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string): ProjectCatalogFile {
   const cached = state.files[raw.path];
   const identity = fileDescriptionIdentity(raw.rootName, raw.path, raw.st);
+  const durableSummaryMatches = identity.complete
+    && cached?.summaryVersion === PROJECT_SUMMARY_VERSION
+    && cached.size === raw.st.size
+    && cached.mtimeMs === raw.st.mtimeMs
+    && cached.sidecarSize === identity.sidecarSize
+    && cached.sidecarMtimeMs === identity.sidecarMtimeMs
+    && cached.projectRoot !== undefined;
+  if (durableSummaryMatches && (
+    state.resolutionVersion !== PROJECT_RESOLUTION_VERSION
+    || cached.stateKey !== stateKey
+  )) {
+    const description = reprojectFileDescription(raw.rootName, raw.root, raw.path, {
+      project: cached.project,
+      worktree: cached.worktree,
+      cwd: cached.cwd ?? undefined,
+      sessionStartedAt: cached.sessionStartedAt,
+      nativeParentThreadId: cached.nativeParentThreadId,
+      projectRoot: cached.projectRoot,
+      title: cached.title ?? fallbackTitle(raw, cached.kind),
+      engine: cached.engine ?? engineForRoot(raw.rootName),
+      kind: cached.kind,
+      fmt: cached.fmt ?? fmtForRoot(raw.rootName),
+    }, stateKey);
+    const file: ProjectCatalogFile = {
+      ...cached,
+      path: raw.path,
+      stateKey,
+      project: description.project,
+      projectRoot: description.projectRoot ?? null,
+      worktree: description.worktree,
+      cwd: description.cwd,
+      session: isConversation(raw.rootName, description.kind),
+      title: description.title,
+      titleCached: true,
+      engine: description.engine,
+      kind: description.kind,
+      fmt: description.fmt,
+    };
+    storeCachedFile(state, file);
+    return file;
+  }
   if (
     state.resolutionVersion === PROJECT_RESOLUTION_VERSION &&
     identity.complete &&
@@ -297,27 +363,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     engine: meta.engine,
     fmt: meta.fmt,
   };
-  state.files[raw.path] = {
-    summaryVersion: file.summaryVersion,
-    summaryIncomplete: file.summaryIncomplete,
-    rootName: file.rootName,
-    size: file.size,
-    mtimeMs: file.mtimeMs,
-    sidecarSize: file.sidecarSize,
-    sidecarMtimeMs: file.sidecarMtimeMs,
-    stateKey: file.stateKey,
-    project: file.project,
-    projectRoot: file.projectRoot,
-    kind: file.kind,
-    session: file.session,
-    worktree: file.worktree,
-    cwd: file.cwd ?? null,
-    sessionStartedAt: file.sessionStartedAt ?? null,
-    nativeParentThreadId: file.nativeParentThreadId ?? null,
-    title: file.titleCached ? file.title : undefined,
-    engine: file.engine,
-    fmt: file.fmt,
-  };
+  storeCachedFile(state, file);
   return file;
 }
 

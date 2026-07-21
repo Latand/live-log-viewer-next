@@ -11,7 +11,7 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 import { runStructuredHostStartup } from "@/lib/viewerInstrumentation";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
-import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./structuredDeliveryController";
+import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { createFakeDeliveryLedger, FakeEngineHost } from "./fixtures/fakeEngineHost";
 import { demoteSkippedStructuredRegistryHosts, type StructuredHostAdoptionFilter } from "./registry";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -32,6 +32,98 @@ function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
     transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
   } as RuntimeHostClient;
 }
+
+test("startup publishes the structured controller before transcript refresh settles", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-early-controller-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  let refreshStarted!: () => void;
+  const refreshStartedPromise = new Promise<void>((resolve) => { refreshStarted = resolve; });
+  let releaseRefresh!: () => void;
+  const refreshRelease = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  const startup = adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    refreshTranscriptState: async () => {
+      refreshStarted();
+      await refreshRelease;
+    },
+    adopt: async () => [],
+    adoptClaude: async () => [],
+  });
+  await refreshStartedPromise;
+
+  const sessionId = "early-controller-session";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  fs.writeFileSync(artifactPath, "");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:early-controller",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "test",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  const key = { engine: "codex" as const, sessionId };
+  const host = Object.assign(new FakeEngineHost(createFakeDeliveryLedger()), { onStateChange: () => () => {} });
+  const unregister = await publishStructuredDeliveryHost({ key, host });
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+
+  await unregister();
+  releaseRefresh();
+  await startup;
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+});
+
+test("startup retry preserves a host registered after the first attempt fails", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-controller-retry-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  let refreshAttempts = 0;
+  const dependencies = {
+    registry,
+    client,
+    refreshTranscriptState: async () => {
+      refreshAttempts += 1;
+      if (refreshAttempts === 1) throw new RuntimeHostUnavailableError("runtime host is unavailable");
+    },
+    adopt: async () => [],
+    adoptClaude: async () => [],
+  } satisfies StructuredStartupDependencies;
+
+  await expect(adoptStructuredHostsAtStartup(dependencies)).rejects.toThrow("runtime host is unavailable");
+
+  const key = { engine: "claude" as const, sessionId: "hosted-between-startup-attempts" };
+  const host = Object.assign(new FakeEngineHost(createFakeDeliveryLedger()), { onStateChange: () => () => {} });
+  const unregister = await publishStructuredDeliveryHost({ key, host });
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+
+  await adoptStructuredHostsAtStartup(dependencies);
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+
+  await unregister();
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
 
 test("server startup delegates managed rows with file credentials and their launch profile", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-"));

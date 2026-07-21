@@ -58,6 +58,7 @@ export interface SqliteRegistryStoreOptions {
   initialSnapshot: RegistryFile;
   normalize(value: unknown): RegistryFile;
   onWriterWait?(durationMs: number): void;
+  onSnapshotLoad?(): void;
 }
 
 interface LazyRegistrySnapshot extends SqliteRegistrySnapshot {
@@ -68,6 +69,8 @@ export class SqliteAgentRegistryStore {
   private readonly db: BunDatabase;
   private readonly normalize: (value: unknown) => RegistryFile;
   private readonly onWriterWait: ((durationMs: number) => void) | undefined;
+  private readonly onSnapshotLoad: (() => void) | undefined;
+  private readOnlyCache: SqliteRegistrySnapshot | null = null;
 
   constructor(readonly filename: string, options: SqliteRegistryStoreOptions) {
     fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
@@ -77,6 +80,7 @@ export class SqliteAgentRegistryStore {
     this.db = new Database(filename, { create: true, strict: true });
     this.normalize = options.normalize;
     this.onWriterWait = options.onWriterWait;
+    this.onSnapshotLoad = options.onSnapshotLoad;
     this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS registry_meta (
@@ -112,6 +116,7 @@ export class SqliteAgentRegistryStore {
   }
 
   snapshot(): SqliteRegistrySnapshot {
+    this.onSnapshotLoad?.();
     this.db.exec("BEGIN");
     try {
       const snapshot = this.loadInTransaction();
@@ -121,6 +126,17 @@ export class SqliteAgentRegistryStore {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
       throw error;
     }
+  }
+
+  revision(): number {
+    return Number(this.meta("revision") ?? 0);
+  }
+
+  readOnlySnapshot(): SqliteRegistrySnapshot {
+    const revision = this.revision();
+    if (this.readOnlyCache?.revision === revision) return this.readOnlyCache;
+    this.readOnlyCache = this.snapshot();
+    return this.readOnlyCache;
   }
 
   mutate<T>(operation: (file: RegistryFile) => T, includeSnapshot = true): SqliteRegistryMutation<T> {
@@ -141,20 +157,24 @@ export class SqliteAgentRegistryStore {
       const waitStartedAt = performance.now();
       this.db.exec("BEGIN IMMEDIATE");
       let revision: number;
+      const changed = changes.rows.size > 0 || changes.meta.size > 0 || changes.order.size > 0;
       try {
         this.onWriterWait?.(performance.now() - waitStartedAt);
         if (Number(this.meta("revision") ?? 0) !== current.revision) {
           this.db.exec("ROLLBACK");
           continue;
         }
-        revision = current.revision + 1;
-        this.persistChanges(current.file, changes, revision);
+        revision = changed ? current.revision + 1 : current.revision;
+        if (changed) this.persistChanges(current.file, changes, revision);
         this.db.exec("COMMIT");
       } catch (error) {
         try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
         throw error;
       }
-      this.secureFiles();
+      if (changed) {
+        this.secureFiles();
+        this.readOnlyCache = null;
+      }
       if (includeSnapshot) {
         const committed = this.snapshot();
         return { result, file: committed.file, revision: committed.revision };
@@ -175,6 +195,7 @@ export class SqliteAgentRegistryStore {
       this.persistDiff(current.file, file, revision);
       this.db.exec("COMMIT");
       this.secureFiles();
+      this.readOnlyCache = null;
       return { file, revision, replaced: true };
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }

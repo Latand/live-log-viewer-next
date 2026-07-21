@@ -108,6 +108,7 @@ afterAll(() => {
 });
 
 const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
+const { controllerFileScan } = await import("@/lib/pipelines/controller");
 const { allowedKillTarget, buildResourceSnapshot, lastResourceTargetRefs, noteSessionTargets, readResourceFileSnapshot } = await import("@/lib/resources");
 const { GET } = await import("./route");
 
@@ -117,7 +118,11 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   const etag = first.headers.get("etag");
   const second = await GET(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(first.status).toBe(200);
-  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } }, conversationAliases: {} });
+  expect(await first.json()).toMatchObject({
+    files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [],
+    systemHealth: { tmux: { status: "healthy" }, registry: { backendMode: expect.any(String) } },
+    conversationAliases: {},
+  });
   expect(second.status).toBe(304);
   expect(scans).toBe(1);
   expect(scanOptions).toEqual(expect.objectContaining({
@@ -141,6 +146,82 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(first.headers.get("server-timing")).toMatch(/files-flow-restore;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-task-store;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
+});
+
+test("volatile registry diagnostics do not invalidate an otherwise stable files ETag", async () => {
+  const filename = path.join(registryRoot, "registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  let now = 1_000;
+  const registry = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "read",
+    now: () => now,
+    mirrorCheckpointMs: 120_000,
+    scheduleMirrorCheckpoint: () => ({ unref() {} }),
+  });
+  registry.beginSpawn("codex", "/writer-rate-sample");
+  setAgentRegistryForTests(registry);
+  const first = await GET(new Request("http://127.0.0.1/api/files"));
+  const etag = first.headers.get("etag");
+
+  now += 61_000;
+  const second = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "if-none-match": etag! },
+  }));
+
+  expect(first.status).toBe(200);
+  expect(second.status).toBe(304);
+});
+
+test("production-sized SQLite registry keeps cold and warm files probes within budget", async () => {
+  const filename = path.join(registryRoot, "production-registry.json");
+  const seed = new AgentRegistry(filename);
+  const template = seed.beginSpawn("codex", "/production-seed");
+  const production = seed.snapshot();
+  for (let index = 1; index < 18_000; index += 1) {
+    const launchId = `production-seed-${String(index).padStart(5, "0")}`;
+    production.receipts[launchId] = {
+      ...structuredClone(template),
+      launchId,
+      state: "failed",
+      artifactLifecycle: "materialized",
+      error: "fixture-terminal",
+    };
+  }
+  const payload = JSON.stringify(production);
+  expect(Buffer.byteLength(payload)).toBeGreaterThanOrEqual(14_660_822);
+  fs.writeFileSync(filename, payload);
+  setAgentRegistryForTests(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" }));
+
+  const writerReady = path.join(registryRoot, "production-writer.ready");
+  const writerStart = path.join(registryRoot, "production-writer.start");
+  const writerResult = path.join(registryRoot, "production-writer.json");
+  const writer = Bun.spawn([
+    process.execPath,
+    path.resolve(import.meta.dir, "../../../lib/agent/registry.sqliteChild.ts"),
+    "writer-mixed",
+    filename,
+    writerReady,
+    writerStart,
+    "files-probe-writer",
+    "12",
+    writerResult,
+  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+  while (!fs.existsSync(writerReady)) await Bun.sleep(1);
+  fs.writeFileSync(writerStart, "start");
+
+  const coldStartedAt = performance.now();
+  const cold = await GET(new Request("http://127.0.0.1/api/files"));
+  const coldDuration = performance.now() - coldStartedAt;
+  const warmStartedAt = performance.now();
+  const warm = await GET(new Request("http://127.0.0.1/api/files"));
+  const warmDuration = performance.now() - warmStartedAt;
+  expect(await writer.exited).toBe(0);
+  expect(await new Response(writer.stderr).text()).toBe("");
+
+  expect(cold.status).toBe(200);
+  expect(warm.status).toBe(200);
+  expect(coldDuration).toBeLessThan(1_000);
+  expect(warmDuration).toBeLessThan(500);
 });
 
 test("files API surfaces degraded tmux endpoint health", async () => {
@@ -194,6 +275,33 @@ test("a restart serves the persisted completed snapshot while revalidating", asy
   expect(scans).toBe(1);
   const next = await cachedFileScan();
   expect(next.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/refreshed.jsonl"]);
+});
+
+test("the pipeline controller warm-starts from the persisted completed snapshot while revalidating", async () => {
+  fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
+    version: 1,
+    schemaVersion: 9,
+    snapshot: {
+      files: [file("/sessions/persisted-controller.jsonl")],
+      projectCatalog: [],
+      complete: true,
+    },
+  }));
+  resetFilesRouteCacheForTests();
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [file("/sessions/refreshed-controller.jsonl")];
+
+  const started = performance.now();
+  const snapshot = await controllerFileScan();
+
+  expect(performance.now() - started).toBeLessThan(300);
+  expect(snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/persisted-controller.jsonl"]);
+  expect(scans).toBe(0);
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(scans).toBe(1);
+  release();
 });
 
 test("a current scan joins restart revalidation before publishing transcript metadata", async () => {

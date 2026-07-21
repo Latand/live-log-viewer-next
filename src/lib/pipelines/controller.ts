@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { tickFlows } from "@/lib/flows/engine";
-import { coordinatedControllerScan } from "@/lib/scanner/scanCoordinator";
+import { completedFileScan } from "@/lib/scanner/scanCache";
 import type { FileEntry } from "@/lib/types";
 
 import { registerPipelineTick } from "./controllerSignal";
@@ -80,11 +80,19 @@ export function writeFlowPipelineControllerHeartbeat(
   fs.renameSync(temporary, filename);
 }
 
+export async function controllerFileScan(): Promise<{ files: FileEntry[]; complete: boolean }> {
+  const completed = await completedFileScan();
+  return {
+    files: completed.snapshot.files,
+    complete: completed.snapshot.complete,
+  };
+}
+
 function productionPorts(): FlowPipelineControllerPorts {
   return {
-    // The watchdog joins the process-wide scan generation instead of racing
-    // the HTTP cache and the account controller with its own scanner run.
-    scan: async () => coordinatedControllerScan(),
+    // Consume the latest completed generation immediately. The shared scan
+    // cache starts stale revalidation in the background for the next pass.
+    scan: controllerFileScan,
     tickPipelines,
     tickFlows,
     publishHeartbeat: writeFlowPipelineControllerHeartbeat,

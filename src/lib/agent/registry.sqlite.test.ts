@@ -41,7 +41,7 @@ test("SQLite first boot imports JSON and preserves membership and capability dig
   if (begun.kind !== "created") throw new Error("expected a new receipt");
   const expected = legacy.snapshot();
 
-  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" });
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read", mirrorCheckpointMs: 0 });
 
   expect(fs.existsSync(path.join(directory, "agent-registry.sqlite"))).toBeTrue();
   expect(sqlite.snapshot()).toEqual(expected);
@@ -60,6 +60,7 @@ test("SQLite first boot imports JSON and preserves membership and capability dig
     round: null,
     parentConversationId: null,
   });
+  sqlite.checkpointRollbackMirror();
 
   expect(new AgentRegistry(filename).snapshot()).toEqual(sqlite.snapshot());
 });
@@ -100,7 +101,7 @@ test("supersedence edges round-trip JSON ↔ SQLite with parity intact", () => {
   store.recordSupersedence(predecessor.id, successor.id, "recovery-spawn");
   const expected = store.snapshot();
 
-  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" });
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read", mirrorCheckpointMs: 0 });
   expect(sqlite.snapshot()).toEqual(expected);
   expect(sqlite.conversation(predecessor.id)?.supersededBy).toMatchObject({
     conversationId: successor.id,
@@ -109,6 +110,7 @@ test("supersedence edges round-trip JSON ↔ SQLite with parity intact", () => {
 
   sqlite.clearSupersedence(predecessor.id);
   expect(sqlite.conversation(predecessor.id)?.supersededBy).toBeNull();
+  sqlite.checkpointRollbackMirror();
   expect(new AgentRegistry(filename).conversation(predecessor.id)?.supersededBy).toBeNull();
 });
 
@@ -116,10 +118,12 @@ test("a staged pending supersedence edge round-trips JSON ↔ SQLite with parity
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-pending-"));
   const filename = path.join(directory, "agent-registry.json");
   const store = new AgentRegistry(filename);
-  const predecessorPath = "/repo/819f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const predecessorSessionId = ["819f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
+  const successorSessionId = ["919f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
+  const predecessorPath = `/repo/${predecessorSessionId}.jsonl`;
   const predecessor = store.ensureConversation("codex", predecessorPath, "a");
   store.upsert({
-    key: { engine: "codex", sessionId: "819f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    key: { engine: "codex", sessionId: predecessorSessionId },
     artifactPath: predecessorPath,
     cwd: "/repo",
     accountId: "a",
@@ -132,8 +136,8 @@ test("a staged pending supersedence edge round-trips JSON ↔ SQLite with parity
   const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id, supersedesReason: "stage-retry" });
   if (begun.kind !== "created") throw new Error("expected create");
   store.settleSpawn(begun.receipt.launchId, {
-    key: { engine: "codex", sessionId: "919f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
-    artifactPath: "/sessions/919f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+    key: { engine: "codex", sessionId: successorSessionId },
+    artifactPath: `/sessions/${successorSessionId}.jsonl`,
     cwd: "/repo",
     accountId: "a",
     status: "live",
@@ -417,6 +421,21 @@ test("dual-write leaves both backends unchanged after a no-op mutation", () => {
   expect(replaceCalls).toBe(1);
   db.close();
 });
+
+for (const sqliteMode of ["read", "sqlite"] as const) {
+  test(`${sqliteMode} mode leaves the durable revision unchanged after a missing claim release`, () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-${sqliteMode}-noop-`));
+    const filename = path.join(directory, "agent-registry.json");
+    new AgentRegistry(filename).beginSpawn("codex", "/seed");
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode });
+    const before = registry.storageDiagnostics().revision;
+
+    expect(registry.releaseStructuredHostClaim({ engine: "codex", sessionId: "missing" }, "owner", 1)).toBeFalse();
+
+    expect(registry.storageDiagnostics().revision).toBe(before);
+    expect(registry.storageDiagnostics().mirrorDirty).toBeFalse();
+  });
+}
 
 test("dual-write fails closed when SQLite is ahead of its JSON mirror", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-transition-"));
@@ -745,6 +764,308 @@ test("SQLite-only operations avoid JSON rewrites and the read mode prepares roll
   expect(rollback.conversations[conversation.id]).toBeDefined();
 });
 
+test("SQLite demotion checkpoint publishes every revision without streaming mirror writes", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-demotion-checkpoint-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  const externalWriter = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  const before = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision: number };
+  externalWriter.beginSpawn("codex", "/after-promotion");
+  const stale = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision: number };
+  expect(stale._sqliteRevision).toBe(before._sqliteRevision);
+  expect(registry.storageDiagnostics().mirrorDirty).toBeTrue();
+
+  registry.checkpointRollbackMirror();
+
+  const checkpoint = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision: number };
+  expect(checkpoint._sqliteRevision).toBe(registry.storageDiagnostics().revision!);
+  expect(registry.storageDiagnostics().mirrorDirty).toBeFalse();
+});
+
+test("dual-write release demotion leaves the authoritative JSON handoff untouched", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-dual-write-handoff-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  let rollbackWrites = 0;
+  const retiring = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "dual-write",
+    afterMirrorWrite: () => { rollbackWrites += 1; },
+  });
+  const successor = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+
+  retiring.checkpointRollbackMirror();
+  successor.beginSpawn("codex", "/successor");
+
+  expect(rollbackWrites).toBe(0);
+  expect(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot())
+    .toEqual(successor.snapshot());
+});
+
+test("read mode bounds rollback mirror writes and exposes checkpoint diagnostics", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-mirror-cadence-"));
+  const filename = path.join(directory, "agent-registry.json");
+  let now = 1_000;
+  const checkpoints: Array<() => void> = [];
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const registry = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "read",
+    mirrorCheckpointMs: 5_000,
+    now: () => now,
+    scheduleMirrorCheckpoint: (callback) => {
+      checkpoints.push(callback);
+      return { unref() {} };
+    },
+  });
+  const initialRevision = JSON.parse(fs.readFileSync(filename, "utf8"))._sqliteRevision;
+
+  registry.beginSpawn("codex", "/cursor-1");
+  registry.beginSpawn("codex", "/cursor-2");
+  expect(JSON.parse(fs.readFileSync(filename, "utf8"))._sqliteRevision).toBe(initialRevision);
+  expect(registry.storageDiagnostics()).toMatchObject({
+    backendMode: "read",
+    mirrorDirty: true,
+    mirrorAgeMs: 0,
+  });
+
+  now += 5_001;
+  expect(checkpoints).toHaveLength(1);
+  checkpoints.shift()!();
+  expect(JSON.parse(fs.readFileSync(filename, "utf8"))._sqliteRevision).toBeGreaterThan(initialRevision);
+  expect(registry.storageDiagnostics()).toMatchObject({ mirrorDirty: false, mirrorAgeMs: 0 });
+});
+
+test("read mode schedules only the remaining rollback checkpoint interval", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-mirror-boundary-"));
+  const filename = path.join(directory, "agent-registry.json");
+  let now = 1_000;
+  const delays: number[] = [];
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const registry = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "read",
+    mirrorCheckpointMs: 5_000,
+    now: () => now,
+    scheduleMirrorCheckpoint: (_callback, delayMs) => {
+      delays.push(delayMs);
+      return { unref() {} };
+    },
+  });
+
+  now += 4_999;
+  registry.beginSpawn("codex", "/boundary");
+
+  expect(registry.storageDiagnostics().mirrorAgeMs).toBe(4_999);
+  expect(delays).toEqual([1]);
+});
+
+test("one rollback checkpoint publishes one coherent snapshot under sustained writers", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-bounded-checkpoint-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const writer = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  const scheduled: Array<() => void> = [];
+  let concurrentWrites = false;
+  let mirrorWrites = 0;
+  const checkpoint = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "read",
+    mirrorCheckpointMs: 60_000,
+    scheduleMirrorCheckpoint: (callback) => { scheduled.push(callback); return { unref() {} }; },
+    afterMirrorWrite: () => {
+      mirrorWrites += 1;
+      if (concurrentWrites) writer.beginSpawn("codex", `/concurrent-${mirrorWrites}`);
+    },
+  });
+  checkpoint.beginSpawn("codex", "/dirty");
+  concurrentWrites = true;
+  const startedAt = performance.now();
+  checkpoint.checkpointRollbackMirror();
+
+  expect(mirrorWrites).toBe(2); // startup plus this checkpoint
+  expect(performance.now() - startedAt).toBeLessThan(100);
+  expect(checkpoint.storageDiagnostics().mirrorDirty).toBeTrue();
+  expect(scheduled).toHaveLength(1);
+  const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision: number };
+  expect(mirror._sqliteRevision).toBeLessThan(writer.storageDiagnostics().revision!);
+});
+
+test("release demotion converges a mirror dirtied by one concurrent successor commit", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-demotion-convergence-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const successor = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  let concurrentCommit = false;
+  const retiring = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "sqlite",
+    afterMirrorWrite: () => {
+      if (!concurrentCommit) return;
+      concurrentCommit = false;
+      successor.beginSpawn("codex", "/successor-during-checkpoint");
+    },
+  });
+  successor.beginSpawn("codex", "/dirty-before-demotion");
+  concurrentCommit = true;
+
+  retiring.checkpointRollbackMirrorForDemotion();
+
+  const json = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision: number };
+  expect(json._sqliteRevision).toBe(successor.storageDiagnostics().revision!);
+  expect(retiring.storageDiagnostics().mirrorDirty).toBeFalse();
+});
+
+test("release demotion fails closed after bounded continuously dirty checkpoints", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-demotion-bounded-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const successor = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  let mirrorWrites = 0;
+  const retiring = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "sqlite",
+    afterMirrorWrite: () => {
+      mirrorWrites += 1;
+      successor.beginSpawn("codex", `/successor-${mirrorWrites}`);
+    },
+  });
+
+  expect(() => retiring.checkpointRollbackMirrorForDemotion()).toThrow("did not converge");
+  expect(mirrorWrites).toBe(3); // startup plus two bounded demotion attempts
+});
+
+test("failed rollback checkpoints retry with bounded backoff until the mirror converges", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-checkpoint-retry-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+  let failCheckpoint = false;
+  const registry = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "read",
+    mirrorCheckpointMs: 5_000,
+    now: () => 1_000,
+    scheduleMirrorCheckpoint: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs });
+      return { unref() {} };
+    },
+    afterMirrorWrite: () => {
+      if (failCheckpoint) throw new Error("injected checkpoint failure");
+    },
+  });
+  registry.beginSpawn("codex", "/dirty");
+  expect(scheduled.map(({ delayMs }) => delayMs)).toEqual([5_000]);
+
+  failCheckpoint = true;
+  scheduled.shift()!.callback();
+  expect(registry.storageDiagnostics().mirrorDirty).toBeTrue();
+  expect(scheduled.map(({ delayMs }) => delayMs)).toEqual([1_000]);
+
+  failCheckpoint = false;
+  scheduled.shift()!.callback();
+  expect(registry.storageDiagnostics().mirrorDirty).toBeFalse();
+  expect(scheduled).toHaveLength(0);
+});
+
+test("production-sized read burn-in defers full snapshot loading until its checkpoint", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-read-no-snapshot-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const seed = new AgentRegistry(filename);
+  const template = seed.beginSpawn("codex", "/read-seed");
+  const production = seed.snapshot();
+  for (let index = 1; index < 18_000; index += 1) {
+    const launchId = `read-seed-${String(index).padStart(5, "0")}`;
+    production.receipts[launchId] = { ...structuredClone(template), launchId };
+  }
+  const payload = JSON.stringify(production);
+  expect(Buffer.byteLength(payload)).toBeGreaterThanOrEqual(14_660_822);
+  fs.writeFileSync(filename, payload);
+  let snapshotLoads = 0;
+  let now = 1_000;
+  const checkpoints: Array<() => void> = [];
+  const registry = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "read",
+    mirrorCheckpointMs: 60_000,
+    now: () => now,
+    scheduleMirrorCheckpoint: (callback) => {
+      checkpoints.push(callback);
+      return { unref() {} };
+    },
+    onSqliteSnapshotLoad: () => { snapshotLoads += 1; },
+  });
+  const startupLoads = snapshotLoads;
+  const durations: number[] = [];
+  for (let index = 0; index < 12; index += 1) {
+    const startedAt = performance.now();
+    registry.ensureConversation("codex", `/sessions/read-${index}.jsonl`, "read-burn-in");
+    durations.push(performance.now() - startedAt);
+  }
+
+  expect(snapshotLoads).toBe(startupLoads);
+  expect(percentile(durations, 0.95)).toBeLessThan(250);
+  expect(registry.storageDiagnostics().mirrorDirty).toBeTrue();
+
+  now += 60_000;
+  const dueStartedAt = performance.now();
+  registry.ensureConversation("codex", "/sessions/read-due.jsonl", "read-burn-in");
+  const dueMutationMs = performance.now() - dueStartedAt;
+  expect(dueMutationMs).toBeLessThan(250);
+  expect(snapshotLoads).toBe(startupLoads);
+
+  checkpoints.shift()!();
+  expect(snapshotLoads).toBe(startupLoads + 1);
+  expect(registry.storageDiagnostics().mirrorDirty).toBeFalse();
+});
+
+test("SQLite snapshot cache follows external revisions and reports writer metrics", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-snapshot-cache-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const waits: number[] = [];
+  const first = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "sqlite",
+    onSqliteWriterWait: (duration) => waits.push(duration),
+  });
+  const second = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+
+  first.readOnlySnapshot();
+  second.beginSpawn("codex", "/external-writer");
+  expect(first.readOnlySnapshot().receipts).toEqual(expect.objectContaining(
+    Object.fromEntries(Object.entries(second.snapshot().receipts)),
+  ));
+  first.beginSpawn("codex", "/metric-writer");
+  expect(waits.length).toBeGreaterThan(0);
+  expect(first.storageDiagnostics()).toMatchObject({
+    backendMode: "sqlite",
+    revision: expect.any(Number),
+    transactionCount: expect.any(Number),
+    writerRatePerSecond: expect.any(Number),
+    writerWaitP95Ms: expect.any(Number),
+    transactionP95Ms: expect.any(Number),
+  });
+});
+
+test.each(["off", "dual-write", "read", "sqlite"] as const)(
+  "%s diagnostics keep cumulative counts and a rolling rate beyond the percentile sample cap",
+  (sqliteMode) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-metrics-${sqliteMode}-`));
+    const filename = path.join(directory, "agent-registry.json");
+    let clock = 0;
+    const registry = new AgentRegistry(filename, undefined, undefined, {
+      sqliteMode,
+      now: () => clock,
+      mirrorCheckpointMs: 60_000,
+    });
+    for (let index = 0; index < 650; index += 1) {
+      registry.beginSpawn("codex", `/metric-${index}`);
+      clock += 100;
+    }
+
+    expect(registry.storageDiagnostics()).toMatchObject({
+      backendMode: sqliteMode,
+      transactionCount: 650,
+      writerRatePerSecond: expect.closeTo(9.83, 1),
+      transactionP95Ms: expect.any(Number),
+    });
+  },
+  30_000,
+);
+
 test("SQLite adoption keeps structured-host writer epochs fenced across restarts", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-adoption-"));
   const filename = path.join(directory, "agent-registry.json");
@@ -792,31 +1113,37 @@ test("SQLite adoption keeps structured-host writer epochs fenced across restarts
   )).toMatchObject({ status: "idle", claimOwner: null, structuredHost: { eventCursor: 5 } });
 });
 
-test("synthetic ten-lane load records JSON and SQLite registry operation p95", async () => {
-  async function measure(mode: "json" | "sqlite"): Promise<{
+test("production-sized SQLite registry bounds ten-lane writes, concurrent reads, and JSON rewrites", async () => {
+  const PRODUCTION_BYTES = 14_660_822;
+  async function measure(): Promise<{
     operationP95: number;
-    writerWaitP95: number | null;
+    writerWaitP95: number;
+    readerP95: number;
   }> {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-${mode}-ten-lane-`));
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-production-ten-lane-"));
     const filename = path.join(directory, "agent-registry.json");
     const seed = new AgentRegistry(filename);
     const template = seed.beginSpawn("codex", "/benchmark-seed");
     const productionShape = seed.snapshot();
-    for (let index = 1; index < 5_000; index += 1) {
+    for (let index = 1; index < 18_000; index += 1) {
       const launchId = `benchmark-seed-${String(index).padStart(5, "0")}`;
       productionShape.receipts[launchId] = { ...structuredClone(template), launchId };
     }
-    fs.writeFileSync(filename, JSON.stringify(productionShape));
-    if (mode === "sqlite") new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    const payload = JSON.stringify(productionShape);
+    expect(Buffer.byteLength(payload)).toBeGreaterThanOrEqual(PRODUCTION_BYTES);
+    fs.writeFileSync(filename, payload);
+    new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    const revisionBefore = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" })
+      .storageDiagnostics().revision!;
     const start = path.join(directory, "start");
     const children = Array.from({ length: 10 }, (_, lane) => {
-      const label = `${mode}-lane-${lane}`;
+      const label = `sqlite-lane-${lane}`;
       const ready = path.join(directory, `${label}.ready`);
       const result = path.join(directory, `${label}.json`);
       const child = Bun.spawn([
         process.execPath,
         CHILD,
-        mode === "sqlite" ? "writer-sqlite" : "writer-json",
+        "writer-mixed",
         filename,
         ready,
         start,
@@ -826,10 +1153,19 @@ test("synthetic ten-lane load records JSON and SQLite registry operation p95", a
       ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       return { child, ready, result };
     });
+    const readerReady = path.join(directory, "reader.ready");
+    const readerResult = path.join(directory, "reader.json");
+    const reader = Bun.spawn([
+      process.execPath, CHILD, "reader-sqlite", filename, readerReady, start, "reader", "40", readerResult,
+    ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
     for (const { ready } of children) waitFor(ready);
+    waitFor(readerReady);
+    const jsonBefore = fs.statSync(filename);
     fs.writeFileSync(start, "start");
     expect(await Promise.all(children.map(({ child }) => child.exited))).toEqual(Array(10).fill(0));
+    expect(await reader.exited).toBe(0);
     expect(await Promise.all(children.map(({ child }) => new Response(child.stderr).text()))).toEqual(Array(10).fill(""));
+    expect(await new Response(reader.stderr).text()).toBe("");
     const measurements = children.map(({ result }) => JSON.parse(fs.readFileSync(result, "utf8")) as {
       durations: number[];
       writerWaits: number[];
@@ -837,21 +1173,27 @@ test("synthetic ten-lane load records JSON and SQLite registry operation p95", a
     const durations = measurements.flatMap((measurement) => measurement.durations);
     expect(durations).toHaveLength(120);
     const writerWaits = measurements.flatMap((measurement) => measurement.writerWaits);
-    if (mode === "sqlite") expect(writerWaits.length).toBeGreaterThanOrEqual(durations.length);
+    expect(writerWaits.length).toBeGreaterThanOrEqual(durations.length);
+    const readerDurations = (JSON.parse(fs.readFileSync(readerResult, "utf8")) as { durations: number[] }).durations;
+    const jsonAfter = fs.statSync(filename);
+    expect(jsonAfter.mtimeMs).toBe(jsonBefore.mtimeMs);
+    expect(jsonAfter.size).toBe(jsonBefore.size);
+    expect(jsonAfter.ino).toBe(jsonBefore.ino);
+    const finalRegistry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    expect(finalRegistry.storageDiagnostics().revision! - revisionBefore).toBe(140);
     return {
       operationP95: percentile(durations, 0.95),
-      writerWaitP95: writerWaits.length > 0 ? percentile(writerWaits, 0.95) : null,
+      writerWaitP95: percentile(writerWaits, 0.95),
+      readerP95: percentile(readerDurations, 0.95),
     };
   }
 
-  const json = await measure("json");
-  const sqlite = await measure("sqlite");
+  const sqlite = await measure();
   console.info(
-    `[agent registry benchmark] ten-lane p95: operation JSON=${json.operationP95.toFixed(1)}ms `
-    + `SQLite=${sqlite.operationP95.toFixed(1)}ms; SQLite writer wait=${sqlite.writerWaitP95?.toFixed(1)}ms`,
+    `[agent registry benchmark] production ten-lane p95: operation=${sqlite.operationP95.toFixed(1)}ms `
+    + `writer wait=${sqlite.writerWaitP95.toFixed(1)}ms; reader=${sqlite.readerP95.toFixed(1)}ms`,
   );
-  expect(json.operationP95).toBeGreaterThan(0);
-  expect(sqlite.operationP95).toBeGreaterThan(0);
-  expect(sqlite.writerWaitP95).not.toBeNull();
-  expect(sqlite.operationP95).toBeLessThan(json.operationP95);
-}, 30_000);
+  expect(sqlite.operationP95).toBeLessThan(250);
+  expect(sqlite.writerWaitP95).toBeLessThan(100);
+  expect(sqlite.readerP95).toBeLessThan(100);
+}, 60_000);

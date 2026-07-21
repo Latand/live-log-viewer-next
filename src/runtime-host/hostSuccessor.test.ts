@@ -19,6 +19,7 @@ import {
   stageRuntimeHostSuccessorContainer,
   type RuntimeHostSuccessorPorts,
 } from "./hostSuccessor";
+import { AGENT_REGISTRY_SQLITE_ENV } from "./candidateContainer";
 
 const revision = "b".repeat(40);
 const candidate: ViewerReleaseIdentity = {
@@ -107,6 +108,8 @@ const predecessorInspect = JSON.stringify([{
     Env: [
       "LLV_RUNTIME_EVENTS=1",
       "HOME=/home/user",
+      `${AGENT_REGISTRY_SQLITE_ENV}=off`,
+      `${AGENT_REGISTRY_SQLITE_ENV}=off`,
       `${WAKATIME_CREDENTIAL_ENV}=${wakatimePlaceholderValue}`,
     ],
     Cmd: ["bun-container", "run", "src/runtime-host/main.ts"],
@@ -142,6 +145,7 @@ function harness(overrides: {
   stableRestartCount?: number;
   stableStartedAt?: string;
   successorImage?: string;
+  registryBackendMode?: string;
   updateFailure?: Error;
   wait?: (milliseconds: number) => Promise<void>;
 } = {}): Harness {
@@ -175,6 +179,7 @@ function harness(overrides: {
           `${RUNTIME_HOST_IMAGE_ENV}=${candidate.image}`,
           `${RUNTIME_HOST_REVISION_ENV}=${candidate.revision}`,
           `${RUNTIME_HOST_CONTAINER_ENV}=${successorName}`,
+          `${AGENT_REGISTRY_SQLITE_ENV}=${overrides.registryBackendMode ?? "off"}`,
         ],
       },
     }]);
@@ -379,9 +384,11 @@ function crashHarness(world: CrashWorld): { ports: RuntimeHostSuccessorPorts; ca
    handoff: every mutating step is a short-lived CLI call against dockerd, so
    the successor exists daemon-side before the predecessor generation exits. */
 test("issue 518: staging creates a dockerd-owned successor from the candidate image without stopping the predecessor", async () => {
-  const { ports, calls, events, records, storedIntent } = harness();
+  const { ports, calls, events, records, storedIntent } = harness({ registryBackendMode: "dual-write" });
 
-  const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports);
+  const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports, {
+    registryBackendMode: "dual-write",
+  });
 
   expect(staged.successorContainer).toBe(runtimeHostSuccessorName(revision, candidate.image));
   /* The successor container boots exactly the deployed candidate image with
@@ -393,6 +400,8 @@ test("issue 518: staging creates a dockerd-owned successor from the candidate im
   expect(run).toContain(candidate.image);
   expect(run?.join(" ")).toContain("--restart unless-stopped");
   expect(run?.join(" ")).toContain(`-e ${RUNTIME_HOST_FENCE_WAIT_ENV}=`);
+  expect(run?.filter((entry) => entry === `${AGENT_REGISTRY_SQLITE_ENV}=dual-write`)).toHaveLength(1);
+  expect(run?.some((entry) => entry === `${AGENT_REGISTRY_SQLITE_ENV}=off`)).toBe(false);
   expect(run?.join(" ")).toContain("-v /home/user:/home/user");
   expect(run?.slice(-3)).toEqual(["bun-container", "run", "src/runtime-host/main.ts"]);
   /* The durable record binds the successor to the deployed revision only

@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -27,6 +27,24 @@ type StageTurnEvidence = import("./durableEvidence").StageTurnEvidence;
 registerPipelineTick(async () => {});
 
 afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
+
+test("default pipeline projections reuse one registry parse across the historical backlog", () => {
+  const registryPath = path.join(process.env.LLV_STATE_DIR!, "projection-cache-agent-registry.json");
+  const registry = new AgentRegistry(registryPath);
+  setAgentRegistryForTests(registry);
+  const reads = spyOn(fs, "readFileSync");
+  try {
+    const ports = defaultPipelinePorts();
+    for (let index = 0; index < 300; index += 1) {
+      expect(ports.pipelineAdoptionCandidates(`historical-${index}`)).toEqual([]);
+      expect(ports.spawnReceipt(`missing-${index}`)).toBeNull();
+    }
+    expect(reads.mock.calls.filter(([filename]) => filename === registryPath)).toHaveLength(1);
+  } finally {
+    reads.mockRestore();
+    setAgentRegistryForTests(null);
+  }
+});
 
 const RUN_STAGES = [
   { id: "plan", kind: "run", role: { roleId: "architect" }, access: "read-only", prompt: "Plan {{task}}", next: "build" },

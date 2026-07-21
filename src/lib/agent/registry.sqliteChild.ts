@@ -44,8 +44,10 @@ if (action === "dual-writer") {
   process.exit(0);
 }
 
-if (action === "writer" || action === "writer-json" || action === "writer-sqlite") {
-  const sqliteMode = action === "writer-json" ? "off" : action === "writer-sqlite" ? "sqlite" : "read";
+if (action === "writer" || action === "writer-json" || action === "writer-sqlite" || action === "writer-mixed") {
+  const sqliteMode = action === "writer-json" ? "off"
+    : action === "writer-sqlite" || action === "writer-mixed" ? "sqlite"
+    : "read";
   const writerWaits: number[] = [];
   const registry = new AgentRegistry(filename, undefined, undefined, {
     sqliteMode,
@@ -54,13 +56,61 @@ if (action === "writer" || action === "writer-json" || action === "writer-sqlite
   fs.writeFileSync(ready, "ready");
   waitFor(release);
   const durations: number[] = [];
+  const key = { engine: "codex" as const, sessionId: label };
+  const baseHost = {
+    kind: "codex-app-server" as const,
+    endpoint: `stdio:${label}`,
+    process: { pid: process.pid, startIdentity: `${process.pid}:${label}` },
+    eventCursor: 0,
+    protocolVersion: "1",
+    writerClaimEpoch: 0,
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+  };
+  let claim: ReturnType<AgentRegistry["claimStructuredHost"]> = null;
+  if (action === "writer-mixed") {
+    registry.upsert({
+      key, artifactPath: `/sessions/${label}.jsonl`, cwd: "/repo", accountId: "work",
+      status: "unhosted", host: null, structuredHost: baseHost, claimEpoch: 0, claimOwner: null, pendingAction: null,
+    });
+    claim = registry.claimStructuredHost(key, { pid: process.pid, startIdentity: `${process.pid}:${label}` }, { allowUnhosted: true });
+    if (!claim?.claimOwner) throw new Error("mixed writer claim is required");
+  }
   for (let index = 0; index < Number(countText); index += 1) {
     const suffix = `${label}-${String(index).padStart(3, "0")}`;
     const startedAt = performance.now();
-    registry.ensureConversation("codex", `/sessions/${suffix}.jsonl`, label);
+    if (action === "writer-mixed") {
+      const material = index % 4 === 3;
+      const released = index === Number(countText) - 1;
+      const updated = registry.setStructuredHostClaimed(key, {
+        ...baseHost,
+        writerClaimEpoch: claim!.claimEpoch,
+        eventCursor: index + 1,
+        activeTurnRef: material && !released ? `turn-${index}` : null,
+        pendingAttention: material && !released ? [`attention-${index}`] : [],
+        endpoint: released ? "stdio:released" : baseHost.endpoint,
+        process: released ? null : baseHost.process,
+      }, released ? "unhosted" : "live", claim!.claimOwner!, claim!.claimEpoch, released);
+      if (!updated) throw new Error("mixed writer lost its claim");
+    } else registry.ensureConversation("codex", `/sessions/${suffix}.jsonl`, label);
     durations.push(performance.now() - startedAt);
   }
   if (resultFile) fs.writeFileSync(resultFile, JSON.stringify({ durations, writerWaits }));
+  process.exit(0);
+}
+
+if (action === "reader-sqlite") {
+  const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  fs.writeFileSync(ready, "ready");
+  waitFor(release);
+  const durations: number[] = [];
+  for (let index = 0; index < Number(countText); index += 1) {
+    const startedAt = performance.now();
+    registry.readOnlySnapshot();
+    durations.push(performance.now() - startedAt);
+  }
+  if (resultFile) fs.writeFileSync(resultFile, JSON.stringify({ durations }));
   process.exit(0);
 }
 

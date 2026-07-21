@@ -176,6 +176,38 @@ test("snapshot exposes the canonical projected runtime model", () => {
   journal.close();
 });
 
+test("snapshot bounds inactive session history while retaining every active session", () => {
+  const dir = sandbox("bounded-inactive-snapshot");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 2_000, now: () => 100 });
+  const projectSession = (conversationId: string, host: "hosted" | "dead") => journal.append({
+    scope: runtimeScope("session", conversationId),
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey: { engine: "claude", sessionId: `session-${conversationId}` },
+      hostKind: "claude-broker",
+      host,
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: false, structuredAttention: true },
+    },
+  });
+
+  projectSession("conversation_active_oldest", "hosted");
+  for (let index = 0; index < 300; index += 1) {
+    projectSession(`conversation_dead_${String(index).padStart(3, "0")}`, "dead");
+  }
+
+  const snapshot = journal.snapshot();
+  const ids = new Set(snapshot.sessions.map((session) => session.conversationId));
+  expect(snapshot.sessions).toHaveLength(129);
+  expect(ids.has("conversation_active_oldest")).toBeTrue();
+  expect(ids.has("conversation_dead_299")).toBeTrue();
+  expect(ids.has("conversation_dead_000")).toBeFalse();
+  expect(journal.sessionState("conversation_dead_000")).toMatchObject({ host: "dead" });
+  journal.close();
+});
+
 test("issue 51 keeps tool work running until authoritative turn completion", () => {
   const dir = sandbox("terminal-axes");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });

@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 import {
   accountControllerDelayMs,
   activateViewerRuntimeWhenCurrent,
+  completeViewerReleaseDemotion,
   initializeOperatorSpawnCapabilityAtStartup,
   runStructuredHostStartup,
   scheduleAccountMigrationController,
@@ -95,6 +96,17 @@ test("deployment candidates stay passive until their endpoint owns the durable r
   expect(viewerReleaseOwnsTraffic({ PORT: "19115" }, () => target)).toBe(false);
 });
 
+test("exact-SHA release probe grants background ownership to one serving endpoint", () => {
+  const target = JSON.stringify({
+    sha: "fixture-sha",
+    endpoint: "http://127.0.0.1:19892",
+    previous: { sha: "fixture-previous", endpoint: "http://127.0.0.1:19115" },
+  });
+  const owners = ["19892", "19115", "18888"]
+    .filter((port) => viewerReleaseOwnsTraffic({ PORT: port }, () => target));
+  expect(owners).toEqual(["19892"]);
+});
+
 test("release ownership keeps local boot active and fails closed on an unreadable durable target", () => {
   const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
   expect(viewerReleaseOwnsTraffic({}, () => { throw missing; })).toBe(true);
@@ -130,7 +142,51 @@ test("passive candidate activates runtime startup exactly once after promotion",
   await Promise.resolve();
   await Promise.resolve();
   expect(activations).toBe(1);
-  expect(scheduled).toHaveLength(0);
+  expect(scheduled).toHaveLength(1);
+});
+
+test("a promoted release continuously relinquishes background ownership after demotion", async () => {
+  let current = true;
+  let activations = 0;
+  let demotions = 0;
+  const scheduled: Array<() => void> = [];
+  await activateViewerRuntimeWhenCurrent(
+    async () => { activations += 1; },
+    () => current,
+    {
+      pollMs: 1,
+      schedule: (callback) => { scheduled.push(callback); return { unref() {} }; },
+      onDemoted: () => { demotions += 1; },
+    },
+  );
+  expect(activations).toBe(1);
+  expect(scheduled).toHaveLength(1);
+  current = false;
+  scheduled.shift()!();
+  expect(demotions).toBe(1);
+});
+
+test("release demotion reports checkpoint failure before exiting with failure status", async () => {
+  const events: Array<[string, unknown?]> = [];
+  await completeViewerReleaseDemotion(
+    () => { throw new Error("injected fsync failure"); },
+    (code) => { events.push(["exit", code]); },
+    (...args) => { events.push([String(args[0]), args[1]]); },
+  );
+
+  expect(events[0]?.[0]).toBe("[viewer release] demotion checkpoint failed");
+  expect(events[0]?.[1]).toBeInstanceOf(Error);
+  expect(events[1]).toEqual(["exit", 1]);
+});
+
+test("release demotion exits successfully after its checkpoint", async () => {
+  const exits: number[] = [];
+  await completeViewerReleaseDemotion(
+    () => undefined,
+    (code) => { exits.push(code); },
+    () => undefined,
+  );
+  expect(exits).toEqual([0]);
 });
 
 test("a restarted current release activates before register returns", async () => {
@@ -142,7 +198,7 @@ test("a restarted current release activates before register returns", async () =
     { schedule: (callback) => { scheduled.push(callback); return { unref() {} }; } },
   );
   expect(activations).toBe(1);
-  expect(scheduled).toHaveLength(0);
+  expect(scheduled).toHaveLength(1);
 });
 
 test("current release starts flow and pipeline recovery and watchdog while account migration is disabled", async () => {
