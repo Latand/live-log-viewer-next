@@ -416,6 +416,9 @@ test("concurrent fresh callers share one pending generation through failure and 
     return scan;
   });
 
+  // The scan coordinator starts the merged generation one microtask after the
+  // callers enqueue (#287); both retries still share exactly one scan.
+  await Promise.resolve();
   expect(scans).toBe(scansAfterFailure + 1);
   expect(firstRetrySettled).toBeFalse();
   expect(secondRetrySettled).toBeFalse();
@@ -498,6 +501,9 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
   });
 
   expect(filesFresh).toBeTrue();
+  // The scan coordinator starts the fresh generation one microtask after the
+  // resource reader enqueues it (#287).
+  await Promise.resolve();
   expect(scans).toBe(2);
   const payload = await payloadPromise;
   expect(resourceSettled).toBeTrue();

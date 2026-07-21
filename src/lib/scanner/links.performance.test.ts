@@ -247,6 +247,189 @@ test("background command recovery advances within one bounded read budget", asyn
   }
 });
 
+test("background command recovery rescans replacement head after shrink above its offset", async () => {
+  const projectRoot = path.join(SANDBOX, "shrunken-background-projects");
+  const taskRoot = path.join(SANDBOX, "shrunken-background-tasks");
+  const previousProjectRoot = ROOTS["claude-projects"];
+  const previousTaskRoot = ROOTS["claude-tasks"];
+  ROOTS["claude-projects"] = projectRoot;
+  ROOTS["claude-tasks"] = taskRoot;
+  const slug = "-repo-shrunken-background";
+  const sid = "session-shrunken-background";
+  const tid = "task-shrunken-background";
+  const toolUseId = "toolu_shrunken_background";
+  const mainPath = path.join(projectRoot, slug, `${sid}.jsonl`);
+  const taskPath = path.join(taskRoot, slug, sid, "tasks", `${tid}.output`);
+  fs.mkdirSync(path.dirname(mainPath), { recursive: true });
+  fs.mkdirSync(path.dirname(taskPath), { recursive: true });
+  fs.writeFileSync(mainPath, Buffer.alloc(512 * 1024, 0x78));
+  fs.writeFileSync(taskPath, "complete\n");
+  const main = entry(mainPath, `fixture/${slug}/${sid}.jsonl`, 1);
+  const task: FileEntry = {
+    ...entry(taskPath, `${slug}/${sid}/tasks/${tid}.output`, 2),
+    root: "claude-tasks",
+    engine: "shell",
+    fmt: "plain",
+    kind: "task",
+  };
+
+  try {
+    await linkEntries([main, task], { persist: false });
+    expect(task.cmd).toBe("");
+
+    const proof = [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{
+          type: "tool_use",
+          id: toolUseId,
+          name: "Bash",
+          input: { command: "bun run replacement-worker", description: "Run replacement worker" },
+        }] },
+      }),
+      JSON.stringify({
+        type: "user",
+        tool_use_id: toolUseId,
+        message: { content: [{
+          type: "tool_result",
+          tool_use_id: toolUseId,
+          content: `background with ID: ${tid}`,
+        }] },
+      }),
+      "",
+    ].join("\n");
+    const replacement = Buffer.alloc(384 * 1024, 0x20);
+    replacement.write(proof, 0, "utf8");
+    fs.writeFileSync(mainPath, replacement);
+    main.size = replacement.length;
+    main.mtime = fs.statSync(mainPath).mtimeMs / 1000;
+
+    await linkEntries([main, task], { persist: false });
+    expect(task).toMatchObject({
+      parent: mainPath,
+      cmd: "bun run replacement-worker",
+      cmdDesc: "Run replacement worker",
+      title: "Run replacement worker",
+    });
+  } finally {
+    ROOTS["claude-projects"] = previousProjectRoot;
+    ROOTS["claude-tasks"] = previousTaskRoot;
+  }
+});
+
+test("background command recovery reserves a bounded fair share for later candidates", async () => {
+  const projectRoot = path.join(SANDBOX, "fair-background-projects");
+  const taskRoot = path.join(SANDBOX, "fair-background-tasks");
+  const previousProjectRoot = ROOTS["claude-projects"];
+  const previousTaskRoot = ROOTS["claude-tasks"];
+  ROOTS["claude-projects"] = projectRoot;
+  ROOTS["claude-tasks"] = taskRoot;
+  const slug = "-repo-fair-background";
+  const blockedSid = "session-blocked-background";
+  const resolvedSid = "session-resolved-background";
+  const blockedTid = "task-blocked-background";
+  const resolvedTid = "task-resolved-background";
+  const toolUseId = "toolu_resolved_background";
+  const blockedMainPath = path.join(projectRoot, slug, `${blockedSid}.jsonl`);
+  const resolvedMainPath = path.join(projectRoot, slug, `${resolvedSid}.jsonl`);
+  const blockedTaskPath = path.join(taskRoot, slug, blockedSid, "tasks", `${blockedTid}.output`);
+  const resolvedTaskPath = path.join(taskRoot, slug, resolvedSid, "tasks", `${resolvedTid}.output`);
+  fs.mkdirSync(path.dirname(blockedMainPath), { recursive: true });
+  fs.mkdirSync(path.dirname(resolvedMainPath), { recursive: true });
+  fs.mkdirSync(path.dirname(blockedTaskPath), { recursive: true });
+  fs.mkdirSync(path.dirname(resolvedTaskPath), { recursive: true });
+  fs.writeFileSync(blockedMainPath, Buffer.alloc(512 * 1024, 0x78));
+  fs.writeFileSync(resolvedMainPath, [
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use",
+          id: toolUseId,
+          name: "Bash",
+          input: { command: "bun run fair-worker", description: "Run fair worker" },
+        }],
+      },
+    }),
+    JSON.stringify({
+      type: "user",
+      tool_use_id: toolUseId,
+      message: {
+        content: [{
+          type: "tool_result",
+          tool_use_id: toolUseId,
+          content: `background with ID: ${resolvedTid}`,
+        }],
+      },
+    }),
+    "",
+  ].join("\n"));
+  fs.writeFileSync(blockedTaskPath, "complete\n");
+  fs.writeFileSync(resolvedTaskPath, "complete\n");
+  /* Fixture names avoid compact-chain probes; this
+     regression measures only the background-command generation allowance. */
+  const blockedMain = entry(blockedMainPath, `fixture/${slug}/${blockedSid}.jsonl`, 1);
+  const resolvedMain = entry(resolvedMainPath, `fixture/${slug}/${resolvedSid}.jsonl`, 2);
+  const blockedTask: FileEntry = {
+    ...entry(blockedTaskPath, `${slug}/${blockedSid}/tasks/${blockedTid}.output`, 3),
+    root: "claude-tasks",
+    engine: "shell",
+    fmt: "plain",
+    kind: "task",
+  };
+  const resolvedTask: FileEntry = {
+    ...entry(resolvedTaskPath, `${slug}/${resolvedSid}/tasks/${resolvedTid}.output`, 4),
+    root: "claude-tasks",
+    engine: "shell",
+    fmt: "plain",
+    kind: "task",
+  };
+  const originalOpen = fs.openSync;
+  const originalRead = fs.readSync;
+  const originalClose = fs.closeSync;
+  const tracked = new Map<number, string>();
+  let blockedBytesRead = 0;
+  let totalBytesRead = 0;
+
+  try {
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      const resolved = path.resolve(String(filename));
+      if (resolved === blockedMainPath || resolved === resolvedMainPath) tracked.set(fd, resolved);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      const read = originalRead(fd, buffer, offset, length, position);
+      const source = tracked.get(fd);
+      if (source) {
+        totalBytesRead += read;
+        if (source === blockedMainPath) blockedBytesRead += read;
+      }
+      return read;
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+    await linkEntries([blockedMain, blockedTask, resolvedMain, resolvedTask], { persist: false });
+
+    expect(blockedBytesRead).toBeLessThanOrEqual(128 * 1024);
+    expect(totalBytesRead).toBeLessThanOrEqual(256 * 1024);
+    expect(resolvedTask).toMatchObject({
+      parent: resolvedMainPath,
+      cmd: "bun run fair-worker",
+      cmdDesc: "Run fair worker",
+      title: "Run fair worker",
+    });
+  } finally {
+    fs.openSync = originalOpen;
+    fs.readSync = originalRead;
+    fs.closeSync = originalClose;
+    ROOTS["claude-projects"] = previousProjectRoot;
+    ROOTS["claude-tasks"] = previousTaskRoot;
+  }
+});
+
 test("proven background commands survive restart without source transcript reads", async () => {
   const projectRoot = path.join(SANDBOX, "restart-projects");
   const taskRoot = path.join(SANDBOX, "restart-tasks");
