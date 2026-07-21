@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
+import { globalCache } from "./caches";
 import {
   describe,
   parseWorktreeGitdir,
@@ -25,25 +26,25 @@ afterAll(() => {
 
 test("parseWorktreeGitdir resolves an absolute gitdir into repo + worktree name", () => {
   const info = parseWorktreeGitdir(
-    "/home/u/.agents/tools/live-log-viewer-attention-queue",
-    "gitdir: /home/u/.agents/tools/live-log-viewer-next/.git/worktrees/live-log-viewer-attention-queue\n",
+    "/home/user/.agents/tools/live-log-viewer-attention-queue",
+    "gitdir: /home/user/.agents/tools/live-log-viewer-next/.git/worktrees/live-log-viewer-attention-queue\n",
   );
   expect(info).toEqual({
-    repo: "/home/u/.agents/tools/live-log-viewer-next",
+    repo: "/home/user/.agents/tools/live-log-viewer-next",
     worktree: "live-log-viewer-attention-queue",
   });
 });
 
 test("parseWorktreeGitdir resolves a relative gitdir against the checkout cwd", () => {
-  const info = parseWorktreeGitdir("/home/u/wt", "gitdir: ../main/.git/worktrees/wt");
-  expect(info).toEqual({ repo: "/home/u/main", worktree: "wt" });
+  const info = parseWorktreeGitdir("/home/user/wt", "gitdir: ../main/.git/worktrees/wt");
+  expect(info).toEqual({ repo: "/home/user/main", worktree: "wt" });
 });
 
 test("parseWorktreeGitdir rejects gitdirs that are not linked worktrees", () => {
-  expect(parseWorktreeGitdir("/home/u/sub", "gitdir: /home/u/main/.git")).toBeNull();
-  expect(parseWorktreeGitdir("/home/u/sub", "not a git file")).toBeNull();
+  expect(parseWorktreeGitdir("/home/user/sub", "gitdir: /home/user/main/.git")).toBeNull();
+  expect(parseWorktreeGitdir("/home/user/sub", "not a git file")).toBeNull();
   /* "worktrees" segment without a .git parent is another repo layout, not a linked checkout */
-  expect(parseWorktreeGitdir("/home/u/sub", "gitdir: /home/u/worktrees/x")).toBeNull();
+  expect(parseWorktreeGitdir("/home/user/sub", "gitdir: /home/user/worktrees/x")).toBeNull();
 });
 
 test("an absent cwd cannot inherit the Viewer process project", () => {
@@ -222,6 +223,70 @@ test("growing Codex transcripts retain cwd metadata after the project cache warm
   expect(describe("codex-sessions", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: repo });
   fs.appendFileSync(transcript, JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "continue" } }) + "\n");
   expect(describe("codex-sessions", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: repo });
+});
+
+test("a project-state change recomputes only the overlay, never transcript metadata (#287)", () => {
+  const base = path.join(SANDBOX, "identity-split");
+  const state = path.join(base, "state");
+  fs.mkdirSync(state, { recursive: true });
+  process.env.LLV_STATE_DIR = state;
+  const repo = path.join(base, "live-log-viewer-next");
+  const worktree = path.join(base, "live-log-viewer-split-branch");
+  const root = path.join(base, "codex-root");
+  const transcript = path.join(root, "2026", "07", "rollout-split.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: worktree } }) + "\n");
+  const st = fs.statSync(transcript);
+
+  /* The checkout does not exist yet: without its .git pointer the cwd cannot
+     regroup under the parent repo and gets a standalone path-derived name. */
+  const before = describe("codex-sessions", root, transcript, st, "state-a");
+  expect(before.cwd).toBe(worktree);
+  expect(before.worktree).toBeUndefined();
+
+  // The checkout appears (reconciliation would rewrite the project state and
+  // change the resolution state key with it).
+  fs.mkdirSync(path.join(repo, ".git", "worktrees", "live-log-viewer-split-branch"), { recursive: true });
+  fs.mkdirSync(worktree, { recursive: true });
+  fs.writeFileSync(
+    path.join(worktree, ".git"),
+    `gitdir: ${path.join(repo, ".git", "worktrees", "live-log-viewer-split-branch")}\n`,
+  );
+
+  /* The cwd-resolution and .git-pointer memos hold the unresolved lookup for
+     10–60 s in production; expire them so the overlay recompute sees the live
+     checkout the way a later scan generation would. */
+  globalCache("project-info-cwd-v1").clear();
+  globalCache("worktree-git").clear();
+
+  /* The overlay recomputes under the new state key without touching the
+     transcript bytes: metadata is keyed by file identity alone. */
+  const realOpenSync = fs.openSync;
+  const realReadFileSync = fs.readFileSync;
+  let transcriptReads = 0;
+  const countTranscript = (target: fs.PathOrFileDescriptor | fs.PathLike) => {
+    if (String(target) === transcript) transcriptReads += 1;
+  };
+  fs.openSync = ((target: fs.PathLike, ...rest: [number | string, (fs.Mode | null)?]) => {
+    countTranscript(target);
+    return realOpenSync(target, ...rest);
+  }) as typeof fs.openSync;
+  fs.readFileSync = ((target: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    countTranscript(target);
+    return (realReadFileSync as (...args: unknown[]) => ReturnType<typeof fs.readFileSync>)(target, ...rest);
+  }) as typeof fs.readFileSync;
+  let after;
+  try {
+    after = describe("codex-sessions", root, transcript, st, "state-b");
+  } finally {
+    fs.openSync = realOpenSync;
+    fs.readFileSync = realReadFileSync;
+  }
+  expect(transcriptReads).toBe(0);
+  expect(after.cwd).toBe(worktree);
+  expect(after.title).toBe(before.title);
+  expect(projectForCwd(repo)).toBe(after.project);
+  expect(after.worktree).toBe("live-log-viewer-split-branch");
 });
 
 test("a nested `worktrees` segment under .claude/.codex is left to its own recognizer", () => {

@@ -32,6 +32,10 @@ import {
   type ReaperReport,
 } from "./reaper";
 
+/* Authorship proof budgets for one controller cycle (#287). */
+const AUTHORSHIP_PATH_PASS_BYTES = 4 * 1024 * 1024;
+const AUTHORSHIP_CYCLE_BUDGET_BYTES = 32 * 1024 * 1024;
+
 const REPORT_FILE = () => statePath("reaper-report.json");
 const STATE_FILE = () => statePath("reaper-state.json");
 const JOURNAL_FILE = () => statePath("reaper-journal.ndjson");
@@ -452,6 +456,12 @@ async function authorshipEvidence(
     if (stamp !== undefined && stamp >= file.mtime) return;
     targets.set(file.path, file.engine);
   });
+  /* Hard byte budgets (#287): one multi-gigabyte ownerless transcript may
+     consume at most AUTHORSHIP_PATH_PASS_BYTES per controller cycle, and all
+     authorship proofs together at most AUTHORSHIP_CYCLE_BUDGET_BYTES. An
+     exhausted pass returns incomplete, the path stays protected as
+     unverified, and the resumable checkpoint continues in the next cycle. */
+  const authorshipReadBudget = { remaining: AUTHORSHIP_CYCLE_BUDGET_BYTES };
   await forEachCooperatively([...targets], async ([pathname, engine]) => {
     if (userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) return;
     if (missingTranscriptPaths.has(pathname)) return;
@@ -470,7 +480,11 @@ async function authorshipEvidence(
       unverifiedPaths.add(pathname);
       return;
     }
-    const scan = await scanUserAuthoredMessagesCooperatively(pathname, engine, viewerMessageAllowance + 1);
+    const scan = await scanUserAuthoredMessagesCooperatively(pathname, engine, viewerMessageAllowance + 1, {
+      resume: true,
+      maxBytes: AUTHORSHIP_PATH_PASS_BYTES,
+      budget: authorshipReadBudget,
+    });
     if (scan.count > viewerMessageAllowance) userAuthoredPaths.add(pathname);
     else if (!scan.complete) unverifiedPaths.add(pathname);
     else verifiedCleanAt.set(pathname, observedMtime);

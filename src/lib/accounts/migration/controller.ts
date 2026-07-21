@@ -8,6 +8,7 @@ import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { loadFlows, reconcileFlowConversationOwnershipCooperatively } from "@/lib/flows/store";
 import { reconcileHandoffConversationOwnershipCooperatively } from "@/lib/handoffLineage";
 import { listFilesWithProjectCatalog, reconcileFileControllers } from "@/lib/scanner";
+import { coordinatedControllerScan } from "@/lib/scanner/scanCoordinator";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { runReaperCycle } from "@/lib/reaperRuntime";
 import { runHeadlessProcessReaper } from "@/lib/headlessProcessReaper";
@@ -133,7 +134,9 @@ function reconcileControllerTasks(registry: AgentRegistry, files: ControllerScan
 }
 
 const DEFAULT_CONTROLLER_CYCLE_PORTS: AccountMigrationControllerCyclePorts = {
-  scan: () => listFilesWithProjectCatalog(undefined, { persist: true }),
+  // Reconciliation consumes the process-wide scan generation; it never fans
+  // out an extra scanner run alongside the HTTP cache or the pipeline watchdog.
+  scan: () => coordinatedControllerScan(),
   reconcileInventory: reconcileMigrationInventory,
   reconcileFlowOwnership: reconcileFlowConversationOwnershipCooperatively,
   reconcileWorkflowOwnership: reconcileWorkflowConversationOwnershipCooperatively,

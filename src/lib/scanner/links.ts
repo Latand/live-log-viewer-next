@@ -48,6 +48,11 @@ const lineageStoreState = globalCache<{
 
 const CHAIN_HEAD_BYTES = 512 * 1024;
 const BACKGROUND_SCAN_BUDGET_BYTES = 256 * 1024;
+/* Nested Claude subagent ownership proofs scan sibling transcripts for a
+   tool-use needle. One generation may spend at most this many fresh bytes on
+   those forward scans; unresolved lineage keeps its path-derived parent and
+   the recorded offsets resume in a later generation (#287). */
+const NESTED_SUBAGENT_NEEDLE_BUDGET_BYTES = 256 * 1024;
 const BACKGROUND_SCAN_CHUNK_BYTES = 64 * 1024;
 const BACKGROUND_INDEX_ENTRY_CAP = 20_000;
 const BACKGROUND_COMMANDS_FILE = "bg-commands.json";
@@ -653,7 +658,15 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
   loadCompactChains();
   const limit = createLimiter(48);
   const backgroundReadBudget = { remaining: BACKGROUND_SCAN_BUDGET_BYTES };
+  const nestedNeedleBudget = { remaining: NESTED_SUBAGENT_NEEDLE_BUDGET_BYTES };
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
+  const backgroundTasks = new Map<FileEntry, [string, string, string]>();
+  for (const entry of entries) {
+    if (entry.root !== "claude-tasks") continue;
+    const parts = taskParts(ROOTS["claude-tasks"], entry.path);
+    if (parts) backgroundTasks.set(entry, parts);
+  }
+  let remainingBackgroundTasks = backgroundTasks.size;
   for (const entry of entries) {
     if (entry.root === "claude-projects") {
       // Both the direct `subagents/agent-*.jsonl` layout and the nested Workflow
@@ -671,21 +684,30 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
           const found = findNeedle(
             toolUse,
             subs.filter((item) => item !== entry.path).concat(main ? [main] : []),
+            nestedNeedleBudget,
           );
           if (found) entry.parent = found;
         }
       }
     } else if (entry.root === "claude-tasks") {
-      const parts = taskParts(ROOTS["claude-tasks"], entry.path);
+      const parts = backgroundTasks.get(entry);
       if (!parts) continue;
       const [slug, sid, tid] = parts;
       const [main, subs] = await sessionTranscripts(sid, limit, slug);
+      /* Reserve each pending task a share of this generation's remaining
+         allowance. An unresolved transcript advances only to its share, so
+         later candidates retain bytes for their first proof attempt. Cached
+         hits consume no share and leave those bytes for unresolved tasks. */
+      const allowance = Math.ceil(backgroundReadBudget.remaining / remainingBackgroundTasks);
+      const taskBudget = { remaining: allowance };
       const info = bgCommand(
         tid,
         (main ? [main] : []).concat(subs),
         slugMainTranscripts(slug, sid),
-        backgroundReadBudget,
+        taskBudget,
       );
+      backgroundReadBudget.remaining -= allowance - taskBudget.remaining;
+      remainingBackgroundTasks -= 1;
       if (info) {
         entry.parent = info.source;
         entry.cmd = info.command;
