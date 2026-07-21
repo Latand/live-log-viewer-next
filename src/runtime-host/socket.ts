@@ -2,7 +2,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 
-import type { RuntimeSocketRequest } from "@/lib/runtime/contracts";
+import type { RuntimeSocketRequest, RuntimeSocketResponse } from "@/lib/runtime/contracts";
 
 import { RuntimeHost } from "./host";
 
@@ -40,6 +40,18 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHost, options:
     socket.setTimeout(defaultTimeoutMs, () => socket.destroy());
     let buffer = "";
     let handled = false;
+    let settled = false;
+    /* One-shot terminal settlement: the connection owns exactly one response
+       frame, and a host completing after the caller disconnected (client
+       timeout destroyed its socket, or the server idle timeout fired) must be
+       discarded silently instead of writing to the finished stream — the
+       production ERR_STREAM_ALREADY_FINISHED path. */
+    const settle = (response: RuntimeSocketResponse) => {
+      if (settled) return;
+      settled = true;
+      if (socket.destroyed || socket.writableEnded || !socket.writable) return;
+      socket.end(JSON.stringify(response) + "\n");
+    };
     socket.on("data", (chunk) => {
       if (handled) return;
       buffer += String(chunk);
@@ -54,20 +66,24 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHost, options:
         const request = JSON.parse(frame) as RuntimeSocketRequest;
         if (!request.id || !request.method) throw new Error("runtime request is malformed");
         if (request.method === "viewer-deployment-request") socket.setTimeout(deploymentTimeoutMs);
+        const failure = (): RuntimeSocketResponse => ({ id: request.id, ok: false, error: "runtime request failed" });
         if (request.method === "wait") {
           if (activeWaitConnections >= maxWaitConnections) {
-            socket.end(JSON.stringify({ id: request.id, ok: false, error: "runtime wait capacity exceeded" }) + "\n");
+            settle({ id: request.id, ok: false, error: "runtime wait capacity exceeded" });
             return;
           }
           activeWaitConnections += 1;
           void host.handle(request, { signal: abort.signal })
-            .then((response) => socket.end(JSON.stringify(response) + "\n"))
+            .then(settle, () => settle(failure()))
             .finally(() => { activeWaitConnections -= 1; });
           return;
         }
-        void host.handle(request).then((response) => socket.end(JSON.stringify(response) + "\n"));
+        /* Every request carries the connection signal, so a disconnected
+           caller stops read-only work early; mutating journal operations
+           ignore the signal and still complete idempotently. */
+        void host.handle(request, { signal: abort.signal }).then(settle, () => settle(failure()));
       } catch {
-        socket.end(JSON.stringify({ id: "unknown", ok: false, error: "runtime request is malformed" }) + "\n");
+        settle({ id: "unknown", ok: false, error: "runtime request is malformed" });
       }
     });
   });

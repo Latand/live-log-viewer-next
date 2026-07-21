@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { tickFlows } from "@/lib/flows/engine";
-import { listFilesWithProjectCatalog } from "@/lib/scanner";
+import { coordinatedControllerScan } from "@/lib/scanner/scanCoordinator";
 import type { FileEntry } from "@/lib/types";
 
 import { registerPipelineTick } from "./controllerSignal";
@@ -82,7 +82,9 @@ export function writeFlowPipelineControllerHeartbeat(
 
 function productionPorts(): FlowPipelineControllerPorts {
   return {
-    scan: async () => listFilesWithProjectCatalog(undefined, { persist: true }),
+    // The watchdog joins the process-wide scan generation instead of racing
+    // the HTTP cache and the account controller with its own scanner run.
+    scan: async () => coordinatedControllerScan(),
     tickPipelines,
     tickFlows,
     publishHeartbeat: writeFlowPipelineControllerHeartbeat,

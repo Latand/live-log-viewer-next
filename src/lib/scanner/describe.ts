@@ -38,10 +38,37 @@ export interface FileDescriptionResult {
   complete: boolean;
 }
 
-type CachedFileDescription = {
+/** Everything derived from the transcript (and sidecar) bytes themselves.
+    Keyed by file identity alone: reconciliation rewriting flows.json or the
+    worktree map must never evict transcript-derived evidence (#287). */
+type TranscriptMetadata = {
+  cwd?: string;
+  sessionStartedAt: string | null;
+  nativeParentThreadId: string | null;
+  title: string;
+  engine: Engine;
+  kind: string;
+  fmt: Fmt;
+};
+
+type CachedTranscriptMetadata = {
   identity: FileDescriptionIdentity;
+  metadata: TranscriptMetadata;
+};
+
+/** Project/worktree resolution overlays the transcript metadata. It depends on
+    the project-state files (flows, workflows, worktree map), so its cache keys
+    on the state revision and the resolved cwd — a flow change recomputes only
+    this overlay while transcript metadata stays untouched (#287). */
+type ProjectOverlay = {
+  project: string;
+  worktree?: string;
+  projectRoot?: string | null;
+};
+
+type CachedProjectOverlay = ProjectOverlay & {
   stateKey: string;
-  description: FileDescription;
+  cwd?: string;
 };
 
 /* Earlier issue-171 builds retained full prompts in these global maps. Clear
@@ -49,7 +76,11 @@ type CachedFileDescription = {
    without waiting for a process restart. */
 globalCache<unknown>("meta-v4").clear();
 globalCache<unknown>("title-v2").clear();
-const metaCache = globalCache<CachedFileDescription>("meta-v6");
+/* The pre-#287 composite description cache keyed transcript metadata on the
+   project-state hash, so reconciliation invalidated it corpus-wide. */
+globalCache<unknown>("meta-v6").clear();
+const transcriptMetaCache = globalCache<CachedTranscriptMetadata>("meta-transcript-v7");
+const projectOverlayCache = globalCache<CachedProjectOverlay>("project-overlay-v1");
 // Title and codex project live in the immutable head of a growing transcript.
 // Resolved head values survive append-only growth, while the complete file
 // identity invalidates same-size rewrites and truncations. A head that has not
@@ -66,13 +97,8 @@ const titleCache = globalCache<HeadMetadataCache<string | null>>("title-v5");
 /* Search text can be large and belongs to the list/search path. Its bounded
    cache lives with the search index; page hydration reads only its visible rows. */
 globalCache<unknown>("conversation-search-v1").clear();
-const codexProjectCache = globalCache<{
-  size: number;
-  mtimeMs: number;
-  stateKey: string;
-  project: string;
-  worktree?: string;
-}>("codex-project-v5");
+/* Subsumed by the split project-overlay cache above (#287). */
+globalCache<unknown>("codex-project-v5").clear();
 const repoSlugCache = globalCache<[number, string | null]>("repo-path-from-slug-v1");
 /* The cwd follows the same append-only head reuse and rewrite invalidation. */
 const cwdCache = globalCache<HeadMetadataCache<string | null>>("claude-cwd-v3");
@@ -808,23 +834,15 @@ export function searchTextForTranscript(pathname: string, size: number, engine: 
   return conversationTextFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
 }
 
-export function describeFile(
+function deriveTranscriptMetadata(
   rootName: RootKey,
-  root: string,
   pathname: string,
   st: fs.Stats,
-  stateKey = projectResolutionStateKey(),
-  identity = fileDescriptionIdentity(rootName, pathname, st),
-): FileDescriptionResult {
-  const cached = metaCache.get(pathname);
-  if (identity.complete && cached?.stateKey === stateKey && sameFileDescriptionIdentity(cached.identity, identity)) {
-    return { description: cached.description, complete: true };
-  }
-  const rel = path.relative(root, pathname);
+  identity: FileDescriptionIdentity,
+): { metadata: TranscriptMetadata; complete: boolean; cwdComplete: boolean } {
   const fn = path.basename(pathname);
-  let project = "other";
-  let worktree: string | undefined;
   let cwd: string | undefined;
+  let cwdComplete = identity.complete;
   let sessionStartedAt: string | null = null;
   let nativeParentThreadId: string | null = null;
   let title: string | null = null;
@@ -837,6 +855,7 @@ export function describeFile(
       ? transcriptCwd(pathname, st)
       : { value: null, complete: false, headPreserved: false };
     complete &&= cwdRead.complete;
+    cwdComplete = cwdRead.complete;
     cwd = cwdRead.value ?? undefined;
     if (complete) {
       const startedAtRead = transcriptStartedAt(pathname, st);
@@ -848,34 +867,6 @@ export function describeFile(
       complete &&= nativeParent.complete;
       nativeParentThreadId = nativeParent.value;
     }
-    const cachedProject = codexProjectCache.get(pathname);
-    const cachedProjectMatches = cwdRead.complete && cachedProject?.stateKey === stateKey
-      && (
-        (cachedProject.size === st.size && cachedProject.mtimeMs === st.mtimeMs)
-        || (st.size > cachedProject.size && cwdRead.headPreserved)
-      );
-    if (cachedProjectMatches) {
-      project = cachedProject.project;
-      worktree = cachedProject.worktree;
-    } else {
-      project = "";
-      const info = cwd ? projectInfoFromCwd(cwd) : null;
-      project = info?.project ?? "";
-      worktree = info?.worktree;
-      if (!project) {
-        const info = projectInfoFromTranscript(pathname);
-        project = info?.project ?? "";
-        worktree = info?.worktree;
-      }
-      if (project && cwdRead.complete) codexProjectCache.set(pathname, {
-        size: st.size,
-        mtimeMs: st.mtimeMs,
-        stateKey,
-        project,
-        worktree,
-      });
-    }
-    if (!project) project = "codex";
     engine = "codex";
     kind = "session";
     fmt = "codex";
@@ -886,28 +877,16 @@ export function describeFile(
     }
     title ??= "Codex session";
   } else if (rootName === "claude-projects") {
-    const slug = rel.split(path.sep)[0] ?? "";
-    const worktreeInfo = worktreeFromSlug(slug);
-    project = worktreeInfo?.project ?? projectFromSlug(slug);
-    worktree = worktreeInfo?.worktree;
-    /* The slug alone cannot tell a sibling worktree checkout from a real
-       standalone project — only the cwd's git metadata can. When it proves a
-       worktree, the session regroups under its main repo's project name. */
     const cwdRead = complete
       ? transcriptCwd(pathname, st)
       : { value: null, complete: false, headPreserved: false };
     complete &&= cwdRead.complete;
+    cwdComplete = cwdRead.complete;
     cwd = cwdRead.value ?? undefined;
     if (complete) {
       const startedAtRead = transcriptStartedAt(pathname, st);
       complete &&= startedAtRead.complete;
       sessionStartedAt = startedAtRead.value;
-    }
-    const info = cwd ? projectInfoFromCwd(cwd) : projectInfoFromTranscript(pathname);
-    const persistedInfo = projectInfoFromTranscript(pathname);
-    if (info && (worktreeInfo || info.worktree || persistedInfo)) {
-      project = info.project;
-      worktree = info.worktree ?? worktree;
     }
     fmt = "claude";
     if (fn.startsWith("agent-")) {
@@ -939,28 +918,124 @@ export function describeFile(
       title ??= "Claude session";
     }
   } else if (rootName === "claude-tasks") {
-    const slug = rel.split(path.sep)[0] ?? "";
-    const info = projectInfoFromSlug(slug);
-    project = info?.project ?? projectFromSlug(slug);
-    worktree = info?.worktree;
     engine = "shell";
     kind = "background";
     title = "Background task " + fn.split(".")[0];
   }
-  const meta = {
+  return {
+    metadata: {
+      cwd,
+      sessionStartedAt,
+      nativeParentThreadId,
+      title: cleanTitle(title ?? fn, 120),
+      engine,
+      kind,
+      fmt,
+    },
+    complete,
+    cwdComplete,
+  };
+}
+
+function resolveProjectOverlay(
+  rootName: RootKey,
+  root: string,
+  pathname: string,
+  cwd: string | undefined,
+  cwdAuthoritative: boolean,
+  stateKey: string,
+): ProjectOverlay {
+  const cached = projectOverlayCache.get(pathname);
+  if (cwdAuthoritative && cached && cached.stateKey === stateKey && cached.cwd === cwd) {
+    return { project: cached.project, worktree: cached.worktree, projectRoot: cached.projectRoot };
+  }
+  let project = "other";
+  let worktree: string | undefined;
+  /* An unresolved codex project falls back to the generic "codex" bucket.
+     That terminal fallback stays uncached so a later scan can re-attempt the
+     disk-dependent resolvers once the checkout or persisted map appears. */
+  let cacheable = cwdAuthoritative;
+  if (rootName === "codex-sessions") {
+    const info = cwd ? projectInfoFromCwd(cwd) : null;
+    project = info?.project ?? "";
+    worktree = info?.worktree;
+    if (!project) {
+      const persisted = projectInfoFromTranscript(pathname);
+      project = persisted?.project ?? "";
+      worktree = persisted?.worktree;
+    }
+    if (!project) {
+      project = "codex";
+      cacheable = false;
+    }
+  } else if (rootName === "claude-projects") {
+    const rel = path.relative(root, pathname);
+    const slug = rel.split(path.sep)[0] ?? "";
+    const worktreeInfo = worktreeFromSlug(slug);
+    project = worktreeInfo?.project ?? projectFromSlug(slug);
+    worktree = worktreeInfo?.worktree;
+    /* The slug alone cannot tell a sibling worktree checkout from a real
+       standalone project — only the cwd's git metadata can. When it proves a
+       worktree, the session regroups under its main repo's project name. */
+    const info = cwd ? projectInfoFromCwd(cwd) : projectInfoFromTranscript(pathname);
+    const persistedInfo = projectInfoFromTranscript(pathname);
+    if (info && (worktreeInfo || info.worktree || persistedInfo)) {
+      project = info.project;
+      worktree = info.worktree ?? worktree;
+    }
+  } else if (rootName === "claude-tasks") {
+    const rel = path.relative(root, pathname);
+    const slug = rel.split(path.sep)[0] ?? "";
+    const info = projectInfoFromSlug(slug);
+    project = info?.project ?? projectFromSlug(slug);
+    worktree = info?.worktree;
+  }
+  const overlay: ProjectOverlay = {
     project,
     worktree,
-    cwd,
-    sessionStartedAt,
-    nativeParentThreadId,
     projectRoot: cwd ? projectRootForCwd(cwd) ?? null : undefined,
-    title: cleanTitle(title ?? fn, 120),
-    engine,
-    kind,
-    fmt,
   };
-  if (complete) metaCache.set(pathname, { identity, stateKey, description: meta });
-  return { description: meta, complete };
+  if (cacheable) projectOverlayCache.set(pathname, { ...overlay, stateKey, cwd });
+  return overlay;
+}
+
+export function describeFile(
+  rootName: RootKey,
+  root: string,
+  pathname: string,
+  st: fs.Stats,
+  stateKey = projectResolutionStateKey(),
+  identity = fileDescriptionIdentity(rootName, pathname, st),
+): FileDescriptionResult {
+  const cachedMeta = transcriptMetaCache.get(pathname);
+  let metadata: TranscriptMetadata;
+  let complete: boolean;
+  let cwdAuthoritative: boolean;
+  if (identity.complete && cachedMeta && sameFileDescriptionIdentity(cachedMeta.identity, identity)) {
+    metadata = cachedMeta.metadata;
+    complete = true;
+    cwdAuthoritative = true;
+  } else {
+    const derived = deriveTranscriptMetadata(rootName, pathname, st, identity);
+    metadata = derived.metadata;
+    complete = derived.complete;
+    cwdAuthoritative = derived.cwdComplete;
+    if (complete) transcriptMetaCache.set(pathname, { identity, metadata });
+  }
+  const overlay = resolveProjectOverlay(rootName, root, pathname, metadata.cwd, cwdAuthoritative, stateKey);
+  const description: FileDescription = {
+    project: overlay.project,
+    worktree: overlay.worktree,
+    cwd: metadata.cwd,
+    sessionStartedAt: metadata.sessionStartedAt,
+    nativeParentThreadId: metadata.nativeParentThreadId,
+    projectRoot: overlay.projectRoot,
+    title: metadata.title,
+    engine: metadata.engine,
+    kind: metadata.kind,
+    fmt: metadata.fmt,
+  };
+  return { description, complete };
 }
 
 export function describe(

@@ -14,6 +14,12 @@ process.env.LLV_STATE_DIR = path.join(sandbox, "state");
 process.env.LLV_CODEX_HOME = path.join(sandbox, "codex");
 process.env.LLV_CLAUDE_HOME = path.join(sandbox, "claude");
 process.env.TMPDIR = path.join(sandbox, "tmp");
+/* The claude-tasks root falls back to the legacy /tmp/claude-<uid> directory
+   whenever the $TMPDIR candidate does not exist. On a workstation running live
+   Claude agents that fallback leaks real task outputs into this sandbox and
+   their recent projects evict the deliberately old fixtures from the scheme
+   window. Creating the sandbox candidate keeps the scan hermetic. */
+fs.mkdirSync(path.join(sandbox, "tmp", `claude-${process.getuid?.() ?? 1000}`), { recursive: true });
 
 const sessions = path.join(process.env.LLV_CODEX_HOME, "sessions");
 fs.mkdirSync(sessions, { recursive: true });
