@@ -58,6 +58,7 @@ export interface SqliteRegistryStoreOptions {
   initialSnapshot: RegistryFile;
   normalize(value: unknown): RegistryFile;
   onWriterWait?(durationMs: number): void;
+  onSnapshotLoad?(): void;
 }
 
 interface LazyRegistrySnapshot extends SqliteRegistrySnapshot {
@@ -68,6 +69,7 @@ export class SqliteAgentRegistryStore {
   private readonly db: BunDatabase;
   private readonly normalize: (value: unknown) => RegistryFile;
   private readonly onWriterWait: ((durationMs: number) => void) | undefined;
+  private readonly onSnapshotLoad: (() => void) | undefined;
   private readOnlyCache: SqliteRegistrySnapshot | null = null;
 
   constructor(readonly filename: string, options: SqliteRegistryStoreOptions) {
@@ -78,6 +80,7 @@ export class SqliteAgentRegistryStore {
     this.db = new Database(filename, { create: true, strict: true });
     this.normalize = options.normalize;
     this.onWriterWait = options.onWriterWait;
+    this.onSnapshotLoad = options.onSnapshotLoad;
     this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS registry_meta (
@@ -113,6 +116,7 @@ export class SqliteAgentRegistryStore {
   }
 
   snapshot(): SqliteRegistrySnapshot {
+    this.onSnapshotLoad?.();
     this.db.exec("BEGIN");
     try {
       const snapshot = this.loadInTransaction();

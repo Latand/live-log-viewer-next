@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import type { AgentRegistry, AgentRegistryEntry, StructuredHostColumns } from "@/lib/agent/registry";
+import { AgentRegistry, type AgentRegistryEntry, type StructuredHostColumns } from "@/lib/agent/registry";
 
 import type { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import type { CodexAppServerHost } from "./codexAppServerHost";
@@ -203,3 +206,79 @@ for (const [engine, bind] of binders) {
     });
   });
 }
+
+test("production-sized ten-lane persistence coalesces cursors and orders material transitions", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-persistence-production-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const seed = new AgentRegistry(filename);
+  const template = seed.beginSpawn("codex", "/production-seed");
+  const production = seed.snapshot();
+  for (let index = 1; index < 18_000; index += 1) {
+    const launchId = `production-persistence-${String(index).padStart(5, "0")}`;
+    production.receipts[launchId] = { ...structuredClone(template), launchId };
+  }
+  const payload = JSON.stringify(production);
+  expect(Buffer.byteLength(payload)).toBeGreaterThanOrEqual(14_660_822);
+  fs.writeFileSync(filename, payload);
+  const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  const lanes = await Promise.all(Array.from({ length: 10 }, async (_, lane) => {
+    const engine = lane % 2 === 0 ? "codex" as const : "claude" as const;
+    const key = { engine, sessionId: `production-lane-${lane}` };
+    const claimOwner = `production-owner-${lane}`;
+    const claimEpoch = 7;
+    registry.upsert({
+      key,
+      artifactPath: `/sessions/production-lane-${lane}.jsonl`,
+      cwd: "/repo",
+      accountId: "work",
+      status: "live",
+      host: null,
+      structuredHost: {
+        kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+        endpoint: `stdio:${lane}`,
+        process: { pid: 4_000 + lane, startIdentity: `${4_000 + lane}:fixture` },
+        eventCursor: 0,
+        protocolVersion: "1",
+        writerClaimEpoch: claimEpoch,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch,
+      claimOwner,
+      pendingAction: null,
+    });
+    const host = new RecordingHost();
+    const stop = engine === "codex"
+      ? await bindCodexHostPersistence(registry, key, host as unknown as CodexAppServerHost, claimOwner, claimEpoch, "unhosted", { cursorDebounceMs: 20 })
+      : await bindClaudeHostPersistence(registry, key, host as unknown as ClaudeStreamBrokerHost, claimOwner, claimEpoch, "unhosted", { cursorDebounceMs: 20 });
+    return { key, host, stop };
+  }));
+  const revisionBeforeEvents = registry.storageDiagnostics().revision!;
+
+  for (let cursor = 1; cursor <= 100; cursor += 1) {
+    for (const lane of lanes) lane.host.emit({ eventCursor: cursor });
+  }
+  await Bun.sleep(35);
+  for (const lane of lanes) lane.host.emit({ eventCursor: 101, status: "active", activeTurnRef: "turn-live" });
+  for (const lane of lanes) lane.host.emit({ eventCursor: 102, status: "attention", pendingAttention: ["approval"] });
+  for (const lane of lanes) lane.host.emit({
+    eventCursor: 103,
+    status: "unhosted",
+    endpoint: "stdio:released",
+    pid: null,
+    processStartIdentity: null,
+    activeTurnRef: null,
+    pendingAttention: [],
+  });
+
+  expect(registry.storageDiagnostics().revision! - revisionBeforeEvents).toBe(40);
+  for (const lane of lanes) {
+    expect(registry.snapshot().entries[`${lane.key.engine}:${lane.key.sessionId}`]).toMatchObject({
+      status: "unhosted",
+      claimOwner: null,
+      structuredHost: { eventCursor: 103, activeTurnRef: null, pendingAttention: [] },
+    });
+    lane.stop();
+  }
+}, 30_000);

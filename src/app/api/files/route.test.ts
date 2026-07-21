@@ -158,7 +158,7 @@ test("production-sized SQLite registry keeps cold and warm files probes within b
       ...structuredClone(template),
       launchId,
       state: "failed",
-      artifactLifecycle: "deleted",
+      artifactLifecycle: "materialized",
       error: "fixture-terminal",
     };
   }

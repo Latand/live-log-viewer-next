@@ -33,6 +33,10 @@ The measured revision delta must equal the admitted material and coalesced
 cursor transactions, and the JSON mirror inode metadata must remain unchanged
 through steady-state `sqlite` traffic.
 
+A failed scheduled rollback checkpoint retains the dirty revision and retries
+with exponential backoff capped at 30 seconds. Successful convergence resets
+the retry series.
+
 The `read` and `sqlite` paths bypass the whole-registry writer lock, its retry/backoff loop, stale-lock recovery, temp-file cleanup, and startup JSON compaction. Per-session operation locks remain active. They serialize host actuation independently of registry persistence.
 
 ## Rollback
