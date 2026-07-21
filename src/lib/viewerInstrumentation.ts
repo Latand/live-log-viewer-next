@@ -235,7 +235,7 @@ export async function registerViewerRuntime(): Promise<void> {
   }, () => viewerReleaseOwnsTraffic(), {
     onDemoted: () => completeViewerReleaseDemotion(async () => {
         const { agentRegistry } = await import("@/lib/agent/registry");
-        agentRegistry().checkpointRollbackMirror();
+        agentRegistry().checkpointRollbackMirrorForDemotion();
     }),
   });
 }

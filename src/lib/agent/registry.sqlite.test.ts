@@ -422,6 +422,21 @@ test("dual-write leaves both backends unchanged after a no-op mutation", () => {
   db.close();
 });
 
+for (const sqliteMode of ["read", "sqlite"] as const) {
+  test(`${sqliteMode} mode leaves the durable revision unchanged after a missing claim release`, () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-${sqliteMode}-noop-`));
+    const filename = path.join(directory, "agent-registry.json");
+    new AgentRegistry(filename).beginSpawn("codex", "/seed");
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode });
+    const before = registry.storageDiagnostics().revision;
+
+    expect(registry.releaseStructuredHostClaim({ engine: "codex", sessionId: "missing" }, "owner", 1)).toBeFalse();
+
+    expect(registry.storageDiagnostics().revision).toBe(before);
+    expect(registry.storageDiagnostics().mirrorDirty).toBeFalse();
+  });
+}
+
 test("dual-write fails closed when SQLite is ahead of its JSON mirror", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-transition-"));
   const filename = path.join(directory, "agent-registry.json");
@@ -871,6 +886,48 @@ test("one rollback checkpoint publishes one coherent snapshot under sustained wr
   expect(scheduled).toHaveLength(1);
   const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision: number };
   expect(mirror._sqliteRevision).toBeLessThan(writer.storageDiagnostics().revision!);
+});
+
+test("release demotion converges a mirror dirtied by one concurrent successor commit", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-demotion-convergence-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const successor = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  let concurrentCommit = false;
+  const retiring = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "sqlite",
+    afterMirrorWrite: () => {
+      if (!concurrentCommit) return;
+      concurrentCommit = false;
+      successor.beginSpawn("codex", "/successor-during-checkpoint");
+    },
+  });
+  successor.beginSpawn("codex", "/dirty-before-demotion");
+  concurrentCommit = true;
+
+  retiring.checkpointRollbackMirrorForDemotion();
+
+  const json = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision: number };
+  expect(json._sqliteRevision).toBe(successor.storageDiagnostics().revision!);
+  expect(retiring.storageDiagnostics().mirrorDirty).toBeFalse();
+});
+
+test("release demotion fails closed after bounded continuously dirty checkpoints", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-demotion-bounded-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  const successor = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  let mirrorWrites = 0;
+  const retiring = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "sqlite",
+    afterMirrorWrite: () => {
+      mirrorWrites += 1;
+      successor.beginSpawn("codex", `/successor-${mirrorWrites}`);
+    },
+  });
+
+  expect(() => retiring.checkpointRollbackMirrorForDemotion()).toThrow("did not converge");
+  expect(mirrorWrites).toBe(3); // startup plus two bounded demotion attempts
 });
 
 test("failed rollback checkpoints retry with bounded backoff until the mirror converges", () => {

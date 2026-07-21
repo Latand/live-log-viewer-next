@@ -147,6 +147,26 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
 });
 
+test("rollback checkpoint age does not invalidate an otherwise stable files ETag", async () => {
+  const filename = path.join(registryRoot, "registry.json");
+  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  let now = 1_000;
+  setAgentRegistryForTests(new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "read",
+    now: () => now,
+  }));
+  const first = await GET(new Request("http://127.0.0.1/api/files"));
+  const etag = first.headers.get("etag");
+
+  now += 15;
+  const second = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "if-none-match": etag! },
+  }));
+
+  expect(first.status).toBe(200);
+  expect(second.status).toBe(304);
+});
+
 test("production-sized SQLite registry keeps cold and warm files probes within budget", async () => {
   const filename = path.join(registryRoot, "production-registry.json");
   const seed = new AgentRegistry(filename);

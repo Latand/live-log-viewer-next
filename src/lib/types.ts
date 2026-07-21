@@ -275,7 +275,7 @@ export interface FilesResponse {
   tasks: BoardTask[];
   systemHealth: {
     tmux: TmuxEndpointHealth;
-    registry?: import("@/lib/agent/registry").AgentRegistryStorageDiagnostics;
+    registry?: Omit<import("@/lib/agent/registry").AgentRegistryStorageDiagnostics, "mirrorAgeMs">;
   };
   /** Durable conversation-id aliases (old id → canonical id), so a deep link
       copied before provisional-id adoption still resolves its card. */

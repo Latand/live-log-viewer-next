@@ -157,21 +157,24 @@ export class SqliteAgentRegistryStore {
       const waitStartedAt = performance.now();
       this.db.exec("BEGIN IMMEDIATE");
       let revision: number;
+      const changed = changes.rows.size > 0 || changes.meta.size > 0 || changes.order.size > 0;
       try {
         this.onWriterWait?.(performance.now() - waitStartedAt);
         if (Number(this.meta("revision") ?? 0) !== current.revision) {
           this.db.exec("ROLLBACK");
           continue;
         }
-        revision = current.revision + 1;
-        this.persistChanges(current.file, changes, revision);
+        revision = changed ? current.revision + 1 : current.revision;
+        if (changed) this.persistChanges(current.file, changes, revision);
         this.db.exec("COMMIT");
       } catch (error) {
         try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
         throw error;
       }
-      this.secureFiles();
-      this.readOnlyCache = null;
+      if (changed) {
+        this.secureFiles();
+        this.readOnlyCache = null;
+      }
       if (includeSnapshot) {
         const committed = this.snapshot();
         return { result, file: committed.file, revision: committed.revision };

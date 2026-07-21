@@ -537,6 +537,17 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const projectsFinishedAt = performance.now();
   timings.push(`files-projects;dur=${(projectsFinishedAt - projectsStartedAt).toFixed(1)}`);
   timingMark = projectsFinishedAt;
+  const registryDiagnostics = registry.storageDiagnostics();
+  const registryHealth = {
+    backendMode: registryDiagnostics.backendMode,
+    revision: registryDiagnostics.revision,
+    transactionCount: registryDiagnostics.transactionCount,
+    writerRatePerSecond: registryDiagnostics.writerRatePerSecond,
+    writerWaitP95Ms: registryDiagnostics.writerWaitP95Ms,
+    transactionP95Ms: registryDiagnostics.transactionP95Ms,
+    mirrorCheckpointAtMs: registryDiagnostics.mirrorCheckpointAtMs,
+    mirrorDirty: registryDiagnostics.mirrorDirty,
+  };
   const body = JSON.stringify({
     files: projected.files,
     ...(responsePinOverlayPaths.size ? { pinOverlayPaths: [...responsePinOverlayPaths] } : {}),
@@ -546,7 +557,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     pipelines,
     workflows,
     tasks: tasks.tasks,
-    systemHealth: { tmux: tmuxEndpointHealth(), registry: registry.storageDiagnostics() },
+    systemHealth: { tmux: tmuxEndpointHealth(), registry: registryHealth },
     conversationAliases: registrySnapshot.conversationAliases,
     ...(pipelinesError ? { pipelinesError } : {}),
   } satisfies FilesResponse);

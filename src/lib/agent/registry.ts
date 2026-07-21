@@ -2234,6 +2234,7 @@ export interface AgentRegistryStorageDiagnostics {
   writerRatePerSecond: number;
   writerWaitP95Ms: number | null;
   transactionP95Ms: number | null;
+  mirrorCheckpointAtMs: number | null;
   mirrorAgeMs: number | null;
   mirrorDirty: boolean;
 }
@@ -2386,6 +2387,7 @@ export class AgentRegistry {
       writerRatePerSecond: rollingTransactions / 60,
       writerWaitP95Ms: this.percentile(this.writerWaits),
       transactionP95Ms: this.percentile(this.transactionDurations),
+      mirrorCheckpointAtMs: this.lastMirrorAt,
       mirrorAgeMs: this.lastMirrorAt === null ? null : Math.max(0, this.now() - this.lastMirrorAt),
       mirrorDirty: this.mirrorDirty,
     };
@@ -2397,6 +2399,15 @@ export class AgentRegistry {
     if (!this.mirrorDirty && this.lastMirroredRevision !== null && currentRevision <= this.lastMirroredRevision) return;
     this.mirrorSqliteSnapshot(this.sqliteStore.snapshot());
     this.mirrorCheckpointFailures = 0;
+  }
+
+  checkpointRollbackMirrorForDemotion(maxAttempts = 2): void {
+    if (!this.sqliteStore || this.sqliteMode === "dual-write") return;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      this.checkpointRollbackMirror();
+      if (!this.storageDiagnostics().mirrorDirty) return;
+    }
+    throw new Error(`agent registry rollback mirror did not converge after ${maxAttempts} attempts`);
   }
 
   private scheduleRollbackMirror(delayMs = this.mirrorCheckpointMs): void {
@@ -2852,10 +2863,12 @@ export class AgentRegistry {
     if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
       const mutation = this.sqliteStore!.mutate(mutator, false);
       if (this.sqliteMode === "read") {
-        this.mirrorDirty = true;
-        this.scheduleRollbackMirrorForCadence();
+        this.mirrorDirty = this.lastMirroredRevision === null || mutation.revision > this.lastMirroredRevision;
+        if (this.mirrorDirty) this.scheduleRollbackMirrorForCadence();
       }
-      if (this.sqliteMode === "sqlite") this.mirrorDirty = true;
+      if (this.sqliteMode === "sqlite") {
+        this.mirrorDirty = this.lastMirroredRevision === null || mutation.revision > this.lastMirroredRevision;
+      }
       return mutation.result;
     }
     const lock = `${this.filename}.write-lock`;
