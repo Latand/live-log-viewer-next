@@ -164,6 +164,29 @@ test("a truncated transcript resets its checkpoint instead of replaying stale ev
   expect(second.count).toBe(1);
 });
 
+test("a same-inode shrink above the saved offset resets before scanning newly authored content", async () => {
+  const pathname = path.join(SANDBOX, "shrink-above-offset.jsonl");
+  fs.writeFileSync(pathname, Buffer.alloc(8 * MIB, 0x0a));
+  const first = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, {
+    resume: true,
+    maxBytes: 4 * MIB,
+  });
+  expect(first).toEqual({ count: 0, complete: false });
+  expect(checkpointFor(pathname)!.offset).toBe(4 * MIB);
+
+  const authored = Buffer.from(`${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "new owner content" } })}\n`);
+  const fd = fs.openSync(pathname, "r+");
+  try {
+    fs.writeSync(fd, authored, 0, authored.length, MIB);
+    fs.ftruncateSync(fd, 6 * MIB);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  const resumed = await scanUserAuthoredMessagesCooperatively(pathname, "codex", 1, { resume: true });
+  expect(resumed).toEqual({ count: 1, complete: true });
+});
+
 test("a finished scan replays its verdict from the checkpoint without re-reading", async () => {
   const pathname = path.join(SANDBOX, "finished.jsonl");
   fs.writeFileSync(pathname, `${JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "done" } })}\n`);
