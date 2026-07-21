@@ -122,7 +122,10 @@ export class FlowPipelineController {
       this.trailingTrigger = trigger;
       return this.running;
     }
-    this.running = this.runRequestedCycles(trigger).finally(() => { this.running = null; });
+    this.running = this.runRequestedCycles(trigger).finally(() => {
+      this.running = null;
+      if (this.trailingCycleRequested) return this.tick(this.trailingTrigger);
+    });
     return this.running;
   }
 

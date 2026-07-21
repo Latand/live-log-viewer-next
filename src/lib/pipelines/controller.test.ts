@@ -175,6 +175,40 @@ test("startup recovery and the watchdog converge a pending transition without du
   expect(transitions).toBe(1);
 });
 
+test("a wake during controller settlement runs one additional cycle without duplicate transition effects", async () => {
+  const idleCycles: number[] = [];
+  let transitionPending = false;
+  let transitionEffects = 0;
+  let settlementWake: Promise<void> | null = null;
+  const controller = new FlowPipelineController({
+    tickPipelines: async () => {
+      if (!transitionPending) return { changed: false };
+      transitionPending = false;
+      transitionEffects += 1;
+      return { changed: true };
+    },
+    tickFlows: async () => ({ changed: false }),
+    publishHeartbeat: (heartbeat) => {
+      if (heartbeat.phase !== "idle") return;
+      idleCycles.push(heartbeat.cycle);
+      if (heartbeat.cycle !== 1) return;
+      queueMicrotask(() => {
+        queueMicrotask(() => {
+          transitionPending = true;
+          settlementWake = controller.tick("settlement-wake");
+        });
+      });
+    },
+  });
+
+  await controller.tick("initial");
+  if (settlementWake === null) throw new Error("settlement wake was not scheduled");
+  await settlementWake;
+
+  expect(idleCycles).toEqual([1, 2]);
+  expect(transitionEffects).toBe(1);
+});
+
 test("controller runtime registers startup recovery and one deterministic watchdog", async () => {
   const calls: string[] = [];
   const signals: Array<() => Promise<void>> = [];
