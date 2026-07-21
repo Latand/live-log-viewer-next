@@ -122,5 +122,6 @@ test("a candidate that shrinks above its saved offset rescans replacement head c
   fs.writeFileSync(pathname, replacement);
   expect(fs.statSync(pathname).size).toBeGreaterThan(MIB);
 
+  expect(fileHasNeedle(needle, pathname, { remaining: 0 })).toBe(false);
   expect(fileHasNeedle(needle, pathname, { remaining: MIB })).toBe(true);
 });

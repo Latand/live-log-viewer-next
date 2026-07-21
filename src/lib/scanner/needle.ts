@@ -203,6 +203,7 @@ export function fileHasNeedle(needle: string, pathname: string, budget?: NeedleS
   // end remains above the incremental checkpoint.
   if (observedSize !== undefined && size < observedSize) {
     done = 0;
+    ent.scanned[pathname] = 0;
     delete ent.hits[pathname];
   }
   ent.sizes[pathname] = size;
