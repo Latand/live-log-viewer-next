@@ -379,3 +379,14 @@ test("runtime-host discards the unsupported credential before loading child-capa
     'import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential";',
   ]);
 });
+
+test("runtime-host completes predecessor cleanup only after acquiring the singleton fence", () => {
+  const source = fs.readFileSync(new URL("./runtime-host/main.ts", import.meta.url), "utf8");
+  const fenceAt = source.indexOf("fence.acquire()");
+  const cleanupAt = source.indexOf("await deploymentAdapter.completeRuntimeHostHandoff");
+  const recoveryAt = source.indexOf("await host.recoverConsumers()");
+
+  expect(fenceAt).toBeGreaterThanOrEqual(0);
+  expect(cleanupAt).toBeGreaterThan(fenceAt);
+  expect(recoveryAt).toBeGreaterThan(cleanupAt);
+});
