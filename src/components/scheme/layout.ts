@@ -67,10 +67,11 @@ export const GROUP_SIBLING_GAP = GROUP_PAD * 2 + GAP_X;
 export const SLOT_W = NODE_W;
 export const SLOT_H = 620;
 export const SLOT_GAP = 72;
-/* Compact-history stage cards (#353 R3): a terminal stage whose full pane is
-   folded out of the scene keeps a short navigable anchor card at its stage
-   position so its pass/fail edges and halo membership survive compaction. */
-export const HISTORY_H = 168;
+/* Completed stage cards (#507 F2): a terminal stage of an ACTIVE pipeline whose
+   idle transcript is not surfaced as a live node still stands in at its stage
+   position as a FULL conversation card — same footprint (SLOT_H) as the live
+   and placeholder cards, so a five-stage graph reads as five real/placeholder
+   cards, not one live pane beside compact history stubs. */
 /* Quiet-branch mini cards stacked under their parent pane. */
 const MINI_W = 360;
 const MINI_H = 52;
@@ -165,12 +166,13 @@ export interface StageSlot extends SchemeRect {
   /** 0-based position of this stage within the pipeline's full chain. */
   index: number;
   total: number;
-  /** How this stage renders (#353 R3): `placeholder` = a future or still-forming
-      (pending/spawning) stage as a conversation-shaped shell; `history` = a
-      terminal stage whose full pane is folded out of the scene, standing in as a
-      compact navigable anchor so its edges and halo membership survive. */
-  presentation: "placeholder" | "history";
-  /** History slots: the terminal attempt whose transcript the compact card opens. */
+  /** How this stage renders: `placeholder` = a future or still-forming
+      (pending/spawning) stage as a conversation-shaped shell; `completed` = a
+      terminal stage of an active pipeline whose idle transcript is not a live
+      node, standing in as a FULL conversation card (#507 F2) so its edges, halo
+      membership, and real-card footprint survive. */
+  presentation: "placeholder" | "completed";
+  /** Completed slots: the terminal attempt whose transcript the card opens. */
   attempt?: PipelineStageAttempt;
   /** Render an incoming handoff badge on this slot's left edge: set when the
       previous stage's slot sits directly beside it in the same row. */
@@ -678,19 +680,19 @@ export function buildSchemeLayout(
     });
     let slotDockY = restTop;
     for (const pipeline of pool) {
-      /* Classify every declared stage into exactly one surface (#353 R3): a live
-         full pane (its transcript is a placed node), a compact history card (a
-         terminal stage whose full pane was folded out of the scene by
-         compactPipelineArtifactPaths), or a placeholder (a future or still-forming
-         pending/spawning stage). Only the live stage keeps a full pane; the others
-         become slots so their edges and halo membership survive compaction. */
+      /* Classify every declared stage into exactly one surface (#507 F2): a live
+         full pane (its transcript is a placed node), a completed full card (a
+         terminal stage of an active pipeline whose idle transcript is not a node),
+         or a placeholder (a future or still-forming pending/spawning stage). Every
+         current stage is a full-size card; only superseded retries fold out of the
+         scene via compactPipelineArtifactPaths. */
       const placeholderIds = new Set(pipelinePlaceholderStages(pipeline, placedNodePaths, placedDeckFlowIds).map((stage) => stage.id));
-      /* Compact history anchors only grow on an active pipeline, and never for the
-         cursor stage itself: a cursor stage whose only transcript is quiet history
+      /* Completed cards only grow on an active pipeline, and never for the cursor
+         stage itself: a cursor stage whose only transcript is quiet history
          (folded into an under-deck) has no live pane and shelves (#343), rather
-         than resurfacing as an anchor. */
+         than resurfacing as a card. */
       const growsHistory = PIPELINE_PLACEHOLDER_STATES.has(pipeline.state);
-      type SlotStage = { stage: PipelineStage; index: number; presentation: "placeholder" | "history"; attempt?: PipelineStageAttempt };
+      type SlotStage = { stage: PipelineStage; index: number; presentation: "placeholder" | "completed"; attempt?: PipelineStageAttempt };
       const slotStages: SlotStage[] = [];
       const memberPaths = new Set<string>();
       /* The chain's tip: the LAST stage (in chain order) whose live pane is a
@@ -721,12 +723,13 @@ export function buildSchemeLayout(
           continue;
         }
         /* Any materialized attempt (the operational latest or a folded historical
-           one) on a NON-cursor stage makes this a terminal stage folded out of the
-           scene: a compact history anchor. */
+           one) on a NON-cursor stage is a completed stage whose idle transcript is
+           not a live node: it stands in as a full conversation card at its
+           position. */
         if (!growsHistory || stage.id === pipeline.cursor?.stageId) continue;
         const materialized = stageAttempts(pipeline, stage.id).findLast((candidate) => candidate.agentPath || candidate.flowId);
         if (materialized) {
-          slotStages.push({ stage, index, presentation: "history", attempt: materialized });
+          slotStages.push({ stage, index, presentation: "completed", attempt: materialized });
         }
       }
       if (!surfaceIds.has(pipeline.id) && !memberPaths.size) continue;
@@ -774,7 +777,9 @@ export function buildSchemeLayout(
           x: sx + i * (SLOT_W + SLOT_GAP),
           y: sy,
           w: SLOT_W,
-          h: presentation === "history" ? HISTORY_H : SLOT_H,
+          /* Every slot is a full-size card now — completed and placeholder alike
+             share the live conversation's footprint (#507 F2). */
+          h: SLOT_H,
         };
         slots.push(slot);
         keys.push(slot.key);

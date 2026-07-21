@@ -6,6 +6,24 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 
 ## [Unreleased]
 
+### Changed
+- Completed the on-canvas pipeline editor visual contract (#507 review). Three
+  repairs finish the pivot to composing the whole pipeline on the canvas as real
+  cards: (1) desktop stage editing no longer has a nested form/scroller — the
+  pipeline group's override panel keeps only pipeline-level controls (draft
+  task/spec/repo, lifecycle, retry/skip) and points to the canvas, so every
+  per-stage edit (role, model, prompt, order, connections) happens on the real
+  conversation/placeholder cards. (2) A completed stage of an active pipeline now
+  stays a full conversation card inside the colored group — `compactPipelineArtifactPaths`
+  keeps every current stage's latest transcript full-size and folds only
+  superseded retries (and completed/closed pipeline history), and an idle
+  completed stage whose transcript is no longer surfaced as a live node stands in
+  as a full-size completed card that shows the prompt it ran and opens its
+  transcript. A five-stage graph now renders as five real/placeholder cards, not
+  one live pane beside compact history stubs. (3) The mobile stage editor now
+  portals above the phone pipeline dock sheet (z-[80] over the sheet's z-[70]),
+  so it is visible and usable at 390px instead of painting under the backdrop.
+
 ### Added
 - On-canvas pipeline stage reordering (#507). A draft's stage cards carry their
   own move-earlier / move-later controls, so the whole conversation graph is

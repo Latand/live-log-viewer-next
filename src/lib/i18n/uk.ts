@@ -928,6 +928,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "groupOverride.stagePrompt": "Додатковий промпт (необов'язково)",
   "groupOverride.applyStage": "Оновити етап",
   "groupOverride.noEditableStage": "Немає майбутнього етапу для змін — усі етапи вже стартували.",
+  "groupOverride.editStagesOnCanvas": "Редагуйте етапи на їхніх картках — роль, модель, підказка, порядок і зʼєднання є на картці кожного етапу на полотні.",
   "groupOverride.savedReviewer": "Рев'юера оновлено на наступний раунд",
   "groupOverride.savedLimit": "Ліміт раундів оновлено",
   "groupOverride.savedExtend": "Додано раунд",
@@ -1079,9 +1080,8 @@ export const uk: Record<keyof typeof en, Message> = {
 
   // плейсхолдери етапів пайплайна + вибір шаблону (#196)
   "pipelineSlot.paneAria": "Запланований етап {role}",
-  "pipelineSlot.historyAria": "Завершений етап {role} — компактна історія",
-  "pipelineSlot.historyFolded": "Повний транскрипт згорнуто — відкрийте для перегляду",
-  "pipelineSlot.openHistory": "Відкрити історію",
+  "pipelineSlot.completedAria": "Завершений етап {role} — відкрийте для перегляду",
+  "pipelineSlot.openTranscript": "Відкрити розмову",
   "pipelineSlot.stageOf": "етап {k}/{n}",
   "pipelineSlot.promptLabel": "Додатковий промпт (необов'язково)",
   "pipelineSlot.noPrompt": "Додатковий контекст для агента — все вище підключається автоматично.",

@@ -287,6 +287,12 @@ async function main(): Promise<void> {
       return scrolls;
     });
     if (nestedScroll.length) throw new Error(`nested scrollbars inside stage cards: ${nestedScroll.join(" | ")}`);
+    /* Finding 2: a completed stage of an active pipeline stays a full real card
+       inside the colored group — never a compact history-only stub. */
+    const historyStubs = await desktop.locator('[data-pipeline-stage-history]').count();
+    if (historyStubs) throw new Error(`completed stages must be full cards, found ${historyStubs} compact history stubs`);
+    const mixedCompleted = await desktop.locator(`[data-pipeline-stage-card="${MIXED_ID}::architect"], [data-pipeline-stage-card="${MIXED_ID}::builder"]`).count();
+    if (mixedCompleted < 2) throw new Error(`running pipeline: expected both completed stages as real cards, found ${mixedCompleted}`);
     await desktop.evaluate(() => {
       const fit = Array.from(document.querySelectorAll("button")).find((button) =>
         (button.getAttribute("title") || "").startsWith("Fit all content"),
@@ -325,11 +331,62 @@ async function main(): Promise<void> {
       throw new Error(`390px shell overflows horizontally: scrollWidth ${overflow.scrollWidth} > innerWidth ${overflow.innerWidth}`);
     }
     await mobile.screenshot({ path: path.join(outDir, "issue-507-editor-mobile-390.png") });
+
+    /* Finding 3: the stage configuration editor must render ABOVE the mobile
+       pipeline dock sheet and stay usable at 390px. Open the sheet, expand a
+       pipeline, open a stage's editor, and assert its portal layer clears the
+       sheet's z-index and lands inside the viewport. */
+    let editorEvidence = "skipped";
+    try {
+      await mobile.locator('[data-testid="mobile-pipeline-summary"]').first().click();
+      await mobile.waitForSelector('[data-testid="mobile-pipeline-sheet"]', { timeout: 20_000 });
+      await mobile.locator('[data-testid="mobile-pipeline-dock-summary"]').first().click();
+      const configure = mobile.locator('button[aria-label^="Configure stage"]').first();
+      await configure.waitFor({ state: "visible", timeout: 20_000 });
+      await configure.click();
+      const editor = mobile.locator('[role="dialog"][aria-label^="Configuration for stage"]');
+      await editor.waitFor({ state: "visible", timeout: 20_000 });
+      const check = await mobile.evaluate(() => {
+        const dialog = document.querySelector('[role="dialog"][aria-label^="Configuration for stage"]');
+        const sheet = document.querySelector('[data-testid="mobile-pipeline-sheet"]');
+        if (!dialog || !sheet) return null;
+        const portal = dialog.parentElement as HTMLElement | null;
+        const zOf = (el: Element | null) => {
+          for (let node: Element | null = el; node; node = node.parentElement) {
+            const z = Number.parseInt(getComputedStyle(node).zIndex, 10);
+            if (Number.isFinite(z)) return z;
+          }
+          return 0;
+        };
+        const rect = dialog.getBoundingClientRect();
+        return {
+          editorZ: zOf(portal),
+          sheetZ: zOf(sheet),
+          onScreen: rect.left >= 0 && rect.right <= window.innerWidth && rect.width > 0,
+          right: Math.round(rect.right),
+          innerWidth: window.innerWidth,
+        };
+      });
+      if (!check) throw new Error("editor or sheet element not found for z-index comparison");
+      if (check.editorZ <= check.sheetZ) {
+        throw new Error(`stage editor z-index ${check.editorZ} does not clear the sheet z-index ${check.sheetZ}`);
+      }
+      if (!check.onScreen) {
+        throw new Error(`stage editor spills off the 390px viewport (right ${check.right} > innerWidth ${check.innerWidth})`);
+      }
+      await mobile.waitForTimeout(300);
+      await mobile.screenshot({ path: path.join(outDir, "issue-507-editor-mobile-390-editor.png") });
+      editorEvidence = `editorZ ${check.editorZ} > sheetZ ${check.sheetZ}, on-screen (right ${check.right} <= ${check.innerWidth})`;
+    } catch (error) {
+      await mobile.close();
+      throw new Error(`mobile stage-editor evidence failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     await mobile.close();
 
     console.log(
       `captured #507 evidence into ${outDir}: draft five-card editor + running real/placeholder mix at 1600x1000, ` +
-        `390x844 overflow-safe (scrollWidth ${overflow.scrollWidth} <= innerWidth ${overflow.innerWidth})`,
+        `390x844 overflow-safe (scrollWidth ${overflow.scrollWidth} <= innerWidth ${overflow.innerWidth}); ` +
+        `mobile editor above sheet — ${editorEvidence}`,
     );
   } finally {
     await browser.close();

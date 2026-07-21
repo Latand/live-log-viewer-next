@@ -262,7 +262,7 @@ describe("pipelineCursorActive", () => {
 describe("compactPipelineArtifactPaths", () => {
   const stages = [stage("architect"), stage("builder"), stage("review", "review-loop")];
 
-  test("keeps only the cursor stage's live pane; every terminal stage and prior retry compacts (#353 R2)", () => {
+  test("keeps every current stage's live pane; only the superseded retry compacts (#507 F2)", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
@@ -278,12 +278,13 @@ describe("compactPipelineArtifactPaths", () => {
       ],
     });
 
-    /* The live builder attempt is the sole full pane; the passed architect (a
-       terminal stage) and the failed builder retry fold into compact history. */
-    expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/architect", "/builder-attempt-1"]);
+    /* Both the passed architect and the live builder attempt stay full real
+       cards inside the group (#507); only the failed builder retry — a
+       superseded transcript — folds into compact history. */
+    expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/builder-attempt-1"]);
   });
 
-  test("keeps the live reviewer transcript as the pane and compacts the implementer it reviews (#353 R2)", () => {
+  test("keeps the live reviewer AND the completed implementer it reviews as full cards (#507 F2)", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -294,12 +295,13 @@ describe("compactPipelineArtifactPaths", () => {
     });
     const flows = [{ id: "f1", implementerPath: "/builder", rounds: [{ reviewerPath: "/reviewer" }] }] as unknown as Flow[];
 
-    /* The reviewer is the current live pane (its flow deck is folded out in
-       production), so the passed builder it reviews compacts. */
-    expect(compactPipelineArtifactPaths([p], flows)).toEqual(new Set(["/builder"]));
+    /* The reviewer is a live card (its flow deck is folded out in production) and
+       the passed builder it reviews is its own completed run card — neither
+       compacts (#507 F2). */
+    expect(compactPipelineArtifactPaths([p], flows)).toEqual(new Set([]));
   });
 
-  test("compacts the reviewed implementer and every durable binding from a retried review round", () => {
+  test("keeps current transcripts full but still compacts a superseded prior-round reviewer binding (#507 F2)", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -322,10 +324,12 @@ describe("compactPipelineArtifactPaths", () => {
       { path: "/review-current", conversationId: "conversation-current", durableLineage: { memberships: [membership("reviewer:1:binding-b")] } },
     ] as unknown as FileEntry[];
 
-    expect(compactPipelineArtifactPaths([p], flows, files)).toEqual(new Set(["/builder", "/review-prior"]));
+    /* The reviewed implementer /builder and the current reviewer /review-current
+       stay full cards; only the superseded /review-prior binding folds. */
+    expect(compactPipelineArtifactPaths([p], flows, files)).toEqual(new Set(["/review-prior"]));
   });
 
-  test("a review cursor with no reviewer yet keeps the implementer pane and compacts earlier stages", () => {
+  test("a review cursor with no reviewer yet keeps the implementer AND every earlier stage full (#507 F2)", () => {
     const p = pipeline({
       stages,
       cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
@@ -337,9 +341,9 @@ describe("compactPipelineArtifactPaths", () => {
     });
 
     /* The reviewer transcript has not materialized, so the implementer it reviews
-       (the latest preceding passed run, /builder) is the live pane; the earlier
-       architect compacts. */
-    expect([...compactPipelineArtifactPaths([p], [])]).toEqual(["/architect"]);
+       (/builder) stands in as its live pane; the earlier architect is its own
+       completed card too. Nothing compacts (#507 F2). */
+    expect([...compactPipelineArtifactPaths([p], [])]).toEqual([]);
   });
 
   test("a completed pipeline represents every transcript through compact history", () => {

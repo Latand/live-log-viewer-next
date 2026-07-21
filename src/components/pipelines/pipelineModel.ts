@@ -292,18 +292,23 @@ export function pipelinePlaceholderStages(
 
 /**
  * Transcript artifacts represented by compact, navigable stage history rather
- * than a full conversation pane (#353 review round 2).
+ * than a full conversation pane (#353 review round 2, revised by #507 review F2).
  *
- * Each declared stage projects into exactly ONE surface. Only the pipeline's
- * current live stage — the cursor's latest attempt — keeps a full conversation
- * pane. Every terminal or prior stage (a passed/failed/skipped attempt, an
- * all-historical stage, or an earlier retry) folds into compact navigable
- * history that stays out of the world scene (and so out of the minimap / Fit All
- * bounds) until it is opened; its verdict, duration, model, and every retry
- * transcript remain reachable through the stage's evidence controls. Future
- * stages hold conversation-shaped placeholders. Keeping only the cursor pane
- * full-size is what lets the halo read as one live conversation plus its
- * placeholders instead of a wall of equal cards.
+ * Each declared stage projects into exactly ONE surface. On an ACTIVE pipeline
+ * (running/paused/blocked — anything that still holds a cursor) every current
+ * stage keeps its own full conversation pane: the LATEST attempt of every stage
+ * is a real card inside the colored pipeline group, so a five-stage graph reads
+ * as five real/placeholder cards rather than one live pane beside a rail of
+ * compact history stubs (#507). Future stages hold conversation-shaped
+ * placeholders; completed run stages and the live/completed reviewer keep their
+ * transcript full-size beside them.
+ *
+ * Only genuinely superseded transcripts fold into compact navigable history that
+ * stays out of the world scene (and so out of the minimap / Fit All bounds)
+ * until opened: an EARLIER retry of a stage (any attempt that is not the stage's
+ * latest) and the prior-round reviewer bindings of a review loop. Their verdict,
+ * duration, model, and transcript remain reachable through the stage's evidence
+ * controls.
  *
  * For a live review-loop cursor the retained pane is the reviewer transcript
  * itself (`attempt.agentPath`) — the pipeline folds its flow's round deck out of
@@ -312,7 +317,7 @@ export function pipelinePlaceholderStages(
  * falls back to its flow implementer so the loop still shows a live pane.
  *
  * Completed and closed pipelines fold their full transcript chain — they have no
- * live stage and no future placeholders.
+ * live stage and no future placeholders, so the whole run collapses to history.
  */
 export function compactPipelineArtifactPaths(
   pipelines: readonly Pipeline[],
@@ -324,17 +329,20 @@ export function compactPipelineArtifactPaths(
 
   for (const pipeline of pipelines) {
     if (!pipeline.cursor || pipeline.state === "completed" || pipeline.state === "closed" || pipeline.state === "draft") continue;
-    const stage = pipeline.stages.find((candidate) => candidate.id === pipeline.cursor!.stageId);
-    const attempt = stage ? latestAttempt(pipeline, stage.id) : null;
-    if (!stage || !attempt) continue;
-    if (attempt.agentPath) {
-      /* The cursor stage's own transcript — a run's session or the live
-         reviewer's transcript — is the single full pane. */
-      fullPanePaths.add(attempt.agentPath);
-    } else if (stage.kind === "review-loop") {
-      /* A review cursor that has not spawned its reviewer yet keeps the
-         implementer it reviews as the live pane: the flow's implementer, or the
-         most recent preceding passed run. */
+    /* Every current stage stays a full conversation card (#507 F2): keep each
+       stage's latest attempt transcript, not just the cursor's. Earlier retries
+       are excluded here (only `latestAttempt` is retained) so they still fold. */
+    for (const stage of pipeline.stages) {
+      const attempt = latestAttempt(pipeline, stage.id);
+      if (!attempt) continue;
+      if (attempt.agentPath) {
+        fullPanePaths.add(attempt.agentPath);
+        continue;
+      }
+      /* A review stage whose reviewer transcript has not materialized yet keeps
+         the implementer it reviews as its live pane: the flow's implementer, or
+         the most recent preceding passed run. */
+      if (stage.kind !== "review-loop") continue;
       const stageIndex = pipeline.stages.findIndex((candidate) => candidate.id === stage.id);
       const priorRunPath = pipeline.stages
         .slice(0, stageIndex)

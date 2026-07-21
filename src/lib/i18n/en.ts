@@ -957,6 +957,7 @@ export const en = {
   "groupOverride.stagePrompt": "Additional prompt (optional)",
   "groupOverride.applyStage": "Update stage",
   "groupOverride.noEditableStage": "No upcoming stage to edit — every stage has already started.",
+  "groupOverride.editStagesOnCanvas": "Edit stages on their cards — role, model, prompt, order, and connections live on each stage's card in the canvas.",
   "groupOverride.savedReviewer": "Reviewer updated for the next round",
   "groupOverride.savedLimit": "Round limit updated",
   "groupOverride.savedExtend": "Added a round",
@@ -1110,9 +1111,8 @@ export const en = {
 
   // pipeline stage placeholders + template picker (#196)
   "pipelineSlot.paneAria": "Planned stage {role}",
-  "pipelineSlot.historyAria": "Completed stage {role} — compact history",
-  "pipelineSlot.historyFolded": "Full transcript folded — open to review",
-  "pipelineSlot.openHistory": "Open history",
+  "pipelineSlot.completedAria": "Completed stage {role} — open to review",
+  "pipelineSlot.openTranscript": "Open conversation",
   "pipelineSlot.stageOf": "stage {k}/{n}",
   "pipelineSlot.promptLabel": "Additional prompt (optional)",
   "pipelineSlot.noPrompt": "Extra context for this agent — the wiring above is automatic.",

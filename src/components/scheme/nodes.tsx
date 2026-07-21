@@ -22,7 +22,7 @@ import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
-import { StageHistoryCard } from "@/components/pipelines/StageHistoryCard";
+import { StageCompletedCard } from "@/components/pipelines/StageCompletedCard";
 import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, latestAttempt, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
@@ -1063,9 +1063,10 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
   const [busy, setBusy] = useState(false);
   const tone = STAGE_TONES[stageChipState(slot.pipeline, slot.stage)];
   const { pipeline } = slot;
-  /* A terminal stage folded out of the scene renders as a compact navigable
-     history anchor rather than the full-size placeholder pane (#353 R3). */
-  if (slot.presentation === "history") {
+  /* A completed stage of an active pipeline renders as a full conversation card
+     at its stage position — same footprint as the live and placeholder cards, so
+     the group reads as real cards rather than compact history stubs (#507 F2). */
+  if (slot.presentation === "completed") {
     const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
     const file = target ? resolveStageNavFile(target, files) : null;
     return (
@@ -1077,13 +1078,13 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
         {slot.incoming ? (
           <span
             aria-hidden
-            className="absolute top-[24px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
+            className="absolute top-[110px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
             style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
           >
             {slot.incoming === "review-loop" ? "⟳" : "→"}
           </span>
         ) : null}
-        <StageHistoryCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} />
+        <StageCompletedCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} />
       </div>
     );
   }

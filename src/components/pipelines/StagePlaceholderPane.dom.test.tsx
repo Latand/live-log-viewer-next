@@ -136,6 +136,29 @@ test("editing the effort + Apply PATCHes override-stage with ONLY the changed fi
   host.remove();
 });
 
+test("switching the engine on the card clears the previous engine's model (#118 F2, now canvas-owned)", async () => {
+  const patches: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
+    if (!init?.method || init.method !== "PATCH") return { ok: true, json: async () => ({ roles: [] }) };
+    patches.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+    return { ok: true, json: async () => ({}) };
+  }) as unknown as typeof fetch;
+
+  const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
+  openConfig(host);
+  /* The engine radios only exist inside the disclosed config, matching the live
+     window's own header. Switch claude → codex; the fable model must not ride
+     along (resolvePipelineRole would 400 a codex+fable pin). */
+  const radios = [...host.querySelectorAll('[role="radio"]')] as HTMLButtonElement[];
+  const codex = radios.find((r) => r.getAttribute("aria-checked") === "false") as HTMLButtonElement;
+  expect(codex.textContent?.toLowerCase()).toContain("codex");
+  flushSync(() => codex.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Bun.sleep(0);
+  expect(patches).toEqual([{ action: "override-stage", stageId: "architect", engine: "codex", model: null }]);
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
 test("editing the prompt saves on blur with ONLY the prompt", async () => {
   const patches: Array<Record<string, unknown>> = [];
   globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {

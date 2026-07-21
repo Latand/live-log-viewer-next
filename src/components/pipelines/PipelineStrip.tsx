@@ -79,6 +79,13 @@ export function verdictPlacement(
  * measures the popover's own box and flips/clamps via {@link verdictPlacement}
  * so a strip near the page header never renders it off-screen. Recomputed on
  * scroll/resize.
+ *
+ * The portal sits at z-[80] — above the z-[70] mobile pipeline dock sheet
+ * (MobilePipelineDockSheet) that hosts the strip on a phone (#507 review F3).
+ * The verdict popover and the stage configuration editor both mount here, and a
+ * z-[60] portal painted UNDER the sheet's z-[70] backdrop was invisible and
+ * unclickable at 390px; z-[80] clears the sheet while staying below the
+ * AgentLink full-screen overlay (z-[95]).
  */
 function AnchoredVerdict({ anchorRef, children }: { anchorRef: RefObject<HTMLElement | null>; children: ReactNode }) {
   const contentRef = useRef<HTMLDivElement>(null);
@@ -109,7 +116,7 @@ function AnchoredVerdict({ anchorRef, children }: { anchorRef: RefObject<HTMLEle
   return createPortal(
     <div
       ref={contentRef}
-      className="fixed z-[60]"
+      className="fixed z-[80]"
       style={
         placement
           ? { left: placement.left, top: placement.top, transform: placement.below ? "translate(-50%, 0)" : "translate(-50%, -100%)" }

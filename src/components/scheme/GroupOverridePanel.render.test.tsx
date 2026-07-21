@@ -91,28 +91,25 @@ test("the flow override panel exposes next-reviewer role, note, rounds and lifec
   expect(html).toContain("Close");
 });
 
-test("the pipeline override panel edits the next unstarted stage and keeps stage controls", () => {
+test("the pipeline override panel keeps only pipeline-level controls and points stage edits to the canvas (#507 F1)", () => {
   const html = renderToStaticMarkup(<GroupOverridePanel group={pipelineGroup} onClose={noop} />);
   expect(html).toContain('data-group-override="pipeline"');
-  /* The upcoming (zero-attempt) stage is editable: role + prompt + model + apply. */
-  expect(html).toContain("Next stage");
-  expect(html).toContain("Role");
-  expect(html).toContain("No role");
-  /* Role options are offered with localized display names (issue #221 §1) and
-     deployer is excluded (pipeline-disallowed). */
-  expect(html).toContain(">Architect<");
-  expect(html).not.toContain(">Deployer<");
-  expect(html).toContain("Additional prompt (optional)");
-  expect(html).toContain("Build it");
-  expect(html).toContain("Update stage");
-  /* The already-running "plan" stage must not be offered for override. */
-  expect(html).not.toContain("Plan it");
+  /* No nested stage editor: no next-stage picker, no per-stage role/prompt form. */
+  expect(html).not.toContain("Next stage");
+  expect(html).not.toContain("Update stage");
+  expect(html).not.toContain("Additional prompt (optional)");
+  expect(html).not.toContain(">Architect<");
+  expect(html).not.toContain("Build it");
+  /* The upcoming (zero-attempt) build stage means an on-canvas edit is possible,
+     so the panel points the operator at the stage cards instead. */
+  expect(html).toContain("data-pipeline-editor-canvas-hint");
+  expect(html).toContain("Edit stages on their cards");
   /* Lifecycle controls remain. */
   expect(html).toContain("Pause");
   expect(html).toContain("Close");
 });
 
-test("a pipeline with every stage started shows the no-editable-stage message", () => {
+test("a pipeline with every stage started shows no canvas hint and no stage editor (#507 F1)", () => {
   const started = {
     ...pipeline,
     runs: [
@@ -123,11 +120,14 @@ test("a pipeline with every stage started shows the no-editable-stage message", 
   const html = renderToStaticMarkup(
     <GroupOverridePanel group={{ ...pipelineGroup, pipeline: started }} onClose={noop} />,
   );
-  expect(html).toContain("No upcoming stage to edit");
+  /* Every stage has already run, so there is no editable stage — no canvas
+     pointer, and certainly no nested stage form. */
+  expect(html).not.toContain("data-pipeline-editor-canvas-hint");
   expect(html).not.toContain("Update stage");
+  expect(html).toContain("Pause");
 });
 
-test("a draft pipeline exposes metadata, stage-plan, Start, and discard controls", () => {
+test("a draft pipeline exposes metadata, a canvas pointer, Start, and discard controls (#507 F1)", () => {
   const draft = {
     ...pipeline,
     state: "draft",
@@ -143,10 +143,12 @@ test("a draft pipeline exposes metadata, stage-plan, Start, and discard controls
   expect(html).toContain("Specification");
   expect(html).toContain("Repository");
   expect(html).toContain("Save draft details");
-  expect(html).toContain("Add stage");
-  expect(html).toContain("Move up");
-  expect(html).toContain("Move down");
-  expect(html).toContain("Remove stage");
+  /* Stage composition moved to the canvas cards — the panel no longer hosts an
+     add/reorder/remove stage plan. */
+  expect(html).toContain("Edit stages on their cards");
+  expect(html).not.toContain("Add stage");
+  expect(html).not.toContain("Move up");
+  expect(html).not.toContain("Remove stage");
   expect(html).toContain("Start pipeline");
   expect(html).toContain("Discard draft");
   expect(html).not.toContain("Pause pipeline");

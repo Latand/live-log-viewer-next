@@ -74,7 +74,7 @@ function surfaces(specs: StageSpec[]): { live: Set<string>; placeholder: Set<str
     if (path && placedPaths.has(path)) live.add(stage.id);
   }
   const placeholder = new Set(layout.slots.filter((slot) => slot.pipeline.id === "p1" && slot.presentation === "placeholder").map((slot) => slot.stage.id));
-  const history = new Set(layout.slots.filter((slot) => slot.pipeline.id === "p1" && slot.presentation === "history").map((slot) => slot.stage.id));
+  const history = new Set(layout.slots.filter((slot) => slot.pipeline.id === "p1" && slot.presentation === "completed").map((slot) => slot.stage.id));
   return { live, placeholder, history };
 }
 

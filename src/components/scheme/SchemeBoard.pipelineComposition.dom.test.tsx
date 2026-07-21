@@ -86,14 +86,7 @@ const settle = async () => {
   flushSync(() => undefined);
 };
 
-test("the production scene keeps only the live stage full, compacts terminal stages, and shells the future stages inside one halo (#353 R2)", async () => {
-  /* Assemble the scene exactly as ProjectDashboard does: fold the terminal
-     stages' transcripts into compact history (out of the world scene) and keep
-     only the cursor's live pane. */
-  const allFiles = [architect, builder, verify];
-  const compactPaths = compactPipelineArtifactPaths([pipeline], []);
-  expect([...compactPaths].sort()).toEqual(["/arch", "/build"]);
-  const files = excludeCompactPipelineArtifacts(allFiles, compactPaths);
+function mountScene(files: FileEntry[]): HTMLElement {
   const groups = buildBranchGroups(files, "demo");
   const host = document.createElement("div");
   document.body.append(host);
@@ -117,27 +110,34 @@ test("the production scene keeps only the live stage full, compacts terminal sta
       onDraftSpawned={() => {}}
     />,
   ));
+  return host;
+}
+
+test("the production scene keeps EVERY current stage a full real card and shells the future stages inside one halo (#507 F2)", async () => {
+  /* No stage compacts on an active pipeline: the two passed stages and the live
+     stage all keep their transcripts in the scene as full conversation cards. */
+  const allFiles = [architect, builder, verify];
+  const compactPaths = compactPipelineArtifactPaths([pipeline], []);
+  expect([...compactPaths]).toEqual([]);
+  const files = excludeCompactPipelineArtifacts(allFiles, compactPaths);
+  const host = mountScene(files);
   await settle();
 
   /* Exactly one colored pipeline region — the halo — is the single visual owner. */
   expect(host.querySelectorAll('[data-scheme-group="pipeline"]')).toHaveLength(1);
   expect(host.querySelector('[data-pipeline-group-header="pipe-1"]')).toBeTruthy();
 
-  /* Only the live cursor stage keeps a full conversation pane. */
+  /* All three materialized stages keep a full conversation pane — no stub. */
+  expect(host.querySelector('[data-scheme-node="/arch"]')).toBeTruthy();
+  expect(host.querySelector('[data-scheme-node="/build"]')).toBeTruthy();
   expect(host.querySelector('[data-scheme-node="/verify"]')).toBeTruthy();
-  /* The terminal architect/builder stages keep NO full pane (folded off-scene)… */
-  expect(host.querySelector('[data-scheme-node="/arch"]')).toBeNull();
-  expect(host.querySelector('[data-scheme-node="/build"]')).toBeNull();
-  /* …but each retains a compact navigable history anchor at its stage position. */
-  expect(host.querySelector('[data-scheme-node="slot::pipe-1::architect"]')).toBeTruthy();
-  expect(host.querySelector('[data-scheme-node="slot::pipe-1::builder"]')).toBeTruthy();
-  expect(host.querySelectorAll('[data-pipeline-stage-history="true"]')).toHaveLength(2);
+  expect(host.querySelectorAll('[data-pipeline-stage-completed="true"]')).toHaveLength(0);
 
   /* Both future stages render conversation-shaped shells. */
   expect(host.querySelector('[data-scheme-node="slot::pipe-1::polish"]')).toBeTruthy();
   expect(host.querySelector('[data-scheme-node="slot::pipe-1::review"]')).toBeTruthy();
-  /* Every declared stage projects EXACTLY ONE surface: one live pane, two compact
-     history anchors, two future shells. */
+  /* Every declared stage projects EXACTLY ONE surface: three real cards + two
+     future shells = five cards. */
   const stageCards = [...host.querySelectorAll('[data-pipeline-stage-card^="pipe-1::"]')];
   expect(stageCards.map((card) => card.getAttribute("data-pipeline-stage-card")).sort()).toEqual([
     "pipe-1::architect",
@@ -152,4 +152,43 @@ test("the production scene keeps only the live stage full, compacts terminal sta
   expect(host.querySelector("[data-pipeline-group]")).toBeNull();
   expect(host.querySelector("[data-scheme-group-strip]")).toBeNull();
   expect(host.querySelector("[data-pipeline-stage-graph]")).toBeNull();
+});
+
+test("an idle completed stage still renders as a full conversation card inside the halo, not a compact stub (#507 F2)", async () => {
+  /* Realistic scene: the two passed stages have gone idle, so the board's
+     activity gate would not surface them as live nodes. They must still stand in
+     at their stage positions as FULL conversation cards (the completed slot), so
+     the five-stage graph stays five real/placeholder cards. */
+  const idleArchitect = { ...architect, activity: "idle" as const };
+  const idleBuilder = { ...builder, activity: "idle" as const };
+  const files = [idleArchitect, idleBuilder, verify];
+  const host = mountScene(files);
+  await settle();
+
+  expect(host.querySelectorAll('[data-scheme-group="pipeline"]')).toHaveLength(1);
+  /* The live cursor stage is a full board node; the idle passed stages are full
+     completed cards at their slot positions. */
+  expect(host.querySelector('[data-scheme-node="/verify"]')).toBeTruthy();
+  const completed = [...host.querySelectorAll('[data-pipeline-stage-completed="true"]')];
+  expect(completed).toHaveLength(2);
+  expect(host.querySelector('[data-scheme-node="slot::pipe-1::architect"]')).toBeTruthy();
+  expect(host.querySelector('[data-scheme-node="slot::pipe-1::builder"]')).toBeTruthy();
+  /* The completed card is full-size (the live/placeholder footprint), NOT the
+     old 168px compact stub. */
+  const archSlot = host.querySelector('[data-scheme-node="slot::pipe-1::architect"]') as HTMLElement;
+  expect(Number.parseInt(archSlot.style.height, 10)).toBeGreaterThan(400);
+  /* It shows the real prompt that was sent (minimal visual difference from the
+     eventual live conversation) and opens the transcript. */
+  expect(completed[0]!.textContent).toContain("Pinned task:");
+  expect(completed.some((card) => card.textContent?.includes("Open conversation"))).toBe(true);
+
+  /* Still exactly five stage cards, one per declared stage. */
+  const stageCards = [...host.querySelectorAll('[data-pipeline-stage-card^="pipe-1::"]')];
+  expect(stageCards.map((card) => card.getAttribute("data-pipeline-stage-card")).sort()).toEqual([
+    "pipe-1::architect",
+    "pipe-1::builder",
+    "pipe-1::polish",
+    "pipe-1::review",
+    "pipe-1::verify",
+  ]);
 });
