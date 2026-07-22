@@ -4,6 +4,7 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
+import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 
 import type { RuntimeHostClient } from "./client";
@@ -98,8 +99,8 @@ test("a staged launch whose host entry is claimed stays with its claimant", asyn
   const store = registry();
   const receipt = staleStructuredReceipt(store, "claimed_20260719_a1");
   const staged = store.stageStructuredSpawn(receipt.launchId, {
-    key: { engine: "codex", sessionId: "019f7b8a-9f75-7dc0-b231-17f7eadd7fe1" },
-    artifactPath: "/sessions/019f7b8a-9f75-7dc0-b231-17f7eadd7fe1.jsonl",
+    key: { engine: "codex", sessionId: "019f7b8a-" + "9f75-7dc0-b231-17f7eadd7fe1" },
+    artifactPath: "/sessions/019f7b8a_9f75_7dc0_b231_17f7eadd7fe1.jsonl",
     cwd: "/repo",
     accountId: "work",
     launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
@@ -128,6 +129,46 @@ test("a staged launch whose host entry is claimed stays with its claimant", asyn
   });
   expect(result).toEqual({ examined: 0, terminalized: [], recovered: [] });
   expect(store.snapshot().receipts[receipt.launchId]!.state).not.toBe("failed");
+});
+
+test("issue 533: host loss after recoverable timeout reaches retry-safe failure despite the same process staying live", async () => {
+  const store = registry();
+  const receipt = staleStructuredReceipt(store, "recoverable_timeout_host_loss");
+  const key = { engine: "codex" as const, sessionId: "session-timeout-host-loss" };
+  store.stageStructuredSpawn(receipt.launchId, {
+    key,
+    artifactPath: "/sessions/timeout-host-loss.jsonl",
+    cwd: "/repo",
+    accountId: "work",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server", endpoint: "stdio:released", process: null,
+      eventCursor: 1, protocolVersion: null, writerClaimEpoch: 0,
+      activeTurnRef: null, pendingAttention: [], activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  store.releaseStructuredSpawnAdmissionOwner(receipt.launchId, receipt.admissionOwner!);
+
+  const result = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT, {
+    now: AGED,
+    ownerAlive: () => true,
+  });
+
+  expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
+  expect(store.snapshot().receipts[receipt.launchId]).toMatchObject({
+    state: "failed",
+    admissionOwner: null,
+    error: expect.stringContaining("no session"),
+  });
+  expect(spawnResponseForReceipt(store.snapshot().receipts[receipt.launchId]!)).toMatchObject({
+    state: "failed",
+    retrySafe: true,
+  });
 });
 
 test("the actuation cap bounds one cycle and the remainder converges on the next", async () => {

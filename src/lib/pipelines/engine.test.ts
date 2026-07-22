@@ -2587,6 +2587,41 @@ test("failed stages park and retry resets to the last passed commit", async () =
   expect(loadPipelines()[0]!.runs[0]!.attempts).toHaveLength(2);
 });
 
+test("issue 533: receipt retry validates the current stage and failed launch identity", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
+  const parked = loadPipelines()[0]!;
+  const attempt = parked.runs[0]!.attempts[0]!;
+  expect(attempt.launchId).toBeString();
+  const launchId = attempt.launchId!;
+
+  expect(await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+    stageId: "build",
+    launchId,
+  }, h.ports)).toMatchObject({ status: 409, error: expect.stringContaining("stage") });
+  expect(await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+    stageId: "plan",
+    launchId: "launch-stale-history",
+  }, h.ports)).toMatchObject({ status: 409, error: expect.stringContaining("launch") });
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
+
+  expect((await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+    stageId: "plan",
+    launchId,
+  }, h.ports)).pipeline?.state).toBe("running");
+  expect(await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+    stageId: "plan",
+    launchId,
+  }, h.ports)).toMatchObject({ status: 409 });
+});
+
 test("a stage retry supersedes the prior attempt's conversation and numbers its round (#383)", async () => {
   const h = harness();
   const pipeline = await create(h.ports);
@@ -2609,6 +2644,42 @@ test("a stage retry supersedes the prior attempt's conversation and numbers its 
   await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
   await tickPipelines([], h.ports);
   expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_3:parent=/codex/creator.jsonl:supersedes=conversation_stage_2`);
+});
+
+test("issue 533: retry replays the pipeline launch contract from durable stage state", async () => {
+  const h = harness();
+  const launches: Array<Parameters<PipelinePorts["spawnAgent"]>[0]> = [];
+  const spawn = h.ports.spawnAgent;
+  h.ports.spawnAgent = async (input, onReserved) => {
+    launches.push(structuredClone(input));
+    return spawn(input, onReserved);
+  };
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
+  const firstAttempt = loadPipelines()[0]!.runs[0]!.attempts[0]!;
+  expect(firstAttempt.launchId).toBeString();
+  await patchPipeline(pipeline.id, {
+    action: "retry-stage", stageId: "plan", launchId: firstAttempt.launchId!,
+  }, h.ports);
+  await tickPipelines([], h.ports);
+
+  const [first, retry] = launches;
+  expect(retry).toMatchObject({
+    role: first!.role,
+    cwd: first!.cwd,
+    "prompt": first!.prompt,
+    parentPath: first!.parentPath,
+    creatorConversationId: first!.creatorConversationId,
+    membership: {
+      kind: "pipeline", containerId: pipeline.id, role: first!.membership.role,
+      stageId: "plan", stageOrder: 0, parentConversationId: null,
+    },
+    supersedes: "conversation_stage_1",
+  });
+  expect(retry!.membership.slot).toBe("plan:2");
+  expect(retry!.membership.round).toBe(2);
 });
 
 test("a retried attempt whose predecessor never reserved a conversation records nothing (#383)", async () => {

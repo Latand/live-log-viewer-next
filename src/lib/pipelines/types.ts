@@ -238,6 +238,8 @@ export type PatchPipelineRequest = {
       the Builder default. Changing the role resets any unpinned engine/model/
       effort to the new role's defaults; an explicit engine/model/effort still wins. */
   stageId?: string;
+  /** retry-stage identity fence for a retry initiated from a launch receipt. */
+  launchId?: string;
   role?: PipelineRoleRef | null;
   engine?: FlowEngine;
   model?: string | null;

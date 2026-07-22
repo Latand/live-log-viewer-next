@@ -76,9 +76,15 @@ function newestUnscannedReceipts(files: readonly FileEntry[], snapshot: Registry
   const byConversation = new Map<string, SpawnReceipt>();
   for (const receipt of Object.values(snapshot.receipts)) {
     if (receipt.transport !== "structured" || receipt.purpose !== "launch") continue;
-    if (receipt.artifactLifecycle !== "pending") continue;
-    if (scannedConversations.has(receipt.conversationId)) continue;
-    if (receipt.artifactPath && scannedPaths.has(receipt.artifactPath)) continue;
+    const createdMs = Date.parse(receipt.createdAt);
+    const visibleLateSuccess = receipt.completionMode === "route-recovered"
+      && Number.isFinite(createdMs)
+      && nowMs - createdMs < TERMINAL_SPAWN_RECENT_MS;
+    if (!visibleLateSuccess) {
+      if (receipt.artifactLifecycle !== "pending") continue;
+      if (scannedConversations.has(receipt.conversationId)) continue;
+      if (receipt.artifactPath && scannedPaths.has(receipt.artifactPath)) continue;
+    }
     const current = byConversation.get(receipt.conversationId);
     if (!current || current.createdAt < receipt.createdAt) byConversation.set(receipt.conversationId, receipt);
   }

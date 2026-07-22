@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
 
-import { isHistoricalLaunchReceipt, LAUNCH_HISTORY_HORIZON_MS, launchHistoryFor, pipelineRetryTarget } from "./launchHistoryModel";
+import { isHistoricalLaunchReceipt, LAUNCH_HISTORY_HORIZON_MS, launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
 
 const NOW = Date.parse("2026-07-17T12:00:00.000Z");
 
@@ -93,6 +93,33 @@ test("issue 533: a pipeline-owned failed launch retries its durable stage", () =
     },
   });
 
-  expect(pipelineRetryTarget(file)).toEqual({ pipelineId: "pipeline-533", stageId: "build" });
+  expect(pipelineRetryTarget(file)).toEqual({
+    pipelineId: "pipeline-533",
+    stageId: "build",
+    launchId: "launch-history-fixture-533",
+  });
   expect(pipelineRetryTarget(receipt(3_600_000))).toBeNull();
+});
+
+test("issue 533: pipeline launch retry forwards stage and launch identity and preserves failures", async () => {
+  const file = receipt(3_600_000, {
+    durableLineage: {
+      kind: "spawn",
+      role: "builder",
+      parentConversationId: null,
+      reviewsConversationId: null,
+      memberships: [{ kind: "pipeline", containerId: "pipeline-533", role: "builder", slot: "build:2", stageId: "build", stageOrder: 0, round: 2, parentConversationId: null }],
+    },
+  });
+  const calls: unknown[] = [];
+  const error = await retryPipelineLaunch(file, async (...args) => {
+    calls.push(args);
+    return "runtime unavailable";
+  });
+
+  expect(calls).toEqual([["pipeline-533", "retry-stage", {
+    stageId: "build",
+    launchId: "launch-history-fixture-533",
+  }]]);
+  expect(error).toBe("runtime unavailable");
 });

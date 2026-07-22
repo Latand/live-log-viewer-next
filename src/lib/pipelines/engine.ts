@@ -1943,6 +1943,16 @@ export async function patchPipeline(
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
+      const receiptRetry = req.stageId !== undefined || req.launchId !== undefined;
+      if (receiptRetry && (typeof req.stageId !== "string" || typeof req.launchId !== "string")) {
+        return { error: "receipt retry requires both stageId and launchId", status: 400 };
+      }
+      if (receiptRetry && stage?.id !== req.stageId) {
+        return { error: "the clicked launch belongs to a different pipeline stage", status: 409 };
+      }
+      if (receiptRetry && attempt?.launchId !== req.launchId) {
+        return { error: "the clicked launch is no longer the current failed attempt", status: 409 };
+      }
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
       if (flow && flow.state !== "closed") {

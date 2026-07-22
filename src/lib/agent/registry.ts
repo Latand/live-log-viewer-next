@@ -3245,6 +3245,23 @@ export class AgentRegistry {
     });
   }
 
+  /** Releases the process-local admission lease after a structured host has
+      reached durable registry ownership. The host claim remains untouched. */
+  releaseStructuredSpawnAdmissionOwner(launchId: string, owner: ProcessIdentity): { released: boolean; receipt: SpawnReceipt } {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.transport !== "structured"
+        || !receipt.admissionOwner
+        || receipt.admissionOwner.pid !== owner.pid
+        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        return { released: false, receipt: clone(receipt) };
+      }
+      receipt.admissionOwner = null;
+      return { released: true, receipt: clone(receipt) };
+    });
+  }
+
   rememberMembership(conversationId: ViewerConversationId, membership: DurableMembershipInput): DurableConversationMembership {
     return this.mutate((file) => clone(recordMembership(file, conversationId, membership, now())));
   }

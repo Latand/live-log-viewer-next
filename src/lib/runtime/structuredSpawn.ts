@@ -791,18 +791,7 @@ async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: st
   if (!delivered?.ok) throw new Error(delivered?.error ?? "structured spawn first-message delivery was unavailable");
   if (delivered.outcome === "held") return "held";
   if (delivered.outcome !== "delivered") {
-    try {
-      await waitForStructuredInitialMessage(input.client, delivered.operationId);
-    } catch (error) {
-      /* The request and host are already durable. Keep the launch queued so a
-         late acknowledgement, reload, or controller restart can reconcile the
-         same launch id without releasing a turn that may already be live. */
-      if (error instanceof StructuredInitialMessageTimeoutError) {
-        markInitialMessageTimeout(input.registry, input.receipt.launchId, error);
-        return "held";
-      }
-      throw error;
-    }
+    await waitForStructuredInitialMessage(input.client, delivered.operationId);
     settleInitialMessageReservation(input.registry, input.receipt.launchId);
   }
 }
@@ -905,8 +894,21 @@ export async function spawnStructuredConversation(
     adoptionClaimTransferred = adoptionClaim !== null;
     binding.stopPersistence = await bindHost(input.registry, key, host, claimed.claimOwner, claimed.claimEpoch);
     binding.unregister = await publishHost(key, host);
-    const initialMessage = await deliverFirst(input, identity.path);
+    let initialMessage: void | "held";
+    try {
+      initialMessage = await deliverFirst(input, identity.path);
+    } catch (error) {
+      /* Host identity and ownership are durable by this point. A caller
+         timeout becomes reconciliation work and never enters host cleanup. */
+      if (!(error instanceof StructuredInitialMessageTimeoutError)) throw error;
+      markInitialMessageTimeout(input.registry, input.receipt.launchId, error);
+      initialMessage = "held";
+    }
     if (initialMessage === "held") {
+      input.registry.releaseStructuredSpawnAdmissionOwner(
+        input.receipt.launchId,
+        input.receipt.admissionOwner ?? processIdentity(),
+      );
       return {
         ok: true,
         target: null,

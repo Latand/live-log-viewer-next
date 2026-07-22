@@ -34,7 +34,7 @@ import { buildSubagentTrays } from "./scheme/subagentTray";
 import type { SubagentTrayApi } from "./scheme/SubagentTrayView";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
-import { launchHistoryFor, pipelineRetryTarget } from "./launchHistoryModel";
+import { launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
 import { LaunchHistory } from "./LaunchHistory";
 import { isPlacedTask } from "./scheme/taskGeometry";
 import { loadExpandedTasks, partitionTaskStacks, persistExpandedTasks } from "./scheme/taskStacks";
@@ -44,7 +44,7 @@ import { MobileBottomShelf } from "./MobileBottomShelf";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
-import { TaskToastHost } from "./tasks/taskToast";
+import { pushTaskToast, TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
@@ -999,7 +999,9 @@ export function ProjectDashboard({
     onUserNavigate?.();
     const pipelineTarget = pipelineRetryTarget(file);
     if (pipelineTarget) {
-      void patchPipeline(pipelineTarget.pipelineId, "retry-stage");
+      void retryPipelineLaunch(file, patchPipeline).then((error) => {
+        if (error) pushTaskToast("err", error);
+      });
       return;
     }
     const id = newDraftId();

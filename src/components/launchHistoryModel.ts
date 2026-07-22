@@ -51,9 +51,18 @@ export function launchHistoryFor(files: readonly FileEntry[], project: string, n
 
 /** Routes retry back through the owning pipeline, whose durable attempt keeps
     the full launch envelope and provisioned worktree authority. */
-export function pipelineRetryTarget(file: FileEntry): { pipelineId: string; stageId: string } | null {
+export function pipelineRetryTarget(file: FileEntry): { pipelineId: string; stageId: string; launchId: string } | null {
   const membership = file.durableLineage?.memberships.find((item) => item.kind === "pipeline" && item.stageId);
-  return membership?.stageId
-    ? { pipelineId: membership.containerId, stageId: membership.stageId }
+  return membership?.stageId && file.spawn
+    ? { pipelineId: membership.containerId, stageId: membership.stageId, launchId: file.spawn.launchId }
     : null;
+}
+
+export async function retryPipelineLaunch(
+  file: FileEntry,
+  retry: (id: string, action: "retry-stage", extra: { stageId: string; launchId: string }) => Promise<string | null>,
+): Promise<string | null> {
+  const target = pipelineRetryTarget(file);
+  if (!target) return "launch is not owned by a pipeline stage";
+  return retry(target.pipelineId, "retry-stage", { stageId: target.stageId, launchId: target.launchId });
 }

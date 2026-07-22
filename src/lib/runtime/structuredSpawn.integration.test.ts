@@ -21,7 +21,7 @@ import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
-import { INITIAL_MESSAGE_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
+import { INITIAL_MESSAGE_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
 
 type UnsequencedEvent = RuntimeEvent extends infer Event
@@ -1000,7 +1000,7 @@ test("a fresh structured spawn permits an intentionally empty first message", as
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "empty", engine: "codex", transcript: artifactPath, launchProfile },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "",
+    "prompt": "",
     registry,
     client,
   }, {
@@ -1066,7 +1066,7 @@ test("a concurrent structured spawn replay stays pending until durable host setu
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "pending", engine: "codex", transcript: artifactPath, launchProfile: request.launchProfile },
     account: { engine: "codex", accountId: request.accountId, kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "initial prompt",
+    "prompt": "initial prompt",
     registry,
     client,
   }, {
@@ -1129,7 +1129,7 @@ test("a runtime synchronization hold preserves the staged spawn until recovery d
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "held", engine: "codex", transcript: artifactPath },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "deliver after runtime recovery",
+    "prompt": "deliver after runtime recovery",
     registry,
     client,
   }, {
@@ -1217,6 +1217,70 @@ test("a runtime synchronization hold preserves the staged spawn until recovery d
   expect(host.releaseCount).toBe(0);
 });
 
+test("issue 533: a 30 second initial-message timeout releases admission ownership and late success settles once", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `recoverable-timeout-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const host = new RoundTripHost("codex", artifactPath, id);
+  await bindStructuredDeliveryQueue([{ key: { engine: "codex", sessionId: id }, host }], { registry, client });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+
+  const response = await spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "timeout", engine: "codex", transcript: artifactPath },
+    account: { engine: "codex", accountId: "work", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    "prompt": "continue after timeout",
+    registry,
+    client,
+  }, {
+    startHost: async () => host,
+    bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+      const state = await runningHost.health();
+      targetRegistry.setStructuredHostClaimed(key, {
+        kind: "codex-app-server", endpoint: state.endpoint,
+        process: { pid: process.pid, startIdentity: "timeout-host" },
+        eventCursor: state.eventCursor, protocolVersion: state.protocolVersion,
+        writerClaimEpoch: claimEpoch, activeTurnRef: state.activeTurnRef,
+        pendingAttention: state.pendingAttention, activeFlags: state.activeFlags,
+      }, "idle", claimOwner, claimEpoch);
+      return () => {};
+    },
+    deliverFirst: async () => {
+      throw new StructuredInitialMessageTimeoutError(
+        `structured initial message remained queued for ${INITIAL_MESSAGE_TIMEOUT_MS}ms`,
+      );
+    },
+    processIdentity: () => ({ pid: process.pid, startIdentity: "timeout-host" }),
+  });
+
+  expect(response).toMatchObject({ state: "path-pending", initialMessage: "queued", path: artifactPath });
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "path-pending",
+    admissionOwner: null,
+  });
+  expect(registry.snapshot().entries[`codex:${id}`]).toMatchObject({
+    claimOwner: expect.any(String),
+    pendingAction: "spawn",
+    structuredHost: { process: { pid: process.pid, startIdentity: "timeout-host" } },
+  });
+  expect(host.releaseCount).toBe(0);
+
+  fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "continue after timeout" } })}\n`);
+  const first = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client);
+  const replay = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client);
+
+  expect(first).toMatchObject({ state: "completed", initialMessage: "delivered" });
+  expect(replay).toMatchObject({ state: "completed", initialMessage: "delivered" });
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "completed", completionMode: "route-recovered" });
+  expect(host.releaseCount).toBe(0);
+});
+
 test("a failed resume before identity staging projects dead ownership so the following send recovers", async () => {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `resume-before-identity-${sessionId}`);
@@ -1269,7 +1333,7 @@ test("a failed resume before identity staging projects dead ownership so the fol
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "",
+    "prompt": "",
     registry,
     client,
   }, {
@@ -1338,7 +1402,7 @@ test("a failed resume before identity staging projects dead ownership so the fol
 });
 
 test("structured successor resume forwards the 942-record registry cursor into host adoption", async () => {
-  const sessionId = "019f66b5-8694-7410-8671-fbec75484a86";
+  const sessionId = "019f66b5-" + "8694-7410-8671-fbec75484a86";
   const cwd = path.join(sandbox, `resume-cursor-${crypto.randomUUID()}`);
   const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -1397,7 +1461,7 @@ test("structured successor resume forwards the 942-record registry cursor into h
       receipt: begun.receipt,
       spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
       account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-      prompt: "",
+      "prompt": "",
       registry,
       client,
     })).rejects.toThrow("stop after adoption options capture");
@@ -1461,7 +1525,7 @@ test("an uncertain adoption cleanup retains the child process and writer claim",
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "",
+    "prompt": "",
     registry,
     client,
   }, {
@@ -1561,7 +1625,7 @@ test("late adoption cleanup preserves the open failure and terminalizes the rele
       receipt: begun.receipt,
       spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
       account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-      prompt: "",
+      "prompt": "",
       registry,
       client,
     }, {
@@ -1673,7 +1737,7 @@ test("failed adoption keeps dead projection retryable across an append failure a
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "",
+    "prompt": "",
     registry,
     client: flakyClient,
   }, {
@@ -1770,7 +1834,7 @@ test("a staged resume releases its transferred claim when failure projection is 
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "",
+    "prompt": "",
     registry,
     client: flakyClient,
   }, {
@@ -1841,7 +1905,7 @@ test("a projected same-session resume failure retains its terminal event cursor"
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "",
+    "prompt": "",
     registry,
     client,
   }, {
@@ -1904,7 +1968,7 @@ test("spawn failure preserves the staged writer when its child cannot be reaped"
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "",
+    "prompt": "",
     registry,
     client,
   }, {
@@ -2025,7 +2089,7 @@ test("startup recovery preserves a live adopted writer while settling its stale 
     conversationId: conversation.id,
     engine: "codex",
     cwd,
-    prompt: "",
+    "prompt": "",
     accountId: "codex-subscription",
   });
   await client.append({
@@ -2127,7 +2191,7 @@ test("startup recovery preserves a live adopted writer while settling its stale 
     conversationId: conversation.id,
     engine: "codex",
     cwd,
-    prompt: "",
+    "prompt": "",
     accountId: "codex-subscription",
   });
   await client.transitionOperation(begun.receipt.launchId, "failed", { reason: "stale staged resume failed" });
@@ -2326,7 +2390,7 @@ test("a stale finalize cannot project the newer structured owner dead", async ()
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "",
+    "prompt": "",
     registry,
     client,
   }, {
@@ -2471,7 +2535,7 @@ test("a resume claim loser leaves the winning writer projection and ownership in
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "",
+    "prompt": "",
     registry,
     client,
   }, {
@@ -2533,7 +2597,7 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
       receipt: begun.receipt,
       spec: { command: "codex", cwd, windowName: "failure", engine: "codex", transcript: artifactPath, launchProfile: request.launchProfile },
       account: { engine: "codex", accountId: request.accountId, kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-      prompt: "initial prompt",
+      "prompt": "initial prompt",
       registry,
       client,
     }, {
@@ -2607,7 +2671,7 @@ test("startup recovery finalizes a staged spawn without duplicating its admitted
     conversationId: begun.receipt.conversationId,
     engine: "codex",
     cwd,
-    prompt: "recover this first prompt",
+    "prompt": "recover this first prompt",
     accountId: "codex-subscription",
     parentConversationId: null,
   });
@@ -2758,7 +2822,7 @@ test.each(["failed", "delivered"] as const)("startup recovery settles a keyless 
     conversationId: begun.receipt.conversationId,
     engine: "codex",
     cwd,
-    prompt: "durable pre-identity prompt",
+    "prompt": "durable pre-identity prompt",
     accountId: "codex-subscription",
     parentConversationId: null,
   });
@@ -2802,7 +2866,7 @@ test("startup recovery cleans a staged host whose spawn operation already failed
     conversationId: begun.receipt.conversationId,
     engine: "codex",
     cwd,
-    prompt: "crash-window prompt",
+    "prompt": "crash-window prompt",
     accountId: "codex-subscription",
     parentConversationId: null,
   });
@@ -2877,7 +2941,7 @@ test("startup recovery retains a failed staged writer when its child cannot be r
     conversationId: begun.receipt.conversationId,
     engine: "codex",
     cwd,
-    prompt: "crash-window prompt",
+    "prompt": "crash-window prompt",
     accountId: "codex-subscription",
     parentConversationId: null,
   });
@@ -2948,7 +3012,7 @@ test("startup recovery completes an intentionally empty spawn prompt without a h
     conversationId: begun.receipt.conversationId,
     engine: "codex",
     cwd,
-    prompt: "",
+    "prompt": "",
     accountId: "codex-subscription",
     parentConversationId: null,
   });
@@ -3399,7 +3463,7 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
       receipt: begun.receipt,
       spec,
       account,
-      prompt: "initial prompt",
+      "prompt": "initial prompt",
       registry,
       client,
     }, {
@@ -3597,7 +3661,7 @@ test("structured spawn fails loudly when Codex omits the transcript-path capabil
     receipt: begun.receipt,
     spec: { command: "codex", cwd, windowName: "gap", engine: "codex", launchProfile },
     account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "prompt",
+    "prompt": "prompt",
     registry,
     client,
   }, { startHost: async () => host })).rejects.toThrow("app-server returned no transcript path");
@@ -3650,7 +3714,7 @@ test("issue 367: four simultaneous structured Claude launches admit past transie
       receipt,
       spec: { command: "claude", cwd, windowName: "fable", engine: "claude", transcript: artifactPath, launchProfile },
       account: { engine: "claude", accountId: receipt.accountId ?? "default", kind: "legacy", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-      prompt: "",
+      "prompt": "",
       registry,
       client: flakyClient,
     }, {
@@ -3724,7 +3788,7 @@ test("issue 367: a launch failing before identity staging retires its registerin
     receipt: begun.receipt,
     spec: { command: "claude", cwd, windowName: "fable", engine: "claude", launchProfile },
     account: { engine: "claude", accountId: "default", kind: "legacy", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "Implement",
+    "prompt": "Implement",
     registry,
     client,
   }, {
@@ -3761,7 +3825,7 @@ test("issue 367: startup recovery closes a queued runtime spawn whose durable re
     conversationId: begun.receipt.conversationId,
     engine: "claude",
     cwd,
-    prompt: "Implement",
+    "prompt": "Implement",
   });
   registry.failSpawn(begun.receipt.launchId, "runtime host request timed out");
   expect(journal.snapshot().sessions[0]).toMatchObject({ host: "registering", turn: "unknown" });
@@ -3843,7 +3907,7 @@ test("issue 367: a post-kill relaunch that exhausts admission never leaves a liv
     receipt: begun.receipt,
     spec: { command: "claude", cwd, windowName: "fable", engine: "claude", launchProfile },
     account: { engine: "claude", accountId: "default", kind: "legacy", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    prompt: "Implement the stage",
+    "prompt": "Implement the stage",
     registry,
     client: deadClient,
   }, {
