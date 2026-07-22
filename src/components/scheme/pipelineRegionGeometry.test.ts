@@ -578,6 +578,117 @@ describe("every pipeline conversation surface stays inside its colored region (#
     expectRegionsSeparated(layout);
   });
 
+  test("a pipeline scattered across separate root trees never swallows a foreign conversation", () => {
+    /* Production shape (2026-07-22 board report): stage transcripts of one
+       pipeline surfaced as SEPARATE root conversations (structured
+       continuations / rollouts whose lineage hosts are collapsed). The rest
+       band orders roots by activity+recency, so an unrelated live conversation
+       lands BETWEEN two member trees — and the union halo then covers it. The
+       member trees must cluster side by side instead, so the region encloses
+       only its own conversations. */
+    const impl = entry({ path: "/impl", activity: "live", mtime: 1_000 });
+    const other = entry({ path: "/other", activity: "live", mtime: 2_000 });
+    const review = entry({ path: "/review", activity: "live", mtime: 3_000 });
+    const files = [impl, other, review];
+    const pipeline = pipe({
+      stages: [
+        { id: "implement", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "run", prompt: "", next: null },
+      ],
+      cursor: { stageId: "review", state: "running", input: null, activatedBy: null },
+      runs: [
+        { stageId: "implement", attempts: [{ n: 1, state: "passed", agentPath: "/impl", flowId: null }] },
+        { stageId: "review", attempts: [{ n: 1, state: "running", agentPath: "/review", flowId: null }] },
+      ],
+    });
+    const groups = buildBranchGroups(files, "demo");
+    const layout = buildSchemeLayout(groups, [], files, [], [], [pipeline], [pipeline]);
+
+    const halo = haloOf(layout, "p1");
+    const foreign = layout.nodes.find((node) => node.file.path === "/other")!;
+    expect(
+      disjointWithGap(halo, foreign, REGION_GAP),
+      `region ${JSON.stringify({ x: halo.x, y: halo.y, w: halo.w, h: halo.h })} swallows the unrelated conversation ${JSON.stringify({ x: foreign.x, y: foreign.y, w: foreign.w, h: foreign.h })}`,
+    ).toBe(true);
+    expectMembersContained(layout, "p1");
+  });
+
+  test("a stage that surfaced as its own root joins the host-anchored chain instead of bridging the board", () => {
+    /* Production shape (2026-07-22 board report): the implement stage lives as
+       a grandchild deep inside the orchestrator's tree, while the review stage
+       surfaced as its OWN root (structured continuation). The union halo used
+       to span from the in-tree member across every foreign sibling to the
+       far-away root. The rootless member must instead land at its stage anchor
+       inside the host-anchored chain, beside the implement pane. */
+    const orchestrator = entry({ path: "/orch", activity: "live", mtime: 9_000 });
+    const mid = entry({ path: "/orch/mid", parent: "/orch", kind: "subagent", activity: "live" });
+    const impl = entry({ path: "/orch/mid/impl", parent: "/orch/mid", kind: "subagent", activity: "live" });
+    const sibling = entry({ path: "/orch/mid/sibling", parent: "/orch/mid", kind: "subagent", activity: "live" });
+    const review = entry({ path: "/review-root", activity: "live", mtime: 8_000 });
+    const other = entry({ path: "/other", activity: "live", mtime: 8_500 });
+    const files = [orchestrator, mid, impl, sibling, review, other];
+    const pipeline = pipe({
+      stages: [
+        { id: "implement", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "run", prompt: "", next: null },
+      ],
+      cursor: { stageId: "review", state: "running", input: null, activatedBy: null },
+      runs: [
+        { stageId: "implement", attempts: [{ n: 1, state: "passed", agentPath: "/orch/mid/impl", flowId: null }] },
+        { stageId: "review", attempts: [{ n: 1, state: "running", agentPath: "/review-root", flowId: null }] },
+      ],
+    });
+    const groups = buildBranchGroups(files, "demo");
+    const layout = buildSchemeLayout(groups, [], files, [], [], [pipeline], [pipeline]);
+
+    /* The review tree is placed exactly once, beside the implement pane. */
+    const reviewNodes = layout.nodes.filter((node) => node.file.path === "/review-root");
+    expect(reviewNodes).toHaveLength(1);
+    const implNode = layout.nodes.find((node) => node.file.path === "/orch/mid/impl")!;
+    expect(reviewNodes[0]!.y).toBe(implNode.y);
+    expect(reviewNodes[0]!.x).toBeGreaterThan(implNode.x);
+
+    const halo = haloOf(layout, "p1");
+    for (const path of ["/other", "/orch/mid/sibling"]) {
+      const foreign = layout.nodes.find((node) => node.file.path === path)!;
+      expect(
+        disjointWithGap(halo, foreign, 0),
+        `region ${JSON.stringify({ x: halo.x, y: halo.y, w: halo.w, h: halo.h })} swallows the unrelated conversation ${path} ${JSON.stringify({ x: foreign.x, y: foreign.y, w: foreign.w, h: foreign.h })}`,
+      ).toBe(true);
+    }
+    expectMembersContained(layout, "p1");
+  });
+
+  test("two pipelines with interleaved scattered member trees keep disjoint regions", () => {
+    /* Same scattering, doubled: recency interleaves the two pipelines' root
+       trees (a1 b1 b2 a2), which used to make the two union halos cross. */
+    const a1 = entry({ path: "/a1", activity: "live", mtime: 4_000 });
+    const b1 = entry({ path: "/b1", activity: "live", mtime: 3_000 });
+    const b2 = entry({ path: "/b2", activity: "live", mtime: 2_000 });
+    const a2 = entry({ path: "/a2", activity: "live", mtime: 1_000 });
+    const files = [a1, b1, b2, a2];
+    const stages = [
+      { id: "implement", kind: "run", prompt: "", next: "review" },
+      { id: "review", kind: "run", prompt: "", next: null },
+    ];
+    const pipelineOf = (id: string, implPath: string, reviewPath: string) => pipe({
+      id,
+      stages,
+      cursor: { stageId: "review", state: "running", input: null, activatedBy: null },
+      runs: [
+        { stageId: "implement", attempts: [{ n: 1, state: "passed", agentPath: implPath, flowId: null }] },
+        { stageId: "review", attempts: [{ n: 1, state: "running", agentPath: reviewPath, flowId: null }] },
+      ],
+    });
+    const pipelines = [pipelineOf("pa", "/a1", "/a2"), pipelineOf("pb", "/b1", "/b2")];
+    const groups = buildBranchGroups(files, "demo");
+    const layout = buildSchemeLayout(groups, [], files, [], [], pipelines, pipelines);
+
+    expectRegionsSeparated(layout);
+    expectMembersContained(layout, "pa");
+    expectMembersContained(layout, "pb");
+  });
+
   test("groupRect stays a padded union of its member rects", () => {
     const rects = new Map<string, SchemeRect>([
       ["a", { x: 100, y: 100, w: 50, h: 50 }],
