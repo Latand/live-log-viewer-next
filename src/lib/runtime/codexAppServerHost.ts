@@ -397,8 +397,6 @@ export class CodexAppServerHost implements EngineHost {
       spawn(command, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
     const args = [
       ...(options.fileAuthCredentials ? ["-c", "cli_auth_credentials_store=file"] : []),
-      "-c",
-      "mcp_servers={}",
       "app-server",
     ];
     const child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", args, {

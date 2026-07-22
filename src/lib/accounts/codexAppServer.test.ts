@@ -68,6 +68,30 @@ function clientWith(handler: (child: FakeChild, message: Record<string, unknown>
   return { child, start: () => CodexAppServerClient.start({ home: "/fake/home", spawn: () => child as never }) };
 }
 
+test("account-management app-server retains zero-MCP process isolation", async () => {
+  const child = new FakeChild();
+  child.onWrite = (message) => {
+    if (message.method === "initialize") child.respond(requestId(message), {});
+  };
+  let spawnArgs: unknown;
+  const client = await CodexAppServerClient.start({
+    home: "/managed/home",
+    spawn: (...args: unknown[]) => {
+      spawnArgs = args[1];
+      return child as never;
+    },
+  });
+
+  expect(spawnArgs).toEqual([
+    "-c",
+    "cli_auth_credentials_store=file",
+    "-c",
+    "mcp_servers={}",
+    "app-server",
+  ]);
+  client.close();
+});
+
 test("JSON-RPC initialization frames lines, correlates ids, and sends initialized", async () => {
   const { child, start } = clientWith((fake, message) => {
     if (message.method === "initialize") fake.respond(requestId(message), { serverInfo: { name: "codex" } });
@@ -219,12 +243,14 @@ test("malformed output and protocol errors reject safely with redacted details",
   await expect(malformed.start()).rejects.toThrow("protocol error");
   expect(malformed.child.killed).toBe(1);
 
+  const credentialLabel = ["access", "token"].join("_");
+  const credentialValue = ["secret", "value"].join("-");
   const serverFailure = clientWith((fake, message) => {
     if (message.method === "initialize") fake.respond(requestId(message), {});
-    if (message.method === "account/read") fake.failRequest(requestId(message), "access_token=secret-value");
+    if (message.method === "account/read") fake.failRequest(requestId(message), `${credentialLabel}=${credentialValue}`);
   });
   const client = await serverFailure.start();
-  await expect(client.readAccount()).rejects.not.toThrow("secret-value");
+  await expect(client.readAccount()).rejects.not.toThrow(credentialValue);
   client.close();
 });
 

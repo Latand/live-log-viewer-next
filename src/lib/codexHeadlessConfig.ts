@@ -12,7 +12,7 @@ export function headlessCodexThreadConfig(configRead: unknown, allowSubagents = 
   const servers = record(config?.mcp_servers);
   if (!config || !servers) throw new Error("config/read returned no MCP server table");
   return {
-    mcp_servers: Object.fromEntries(Object.keys(servers).map((name) => [name, { enabled: false }])),
+    mcp_servers: Object.fromEntries(Object.keys(servers).map((name) => [name, { enabled: name === "viewer" }])),
     features: { ...CODEX_VIEWER_SPAWN_FEATURES, multi_agent: allowSubagents },
     include_apps_instructions: false,
   };
