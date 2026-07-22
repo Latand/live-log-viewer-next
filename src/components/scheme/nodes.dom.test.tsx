@@ -176,6 +176,7 @@ function layout(parts: Partial<SchemeLayout> = {}): SchemeLayout {
     links: [],
     drafts: [],
     slots: [],
+    regionTasks: [],
     byPath: new Map(),
     width: 2000,
     height: 1000,

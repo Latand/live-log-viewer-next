@@ -49,6 +49,7 @@ const layout = (over: Partial<SchemeLayout> = {}): SchemeLayout => ({
   links: [],
   drafts: [],
   slots: [],
+  regionTasks: [],
   byPath: new Map(),
   width: 6_000,
   height: 4_000,

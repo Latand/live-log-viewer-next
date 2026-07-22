@@ -250,13 +250,49 @@ export function SchemeBoard({
      flowsByImpl and every strip/hub below keep reading the real `flows`. */
   const deckFlows = useMemo(() => (reviewGroups.length ? [...flows, ...reviewGroups] : flows), [flows, reviewGroups]);
   const layoutFlows = useMemo(() => compactPipelineLayoutFlows(pipelines, deckFlows), [pipelines, deckFlows]);
+  /* Tasks created this session but not yet echoed by the poll: overlaid so a
+     fresh card never blinks out between the POST and the refetch. Entries
+     leave the cache the moment the server echoes them (or on local delete),
+     so a later server-side removal can never be shadowed by a stale copy;
+     the project filter keeps a card created here off other projects' boards. */
+  const [localTasks, setLocalTasks] = useState<BoardTask[]>([]);
+  const [pendingTask, setPendingTask] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    const have = new Set(tasks.map((task) => task.id));
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- prune-only:
+       returns the same reference unless an entry was echoed or reprojected */
+    setLocalTasks((prev) => {
+      const next = prev.filter((task) => !have.has(task.id) && task.project === project);
+      return next.length === prev.length ? prev : next;
+    });
+  }, [tasks, project]);
+  const mergedTasks = useMemo(() => {
+    const have = new Set(tasks.map((task) => task.id));
+    const fresh = localTasks.filter((task) => !have.has(task.id) && task.project === project);
+    return fresh.length ? [...tasks, ...fresh] : tasks;
+  }, [tasks, localTasks, project]);
+  /* Session-only full-text state. Every geometry consumer reads this set, while
+     durable task records and pinned positions stay unchanged. */
+  const [textExpandedIds, setTextExpandedIds] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    const present = new Set(mergedTasks.map((task) => task.id));
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- prune-only state synchronization */
+    setTextExpandedIds((previous) => {
+      if (![...previous].some((id) => !present.has(id))) return previous;
+      return new Set([...previous].filter((id) => present.has(id)));
+    });
+  }, [mergedTasks]);
+  /* Only placed tasks have a board position; unplaced ones (panel/mobile creation)
+     live in the list until place-on-map pins them. */
+  const boardTasks = useMemo(() => mergedTasks.filter(isPlacedTask), [mergedTasks]);
   /* Desktop pipeline ownership is the colored SchemeGroup halo (#353): the board
      layout places every materialized stage conversation and derives one halo that
-     encloses them plus the planned-stage placeholders, so the pipeline reads as a
-     single region — never a detached control card with a duplicate stage graph. */
+     encloses them plus the planned-stage placeholders — and the pipeline's linked
+     task cards (#531), so the pipeline reads as a single region — never a
+     detached control card with a duplicate stage graph. */
   const layout = useMemo(
-    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths),
-    [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths],
+    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds),
+    [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds],
   );
 
   /* Selection keys are transcript paths, so the 10s poll relayout keeps the
@@ -515,44 +551,12 @@ export function SchemeBoard({
      the camera↔lasso creation cycle (the lasso needs the camera's viewport). */
   const lassoDownRef = useRef<(event: React.PointerEvent<HTMLDivElement>) => boolean>(() => false);
 
-  /* Tasks created this session but not yet echoed by the poll: overlaid so a
-     fresh card never blinks out between the POST and the refetch. Entries
-     leave the cache the moment the server echoes them (or on local delete),
-     so a later server-side removal can never be shadowed by a stale copy;
-     the project filter keeps a card created here off other projects' boards. */
-  const [localTasks, setLocalTasks] = useState<BoardTask[]>([]);
-  const [pendingTask, setPendingTask] = useState<{ x: number; y: number } | null>(null);
-  useEffect(() => {
-    const have = new Set(tasks.map((task) => task.id));
-    /* eslint-disable-next-line react-hooks/set-state-in-effect -- prune-only:
-       returns the same reference unless an entry was echoed or reprojected */
-    setLocalTasks((prev) => {
-      const next = prev.filter((task) => !have.has(task.id) && task.project === project);
-      return next.length === prev.length ? prev : next;
-    });
-  }, [tasks, project]);
-  const mergedTasks = useMemo(() => {
-    const have = new Set(tasks.map((task) => task.id));
-    const fresh = localTasks.filter((task) => !have.has(task.id) && task.project === project);
-    return fresh.length ? [...tasks, ...fresh] : tasks;
-  }, [tasks, localTasks, project]);
-  /* Session-only full-text state. Every geometry consumer reads this set, while
-     durable task records and pinned positions stay unchanged. */
-  const [textExpandedIds, setTextExpandedIds] = useState<ReadonlySet<string>>(new Set());
-  useEffect(() => {
-    const present = new Set(mergedTasks.map((task) => task.id));
-    /* eslint-disable-next-line react-hooks/set-state-in-effect -- prune-only state synchronization */
-    setTextExpandedIds((previous) => {
-      if (![...previous].some((id) => !present.has(id))) return previous;
-      return new Set([...previous].filter((id) => present.has(id)));
-    });
-  }, [mergedTasks]);
-  /* Panes, decks, stacks and drafts the cards must not bury (issue #17): the
-     placement pass spreads any pileup into their gaps. Group halos are derived
-     from these same rects, so nudging cards never disturbs a flow/pipeline
-     overlay. */
+  /* Panes, decks, stacks, drafts and pipeline-owned task cards the free cards
+     must not bury (issue #17): the placement pass spreads any pileup into their
+     gaps. Group halos are derived from these same rects, so nudging cards never
+     disturbs a flow/pipeline overlay. */
   const taskObstacles = useMemo<SchemeRect[]>(
-    () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts, ...layout.slots].map(({ x, y, w, h }) => ({ x, y, w, h })),
+    () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts, ...layout.slots, ...layout.regionTasks].map(({ x, y, w, h }) => ({ x, y, w, h })),
     [layout],
   );
   /* Card rects the pipeline rails route around (issue #136). Unlike taskObstacles
@@ -562,23 +566,27 @@ export function SchemeBoard({
     () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts, ...layout.slots],
     [layout],
   );
-  /* Only placed tasks have a board position; unplaced ones (panel/mobile creation)
-     live in the list until place-on-map pins them. */
-  const boardTasks = useMemo(() => mergedTasks.filter(isPlacedTask), [mergedTasks]);
+  /* Task cards owned by a pipeline region (#531) sit at the layout's coordinates
+     inside the colored halo; only the remaining free cards run through the
+     collision solver below. */
+  const regionTaskPos = useMemo(
+    () => new Map(layout.regionTasks.map((rect) => [rect.taskId, { x: rect.x, y: rect.y }] as const)),
+    [layout],
+  );
   /* Collision-aware display positions: cards keep their stored spot unless they
      overlap another card or pane, so hand-arranged boards pass through untouched
      while the curator/inbox lattice pileup gets spread out and stays readable. */
   const placement = useMemo(
-    () => resolveTaskPlacements(boardTasks, taskObstacles, textExpandedIds),
-    [boardTasks, taskObstacles, textExpandedIds],
+    () => resolveTaskPlacements(boardTasks.filter((task) => !regionTaskPos.has(task.id)), taskObstacles, textExpandedIds),
+    [boardTasks, regionTaskPos, taskObstacles, textExpandedIds],
   );
   const placedTasks = useMemo(
     () =>
       boardTasks.map((task) => {
-        const spot = placement.get(task.id);
+        const spot = regionTaskPos.get(task.id) ?? placement.get(task.id);
         return spot && (spot.x !== task.pos.x || spot.y !== task.pos.y) ? { ...task, pos: spot } : task;
       }),
-    [boardTasks, placement],
+    [boardTasks, regionTaskPos, placement],
   );
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
