@@ -14,7 +14,7 @@ import { procBackend } from "@/lib/proc";
 import { ClaudeStreamBrokerHost } from "@/lib/runtime/claudeStreamBrokerHost";
 import { CodexAppServerHost } from "@/lib/runtime/codexAppServerHost";
 import { StructuredHostAdoptionCleanupError } from "@/lib/runtime/engineHost";
-import { hasStructuredDeliveryHost, publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "@/lib/runtime/structuredDeliveryController";
+import { hasStructuredDeliveryHost, publishStructuredDeliveryHost, releaseStructuredDeliveryHost, requireStructuredDeliveryControllerPublication } from "@/lib/runtime/structuredDeliveryController";
 import { bindClaudeHostPersistence, bindCodexHostPersistence, structuredHostsEnabled } from "@/lib/runtime/registry";
 import { cleanupTmuxHostIfMatches, forgetResumePaneIfMatches, spawnAgentWithPrompt, verifyTmuxHostEvidence, type TmuxHostCleanupResult } from "@/lib/tmux";
 
@@ -302,6 +302,7 @@ async function publishClaudeSuccessorHost(
   const key = sessionKey("claude", input.receipt.nativeId);
   if (!key) throw new Error("successor Claude session identity is invalid");
   if (hasStructuredDeliveryHost(key)) return async () => { await releaseStructuredDeliveryHost(key); };
+  requireStructuredDeliveryControllerPublication();
 
   const existing = input.registry.snapshot().entries[sessionKeyId(key)];
   const entry = input.registry.upsert({
@@ -648,6 +649,22 @@ function assertClaudeTranscript(receipt: ProviderReceipt, target: AccountContext
   if (!matchesSession) throw new Error("target Claude transcript session identity does not match");
 }
 
+function ownsCompletedClaudeBrokerTransition(
+  registry: AgentRegistry,
+  receipt: ProviderReceipt,
+  target: AccountContext,
+): boolean {
+  const key = sessionKey("claude", receipt.nativeId);
+  if (!key) return false;
+  const entry = registry.snapshot().entries[sessionKeyId(key)];
+  return entry?.structuredHostOperationId === receipt.operationId
+    && entry.artifactPath === receipt.path
+    && entry.accountId === target.accountId
+    && entry.structuredHost?.kind === "claude-broker"
+    && entry.structuredHost.endpoint !== "stdio:pending"
+    && entry.structuredHost.protocolVersion !== null;
+}
+
 export class RegisteredSuccessorProvider implements SuccessorProviderPort {
   private readonly publishedHosts = new Map<string, {
     nativeId: string;
@@ -675,7 +692,10 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       if (!status.loggedIn) throw new Error("target Claude account is not authenticated");
       assertClaudeTranscript(receipt, target);
       const host = claudeTmuxHostFromReceipt(receipt);
-      if (host.windowName !== "claude-migration-successor" || !await this.dependencies.verifyClaudeHost?.(host)) {
+      const registry = this.dependencies.registry ?? agentRegistry();
+      const tmuxLive = host.windowName === "claude-migration-successor"
+        && await this.dependencies.verifyClaudeHost?.(host);
+      if (!tmuxLive && !ownsCompletedClaudeBrokerTransition(registry, receipt, target)) {
         throw new Error("target Claude successor host is not live and canonical");
       }
       return;

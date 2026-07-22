@@ -71,6 +71,12 @@ export function isStructuredDeliveryControllerUnavailable(error: unknown): boole
       && error.code === CONTROLLER_UNAVAILABLE_CODE);
 }
 
+export function requireStructuredDeliveryControllerPublication(): NonNullable<ControllerState["registerActiveHost"]> {
+  const publish = state.registerActiveHost;
+  if (!publish) throw new StructuredDeliveryControllerUnavailableError();
+  return publish;
+}
+
 function entryForHost(registry: AgentRegistry, adopted: StructuredDeliveryHost): AgentRegistryEntry | null {
   return registry.readOnlySnapshot().entries[sessionKeyId(adopted.key)] ?? null;
 }
@@ -668,8 +674,7 @@ export async function publishStructuredDeliveryHost(
   item: StructuredDeliveryHost,
   ownsOperation?: () => Promise<boolean>,
 ): Promise<() => Promise<void>> {
-  if (!state.registerActiveHost) throw new StructuredDeliveryControllerUnavailableError();
-  return state.registerActiveHost(item, ownsOperation);
+  return requireStructuredDeliveryControllerPublication()(item, ownsOperation);
 }
 
 export async function completeStructuredDeliveryQueueStartup(
