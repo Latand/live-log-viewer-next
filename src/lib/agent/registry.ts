@@ -2250,7 +2250,9 @@ export class RegistryParityError extends Error {
   override name = "RegistryParityError";
 }
 
-function sqliteModeFromEnvironment(): AgentRegistrySqliteMode {
+/** Pure env read: lets health/capability probes answer without paying the
+    full registry load (a multi-MB JSON parse) on first touch. */
+export function sqliteModeFromEnvironment(): AgentRegistrySqliteMode {
   const configured = process.env.LLV_AGENT_REGISTRY_SQLITE ?? "off";
   if (configured === "off" || configured === "dual-write" || configured === "read" || configured === "sqlite") return configured;
   throw new Error("LLV_AGENT_REGISTRY_SQLITE must be off, dual-write, read, or sqlite");
