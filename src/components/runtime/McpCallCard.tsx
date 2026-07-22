@@ -92,7 +92,7 @@ function LinkChip({
 }) {
   const disabled = link.kind === "conversation"
     && (!conversationAvailability.loaded || !conversationAvailability.ids.has(link.id));
-  const shared = "inline-flex min-h-7 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold transition-colors";
+  const shared = "inline-flex min-h-6 shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10.5px] font-semibold transition-colors [@media(pointer:coarse)]:min-h-8";
   if (disabled) {
     return (
       <span
@@ -140,56 +140,57 @@ export function McpCallCard({
   const error = state === "error" ? resultError(result, event.outputPreview) : "";
   const payload = useMemo(() => prettyPayload(mcp?.args ?? {}, result), [mcp?.args, result]);
 
+  /* Compact contract: one dense row — action meaning first, chrome last.
+     The title (which already carries the useful payload, e.g. the message text
+     of a send_message call) truncates inline; state lives in the icon color and
+     a small glyph instead of a separate "Completed" row; ids/paths/payload sit
+     behind the quiet Details disclosure. An error is never quiet: its text gets
+     its own visible line under the row. */
   return (
-    <article
-      data-testid="mcp-call-card"
-      data-state={state}
-      className={`relative my-2.5 ml-9 overflow-hidden rounded-surface border bg-card ${
-        state === "error" ? "border-danger/40" : state === "success" ? "border-success/25" : "border-accent/35"
-      }`}
-    >
+    <article data-testid="mcp-call-card" data-state={state} className="group/mcp relative my-1 ml-9">
       {state === "pending" ? (
         <div data-testid="mcp-call-progress" className="absolute inset-x-0 top-0 h-0.5 animate-pulse bg-gradient-to-r from-transparent via-accent to-transparent" />
       ) : null}
-      <div className="flex items-start gap-2.5 px-3 py-2.5">
-        <span
-          className={`relative mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
-            state === "error" ? "bg-danger-soft text-danger" : state === "success" ? "bg-success-soft text-success" : "bg-accent-soft text-accent"
-          }`}
-        >
-          <Icon className={`h-4 w-4 ${state === "pending" ? "animate-pulse" : ""}`} aria-hidden />
-          {state === "pending" ? <span className="absolute -bottom-1 -right-1 h-2.5 w-2.5 animate-ping rounded-full bg-accent/70" aria-hidden /> : null}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="rounded-md border border-border bg-sunken px-1.5 py-0.5 font-mono text-[9.5px] font-semibold uppercase tracking-[0.08em] text-muted">
-              MCP · {mcp?.serverName ?? "viewer"}
-            </span>
-            {replayed ? <span data-testid="mcp-replay" className="rounded-full bg-accent-soft px-2 py-0.5 text-[10px] font-bold text-accent">Replay</span> : null}
-            {retryable ? <span className="rounded-full bg-danger-soft px-2 py-0.5 text-[10px] font-bold text-danger">Retryable</span> : null}
-            {hhmm(event.ts) ? <span className="ml-auto text-[10px] tabular-nums text-muted">{hhmm(event.ts)}</span> : null}
-          </div>
-          <div className="mt-1.5 text-[13px] font-bold leading-snug text-primary">{description.title}</div>
-          {description.subtitle ? <div className="mt-0.5 truncate font-mono text-[10.5px] text-muted" title={description.subtitle}>{description.subtitle}</div> : null}
-          <div className={`mt-2 flex items-center gap-1.5 text-[11px] font-semibold ${
-            state === "error" ? "text-danger" : state === "success" ? "text-success" : "text-accent"
-          }`} role={state === "pending" ? "status" : undefined}>
+      <details className="min-w-0">
+        <summary className="flex min-w-0 cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-0.5 rounded-control py-0.5 text-ui hover:bg-sunken [@media(pointer:coarse)]:min-h-11 [&::-webkit-details-marker]:hidden">
+          <Icon
+            className={`h-3.5 w-3.5 shrink-0 ${
+              state === "error" ? "text-danger" : state === "success" ? "text-success" : "text-accent"
+            } ${state === "pending" ? "animate-pulse" : ""}`}
+            aria-hidden
+          />
+          <span className="shrink-0 font-mono text-[9.5px] font-semibold uppercase tracking-[0.08em] text-muted">
+            MCP · {mcp?.serverName ?? "viewer"}
+          </span>
+          <span className="min-w-0 flex-1 truncate font-semibold text-secondary" title={description.title}>
+            {description.title}
+          </span>
+          {replayed ? <span data-testid="mcp-replay" className="shrink-0 rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-bold text-accent">Replay</span> : null}
+          {retryable ? <span className="shrink-0 rounded-full bg-danger-soft px-1.5 py-0.5 text-[10px] font-bold text-danger">Retryable</span> : null}
+          {description.links.map((link) => (
+            <LinkChip key={`${link.kind}:${link.id}`} link={link} conversationAvailability={conversationAvailability} />
+          ))}
+          <span
+            className={`inline-flex shrink-0 items-center ${
+              state === "error" ? "text-danger" : state === "success" ? "text-success" : "text-accent"
+            }`}
+            role={state === "pending" ? "status" : undefined}
+            aria-label={state === "pending" ? `${description.verb}…` : state}
+          >
             {state === "pending" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden /> : state === "success" ? <CheckCircle2 className="h-3.5 w-3.5" aria-hidden /> : <CircleAlert className="h-3.5 w-3.5" aria-hidden />}
-            {state === "pending" ? `${description.verb}…` : state === "success" ? "Completed" : error}
-          </div>
-          {description.links.length ? (
-            <div className="mt-2.5 flex flex-wrap gap-1.5">
-              {description.links.map((link) => <LinkChip key={`${link.kind}:${link.id}`} link={link} conversationAvailability={conversationAvailability} />)}
-            </div>
+          </span>
+          {hhmm(event.ts) ? <span className="shrink-0 text-caption tabular-nums text-muted">{hhmm(event.ts)}</span> : null}
+        </summary>
+        <div className="ml-5 mt-1 text-[10.5px] text-muted">
+          {description.subtitle ? (
+            <div className="mb-1 truncate font-mono" title={description.subtitle}>{description.subtitle}</div>
           ) : null}
-          <details className="group/mcp mt-2 text-[10.5px] text-muted">
-            <summary className="inline-flex min-h-6 cursor-pointer list-none items-center font-semibold hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [&::-webkit-details-marker]:hidden">
-              Details
-            </summary>
-            <pre className="mt-1 max-h-[320px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-t border-border pt-1.5 font-mono text-[10.5px] text-secondary">{payload}</pre>
-          </details>
+          <pre className="max-h-[320px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-t border-border pt-1.5 font-mono text-[10.5px] text-secondary">{payload}</pre>
         </div>
-      </div>
+      </details>
+      {state === "error" ? (
+        <div className="ml-5 border-l-2 border-danger pl-2 text-[11px] font-semibold text-danger">{error}</div>
+      ) : null}
     </article>
   );
 }

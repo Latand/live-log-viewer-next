@@ -50,13 +50,12 @@ test("a non-ok tool row surfaces its status label even when collapsed", () => {
   expect(html).toContain("text-danger");
 });
 
-test("an auto-opened error row mounts its body and shows the compact no-output chip", () => {
+test("an auto-opened error row mounts its body without empty-output noise", () => {
   const html = renderToStaticMarkup(<ToolCard event={toolEvent({ status: "err", statusLabel: "exit 1", open: true, outputPreview: "" })} />);
-  expect(html).toContain(en("tools.noOutput"));
-  expect(html).toContain(en("tools.noOutputTip"));
-  // No leftover apology prose.
+  // Absent output renders nothing: no apology chip, no raw-record toggle (compact-feed pass).
+  expect(html).not.toContain(en("tools.noOutput"));
   expect(html).not.toContain("rollout session in the left list");
-  expect(html).toContain(en("tools.rawRecord"));
+  expect(html).not.toContain(en("tools.rawRecord"));
 });
 
 test("the summary row is a native <summary> and every icon is aria-hidden", () => {
@@ -197,10 +196,10 @@ test("a cmd-group carrying an error opens and mounts the failing child's full bo
   // The failing line is danger and never silenced.
   expect(html).toContain("exit 1");
   expect(html).toContain("text-danger");
-  // The opened error child mounts its body — a grouped call now exposes the same
-  // raw-record control a standalone line does.
+  // The opened error child mounts its body with the real output and no
+  // raw-record noise toggle (compact-feed pass).
   expect(html).toContain("boom");
-  expect(html).toContain(en("tools.rawRecord"));
+  expect(html).not.toContain(en("tools.rawRecord"));
 });
 
 test("a system message collapses to the compact per-1000 size, not chars/kB (§3.4)", () => {
@@ -251,5 +250,6 @@ test("an orchestration row renders nested children and the meaningful outer summ
   expect(html).toContain(en("tools.nestedCalls"));
   expect(html).toContain("git status");
   expect(html).toContain("Read a.ts");
-  expect(html).toContain(en("tools.source"));
+  // The raw JavaScript "source" disclosure is gone (compact-feed pass).
+  expect(html).not.toContain(en("tools.source"));
 });

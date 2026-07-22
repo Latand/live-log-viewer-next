@@ -2,15 +2,12 @@
 
 import { useState } from "react";
 
-import { debugRaw } from "@/lib/review";
-
 import { AlarmClock, GlyphIcon } from "../../icons";
 import { hhmm } from "../../utils";
 import { CopyButton } from "../CopyButton";
 import { tr, type ToolEvent } from "../parse";
 import type { ArgChip } from "../tools";
-import { formatDuration, isCollapsiblePoll, isFollowUpCall } from "../toolBlocks";
-import { useRawLine } from "../rawLine";
+import { formatDuration, isFollowUpCall } from "../toolBlocks";
 import { DiffCard } from "./DiffCard";
 import { OrchestrationCard } from "./OrchestrationCard";
 import { OutputPreview } from "./OutputPreview";
@@ -102,41 +99,6 @@ function CommandBlock({ command }: { command: string }) {
   );
 }
 
-/* Level-2 provenance: the redacted raw source line(s) resolved lazily and
-   client-side from the retained window. Slid out of the window → a quiet chip.
-   The call id is exposed for diagnosis and copy. */
-function RawRecord({ event }: { event: ToolEvent }) {
-  const getRaw = useRawLine();
-  const [open, setOpen] = useState(false);
-  if (!open) {
-    return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="mt-1.5 text-[11px] font-semibold text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-      >
-        {tr("tools.rawRecord")}
-      </button>
-    );
-  }
-  const indices = [event.srcCall, event.srcResult].filter((n): n is number => typeof n === "number");
-  const raw = indices.map((n) => getRaw(n)).filter((line): line is string => line !== null);
-  const record = raw.length ? debugRaw(raw.join("\n")).raw : "";
-  return (
-    <div className="mt-1.5">
-      <div className="mb-1 flex items-center gap-2 text-[10.5px] text-muted">
-        <span className="font-mono">{tr("tools.callId", { id: event.id })}</span>
-        <CopyButton text={event.id} label={tr("tools.copyId")} className="p-0.5" />
-      </div>
-      {record ? (
-        <pre className="max-h-[300px] max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-t border-border pt-1.5 font-mono text-[11px]">{record}</pre>
-      ) : (
-        <span className="text-[11px] text-muted">{tr("tools.noRawRecord")}</span>
-      )}
-    </div>
-  );
-}
-
 /* The expanded readable body of a tool call (issue #475): chips, the auditable
    command header, structured diff/orchestration, and separate stdout/stderr
    disclosures. Mounted lazily by {@link ToolLine} on first expand, so a long
@@ -148,7 +110,6 @@ export function ToolBody({ event }: { event: ToolEvent }) {
      source disclosure. Meaningful stdin keeps that bounded redacted provenance
      even when the result body is empty (issue #502). */
   const emptyFollowUp = isFollowUpCall(event) && !event.outputPreview.trim() && event.stderr === undefined && event.status !== "err";
-  const emptyPoll = isCollapsiblePoll(event);
   const showOutput = !emptyFollowUp && (!hasDiff || Boolean(event.outputPreview.trim()));
   return (
     <div className="mb-1 mt-1 rounded-surface bg-sunken px-2.5 py-2">
@@ -173,10 +134,8 @@ export function ToolBody({ event }: { event: ToolEvent }) {
           tone="err"
           copyLabel={tr("tools.copyStderr")}
           showAllLabel={tr("tools.showStderr")}
-          emptyLabel={tr("tools.noStderr")}
         />
       ) : null}
-      {emptyPoll ? null : <RawRecord event={event} />}
     </div>
   );
 }
