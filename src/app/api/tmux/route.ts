@@ -13,6 +13,7 @@ import {
 import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/transcriptHost";
 import { reconfigurationFromBody } from "@/lib/agent/reconfigure";
 import { listFiles } from "@/lib/scanner";
+import { completedFileScan } from "@/lib/scanner/scanCache";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -58,6 +59,11 @@ interface SendResponse {
   receipt?: { operationId: string; status: string };
 }
 
+async function currentTranscriptHosts() {
+  const files = (await completedFileScan()).snapshot.files;
+  return readTranscriptHosts(true, files);
+}
+
 function respond(outcome: DeliveryOutcome): NextResponse<SendResponse | ApiError | { ok: false; outcome: "failed"; error: string }> {
   if (!outcome.ok) {
     const { status, ...body } = outcome;
@@ -71,7 +77,7 @@ async function targetForRequest(pid: number | null, filePath: string): Promise<s
     /* A transcript path names the conversation being addressed. Its canonical
        host therefore wins over a client-side pid that may have exited and
        been recycled for another session between scanner polls. */
-    return canonicalTranscriptTarget(await readTranscriptHosts(true), filePath);
+    return canonicalTranscriptTarget(await currentTranscriptHosts(), filePath);
   }
   return pid === null ? null : resolveRequestedTmuxTarget(pid);
 }
@@ -93,7 +99,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<TargetResponse
     let reference;
     if (filePath) {
       if (!pathAllowed(filePath)) return attachJson({ error: "invalid transcript path", reason: "tmux-unavailable" }, 400);
-      const host = (await readTranscriptHosts(true)).canonicalFor(filePath);
+      const host = (await currentTranscriptHosts()).canonicalFor(filePath);
       if (host === null) return attachJson({ error: "unknown transcript host", reason: "tmux-unavailable" }, 400);
       reference = captureTmuxAttachReference(host);
     } else {

@@ -5,7 +5,11 @@ import { NextRequest } from "next/server";
 const FIRST_PATH = "/allowed/first.jsonl";
 const SECOND_PATH = "/allowed/second.jsonl";
 let transcriptReads = 0;
+let completedScanReads = 0;
+let suppliedFiles: unknown;
 let pidTargets = new Map<number, string | null>();
+
+const completedFiles = [{ path: FIRST_PATH }, { path: SECOND_PATH }];
 
 const first = { display: "agents:4.0" };
 const second = { display: "agents:5.0" };
@@ -16,9 +20,16 @@ const snapshot = {
 };
 
 mock.module("@/lib/agent/transcriptHost", () => ({
-  readTranscriptHosts: async () => {
+  readTranscriptHosts: async (_fresh: boolean, files: unknown) => {
     transcriptReads += 1;
+    suppliedFiles = files;
     return snapshot;
+  },
+}));
+mock.module("@/lib/scanner/scanCache", () => ({
+  completedFileScan: async () => {
+    completedScanReads += 1;
+    return { snapshot: { files: completedFiles } };
   },
 }));
 mock.module("@/lib/scanner/roots", () => ({ pathAllowed: (pathname: string) => pathname.startsWith("/allowed/") }));
@@ -38,6 +49,8 @@ function request(body: unknown): NextRequest {
 
 test("/api/tmux/targets projects every path from one canonical host snapshot", async () => {
   transcriptReads = 0;
+  completedScanReads = 0;
+  suppliedFiles = undefined;
   pidTargets = new Map([[11, "agents:9.0"]]);
 
   const response = await POST(request({
@@ -53,4 +66,6 @@ test("/api/tmux/targets projects every path from one canonical host snapshot", a
     targets: { first: "agents:4.0", second: "agents:5.0", "pid-only": "agents:9.0" },
   });
   expect(transcriptReads).toBe(1);
+  expect(completedScanReads).toBe(1);
+  expect(suppliedFiles).toBe(completedFiles);
 });
