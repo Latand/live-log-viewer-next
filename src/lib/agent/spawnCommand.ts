@@ -412,7 +412,7 @@ export async function executeSpawnRequest(
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
     const adoptMaterializedAttempt = async (receipt: typeof begun.receipt, agentPath: string): Promise<void> => {
       if (!pipelineSourceConversationId || !dependencies.adoptPipelineAttemptFromSource) return;
-      const materialized = registry.snapshot().receipts[receipt.launchId] ?? receipt;
+      const materialized = registry.readOnlySnapshot().receipts[receipt.launchId] ?? receipt;
       try {
         await dependencies.adoptPipelineAttemptFromSource(pipelineSourceConversationId, {
           launchId: materialized.launchId,
@@ -494,7 +494,7 @@ export async function executeSpawnRequest(
     if (begun.kind === "replay") {
       const structured = begun.receipt.transport === "structured"
         || (begun.receipt.transport === null
-          && Boolean(begun.receipt.key && registry.snapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost));
+          && Boolean(begun.receipt.key && registry.readOnlySnapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost));
       let receipt = begun.receipt;
       let initialMessage: SpawnResponse["initialMessage"] | undefined;
       const runtimeClient = structured ? dependencies.runtimeHostClient() : null;
@@ -583,7 +583,7 @@ export async function executeSpawnRequest(
     const key = childPath ? sessionKeyFromTranscript(engine, childPath) : null;
     if (!pane.host || !await verifyTmuxHostEvidence(pane.host)) {
       agentRegistry().invalidateSpawnHost(begun.receipt.launchId, "spawn host disappeared before API confirmation");
-      const lost = agentRegistry().snapshot().receipts[begun.receipt.launchId]!;
+      const lost = agentRegistry().readOnlySnapshot().receipts[begun.receipt.launchId]!;
       return NextResponse.json(spawnResponseForReceipt(lost, childPath));
     }
     if (!childPath || !key || !pane.receipt) {
@@ -626,12 +626,12 @@ export async function executeSpawnRequest(
     }
     if (!await verifyTmuxHostEvidence(pane.host)) {
       agentRegistry().invalidateSpawnHost(begun.receipt.launchId, "spawn host disappeared before API response");
-      const lost = agentRegistry().snapshot().receipts[begun.receipt.launchId]!;
+      const lost = agentRegistry().readOnlySnapshot().receipts[begun.receipt.launchId]!;
       return NextResponse.json(spawnResponseForReceipt(lost, childPath));
     }
     return NextResponse.json(spawnResponseForReceipt(settled.receipt, childPath));
   } catch (error) {
-    const receipt = launchId ? agentRegistry().snapshot().receipts[launchId] : null;
+    const receipt = launchId ? agentRegistry().readOnlySnapshot().receipts[launchId] : null;
     if (!receipt || receipt.pane === null) {
       if (receipt) agentRegistry().failSpawn(receipt.launchId, "spawn failed before pane binding");
       deleteInboxImages(imagePaths);
@@ -647,7 +647,7 @@ export async function executeSpawnRequest(
     if (accountError) return accountError;
     if (receipt?.pane) {
       if (receipt.state === "prompt-delivered" || receipt.state === "host-verified") agentRegistry().markSpawnPathPending(receipt.launchId);
-      const recovered = agentRegistry().snapshot().receipts[receipt.launchId];
+      const recovered = agentRegistry().readOnlySnapshot().receipts[receipt.launchId];
       if (recovered) return NextResponse.json(spawnResponseForReceipt(recovered, recovered.artifactPath));
     }
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });

@@ -79,7 +79,7 @@ function candidateFor(
   const generation = conversation?.generations.at(-1);
   if (!conversation || !generation) return null;
   const key = { engine: conversation.engine, sessionId: generation.id } as const;
-  const snapshot = registry.snapshot();
+  const snapshot = registry.readOnlySnapshot();
   const entry = snapshot.entries[sessionKeyId(key)];
   if (!entry || entry.host) return null;
   const structuredReceipt = Object.values(snapshot.receipts).some((receipt) =>

@@ -110,7 +110,7 @@ export function pinnedPathsFor(value: string | readonly string[] | undefined): R
   if (!values.length) return new Set();
   try {
     const registry = agentRegistry();
-    const snapshot = registry.snapshot();
+    const snapshot = registry.readOnlySnapshot();
     const paths = new Set<string>();
     const latestByKnownPath = new Map<string, string>();
     const conversationIdByKnownPath = new Map<string, `conversation_${string}`>();

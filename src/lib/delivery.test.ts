@@ -667,7 +667,7 @@ test("conversation kill refreshes the registry host inside the session lock", as
   const killed: string[] = [];
   const unhosted: string[] = [];
   const registry = {
-    snapshot: () => snapshots++ === 0 ? oldSnapshot : freshSnapshot,
+    readOnlySnapshot: () => snapshots++ === 0 ? oldSnapshot : freshSnapshot,
     withOperationLock: async (_key: unknown, _owner: unknown, task: () => Promise<unknown>) => task(),
     markUnhosted: (key: { sessionId: string }) => { unhosted.push(key.sessionId); },
   };

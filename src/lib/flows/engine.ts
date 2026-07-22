@@ -464,7 +464,7 @@ function adoptReviewerReceipt(flow: Flow, round: Round, receipt: SpawnReceipt): 
 function settleReviewerSpawn(flow: Flow, round: Round, role: RoleConfig, accountId: string | null, host: TmuxHostEvidence | null = null): void {
   if (!round.launchId || !round.reviewerPath) return;
   const registry = agentRegistry();
-  const receipt = registry.snapshot().receipts[round.launchId];
+  const receipt = registry.readOnlySnapshot().receipts[round.launchId];
   if (!receipt) return;
   if (receipt?.state === "completed") {
     round.reviewerConversationId = receipt.conversationId;
@@ -832,7 +832,7 @@ export async function tickFlow(
     }
     maybeClaimReviewerPathByHeuristic(flow, entries, round);
     settleReviewerSpawn(flow, round, reviewerRoleFor(flow, round), round.accountId ?? null, round.reviewerPane
-      ? agentRegistry().snapshot().receipts[round.launchId ?? ""]?.verifiedHost ?? null
+      ? agentRegistry().readOnlySnapshot().receipts[round.launchId ?? ""]?.verifiedHost ?? null
       : null);
     if (round.reviewerPath) {
       const reviewer = entriesByPath.get(round.reviewerPath);

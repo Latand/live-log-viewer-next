@@ -203,8 +203,8 @@ describe("durable account migration coordinator", () => {
     fs.writeFileSync(secondPath, JSON.stringify({ type: "event_msg", timestamp: "2026-07-11T00:00:00.000Z", payload: { type: "task_complete" } }) + "\n");
     store.reconcileConversations([observation(firstPath, "default", "idle")]);
     let snapshotCalls = 0;
-    const originalSnapshot = store.snapshot.bind(store);
-    store.snapshot = (() => { snapshotCalls += 1; return originalSnapshot(); }) as typeof store.snapshot;
+    const originalSnapshot = store.readOnlySnapshot.bind(store);
+    store.readOnlySnapshot = (() => { snapshotCalls += 1; return originalSnapshot(); }) as typeof store.readOnlySnapshot;
     store.conversationForPath = (() => { throw new Error("inventory must use its snapshot index"); }) as typeof store.conversationForPath;
     store.launchProfileForPath = (() => { throw new Error("inventory must use its snapshot index"); }) as typeof store.launchProfileForPath;
     const files = [firstPath, secondPath].map((pathname): FileEntry => ({

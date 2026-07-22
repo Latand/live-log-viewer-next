@@ -40,7 +40,7 @@ export async function reconcileAccountMigrationCycle(
   await yieldToRuntime();
   await reconcileMigrations(provider, delivery, registry);
   await yieldToRuntime();
-  await forEachCooperatively(Object.values(registry.snapshot().conversations), async (conversation) => {
+  await forEachCooperatively(Object.values(registry.readOnlySnapshot().conversations), async (conversation) => {
     if (conversation.migration?.phase === "rolled-back") await drainHeldDeliveries(conversation.id, delivery, registry);
   });
   await yieldToRuntime();
@@ -48,7 +48,7 @@ export async function reconcileAccountMigrationCycle(
 }
 
 export function syncCompatibilityRouting(registry: AgentRegistry): void {
-  const current = registry.snapshot().engineRouting;
+  const current = registry.readOnlySnapshot().engineRouting;
   const claudeNeedsSync = (() => {
     try { return Boolean(current.claude.activeAccountId && current.claude.activeAccountId !== activeClaudeAccountId()); }
     catch { return true; }
@@ -59,7 +59,7 @@ export function syncCompatibilityRouting(registry: AgentRegistry): void {
   })();
   if (!claudeNeedsSync && !codexNeedsSync) return;
   withAccountMutationLock(() => {
-    const snapshot = registry.snapshot();
+    const snapshot = registry.readOnlySnapshot();
     const claude = snapshot.engineRouting.claude.activeAccountId;
     const codex = snapshot.engineRouting.codex.activeAccountId;
     try { if (claude && claude !== activeClaudeAccountId()) setActiveClaudeAccount(claude); } catch { /* registry routing stays authoritative */ }
@@ -116,7 +116,7 @@ async function reconcileControllerRuntime(registry: AgentRegistry, files: Contro
 }
 
 function reconcileControllerTasks(registry: AgentRegistry, files: ControllerScan["files"]): void {
-  const currentLookup = conversationLookupFromSnapshot(registry.snapshot());
+  const currentLookup = conversationLookupFromSnapshot(registry.readOnlySnapshot());
   mutateTasks((current) => {
     const reconciled = reconcileTasks(files, current, {
       pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),

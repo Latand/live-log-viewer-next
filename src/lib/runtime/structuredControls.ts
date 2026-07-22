@@ -47,7 +47,7 @@ export async function dispatchStructuredControl(
       : null;
   const generation = conversation?.generations.at(-1);
   if (!conversation || !generation) return null;
-  const snapshot = registry.snapshot();
+  const snapshot = registry.readOnlySnapshot();
   const entry = snapshot.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
   if (!entry) return null;
   /* Host teardown clears the structuredHost column before terminal kill

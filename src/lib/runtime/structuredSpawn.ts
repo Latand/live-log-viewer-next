@@ -96,7 +96,7 @@ function reconciledInitialMessage(
 
 function settleInitialMessageReservation(registry: AgentRegistry, launchId: string): void {
   const clientMessageId = `spawn_${launchId}`;
-  const reservation = Object.values(registry.snapshot().heldDeliveries)
+  const reservation = Object.values(registry.readOnlySnapshot().heldDeliveries)
     .find((delivery) => delivery.clientMessageId === clientMessageId);
   if (reservation && reservation.state !== "delivered") {
     registry.recordDeliveryOutcome(reservation.id, "delivered");
@@ -104,7 +104,7 @@ function settleInitialMessageReservation(registry: AgentRegistry, launchId: stri
 }
 
 function markInitialMessageTimeout(registry: AgentRegistry, launchId: string, error: StructuredInitialMessageTimeoutError): void {
-  const reservation = Object.values(registry.snapshot().heldDeliveries)
+  const reservation = Object.values(registry.readOnlySnapshot().heldDeliveries)
     .find((delivery) => delivery.clientMessageId === `spawn_${launchId}`);
   if (reservation && reservation.state !== "delivered") {
     registry.recordDeliveryOutcome(reservation.id, "delivery-uncertain", error.message);
@@ -181,7 +181,7 @@ export async function reconcileStructuredSpawnReplay(
     releaseHost?: (key: SessionKey) => Promise<boolean>;
   } = {},
 ): Promise<SpawnReceipt & { initialMessage: "pending" | "queued" | "delivered" | "failed" }> {
-  const current = registry.snapshot().receipts[launchId];
+  const current = registry.readOnlySnapshot().receipts[launchId];
   if (!current) throw new Error("unknown spawn receipt");
   if (current.state === "completed") {
     return { ...current, initialMessage: "delivered" };
@@ -265,7 +265,7 @@ export async function reconcileStructuredSpawnReplay(
   }
   const messageStatus = operation?.receipt.status;
   const runtimeSession = runtime?.sessions.find((candidate) => candidate.conversationId === current.conversationId) ?? null;
-  const entry = current.key ? registry.snapshot().entries[sessionKeyId(current.key)] : null;
+  const entry = current.key ? registry.readOnlySnapshot().entries[sessionKeyId(current.key)] : null;
   const matchingRuntimeSession = Boolean(runtimeSession
     && current.key
     && sessionKeyId(runtimeSession.sessionKey) === sessionKeyId(current.key)
@@ -309,10 +309,10 @@ export async function reconcileStructuredSpawnReplay(
     if (current.key) {
       await (options.releaseHost ?? releaseStructuredDeliveryHost)(current.key).catch(() => false);
     }
-    const failed = registry.snapshot().receipts[launchId] ?? current;
+    const failed = registry.readOnlySnapshot().receipts[launchId] ?? current;
     return { ...failed, initialMessage: "failed" };
   }
-  const receipt = registry.snapshot().receipts[launchId] ?? current;
+  const receipt = registry.readOnlySnapshot().receipts[launchId] ?? current;
   return {
     ...receipt,
     initialMessage: reconciledInitialMessage(receipt, messageStatus, runtimeDelivered),
@@ -528,7 +528,7 @@ export async function recoverPendingStructuredSpawns(
     return registeringConversationIds;
   };
 
-  const snapshot = registry.snapshot();
+  const snapshot = registry.readOnlySnapshot();
   for (const receipt of Object.values(snapshot.receipts)) {
     const effect = spawnEffects.get(receipt.launchId);
     if (receipt.state === "failed" && receipt.transport !== "tmux") {
@@ -566,7 +566,7 @@ export async function recoverPendingStructuredSpawns(
       const identity = resumeIdentityForReceipt(registry, receipt);
       let claimed: AgentRegistryEntry | null = null;
       if (identity) {
-        const entry = registry.snapshot().entries[sessionKeyId(identity.key)];
+        const entry = registry.readOnlySnapshot().entries[sessionKeyId(identity.key)];
         if (entry?.structuredHost) {
           claimed = registry.claimStructuredHost(identity.key, {
             pid: process.pid,
@@ -773,7 +773,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
   const env = { ...input.account.env, LLV_SPAWN_CAPABILITY: capability };
   const resumeSessionId = structuredResumeSessionId(input);
   const initialEventCursor = resumeSessionId
-    ? input.registry.snapshot().entries[sessionKeyId({ engine: input.engine, sessionId: resumeSessionId })]?.structuredHost?.eventCursor
+    ? input.registry.readOnlySnapshot().entries[sessionKeyId({ engine: input.engine, sessionId: resumeSessionId })]?.structuredHost?.eventCursor
     : undefined;
   if (initialEventCursor !== undefined
     && (!Number.isSafeInteger(initialEventCursor) || initialEventCursor < 0)) {
@@ -917,7 +917,7 @@ export async function spawnStructuredConversation(
       ...(input.receipt.purpose === "resume-successor" ? { sessionId: structuredResumeSessionId(input) } : {}),
     }));
     const capability = input.registry.rotateSpawnCapabilityForReceipt(input.receipt.launchId);
-    const resumeEntry = resumeKey ? input.registry.snapshot().entries[sessionKeyId(resumeKey)] : null;
+    const resumeEntry = resumeKey ? input.registry.readOnlySnapshot().entries[sessionKeyId(resumeKey)] : null;
     if (resumeEntry?.structuredHost) {
       adoptionClaim = input.registry.claimStructuredHost(resumeKey!, processIdentity(), { allowUnhosted: true });
       if (!adoptionClaim?.claimOwner) {
@@ -1032,14 +1032,14 @@ export async function spawnStructuredConversation(
     let failedEntry: AgentRegistryEntry | null = null;
     let failedIdentity = resumeIdentity;
     if (key) {
-      const entry = input.registry.snapshot().entries[sessionKeyId(key)];
+      const entry = input.registry.readOnlySnapshot().entries[sessionKeyId(key)];
       if (entry) {
         failedEntry = entry;
         failedIdentity = { key, artifactPath: entry.artifactPath };
       }
     } else {
       if (resumeIdentity) {
-        failedEntry = input.registry.snapshot().entries[sessionKeyId(resumeIdentity.key)] ?? null;
+        failedEntry = input.registry.readOnlySnapshot().entries[sessionKeyId(resumeIdentity.key)] ?? null;
       }
     }
     if (typeof failedEntry?.structuredHostOperationId === "string"
