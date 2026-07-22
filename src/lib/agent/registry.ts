@@ -2239,6 +2239,9 @@ export interface AgentRegistryStorageOptions {
   sqliteFilename?: string;
   onSqliteWriterWait?: (durationMs: number) => void;
   onSqliteSnapshotLoad?: () => void;
+  onSqliteRowPayloadRead?: (collection: string, count: number) => void;
+  onSqliteRowPayloadParse?: (collection: string, count: number) => void;
+  onSqliteRevisionQuery?: () => void;
   beforeDualWriteStartupReplace?: () => void;
   beforeDualWriteMutationReplace?: () => void;
   mirrorCheckpointMs?: number;
@@ -2338,6 +2341,9 @@ export class AgentRegistry {
             storage.onSqliteWriterWait?.(duration);
           },
           onSnapshotLoad: storage.onSqliteSnapshotLoad,
+          onRowPayloadRead: storage.onSqliteRowPayloadRead,
+          onRowPayloadParse: storage.onSqliteRowPayloadParse,
+          onRevisionQuery: storage.onSqliteRevisionQuery,
         });
     if (this.sqliteMode === "off") {
       this.cleanupStaleTempFiles();
@@ -3990,9 +3996,13 @@ export class AgentRegistry {
         || entry.claimOwner !== claimOwner
         || entry.claimEpoch !== claimEpoch
         || entry.structuredHost.writerClaimEpoch !== claimEpoch) return null;
+      const normalizedHost = normalizeStructuredHost(structuredHost);
+      if (!releaseClaim
+        && entry.status === status
+        && isDeepStrictEqual(normalizeStructuredHost(entry.structuredHost), normalizedHost)) return clone(entry);
       const replacement = {
         ...entry,
-        structuredHost: normalizeStructuredHost(structuredHost),
+        structuredHost: normalizedHost,
         status,
       };
       const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
