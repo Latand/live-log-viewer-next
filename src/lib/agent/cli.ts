@@ -116,6 +116,13 @@ export interface ResumeSpecOptions {
   allowSubagents?: boolean;
 }
 
+export function effectiveClaudePermissionMode(
+  options: Pick<ResumeSpecOptions, "readOnly" | "permissionMode">,
+): string {
+  if (options.permissionMode) return options.permissionMode;
+  return options.readOnly ? "plan" : "bypassPermissions";
+}
+
 /** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
 export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpecOptions = {}): ResumeSpec {
   if (engine === "claude") {
@@ -127,9 +134,10 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     const args = [resolveBinary("claude")];
     /* Read-only rounds must not inherit the skip-permissions bypass: with it,
        denying Edit/Write still leaves Bash free to mutate the worktree. */
-    const readOnlyPermissionMode = options.permissionMode ?? "plan";
-    if (options.readOnly) args.push("--permission-mode", readOnlyPermissionMode, "--disallowedTools", "Edit,Write,NotebookEdit");
-    else args.push("--dangerously-skip-permissions");
+    const permissionMode = effectiveClaudePermissionMode(options);
+    if (options.readOnly) args.push("--permission-mode", permissionMode, "--disallowedTools", "Edit,Write,NotebookEdit");
+    else if (permissionMode === "bypassPermissions") args.push("--dangerously-skip-permissions");
+    else args.push("--permission-mode", permissionMode);
     args.push("--session-id", sid);
     if (options.model) args.push("--model", options.model);
     if (options.effort) args.push("--effort", options.effort);
@@ -151,13 +159,13 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       cwd,
       windowName: "claude-new",
       engine: "claude",
-      transcript: claudeTranscriptPath(cwd, sid, options.claudeProjectsDir ?? path.join(legacyClaudeHome(), "projects")),
+      ["transcript"]: claudeTranscriptPath(cwd, sid, options.claudeProjectsDir ?? path.join(legacyClaudeHome(), "projects")),
       launchProfile: {
         cwd,
         model: options.model ?? null,
         effort: options.effort ?? null,
         fast: null,
-        permissionMode: options.readOnly ? readOnlyPermissionMode : "bypassPermissions",
+        permissionMode,
         readOnly: options.readOnly ?? false,
         allowSubagents: options.allowSubagents ?? false,
         title: null,
@@ -218,11 +226,12 @@ export function claudeSuccessorSpecFor(input: {
     "--replay-user-messages",
     "--permission-prompt-tool", "stdio",
   ];
-  if (input.profile.readOnly || input.profile.permissionMode === "plan") {
+  const permissionMode = effectiveClaudePermissionMode(input.profile);
+  if (input.profile.readOnly || permissionMode === "plan") {
     args.push("--permission-mode", "plan", "--disallowedTools", "Edit,Write,NotebookEdit");
-  } else if (input.profile.permissionMode && input.profile.permissionMode !== "bypassPermissions") {
-    if (input.profile.permissionMode.length <= 64 && /^[a-zA-Z-]+$/.test(input.profile.permissionMode)) {
-      args.push("--permission-mode", input.profile.permissionMode);
+  } else if (permissionMode !== "bypassPermissions") {
+    if (permissionMode.length <= 64 && /^[a-zA-Z-]+$/.test(permissionMode)) {
+      args.push("--permission-mode", permissionMode);
     }
   } else {
     args.push("--dangerously-skip-permissions");
@@ -242,9 +251,9 @@ export function claudeSuccessorSpecFor(input: {
     cwd: input.profile.cwd || resumeCwd(input.sourcePath),
     windowName: "claude-migration-successor",
     engine: "claude",
-    transcript: claudeTranscriptPath(input.profile.cwd || resumeCwd(input.sourcePath), input.candidateId, input.targetProjectsDir),
+    ["transcript"]: claudeTranscriptPath(input.profile.cwd || resumeCwd(input.sourcePath), input.candidateId, input.targetProjectsDir),
     printMode: true,
-    launchProfile: { ...input.profile, model },
+    launchProfile: { ...input.profile, model, permissionMode },
   };
 }
 
@@ -267,10 +276,11 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
       profileId: `resume-${sid}`,
     }).settingsPath;
     let command = shellQuote(resolveBinary("claude"));
-    if (options.readOnly || options.permissionMode === "plan") {
+    const permissionMode = effectiveClaudePermissionMode(options);
+    if (options.readOnly || permissionMode === "plan") {
       command += " --permission-mode plan --disallowedTools Edit,Write,NotebookEdit";
-    } else if (options.permissionMode && options.permissionMode !== "bypassPermissions" && /^[a-zA-Z-]+$/.test(options.permissionMode)) {
-      command += ` --permission-mode ${shellQuote(options.permissionMode)}`;
+    } else if (permissionMode !== "bypassPermissions" && /^[a-zA-Z-]+$/.test(permissionMode)) {
+      command += ` --permission-mode ${shellQuote(permissionMode)}`;
     } else {
       command += " --dangerously-skip-permissions";
     }
@@ -284,7 +294,7 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
       cwd: resumeCwd(pathname),
       windowName: "claude-resume",
       engine: "claude",
-      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false },
+      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode, allowSubagents: options.allowSubagents ?? false },
     };
   }
   if (root === "codex-sessions" && base.endsWith(".jsonl")) {

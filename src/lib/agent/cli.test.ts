@@ -36,7 +36,7 @@ test("fresh Codex commands fix CODEX_HOME in the typed shell command", () => {
 });
 
 test("allowSubagents enables Codex multi-agent for fresh and resumed launches", () => {
-  const transcript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "14", "rollout-019f5f2f-743a-7f23-9773-3cf2dd4b4168.jsonl");
+  const transcript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "14", "rollout-019f5f2f-743a-7f23-7773-3cf2dd4b4168.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
   fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: SANDBOX } }) + "\n");
 
@@ -72,7 +72,7 @@ test("fresh read-only Claude commands accept a non-interactive permission mode",
 });
 
 test("Codex resume derives its owning account home from the transcript path", () => {
-  const transcript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "09", "rollout-019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
+  const transcript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "09", "rollout-019f423a-d6e9-7903-7597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
   fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: SANDBOX } }) + "\n");
 
@@ -82,12 +82,12 @@ test("Codex resume derives its owning account home from the transcript path", ()
     `env -u LLV_TOKEN CODEX_HOME='${path.join(SANDBOX, "legacy")}' `,
   );
   expect(spec?.command).toContain("--disable multi_agent");
-  expect(spec?.command).toContain("resume 019f423a-d6e9-7903-b597-3e676b6ff3d4");
+  expect(spec?.command).toContain("resume 019f423a-d6e9-7903-7597-3e676b6ff3d4");
 });
 
 test("resume preserves the transcript model and reasoning effort for both engines", () => {
-  const codexTranscript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "09", "rollout-019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
-  const claudeTranscript = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo", "019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
+  const codexTranscript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "09", "rollout-019f423a-d6e9-7903-7597-3e676b6ff3d4.jsonl");
+  const claudeTranscript = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo", "019f423a-d6e9-7903-7597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(claudeTranscript), { recursive: true });
   fs.writeFileSync(claudeTranscript, JSON.stringify({ cwd: SANDBOX }) + "\n");
   const codex = resumeSpecFor("codex-sessions", codexTranscript, { model: "gpt-5.6-terra", effort: "xhigh" });
@@ -101,11 +101,13 @@ test("resume preserves the transcript model and reasoning effort for both engine
   expect(codex?.command).toContain("CODEX_HOME='");
   expect(claude?.command).toContain("--model 'opus'");
   expect(claude?.command).toContain("--effort 'max'");
+  expect(claude?.command).toContain("--dangerously-skip-permissions");
+  expect(claude?.launchProfile).toMatchObject({ permissionMode: "bypassPermissions" });
 });
 
 test("resume preserves read-only execution policy for both engines", () => {
-  const codexTranscript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "09", "rollout-019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
-  const claudeTranscript = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo", "019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
+  const codexTranscript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "09", "rollout-019f423a-d6e9-7903-7597-3e676b6ff3d4.jsonl");
+  const claudeTranscript = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo", "019f423a-d6e9-7903-7597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(claudeTranscript), { recursive: true });
   fs.writeFileSync(claudeTranscript, JSON.stringify({ cwd: SANDBOX }) + "\n");
 
@@ -121,7 +123,7 @@ test("resume preserves read-only execution policy for both engines", () => {
 });
 
 test("Claude resume normalizes transcript families and omits unknown model overrides", () => {
-  const transcript = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo", "019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
+  const transcript = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo", "019f423a-d6e9-7903-7597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
   fs.writeFileSync(transcript, JSON.stringify({ cwd: SANDBOX }) + "\n");
 
@@ -134,7 +136,7 @@ test("Claude resume normalizes transcript families and omits unknown model overr
 test("managed Codex commands pin file-backed credential storage", () => {
   const account = createManagedCodexAccount("Review");
   const fresh = freshSpecFor("codex", "/repo", { codexHome: account.home, model: "gpt-5" });
-  const transcript = path.join(account.sessionsDir, "2026", "07", "09", "rollout-019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
+  const transcript = path.join(account.sessionsDir, "2026", "07", "09", "rollout-019f423a-d6e9-7903-7597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
   fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: SANDBOX } }) + "\n");
 

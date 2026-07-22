@@ -168,13 +168,12 @@ const IMAGE_REF: StructuredImageRef = {
 };
 
 describe("ClaudeStreamBrokerHost", () => {
-  test("passes bypassPermissions to the pane-less Claude process", async () => {
+  test("defaults writable pane-less Claude processes to bypassPermissions", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);
     const captured: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
     const host = await ClaudeStreamBrokerHost.start({
       cwd: process.cwd(),
-      permissionMode: "bypassPermissions",
       eventStore: new MemoryEventStore(),
       deliveryLedger: ledger,
       readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),

@@ -6,6 +6,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { statePath } from "@/lib/configDir";
+import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
 import { applyClaudeSpawnPolicy, NATIVE_MULTI_AGENT_TOOLS } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
@@ -553,7 +554,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--safe-mode", "--include-partial-messages", "--replay-user-messages",
       "--permission-prompt-tool", "stdio",
-      "--permission-mode", options.permissionMode ?? "default",
+      "--permission-mode", effectiveClaudePermissionMode(options),
     ];
     const disallowedTools = [
       ...(!options.allowSubagents ? NATIVE_MULTI_AGENT_TOOLS : []),

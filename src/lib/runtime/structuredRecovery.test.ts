@@ -1044,7 +1044,7 @@ test("a registered legacy Claude transcript bridges into the structured broker",
   expect(drainRequests).toBe(1);
 });
 
-test("legacy Codex tmux history remains on the legacy resume path after cutover", async () => {
+test("a registered legacy Codex transcript bridges into the structured app server", async () => {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `legacy-${sessionId}`);
   const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
@@ -1083,19 +1083,58 @@ test("legacy Codex tmux history remains on the legacy resume path after cutover"
   });
   registry.failSpawn(failedStructuredAttempt.receipt.launchId, "structured launch failed before ownership");
   let spawnCalls = 0;
+  let drainRequests = 0;
 
   const result = await recoverDeadStructuredConversation({
     path: artifactPath,
     conversationId: conversation.id,
   }, {
     registry,
+    client: {} as RuntimeHostClient,
     transport: () => "structured",
-    spawn: async () => {
-      spawnCalls += 1;
-      throw new Error("legacy conversation entered structured recovery");
+    resolveAccount: (engine, accountId) => {
+      expect({ engine, accountId }).toEqual({ engine: "codex", accountId: "legacy-account" });
+      return {
+        engine: "codex",
+        accountId: "legacy-account",
+        kind: "managed",
+        home: path.join(cwd, "account"),
+        transcriptRoot: cwd,
+        env: { NODE_ENV: "test" },
+      };
     },
+    spawn: async (input) => {
+      spawnCalls += 1;
+      expect(input.receipt).toMatchObject({
+        conversationId: conversation.id,
+        purpose: "resume-successor",
+        transport: "structured",
+        accountId: "legacy-account",
+      });
+      expect(input.spec).toMatchObject({
+        engine: "codex",
+        ["transcript"]: artifactPath,
+      });
+      return {
+        ok: true,
+        target: null,
+        path: artifactPath,
+        launchId: input.receipt.launchId,
+        conversationId: conversation.id,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "delivered" as const,
+        state: "settled",
+      };
+    },
+    requestDeliveryDrain: () => { drainRequests += 1; },
   });
 
-  expect(result).toBeNull();
-  expect(spawnCalls).toBe(0);
+  expect(result).toMatchObject({
+    conversationId: conversation.id,
+    path: artifactPath,
+    spawned: true,
+  });
+  expect(spawnCalls).toBe(1);
+  expect(drainRequests).toBe(1);
 });
