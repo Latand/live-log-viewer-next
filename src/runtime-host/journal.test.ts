@@ -62,20 +62,50 @@ test("producer dedupe keys are isolated by producer identity", () => {
 
 test("producer cursor reports the highest durably acknowledged engine event", () => {
   const dir = sandbox("producer-cursor");
-  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 1, now: () => 100 });
-  for (const sequence of [1, 2, 3]) {
+  const filename = path.join(dir, "events.sqlite");
+  const sessionId = "thread-one";
+  const prefix = `engine-host:codex:${sessionId}:`;
+  const journal = new RuntimeJournal(filename, { maxEvents: 1, now: () => 100 });
+  for (const sequence of [1, 2, 10]) {
     journal.append({
       scope: runtimeScope("session", "one"),
       kind: "delta",
       payload: { conversationId: "one", turnId: "turn-one", text: `delta ${sequence}` },
-      producer: { kind: "codex-app-server", eventKey: `engine-host:codex:thread-one:${sequence}` },
+      producer: { kind: "codex-app-server", eventKey: `${prefix}${sequence}` },
     });
   }
   journal.compact(1);
 
-  expect(journal.producerCursor("codex-app-server", "engine-host:codex:thread-one:")).toBe(3);
+  expect(journal.producerCursor("codex-app-server", prefix)).toBe(10);
   expect(journal.producerCursor("claude-broker", "engine-host:claude:thread-one:")).toBe(0);
   journal.close();
+
+  const legacy = new Database(filename);
+  const latest = legacy.query<{ event_json: string }, [string, string]>(
+    "SELECT event_json FROM producer_receipts WHERE producer_kind = ? AND producer_key = ?",
+  ).get("codex-app-server", `${prefix}10`)!;
+  for (const sequence of [2, 9]) {
+    legacy.query("INSERT INTO producer_receipts(producer_kind, producer_key, event_json) VALUES (?, ?, ?)")
+      .run("codex-app-server", `${prefix}${sequence}`, latest.event_json);
+  }
+  legacy.close();
+
+  const reopened = new RuntimeJournal(filename, { maxEvents: 1, now: () => 100 });
+  expect(reopened.producerCursor("codex-app-server", prefix)).toBe(10);
+  const stale = reopened.append({
+    scope: runtimeScope("session", "one"),
+    kind: "delta",
+    payload: { conversationId: "one", turnId: "turn-one", text: "stale delta" },
+    producer: { kind: "codex-app-server", eventKey: `${prefix}9` },
+  });
+  expect(stale.seq).toBe(3);
+  reopened.close();
+
+  const compacted = new Database(filename, { readonly: true });
+  expect(compacted.query<{ count: number }, [string, string, string]>(
+    "SELECT COUNT(*) AS count FROM producer_receipts WHERE producer_kind = ? AND producer_key >= ? AND producer_key < ?",
+  ).get("codex-app-server", prefix, `${prefix}\uffff`)?.count).toBe(1);
+  compacted.close();
 });
 
 test("snapshot exposes the canonical projected runtime model", () => {

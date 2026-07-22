@@ -74,6 +74,19 @@ type EncryptedSecret = {
   ciphertext: string;
 };
 
+type EngineProducerCursor = { prefix: string; sequence: number };
+
+function engineProducerCursor(producerKind: string, producerKey: string): EngineProducerCursor | null {
+  if (producerKind !== "codex-app-server" && producerKind !== "claude-broker") return null;
+  const expected = producerKind === "codex-app-server" ? "engine-host:codex:" : "engine-host:claude:";
+  if (!producerKey.startsWith(expected)) return null;
+  const separator = producerKey.lastIndexOf(":");
+  if (separator < expected.length) return null;
+  const sequence = Number(producerKey.slice(separator + 1));
+  if (!Number.isSafeInteger(sequence) || sequence < 0) return null;
+  return { prefix: producerKey.slice(0, separator + 1), sequence };
+}
+
 function loadSecretKey(filename: string): Buffer {
   if (filename === ":memory:") return randomBytes(32);
   const keyFile = `${filename}.key`;
@@ -1009,9 +1022,25 @@ export class RuntimeJournal {
 
   private appendInTransaction(input: NormalizedRuntimeEventInput): RuntimeEvent {
     const producerKey = input.producer.eventKey ?? null;
+    const engineCursor = producerKey ? engineProducerCursor(input.producer.kind, producerKey) : null;
     if (producerKey) {
-      const duplicate = this.db.query<{ event_json: string }, [string, string]>("SELECT event_json FROM producer_receipts WHERE producer_kind = ? AND producer_key = ?").get(input.producer.kind, producerKey);
-      if (duplicate) return JSON.parse(duplicate.event_json) as RuntimeEvent;
+      if (engineCursor) {
+        const latest = this.db.query<{ producer_key: string; event_json: string }, [string, string, string, string]>(
+          "SELECT producer_key, event_json FROM producer_receipts WHERE producer_kind = ? AND producer_key >= ? AND producer_key < ? ORDER BY CAST(substr(producer_key, length(?) + 1) AS INTEGER) DESC LIMIT 1",
+        ).get(input.producer.kind, engineCursor.prefix, `${engineCursor.prefix}\uffff`, engineCursor.prefix);
+        if (latest) {
+          const latestCursor = engineProducerCursor(input.producer.kind, latest.producer_key);
+          if (latestCursor && latestCursor.sequence >= engineCursor.sequence) {
+            this.db.query(
+              "DELETE FROM producer_receipts WHERE producer_kind = ? AND producer_key >= ? AND producer_key < ? AND producer_key <> ?",
+            ).run(input.producer.kind, engineCursor.prefix, `${engineCursor.prefix}\uffff`, latest.producer_key);
+            return JSON.parse(latest.event_json) as RuntimeEvent;
+          }
+        }
+      } else {
+        const duplicate = this.db.query<{ event_json: string }, [string, string]>("SELECT event_json FROM producer_receipts WHERE producer_kind = ? AND producer_key = ?").get(input.producer.kind, producerKey);
+        if (duplicate) return JSON.parse(duplicate.event_json) as RuntimeEvent;
+      }
     }
     const now = this.now();
     const seq = Number(this.meta("seq")) + 1;
@@ -1058,7 +1087,14 @@ export class RuntimeJournal {
       )
     `).run(event);
     this.db.query("INSERT INTO scope_revisions(scope, revision) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET revision=excluded.revision").run(scope, revision);
-    if (producerKey) this.db.query("INSERT INTO producer_receipts(producer_kind, producer_key, event_json) VALUES (?, ?, ?)").run(input.producer.kind, producerKey, stableJson(toEvent(event)));
+    if (producerKey) {
+      this.db.query("INSERT INTO producer_receipts(producer_kind, producer_key, event_json) VALUES (?, ?, ?)").run(input.producer.kind, producerKey, stableJson(toEvent(event)));
+      if (engineCursor) {
+        this.db.query(
+          "DELETE FROM producer_receipts WHERE producer_kind = ? AND producer_key >= ? AND producer_key < ? AND producer_key <> ?",
+        ).run(input.producer.kind, engineCursor.prefix, `${engineCursor.prefix}\uffff`, producerKey);
+      }
+    }
     const projection = stableJson({ revision, lastKind: input.kind, payload: input.payload });
     this.db.query("INSERT INTO projections(scope, revision, state_json, checkpoint_seq) VALUES (?, ?, ?, ?) ON CONFLICT(scope) DO UPDATE SET revision=excluded.revision, state_json=excluded.state_json, checkpoint_seq=excluded.checkpoint_seq").run(scope, revision, projection, seq);
     this.project(event, input.payload);
@@ -1685,8 +1721,10 @@ export class RuntimeJournal {
 
   private verify(): void {
     try {
-      const check = this.db.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
-      if (check?.quick_check !== "ok") throw new RuntimeJournalFault("runtime journal SQLite check failed");
+      for (const table of ["journal_meta", "events", "scope_revisions", "projections", "entities", "outbox", "operations", "consumer_checkpoints", "viewer_deployments"]) {
+        const check = this.db.query<{ quick_check: string }, []>(`PRAGMA quick_check(${table})`).get();
+        if (check?.quick_check !== "ok") throw new RuntimeJournalFault(`runtime journal SQLite check failed: ${table}`);
+      }
       let previous = this.meta("anchor_hash");
       let expected = Number(this.meta("anchor_seq")) + 1;
       for (const row of this.db.query<EventRow, []>("SELECT * FROM events ORDER BY seq").all()) {
