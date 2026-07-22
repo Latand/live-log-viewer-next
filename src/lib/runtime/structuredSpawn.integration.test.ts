@@ -23,6 +23,7 @@ import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { INITIAL_MESSAGE_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
+import { structuredContentDigest } from "./structuredContent";
 
 type UnsequencedEvent = RuntimeEvent extends infer Event
   ? Event extends RuntimeEvent ? Omit<Event, "seq"> : never
@@ -1327,12 +1328,20 @@ test("issue 533: a 30 second initial-message timeout releases admission ownershi
   const claimedBeforeRecovery = registry.snapshot().entries[`codex:${id}`]!;
   expect(host.releaseCount).toBe(0);
 
-  fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "continue after timeout" } })}\n`);
-  const first = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client);
-  const replay = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client);
+  await bindStructuredDeliveryQueue([{ key: { engine: "codex", sessionId: id }, host }], { registry, client });
+  await client.command({
+    kind: "send",
+    operationId: `spawn_message_${begun.receipt.launchId}`,
+    conversationId: begun.receipt.conversationId,
+    idempotencyKey: `spawn_${begun.receipt.launchId}`,
+    text: "continue after timeout",
+    contentDigest: structuredContentDigest({ text: "continue after timeout", images: [] }),
+    policy: "queue",
+    turnId: null,
+  });
+  await kickStructuredDeliveryQueue();
+  await waitFor(() => host.sent.some((entry) => entry.text === "continue after timeout"));
 
-  expect(first).toMatchObject({ state: "completed", initialMessage: "delivered" });
-  expect(replay).toMatchObject({ state: "completed", initialMessage: "delivered" });
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "completed", completionMode: "route-recovered" });
   expect(registry.snapshot().entries[`codex:${id}`]).toMatchObject({
     claimOwner: claimedBeforeRecovery.claimOwner,

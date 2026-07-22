@@ -245,6 +245,15 @@ export async function bindStructuredDeliveryQueue(
           status,
           details?.reason ?? null,
         );
+        if (status === "delivered" && operationId.startsWith("spawn_message_")) {
+          const launchId = operationId.slice("spawn_message_".length);
+          const receipt = registry.snapshot().receipts[launchId];
+          if (receipt?.conversationId === conversationId && receipt.state !== "completed") {
+            await client.transitionOperation(launchId, "delivered");
+            const { reconcileStructuredSpawnReplay } = await import("./structuredSpawn");
+            await reconcileStructuredSpawnReplay(launchId, registry, client);
+          }
+        }
       },
     },
     hostResolver(registry, hosts),

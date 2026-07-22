@@ -7,6 +7,7 @@ import path from "node:path";
 import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
+import type { AgentRegistry as AgentRegistryType } from "@/lib/agent/registry";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
 const engineModule = await import("./engine");
@@ -126,6 +127,7 @@ function harness() {
       return null;
     },
     spawnReceipt: () => null,
+    claimSpawnRetry: () => "claimed",
     spawnAgent: async ({ role, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
       spawn += 1;
       spawnRoles.push(structuredClone(role));
@@ -2702,6 +2704,63 @@ test("issue 533: a matching receipt that settles late cannot spawn a retry", asy
   expect(afterTick.runs[0]!.attempts).toEqual([
     expect.objectContaining({ launchId, conversationId: attempt.conversationId }),
   ]);
+});
+
+test("issue 533: a cross-process late recovery loses atomically to a claimed retry", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
+  const registryPath = path.join(process.env.LLV_STATE_DIR!, `retry-race-${pipeline.id}.json`);
+  const retryRegistry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
+  const competingRegistry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
+  const begun = retryRegistry.beginSpawnRequest({ engine: "codex", cwd: pipeline.worktreeDir, transport: "structured", accountId: "work" });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const key = { engine: "codex" as const, sessionId: `retry-race-${pipeline.id}` };
+  const artifactPath = path.join(pipeline.worktreeDir, "late-original.jsonl");
+  retryRegistry.stageStructuredSpawn(begun.receipt.launchId, {
+    key, artifactPath, cwd: pipeline.worktreeDir, accountId: "work", status: "dead",
+    host: null, structuredHost: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+  });
+  retryRegistry.failStructuredSpawn(begun.receipt.launchId, "host loss confirmed");
+  const persisted = loadPipelines()[0]!;
+  const attempt = persisted.runs[0]!.attempts[0]!;
+  attempt.launchId = begun.receipt.launchId;
+  attempt.conversationId = begun.receipt.conversationId;
+  attempt.sessionId = key.sessionId;
+  attempt.agentPath = artifactPath;
+  attempt.paneId = null;
+  savePipelines([persisted]);
+  h.ports.spawnReceipt = (launchId) => {
+    const receipt = retryRegistry.readOnlySnapshot().receipts[launchId];
+    return receipt ? {
+      state: receipt.state, launchId, conversationId: receipt.conversationId,
+      sessionId: receipt.key?.sessionId ?? null, "transcript": receipt.artifactPath, paneId: null,
+    } : null;
+  };
+  let lateRecovery: ReturnType<AgentRegistryType["recoverStructuredSpawnFromEvidence"]> | null = null;
+  h.ports.claimSpawnRetry = (launchId, claimId) => {
+    const claim = retryRegistry.claimFailedSpawnForRetry(launchId, claimId);
+    lateRecovery = competingRegistry.recoverStructuredSpawnFromEvidence(launchId, {
+      key, artifactPath, cwd: pipeline.worktreeDir, accountId: "work",
+      launchProfile: begun.receipt.launchProfile, status: "live", host: null, structuredHost: null,
+      claimEpoch: 0, claimOwner: null, pendingAction: null,
+    });
+    return claim.kind;
+  };
+  const spawnCount = h.calls.filter((call) => call.startsWith("spawn:")).length;
+
+  expect((await patchPipeline(pipeline.id, {
+    action: "retry-stage", stageId: "plan", launchId: begun.receipt.launchId,
+  }, h.ports)).pipeline?.state).toBe("running");
+  expect(lateRecovery).toMatchObject({ kind: "conflict" });
+  expect(competingRegistry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    retryClaim: { claimId: expect.any(String) },
+  });
+  await tickPipelines([], h.ports);
+  expect(h.calls.filter((call) => call.startsWith("spawn:")).length).toBe(spawnCount + 1);
 });
 
 test("a stage retry supersedes the prior attempt's conversation and numbers its round (#383)", async () => {

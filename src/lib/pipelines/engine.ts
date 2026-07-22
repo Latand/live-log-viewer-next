@@ -88,6 +88,7 @@ export interface PipelinePorts {
     supersedes?: string | null;
   }, onReserved: (reservation: PipelineStageLaunchReservation) => void): Promise<PipelineStageSpawn>;
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
+  claimSpawnRetry(launchId: string, claimId: string): "claimed" | "settled" | "conflict";
   paneAgentAlive(paneId: string): Promise<boolean>;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
   durableTurnEvidence(engine: EffectivePipelineRole["engine"], transcriptPath: string): Promise<StageTurnEvidence | null>;
@@ -261,6 +262,7 @@ export function defaultPipelinePorts(): PipelinePorts {
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
       };
     },
+    claimSpawnRetry: (launchId, claimId) => agentRegistry().claimFailedSpawnForRetry(launchId, claimId).kind,
     paneAgentAlive: async (paneId) => {
       const info = await paneInfo(paneId);
       return info !== null && !isShellCommand(info.command);
@@ -1989,6 +1991,17 @@ export async function patchPipeline(
          This final durable read fences the synchronous reset and cursor update. */
       const settledReceiptConflict = validateRetryReceipt();
       if (settledReceiptConflict) return settledReceiptConflict;
+      if (receiptRetry) {
+        const claim = ports.claimSpawnRetry(req.launchId!, `${pipeline.id}:${stage!.id}:${req.launchId}`);
+        if (claim !== "claimed") {
+          return {
+            error: claim === "settled"
+              ? "the clicked launch settled before its retry could be claimed"
+              : "the clicked launch is already claimed by another retry",
+            status: 409,
+          };
+        }
+      }
       const retryReviewHead = stage?.kind === "review-loop" ? synchronizePipelineRetryHead(pipeline, ports.exec) : null;
       if (retryReviewHead && !retryReviewHead.ok) {
         pipeline.stateDetail = retryReviewHead.error;
