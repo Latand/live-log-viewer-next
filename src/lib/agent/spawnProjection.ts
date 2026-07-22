@@ -45,8 +45,14 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
     state = "failed";
     initialMessage = "failed";
   } else if (delivered) {
-    state = "recovered";
+    state = receipt.completionMode === "route-recovered" ? "live-late-success" : "recovered";
     initialMessage = "delivered";
+  } else if (delivery?.state === "delivery-uncertain" && delivery.error?.startsWith("structured initial message")) {
+    state = "recoverable-timeout";
+    initialMessage = "queued";
+  } else if (delivery?.state === "delivery-uncertain") {
+    state = "reconciling";
+    initialMessage = "queued";
   } else if (queued) {
     state = "queued";
     initialMessage = "queued";
@@ -70,9 +76,15 @@ function newestUnscannedReceipts(files: readonly FileEntry[], snapshot: Registry
   const byConversation = new Map<string, SpawnReceipt>();
   for (const receipt of Object.values(snapshot.receipts)) {
     if (receipt.transport !== "structured" || receipt.purpose !== "launch") continue;
-    if (receipt.artifactLifecycle !== "pending") continue;
-    if (scannedConversations.has(receipt.conversationId)) continue;
-    if (receipt.artifactPath && scannedPaths.has(receipt.artifactPath)) continue;
+    const createdMs = Date.parse(receipt.createdAt);
+    const visibleLateSuccess = receipt.completionMode === "route-recovered"
+      && Number.isFinite(createdMs)
+      && nowMs - createdMs < TERMINAL_SPAWN_RECENT_MS;
+    if (!visibleLateSuccess) {
+      if (receipt.artifactLifecycle !== "pending") continue;
+      if (scannedConversations.has(receipt.conversationId)) continue;
+      if (receipt.artifactPath && scannedPaths.has(receipt.artifactPath)) continue;
+    }
     const current = byConversation.get(receipt.conversationId);
     if (!current || current.createdAt < receipt.createdAt) byConversation.set(receipt.conversationId, receipt);
   }

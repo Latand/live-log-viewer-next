@@ -130,6 +130,7 @@ function isFlow(value: unknown): value is Flow {
     typeof flow.cwd === "string" &&
     typeof flow.implementerPath === "string" &&
     typeof flow.baseRef === "string" &&
+    (flow.headRef === undefined || flow.headRef === null || typeof flow.headRef === "string") &&
     (flow.targetSha === undefined || flow.targetSha === null || typeof flow.targetSha === "string") &&
     (flow.spec === undefined || typeof flow.spec === "string") &&
     Array.isArray(flow.rounds)

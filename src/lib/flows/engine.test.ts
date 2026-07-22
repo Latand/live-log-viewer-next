@@ -81,6 +81,39 @@ test("a review round captures its clean commit immediately before launch", () =>
   }
 });
 
+test("issue 533: a repair review parks when its remote branch is behind the captured head", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-remote-head-"));
+  const directory = path.join(root, "worktree");
+  const remote = path.join(root, "origin.git");
+  fs.mkdirSync(directory);
+  try {
+    expect(spawnSync("git", ["init", "--bare", remote]).status).toBe(0);
+    expect(spawnSync("git", ["init", "-b", "main"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "flow@example.com"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["remote", "add", "origin", remote], { cwd: directory }).status).toBe(0);
+    fs.writeFileSync(path.join(directory, "work.txt"), "published\n");
+    expect(spawnSync("git", ["add", "work.txt"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "published"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["push", "-u", "origin", "main"], { cwd: directory }).status).toBe(0);
+    const remoteSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).stdout.trim();
+    fs.writeFileSync(path.join(directory, "work.txt"), "repair\n");
+    expect(spawnSync("git", ["commit", "-am", "repair"], { cwd: directory }).status).toBe(0);
+    const repairSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).stdout.trim();
+    const flow = {
+      cwd: directory, headRef: "main", roles: {
+        implementer: { engine: "codex", model: null, effort: "high" },
+        reviewer: { engine: "codex", model: null, effort: "xhigh" },
+      }, rounds: [],
+    } as unknown as Flow;
+
+    expect(() => captureReviewHead(flow, newRound(flow, "marker", null)))
+      .toThrow(`review remote head mismatch before launch: local ${repairSha}, origin/main ${remoteSha}`);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a review round parks when clean HEAD advances past its synchronized target before launch (#522)", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-target-head-"));
   try {

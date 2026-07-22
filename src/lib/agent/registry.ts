@@ -181,6 +181,8 @@ export interface SpawnReceipt {
   /** Validated explicit operator project. Becomes durable conversation
       ownership at admission; `launchProfile.project` stays a hint. */
   explicitProject: string | null;
+  /** Cross-process CAS fence acquired before a failed launch is retried. */
+  retryClaim?: { claimId: string; claimedAt: string };
 }
 
 export interface SpawnLineageEdge {
@@ -1980,6 +1982,11 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     rejection: normalizeSpawnRejection(value.rejection),
     launchProfile: emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }),
     explicitProject: validExplicitProject(value.explicitProject),
+    ...(value.retryClaim
+      && typeof value.retryClaim.claimId === "string"
+      && typeof value.retryClaim.claimedAt === "string"
+      ? { retryClaim: { claimId: value.retryClaim.claimId, claimedAt: value.retryClaim.claimedAt } }
+      : {}),
   };
 }
 
@@ -3245,6 +3252,39 @@ export class AgentRegistry {
     });
   }
 
+  /** Releases the process-local admission lease after a structured host has
+      reached durable registry ownership. The host claim remains untouched. */
+  releaseStructuredSpawnAdmissionOwner(launchId: string, owner: ProcessIdentity): { released: boolean; receipt: SpawnReceipt } {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.transport !== "structured"
+        || !receipt.admissionOwner
+        || receipt.admissionOwner.pid !== owner.pid
+        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        return { released: false, receipt: clone(receipt) };
+      }
+      receipt.admissionOwner = null;
+      return { released: true, receipt: clone(receipt) };
+    });
+  }
+
+  claimFailedSpawnForRetry(
+    launchId: string,
+    claimId: string,
+  ): { kind: "claimed" | "settled" | "conflict"; receipt: SpawnReceipt } {
+    if (!claimId.trim()) throw new Error("spawn retry claim id is required");
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.retryClaim?.claimId === claimId) return { kind: "claimed", receipt: clone(receipt) };
+      if (receipt.retryClaim) return { kind: "conflict", receipt: clone(receipt) };
+      if (receipt.state !== "failed") return { kind: "settled", receipt: clone(receipt) };
+      receipt.retryClaim = { claimId, claimedAt: now() };
+      return { kind: "claimed", receipt: clone(receipt) };
+    });
+  }
+
   rememberMembership(conversationId: ViewerConversationId, membership: DurableMembershipInput): DurableConversationMembership {
     return this.mutate((file) => clone(recordMembership(file, conversationId, membership, now())));
   }
@@ -3701,7 +3741,7 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt) throw new Error("unknown spawn receipt");
-      if (receipt.state === "conflicted") {
+      if (receipt.state === "conflicted" || receipt.retryClaim) {
         return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
       }
       const stored = receipt.key ? file.entries[sessionKeyId(receipt.key)] : null;
@@ -3711,7 +3751,19 @@ export class AgentRegistry {
         void updatedAt;
         storedEvidence = entry;
       }
-      const candidate = evidence ?? storedEvidence;
+      /* Runtime snapshots prove delivery and session identity, while the
+         registry remains authoritative for an active writer claim. Merge the
+         live claim inside this mutation so synthesized evidence cannot clear
+         ownership between its read and late-success settlement. */
+      const candidate = evidence && storedEvidence
+        && (storedEvidence.structuredHost?.process || storedEvidence.claimOwner) ? {
+        ...evidence,
+        host: storedEvidence.host,
+        structuredHost: storedEvidence.structuredHost,
+        claimEpoch: storedEvidence.claimEpoch,
+        claimOwner: storedEvidence.claimOwner,
+        pendingAction: storedEvidence.pendingAction,
+      } : evidence ?? storedEvidence;
       if (!candidate
         || (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(candidate.key))
         || (receipt.artifactPath && receipt.artifactPath !== candidate.artifactPath)) {

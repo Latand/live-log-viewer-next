@@ -26,7 +26,7 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
-import { commitPipelineStage, currentPipelineBranchHead, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
+import { commitPipelineStage, currentPipelineBranchHead, currentPipelineRemoteBranchHead, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import {
   DEFAULT_FAIL_EDGE_ROUNDS,
   MAX_FAIL_EDGE_ROUNDS,
@@ -88,6 +88,7 @@ export interface PipelinePorts {
     supersedes?: string | null;
   }, onReserved: (reservation: PipelineStageLaunchReservation) => void): Promise<PipelineStageSpawn>;
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
+  claimSpawnRetry(launchId: string, claimId: string): "claimed" | "settled" | "conflict";
   paneAgentAlive(paneId: string): Promise<boolean>;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
   durableTurnEvidence(engine: EffectivePipelineRole["engine"], transcriptPath: string): Promise<StageTurnEvidence | null>;
@@ -261,6 +262,7 @@ export function defaultPipelinePorts(): PipelinePorts {
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
       };
     },
+    claimSpawnRetry: (launchId, claimId) => agentRegistry().claimFailedSpawnForRetry(launchId, claimId).kind,
     paneAgentAlive: async (paneId) => {
       const info = await paneInfo(paneId);
       return info !== null && !isShellCommand(info.command);
@@ -1128,6 +1130,7 @@ async function tickReviewStage(
       roles: { implementer: implementerRole, reviewer: reviewerRole },
       baseMode: "head",
       baseRef: pipeline.baseRef,
+      headRef: pipeline.branch,
       targetSha: attempt.expectedReviewHeadSha,
       spec: pipeline.spec ?? pipeline.task,
       mode: "auto",
@@ -1180,6 +1183,10 @@ async function tickReviewStage(
   attachReviewFlowAttempt(attempt, flow);
   const capturedReviewHead = flow.rounds.findLast((round) => round.reviewHeadSha)?.reviewHeadSha ?? null;
   if (capturedReviewHead && attempt.reviewHeadSha !== capturedReviewHead) {
+    /* Each repair round establishes a new immutable approval fence. Persist
+       both fields together so restart/reload cannot retain the pre-repair SHA
+       while the active reviewer and worktree have advanced. */
+    attempt.expectedReviewHeadSha = capturedReviewHead;
     attempt.reviewHeadSha = capturedReviewHead;
     persist();
   }
@@ -1256,10 +1263,20 @@ const RECONCILABLE_BOUND_FLOW_ERRORS = [
 ] as const;
 
 function reviewHeadFenceError(pipeline: Pipeline, attempt: PipelineStageAttempt, ports: PipelinePorts): string | null {
+  if (!attempt.reviewHeadSha || attempt.expectedReviewHeadSha !== attempt.reviewHeadSha) {
+    return `approved review flow envelope mismatch: expected ${attempt.expectedReviewHeadSha ?? "no exact head"}, reviewed ${attempt.reviewHeadSha ?? "no exact head"}`;
+  }
   const currentHead = currentPipelineBranchHead(pipeline, ports.exec);
   if (!currentHead.ok) return `approved review flow could not verify the current pipeline head: ${currentHead.error}`;
-  if (attempt.reviewHeadSha === currentHead.sha) return null;
-  return `approved review flow head mismatch: reviewed ${attempt.reviewHeadSha ?? "no exact head"}, current pipeline head is ${currentHead.sha}`;
+  if (attempt.reviewHeadSha !== currentHead.sha) {
+    return `approved review flow head mismatch: reviewed ${attempt.reviewHeadSha}, current pipeline head is ${currentHead.sha}`;
+  }
+  const remoteHead = currentPipelineRemoteBranchHead(pipeline, ports.exec);
+  if (!remoteHead.ok) return `approved review flow could not verify the remote pipeline head: ${remoteHead.error}`;
+  if (attempt.reviewHeadSha !== remoteHead.sha) {
+    return `approved review flow head mismatch: reviewed ${attempt.reviewHeadSha}, remote pipeline head is ${remoteHead.sha}`;
+  }
+  return null;
 }
 
 function terminalReviewFlowError(flow: Flow): string | null {
@@ -1290,6 +1307,37 @@ function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boo
   return true;
 }
 
+function reconcileParkedStructuredSpawn(pipeline: Pipeline, ports: PipelinePorts): boolean {
+  if (pipeline.state !== "needs_decision") return false;
+  const stage = currentStage(pipeline);
+  if (!stage || stage.kind !== "run") return false;
+  const attempt = currentAttempt(pipeline, stage.id);
+  if (!attempt?.launchId || attempt.paneId || attempt.verdict || attempt.completedAt) return false;
+  if (!isStructuredSpawnPark(pipeline, attempt)) return false;
+  const receipt = ports.spawnReceipt(attempt.launchId);
+  if (
+    receipt?.state !== "completed"
+    || receipt.launchId !== attempt.launchId
+    || receipt.conversationId !== attempt.conversationId
+  ) return false;
+  attempt.sessionId = receipt.sessionId;
+  attempt.agentPath = receipt.transcript;
+  attempt.paneId = receipt.paneId;
+  attempt.state = "running";
+  attempt.error = null;
+  pipeline.state = "running";
+  pipeline.stateDetail = null;
+  setCursorState(pipeline, stage.id, "running");
+  return true;
+}
+
+function isStructuredSpawnPark(pipeline: Pipeline, attempt: PipelineStageAttempt): boolean {
+  const failure = attempt.error ?? pipeline.stateDetail ?? "";
+  return failure.startsWith("stage spawn")
+    || failure.includes("structured initial message")
+    || failure.includes("runtime host request timed out");
+}
+
 export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts = defaultPipelinePorts()): Promise<{ pipelines: Pipeline[]; changed: boolean }> {
   if (tickStore.__llvPipelineTick) return { pipelines: [], changed: false };
   tickStore.__llvPipelineTick = true;
@@ -1301,6 +1349,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         let pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports);
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
+        pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
           pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
@@ -1939,6 +1988,46 @@ export async function patchPipeline(
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
+      const explicitReceiptRetry = req.stageId !== undefined || req.launchId !== undefined;
+      if (explicitReceiptRetry && (typeof req.stageId !== "string" || typeof req.launchId !== "string")) {
+        return { error: "receipt retry requires both stageId and launchId", status: 400 };
+      }
+      const retryStageId = explicitReceiptRetry ? req.stageId! : stage?.id ?? null;
+      const retryLaunchId = explicitReceiptRetry ? req.launchId! : attempt?.launchId ?? null;
+      const receiptRetry = (explicitReceiptRetry || attempt?.paneId === null)
+        && retryStageId !== null
+        && retryLaunchId !== null;
+      if (explicitReceiptRetry && stage?.id !== retryStageId) {
+        return { error: "the clicked launch belongs to a different pipeline stage", status: 409 };
+      }
+      if (explicitReceiptRetry && attempt?.launchId !== retryLaunchId) {
+        return { error: "the clicked launch is no longer the current failed attempt", status: 409 };
+      }
+      const validateRetryReceipt = (settlementWasPending = false): { conflict: { error: string; status: number } | null; claimRequired: boolean } => {
+        if (!receiptRetry) return { conflict: null, claimRequired: false };
+        const receipt = ports.spawnReceipt(retryLaunchId);
+        if (!receipt) return {
+          conflict: { error: "the clicked launch receipt is no longer available", status: 409 },
+          claimRequired: false,
+        };
+        if (receipt.state === "failed" || receipt.state === "conflicted") {
+          return { conflict: null, claimRequired: true };
+        }
+        if (
+          explicitReceiptRetry
+          || settlementWasPending
+          || (attempt !== null && isStructuredSpawnPark(pipeline, attempt))
+          || receipt.state !== "completed"
+        ) {
+          return {
+            conflict: { error: `the clicked launch settled as ${receipt.state}; retry was cancelled`, status: 409 },
+            claimRequired: false,
+          };
+        }
+        return { conflict: null, claimRequired: false };
+      };
+      const initialReceipt = validateRetryReceipt();
+      if (initialReceipt.conflict) return initialReceipt.conflict;
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
       if (flow && flow.state !== "closed") {
@@ -1947,6 +2036,24 @@ export async function patchPipeline(
           pipeline.stateDetail = closed.error;
           persist();
           return { error: closed.error, status: closed.status ?? 409 };
+        }
+      }
+      /* Pane/flow cleanup can yield while a structured receipt reconciles.
+         This final durable read fences the synchronous reset and cursor update. */
+      const settledReceipt = validateRetryReceipt(initialReceipt.claimRequired);
+      if (settledReceipt.conflict) return settledReceipt.conflict;
+      if (settledReceipt.claimRequired) {
+        if (!retryLaunchId || !retryStageId) {
+          return { error: "structured retry identity is unavailable", status: 409 };
+        }
+        const claim = ports.claimSpawnRetry(retryLaunchId, `${pipeline.id}:${retryStageId}:${retryLaunchId}`);
+        if (claim !== "claimed") {
+          return {
+            error: claim === "settled"
+              ? "the clicked launch settled before its retry could be claimed"
+              : "the clicked launch is already claimed by another retry",
+            status: 409,
+          };
         }
       }
       const retryReviewHead = stage?.kind === "review-loop" ? synchronizePipelineRetryHead(pipeline, ports.exec) : null;

@@ -105,6 +105,17 @@ export function currentPipelineBranchHead(pipeline: Pipeline, exec: ExecPort): P
   return { ok: true, sha };
 }
 
+/** Reads the authoritative remote pipeline branch without relying on a stale
+    tracking ref. Approval fences use this alongside the clean local HEAD. */
+export function currentPipelineRemoteBranchHead(pipeline: Pipeline, exec: ExecPort): PipelineGitResult {
+  if (!validPipelineBranch(pipeline.branch)) return { ok: false, error: "the pipeline branch is invalid" };
+  const remote = exec("git", ["ls-remote", "--heads", "origin", `refs/heads/${pipeline.branch}`], pipeline.worktreeDir);
+  if (remote.code !== 0) return failure("checking the remote pipeline branch", remote);
+  const sha = remote.stdout.trim().split(/\s+/)[0] ?? "";
+  if (!/^[0-9a-f]{40}$/i.test(sha)) return { ok: false, error: "the remote pipeline branch has no exact commit SHA" };
+  return { ok: true, sha };
+}
+
 /**
  * Resolves the exact revision a retried reviewer will receive. A remote repair
  * fast-forwards the shared worktree; a local repair stays intact; divergence

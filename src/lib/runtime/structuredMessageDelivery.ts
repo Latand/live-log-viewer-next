@@ -11,7 +11,7 @@ import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
-import { runtimeHostClient, type RuntimeHostClient } from "./client";
+import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt, RuntimeSendSettings, RuntimeSession } from "./contracts";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
@@ -48,7 +48,7 @@ export interface StructuredMessageRequest {
 export type StructuredMessageResult =
   | { ok: true; structured: true; target: string | null; outcome: "queued" | "delivering" | "delivered"; operationId: string; receipt: RuntimeOperationReceipt; spawned?: boolean }
   | { ok: true; structured: true; target: string | null; outcome: "held"; spawned?: boolean }
-  | { ok: false; structured: true; outcome: "failed"; error: string; status: number; operationId?: string; receipt?: RuntimeOperationReceipt; successorConversationId?: string };
+  | { ok: false; structured: true; outcome: "failed"; error: string; status: number; operationId?: string; receipt?: RuntimeOperationReceipt; successorConversationId?: string; transportUncertain?: true };
 
 export interface StructuredMessageDependencies {
   enabled?: () => boolean;
@@ -175,6 +175,7 @@ function deliveryFailure(error: unknown): StructuredMessageResult {
       : error instanceof StructuredEnvelopeTooLargeError
         ? 413
         : 503,
+    ...(isRuntimeHostTransportFailure(error) ? { transportUncertain: true } : {}),
   };
 }
 

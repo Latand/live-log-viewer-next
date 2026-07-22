@@ -95,6 +95,10 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     return { error: "spec must be a string", status: 400 };
   }
   let targetSha: string | null = null;
+  const headRef = req.headRef?.trim() ?? null;
+  if (headRef && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(headRef) || headRef.includes("..") || headRef.endsWith("/"))) {
+    return { error: "headRef must be a safe branch name", status: 400 };
+  }
   if (req.targetSha !== undefined) {
     if (typeof req.targetSha !== "string" || !/^[0-9a-f]{40}$/i.test(req.targetSha.trim())) {
       return { error: "targetSha must be an exact commit SHA", status: 400 };
@@ -162,6 +166,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     roles,
     reviewerFallback: roles.reviewer.engine === "codex" ? configuredReviewerFallback() : null,
     baseRef: base.sha,
+    headRef,
     targetSha,
     ...(normalizedSpec.spec ? { spec: normalizedSpec.spec } : {}),
     baseMode,

@@ -59,6 +59,13 @@ export async function withRuntimeAdmissionRetry<T>(
 const INITIAL_MESSAGE_DELIVERED = new Set(["delivered", "turn-started", "steered"]);
 const INITIAL_MESSAGE_FAILED = new Set(["failed", "rejected", "uncertain", "interrupted"]);
 
+export class StructuredInitialMessageTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StructuredInitialMessageTimeoutError";
+  }
+}
+
 function structuredSpawnFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : "structured spawn failed";
   return hardenedRedact(message).replace(/\s+/g, " ").trim().slice(0, 240) || "structured spawn failed";
@@ -96,6 +103,14 @@ function settleInitialMessageReservation(registry: AgentRegistry, launchId: stri
   }
 }
 
+function markInitialMessageTimeout(registry: AgentRegistry, launchId: string, error: StructuredInitialMessageTimeoutError): void {
+  const reservation = Object.values(registry.snapshot().heldDeliveries)
+    .find((delivery) => delivery.clientMessageId === `spawn_${launchId}`);
+  if (reservation && reservation.state !== "delivered") {
+    registry.recordDeliveryOutcome(reservation.id, "delivery-uncertain", error.message);
+  }
+}
+
 export async function waitForStructuredInitialMessage(
   client: RuntimeHostClient,
   operationId: string,
@@ -129,11 +144,30 @@ export async function waitForStructuredInitialMessage(
     }
     if (now() >= deadline) {
       if (lastReadError) {
-        throw new Error(`structured initial message status remained unavailable for ${timeoutMs}ms: ${lastReadError}`);
+        throw new StructuredInitialMessageTimeoutError(`structured initial message status remained unavailable for ${timeoutMs}ms: ${lastReadError}`);
       }
-      throw new Error(`structured initial message remained ${status ?? "pending"} for ${timeoutMs}ms`);
+      throw new StructuredInitialMessageTimeoutError(`structured initial message remained ${status ?? "pending"} for ${timeoutMs}ms`);
     }
     await sleep(Math.min(pollMs, deadline - now()));
+  }
+}
+
+async function structuredSpawnEffectForLaunch(
+  client: RuntimeHostClient,
+  launchId: string,
+): Promise<Record<string, unknown> | null> {
+  let afterEventSeq = 0;
+  while (true) {
+    const batch = await client.effectBatch(["runtime.spawn"], afterEventSeq);
+    for (const effect of batch) {
+      if (effect.payload.operationId === launchId) return effect.payload;
+    }
+    if (batch.length < 100) return null;
+    const next = Math.max(...batch.map((effect) => effect.eventSeq));
+    if (!Number.isSafeInteger(next) || next <= afterEventSeq) {
+      throw new Error("structured spawn replay effect page did not advance");
+    }
+    afterEventSeq = next;
   }
 }
 
@@ -152,11 +186,40 @@ export async function reconcileStructuredSpawnReplay(
   if (current.state === "completed") {
     return { ...current, initialMessage: "delivered" };
   }
-  const [operation, spawnOperation, runtime] = await Promise.all([
+  const [initialOperation, spawnOperation, runtime] = await Promise.all([
     client.operationStatus(`spawn_message_${launchId}`, { currentRetryLeaf: true }).catch(() => null),
     client.operationStatus(launchId, { currentRetryLeaf: true }).catch(() => null),
     client.snapshot().catch(() => null),
   ]);
+  let operation = initialOperation;
+  if (!operation && current.state === "path-pending" && current.artifactPath) {
+    const effect = await structuredSpawnEffectForLaunch(client, launchId);
+    const prompt = typeof effect?.prompt === "string" ? effect.prompt : null;
+    const imageRefs = parseStructuredImageRefs(effect?.images ?? [], 16);
+    if (
+      prompt !== null
+      && imageRefs !== null
+      && effect?.conversationId === current.conversationId
+      && effect.cwd === current.cwd
+      && (prompt.trim() || imageRefs.length)
+    ) {
+      const readmitted = await enqueueStructuredMessage({
+        path: current.artifactPath,
+        conversationId: current.conversationId,
+        clientMessageId: `spawn_${launchId}`,
+        operationId: `spawn_message_${launchId}`,
+        text: prompt,
+        imageRefs,
+      }, {
+        client: () => client,
+        registry: () => registry,
+        enabled: () => true,
+      });
+      if (readmitted?.ok && readmitted.outcome !== "held") {
+        operation = await client.operationStatus(`spawn_message_${launchId}`, { currentRetryLeaf: true }).catch(() => null);
+      }
+    }
+  }
   const runtimeDelivered = Boolean(operation
     && operation.receipt.conversationId === current.conversationId
     && INITIAL_MESSAGE_DELIVERED.has(operation.receipt.status));
@@ -203,12 +266,13 @@ export async function reconcileStructuredSpawnReplay(
   const messageStatus = operation?.receipt.status;
   const runtimeSession = runtime?.sessions.find((candidate) => candidate.conversationId === current.conversationId) ?? null;
   const entry = current.key ? registry.snapshot().entries[sessionKeyId(current.key)] : null;
-  const liveRegisteringSession = Boolean(runtimeSession
+  const matchingRuntimeSession = Boolean(runtimeSession
     && current.key
-    && runtimeSession.host === "registering"
     && sessionKeyId(runtimeSession.sessionKey) === sessionKeyId(current.key)
     && runtimeSession.cwd === current.cwd
-    && runtimeSession.artifactPath === current.artifactPath
+    && runtimeSession.artifactPath === current.artifactPath);
+  const liveRegisteringSession = Boolean(matchingRuntimeSession
+    && runtimeSession?.host === "registering"
     && entry?.structuredHostOperationId === launchId
     && entry.pendingAction === "spawn"
     && entry.claimOwner
@@ -216,6 +280,15 @@ export async function reconcileStructuredSpawnReplay(
     && entry.structuredHost.writerClaimEpoch === entry.claimEpoch
     && entry.status !== "dead"
     && entry.status !== "unhosted");
+  const liveHostedSession = Boolean(matchingRuntimeSession
+    && runtimeSession
+    && (runtimeSession.host === "hosted" || runtimeSession.host === "recovering"));
+  const durableQueuedMessage = Boolean(operation
+    && operation.receipt.conversationId === current.conversationId
+    && (operation.receipt.status === "pending"
+      || operation.receipt.status === "queued"
+      || operation.receipt.status === "delivering"));
+  const recoverableDelivery = liveRegisteringSession || liveHostedSession || durableQueuedMessage;
   const operationStartedAt = operation ? Date.parse(operation.receipt.at) : Number.NaN;
   const stageStartedAt = Number.isFinite(operationStartedAt) ? operationStartedAt : Date.parse(current.createdAt);
   const ageMs = (options.now ?? Date.now)() - stageStartedAt;
@@ -225,7 +298,7 @@ export async function reconcileStructuredSpawnReplay(
   if (!terminalReason
     && current.state !== "failed"
     && runtime
-    && !liveRegisteringSession
+    && !recoverableDelivery
     && ageMs >= timeoutMs) {
     terminalReason = runtimeSession
       ? `structured initial message remained ${messageStatus ?? "pending"} for ${timeoutMs}ms`
@@ -320,7 +393,7 @@ export interface StructuredSpawnInput {
   receipt: SpawnReceipt;
   spec: ResumeSpec;
   account: AccountContext;
-  prompt: string;
+  "prompt": string;
   imageRefs?: StructuredImageRef[];
   registry: AgentRegistry;
   client: RuntimeHostClient;
@@ -459,6 +532,8 @@ export async function recoverPendingStructuredSpawns(
   for (const receipt of Object.values(snapshot.receipts)) {
     const effect = spawnEffects.get(receipt.launchId);
     if (receipt.state === "failed" && receipt.transport !== "tmux") {
+      const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, client);
+      if (reconciled.state === "completed") continue;
       /* The durable launch receipt failed, but its runtime spawn operation can
          survive as queued when the terminal transition itself timed out. The
          placeholder session then sits registering/unknown until someone closes
@@ -773,7 +848,11 @@ async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: st
     registry: () => input.registry,
     enabled: () => true,
   });
-  if (!delivered?.ok) throw new Error(delivered?.error ?? "structured spawn first-message delivery was unavailable");
+  if (!delivered?.ok) {
+    const message = delivered?.error ?? "structured spawn first-message delivery was unavailable";
+    if (delivered?.transportUncertain) throw new StructuredInitialMessageTimeoutError(message);
+    throw new Error(message);
+  }
   if (delivered.outcome === "held") return "held";
   if (delivered.outcome !== "delivered") {
     await waitForStructuredInitialMessage(input.client, delivered.operationId);
@@ -830,7 +909,7 @@ export async function spawnStructuredConversation(
       conversationId: input.receipt.conversationId,
       engine: input.engine,
       cwd: input.spec.cwd,
-      prompt: content?.content.text ?? "",
+      "prompt": content?.content.text ?? "",
       ...(content?.content.images.length ? { images: content.content.images } : {}),
       ...(content ? { contentDigest: content.contentDigest } : {}),
       accountId: input.account.accountId,
@@ -879,8 +958,21 @@ export async function spawnStructuredConversation(
     adoptionClaimTransferred = adoptionClaim !== null;
     binding.stopPersistence = await bindHost(input.registry, key, host, claimed.claimOwner, claimed.claimEpoch);
     binding.unregister = await publishHost(key, host);
-    const initialMessage = await deliverFirst(input, identity.path);
+    let initialMessage: void | "held";
+    try {
+      initialMessage = await deliverFirst(input, identity.path);
+    } catch (error) {
+      /* Host identity and ownership are durable by this point. A caller
+         timeout becomes reconciliation work and never enters host cleanup. */
+      if (!(error instanceof StructuredInitialMessageTimeoutError)) throw error;
+      markInitialMessageTimeout(input.registry, input.receipt.launchId, error);
+      initialMessage = "held";
+    }
     if (initialMessage === "held") {
+      input.registry.releaseStructuredSpawnAdmissionOwner(
+        input.receipt.launchId,
+        input.receipt.admissionOwner ?? processIdentity(),
+      );
       return {
         ok: true,
         target: null,

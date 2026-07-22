@@ -7,12 +7,13 @@ import path from "node:path";
 import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
+import type { AgentRegistry as AgentRegistryType } from "@/lib/agent/registry";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
 const engineModule = await import("./engine");
 const { adoptAttempt, defaultPipelinePorts, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reviewNote, tickPipelines } = engineModule;
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
-const { captureReviewHead, newRound } = await import("@/lib/flows/engine");
+const { newRound } = await import("@/lib/flows/engine");
 const rawCreatePipelineFromRequest = engineModule.createPipelineFromRequest;
 const createPipelineFromRequest: typeof rawCreatePipelineFromRequest = async (request, ports, options) =>
   await rawCreatePipelineFromRequest({ src: "/codex/creator.jsonl", ...request }, ports, options);
@@ -105,6 +106,10 @@ function harness() {
       if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return { code: 0, stdout: "main\n", stderr: "" };
       if (args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]?.branch ?? ""}\n`, stderr: "" };
+      if (args[0] === "ls-remote") {
+        const branch = loadPipelines()[0]?.branch ?? "pipeline/test";
+        return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\trefs/heads/${branch}\n`, stderr: "" };
+      }
       if (args[0] === "rev-parse") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
@@ -122,6 +127,7 @@ function harness() {
       return null;
     },
     spawnReceipt: () => null,
+    claimSpawnRetry: () => "claimed",
     spawnAgent: async ({ role, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
       spawn += 1;
       spawnRoles.push(structuredClone(role));
@@ -143,7 +149,7 @@ function harness() {
     pipelineAdoptionCandidates: () => [],
     createFlow: async (req) => {
       calls.push(`flow:${req.implementerPath}:${req.baseRef}:${req.targetSha}:${req.spec}`);
-      const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, targetSha: req.targetSha, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
+      const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, headRef: req.headRef, targetSha: req.targetSha, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
       flows.set(flow.id, flow);
       return { flow };
     },
@@ -1645,6 +1651,15 @@ test("a genuinely terminal turn without a valid verdict stays parked and retry p
   const parked = loadPipelines()[0]!;
   expect(parked.state).toBe("needs_decision");
   expect(parked.stateDetail).toContain("without a valid final JSON verdict");
+  const attempt = parked.runs[0]!.attempts[0]!;
+  h.ports.spawnReceipt = (launchId) => launchId === attempt.launchId ? {
+    state: "completed",
+    launchId,
+    conversationId: attempt.conversationId!,
+    sessionId: attempt.sessionId,
+    "transcript": attempt.agentPath,
+    paneId: null,
+  } : null;
 
   const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
   expect(retried.pipeline?.state).toBe("running");
@@ -1927,9 +1942,10 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
 
   const launchedFlow = h.flows.get("flow-2")!;
   const launchedRound = newRound(launchedFlow, "button", null);
-  captureReviewHead(launchedFlow, launchedRound);
+  launchedRound.reviewHeadSha = repairHead;
   launchedFlow.rounds.push(launchedRound);
   expect(launchedFlow.targetSha).toBe(repairHead);
+  expect(launchedFlow.headRef).toBe(pipeline.branch);
   expect(launchedRound.reviewHeadSha).toBe(repairHead);
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
@@ -1943,7 +1959,7 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
   expect(h.calls.indexOf("flow-close:flow-1")).toBeLessThan(h.calls.indexOf(`git merge --ff-only refs/remotes/origin/${pipeline.branch}`));
 });
 
-test("a pipeline persists the immutable SHA captured by the launched review round (#522)", async () => {
+test("issue 533: an in-loop repair advances expectedReviewHeadSha with reviewHeadSha from d03cc211 to 5755f992", async () => {
   const h = harness();
   const stages = [
     { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
@@ -1953,14 +1969,19 @@ test("a pipeline persists the immutable SHA captured by the launched review roun
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  const beforeRepair = "d03cc2118d7d02b4e3afdfc2af3bb4bf2b9e7d2a";
+  const persisted = loadPipelines()[0]!;
+  persisted.lastPassedCommit = beforeRepair;
+  savePipelines([persisted]);
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
-  const actualReviewHead = "d".repeat(40);
+  const actualReviewHead = "5755f992b195cc8637fd7129d9be4049c10494fa";
+  expect(loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts[0]!.expectedReviewHeadSha).toBe(beforeRepair);
   h.flows.get("flow-1")!.rounds.push({ n: 1, reviewHeadSha: actualReviewHead } as never);
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
   const attempt = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts[0]!;
-  expect(attempt.expectedReviewHeadSha).toBe(ORIGIN_MAIN_SHA);
+  expect(attempt.expectedReviewHeadSha).toBe(actualReviewHead);
   expect(attempt.reviewHeadSha).toBe(actualReviewHead);
 });
 
@@ -2241,6 +2262,44 @@ test("a later approval stays parked when its reviewed head differs from the curr
   });
   expect((await tickPipelines([], h.ports)).changed).toBe(false);
   expect(loadPipelines()[0]!.stateDetail).toBe(parked.stateDetail);
+});
+
+test("issue 533: approval parks when the reviewed repair is absent from the remote pipeline branch", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  const repairHead = "5".repeat(40);
+  const staleRemoteHead = "d".repeat(40);
+  const flow = h.flows.get("flow-1")!;
+  flow.rounds.push({ n: 1, reviewHeadSha: repairHead } as never);
+  flow.state = "approved";
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+      return { code: 0, stdout: `${repairHead}\n`, stderr: "" };
+    }
+    if (command === "git" && args[0] === "ls-remote") {
+      return { code: 0, stdout: `${staleRemoteHead}\trefs/heads/${pipeline.branch}\n`, stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain(`remote pipeline head is ${staleRemoteHead}`);
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    expectedReviewHeadSha: repairHead,
+    reviewHeadSha: repairHead,
+    state: "needs_decision",
+  });
 });
 
 test("an approval parks when the clean head advances during final settlement (#526)", async () => {
@@ -2582,6 +2641,154 @@ test("failed stages park and retry resets to the last passed commit", async () =
   expect(loadPipelines()[0]!.runs[0]!.attempts).toHaveLength(2);
 });
 
+test("issue 533: receipt retry validates the current stage and failed launch identity", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
+  const parked = loadPipelines()[0]!;
+  const attempt = parked.runs[0]!.attempts[0]!;
+  expect(attempt.launchId).toBeString();
+  const launchId = attempt.launchId!;
+  h.ports.spawnReceipt = (candidate) => candidate === launchId ? {
+    state: "failed", launchId, conversationId: attempt.conversationId!, sessionId: attempt.sessionId,
+    "transcript": attempt.agentPath, paneId: attempt.paneId,
+  } : null;
+
+  expect(await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+    stageId: "build",
+    launchId,
+  }, h.ports)).toMatchObject({ status: 409, error: expect.stringContaining("stage") });
+  expect(await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+    stageId: "plan",
+    launchId: "launch-stale-history",
+  }, h.ports)).toMatchObject({ status: 409, error: expect.stringContaining("launch") });
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
+
+  expect((await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+    stageId: "plan",
+    launchId,
+  }, h.ports)).pipeline?.state).toBe("running");
+  expect(await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+    stageId: "plan",
+    launchId,
+  }, h.ports)).toMatchObject({ status: 409 });
+});
+
+test("issue 533: a matching receipt that settles late cannot spawn a retry", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  const attempt = parked.runs[0]!.attempts[0]!;
+  expect(attempt.launchId).toBeString();
+  const launchId = attempt.launchId!;
+  attempt.state = "needs_decision";
+  attempt.sessionId = null;
+  attempt.agentPath = null;
+  attempt.paneId = null;
+  attempt.error = "stage spawn cannot recover from receipt state failed";
+  parked.state = "needs_decision";
+  parked.stateDetail = attempt.error;
+  savePipelines([parked]);
+  const spawnCount = h.calls.filter((call) => call.startsWith("spawn:")).length;
+  h.ports.spawnReceipt = (candidate) => candidate === launchId ? {
+    state: "completed",
+    launchId,
+    conversationId: attempt.conversationId!,
+    sessionId: "late-success",
+    "transcript": "/codex/stage-1.jsonl",
+    paneId: null,
+  } : null;
+
+  expect(await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+  }, h.ports)).toMatchObject({ status: 409, error: expect.stringContaining("settled") });
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
+
+  await tickPipelines([], h.ports);
+  expect(h.calls.filter((call) => call.startsWith("spawn:")).length).toBe(spawnCount);
+  const afterTick = loadPipelines()[0]!;
+  expect(afterTick).toMatchObject({
+    state: "running",
+    stateDetail: null,
+    cursor: { stageId: "plan", state: "running" },
+  });
+  expect(afterTick.runs[0]!.attempts).toEqual([
+    expect.objectContaining({
+      state: "running",
+      launchId,
+      conversationId: attempt.conversationId,
+      sessionId: "late-success",
+      agentPath: "/codex/stage-1.jsonl",
+      error: null,
+    }),
+  ]);
+});
+
+test("issue 533: a cross-process late recovery loses atomically to a claimed retry", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
+  const registryPath = path.join(process.env.LLV_STATE_DIR!, `retry-race-${pipeline.id}.json`);
+  const retryRegistry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
+  const competingRegistry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
+  const begun = retryRegistry.beginSpawnRequest({ engine: "codex", cwd: pipeline.worktreeDir, transport: "structured", accountId: "work" });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const key = { engine: "codex" as const, sessionId: `retry-race-${pipeline.id}` };
+  const artifactPath = path.join(pipeline.worktreeDir, "late-original.jsonl");
+  retryRegistry.stageStructuredSpawn(begun.receipt.launchId, {
+    key, artifactPath, cwd: pipeline.worktreeDir, accountId: "work", status: "dead",
+    host: null, structuredHost: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+  });
+  retryRegistry.failStructuredSpawn(begun.receipt.launchId, "host loss confirmed");
+  const persisted = loadPipelines()[0]!;
+  const attempt = persisted.runs[0]!.attempts[0]!;
+  attempt.launchId = begun.receipt.launchId;
+  attempt.conversationId = begun.receipt.conversationId;
+  attempt.sessionId = key.sessionId;
+  attempt.agentPath = artifactPath;
+  attempt.paneId = null;
+  savePipelines([persisted]);
+  h.ports.spawnReceipt = (launchId) => {
+    const receipt = retryRegistry.readOnlySnapshot().receipts[launchId];
+    return receipt ? {
+      state: receipt.state, launchId, conversationId: receipt.conversationId,
+      sessionId: receipt.key?.sessionId ?? null, "transcript": receipt.artifactPath, paneId: null,
+    } : null;
+  };
+  let lateRecovery: ReturnType<AgentRegistryType["recoverStructuredSpawnFromEvidence"]> | null = null;
+  h.ports.claimSpawnRetry = (launchId, claimId) => {
+    const claim = retryRegistry.claimFailedSpawnForRetry(launchId, claimId);
+    lateRecovery = competingRegistry.recoverStructuredSpawnFromEvidence(launchId, {
+      key, artifactPath, cwd: pipeline.worktreeDir, accountId: "work",
+      launchProfile: begun.receipt.launchProfile, status: "live", host: null, structuredHost: null,
+      claimEpoch: 0, claimOwner: null, pendingAction: null,
+    });
+    return claim.kind;
+  };
+  const spawnCount = h.calls.filter((call) => call.startsWith("spawn:")).length;
+
+  expect((await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+  }, h.ports)).pipeline?.state).toBe("running");
+  expect(lateRecovery).toMatchObject({ kind: "conflict" });
+  expect(competingRegistry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    retryClaim: { claimId: expect.any(String) },
+  });
+  await tickPipelines([], h.ports);
+  expect(h.calls.filter((call) => call.startsWith("spawn:")).length).toBe(spawnCount + 1);
+});
+
 test("a stage retry supersedes the prior attempt's conversation and numbers its round (#383)", async () => {
   const h = harness();
   const pipeline = await create(h.ports);
@@ -2604,6 +2811,46 @@ test("a stage retry supersedes the prior attempt's conversation and numbers its 
   await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
   await tickPipelines([], h.ports);
   expect(h.calls).toContain(`spawn:pipeline_${pipeline.id}_plan_3:parent=/codex/creator.jsonl:supersedes=conversation_stage_2`);
+});
+
+test("issue 533: retry replays the pipeline launch contract from durable stage state", async () => {
+  const h = harness();
+  const launches: Array<Parameters<PipelinePorts["spawnAgent"]>[0]> = [];
+  const spawn = h.ports.spawnAgent;
+  h.ports.spawnAgent = async (input, onReserved) => {
+    launches.push(structuredClone(input));
+    return spawn(input, onReserved);
+  };
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
+  const firstAttempt = loadPipelines()[0]!.runs[0]!.attempts[0]!;
+  expect(firstAttempt.launchId).toBeString();
+  h.ports.spawnReceipt = (candidate) => candidate === firstAttempt.launchId ? {
+    state: "failed", launchId: firstAttempt.launchId!, conversationId: firstAttempt.conversationId!,
+    sessionId: firstAttempt.sessionId, "transcript": firstAttempt.agentPath, paneId: firstAttempt.paneId,
+  } : null;
+  await patchPipeline(pipeline.id, {
+    action: "retry-stage", stageId: "plan", launchId: firstAttempt.launchId!,
+  }, h.ports);
+  await tickPipelines([], h.ports);
+
+  const [first, retry] = launches;
+  expect(retry).toMatchObject({
+    role: first!.role,
+    cwd: first!.cwd,
+    "prompt": first!.prompt,
+    parentPath: first!.parentPath,
+    creatorConversationId: first!.creatorConversationId,
+    membership: {
+      kind: "pipeline", containerId: pipeline.id, role: first!.membership.role,
+      stageId: "plan", stageOrder: 0, parentConversationId: null,
+    },
+    supersedes: "conversation_stage_1",
+  });
+  expect(retry!.membership.slot).toBe("plan:2");
+  expect(retry!.membership.round).toBe(2);
 });
 
 test("a retried attempt whose predecessor never reserved a conversation records nothing (#383)", async () => {

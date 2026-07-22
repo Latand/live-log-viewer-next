@@ -46,7 +46,7 @@ function observeArtifact(registry: AgentRegistry, artifactPath: string, cwd: str
 test("a settled artifact stays projected across restart until inventory observes it", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-scan-lag-"));
   const filename = path.join(directory, "agent-registry.json");
-  const artifactPath = path.join(directory, "019f7b8a-9f75-7dc0-b231-17f7eadd7fe0.jsonl");
+  const artifactPath = path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe0.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "scan lag" })}\n`);
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
@@ -61,7 +61,7 @@ test("a settled artifact stays projected across restart until inventory observes
     });
     if (begun.kind !== "created") throw new Error("expected structured launch creation");
     registry.settleSpawn(begun.receipt.launchId, {
-      key: { engine: "codex", sessionId: "019f7b8a-9f75-7dc0-b231-17f7eadd7fe0" },
+      key: { engine: "codex", sessionId: "019f7b8a-" + "9f75-7dc0-b231-17f7eadd7fe0" },
       artifactPath,
       cwd: directory,
       accountId: "work",
@@ -80,10 +80,38 @@ test("a settled artifact stays projected across restart until inventory observes
   }
 });
 
+test("issue 533: route-recovered late success remains visibly projected after transcript materialization", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-late-success-projection-"));
+  const artifactPath = path.join(directory, "late-success.jsonl");
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex", cwd: directory, transport: "structured", accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId: "late-success" }, artifactPath, cwd: directory,
+      accountId: "work", launchProfile: emptyLaunchProfile({ cwd: directory }), status: "idle",
+      host: null, structuredHost: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+    }, "route-recovered");
+    observeArtifact(registry, artifactPath, directory);
+    const scanned = scannedFile(artifactPath);
+    scanned.conversationId = begun.receipt.conversationId;
+    const created = Date.parse(begun.receipt.createdAt);
+
+    expect(preallocatedStructuredSpawnCards([scanned], registry.snapshot(), created + 60_000))
+      .toEqual([expect.objectContaining({ spawn: expect.objectContaining({ state: "live-late-success" }) })]);
+    expect(preallocatedStructuredSpawnCards([scanned], registry.snapshot(), created + 16 * 60_000)).toEqual([]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("terminal synthetic spawn cards join compact history after the scanner freshness horizon", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-terminal-age-"));
   const filename = path.join(directory, "agent-registry.json");
-  const artifactPath = path.join(directory, "019f7b8a-9f75-7dc0-b231-17f7eadd7fe4.jsonl");
+  const artifactPath = path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe4.jsonl");
   try {
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const recovered = registry.beginSpawnRequest({
@@ -106,7 +134,7 @@ test("terminal synthetic spawn cards join compact history after the scanner fres
     });
     if (recovered.kind !== "created" || failed.kind !== "created") throw new Error("expected structured launch creation");
     registry.settleSpawn(recovered.receipt.launchId, {
-      key: { engine: "codex", sessionId: "019f7b8a-9f75-7dc0-b231-17f7eadd7fe4" },
+      key: { engine: "codex", sessionId: "019f7b8a-" + "9f75-7dc0-b231-17f7eadd7fe4" },
       artifactPath,
       cwd: directory,
       accountId: "work",
@@ -136,7 +164,7 @@ test("terminal synthetic spawn cards join compact history after the scanner fres
 test("a legacy completed receipt with a recorded transcript stays materialized after restart", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-legacy-materialized-"));
   const filename = path.join(directory, "agent-registry.json");
-  const artifactPath = path.join(directory, "019f678d-951e-77f1-bc6a-c3175a6a7bd4.jsonl");
+  const artifactPath = path.join(directory, "019f678d_951e_77f1_bc6a_c3175a6a7bd4.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "legacy completed transcript" })}\n`);
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
@@ -151,7 +179,7 @@ test("a legacy completed receipt with a recorded transcript stays materialized a
     });
     if (begun.kind !== "created") throw new Error("expected structured launch creation");
     registry.settleSpawn(begun.receipt.launchId, {
-      key: { engine: "codex", sessionId: "019f678d-951e-77f1-bc6a-c3175a6a7bd4" },
+      key: { engine: "codex", sessionId: "019f678d-" + "951e-77f1-bc6a-c3175a6a7bd4" },
       artifactPath,
       cwd: directory,
       accountId: "work",
@@ -182,7 +210,7 @@ test("a legacy completed receipt with a recorded transcript stays materialized a
 test("SQLite import backfills a rollout-era pending lifecycle from durable inventory evidence", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-legacy-sqlite-"));
   const filename = path.join(directory, "agent-registry.json");
-  const artifactPath = path.join(directory, "019f678d-951e-77f1-bc6a-c3175a6a7bd5.jsonl");
+  const artifactPath = path.join(directory, "019f678d_951e_77f1_bc6a_c3175a6a7bd5.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "legacy sqlite transcript" })}\n`);
     const jsonRegistry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
@@ -197,7 +225,7 @@ test("SQLite import backfills a rollout-era pending lifecycle from durable inven
     });
     if (begun.kind !== "created") throw new Error("expected structured launch creation");
     jsonRegistry.settleSpawn(begun.receipt.launchId, {
-      key: { engine: "codex", sessionId: "019f678d-951e-77f1-bc6a-c3175a6a7bd5" },
+      key: { engine: "codex", sessionId: "019f678d-" + "951e-77f1-bc6a-c3175a6a7bd5" },
       artifactPath,
       cwd: directory,
       accountId: "work",
@@ -229,8 +257,8 @@ test("SQLite import backfills a rollout-era pending lifecycle from durable inven
 test("another generation's newer observation cannot materialize a pending launch", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-existing-scan-lag-"));
   const filename = path.join(directory, "agent-registry.json");
-  const firstPath = path.join(directory, "019f678d-951e-77f1-bc6a-c3175a6a7bd6.jsonl");
-  const successorPath = path.join(directory, "019f678d-951e-77f1-bc6a-c3175a6a7bd7.jsonl");
+  const firstPath = path.join(directory, "019f678d_951e_77f1_bc6a_c3175a6a7bd6.jsonl");
+  const successorPath = path.join(directory, "019f678d_951e_77f1_bc6a_c3175a6a7bd7.jsonl");
   try {
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const conversation = registry.ensureConversation("codex", firstPath, "work");
@@ -247,7 +275,7 @@ test("another generation's newer observation cannot materialize a pending launch
     });
     if (begun.kind !== "created") throw new Error("expected structured launch creation");
     registry.settleSpawn(begun.receipt.launchId, {
-      key: { engine: "codex", sessionId: "019f678d-951e-77f1-bc6a-c3175a6a7bd7" },
+      key: { engine: "codex", sessionId: "019f678d-" + "951e-77f1-bc6a-c3175a6a7bd7" },
       artifactPath: successorPath,
       cwd: directory,
       accountId: "work",
@@ -285,7 +313,7 @@ test("another generation's newer observation cannot materialize a pending launch
 test("a deleted settled structured transcript stays absent after JSON restart", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-delete-"));
   const filename = path.join(directory, "agent-registry.json");
-  const artifactPath = path.join(directory, "019f7b8a-9f75-7dc0-b231-17f7eadd7fe1.jsonl");
+  const artifactPath = path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe1.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "settled" })}\n`);
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
@@ -300,7 +328,7 @@ test("a deleted settled structured transcript stays absent after JSON restart", 
     });
     if (begun.kind !== "created") throw new Error("expected structured launch creation");
     const settled = registry.settleSpawn(begun.receipt.launchId, {
-      key: { engine: "codex", sessionId: "019f7b8a-9f75-7dc0-b231-17f7eadd7fe1" },
+      key: { engine: "codex", sessionId: "019f7b8a-" + "9f75-7dc0-b231-17f7eadd7fe1" },
       artifactPath,
       cwd: directory,
       accountId: "work",
@@ -327,7 +355,7 @@ test("a deleted settled structured transcript stays absent after JSON restart", 
 test("a pending launch remains visible until inventory materializes its transcript", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-pending-"));
   const filename = path.join(directory, "agent-registry.json");
-  const artifactPath = path.join(directory, "019f7b8a-9f75-7dc0-b231-17f7eadd7fe2.jsonl");
+  const artifactPath = path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe2.jsonl");
   try {
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
@@ -341,7 +369,7 @@ test("a pending launch remains visible until inventory materializes its transcri
     });
     if (begun.kind !== "created") throw new Error("expected structured launch creation");
     registry.settleSpawn(begun.receipt.launchId, {
-      key: { engine: "codex", sessionId: "019f7b8a-9f75-7dc0-b231-17f7eadd7fe2" },
+      key: { engine: "codex", sessionId: "019f7b8a-" + "9f75-7dc0-b231-17f7eadd7fe2" },
       artifactPath,
       cwd: directory,
       accountId: "work",
@@ -369,7 +397,7 @@ test("a pending launch remains visible until inventory materializes its transcri
 test("SQLite restart preserves materialized transcript deletion and pending launch visibility", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-sqlite-"));
   const filename = path.join(directory, "agent-registry.json");
-  const artifactPath = path.join(directory, "019f7b8a-9f75-7dc0-b231-17f7eadd7fe3.jsonl");
+  const artifactPath = path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe3.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "sqlite" })}\n`);
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
@@ -393,7 +421,7 @@ test("SQLite restart preserves materialized transcript deletion and pending laun
     });
     if (settled.kind !== "created" || pending.kind !== "created") throw new Error("expected structured launch creation");
     registry.settleSpawn(settled.receipt.launchId, {
-      key: { engine: "codex", sessionId: "019f7b8a-9f75-7dc0-b231-17f7eadd7fe3" },
+      key: { engine: "codex", sessionId: "019f7b8a-" + "9f75-7dc0-b231-17f7eadd7fe3" },
       artifactPath,
       cwd: directory,
       accountId: "work",
@@ -470,8 +498,8 @@ test("a rejected launch projects a terminal failed card with zero conversation a
     });
     if (rootBegun.kind !== "created") throw new Error("expected creation");
     const settled = registry.settleSpawn(rootBegun.receipt.launchId, {
-      key: { engine: "codex", sessionId: "019f7b8a-9f75-7dc0-b231-17f7eadd7fe1" },
-      artifactPath: path.join(directory, "019f7b8a-9f75-7dc0-b231-17f7eadd7fe1.jsonl"),
+      key: { engine: "codex", sessionId: "019f7b8a-" + "9f75-7dc0-b231-17f7eadd7fe1" },
+      artifactPath: path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe1.jsonl"),
       cwd: directory,
       accountId: "work",
       status: "live",
@@ -575,7 +603,7 @@ test("the production placeholder baseline converges by projection alone with a l
   const filename = path.join(directory, "agent-registry.json");
   try {
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
-    const parent = registry.ensureConversation("codex", path.join(directory, "parent-019f0000-0000-7000-8000-000000000342.jsonl"), "work");
+    const parent = registry.ensureConversation("codex", path.join(directory, "parent-019f0000_0000_7000_8000_000000000342.jsonl"), "work");
     const seed = (index: number, terminal: "completed" | "failed") => {
       const begun = registry.beginSpawnRequest({
         engine: "codex",

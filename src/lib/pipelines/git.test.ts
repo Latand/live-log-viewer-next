@@ -197,3 +197,22 @@ test("review retry preserves a local additive repair that is ahead of origin (#5
   expect(calls.some((call) => call.startsWith("git merge --ff-only"))).toBe(false);
   expect(calls.some((call) => call.includes("reset --hard"))).toBe(false);
 });
+
+test("issue 533: manual review retry never resets clean remote 8232d71 to stale a88ddee", () => {
+  const subject = pipeline();
+  const synchronizedHead = "8232d71c8f1fb62f972d5f68163f15c244e0f358";
+  subject.lastPassedCommit = "a88ddeeef4c2f173be867c775994997e22ab2c5b";
+  const calls: string[] = [];
+  const exec: ExecPort = (command, args) => {
+    calls.push(`${command} ${args.join(" ")}`);
+    if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "branch") return { code: 0, stdout: `${subject.branch}\n`, stderr: "" };
+    if (args[0] === "ls-remote") return { code: 0, stdout: `${synchronizedHead}\trefs/heads/${subject.branch}\n`, stderr: "" };
+    if (args[0] === "rev-parse") return { code: 0, stdout: `${synchronizedHead}\n`, stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  expect(synchronizePipelineRetryHead(subject, exec)).toEqual({ ok: true, sha: synchronizedHead });
+  expect(calls.some((call) => call.includes("reset --hard"))).toBe(false);
+  expect(calls.some((call) => call.startsWith("git merge "))).toBe(false);
+});
