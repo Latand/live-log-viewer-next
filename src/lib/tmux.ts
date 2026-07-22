@@ -24,6 +24,7 @@ import type { RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
 import { spawnTransport, type SpawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { agentProcesses, isHelperArgv, pidAlive, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
+import type { FileEntry } from "@/lib/types";
 import {
   composerLine,
   detectBlockingGate,
@@ -547,26 +548,36 @@ export async function resolveTarget(pid: number): Promise<TmuxTarget | null> {
  * Scanner-known pids that are currently running. The web caller may only target
  * one of these — an arbitrary pid from the request is never trusted directly.
  */
-export async function knownLivePids(): Promise<Set<number>> {
+export function knownLivePidsFrom(entries: readonly FileEntry[]): Set<number> {
   const pids = new Set<number>();
-  for (const entry of await listFiles()) {
+  for (const entry of entries) {
     if (entry.pid !== null && entry.proc === "running" && pidAlive(entry.pid)) pids.add(entry.pid);
   }
   return pids;
 }
 
+export async function knownLivePids(): Promise<Set<number>> {
+  return knownLivePidsFrom(await listFiles());
+}
+
 /** Resolves and revalidates a request pid against the scanner's live set. */
-export async function targetForKnownPid(pid: number): Promise<TmuxTarget | null | "unknown"> {
-  const live = await knownLivePids();
+export async function targetForKnownPid(
+  pid: number,
+  entries?: readonly FileEntry[],
+): Promise<TmuxTarget | null | "unknown"> {
+  const live = entries ? knownLivePidsFrom(entries) : await knownLivePids();
   if (!live.has(pid)) return "unknown";
   return resolveTarget(pid);
 }
 
 /** Resolves a scanner-approved pid only. Transcript-to-pane policy lives in
     agent/transcriptHost so resource observation and delivery cannot diverge. */
-export async function resolveRequestedTmuxTarget(pid: number | null): Promise<TmuxTarget | null> {
+export async function resolveRequestedTmuxTarget(
+  pid: number | null,
+  entries?: readonly FileEntry[],
+): Promise<TmuxTarget | null> {
   if (pid !== null) {
-    const target = await targetForKnownPid(pid);
+    const target = await targetForKnownPid(pid, entries);
     if (target !== "unknown" && target !== null) return target;
   }
   return null;

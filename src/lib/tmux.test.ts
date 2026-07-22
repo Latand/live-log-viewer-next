@@ -12,6 +12,7 @@ import {
   createSpawnWindow,
   createTmuxEndpointDescriptor,
   killTmuxHostIfMatches,
+  knownLivePidsFrom,
   legacyClaudeTmuxSpawnRefusal,
   spawnAgentWithPrompt,
   renameTmuxWindowForPid,
@@ -23,6 +24,16 @@ import {
   tmuxEndpoint,
   verifyTmuxSpawnBinding,
 } from "@/lib/tmux";
+
+test("known live pid validation reuses a supplied scanner snapshot", () => {
+  const live = knownLivePidsFrom([
+    { pid: process.pid, proc: "running" },
+    { pid: process.pid, proc: "done" },
+    { pid: null, proc: "running" },
+  ] as never);
+
+  expect([...live]).toEqual([process.pid]);
+});
 
 describe("renameTmuxWindowForPid guards", () => {
   test("a non-positive pid never touches tmux", async () => {
