@@ -111,6 +111,10 @@ export class SqliteAgentRegistryStore {
         COMMIT;
       `);
     }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS registry_rows_collection_order
+      ON registry_rows(collection, row_order);
+    `);
     this.secureFiles();
     this.importFirstBoot(options.initialSnapshot);
   }

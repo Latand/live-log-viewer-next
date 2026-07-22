@@ -196,6 +196,61 @@ test("stable tmux host reconciliation reads one snapshot without registry mutati
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
+test("completed launch host polls reuse the SQLite registry read cache", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-host-reconcile-launch-cache-"));
+  let snapshotLoads = 0;
+  const registry = new AgentRegistry(path.join(directory, "registry.json"), undefined, undefined, {
+    sqliteMode: "sqlite",
+    onSqliteSnapshotLoad: () => { snapshotLoads += 1; },
+  });
+  const hostEvidence: TmuxHostEvidence = {
+    kind: "tmux",
+    endpoint: "/run/user/1000/agent-log-viewer",
+    server: { pid: 900, startIdentity: "900:one" },
+    paneId: "%1",
+    panePid: { pid: 100, startIdentity: "100:one" },
+    windowName: "codex-resume",
+    agent: { pid: 200, startIdentity: "200:one" },
+    argv: ["codex", "resume", SESSION],
+  };
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra" });
+  if (begun.kind !== "created") throw new Error("expected create");
+  registry.completeObservedSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: SESSION },
+    artifactPath: PATHNAME,
+    cwd: "/repo",
+    accountId: "terra",
+    status: "live",
+    host: hostEvidence,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const host: TranscriptHost = {
+    tmuxServerPid: 900,
+    paneId: "%1",
+    panePid: 100,
+    agentPid: 200,
+    display: "agents:4.0",
+    windowName: "codex-resume",
+    engine: "codex",
+    cwd: "/repo",
+    agentArgv: ["codex", "resume", SESSION],
+    agentIdentity: "200:one",
+    launchId: begun.receipt.launchId,
+    claimedPaths: [PATHNAME],
+    primaryPath: PATHNAME,
+  };
+  registry.readOnlySnapshot();
+  const warmedLoads = snapshotLoads;
+
+  reconcileObservedTranscriptHosts([host], { registry, evidenceForHost: () => hostEvidence });
+  reconcileObservedTranscriptHosts([host], { registry, evidenceForHost: () => hostEvidence });
+
+  expect(snapshotLoads).toBe(warmedLoads);
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test("registry resume receives one conversation-bound capability at central actuation", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-resume-capability-"));
   const registry = new AgentRegistry(path.join(directory, "registry.json"));
