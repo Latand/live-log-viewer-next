@@ -81,25 +81,30 @@ function candidateFor(
   const key = { engine: conversation.engine, sessionId: generation.id } as const;
   const snapshot = registry.readOnlySnapshot();
   const entry = snapshot.entries[sessionKeyId(key)];
-  if (!entry || entry.host) return null;
+  if (entry?.host) return null;
   const structuredReceipt = Object.values(snapshot.receipts).some((receipt) =>
     receipt.transport === "structured"
       && receipt.state === "completed"
       && registry.canonicalConversationId(receipt.conversationId) === conversation.id);
-  if (!entry.structuredHost && !structuredReceipt) return null;
-  const terminal = entry.status === "dead" || entry.status === "unhosted";
-  const publishReady = Boolean(structuredHostProcessAlive(entry.structuredHost?.process ?? null)
-    && entry.claimOwner
+  /* Interactive Claude tmux resumes are prohibited after structured cutover.
+     Registered legacy transcripts reach the pane-less broker through this
+     recovery path, including conversations that predate registry entries. */
+  const legacyClaudeBridge = conversation.engine === "claude";
+  if (!entry && !legacyClaudeBridge) return null;
+  if (entry && !entry.structuredHost && !structuredReceipt && !legacyClaudeBridge) return null;
+  const terminal = entry?.status === "dead" || entry?.status === "unhosted";
+  const publishReady = Boolean(structuredHostProcessAlive(entry?.structuredHost?.process ?? null)
+    && entry?.claimOwner
     && entry.pendingAction === null
     && !terminal);
   const profile = emptyLaunchProfile(durableProfileWins ? {
-    ...(entry.launchProfile ?? {}),
+    ...(entry?.launchProfile ?? {}),
     ...generation.launchProfile,
-    cwd: generation.launchProfile.cwd || entry.launchProfile?.cwd || entry.cwd,
+    cwd: generation.launchProfile.cwd || entry?.launchProfile?.cwd || entry?.cwd,
   } : {
     ...generation.launchProfile,
-    ...(entry.launchProfile ?? {}),
-    cwd: entry.launchProfile?.cwd || generation.launchProfile.cwd || entry.cwd,
+    ...(entry?.launchProfile ?? {}),
+    cwd: entry?.launchProfile?.cwd || generation.launchProfile.cwd || entry?.cwd,
   });
   const recordedParent = snapshot.lineageEdges[conversation.id]?.parentConversationId
     ?? profile.parentConversationId;
@@ -111,7 +116,7 @@ function candidateFor(
     engine: conversation.engine,
     key,
     path: generation.path,
-    accountId: generation.accountId ?? entry.accountId,
+    accountId: generation.accountId ?? entry?.accountId ?? null,
     parentConversationId: parentConversationId === conversation.id ? null : parentConversationId,
     spec: {
       command: "",

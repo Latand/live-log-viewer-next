@@ -978,7 +978,73 @@ test.each(["codex", "claude"] as const)("duplicate %s recovery clicks reuse one 
   expect(terminalRejections).toBe(0);
 });
 
-test("legacy tmux history remains on the legacy resume path after cutover", async () => {
+test("a registered legacy Claude transcript bridges into the structured broker", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `legacy-claude-bridge-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const conversation = registry.ensureConversation("claude", artifactPath, "default");
+  expect(registry.snapshot().entries[`claude:${sessionId}`]).toBeUndefined();
+  let spawnCalls = 0;
+  let drainRequests = 0;
+
+  const result = await recoverDeadStructuredConversation({
+    path: artifactPath,
+    conversationId: conversation.id,
+  }, {
+    registry,
+    client: {} as RuntimeHostClient,
+    transport: () => "structured",
+    resolveAccount: (engine, accountId) => {
+      expect({ engine, accountId }).toEqual({ engine: "claude", accountId: "default" });
+      return {
+        engine: "claude",
+        accountId: "default",
+        kind: "managed",
+        home: path.join(cwd, "account"),
+        transcriptRoot: cwd,
+        env: { NODE_ENV: "test" },
+      };
+    },
+    spawn: async (input) => {
+      spawnCalls += 1;
+      expect(input.receipt).toMatchObject({
+        conversationId: conversation.id,
+        purpose: "resume-successor",
+        transport: "structured",
+        accountId: "default",
+      });
+      expect(input.spec).toMatchObject({
+        engine: "claude",
+        ["transcript"]: artifactPath,
+      });
+      return {
+        ok: true,
+        target: null,
+        path: artifactPath,
+        launchId: input.receipt.launchId,
+        conversationId: conversation.id,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "delivered" as const,
+        state: "settled",
+      };
+    },
+    requestDeliveryDrain: () => { drainRequests += 1; },
+  });
+
+  expect(result).toMatchObject({
+    conversationId: conversation.id,
+    path: artifactPath,
+    spawned: true,
+  });
+  expect(spawnCalls).toBe(1);
+  expect(drainRequests).toBe(1);
+});
+
+test("legacy Codex tmux history remains on the legacy resume path after cutover", async () => {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `legacy-${sessionId}`);
   const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
