@@ -5,6 +5,7 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, normalizeRegistry, RegistryParityError } from "./registry";
 import { SqliteAgentRegistryStore } from "./sqliteRegistryStore";
 
@@ -1227,6 +1228,62 @@ test("SQLite snapshot cache follows external revisions and reports writer metric
     writerWaitP95Ms: expect.any(Number),
     transactionP95Ms: expect.any(Number),
   });
+});
+
+test("unchanged structured-host checkpoints avoid collection materialization", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-host-noop-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const reads = new Map<string, number>();
+  const registry = new AgentRegistry(filename, () => false, undefined, {
+    sqliteMode: "sqlite",
+    onSqliteRowPayloadRead: (collection, count) => {
+      reads.set(collection, (reads.get(collection) ?? 0) + count);
+    },
+  });
+  const key = { engine: "codex" as const, sessionId: "host-noop" };
+  const host = {
+    kind: "codex-app-server" as const,
+    endpoint: "stdio:host-noop",
+    process: { pid: 41, startIdentity: "host-noop-process" },
+    eventCursor: 17,
+    protocolVersion: "v2",
+    writerClaimEpoch: 0,
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+  };
+  registry.upsert({
+    key,
+    artifactPath: "/sessions/host-noop.jsonl",
+    cwd: "/repo",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "unhosted",
+    host: null,
+    structuredHost: host,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const claimed = registry.claimStructuredHost(key, host.process, { allowUnhosted: true });
+  if (!claimed?.claimOwner) throw new Error("expected a structured-host claim");
+  const claimedHost = { ...host, writerClaimEpoch: claimed.claimEpoch };
+  registry.setStructuredHostClaimed(key, claimedHost, "idle", claimed.claimOwner, claimed.claimEpoch);
+  reads.clear();
+  const revision = registry.storageDiagnostics().revision;
+
+  expect(registry.setStructuredHostClaimed(
+    key,
+    claimedHost,
+    "idle",
+    claimed.claimOwner,
+    claimed.claimEpoch,
+  )).toMatchObject({ status: "idle", structuredHost: { eventCursor: 17 } });
+
+  expect(registry.storageDiagnostics().revision).toBe(revision);
+  expect(reads.get("entries")).toBe(1);
+  expect(reads.get("conversations") ?? 0).toBe(0);
+  fs.rmSync(directory, { recursive: true, force: true });
 });
 
 test("SQLite ordered collection reads use the collection-order index", () => {
