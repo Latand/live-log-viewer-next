@@ -2,7 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 
-import { ROOTS } from "@/lib/scanner/roots";
+import { readTailChunk } from "@/lib/logRead";
+import { MAX_CHUNK, ROOTS } from "@/lib/scanner/roots";
 import type { LogChunk } from "@/lib/types";
 
 import { LogTailStreamSession, type LogTailStreamEvent } from "./logTailStream";
@@ -35,6 +36,22 @@ function asChunk(event: LogTailStreamEvent): LogChunk {
 }
 
 describe("LogTailStreamSession", () => {
+  test("a stale live offset skips an oversized backlog and resumes from the bounded tail", async () => {
+    const prefix = "x".repeat(MAX_CHUNK + 128);
+    const tail = "y".repeat(MAX_CHUNK);
+    const file = writeLog("stale-offset.log", prefix + tail);
+
+    const chunk = await readTailChunk(file, 1);
+
+    expect(chunk).not.toBeNull();
+    expect(chunk).toMatchObject({
+      start: prefix.length,
+      offset: prefix.length + tail.length,
+      size: prefix.length + tail.length,
+      data: tail,
+    });
+  });
+
   test("initial catch-up spends one connection byte budget and continues later", async () => {
     const first = writeLog("budget-a.log", "0123456789");
     const second = writeLog("budget-b.log", "abcde");
