@@ -28,7 +28,7 @@ import {
   resolveTmuxAttach,
   tmuxEndpointDescriptor,
 } from "@/lib/tmux";
-import type { ApiError } from "@/lib/types";
+import type { ApiError, FileEntry } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,9 +59,9 @@ interface SendResponse {
   receipt?: { operationId: string; status: string };
 }
 
-async function currentTranscriptHosts() {
-  const files = (await completedFileScan()).snapshot.files;
-  return readTranscriptHosts(true, files);
+async function currentTranscriptHosts(files?: FileEntry[]) {
+  const entries = files ?? (await completedFileScan()).snapshot.files;
+  return readTranscriptHosts(true, entries);
 }
 
 function respond(outcome: DeliveryOutcome): NextResponse<SendResponse | ApiError | { ok: false; outcome: "failed"; error: string }> {
@@ -73,13 +73,14 @@ function respond(outcome: DeliveryOutcome): NextResponse<SendResponse | ApiError
 }
 
 async function targetForRequest(pid: number | null, filePath: string): Promise<string | null> {
+  const files = (await completedFileScan()).snapshot.files;
   if (filePath && pathAllowed(filePath)) {
     /* A transcript path names the conversation being addressed. Its canonical
        host therefore wins over a client-side pid that may have exited and
        been recycled for another session between scanner polls. */
-    return canonicalTranscriptTarget(await currentTranscriptHosts(), filePath);
+    return canonicalTranscriptTarget(await currentTranscriptHosts(files), filePath);
   }
-  return pid === null ? null : resolveRequestedTmuxTarget(pid);
+  return pid === null ? null : resolveRequestedTmuxTarget(pid, files);
 }
 
 function attachJson(body: AttachResponse | AttachError, status = 200): NextResponse<AttachResponse | AttachError> {

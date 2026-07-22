@@ -24,6 +24,7 @@ let transcriptReads = 0;
 let lastTranscriptReadFresh: boolean | undefined;
 let lastTranscriptReadFiles: unknown;
 let completedScanReads = 0;
+let pidResolutionFiles: unknown;
 let pidTargets = new Map<number, string | null>();
 let resourceTarget: Record<string, unknown> | null = null;
 const endpoint = {
@@ -148,7 +149,10 @@ mock.module("@/lib/tmux", () => ({
   killPane: async () => {},
   paneScreen: async () => "",
   panePidOf: async () => null,
-  resolveRequestedTmuxTarget: async (pid: number | null) => (pid === null ? null : pidTargets.get(pid) ?? null),
+  resolveRequestedTmuxTarget: async (pid: number | null, files?: unknown) => {
+    pidResolutionFiles = files;
+    return pid === null ? null : pidTargets.get(pid) ?? null;
+  },
   resolveTarget: async (pid: number) => pidTargets.get(pid) ?? null,
   knownLivePids: async () => new Set<number>(),
   panePidMap: async () => new Map<number, string>(),
@@ -248,12 +252,16 @@ test("/api/tmux attach reports a restarted server and rejects malformed, cross-o
 });
 
 test("/api/tmux GET keeps pid lookup for pid-only compatibility requests", async () => {
+  completedScanReads = 0;
+  pidResolutionFiles = undefined;
   pidTargets = new Map([[77, "agents:9.0"]]);
 
   const response = await GET(get("http://127.0.0.1/api/tmux?pid=77"));
 
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ target: "agents:9.0" });
+  expect(completedScanReads).toBe(1);
+  expect(pidResolutionFiles).toBe(completedFiles);
 });
 
 test("/api/tmux POST carries concurrent sends through the delivery seam", async () => {

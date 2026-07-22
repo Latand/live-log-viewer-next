@@ -4,6 +4,7 @@ import { readTranscriptHosts, type TranscriptHostSnapshot } from "@/lib/agent/tr
 import { completedFileScan } from "@/lib/scanner/scanCache";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { resolveRequestedTmuxTarget } from "@/lib/tmux";
+import type { FileEntry } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +23,7 @@ interface TargetBatchResponse {
 
 async function targetForRequest(
   snapshot: TranscriptHostSnapshot,
+  files: readonly FileEntry[],
   pid: number | null,
   pathname: string,
 ): Promise<string | null> {
@@ -30,7 +32,7 @@ async function targetForRequest(
        another process, so it is used only when the request has no path. */
     return snapshot.canonicalFor(pathname)?.display ?? null;
   }
-  return pid === null ? null : resolveRequestedTmuxTarget(pid);
+  return pid === null ? null : resolveRequestedTmuxTarget(pid, files);
 }
 
 function parseReqs(body: unknown): TargetBatchReq[] | null {
@@ -64,6 +66,6 @@ export async function POST(req: NextRequest): Promise<NextResponse<TargetBatchRe
      closed. PID-only compatibility requests retain their own lookup. */
   const files = (await completedFileScan()).snapshot.files;
   const snapshot = await readTranscriptHosts(true, files);
-  const pairs = await Promise.all(reqs.map(async ({ id, pid, path }) => [id, await targetForRequest(snapshot, pid, path)] as const));
+  const pairs = await Promise.all(reqs.map(async ({ id, pid, path }) => [id, await targetForRequest(snapshot, files, pid, path)] as const));
   return NextResponse.json({ targets: Object.fromEntries(pairs) });
 }

@@ -7,6 +7,7 @@ const SECOND_PATH = "/allowed/second.jsonl";
 let transcriptReads = 0;
 let completedScanReads = 0;
 let suppliedFiles: unknown;
+let pidResolutionFiles: unknown;
 let pidTargets = new Map<number, string | null>();
 
 const completedFiles = [{ path: FIRST_PATH }, { path: SECOND_PATH }];
@@ -34,7 +35,10 @@ mock.module("@/lib/scanner/scanCache", () => ({
 }));
 mock.module("@/lib/scanner/roots", () => ({ pathAllowed: (pathname: string) => pathname.startsWith("/allowed/") }));
 mock.module("@/lib/tmux", () => ({
-  resolveRequestedTmuxTarget: async (pid: number | null) => (pid === null ? null : pidTargets.get(pid) ?? null),
+  resolveRequestedTmuxTarget: async (pid: number | null, files: unknown) => {
+    pidResolutionFiles = files;
+    return pid === null ? null : pidTargets.get(pid) ?? null;
+  },
 }));
 
 const { POST } = await import("./route");
@@ -51,6 +55,7 @@ test("/api/tmux/targets projects every path from one canonical host snapshot", a
   transcriptReads = 0;
   completedScanReads = 0;
   suppliedFiles = undefined;
+  pidResolutionFiles = undefined;
   pidTargets = new Map([[11, "agents:9.0"]]);
 
   const response = await POST(request({
@@ -68,4 +73,5 @@ test("/api/tmux/targets projects every path from one canonical host snapshot", a
   expect(transcriptReads).toBe(1);
   expect(completedScanReads).toBe(1);
   expect(suppliedFiles).toBe(completedFiles);
+  expect(pidResolutionFiles).toBe(completedFiles);
 });
