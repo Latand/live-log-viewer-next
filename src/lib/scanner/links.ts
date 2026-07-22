@@ -11,6 +11,7 @@ import {
   persistHandoffLineage,
   rememberHandoffChild,
 } from "../handoffLineage";
+import { forEachCooperatively } from "../cooperative";
 import type { FileEntry } from "../types";
 import { globalCache } from "./caches";
 import { claudeSubagentLineage } from "./claudeNative";
@@ -252,15 +253,15 @@ function compactParentUuid(pathname: string, size: number): string | null {
  * already gone (middle hop of a longer chain), the nearest older non-live
  * session of the same slug stands in.
  */
-function chainCompactedSessions(entries: FileEntry[]): void {
+async function chainCompactedSessions(entries: FileEntry[]): Promise<void> {
   const mainsBySlug = new Map<string, FileEntry[]>();
-  for (const entry of entries) {
-    if (entry.root !== "claude-projects") continue;
+  await forEachCooperatively(entries, (entry) => {
+    if (entry.root !== "claude-projects") return;
     const parts = entry.name.split(path.sep);
-    if (parts.length !== 2) continue;
+    if (parts.length !== 2) return;
     const slug = parts[0] ?? "";
     mainsBySlug.set(slug, (mainsBySlug.get(slug) ?? []).concat(entry));
-  }
+  });
   const chainsBack = (from: FileEntry, target: FileEntry, mains: FileEntry[]): boolean => {
     const byPath = new Map(mains.map((main) => [main.path, main]));
     const seen = new Set<string>();
@@ -270,19 +271,19 @@ function chainCompactedSessions(entries: FileEntry[]): void {
     }
     return false;
   };
-  for (const mains of mainsBySlug.values()) {
+  await forEachCooperatively([...mainsBySlug.values()], async (mains) => {
     const ordered = [...mains].sort((a, b) => a.mtime - b.mtime);
-    for (const successor of ordered) {
+    await forEachCooperatively(ordered, (successor) => {
       const rememberedPath = compactLinkCache.get(successor.path);
       const remembered = rememberedPath
         ? ordered.find((candidate) => candidate.path === rememberedPath && candidate !== successor && !candidate.parent)
         : undefined;
       if (remembered && !chainsBack(successor, remembered, mains)) {
         remembered.parent = successor.path;
-        continue;
+        return;
       }
       const uuid = compactParentUuid(successor.path, successor.size);
-      if (!uuid) continue;
+      if (!uuid) return;
       // Late system records (away_summary…) can bump the predecessor's mtime
       // above the successor's, so candidates are not mtime-gated: the marker
       // uuid proves direction and chainsBack blocks accidental cycles. The
@@ -295,8 +296,8 @@ function chainCompactedSessions(entries: FileEntry[]): void {
       if (proven) rememberCompactChain(successor.path, proven.path);
       const predecessor = proven ?? (alive ? candidates.find((candidate) => candidate.activity !== "live") : undefined);
       if (predecessor && !chainsBack(successor, predecessor, mains)) predecessor.parent = successor.path;
-    }
-  }
+    });
+  });
 }
 
 async function globWalk(dir: string, pred: (pathname: string) => boolean, limit: Limit): Promise<string[]> {
@@ -557,16 +558,16 @@ function persistLineage(): void {
   }
 }
 
-function attachNativeCodexSubagentParents(entries: FileEntry[], persist: boolean): void {
+async function attachNativeCodexSubagentParents(entries: FileEntry[], persist: boolean): Promise<void> {
   loadLineage();
   const pathByThreadId = new Map<string, string>();
-  for (const entry of entries) {
-    if (entry.root !== "codex-sessions" || !entry.path.endsWith(".jsonl")) continue;
+  await forEachCooperatively(entries, (entry) => {
+    if (entry.root !== "codex-sessions" || !entry.path.endsWith(".jsonl")) return;
     const id = codexThreadIdFromPath(entry.path);
     if (id) pathByThreadId.set(id, entry.path);
-  }
-  for (const entry of entries) {
-    if (entry.root !== "codex-sessions" || entry.parent) continue;
+  });
+  await forEachCooperatively(entries, (entry) => {
+    if (entry.root !== "codex-sessions" || entry.parent) return;
     const parentThreadId = entry.nativeParentThreadId === undefined
       ? nativeCodexParentThreadId(entry.path, entry.size, entry.mtime * 1000)
       : entry.nativeParentThreadId;
@@ -575,7 +576,7 @@ function attachNativeCodexSubagentParents(entries: FileEntry[], persist: boolean
       entry.parent = parent;
       if (persist) rememberLineage(entry.path, parent);
     }
-  }
+  });
   if (persist) persistLineage();
 }
 
@@ -585,17 +586,17 @@ function attachNativeCodexSubagentParents(entries: FileEntry[], persist: boolean
  * is the spawner: the nearest Claude or Codex ancestor owns the child rollout.
  * This is a spawn-lineage fact; no mtime or project heuristics participate.
  */
-function attachLiveCodexParents(entries: FileEntry[], persist: boolean): void {
+async function attachLiveCodexParents(entries: FileEntry[], persist: boolean): Promise<void> {
   loadLineage();
   const orphans = entries.filter((entry) => entry.root === "codex-sessions" && !entry.parent);
   if (orphans.length === 0) return;
   const ownerByPid = new Map<number, string>();
-  for (const entry of entries) {
+  await forEachCooperatively(entries, (entry) => {
     if ((entry.root === "claude-projects" || entry.root === "codex-sessions") && entry.pid !== null) {
       ownerByPid.set(entry.pid, entry.path);
     }
-  }
-  for (const rollout of orphans) {
+  });
+  await forEachCooperatively(orphans, (rollout) => {
     let resolved: string | null = null;
     const seen = new Set<number>();
     for (let pid: number | null = rollout.pid; pid !== null && !seen.has(pid); pid = readPpid(pid)) {
@@ -615,7 +616,7 @@ function attachLiveCodexParents(entries: FileEntry[], persist: boolean): void {
       const remembered = lineageCache.get(rollout.path);
       if (remembered) rollout.parent = remembered;
     }
-  }
+  });
   if (persist) persistLineage();
 }
 
@@ -627,12 +628,12 @@ function attachLiveCodexParents(entries: FileEntry[], persist: boolean): void {
  * The `handoff` flag makes the UI treat the child as a branch of its source
  * rather than a compaction predecessor.
  */
-function attachHandoffParents(entries: FileEntry[], persist: boolean): void {
+async function attachHandoffParents(entries: FileEntry[], persist: boolean): Promise<void> {
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
-  for (const entry of entries) {
-    if (entry.parent) continue;
-    if (entry.root !== "claude-projects" && entry.root !== "codex-sessions") continue;
-    if (!entry.path.endsWith(".jsonl") || entry.path.includes(path.sep + "subagents" + path.sep)) continue;
+  await forEachCooperatively(entries, (entry) => {
+    if (entry.parent) return;
+    if (entry.root !== "claude-projects" && entry.root !== "codex-sessions") return;
+    if (!entry.path.endsWith(".jsonl") || entry.path.includes(path.sep + "subagents" + path.sep)) return;
     let parent = handoffParentForChild(entry.path);
     if (!parent && entry.pid !== null) {
       const seen = new Set<number>();
@@ -648,7 +649,7 @@ function attachHandoffParents(entries: FileEntry[], persist: boolean): void {
       entry.parent = parent;
       entry.handoff = true;
     }
-  }
+  });
   if (persist) persistHandoffLineage();
 }
 
@@ -661,13 +662,13 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
   const nestedNeedleBudget = { remaining: NESTED_SUBAGENT_NEEDLE_BUDGET_BYTES };
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   const backgroundTasks = new Map<FileEntry, [string, string, string]>();
-  for (const entry of entries) {
-    if (entry.root !== "claude-tasks") continue;
+  await forEachCooperatively(entries, (entry) => {
+    if (entry.root !== "claude-tasks") return;
     const parts = taskParts(ROOTS["claude-tasks"], entry.path);
     if (parts) backgroundTasks.set(entry, parts);
-  }
+  });
   let remainingBackgroundTasks = backgroundTasks.size;
-  for (const entry of entries) {
+  await forEachCooperatively(entries, async (entry) => {
     if (entry.root === "claude-projects") {
       // Both the direct `subagents/agent-*.jsonl` layout and the nested Workflow
       // `subagents/**​/agent-*.jsonl` layout resolve to the same root parent
@@ -691,7 +692,7 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
       }
     } else if (entry.root === "claude-tasks") {
       const parts = backgroundTasks.get(entry);
-      if (!parts) continue;
+      if (!parts) return;
       const [slug, sid, tid] = parts;
       const [main, subs] = await sessionTranscripts(sid, limit, slug);
       /* Reserve each pending task a share of this generation's remaining
@@ -727,11 +728,11 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
         entry.cmdDesc = "";
       }
     }
-  }
-  attachNativeCodexSubagentParents(entries, persist);
-  attachLiveCodexParents(entries, persist);
-  attachHandoffParents(entries, persist);
-  chainCompactedSessions(entries);
+  });
+  await attachNativeCodexSubagentParents(entries, persist);
+  await attachLiveCodexParents(entries, persist);
+  await attachHandoffParents(entries, persist);
+  await chainCompactedSessions(entries);
   const rootProject = (entry: FileEntry): string => {
     const seen = new Set<string>();
     let cur: FileEntry = entry;
@@ -743,10 +744,10 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
     }
     return entry.project;
   };
-  for (const entry of entries) {
+  await forEachCooperatively(entries, (entry) => {
     if (!entry.parent || !byPath.has(entry.parent)) entry.parent = null;
     else entry.project = rootProject(entry);
-  }
+  });
   if (persist) {
     persistBackgroundCommands();
     persistCompactChains();
