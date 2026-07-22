@@ -1953,6 +1953,17 @@ export async function patchPipeline(
       if (receiptRetry && attempt?.launchId !== req.launchId) {
         return { error: "the clicked launch is no longer the current failed attempt", status: 409 };
       }
+      const validateRetryReceipt = (): { error: string; status: number } | null => {
+        if (!receiptRetry) return null;
+        const receipt = ports.spawnReceipt(req.launchId!);
+        if (!receipt) return { error: "the clicked launch receipt is no longer available", status: 409 };
+        if (receipt.state !== "failed" && receipt.state !== "conflicted") {
+          return { error: `the clicked launch settled as ${receipt.state}; retry was cancelled`, status: 409 };
+        }
+        return null;
+      };
+      const initialReceiptConflict = validateRetryReceipt();
+      if (initialReceiptConflict) return initialReceiptConflict;
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
       if (flow && flow.state !== "closed") {
@@ -1963,6 +1974,10 @@ export async function patchPipeline(
           return { error: closed.error, status: closed.status ?? 409 };
         }
       }
+      /* Pane/flow cleanup can yield while a structured receipt reconciles.
+         This final durable read fences the synchronous reset and cursor update. */
+      const settledReceiptConflict = validateRetryReceipt();
+      if (settledReceiptConflict) return settledReceiptConflict;
       const retryReviewHead = stage?.kind === "review-loop" ? synchronizePipelineRetryHead(pipeline, ports.exec) : null;
       if (retryReviewHead && !retryReviewHead.ok) {
         pipeline.stateDetail = retryReviewHead.error;

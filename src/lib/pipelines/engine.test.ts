@@ -2597,6 +2597,10 @@ test("issue 533: receipt retry validates the current stage and failed launch ide
   const attempt = parked.runs[0]!.attempts[0]!;
   expect(attempt.launchId).toBeString();
   const launchId = attempt.launchId!;
+  h.ports.spawnReceipt = (candidate) => candidate === launchId ? {
+    state: "failed", launchId, conversationId: attempt.conversationId!, sessionId: attempt.sessionId,
+    "transcript": attempt.agentPath, paneId: attempt.paneId,
+  } : null;
 
   expect(await patchPipeline(pipeline.id, {
     action: "retry-stage",
@@ -2620,6 +2624,41 @@ test("issue 533: receipt retry validates the current stage and failed launch ide
     stageId: "plan",
     launchId,
   }, h.ports)).toMatchObject({ status: 409 });
+});
+
+test("issue 533: a matching receipt that settles late cannot spawn a retry", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
+  const attempt = loadPipelines()[0]!.runs[0]!.attempts[0]!;
+  expect(attempt.launchId).toBeString();
+  const launchId = attempt.launchId!;
+  const spawnCount = h.calls.filter((call) => call.startsWith("spawn:")).length;
+  h.ports.spawnReceipt = (candidate) => candidate === launchId ? {
+    state: "completed",
+    launchId,
+    conversationId: attempt.conversationId!,
+    sessionId: "late-success",
+    "transcript": "/codex/stage-1.jsonl",
+    paneId: null,
+  } : null;
+
+  expect(await patchPipeline(pipeline.id, {
+    action: "retry-stage",
+    stageId: "plan",
+    launchId,
+  }, h.ports)).toMatchObject({ status: 409, error: expect.stringContaining("settled") });
+  expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
+
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "recovered")], h.ports);
+  expect(h.calls.filter((call) => call.startsWith("spawn:")).length).toBe(spawnCount);
+  const afterTick = loadPipelines()[0]!;
+  expect(afterTick.state).toBe("needs_decision");
+  expect(afterTick.runs[0]!.attempts).toEqual([
+    expect.objectContaining({ launchId, conversationId: attempt.conversationId }),
+  ]);
 });
 
 test("a stage retry supersedes the prior attempt's conversation and numbers its round (#383)", async () => {
@@ -2660,6 +2699,10 @@ test("issue 533: retry replays the pipeline launch contract from durable stage s
   await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
   const firstAttempt = loadPipelines()[0]!.runs[0]!.attempts[0]!;
   expect(firstAttempt.launchId).toBeString();
+  h.ports.spawnReceipt = (candidate) => candidate === firstAttempt.launchId ? {
+    state: "failed", launchId: firstAttempt.launchId!, conversationId: firstAttempt.conversationId!,
+    sessionId: firstAttempt.sessionId, "transcript": firstAttempt.agentPath, paneId: firstAttempt.paneId,
+  } : null;
   await patchPipeline(pipeline.id, {
     action: "retry-stage", stageId: "plan", launchId: firstAttempt.launchId!,
   }, h.ports);
