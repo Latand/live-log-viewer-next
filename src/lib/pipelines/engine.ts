@@ -745,6 +745,15 @@ function synchronizeReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow,
     })),
   })).digest("hex").slice(0, 16);
   if (attempt.reviewFlowSync?.generation === generation) return false;
+  const synchronized = attempt.reviewFlowSync;
+  if (synchronized) {
+    if (snapshot.roundCount < synchronized.roundCount) return false;
+    const synchronizedSourceMs = synchronized.sourceUpdatedAt ? Date.parse(synchronized.sourceUpdatedAt) : Number.NaN;
+    if (snapshot.roundCount === synchronized.roundCount
+      && Number.isFinite(sourceMs)
+      && Number.isFinite(synchronizedSourceMs)
+      && sourceMs < synchronizedSourceMs) return false;
+  }
   attachReviewFlowAttempt(attempt, flow);
   if (reviewerHeadSha) {
     attempt.expectedReviewHeadSha = reviewerHeadSha;

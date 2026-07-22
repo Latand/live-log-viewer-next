@@ -711,7 +711,9 @@ export async function tickFlow(
         flow.state = flow.mode === "manual" ? "spawn_pending" : "spawning";
         flow.stateDetail = null;
       } catch (error) {
-        markerRound.error = error instanceof Error ? error.message : "review head capture failed";
+        const detail = error instanceof Error ? error.message : "review head capture failed";
+        markerRound.error = detail;
+        markNeedsDecision(flow, detail);
       }
     }
     return JSON.stringify(flow) !== before;

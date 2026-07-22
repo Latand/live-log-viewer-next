@@ -508,7 +508,11 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   let pipelinesError: string | undefined;
   try {
     const reconciled = await withPipelineMutation((current, persist) => {
-      if (reconcileEmbeddedReviewFlows(current, storedFlows)) persist();
+      /* Re-read after acquiring the pipeline transaction: the controller can
+         advance flows between the scan's earlier projection read and this
+         persistence window. The synchronization seam also fences older round
+         counts/timestamps, so a delayed response cannot rewind its parent. */
+      if (reconcileEmbeddedReviewFlows(current, loadFlows())) persist();
       return current;
     });
     pipelines = filterPipelinesForFileScan(reconciled, files, {

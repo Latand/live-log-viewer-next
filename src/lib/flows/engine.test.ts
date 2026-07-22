@@ -161,6 +161,48 @@ test("issue 532: a marker-created pipeline round captures its published repair h
   }
 });
 
+test("issue 532: a dirty marker-time checkout parks with an actionable decision", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-marker-dirty-"));
+  try {
+    expect(spawnSync("git", ["init", "-b", "main"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "flow@example.com"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd }).status).toBe(0);
+    fs.writeFileSync(path.join(cwd, "work.txt"), "committed\n");
+    expect(spawnSync("git", ["add", "work.txt"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "base"], { cwd }).status).toBe(0);
+    fs.writeFileSync(path.join(cwd, "work.txt"), "dirty\n");
+    const implementer = writeCodexEntry("marker-dirty-implementer.jsonl", {
+      id: ["069f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+      cwd,
+    }, Date.now() / 1_000);
+    fs.appendFileSync(implementer.path, `${JSON.stringify({
+      timestamp: new Date(Date.now() + 1_000).toISOString(),
+      type: "event_msg",
+      payload: { type: "task_complete", last_agent_message: "REVIEW_READY: dirty repair" },
+    })}\n`);
+    const stat = fs.statSync(implementer.path);
+    const current = { ...implementer, size: stat.size, mtime: stat.mtimeMs / 1_000 };
+    const flow = raceFlow({
+      id: "flow-marker-dirty",
+      cwd,
+      headRef: "main",
+      implementerPath: current.path,
+      state: "fixing",
+      rounds: [],
+      createdAt: "2026-07-21T00:00:00Z",
+    });
+
+    expect(await tickFlow(flow, [current], new Map([[current.path, current]]), () => {})).toBe(true);
+    expect(flow).toMatchObject({
+      state: "needs_decision",
+      stateDetail: "review requires a clean committed HEAD",
+      rounds: [{ n: 1, error: "review requires a clean committed HEAD" }],
+    });
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("a review round parks when clean HEAD advances past its synchronized target before launch (#522)", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-target-head-"));
   try {

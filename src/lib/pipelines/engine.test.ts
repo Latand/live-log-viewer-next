@@ -2454,6 +2454,16 @@ test("issue 532: a four-round embedded flow authoritatively repairs its stale pa
     reviewFlowSync: { roundCount: 5, relayState: "reviewing" },
   });
   expect((await tickPipelines([], h.ports)).changed).toBe(false);
+
+  const staleFlow = structuredClone(flow);
+  staleFlow.rounds = staleFlow.rounds.slice(0, 4);
+  expect(reconcileEmbeddedReviewFlows([loadPipelines()[0]!], [staleFlow], "2026-07-22T00:07:00.000Z")).toBe(false);
+  expect(loadPipelines()[0]!.runs[1]!.attempts[0]).toMatchObject({
+    agentPath: "/codex/reviewer-5.jsonl",
+    expectedReviewHeadSha: finalHead,
+    reviewHeadSha: finalHead,
+    reviewFlowSync: { roundCount: 5 },
+  });
 });
 
 test("issue 532: projection rebinds one flow-first partial write and refuses ambiguous candidates", async () => {
