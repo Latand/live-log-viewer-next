@@ -3224,6 +3224,32 @@ describe("durable account migration coordinator", () => {
     expect(advanced.migration?.phase).toBe("committed");
   });
 
+  test("a stalled open turn with no process or registered host releases its waiting-turn reseat", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "dead-stalled-turn.jsonl");
+    fs.writeFileSync(pathname, JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-07-22T15:00:00.000Z",
+      payload: { type: "task_started" },
+    }) + "\n");
+    store.reconcileConversations([observation(pathname, "limited", "busy")]);
+    const conversation = store.conversationForPath(pathname)!;
+    expect(store.requestConversationReseat(conversation.id, "healthy").migration?.phase).toBe("waiting-turn");
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, {
+      activity: "stalled",
+      activityReason: "jsonl_turn_stalled",
+      proc: null,
+      pid: null,
+    })]);
+
+    expect(store.conversation(conversation.id)?.turn.state).toBe("idle");
+    const counts = { create: 0, verify: 0 };
+    const advanced = await advanceConversationMigration(conversation.id, store, provider(["/dead-stalled-successor.jsonl"], counts));
+    expect(counts.create).toBe(1);
+    expect(advanced.migration?.phase).toBe("committed");
+  });
+
   test("a released dead Codex source can migrate after an unclosed transcript turn", async () => {
     const store = registry();
     const pathname = path.join(path.dirname(store.filename), "released-dead-codex.jsonl");
@@ -3255,6 +3281,54 @@ describe("durable account migration coordinator", () => {
     const advanced = await advanceConversationMigration(conversation.id, store, provider(["/released-successor.jsonl"], counts));
     expect(counts.create).toBe(1);
     expect(advanced.migration?.phase).toBe("committed");
+  });
+
+  test("a registered structured host keeps a stalled open turn fenced", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "hosted-stalled-turn.jsonl");
+    fs.writeFileSync(pathname, JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-07-22T15:00:00.000Z",
+      payload: { type: "task_started" },
+    }) + "\n");
+    store.reconcileConversations([observation(pathname, "limited", "busy")]);
+    const conversation = store.conversationForPath(pathname)!;
+    store.upsert({
+      key: { engine: "codex", sessionId: conversation.generations[0]!.id },
+      artifactPath: pathname,
+      cwd: "/repo",
+      accountId: "limited",
+      status: "live",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:4242",
+        process: { pid: 4242, startIdentity: "4242:test" },
+        eventCursor: 10,
+        protocolVersion: "1",
+        writerClaimEpoch: 1,
+        activeTurnRef: "turn-live",
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: "test-owner",
+      pendingAction: null,
+    });
+    expect(store.requestConversationReseat(conversation.id, "healthy").migration?.phase).toBe("waiting-turn");
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, {
+      activity: "stalled",
+      activityReason: "jsonl_turn_stalled",
+      proc: null,
+      pid: null,
+    })]);
+
+    expect(store.conversation(conversation.id)?.turn.state).toBe("busy");
+    const counts = { create: 0, verify: 0 };
+    await advanceConversationMigration(conversation.id, store, provider(["/must-stay-fenced.jsonl"], counts));
+    expect(counts.create).toBe(0);
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
   });
 
   test("a dead null-host Claude OAuth failure releases the waiting-turn reseat exactly once", async () => {

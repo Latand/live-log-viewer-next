@@ -58,10 +58,26 @@ function currentPaneWall(entry: FileEntry): boolean {
   return entry.rateLimit != null;
 }
 
+/** A complete open turn can outlive its agent process when Codex or Claude
+    exits before appending the terminal lifecycle record. After the scanner's
+    three-minute stalled threshold, absent process and host evidence makes the
+    composer safe to resume through a successor. */
+function deadStalledTurn(entry: FileEntry, existing: RegistryConversation | null, hasActiveRegisteredHost: boolean): boolean {
+  const generation = existing?.generations.at(-1);
+  return entry.activity === "stalled"
+    && entry.activityReason === "jsonl_turn_stalled"
+    && entry.proc !== "running"
+    && entry.pid === null
+    && generation?.path === entry.path
+    && generation.host === null
+    && !hasActiveRegisteredHost;
+}
+
 function projectedInventoryTurn(
   entry: FileEntry,
   parsed: ConversationObservation["turn"] | null,
   existing: RegistryConversation | null,
+  hasActiveRegisteredHost: boolean,
 ): ConversationObservation["turn"] {
   if (!parsed) {
     if (existing && (existing.turn.state === "busy" || existing.turn.state === "unknown")) {
@@ -71,7 +87,11 @@ function projectedInventoryTurn(
   }
 
   const activityComplete = entry.derivationComplete !== false;
-  if (parsed.state === "busy" && activityComplete && (entry.activityReason === "pane_at_composer" || currentPaneWall(entry))) {
+  if (parsed.state === "busy" && activityComplete && (
+    entry.activityReason === "pane_at_composer"
+    || currentPaneWall(entry)
+    || deadStalledTurn(entry, existing, hasActiveRegisteredHost)
+  )) {
     return { state: "idle", source: "empty", terminalAt: null };
   }
   if (parsed.state === "unknown" && activityComplete && (entry.activity === "idle" || entry.activity === "recent")) {
@@ -85,6 +105,11 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
   const snapshot = registry.readOnlySnapshot();
   const conversationByPath = new Map<string, RegistryConversation>();
   const launchProfileByPath = new Map<string, RegistryConversation["generations"][number]["launchProfile"]>();
+  const activeRegisteredHostPaths = new Set(Object.values(snapshot.entries)
+    .filter((entry) => entry.artifactPath
+      && ["starting", "live", "idle", "handoff"].includes(entry.status)
+      && (entry.host !== null || entry.structuredHost !== null))
+    .map((entry) => entry.artifactPath));
   await forEachCooperatively(Object.values(snapshot.conversations), (conversation) => {
     for (const generation of conversation.generations) {
       if (!conversationByPath.has(generation.path)) conversationByPath.set(generation.path, conversation);
@@ -111,10 +136,15 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const mtimeMs = entry.mtime * 1000;
     const observedTurn = transcriptTurnResult(entry.path, entry.size, mtimeMs, engine === "codex");
     const parsed = observedTurn.complete ? observedTurn.turn : null;
-    if (observedTurn.complete && entry.derivationComplete !== false && (entry.activityReason === "pane_at_composer" || currentPaneWall(entry))) {
+    const releasedDeadTurn = deadStalledTurn(entry, existing, activeRegisteredHostPaths.has(entry.path));
+    if (observedTurn.complete && entry.derivationComplete !== false && (
+      entry.activityReason === "pane_at_composer"
+      || currentPaneWall(entry)
+      || releasedDeadTurn
+    )) {
       recordTranscriptComposerRelease(entry.path, entry.size, mtimeMs, engine === "codex");
     }
-    const turn = projectedInventoryTurn(entry, parsed, existing);
+    const turn = projectedInventoryTurn(entry, parsed, existing, activeRegisteredHostPaths.has(entry.path));
     const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
     const configuredRoot = process.env.LLV_ROOT_CONVERSATION_ID;

@@ -8,7 +8,7 @@ import { AgentRegistry, type AgentRegistryEntry, type StructuredHostColumns } fr
 import type { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import type { CodexAppServerHost } from "./codexAppServerHost";
 import type { HostState } from "./engineHost";
-import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
+import { bindClaudeHostPersistence, bindCodexHostPersistence, DEFAULT_CURSOR_DEBOUNCE_MS } from "./registry";
 
 const KEY = { engine: "codex" as const, sessionId: "coalesced-host" };
 
@@ -99,6 +99,10 @@ const binders: Array<[string, Binder]> = [
     options,
   )],
 ];
+
+test("production cursor checkpoints stay bounded to two writes per minute", () => {
+  expect(DEFAULT_CURSOR_DEBOUNCE_MS).toBe(30_000);
+});
 
 for (const [engine, bind] of binders) {
   describe(`${engine} structured host persistence`, () => {

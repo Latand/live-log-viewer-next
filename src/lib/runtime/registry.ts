@@ -97,7 +97,7 @@ interface ObservableStructuredHost {
   onStateChange(listener: (state: HostState) => void): () => void;
 }
 
-const DEFAULT_CURSOR_DEBOUNCE_MS = 1_000;
+export const DEFAULT_CURSOR_DEBOUNCE_MS = 30_000;
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
