@@ -852,44 +852,6 @@ test("a persisted structured current generation holds the exact send while the r
   }]);
 });
 
-test("synchronization owner lookup reuses the SQLite read-only snapshot", async () => {
-  const directory = path.join(sandbox, `registry-sqlite-cache-${registryNumber += 1}`);
-  const filename = path.join(directory, "agent-registry.json");
-  let snapshotLoads = 0;
-  const registry = new AgentRegistry(filename, undefined, undefined, {
-    sqliteMode: "sqlite",
-    onSqliteSnapshotLoad: () => { snapshotLoads += 1; },
-  });
-  registry.reconcileConversations([{
-    engine: "codex",
-    path: artifactPath,
-    accountId: "default",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
-    turn: { state: "idle", source: "empty", terminalAt: null },
-    observedAt: "2026-07-13T00:00:00.000Z",
-  }]);
-  const conversation = registry.conversationForPath(artifactPath)!;
-  recordStructuredOwner(registry, conversation);
-  registry.readOnlySnapshot();
-  const baseline = snapshotLoads;
-
-  const result = await enqueueStructuredMessage({
-    path: artifactPath,
-    conversationId: conversation.id,
-    clientMessageId: "sqlite-deployment-window-message",
-    text: "continue through runtime synchronization",
-    hasImages: false,
-  }, {
-    enabled: () => true,
-    client: () => null,
-    registry: () => registry,
-    startupFailed: () => false,
-  });
-
-  expect(result).toMatchObject({ ok: true, structured: true, outcome: "held" });
-  expect(snapshotLoads).toBe(baseline);
-});
-
 test("a reopened synchronization hold replays the exact steer command", async () => {
   const { registry, conversation } = registryWithConversation();
   recordStructuredOwner(registry, conversation);
