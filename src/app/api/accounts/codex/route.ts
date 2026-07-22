@@ -79,12 +79,12 @@ export async function DELETE(req: NextRequest) {
         return NextResponse.json({ error: "Codex account has active sessions, conversations, or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
       }
       const registry = agentRegistry();
-      const beforeRetirement = registry.snapshot();
+      const beforeRetirement = registry.readOnlySnapshot();
       try {
         if (login.attemptState === "pending") await managedCodexRuntime().cancelLogin(account.id);
         if (account.loginPane !== null) setCodexAccountLoginPane(account.id, null);
         registry.retireAccount("codex", account.id, "default");
-        const retired = registry.snapshot();
+        const retired = registry.readOnlySnapshot();
         try {
           const removal = removeManagedCodexAccount(account.id);
           requestAccountMigrationTick();

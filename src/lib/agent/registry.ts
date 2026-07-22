@@ -3409,7 +3409,7 @@ export class AgentRegistry {
     host: TmuxHostEvidence,
     observed: { engine: Extract<AgentEngine, "claude" | "codex">; cwd: string },
   ): SpawnReceipt | null {
-    const current = this.snapshot().receipts[launchId];
+    const current = this.readOnlySnapshot().receipts[launchId];
     if (!current || current.state !== "conflicted") return current ? clone(current) : null;
     return this.mutate((file) => {
       const receipt = this.confirmSpawnPaneAliveInFile(file, launchId, host, observed);
@@ -4001,7 +4001,7 @@ export class AgentRegistry {
   }
 
   ownsStructuredHostClaim(key: SessionKey, claimOwner: string, claimEpoch: number): boolean {
-    const entry = this.snapshot().entries[sessionKeyId(key)];
+    const entry = this.readOnlySnapshot().entries[sessionKeyId(key)];
     return entry?.claimOwner === claimOwner
       && entry.claimEpoch === claimEpoch
       && entry.structuredHost?.writerClaimEpoch === claimEpoch;

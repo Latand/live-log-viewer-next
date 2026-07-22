@@ -13,7 +13,7 @@ const LIVE_RECEIPT_STATES = new Set(["starting", "pane-bound", "host-verified", 
  *  already opts into, and the window is milliseconds. Closing it fully would
  *  need cross-store atomicity between the agent and accounts registries. */
 export function accountRemovalBlockers(engine: ManagedAccountEngine, accountId: string): AccountRemovalBlocker[] {
-  const snapshot = agentRegistry().snapshot();
+  const snapshot = agentRegistry().readOnlySnapshot();
   const liveEntry = Object.values(snapshot.entries).some((entry) =>
     entry.key.engine === engine && (entry.accountId === accountId || entry.accountId === null) && LIVE_ENTRY_STATUSES.has(entry.status));
   const liveReceipt = Object.values(snapshot.receipts).some((receipt) =>

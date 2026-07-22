@@ -44,7 +44,7 @@ function ownedPaths(conversation: { generations: readonly { path: string }[]; co
     still found after coalescing. */
 function aliasConversationIds(canonicalId: string): string[] {
   const registry = agentRegistry();
-  const aliases = registry.snapshot().conversationAliases;
+  const aliases = registry.readOnlySnapshot().conversationAliases;
   const result: string[] = [];
   for (const alias of Object.keys(aliases)) {
     if (alias !== canonicalId && registry.canonicalConversationId(alias as ViewerConversationId) === canonicalId) result.push(alias);

@@ -29,7 +29,7 @@ function mutationsWithConversationAliases(mutations: readonly BoardMutationV1[])
 
   let snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>;
   try {
-    snapshot = agentRegistry().snapshot();
+    snapshot = agentRegistry().readOnlySnapshot();
   } catch (error) {
     if (error instanceof RegistryReadError) return [...mutations];
     throw error;

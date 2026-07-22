@@ -21,7 +21,7 @@ export async function materializeStructuredTerminal(
   const conversation = registry.conversationForPath(artifactPath);
   const generation = conversation?.generations.at(-1);
   if (!conversation || !generation) throw new Error("structured conversation is unavailable");
-  const entry = registry.snapshot().entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+  const entry = registry.readOnlySnapshot().entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
   if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") {
     throw new Error("structured conversation has no live host to attach");
   }

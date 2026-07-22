@@ -81,7 +81,7 @@ function projectedInventoryTurn(
 
 async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<ConversationObservation[]> {
   const inventoryStartedAt = Date.now();
-  const snapshot = registry.snapshot();
+  const snapshot = registry.readOnlySnapshot();
   const conversationByPath = new Map<string, RegistryConversation>();
   const launchProfileByPath = new Map<string, RegistryConversation["generations"][number]["launchProfile"]>();
   await forEachCooperatively(Object.values(snapshot.conversations), (conversation) => {
@@ -159,7 +159,7 @@ export async function reconcileMigrationInventory(registry: AgentRegistry = agen
 }
 
 function previewFromSnapshot(engine: MigrationEngine, targetId: string, registry: AgentRegistry): MigrationPreview {
-  const snapshot = registry.snapshot();
+  const snapshot = registry.readOnlySnapshot();
   const target = (engine === "claude" ? accountManager.resolveSpawn("claude", targetId) : accountManager.resolveSpawn("codex", targetId));
   const targetLabel = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).find((account) => account.id === target.accountId)?.label ?? target.accountId;
   return {
@@ -652,7 +652,7 @@ export async function reconcileMigrations(
   registry: AgentRegistry = agentRegistry(),
   options: MigrationCoordinatorOptions = {},
 ): Promise<void> {
-  const before = registry.snapshot();
+  const before = registry.readOnlySnapshot();
   await forEachCooperatively(Object.values(before.pendingSuccessorCleanups), async (pending) => {
     const owner = registry.conversation(pending.conversationId);
     if (owner) await cleanupDiscardedSuccessor(provider, pending.receipt, owner, registry);
@@ -693,7 +693,7 @@ export async function reconcileMigrations(
     if (advanced.migration?.phase === "committed" && pendingDeliveries.has(advanced.id)) await drainHeldDeliveries(advanced.id, delivery, registry);
   });
   await yieldToRuntime();
-  const after = registry.snapshot();
+  const after = registry.readOnlySnapshot();
   await repairCommittedBoardSuccessions(
     Object.values(after.conversations),
     registry,

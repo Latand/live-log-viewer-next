@@ -100,11 +100,11 @@ export async function DELETE(req: NextRequest) {
         return NextResponse.json({ error: "Claude account has active sessions, conversations, or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
       }
       const registry = agentRegistry();
-      const beforeRetirement = registry.snapshot();
+      const beforeRetirement = registry.readOnlySnapshot();
       try {
         if (login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase)) await claudeLoginSupervisor.cancel(login.operationId);
         registry.retireAccount("claude", account.id, "default");
-        const retired = registry.snapshot();
+        const retired = registry.readOnlySnapshot();
         try {
           const removal = removeManagedClaudeAccount(account.id);
           requestAccountMigrationTick();

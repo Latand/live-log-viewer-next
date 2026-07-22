@@ -201,7 +201,7 @@ async function publishCodexSuccessorHost(input: StructuredHostPublicationInput):
   if (!key) throw new Error("successor Codex thread identity is invalid");
   if (hasStructuredDeliveryHost(key)) return async () => { await releaseStructuredDeliveryHost(key); };
 
-  const existing = input.registry.snapshot().entries[sessionKeyId(key)];
+  const existing = input.registry.readOnlySnapshot().entries[sessionKeyId(key)];
   const entry = input.registry.upsert({
     ...(existing ?? {
       key,
@@ -304,7 +304,7 @@ async function publishClaudeSuccessorHost(
   if (hasStructuredDeliveryHost(key)) return async () => { await releaseStructuredDeliveryHost(key); };
   requireStructuredDeliveryControllerPublication();
 
-  const existing = input.registry.snapshot().entries[sessionKeyId(key)];
+  const existing = input.registry.readOnlySnapshot().entries[sessionKeyId(key)];
   const entry = input.registry.upsert({
     ...(existing ?? {
       key,
@@ -656,7 +656,7 @@ function ownsCompletedClaudeBrokerTransition(
 ): boolean {
   const key = sessionKey("claude", receipt.nativeId);
   if (!key) return false;
-  const entry = registry.snapshot().entries[sessionKeyId(key)];
+  const entry = registry.readOnlySnapshot().entries[sessionKeyId(key)];
   return entry?.structuredHostOperationId === receipt.operationId
     && entry.artifactPath === receipt.path
     && entry.accountId === target.accountId

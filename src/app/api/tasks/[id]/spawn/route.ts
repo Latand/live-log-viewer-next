@@ -200,7 +200,7 @@ async function postTaskSpawn(
   let retryOf: SpawnReceipt | null = null;
   if (typeof body.retryOfLaunchId === "string") {
     const launchId = body.retryOfLaunchId.trim();
-    const receipt = registry.snapshot().receipts[launchId] ?? null;
+    const receipt = registry.readOnlySnapshot().receipts[launchId] ?? null;
     const assignment = task.assignments.find((item) => item.launchId === launchId) ?? null;
     if (!receipt || !assignment) {
       return NextResponse.json({ error: "retryOfLaunchId does not name an assignment of this task" }, { status: 404 });
@@ -340,7 +340,7 @@ async function postTaskSpawn(
       admittedTask = admitted.task;
     } catch (error) {
       registry.failSpawn(launchReceipt.launchId, "task admission could not be persisted");
-      const failed = registry.snapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
+      const failed = registry.readOnlySnapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
       return NextResponse.json(taskSpawnResponse(failed, task, { ...admittedPatch, state: "failed" }, {
         error: error instanceof Error ? error.message : "task admission could not be persisted",
       }), { status: 500 });
@@ -350,7 +350,7 @@ async function postTaskSpawn(
       const binding = await dependencies.ensureTaskPipelineForAssignment(admittedTask, pipelineSpawnParams(null));
       if (!binding.pipeline) {
         registry.failSpawn(launchReceipt.launchId, binding.error ?? "could not reserve task pipeline");
-        const failed = registry.snapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
+        const failed = registry.readOnlySnapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
         const failedAt = isoNow();
         const failedPatch = assignmentPatch(failed, failedAt, account.accountId, engine);
         const persisted = persistAssignment(dependencies, id, failedPatch, failedAt);
@@ -393,12 +393,12 @@ async function postTaskSpawn(
       registry.markSpawnPathPending(launchReceipt.launchId);
     }
   } catch (error) {
-    const observed = registry.snapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
+    const observed = registry.readOnlySnapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
     if (observed.pane) {
       if (observed.state === "prompt-delivered" || observed.state === "host-verified") {
         registry.markSpawnPathPending(observed.launchId);
       }
-      const pending = registry.snapshot().receipts[observed.launchId] ?? observed;
+      const pending = registry.readOnlySnapshot().receipts[observed.launchId] ?? observed;
       const at = isoNow();
       const patch = assignmentPatch(pending, at, account.accountId, engine);
       let taskAfterRecovery = admittedTask;
@@ -413,7 +413,7 @@ async function postTaskSpawn(
       }), { status: 202 });
     }
     registry.failSpawn(launchReceipt.launchId, error instanceof Error ? error.message : "task spawn failed");
-    const failed = registry.snapshot().receipts[launchReceipt.launchId] ?? observed;
+    const failed = registry.readOnlySnapshot().receipts[launchReceipt.launchId] ?? observed;
     const at = isoNow();
     const patch = assignmentPatch(failed, at, account.accountId, engine);
     try {
@@ -427,7 +427,7 @@ async function postTaskSpawn(
     }), { status: 500 });
   }
 
-  const completed = registry.snapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
+  const completed = registry.readOnlySnapshot().receipts[launchReceipt.launchId] ?? launchReceipt;
   const completedAt = isoNow();
   const completedPatch = assignmentPatch(completed, completedAt, account.accountId, engine);
   if (dependencies.ensureTaskPipelineForAssignment && completed.artifactPath) {

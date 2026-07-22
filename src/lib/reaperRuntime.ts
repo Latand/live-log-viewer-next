@@ -749,7 +749,7 @@ async function actuateCandidate(
   const processIdentity = overrides.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
   const initialHost = (await observeHosts(true)).hosts.find((host) => hostMatchesCandidate(host, agent, processIdentity));
   if (!initialHost?.primaryPath) return false;
-  const entry = Object.values(registry.snapshot().entries).find((candidate) => candidate.artifactPath === agent.path);
+  const entry = Object.values(registry.readOnlySnapshot().entries).find((candidate) => candidate.artifactPath === agent.path);
   if (!entry) return false;
   const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
   return registry.withOperationLock(entry.key, owner, async () => {
@@ -764,10 +764,10 @@ async function actuateCandidate(
       const current = evaluateReaper(currentInput);
       const candidate = current.agents.find((item) => reportMatchesCandidate(item, agent));
       if (!candidate?.eligible) return false;
-      if (deliveryRevision(registry.snapshot(), candidate.conversationId)
+      if (deliveryRevision(registry.readOnlySnapshot(), candidate.conversationId)
         !== deliveryRevision(currentInput.registry, candidate.conversationId)) return false;
       const killed = await killHost(expectedEvidence);
-      const registeredHost = registry.snapshot().entries[`${entry.key.engine}:${entry.key.sessionId}`]?.host;
+      const registeredHost = registry.readOnlySnapshot().entries[`${entry.key.engine}:${entry.key.sessionId}`]?.host;
       if (killed && registeredHost && sameTmuxEvidence(registeredHost, expectedEvidence)) {
         registry.markUnhosted(entry.key);
       }

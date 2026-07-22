@@ -41,7 +41,7 @@ function pipelineOriginRejection(req: NextRequest, body: CreatePipelineRequest):
     const caller = authenticatedAgentSpawnCaller(req, body.src, registry);
     if ("error" in caller) return NextResponse.json({ error: caller.error }, { status: caller.status ?? 403 });
     if (caller.kind === "agent") {
-      const role = conversationAgentRole(registry.snapshot(), caller.conversationId);
+      const role = conversationAgentRole(registry.readOnlySnapshot(), caller.conversationId);
       if (isSpawnDeniedRole(role)) {
         return NextResponse.json({ error: reviewerOriginSpawnGuidance(role), code: "reviewer_origin_spawn" }, { status: 403 });
       }
@@ -58,7 +58,7 @@ function pipelineOriginRejection(req: NextRequest, body: CreatePipelineRequest):
   const srcPath = typeof body.src === "string" && body.src.trim() ? body.src.trim() : null;
   const srcConversation = srcPath ? registry.conversationForPath(srcPath) : null;
   if (srcConversation) {
-    const role = conversationAgentRole(registry.snapshot(), srcConversation.id);
+    const role = conversationAgentRole(registry.readOnlySnapshot(), srcConversation.id);
     if (isSpawnDeniedRole(role)) {
       return NextResponse.json({ error: reviewerOriginSpawnGuidance(role), code: "reviewer_origin_spawn" }, { status: 403 });
     }

@@ -22,14 +22,14 @@ export async function updateMigrationAction(
   try {
     if (body.action === "stop") {
       const stopped = registry.setMigrationIntentState(intentId, "stopped", body.expectedRevision as number | undefined);
-      for (const conversation of Object.values(registry.snapshot().conversations)) {
+      for (const conversation of Object.values(registry.readOnlySnapshot().conversations)) {
         if (conversation.migration?.intentId === intentId && conversation.migration.phase === "rolled-back") {
           await drainHeldDeliveries(conversation.id, deliveryPort, registry);
         }
       }
       return NextResponse.json(stopped);
     }
-    const snapshot = registry.snapshot();
+    const snapshot = registry.readOnlySnapshot();
     const intent = snapshot.migrationIntents[intentId];
     if (!intent) return NextResponse.json({ error: "migration intent is unknown" }, { status: 404 });
     if (body.expectedRevision !== undefined && intent.revision !== body.expectedRevision) return NextResponse.json({ error: "migration intent revision is stale" }, { status: 409 });

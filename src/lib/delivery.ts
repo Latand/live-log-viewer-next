@@ -103,7 +103,7 @@ export async function reconfigureConversation(
   const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
   if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) return failure("conversation is unavailable", 403);
   const registry = overrides.registry ?? agentRegistry();
-  const registered = registeredHostForPath(registry.snapshot(), filePath);
+  const registered = registeredHostForPath(registry.readOnlySnapshot(), filePath);
   if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
   const conversation = registry.conversationForPath(filePath);
   const generation = conversation?.generations.at(-1);
@@ -142,7 +142,7 @@ export async function reconfigureConversation(
   const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
   try {
     const prepared = await registry.withOperationLock(registered.key, owner, async () => {
-      const refreshed = registeredHostForPath(registry.snapshot(), filePath);
+      const refreshed = registeredHostForPath(registry.readOnlySnapshot(), filePath);
       if (!refreshed?.host || refreshed.host.paneId !== paneId) {
         return failure("the registered pane changed", 409);
       }
@@ -375,7 +375,7 @@ interface KillConversationOverrides {
   pathAllowed?: typeof pathAllowed;
   listFiles?: typeof listFiles;
   registrySnapshot?: () => ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>;
-  registry?: Pick<AgentRegistry, "snapshot" | "withOperationLock" | "markUnhosted">;
+  registry?: Pick<AgentRegistry, "readOnlySnapshot" | "withOperationLock" | "markUnhosted">;
   killHost?: typeof killTmuxHostIfMatches;
 }
 
@@ -419,8 +419,8 @@ export async function killConversation(filePath: string, overrides: KillConversa
   }
   const registry = overrides.registry ?? agentRegistry();
   const readSnapshot = overrides.registry
-    ? () => registry.snapshot()
-    : overrides.registrySnapshot ?? (() => registry.snapshot());
+    ? () => registry.readOnlySnapshot()
+    : overrides.registrySnapshot ?? (() => registry.readOnlySnapshot());
   const registered = registeredHostForPath(readSnapshot(), filePath);
   if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
   const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
@@ -434,7 +434,7 @@ export async function killConversation(filePath: string, overrides: KillConversa
       const killed = await (overrides.killHost ?? killTmuxHostIfMatches)(refreshed.host);
       if (!killed) return failure("the registered pane changed or its process did not exit", 409);
       if (overrides.registry || !overrides.registrySnapshot) {
-        const current = registry.snapshot().entries[`${refreshed.key.engine}:${refreshed.key.sessionId}`];
+        const current = registry.readOnlySnapshot().entries[`${refreshed.key.engine}:${refreshed.key.sessionId}`];
         if (current?.artifactPath === filePath && sameRegisteredHost(current.host, refreshed.host)) registry.markUnhosted(refreshed.key);
       }
       forgetResumePane(filePath);
