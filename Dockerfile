@@ -3,7 +3,7 @@
 FROM node:22.16.0-bookworm-slim AS deps
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm install -g bun@1.2.18
+RUN npm install -g bun@1.3.3
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
@@ -12,7 +12,7 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1 \
     NODE_ENV=production \
     NEXT_PUBLIC_RUNTIME_UI=1
-RUN npm install -g bun@1.2.18
+RUN npm install -g bun@1.3.3
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN env -u __NEXT_PRIVATE_STANDALONE_CONFIG \
@@ -38,7 +38,7 @@ ENV NODE_ENV=production \
     LLV_WHISPER_VENV=/opt/llv-whisper-venv \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    PATH=/usr/local/bin:/home/latand/.bun/bin:/home/latand/.npm-global/bin:/home/latand/.local/bin:/usr/bin:/bin
+    PATH=/usr/local/bin:/usr/bin:/bin
 
 RUN <<'EOF'
 set -eu
@@ -56,9 +56,9 @@ apt-get install -y --no-install-recommends \
 rm -rf /var/lib/apt/lists/*
 # A real in-container bun for first-party services (runtime-host). It must
 # live under a name the nsenter shims never claim: the `bun` shim below
-# redirects to the HOST bun and remaps any cwd outside /home/latand to $HOME,
+# redirects to the HOST bun and remaps any cwd outside the mounted host home,
 # which broke `bun run src/runtime-host/main.ts` with "Module not found".
-npm install -g bun@1.2.18
+npm install -g bun@1.3.3
 cp "$(realpath /usr/local/bin/bun)" /usr/local/bin/bun-container
 chmod +x /usr/local/bin/bun-container
 chmod u+s /usr/bin/nsenter
@@ -78,24 +78,24 @@ make_nsenter_shim() {
 #!/bin/sh
 wd=\$PWD
 case "\$wd" in
-  /home/latand|/home/latand/*) ;;
+  "\$HOME"|"\$HOME"/*) ;;
   *) wd=\$HOME ;;
 esac
 exec nsenter -t 1 -m -p --setgid="\$(id -g)" --setuid="\$(id -u)" -- /bin/sh -c 'cd "\$1" || exit; shift; exec "\$@"' sh "\$wd" "$host_path" "\$@"
 WRAPPER
   chmod +x "/usr/local/bin/$name"
 }
-make_nsenter_shim claude /home/latand/.bun/bin/claude
-make_nsenter_shim codex /home/latand/.bun/bin/codex
-make_nsenter_shim bun /home/latand/.bun/bin/bun
-make_nsenter_shim uv /home/latand/.local/bin/uv
+make_nsenter_shim claude '$HOME/.bun/bin/claude'
+make_nsenter_shim codex '$HOME/.bun/bin/codex'
+make_nsenter_shim bun '$HOME/.bun/bin/bun'
+make_nsenter_shim uv '$HOME/.local/bin/uv'
 make_nsenter_shim just /usr/bin/just
 make_nsenter_shim tmux /usr/bin/tmux
 cat > /usr/local/bin/docker <<'WRAPPER'
 #!/bin/sh
 wd=$PWD
 case "$wd" in
-  /home/latand|/home/latand/*) ;;
+  "$HOME"|"$HOME"/*) ;;
   *) wd=$HOME ;;
 esac
 # Preserve the runtime-host supplementary Docker socket group while entering
@@ -113,7 +113,7 @@ state_dir=/tmp/llv-tmux-cwd
 
 host_wd() {
   case "$PWD" in
-    /home/latand|/home/latand/*) printf '%s' "$PWD" ;;
+    "$HOME"|"$HOME"/*) printf '%s' "$PWD" ;;
     *) printf '%s' "$HOME" ;;
   esac
 }
@@ -138,16 +138,16 @@ quote_shell() {
 host_command_text() {
   printf '%s' "$1" \
     | sed \
-      -e "s|'\/usr\/local\/bin\/claude'|'/home/latand/.bun/bin/claude'|g" \
-      -e "s|'\/usr\/local\/bin\/codex'|'/home/latand/.bun/bin/codex'|g" \
-      -e "s|'\/usr\/local\/bin\/bun'|'/home/latand/.bun/bin/bun'|g" \
-      -e "s|'\/usr\/local\/bin\/uv'|'/home/latand/.local/bin/uv'|g" \
+      -e "s|'\/usr\/local\/bin\/claude'|'$HOME/.bun/bin/claude'|g" \
+      -e "s|'\/usr\/local\/bin\/codex'|'$HOME/.bun/bin/codex'|g" \
+      -e "s|'\/usr\/local\/bin\/bun'|'$HOME/.bun/bin/bun'|g" \
+      -e "s|'\/usr\/local\/bin\/uv'|'$HOME/.local/bin/uv'|g" \
       -e "s|'\/usr\/local\/bin\/just'|'/usr/bin/just'|g" \
       -e "s|'\/usr\/local\/bin\/tmux'|'/usr/bin/tmux'|g" \
-      -e 's|/usr/local/bin/claude|/home/latand/.bun/bin/claude|g' \
-      -e 's|/usr/local/bin/codex|/home/latand/.bun/bin/codex|g' \
-      -e 's|/usr/local/bin/bun|/home/latand/.bun/bin/bun|g' \
-      -e 's|/usr/local/bin/uv|/home/latand/.local/bin/uv|g' \
+      -e "s|/usr/local/bin/claude|$HOME/.bun/bin/claude|g" \
+      -e "s|/usr/local/bin/codex|$HOME/.bun/bin/codex|g" \
+      -e "s|/usr/local/bin/bun|$HOME/.bun/bin/bun|g" \
+      -e "s|/usr/local/bin/uv|$HOME/.local/bin/uv|g" \
       -e 's|/usr/local/bin/just|/usr/bin/just|g' \
       -e 's|/usr/local/bin/tmux|/usr/bin/tmux|g'
 }

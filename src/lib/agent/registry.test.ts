@@ -196,6 +196,37 @@ describe("agent registry", () => {
     )).toThrow(DeliveryReservationConflictError);
   });
 
+  test("production backlog reconciliation settles many operation outcomes in one registry transaction", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/bulk-operation-reconciliation.jsonl", "default");
+    const outcomes = Array.from({ length: 42 }, (_, index) => {
+      const operationId = `bulk-operation-${index}`;
+      const delivery = store.holdDelivery(
+        conversation.id,
+        `bulk delivery ${index}`,
+        `bulk-client-${index}`,
+        "text",
+        [],
+        null,
+        { operationId, kind: "send", policy: "queue", turnId: null },
+      );
+      expect(store.beginDeliveryAttempt(delivery.id, delivery.generationId!)).not.toBeNull();
+      return {
+        conversationId: conversation.id,
+        operationId,
+        state: "delivered" as const,
+        error: null,
+      };
+    });
+    const before = store.storageDiagnostics().transactionCount;
+
+    const settled = store.recordDeliveryOutcomesForOperations(outcomes);
+
+    expect(store.storageDiagnostics().transactionCount).toBe(before + 1);
+    expect(settled).toHaveLength(outcomes.length);
+    expect(settled.every((delivery) => delivery?.state === "delivered" && delivery.text === "")).toBe(true);
+  });
+
   test("legacy terminal owner normalization rejects a mismatched settled snapshot", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/operation-owner-legacy-mismatch.jsonl", "default");

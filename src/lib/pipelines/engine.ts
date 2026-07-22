@@ -26,7 +26,7 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
-import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
+import { commitPipelineStage, currentPipelineBranchHead, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import {
   DEFAULT_FAIL_EDGE_ROUNDS,
   MAX_FAIL_EDGE_ROUNDS,
@@ -250,7 +250,7 @@ export function defaultPipelinePorts(): PipelinePorts {
     roleLookup: pipelineRoleLookup,
     spawnAgent: spawnPipelineAgent,
     spawnReceipt: (launchId) => {
-      const receipt = agentRegistry().snapshot().receipts[launchId];
+      const receipt = agentRegistry().readOnlySnapshot().receipts[launchId];
       if (!receipt) return null;
       return {
         state: receipt.state,
@@ -291,7 +291,7 @@ export function defaultPipelinePorts(): PipelinePorts {
     sourcePathAllowed: transcriptAllowed,
     conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
     pipelineAdoptionCandidates: (pipelineId) => {
-      const snapshot = agentRegistry().snapshot();
+      const snapshot = agentRegistry().readOnlySnapshot();
       const receipts = Object.values(snapshot.receipts);
       const candidates: PipelineAdoptionCandidate[] = [];
       for (const [conversationId, memberships] of Object.entries(snapshot.memberships)) {
@@ -744,9 +744,18 @@ function commitPassedStage(
   attempt: PipelineStageAttempt,
   ports: PipelinePorts,
 ): void {
-  const result = commitPipelineStage(pipeline, stage.id, stage.kind === "review-loop" || attempt.effectiveRole.access === "read-write", ports.exec);
+  const allowCommit = stage.kind === "run" && attempt.effectiveRole.access === "read-write";
+  const result = commitPipelineStage(pipeline, stage.id, allowCommit, ports.exec);
   if (!result.ok) {
     park(pipeline, result.error, attempt);
+    return;
+  }
+  if (stage.kind === "review-loop" && result.sha !== attempt.reviewHeadSha) {
+    park(
+      pipeline,
+      `approved review flow head mismatch during settlement: reviewed ${attempt.reviewHeadSha ?? "no exact head"}, settled ${result.sha}`,
+      attempt,
+    );
     return;
   }
   pipeline.lastPassedCommit = result.sha;
@@ -1068,6 +1077,11 @@ async function tickReviewStage(
     : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
   if (attempt.state === "committing") {
+    const fenceError = reviewHeadFenceError(pipeline, attempt, ports);
+    if (fenceError) {
+      park(pipeline, fenceError, attempt);
+      return;
+    }
     commitPassedStage(pipeline, stage, attempt, ports);
     return;
   }
@@ -1164,20 +1178,26 @@ async function tickReviewStage(
     return;
   }
   attachReviewFlowAttempt(attempt, flow);
-  const capturedReviewHead = flow.rounds.find((round) => round.reviewHeadSha)?.reviewHeadSha ?? null;
-  if (!attempt.reviewHeadSha && capturedReviewHead) {
+  const capturedReviewHead = flow.rounds.findLast((round) => round.reviewHeadSha)?.reviewHeadSha ?? null;
+  if (capturedReviewHead && attempt.reviewHeadSha !== capturedReviewHead) {
     attempt.reviewHeadSha = capturedReviewHead;
     persist();
   }
   if (flow.state === "approved") {
+    const fenceError = reviewHeadFenceError(pipeline, attempt, ports);
+    if (fenceError) {
+      park(pipeline, fenceError, attempt);
+      return;
+    }
     attempt.output = `Review loop approved after ${flow.rounds.length} round(s).`;
     attempt.verdict = { status: "pass", confidence: 1 };
     attempt.state = "committing";
     setCursorState(pipeline, stage.id, "committing");
     persist();
     commitPassedStage(pipeline, stage, attempt, ports);
-  } else if (flow.state === "needs_decision" || flow.state === "done_comment" || flow.state === "closed") {
-    park(pipeline, `review loop ended in ${flow.state}: ${flow.stateDetail ?? "operator decision required"}`, attempt);
+  } else {
+    const terminalError = terminalReviewFlowError(flow);
+    if (terminalError) park(pipeline, terminalError, attempt);
   }
 }
 
@@ -1214,7 +1234,7 @@ async function tickPipeline(pipeline: Pipeline, entries: FileEntry[], ports: Pip
 }
 
 const tickStore = globalThis as unknown as { __llvPipelineTick?: boolean };
-const REOPENED_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
+const RECONCILABLE_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
   "waiting_ready",
   "spawn_pending",
   "spawning",
@@ -1223,19 +1243,49 @@ const REOPENED_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
   "relaying",
   "fixing",
   "approved",
+  "needs_decision",
+  "done_comment",
+  "closed",
 ]);
+const RECONCILABLE_BOUND_FLOW_ERRORS = [
+  "review flow startup paused:",
+  "review flow paused during startup:",
+  "advancing the review flow failed:",
+  "review loop ended in ",
+  "embedded review flow record disappeared",
+] as const;
 
-function resumeReopenedReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boolean {
+function reviewHeadFenceError(pipeline: Pipeline, attempt: PipelineStageAttempt, ports: PipelinePorts): string | null {
+  const currentHead = currentPipelineBranchHead(pipeline, ports.exec);
+  if (!currentHead.ok) return `approved review flow could not verify the current pipeline head: ${currentHead.error}`;
+  if (attempt.reviewHeadSha === currentHead.sha) return null;
+  return `approved review flow head mismatch: reviewed ${attempt.reviewHeadSha ?? "no exact head"}, current pipeline head is ${currentHead.sha}`;
+}
+
+function terminalReviewFlowError(flow: Flow): string | null {
+  if (flow.state !== "needs_decision" && flow.state !== "done_comment" && flow.state !== "closed") return null;
+  return `review loop ended in ${flow.state}: ${flow.stateDetail ?? "operator decision required"}`;
+}
+
+function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boolean {
   if (pipeline.state !== "needs_decision") return false;
   const stage = currentStage(pipeline);
   if (stage?.kind !== "review-loop") return false;
   const attempt = currentAttempt(pipeline, stage.id);
+  const attemptError = attempt?.error;
   const flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
-  if (!attempt?.error?.startsWith("review loop ended in ") || !flow || !REOPENED_REVIEW_FLOW_STATES.has(flow.state)) return false;
+  if (
+    !attemptError
+    || !RECONCILABLE_BOUND_FLOW_ERRORS.some((prefix) => attemptError.startsWith(prefix))
+    || !flow
+    || !RECONCILABLE_REVIEW_FLOW_STATES.has(flow.state)
+  ) return false;
+  if (attemptError === terminalReviewFlowError(flow)) return false;
   pipeline.state = "running";
   pipeline.stateDetail = null;
   attempt.state = "reviewing";
   attempt.error = null;
+  attachReviewFlowAttempt(attempt, flow);
   setCursorState(pipeline, stage.id, "reviewing");
   return true;
 }
@@ -1251,7 +1301,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         let pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports);
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
-        pipelineChanged = resumeReopenedReviewFlow(pipeline, ports) || pipelineChanged;
+        pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
           pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
         }

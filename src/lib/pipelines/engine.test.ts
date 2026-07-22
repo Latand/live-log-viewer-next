@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -27,6 +27,24 @@ type StageTurnEvidence = import("./durableEvidence").StageTurnEvidence;
 registerPipelineTick(async () => {});
 
 afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
+
+test("default pipeline projections reuse one registry parse across the historical backlog", () => {
+  const registryPath = path.join(process.env.LLV_STATE_DIR!, "projection-cache-agent-registry.json");
+  const registry = new AgentRegistry(registryPath);
+  setAgentRegistryForTests(registry);
+  const reads = spyOn(fs, "readFileSync");
+  try {
+    const ports = defaultPipelinePorts();
+    for (let index = 0; index < 300; index += 1) {
+      expect(ports.pipelineAdoptionCandidates(`historical-${index}`)).toEqual([]);
+      expect(ports.spawnReceipt(`missing-${index}`)).toBeNull();
+    }
+    expect(reads.mock.calls.filter(([filename]) => filename === registryPath)).toHaveLength(1);
+  } finally {
+    reads.mockRestore();
+    setAgentRegistryForTests(null);
+  }
+});
 
 const RUN_STAGES = [
   { id: "plan", kind: "run", role: { roleId: "architect" }, access: "read-only", prompt: "Plan {{task}}", next: "build" },
@@ -1773,6 +1791,7 @@ test("review-loop stage delegates to one regular flow and maps approval", async 
   expect(h.calls.filter((call) => call.startsWith("flow:")).length).toBe(1);
   expect(h.calls).toContain("flow-patch:flow-1:advance");
   expect(h.calls.some((call) => call.includes("Reviewer guidance"))).toBe(true);
+  h.flows.get("flow-1")!.rounds.push({ n: 1, reviewHeadSha: ORIGIN_MAIN_SHA } as never);
   h.flows.get("flow-1")!.state = "approved";
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
   expect(loadPipelines()[0]!.state).toBe("completed");
@@ -2135,6 +2154,327 @@ test("a paused review flow parks its pipeline", async () => {
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
   expect(loadPipelines()[0]!.stateDetail).toContain("kickoff delivery failed");
+});
+
+test("a later exact-head approval replaces a stale startup pause and completes after controller restart (#526)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.state = "paused";
+  flow.stateDetail = "paused by user";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    flowId: "flow-1",
+    state: "needs_decision",
+    error: "review flow paused during startup: paused by user",
+  });
+
+  flow.rounds.push({
+    n: 1,
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+    launchId: "review-launch",
+    sessionId: "review-session",
+    reviewerPath: "/codex/reviewer.jsonl",
+    reviewerConversationId: "conversation_reviewer",
+  } as never);
+  flow.state = "approved";
+  flow.stateDetail = null;
+
+  /* A fresh controller process sees only durable pipeline + flow state. */
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  const completed = loadPipelines()[0]!;
+  expect(completed.state).toBe("completed");
+  expect(completed.stateDetail).toBeNull();
+  expect(completed.runs[1]!.attempts).toHaveLength(1);
+  expect(completed.runs[1]!.attempts[0]).toMatchObject({
+    flowId: "flow-1",
+    state: "passed",
+    error: null,
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+    agentPath: "/codex/reviewer.jsonl",
+    conversationId: "conversation_reviewer",
+  });
+
+  const afterCompletion = JSON.stringify(completed);
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  expect(JSON.stringify(loadPipelines()[0])).toBe(afterCompletion);
+});
+
+test("a later approval stays parked when its reviewed head differs from the current pipeline head (#526)", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.state = "paused";
+  flow.stateDetail = "transient controller restart";
+  await tickPipelines([], h.ports);
+  flow.rounds.push({ n: 1, reviewHeadSha: "f".repeat(40) } as never);
+  flow.state = "approved";
+  flow.stateDetail = null;
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("approved review flow head mismatch");
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    reviewHeadSha: "f".repeat(40),
+    error: expect.stringContaining(`current pipeline head is ${ORIGIN_MAIN_SHA}`),
+  });
+  expect((await tickPipelines([], h.ports)).changed).toBe(false);
+  expect(loadPipelines()[0]!.stateDetail).toBe(parked.stateDetail);
+});
+
+test("an approval parks when the clean head advances during final settlement (#526)", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.rounds.push({ n: 1, reviewHeadSha: ORIGIN_MAIN_SHA } as never);
+  flow.state = "approved";
+  const newerHead = "e".repeat(40);
+  let headReads = 0;
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+      headReads += 1;
+      return { code: 0, stdout: `${headReads === 1 ? ORIGIN_MAIN_SHA : newerHead}\n`, stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(headReads).toBe(2);
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: expect.stringContaining(`settled ${newerHead}`),
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
+  expect(parked.cursor?.stageId).toBe("review");
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+  });
+});
+
+test("REQUEST_CHANGES recovery keeps the bound reviewer in the review slot and lets the flow relay continue (#526)", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.state = "paused";
+  flow.stateDetail = "relay controller unavailable";
+  await tickPipelines([], h.ports);
+  flow.rounds.push({
+    n: 1,
+    verdict: "REQUEST_CHANGES",
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+    launchId: "review-launch",
+    sessionId: "review-session",
+    reviewerPath: "/codex/reviewer.jsonl",
+    reviewerConversationId: "conversation_reviewer",
+  } as never);
+  flow.state = "relay_pending";
+  flow.stateDetail = null;
+
+  await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+  const relaying = loadPipelines()[0]!;
+  expect(relaying.state).toBe("running");
+  expect(relaying.stateDetail).toBeNull();
+  expect(relaying.runs[1]!.attempts).toHaveLength(1);
+  expect(relaying.runs[1]!.attempts[0]).toMatchObject({
+    flowId: "flow-1",
+    state: "reviewing",
+    error: null,
+    agentPath: "/codex/reviewer.jsonl",
+    conversationId: "conversation_reviewer",
+  });
+});
+
+for (const terminalState of ["done_comment", "needs_decision"] as const) {
+  test(`a later ${terminalState} outcome replaces stale startup evidence once across restart ticks (#526)`, async () => {
+    const h = harness();
+    await create(h.ports, [
+      { id: "build", kind: "run", prompt: "build", next: "review" },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    ] as never);
+    await tickPipelines([], h.ports);
+    await tickPipelines([], h.ports);
+    await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+    await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+    const flow = h.flows.get("flow-1")!;
+    flow.state = "paused";
+    flow.stateDetail = "startup transport unavailable";
+    await tickPipelines([], h.ports);
+    expect(loadPipelines()[0]!.runs[1]!.attempts[0]!.error)
+      .toBe("review flow paused during startup: startup transport unavailable");
+
+    flow.rounds.push({
+      n: 1,
+      verdict: terminalState === "done_comment" ? "COMMENT" : null,
+      reviewHeadSha: ORIGIN_MAIN_SHA,
+      reviewerPath: "/codex/reviewer.jsonl",
+      reviewerConversationId: "conversation_reviewer",
+    } as never);
+    flow.state = terminalState;
+    flow.stateDetail = terminalState === "done_comment" ? "reviewer left a comment" : "reviewer relay failed";
+
+    await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports);
+    const reconciled = loadPipelines()[0]!;
+    const expectedError = `review loop ended in ${terminalState}: ${flow.stateDetail}`;
+    expect(reconciled).toMatchObject({ state: "needs_decision", stateDetail: expectedError });
+    expect(reconciled.runs[1]!.attempts).toHaveLength(1);
+    expect(reconciled.runs[1]!.attempts[0]).toMatchObject({
+      flowId: "flow-1",
+      state: "needs_decision",
+      error: expectedError,
+      reviewHeadSha: ORIGIN_MAIN_SHA,
+      agentPath: "/codex/reviewer.jsonl",
+      conversationId: "conversation_reviewer",
+    });
+
+    expect((await tickPipelines([entry("/codex/reviewer.jsonl")], h.ports)).changed).toBe(false);
+    expect(loadPipelines()[0]!.runs[1]!.attempts).toHaveLength(1);
+    expect(loadPipelines()[0]!.stateDetail).toBe(expectedError);
+  });
+}
+
+async function persistedCommittingReview() {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const pipeline = loadPipelines()[0]!;
+  const attempt = pipeline.runs[1]!.attempts[0]!;
+  attempt.state = "committing";
+  attempt.reviewHeadSha = ORIGIN_MAIN_SHA;
+  attempt.output = "Review loop approved after 1 round(s).";
+  attempt.verdict = { status: "pass", confidence: 1 };
+  pipeline.cursor = { ...pipeline.cursor!, state: "committing" };
+  savePipelines([pipeline]);
+  return h;
+}
+
+test("a restarted committing review completes once when its clean head still matches (#526)", async () => {
+  const h = await persistedCommittingReview();
+
+  await tickPipelines([], h.ports);
+  const completed = loadPipelines()[0]!;
+  expect(completed.state).toBe("completed");
+  expect(completed.runs[1]!.attempts[0]).toMatchObject({ state: "passed", reviewHeadSha: ORIGIN_MAIN_SHA });
+
+  const afterCompletion = JSON.stringify(completed);
+  expect((await tickPipelines([], h.ports)).changed).toBe(false);
+  expect(JSON.stringify(loadPipelines()[0])).toBe(afterCompletion);
+});
+
+test("a restarted committing review parks when the branch head drifted after approval (#526)", async () => {
+  const h = await persistedCommittingReview();
+  const driftedHead = "d".repeat(40);
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+      return { code: 0, stdout: `${driftedHead}\n`, stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: expect.stringContaining(`current pipeline head is ${driftedHead}`),
+  });
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({ state: "needs_decision", reviewHeadSha: ORIGIN_MAIN_SHA });
+  expect(h.calls.some((call) => call.startsWith("git commit"))).toBe(false);
+});
+
+test("a restarted committing review parks when the clean head advances during final settlement (#526)", async () => {
+  const h = await persistedCommittingReview();
+  const newerHead = "c".repeat(40);
+  let headReads = 0;
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+      headReads += 1;
+      return { code: 0, stdout: `${headReads === 1 ? ORIGIN_MAIN_SHA : newerHead}\n`, stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(headReads).toBe(2);
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: expect.stringContaining(`settled ${newerHead}`),
+    lastPassedCommit: ORIGIN_MAIN_SHA,
+  });
+  expect(parked.cursor?.stageId).toBe("review");
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    reviewHeadSha: ORIGIN_MAIN_SHA,
+  });
+});
+
+test("a restarted committing review parks without committing post-review changes (#526)", async () => {
+  const h = await persistedCommittingReview();
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "status") {
+      return { code: 0, stdout: " M post-review.txt\n", stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  await tickPipelines([], h.ports);
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: expect.stringContaining("uncommitted changes"),
+  });
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({ state: "needs_decision", reviewHeadSha: ORIGIN_MAIN_SHA });
+  expect(h.calls.some((call) => call.startsWith("git add") || call.startsWith("git commit"))).toBe(false);
 });
 
 test("retrying a paused review with a live reviewer never mutates its checkout (#522)", async () => {
@@ -3120,6 +3460,7 @@ test("consecutive reviews cross a migration boundary and resume positional imple
   await tickPipelines([], ports); // spawn build
   await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "built")], ports); // build → review1
   await tickPipelines([entry("/codex/stage-1.jsonl")], ports); // review1 opens flow-1
+  h.flows.get("flow-1")!.rounds.push({ n: 1, reviewHeadSha: ORIGIN_MAIN_SHA } as never);
   h.flows.get("flow-1")!.state = "approved";
   await tickPipelines([entry("/codex/stage-1.jsonl")], ports); // review1 approves → review2
 

@@ -5488,24 +5488,54 @@ export class AgentRegistry {
     state: Extract<HeldDelivery["state"], "delivered" | "failed">,
     error: string | null = null,
   ): HeldDelivery | null {
+    return this.recordDeliveryOutcomesForOperations([{
+      conversationId,
+      operationId,
+      state,
+      error,
+    }])[0] ?? null;
+  }
+
+  /** Settles a startup reconciliation page in one storage transaction. A
+      production registry can retain hundreds of terminal reservations; one
+      whole-file JSON/SQLite parity pass per reservation starves the Viewer. */
+  recordDeliveryOutcomesForOperations(
+    outcomes: readonly {
+      conversationId: ViewerConversationId;
+      operationId: string;
+      state: Extract<HeldDelivery["state"], "delivered" | "failed">;
+      error?: string | null;
+    }[],
+  ): (HeldDelivery | null)[] {
     return this.mutate((file) => {
-      const canonicalId = resolveConversationAlias(file, conversationId);
-      const delivery = Object.values(file.heldDeliveries).find((candidate) =>
-        resolveConversationAlias(file, candidate.conversationId) === canonicalId
-        && candidate.command.operationId === operationId);
-      if (!delivery || delivery.state === "delivered") return delivery ? clone(delivery) : null;
-      const retryRecovered = delivery.state === "failed" && state === "delivered";
-      if (delivery.state !== "delivery-uncertain" && !retryRecovered) return null;
-      const conversation = file.conversations[canonicalId];
-      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
-      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
-      delivery.state = state;
-      delivery.deliveredAt = state === "delivered" ? now() : null;
-      delivery.error = error?.slice(0, 240) ?? null;
-      if (state === "delivered") delivery.text = "";
-      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
-      const settled = clone(delivery);
-      compactDeliveryReservations(file, delivery.conversationId);
+      const keyFor = (candidateConversationId: ViewerConversationId, candidateOperationId: string) =>
+        `${resolveConversationAlias(file, candidateConversationId)}\u0000${candidateOperationId}`;
+      const deliveries = new Map<string, HeldDelivery>();
+      for (const delivery of Object.values(file.heldDeliveries)) {
+        const key = keyFor(delivery.conversationId, delivery.command.operationId);
+        if (!deliveries.has(key)) deliveries.set(key, delivery);
+      }
+      const compactConversations = new Set<ViewerConversationId>();
+      const settled = outcomes.map((outcome) => {
+        const canonicalId = resolveConversationAlias(file, outcome.conversationId);
+        const delivery = deliveries.get(keyFor(canonicalId, outcome.operationId));
+        if (!delivery || delivery.state === "delivered") return delivery ? clone(delivery) : null;
+        const retryRecovered = delivery.state === "failed" && outcome.state === "delivered";
+        if (delivery.state !== "delivery-uncertain" && !retryRecovered) return null;
+        const conversation = file.conversations[canonicalId];
+        const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+        const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+        delivery.state = outcome.state;
+        delivery.deliveredAt = outcome.state === "delivered" ? now() : null;
+        delivery.error = outcome.error?.slice(0, 240) ?? null;
+        if (outcome.state === "delivered") delivery.text = "";
+        if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+        compactConversations.add(delivery.conversationId);
+        return clone(delivery);
+      });
+      for (const compactConversationId of compactConversations) {
+        compactDeliveryReservations(file, compactConversationId);
+      }
       return settled;
     });
   }

@@ -96,4 +96,15 @@ describe("SQLite registry Viewer runtime (#187)", () => {
     expect(runtimeStage).toContain("CMD [\"sh\", \"-c\", \"exec bun-container --bun node_modules/.bin/next start");
     expect(compose).toContain("exec bun-container --bun node_modules/.bin/next start");
   });
+
+  test("every image stage uses the production-burned-in Bun runtime (#552)", () => {
+    expect(dockerfile.match(/npm install -g bun@1\.3\.3/g)).toHaveLength(3);
+    expect(dockerfile).not.toContain("bun@1.2.18");
+  });
+
+  test("host CLI shims derive the mounted home from the runtime environment", () => {
+    expect(dockerfile).not.toContain("/home/latand");
+    expect(dockerfile).toContain("make_nsenter_shim claude '$HOME/.bun/bin/claude'");
+    expect(dockerfile).toContain('"$HOME"|"$HOME"/*');
+  });
 });
