@@ -642,7 +642,7 @@ export function reconcileObservedTranscriptHosts(
   const quarantinedPaneIds = new Set<string>();
   for (const host of hosts) {
     const evidence = evidenceForHost(host);
-    if (host.launchId) {
+    if (host.launchId && !host.primaryPath) {
       registry.confirmSpawnPaneAlive(host.launchId, evidence, { engine: host.engine, cwd: host.cwd });
       mutated = true;
     }
@@ -657,9 +657,29 @@ export function reconcileObservedTranscriptHosts(
       const rootPath = launchReceiptRootArtifact(host);
       const rootKey = rootPath ? sessionKeyFromTranscript(host.engine, rootPath) : null;
       if (!rootPath || !rootKey) {
+        registry.confirmSpawnPaneAlive(host.launchId, evidence, { engine: host.engine, cwd: host.cwd });
+        mutated = true;
         quarantinedPaneIds.add(host.paneId);
         continue;
       }
+      const rootId = `${rootKey.engine}:${rootKey.sessionId}`;
+      const receipt = snapshot.receipts[host.launchId];
+      const existing = snapshot.entries[rootId];
+      if (receipt?.state === "completed"
+        && receipt.cwd === host.cwd
+        && receipt.artifactPath === rootPath
+        && receipt.key?.engine === rootKey.engine
+        && receipt.key.sessionId === rootKey.sessionId
+        && isDeepStrictEqual(receipt.verifiedHost, evidence)
+        && existing?.artifactPath === rootPath
+        && existing.cwd === host.cwd
+        && existing.status === "live"
+        && existing.pendingAction === null
+        && isDeepStrictEqual(existing.host, evidence)) {
+        seen.add(rootId);
+        continue;
+      }
+      registry.confirmSpawnPaneAlive(host.launchId, evidence, { engine: host.engine, cwd: host.cwd });
       const settled = registry.completeObservedSpawn(host.launchId, {
         key: rootKey,
         artifactPath: rootPath,
@@ -675,7 +695,7 @@ export function reconcileObservedTranscriptHosts(
       /* A mismatched pane/artifact remains quarantined. It must never fall
          through into the generic upsert and overwrite the real receipt. */
       if (settled.kind === "settled") {
-        seen.add(`${rootKey.engine}:${rootKey.sessionId}`);
+        seen.add(rootId);
         continue;
       }
       quarantinedPaneIds.add(host.paneId);
@@ -702,7 +722,11 @@ export function reconcileObservedTranscriptHosts(
     }
     seen.add(id);
   }
-  if (mutated) snapshot = registry.snapshot();
+  /* Completed launch hosts are observed on every tmux-target poll. Their
+     confirmation is usually a durable no-op. The revision-aware read cache
+     supplies fresh projection state for every browser tab, and a real
+     mutation invalidates that cache synchronously. */
+  if (mutated) snapshot = registry.readOnlySnapshot();
   for (const [id, entry] of Object.entries(snapshot.entries)) {
     if (entry.host?.kind === "tmux" && !seen.has(id)) registry.markUnhosted(entry.key);
   }

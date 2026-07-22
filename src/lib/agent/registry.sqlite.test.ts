@@ -1040,6 +1040,25 @@ test("SQLite snapshot cache follows external revisions and reports writer metric
   });
 });
 
+test("SQLite ordered collection reads use the collection-order index", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-order-index-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  for (let index = 0; index < 20; index += 1) {
+    registry.ensureConversation("codex", `/sessions/order-index-${index}.jsonl`, "default");
+  }
+
+  const db = new Database(path.join(directory, "agent-registry.sqlite"), { readonly: true });
+  const plan = db.query<{ detail: string }, [string]>(
+    "EXPLAIN QUERY PLAN SELECT collection, row_key, value_json, row_order FROM registry_rows WHERE collection = ? ORDER BY row_order",
+  ).all("conversations");
+  db.close();
+
+  expect(plan.some((row) => row.detail.includes("registry_rows_collection_order"))).toBeTrue();
+  expect(plan.some((row) => row.detail.includes("TEMP B-TREE"))).toBeFalse();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test.each(["off", "dual-write", "read", "sqlite"] as const)(
   "%s diagnostics keep cumulative counts and a rolling rate beyond the percentile sample cap",
   (sqliteMode) => {
