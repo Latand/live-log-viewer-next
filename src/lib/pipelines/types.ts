@@ -124,6 +124,21 @@ export type PipelineStageAttempt = {
   expectedReviewHeadSha?: string | null;
   /** Exact clean SHA captured by the first launched reviewer round. */
   reviewHeadSha?: string | null;
+  /** Authoritative projection of the embedded flow. The generation is a
+      content digest, so reconciliation remains idempotent across processes and
+      independently committed flow/pipeline writes. */
+  reviewFlowSync?: {
+    generation: string;
+    roundCount: number;
+    implementerHeadSha: string | null;
+    reviewerHeadSha: string | null;
+    verdict: import("@/lib/flows/types").ReviewVerdict | null;
+    relayState: import("@/lib/flows/types").FlowState;
+    terminalState: import("@/lib/flows/types").FlowState | null;
+    synchronizedAt: string;
+    sourceUpdatedAt: string | null;
+    lagMs: number | null;
+  };
   startedAt: string | null;
   completedAt: string | null;
   /** Exactly-once relay (#353): the `{{prev.output}}` payload persisted when the

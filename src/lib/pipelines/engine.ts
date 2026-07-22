@@ -696,6 +696,89 @@ function attachReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow): voi
   attempt.paneId = round?.reviewerPane?.paneId ?? attempt.paneId;
 }
 
+const TERMINAL_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
+  "approved", "done_comment", "needs_decision", "closed",
+]);
+
+function flowSourceUpdatedAt(flow: Flow): string | null {
+  const values = [flow.createdAt, flow.closedAt];
+  for (const round of flow.rounds) {
+    values.push(round.startedAt, round.spawnStartedAt ?? null, round.reviewedAt, round.relayStartedAt ?? null,
+      round.relayedAt, round.terminalAt ?? null);
+  }
+  return values.filter((value): value is string => Boolean(value))
+    .sort((left, right) => right.localeCompare(left))[0] ?? null;
+}
+
+function synchronizeReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow, synchronizedAt: string): boolean {
+  const round = flow.rounds.at(-1) ?? null;
+  const implementerHeadSha = flow.rounds.findLast((candidate) => candidate.reviewHeadSha)?.reviewHeadSha ?? flow.targetSha ?? null;
+  const reviewerHeadSha = round?.reviewHeadSha ?? null;
+  const sourceUpdatedAt = flowSourceUpdatedAt(flow);
+  const sourceMs = sourceUpdatedAt ? Date.parse(sourceUpdatedAt) : Number.NaN;
+  const syncMs = Date.parse(synchronizedAt);
+  const snapshot = {
+    roundCount: flow.rounds.length,
+    implementerHeadSha,
+    reviewerHeadSha,
+    verdict: round?.verdict ?? null,
+    relayState: flow.state,
+    terminalState: TERMINAL_REVIEW_FLOW_STATES.has(flow.state) ? flow.state : null,
+    sourceUpdatedAt,
+  };
+  const generation = crypto.createHash("sha256").update(JSON.stringify({
+    ...snapshot,
+    stateDetail: flow.stateDetail,
+    implementerPath: flow.implementerPath,
+    implementerConversationId: flow.implementerConversationId ?? null,
+    rounds: flow.rounds.map((candidate) => ({
+      n: candidate.n,
+      reviewerPath: candidate.reviewerPath,
+      reviewerConversationId: candidate.reviewerConversationId ?? null,
+      reviewHeadSha: candidate.reviewHeadSha ?? null,
+      verdict: candidate.verdict,
+      reviewedAt: candidate.reviewedAt,
+      relayStartedAt: candidate.relayStartedAt ?? null,
+      relayedAt: candidate.relayedAt,
+      terminalAt: candidate.terminalAt ?? null,
+      error: candidate.error,
+    })),
+  })).digest("hex").slice(0, 16);
+  if (attempt.reviewFlowSync?.generation === generation) return false;
+  attachReviewFlowAttempt(attempt, flow);
+  if (reviewerHeadSha) {
+    attempt.expectedReviewHeadSha = reviewerHeadSha;
+    attempt.reviewHeadSha = reviewerHeadSha;
+  }
+  attempt.reviewFlowSync = {
+    generation,
+    ...snapshot,
+    synchronizedAt,
+    lagMs: Number.isFinite(sourceMs) && Number.isFinite(syncMs) ? Math.max(0, syncMs - sourceMs) : null,
+  };
+  return true;
+}
+
+/** Apply the embedded flow's current durable generation to every bound parent.
+    Shared by controller recovery and the board read path. */
+export function reconcileEmbeddedReviewFlows(
+  pipelines: Pipeline[],
+  flows: readonly Flow[],
+  synchronizedAt = new Date().toISOString(),
+): boolean {
+  const byId = new Map(flows.map((flow) => [flow.id, flow] as const));
+  let changed = false;
+  for (const pipeline of pipelines) {
+    for (const run of pipeline.runs) {
+      for (const attempt of run.attempts) {
+        const flow = attempt.flowId ? byId.get(attempt.flowId) : null;
+        if (flow) changed = synchronizeReviewFlowAttempt(attempt, flow, synchronizedAt) || changed;
+      }
+    }
+  }
+  return changed;
+}
+
 /** Advance along the pass edge, persisting the relay record: the completed
     attempt's output is the next activation's `{{prev.output}}`, written in the
     same mutation as the verdict/commit that produced it (exactly-once, #353). */
@@ -1302,9 +1385,20 @@ function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boo
   pipeline.stateDetail = null;
   attempt.state = "reviewing";
   attempt.error = null;
-  attachReviewFlowAttempt(attempt, flow);
+  synchronizeReviewFlowAttempt(attempt, flow, ports.now());
   setCursorState(pipeline, stage.id, "reviewing");
   return true;
+}
+
+function reconcilePipelineEmbeddedFlows(pipeline: Pipeline, ports: PipelinePorts): boolean {
+  let changed = false;
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      const flow = attempt.flowId ? ports.getFlow(attempt.flowId) : null;
+      if (flow) changed = synchronizeReviewFlowAttempt(attempt, flow, ports.now()) || changed;
+    }
+  }
+  return changed;
 }
 
 function reconcileParkedStructuredSpawn(pipeline: Pipeline, ports: PipelinePorts): boolean {
@@ -1346,7 +1440,8 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
     const result = await withPipelineMutation(async (pipelines, persist) => {
       let changed = false;
       for (const pipeline of pipelines) {
-        let pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports);
+        let pipelineChanged = reconcilePipelineEmbeddedFlows(pipeline, ports);
+        pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;

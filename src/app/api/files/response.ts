@@ -14,7 +14,8 @@ import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles } from "@/lib/displayNames";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
-import { loadPipelines } from "@/lib/pipelines/store";
+import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
+import { withPipelineMutation } from "@/lib/pipelines/store";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
@@ -506,7 +507,11 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   let pipelines: Pipeline[] = [];
   let pipelinesError: string | undefined;
   try {
-    pipelines = filterPipelinesForFileScan(loadPipelines(), files, {
+    const reconciled = await withPipelineMutation((current, persist) => {
+      if (reconcileEmbeddedReviewFlows(current, storedFlows)) persist();
+      return current;
+    });
+    pipelines = filterPipelinesForFileScan(reconciled, files, {
       pinnedPaths: visibilityPinnedPaths,
       memberships: registrySnapshot.memberships,
     });
