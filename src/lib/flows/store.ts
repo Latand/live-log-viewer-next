@@ -323,6 +323,12 @@ export async function withFlowMutation<T>(mutate: (flows: Flow[], persist: () =>
   });
 }
 
+/** Hold the flow registry lock while a cross-store consumer projects one exact
+    durable generation. The callback cannot mutate flows through this interface. */
+export async function withFlowSnapshot<T>(read: (flows: readonly Flow[]) => Promise<T> | T): Promise<T> {
+  return await withFileTransaction(flowsFile(), "flow state is busy", () => read(loadFlows()));
+}
+
 export function loadPresets(): FlowPreset[] {
   const raw = readJson(presetsFile()) as PresetFile | null;
   const presets = Array.isArray(raw?.presets) ? raw.presets.filter(isPreset) : [];

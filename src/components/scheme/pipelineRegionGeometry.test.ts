@@ -208,6 +208,55 @@ describe("neighboring pipeline regions never intersect (#531)", () => {
     expectMembersContained(layout, "pb");
   });
 
+  test("issue 532 atomic projection keeps a delayed multi-round task pipeline beside a host-loss neighbor", () => {
+    const origin = entry({ path: "/origin", activity: "live" });
+    const builder = entry({ path: "/origin/a", parent: origin.path, kind: "subagent", activity: "live" });
+    const files = [origin, builder];
+    const reviewFlow = flow({
+      id: "flow-a",
+      implementerPath: builder.path,
+      rounds: Array.from({ length: 5 }, (_, index) => round(index + 1, null)),
+    });
+    const pipelineA = pipe({
+      id: "pa",
+      taskIds: ["task-a"],
+      stages: [
+        { id: "build", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "review-loop", prompt: "", next: null },
+      ],
+      cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
+      runs: [
+        { stageId: "build", attempts: [{ n: 1, state: "passed", agentPath: builder.path, flowId: null }] },
+        { stageId: "review", attempts: [{ n: 1, state: "reviewing", agentPath: null, flowId: reviewFlow.id }] },
+      ],
+    });
+    const pipelineB = pipe({
+      id: "pb",
+      stages: [
+        { id: "build", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "review-loop", prompt: "", next: null },
+      ],
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/lost/b", flowId: null }] }],
+    });
+    const task = {
+      id: "task-a", project: "demo", status: "assigned", text: "Synchronize flow generation",
+      placement: "pinned", pos: { x: 9000, y: 9000 }, assignments: [],
+      createdAt: "2026-07-22T00:00:00Z", updatedAt: "2026-07-22T00:00:00Z",
+    } as unknown as BoardTask;
+    const layout = buildSchemeLayout(
+      buildBranchGroups(files, "demo"), [], files, [reviewFlow], [],
+      [pipelineA, pipelineB], [pipelineA, pipelineB], new Set(), new Set(), [task],
+    );
+
+    expect(layout.decks.find((candidate) => candidate.key === deckKey(reviewFlow.id))).toBeTruthy();
+    expect(layout.regionTasks.find((candidate) => candidate.taskId === task.id)?.pipelineId).toBe("pa");
+    expect(layout.slots.some((candidate) => candidate.pipeline.id === "pb")).toBe(true);
+    expectMembersContained(layout, "pa");
+    expectMembersContained(layout, "pb");
+    expectRegionsSeparated(layout);
+  });
+
   test("completed stages standing in as full cards keep neighboring regions disjoint", () => {
     /* Both pipelines finished build + review; the idle transcripts are not live
        nodes, so both stages stand in as completed cards — a two-card row under
