@@ -1429,6 +1429,93 @@ test("issue 533: transport-uncertain initial-message admission preserves the sta
   expect(host.releaseCount).toBe(0);
 });
 
+test("issue 533: replay re-admits a first message lost before runtime journal admission", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `pre-admission-timeout-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const durableClient = runtimeClient(journal);
+  let begun: Extract<ReturnType<AgentRegistry["beginSpawnRequest"]>, { kind: "created" }> | null = null;
+  const uncertainClient = {
+    ...durableClient,
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => {
+      if (command.kind === "send") throw new RuntimeHostUnavailableError("runtime host request timed out");
+      const result = await durableClient.command(command);
+      if (command.kind === "spawn" && begun) {
+        await durableClient.append({
+          scope: { type: "session", id: begun.receipt.conversationId },
+          kind: "session-status",
+          payload: {
+            conversationId: begun.receipt.conversationId,
+            sessionKey: { engine: "codex", sessionId: id },
+            hostKind: "codex-app-server",
+            host: "hosted",
+            turn: "idle",
+            provenance: "structured",
+            accountId: "work",
+            cwd,
+            artifactPath,
+            capabilities: { steer: true, structuredAttention: true },
+            activeTurnId: null,
+          },
+        });
+      }
+      return result;
+    },
+  } as RuntimeHostClient;
+  const host = new RoundTripHost("codex", artifactPath, id);
+  await bindStructuredDeliveryQueue([{ key: { engine: "codex", sessionId: id }, host }], { registry, client: uncertainClient });
+  const reservation = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  if (reservation.kind !== "created") throw new Error("spawn receipt was unavailable");
+  begun = reservation;
+
+  const response = await spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "pre-admission", engine: "codex", transcript: artifactPath },
+    account: { engine: "codex", accountId: "work", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    "prompt": "replay immutable first message",
+    registry,
+    client: uncertainClient,
+  }, {
+    startHost: async () => host,
+    bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+      const state = await runningHost.health();
+      targetRegistry.setStructuredHostClaimed(key, {
+        kind: "codex-app-server", endpoint: state.endpoint,
+        process: { pid: process.pid, startIdentity: "pre-admission-host" },
+        eventCursor: state.eventCursor, protocolVersion: state.protocolVersion,
+        writerClaimEpoch: claimEpoch, activeTurnRef: state.activeTurnRef,
+        pendingAttention: state.pendingAttention, activeFlags: state.activeFlags,
+      }, "idle", claimOwner, claimEpoch);
+      return () => {};
+    },
+    processIdentity: () => ({ pid: process.pid, startIdentity: "pre-admission-host" }),
+  });
+
+  expect(response).toMatchObject({ state: "path-pending", initialMessage: "queued", retrySafe: false });
+  expect(await durableClient.operationStatus(`spawn_message_${begun.receipt.launchId}`)).toBeNull();
+  expect(host.releaseCount).toBe(0);
+
+  await bindStructuredDeliveryQueue([{ key: { engine: "codex", sessionId: id }, host }], { registry, client: durableClient });
+  await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, durableClient);
+  await kickStructuredDeliveryQueue();
+  await waitFor(() => registry.snapshot().receipts[begun!.receipt.launchId]?.state === "completed");
+
+  expect(host.sent.map((entry) => entry.text)).toEqual(["replay immutable first message"]);
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "completed",
+    completionMode: "route-recovered",
+  });
+  expect((await durableClient.operationStatus(`spawn_message_${begun.receipt.launchId}`))?.receipt.status).toBe("delivered");
+  expect(host.releaseCount).toBe(0);
+  await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, durableClient);
+  await kickStructuredDeliveryQueue();
+  expect(host.sent.map((entry) => entry.text)).toEqual(["replay immutable first message"]);
+});
+
 test("a failed resume before identity staging projects dead ownership so the following send recovers", async () => {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `resume-before-identity-${sessionId}`);

@@ -152,6 +152,25 @@ export async function waitForStructuredInitialMessage(
   }
 }
 
+async function structuredSpawnEffectForLaunch(
+  client: RuntimeHostClient,
+  launchId: string,
+): Promise<Record<string, unknown> | null> {
+  let afterEventSeq = 0;
+  while (true) {
+    const batch = await client.effectBatch(["runtime.spawn"], afterEventSeq);
+    for (const effect of batch) {
+      if (effect.payload.operationId === launchId) return effect.payload;
+    }
+    if (batch.length < 100) return null;
+    const next = Math.max(...batch.map((effect) => effect.eventSeq));
+    if (!Number.isSafeInteger(next) || next <= afterEventSeq) {
+      throw new Error("structured spawn replay effect page did not advance");
+    }
+    afterEventSeq = next;
+  }
+}
+
 export async function reconcileStructuredSpawnReplay(
   launchId: string,
   registry: AgentRegistry,
@@ -167,11 +186,40 @@ export async function reconcileStructuredSpawnReplay(
   if (current.state === "completed") {
     return { ...current, initialMessage: "delivered" };
   }
-  const [operation, spawnOperation, runtime] = await Promise.all([
+  const [initialOperation, spawnOperation, runtime] = await Promise.all([
     client.operationStatus(`spawn_message_${launchId}`, { currentRetryLeaf: true }).catch(() => null),
     client.operationStatus(launchId, { currentRetryLeaf: true }).catch(() => null),
     client.snapshot().catch(() => null),
   ]);
+  let operation = initialOperation;
+  if (!operation && current.state === "path-pending" && current.artifactPath) {
+    const effect = await structuredSpawnEffectForLaunch(client, launchId);
+    const prompt = typeof effect?.prompt === "string" ? effect.prompt : null;
+    const imageRefs = parseStructuredImageRefs(effect?.images ?? [], 16);
+    if (
+      prompt !== null
+      && imageRefs !== null
+      && effect?.conversationId === current.conversationId
+      && effect.cwd === current.cwd
+      && (prompt.trim() || imageRefs.length)
+    ) {
+      const readmitted = await enqueueStructuredMessage({
+        path: current.artifactPath,
+        conversationId: current.conversationId,
+        clientMessageId: `spawn_${launchId}`,
+        operationId: `spawn_message_${launchId}`,
+        text: prompt,
+        imageRefs,
+      }, {
+        client: () => client,
+        registry: () => registry,
+        enabled: () => true,
+      });
+      if (readmitted?.ok && readmitted.outcome !== "held") {
+        operation = await client.operationStatus(`spawn_message_${launchId}`, { currentRetryLeaf: true }).catch(() => null);
+      }
+    }
+  }
   const runtimeDelivered = Boolean(operation
     && operation.receipt.conversationId === current.conversationId
     && INITIAL_MESSAGE_DELIVERED.has(operation.receipt.status));
