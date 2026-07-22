@@ -61,7 +61,7 @@ function retainedStartupHostIsCurrent(
 async function revalidateRetainedStartupHosts(
   registry: AgentRegistry,
   retained: readonly AdoptedStructuredHost[],
-  snapshot: RegistryFile = registry.snapshot(),
+  snapshot: RegistryFile = registry.readOnlySnapshot(),
 ): Promise<AdoptedStructuredHost[]> {
   const current: AdoptedStructuredHost[] = [];
   for (const item of retained) {
@@ -99,7 +99,7 @@ function interruptedCodexConversations(
   registry: AgentRegistry,
   shouldAdopt: StructuredHostAdoptionFilter,
   runtimeRunningConversationIds: ReadonlySet<string>,
-  snapshot: RegistryFile = registry.snapshot(),
+  snapshot: RegistryFile = registry.readOnlySnapshot(),
 ): ReadonlyMap<string, ViewerConversationId> {
   return new Map(Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
@@ -212,13 +212,15 @@ function persistedTurnState(
 }
 
 async function refreshStructuredTranscriptState(registry: AgentRegistry): Promise<void> {
-  const snapshot = registry.snapshot();
+  const snapshot = registry.readOnlySnapshot();
   const observedAt = new Date().toISOString();
   const candidates = Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
     if (!generation) return [];
     const entry = snapshot.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
-    return entry?.structuredHost ? [{ conversation, generation }] : [];
+    return entry?.structuredHost && entry.status === "live" && !conversation.supersededBy
+      ? [{ conversation, generation }]
+      : [];
   });
   const observations: Parameters<AgentRegistry["reconcileConversations"]>[0] = [];
   let nextCandidate = 0;
@@ -311,7 +313,7 @@ async function structuredStartupSignals(
 function structuredStartupAdoptionFilter(
   registry: AgentRegistry,
   signals: StructuredStartupSignals,
-  snapshot: RegistryFile = registry.snapshot(),
+  snapshot: RegistryFile = registry.readOnlySnapshot(),
 ): StructuredHostAdoptionFilter {
   const conversationsByCurrentEntry = new Map(Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
@@ -440,7 +442,7 @@ export async function adoptStructuredHostsAtStartup(
     ? await interruptedCodexContinuations(registry, client, candidateCodexHosts)
     : new Map<string, RuntimeOperationResult>();
   await demoteSkippedStructuredRegistryHosts(registry, shouldRetainCandidateOrAdopt);
-  const publicationSnapshot = registry.snapshot();
+  const publicationSnapshot = registry.readOnlySnapshot();
   nextAdoptedHosts = await revalidateRetainedStartupHosts(registry, nextAdoptedHosts, publicationSnapshot);
   retryAdoptedHosts = nextAdoptedHosts;
   const finalShouldAdopt = structuredStartupAdoptionFilter(registry, signals, publicationSnapshot);
