@@ -22,6 +22,8 @@ afterAll(() => {
 
 let transcriptReads = 0;
 let lastTranscriptReadFresh: boolean | undefined;
+let lastTranscriptReadFiles: unknown;
+let completedScanReads = 0;
 let pidTargets = new Map<number, string | null>();
 let resourceTarget: Record<string, unknown> | null = null;
 const endpoint = {
@@ -81,13 +83,22 @@ const snapshot = {
   canonicalFor: (pathname: string) => (pathname === PATHNAME ? host : null),
 };
 
+const completedFiles = [{ path: PATHNAME }];
+
 mock.module("@/lib/agent/transcriptHost", () => ({
   canonicalTranscriptTarget: (observed: typeof snapshot, pathname: string) => observed.canonicalFor(pathname)?.display ?? null,
   deliverToTranscriptHost: async () => ({ kind: "unavailable" }),
-  readTranscriptHosts: async (fresh?: boolean) => {
+  readTranscriptHosts: async (fresh?: boolean, files?: unknown) => {
     transcriptReads += 1;
     lastTranscriptReadFresh = fresh;
+    lastTranscriptReadFiles = files;
     return snapshot;
+  },
+}));
+mock.module("@/lib/scanner/scanCache", () => ({
+  completedFileScan: async () => {
+    completedScanReads += 1;
+    return { snapshot: { files: completedFiles } };
   },
 }));
 mock.module("@/lib/runtime/structuredControls", () => ({
@@ -166,6 +177,8 @@ function post(body: unknown): NextRequest {
 
 test("/api/tmux GET uses the transcript host when a recycled pid disagrees", async () => {
   transcriptReads = 0;
+  completedScanReads = 0;
+  lastTranscriptReadFiles = undefined;
   pidTargets = new Map([[77, "agents:9.0"]]);
 
   const response = await GET(get(`http://127.0.0.1/api/tmux?pid=77&path=${encodeURIComponent(PATHNAME)}`));
@@ -173,11 +186,15 @@ test("/api/tmux GET uses the transcript host when a recycled pid disagrees", asy
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ target: "agents:4.0" });
   expect(transcriptReads).toBe(1);
+  expect(completedScanReads).toBe(1);
+  expect(lastTranscriptReadFiles).toBe(completedFiles);
 });
 
 test("/api/tmux attach resolves a fresh transcript host and returns an uncached opaque command", async () => {
   transcriptReads = 0;
+  completedScanReads = 0;
   lastTranscriptReadFresh = undefined;
+  lastTranscriptReadFiles = undefined;
   attachResolution = {
     ok: true,
     target: "agents:8.0",
@@ -200,6 +217,8 @@ test("/api/tmux attach resolves a fresh transcript host and returns an uncached 
   });
   expect(transcriptReads).toBe(1);
   expect(lastTranscriptReadFresh === true).toBe(true);
+  expect(completedScanReads).toBe(1);
+  expect(lastTranscriptReadFiles).toBe(completedFiles);
 });
 
 test("/api/tmux attach resolves an allowlisted orphan resource target", async () => {

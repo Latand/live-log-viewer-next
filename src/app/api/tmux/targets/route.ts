@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { readTranscriptHosts, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
+import { completedFileScan } from "@/lib/scanner/scanCache";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { resolveRequestedTmuxTarget } from "@/lib/tmux";
 
@@ -61,7 +62,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<TargetBatchRe
   /* Every path in this batch projects one observation. This keeps the feed's
      target badges internally consistent while panes are being created or
      closed. PID-only compatibility requests retain their own lookup. */
-  const snapshot = await readTranscriptHosts(true);
+  const files = (await completedFileScan()).snapshot.files;
+  const snapshot = await readTranscriptHosts(true, files);
   const pairs = await Promise.all(reqs.map(async ({ id, pid, path }) => [id, await targetForRequest(snapshot, pid, path)] as const));
   return NextResponse.json({ targets: Object.fromEntries(pairs) });
 }

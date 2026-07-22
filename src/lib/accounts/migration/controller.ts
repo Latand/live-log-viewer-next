@@ -101,7 +101,7 @@ export interface AccountMigrationControllerCyclePorts {
 
 async function reconcileControllerRuntime(registry: AgentRegistry, files: ControllerScan["files"]): Promise<void> {
   await reconcileAccountLogins();
-  const transcriptHosts = await readTranscriptHosts(true);
+  const transcriptHosts = await readTranscriptHosts(true, files);
   try {
     await runReaperCycle({ registry, hosts: transcriptHosts.hosts, files });
   } catch {
