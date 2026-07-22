@@ -2290,9 +2290,9 @@ test("startup fallback projection reads one runtime snapshot and publishes only 
     return { sessionId, conversationId: conversation.id, artifactPath };
   });
   const readSnapshot = registry.snapshot.bind(registry);
-  let snapshotReads = 0;
+  let fullSnapshotReads = 0;
   registry.snapshot = () => {
-    snapshotReads += 1;
+    fullSnapshotReads += 1;
     return readSnapshot();
   };
   let projections = 0;
@@ -2324,7 +2324,7 @@ test("startup fallback projection reads one runtime snapshot and publishes only 
 
   expect(projections).toBe(1);
   expect(runtimeSnapshots).toBe(1);
-  expect(snapshotReads).toBe(2);
+  expect(fullSnapshotReads).toBe(0);
   await bindStructuredDeliveryQueue([], { registry, client: null });
 });
 

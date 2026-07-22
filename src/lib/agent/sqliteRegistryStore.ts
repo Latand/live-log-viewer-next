@@ -65,6 +65,34 @@ interface LazyRegistrySnapshot extends SqliteRegistrySnapshot {
   changes(): RegistryChanges;
 }
 
+function trackMutableJson<T>(
+  value: T,
+  markDirty: () => void,
+  seen: WeakMap<object, object>,
+): T {
+  if (value === null || typeof value !== "object") return value;
+  const object = value as object;
+  const cached = seen.get(object);
+  if (cached) return cached as T;
+  const proxy = new Proxy(object, {
+    get: (target, property, receiver) => trackMutableJson(Reflect.get(target, property, receiver), markDirty, seen),
+    set: (target, property, next) => {
+      markDirty();
+      return Reflect.set(target, property, next);
+    },
+    deleteProperty: (target, property) => {
+      markDirty();
+      return Reflect.deleteProperty(target, property);
+    },
+    defineProperty: (target, property, descriptor) => {
+      markDirty();
+      return Reflect.defineProperty(target, property, descriptor);
+    },
+  });
+  seen.set(object, proxy);
+  return proxy as T;
+}
+
 export class SqliteAgentRegistryStore {
   private readonly db: BunDatabase;
   private readonly normalize: (value: unknown) => RegistryFile;
@@ -225,16 +253,17 @@ export class SqliteAgentRegistryStore {
   }
 
   private loadInTransaction(): SqliteRegistrySnapshot {
-    const snapshot = this.loadLazyInTransaction();
+    const snapshot = this.loadLazyInTransaction(false);
     for (const collection of ROW_COLLECTIONS) void snapshot.file[collection];
     for (const field of META_FIELDS) void snapshot.file[field];
     return snapshot;
   }
 
-  private loadLazyInTransaction(): LazyRegistrySnapshot {
+  private loadLazyInTransaction(trackMutations = true): LazyRegistrySnapshot {
     const file = this.normalize({ version: 2, entries: {}, receipts: {} });
     const loadedCollections = new Map<RowCollection, RegistryFile[RowCollection]>();
-    const baselineCollections = new Map<RowCollection, RegistryFile[RowCollection]>();
+    const baselineCollections = new Map<RowCollection, Map<string, string>>();
+    const dirtyRows = new Map<RowCollection, Set<string>>();
     const reorderedCollections = new Set<RowCollection>();
     for (const collection of ROW_COLLECTIONS) {
       let loaded = false;
@@ -242,20 +271,49 @@ export class SqliteAgentRegistryStore {
       const load = () => {
         if (loaded) return;
         const storedValue = {} as typeof value;
+        const baseline = new Map<string, string>();
         for (const row of this.db.query<StoredRow, [string]>(
           "SELECT collection, row_key, value_json, row_order FROM registry_rows WHERE collection = ? ORDER BY row_order",
         ).all(collection)) {
           (storedValue as Record<string, unknown>)[row.row_key] = JSON.parse(row.value_json);
+          baseline.set(row.row_key, row.value_json);
         }
         const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
         input[collection] = storedValue;
         if (collection === "deliveryOperationOwners") input.heldDeliveries = file.heldDeliveries;
         value = this.normalize(input)[collection] as typeof value;
+        const dirty = new Set<string>();
+        if (trackMutations) {
+          const rowProxies = new Map<string, WeakMap<object, object>>();
+          value = new Proxy(value as Record<string, unknown>, {
+            get: (target, property, receiver) => {
+              const row = Reflect.get(target, property, receiver);
+              if (typeof property !== "string" || !Object.hasOwn(target, property)) return row;
+              let seen = rowProxies.get(property);
+              if (!seen) {
+                seen = new WeakMap<object, object>();
+                rowProxies.set(property, seen);
+              }
+              return trackMutableJson(row, () => dirty.add(property), seen);
+            },
+            set: (target, property, next) => {
+              if (typeof property === "string") dirty.add(property);
+              return Reflect.set(target, property, next);
+            },
+            deleteProperty: (target, property) => {
+              if (typeof property === "string") dirty.add(property);
+              return Reflect.deleteProperty(target, property);
+            },
+            defineProperty: (target, property, descriptor) => {
+              if (typeof property === "string") dirty.add(property);
+              return Reflect.defineProperty(target, property, descriptor);
+            },
+          }) as typeof value;
+        }
         loaded = true;
         loadedCollections.set(collection, value);
-        baselineCollections.set(collection, structuredClone(
-          collection === "deliveryOperationOwners" ? storedValue : value,
-        ) as typeof value);
+        baselineCollections.set(collection, baseline);
+        dirtyRows.set(collection, dirty);
       };
       Object.defineProperty(file, collection, {
         configurable: true,
@@ -305,10 +363,16 @@ export class SqliteAgentRegistryStore {
       changes: () => {
         const changes: RegistryChanges = { rows: new Map(), meta: new Set(), order: new Set() };
         for (const [collection, value] of loadedCollections) {
-          const baseline = baselineCollections.get(collection)! as Record<string, unknown>;
+          const baseline = baselineCollections.get(collection)!;
           const current = value as Record<string, unknown>;
-          const keys = new Set([...Object.keys(baseline), ...Object.keys(current)]);
-          const changed = new Set([...keys].filter((key) => !isDeepStrictEqual(baseline[key], current[key])));
+          const candidates = reorderedCollections.has(collection)
+            ? new Set([...baseline.keys(), ...Object.keys(current)])
+            : dirtyRows.get(collection)!;
+          const changed = new Set([...candidates].filter((key) => {
+            if (!Object.hasOwn(current, key)) return baseline.has(key);
+            const previous = baseline.get(key);
+            return previous === undefined || JSON.stringify(current[key]) !== previous;
+          }));
           if (changed.size > 0) changes.rows.set(collection, changed);
           if (reorderedCollections.has(collection)) {
             changes.rows.set(collection, new Set([...Object.keys(baseline), ...Object.keys(current)]));
