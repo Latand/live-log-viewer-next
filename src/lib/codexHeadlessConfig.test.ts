@@ -12,7 +12,7 @@ test("headless Codex threads allow only the registered Viewer MCP server", () =>
     },
   })).toEqual({
     mcp_servers: {
-      viewer: { enabled: true },
+      viewer: { enabled: true, default_tools_approval_mode: "approve" },
       docs: { enabled: false },
     },
     features: { plugins: false, apps: false, multi_agent: false },
@@ -35,5 +35,23 @@ test("configurations without an MCP table fail closed", () => {
 test("an operator-granted Codex thread enables native collaboration", () => {
   expect(headlessCodexThreadConfig({ config: { mcp_servers: {} } }, true)).toMatchObject({
     features: { plugins: false, apps: false, multi_agent: true },
+  });
+});
+
+test("a Codex thread approves Viewer and retains optional server approval policy", () => {
+  expect(headlessCodexThreadConfig({
+    config: {
+      mcp_servers: {
+        viewer: { default_tools_approval_mode: "prompt" },
+        "agent-browser": { default_tools_approval_mode: "writes" },
+        "telegram-readonly": { default_tools_approval_mode: "prompt" },
+      },
+    },
+  }, false, ["agent-browser"])).toMatchObject({
+    mcp_servers: {
+      viewer: { enabled: true, default_tools_approval_mode: "approve" },
+      "agent-browser": { enabled: true, default_tools_approval_mode: "writes" },
+      "telegram-readonly": { enabled: false, default_tools_approval_mode: "prompt" },
+    },
   });
 });

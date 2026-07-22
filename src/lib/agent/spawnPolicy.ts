@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 import type { AgentEngine } from "./cli";
+import { normalizeSpawnMcpServers } from "./mcpAllowlist";
 
 type JsonObject = Record<string, unknown>;
 
@@ -83,6 +84,26 @@ function readSettings(pathname: string): JsonObject {
   return settings;
 }
 
+function claudeMcpServers(
+  pathname: string,
+  cwd: string | undefined,
+  allowlist: readonly string[] | undefined,
+): JsonObject {
+  if (!fs.existsSync(pathname)) return {};
+  const state = readSettings(pathname);
+  const rootServers = record(state.mcpServers) ?? {};
+  const projects = record(state.projects);
+  const project = cwd && projects ? record(projects[cwd]) : null;
+  const projectServers = record(project?.mcpServers) ?? {};
+  const registered = { ...rootServers, ...projectServers };
+  const normalized = normalizeSpawnMcpServers(allowlist);
+  const names = normalized.ok ? normalized.value : ["viewer"];
+  return Object.fromEntries(names.flatMap((name) => {
+    const definition = record(registered[name]);
+    return definition ? [[name, definition]] : [];
+  }));
+}
+
 /** Seeds the mutable Claude home state before a managed bypass launch. */
 export function prepareManagedClaudeSpawnHome(home: string, cwd: string): void {
   const pathname = path.join(home, ".claude.json");
@@ -141,7 +162,14 @@ function withoutManagedHandlers(value: unknown): unknown[] {
 /** Reconciles the Viewer-owned Claude hook while preserving every user key and handler. */
 export function applyClaudeSpawnPolicy(
   home: string,
-  options: { allowSubagents?: boolean; baseSettingsPath?: string | null; profileId?: string } = {},
+  options: {
+    allowSubagents?: boolean;
+    baseSettingsPath?: string | null;
+    profileId?: string;
+    cwd?: string;
+    mcpServers?: readonly string[];
+    mcpStatePath?: string;
+  } = {},
 ): ClaudeSpawnPolicyResult {
   const sourceSettingsPath = path.join(home, "settings.json");
   const profileId = options.profileId ?? crypto.randomUUID();
@@ -173,7 +201,16 @@ export function applyClaudeSpawnPolicy(
   const enforcedSettings = options.allowSubagents
     ? settings
     : { ...settings, disableAllHooks: false, allowManagedHooksOnly: false };
-  atomicWrite(result.settingsPath, JSON.stringify({ ...enforcedSettings, hooks: { ...hooks, PreToolUse: preToolUse } }, null, 2) + "\n", 0o600);
+  const mcpServers = claudeMcpServers(
+    options.mcpStatePath ?? path.join(home, ".claude.json"),
+    options.cwd,
+    options.mcpServers,
+  );
+  atomicWrite(result.settingsPath, JSON.stringify({
+    ...enforcedSettings,
+    mcpServers,
+    hooks: { ...hooks, PreToolUse: preToolUse },
+  }, null, 2) + "\n", 0o600);
   return result;
 }
 

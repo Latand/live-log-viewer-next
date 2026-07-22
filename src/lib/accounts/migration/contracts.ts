@@ -1,4 +1,5 @@
 import type { AgentEngine } from "@/lib/agent/cli";
+import { normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
 import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
 import type { AgentGoal, AgentPlan, EngineLimits, LimitsProvenance } from "@/lib/types";
 
@@ -56,6 +57,7 @@ export interface LaunchProfile {
   permissionMode: string | null;
   readOnly: boolean | null;
   allowSubagents: boolean;
+  mcpServers: string[];
   title: string | null;
   project: string | null;
   parentConversationId: ViewerConversationId | null;
@@ -65,6 +67,7 @@ export interface LaunchProfile {
 }
 
 export function emptyLaunchProfile(overrides: Partial<LaunchProfile> = {}): LaunchProfile {
+  const mcpServers = normalizeSpawnMcpServers(overrides.mcpServers);
   return {
     cwd: "",
     model: null,
@@ -80,6 +83,7 @@ export function emptyLaunchProfile(overrides: Partial<LaunchProfile> = {}): Laun
     goal: null,
     plan: null,
     ...overrides,
+    mcpServers: mcpServers.ok ? mcpServers.value : ["viewer"],
   };
 }
 

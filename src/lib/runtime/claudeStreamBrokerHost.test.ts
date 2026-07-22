@@ -168,6 +168,37 @@ const IMAGE_REF: StructuredImageRef = {
 };
 
 describe("ClaudeStreamBrokerHost", () => {
+  test("structured Claude hosts materialize their per-spawn MCP allowlist", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-structured-mcp-"));
+    fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+      mcpServers: {
+        viewer: { type: "stdio", command: "viewer-mcp" },
+        "agent-browser": { type: "stdio", command: "browser-mcp" },
+        unrelated: { type: "stdio", command: "unrelated-mcp" },
+      },
+    }));
+    const child = new FakeClaude(new RecordingDeliveryLedger());
+    const captured: { args?: string[] } = {};
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      claudeConfigDir: home,
+      mcpServers: ["viewer", "agent-browser"],
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, captured),
+    });
+
+    const settingsPath = captured.args![captured.args!.indexOf("--settings") + 1]!;
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as { mcpServers: Record<string, unknown> };
+    expect(settings.mcpServers).toEqual({
+      viewer: { type: "stdio", command: "viewer-mcp" },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+    });
+    await host.release();
+    expect(child.signals).toContain("SIGTERM");
+  });
+
   test("defaults writable pane-less Claude processes to bypassPermissions", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);

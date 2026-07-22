@@ -217,8 +217,8 @@ describe("CodexAppServerHost", () => {
   test("fresh structured threads discover account MCP configuration and allow only Viewer", async () => {
     const server = new FakeAppServer("viewer-thread");
     server.mcpServers = {
-      viewer: { command: "agent-log-viewer-mcp", enabled: true },
-      playwright: { command: "npx", enabled: true },
+      viewer: { command: "agent-log-viewer-mcp", enabled: true, default_tools_approval_mode: "prompt" },
+      playwright: { command: "npx", enabled: true, default_tools_approval_mode: "writes" },
     };
     const captured: { args?: string[] } = {};
     const host = await CodexAppServerHost.start({
@@ -231,8 +231,34 @@ describe("CodexAppServerHost", () => {
     expect(server.requests.find((request) => request.method === "thread/start")?.params).toMatchObject({
       config: {
         mcp_servers: {
-          viewer: { enabled: true },
-          playwright: { enabled: false },
+          viewer: { enabled: true, default_tools_approval_mode: "approve" },
+          playwright: { enabled: false, default_tools_approval_mode: "writes" },
+        },
+      },
+    });
+    await host.release();
+  });
+
+  test("fresh structured threads enable a custom MCP allowlist and disable unrelated servers", async () => {
+    const server = new FakeAppServer("custom-mcp-thread");
+    server.mcpServers = {
+      viewer: { command: "agent-log-viewer-mcp", enabled: true, default_tools_approval_mode: "prompt" },
+      "agent-browser": { command: "browser-mcp", enabled: true, default_tools_approval_mode: "writes" },
+      "telegram-readonly": { command: "telegram-mcp", enabled: true, default_tools_approval_mode: "prompt" },
+    };
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      mcpServers: ["agent-browser"],
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(server.requests.find((request) => request.method === "thread/start")?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          viewer: { enabled: true, default_tools_approval_mode: "approve" },
+          "agent-browser": { enabled: true, default_tools_approval_mode: "writes" },
+          "telegram-readonly": { enabled: false, default_tools_approval_mode: "prompt" },
         },
       },
     });
@@ -502,7 +528,7 @@ describe("CodexAppServerHost", () => {
   test("managed-home adoption discovers Viewer and resumes with every unrelated MCP server disabled", async () => {
     const server = new FakeAppServer("managed-thread");
     server.mcpServers = {
-      viewer: { command: "agent-log-viewer-mcp", enabled: true },
+      viewer: { command: "agent-log-viewer-mcp", enabled: true, default_tools_approval_mode: "prompt" },
       playwright: { command: "npx", enabled: true },
       "telegram-readonly": { command: "uv", enabled: true },
     };
@@ -522,7 +548,7 @@ describe("CodexAppServerHost", () => {
     expect(resume?.params).toMatchObject({
       config: {
         mcp_servers: {
-          viewer: { enabled: true },
+          viewer: { enabled: true, default_tools_approval_mode: "approve" },
           playwright: { enabled: false },
           "telegram-readonly": { enabled: false },
         },

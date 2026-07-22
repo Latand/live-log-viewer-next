@@ -98,6 +98,7 @@ export interface FreshSpecOptions {
   claudeProjectsDir?: string | null;
   /** Allow native Claude sub-agents and the Codex multi-agent feature. */
   allowSubagents?: boolean;
+  mcpServers?: string[];
   /** Route admission owns policy materialization after its durable reservation. */
   deferClaudeSpawnPolicy?: boolean;
 }
@@ -147,6 +148,8 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
         ? claudeSpawnPolicyPaths(options.claudeConfigDir, sid)
         : applyClaudeSpawnPolicy(options.claudeConfigDir, {
           allowSubagents: options.allowSubagents,
+          cwd,
+          mcpServers: options.mcpServers,
           baseSettingsPath: managed ? claudeSettingsPath() : null,
           profileId: sid,
         })
@@ -168,6 +171,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
         permissionMode,
         readOnly: options.readOnly ?? false,
         allowSubagents: options.allowSubagents ?? false,
+        mcpServers: options.mcpServers ?? ["viewer"],
         title: null,
         project: null,
         parentConversationId: null,
@@ -199,6 +203,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       permissionMode: options.readOnly ? "never" : null,
       readOnly: options.readOnly ?? false,
       allowSubagents: options.allowSubagents ?? false,
+      mcpServers: options.mcpServers ?? ["viewer"],
       title: null,
       project: null,
       parentConversationId: null,
@@ -333,6 +338,7 @@ function emptyLaunchProfileForResume(cwd: string, model: string | null, effort: 
     permissionMode: null,
     readOnly: null,
     allowSubagents: false,
+    mcpServers: ["viewer"],
     title: null,
     project: null,
     parentConversationId: null,

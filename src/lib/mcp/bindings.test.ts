@@ -70,6 +70,7 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
     clientRequestId: "spawn-http-control",
     cwd: "/repo",
     ["prompt"]: "implement",
+    mcpServers: ["viewer", "agent-browser"],
   });
   const exactMessage = " \tcontinue\nПривіт 🌍\n ";
   await bindings.send_message({
@@ -94,6 +95,7 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
     "/api/runtime/deployments",
   ]);
   expect(requests[0]?.body.clientAttemptId).toBe("spawn-http-control");
+  expect(requests[0]?.body.mcpServers).toEqual(["viewer", "agent-browser"]);
   expect(requests[1]?.body.clientMessageId).toBe("send-http-control");
   expect(requests[1]?.body.text).toBe(exactMessage);
   expect(requests[2]?.body.idempotencyKey).toBe("deploy-http-control");

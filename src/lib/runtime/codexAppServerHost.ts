@@ -73,6 +73,7 @@ export interface CodexAppServerHostOptions {
   model?: string;
   effort?: string;
   allowSubagents?: boolean;
+  mcpServers?: string[];
   fileAuthCredentials?: boolean;
   sandbox?: string;
   approvalPolicy?: string;
@@ -431,6 +432,7 @@ export class CodexAppServerHost implements EngineHost {
       const config = headlessCodexThreadConfig(
         await provisional.rpc("config/read", { cwd: options.cwd, includeLayers: false }),
         options.allowSubagents === true,
+        options.mcpServers,
       );
       const result = threadId
         ? await provisional.rpc("thread/resume", { threadId, config })

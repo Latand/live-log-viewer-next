@@ -787,6 +787,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
       model: profile.model ?? undefined,
       effort: profile.effort ?? undefined,
       allowSubagents: profile.allowSubagents,
+      mcpServers: profile.mcpServers,
       sandbox: profile.readOnly ? "read-only" : "danger-full-access",
       approvalPolicy: profile.permissionMode ?? undefined,
       initialEventCursor,
@@ -803,6 +804,10 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     claudeProjectsDir: input.account.transcriptRoot,
     spawnPolicyBaseSettingsPath: structuredClaudeSpawnPolicyBaseSettingsPath(input.account),
     allowSubagents: profile.allowSubagents,
+    mcpServers: profile.mcpServers,
+    mcpStatePath: input.account.kind === "managed"
+      ? path.join(input.account.home, ".claude.json")
+      : path.join(path.dirname(input.account.home), ".claude.json"),
     readOnly: profile.readOnly === true,
     model: profile.model ?? undefined,
     effort: profile.effort ?? undefined,

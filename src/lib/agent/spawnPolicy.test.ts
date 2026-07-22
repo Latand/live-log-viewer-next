@@ -120,6 +120,48 @@ test("Claude spawn policy seeds a fresh account from the shared user settings sn
   expect(settings.hooks.PreToolUse).toHaveLength(1);
 });
 
+test("Claude spawn settings force Viewer into a custom allowlist and omit unrelated servers", () => {
+  const accountHome = home();
+  fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
+    mcpServers: {
+      viewer: { type: "stdio", command: "viewer-mcp", args: ["--viewer"] },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+      "telegram-readonly": { type: "stdio", command: "telegram-mcp" },
+    },
+  }));
+
+  const installed = applyClaudeSpawnPolicy(accountHome, {
+    profileId: "custom-mcp",
+    cwd: "/repo",
+    mcpServers: ["agent-browser"],
+  });
+  const settings = JSON.parse(fs.readFileSync(installed.settingsPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+
+  expect(settings.mcpServers).toEqual({
+    viewer: { type: "stdio", command: "viewer-mcp", args: ["--viewer"] },
+    "agent-browser": { type: "stdio", command: "browser-mcp" },
+  });
+});
+
+test("Claude spawn settings default to the registered Viewer server only", () => {
+  const accountHome = home();
+  fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
+    mcpServers: {
+      viewer: { type: "stdio", command: "viewer-mcp" },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+    },
+  }));
+
+  const installed = applyClaudeSpawnPolicy(accountHome, { profileId: "default-mcp", cwd: "/repo" });
+  const settings = JSON.parse(fs.readFileSync(installed.settingsPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+
+  expect(settings.mcpServers).toEqual({ viewer: { type: "stdio", command: "viewer-mcp" } });
+});
+
 test("allowSubagents uses an isolated profile while the denied profile stays enforced", () => {
   const accountHome = home();
   const shared = path.join(home(), "settings.json");

@@ -179,6 +179,8 @@ export interface ClaudeStreamBrokerHostOptions {
   claudeProjectsDir?: string;
   spawnPolicyBaseSettingsPath?: string | null;
   allowSubagents?: boolean;
+  mcpServers?: string[];
+  mcpStatePath?: string;
   readOnly?: boolean;
   binary?: string;
   model?: string;
@@ -567,6 +569,9 @@ export class ClaudeStreamBrokerHost implements EngineHost {
         allowSubagents: options.allowSubagents,
         baseSettingsPath: options.spawnPolicyBaseSettingsPath,
         profileId,
+        cwd: options.cwd,
+        mcpServers: options.mcpServers,
+        mcpStatePath: options.mcpStatePath,
       });
       args.push("--settings", settings.settingsPath);
     }
