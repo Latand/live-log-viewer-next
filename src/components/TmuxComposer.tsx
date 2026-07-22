@@ -1794,8 +1794,8 @@ export function TmuxComposer({
             : []
         }
         showImage={!deadHostBlocksSend}
-        imageDisabled={structuredImagesDisabled}
-        imageDisabledReason={structuredImagesReason}
+        imageDisabled={structuredImagesDisabled && caps.surface !== "dead"}
+        imageDisabledReason={caps.surface === "dead" ? undefined : structuredImagesReason}
         sendPayloadAvailable={replayGenerationAvailable}
         sendDisabledReason={deadHostBlocksSend
           ? t("deadHost.sendBlocked")

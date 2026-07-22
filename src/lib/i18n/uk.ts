@@ -273,7 +273,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.structuredImagesUnavailable": "Структуровані розмови поки не підтримують картинки",
   "composer.codexImagesTextOnly": "Обрана модель Codex приймає лише текст.",
   "composer.structuredImagesProtocol": "Цей структурований хост не узгодив підтримку зображень.",
-  "composer.imagesBlockedDuringRecovery": "Зображення не можна додати, доки хост не працює — вже додані залишаться вибраними й будуть доставлені після відновлення.",
+  "composer.imagesBlockedDuringRecovery": "Зображення з чернетки буде надіслано після відновлення хоста; текст можна надіслати вже зараз.",
   "composer.imageCapabilityLoading": "Завантажуємо дані про підтримку зображень.",
   "composer.imageCapabilityError": "Не вдалося завантажити дані про підтримку зображень.",
   "composer.imageCapabilityRetry": "Повторити перевірку зображень",
@@ -342,7 +342,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "strip.resolving": "визначаємо середовище агента…",
 
   // Dead-host banner (issue #247)
-  "deadHost.title": "Хост агента помер · {since}",
+  "deadHost.title": "Агент неактивний · {since} — повідомлення підуть у чергу",
   "deadHost.body": "Текст, надісланий зараз, надійно зберігається і буде доставлений після відновлення хоста. Зображення не можна додати, доки хост не повернеться. Очікувані підтвердження застаріли — відновіть роботу елементами керування нижче.",
   "deadHost.respawn": "Відновити розмову",
   "deadHost.attach": "Відкрити в терміналі",
