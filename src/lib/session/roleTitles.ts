@@ -134,11 +134,15 @@ export function deriveRoleSessionTitles(input: RoleTitleInput): Map<string, stri
     }
 
     /* Non-review roles (and a reviewer edge without a subject): the concise
-       task-plus-role form. Without an owning task there is nothing meaningful
-       to derive — the stable fallback is the untouched scan title. */
+       task-plus-role form. Without an owning task the role alone still beats
+       the scanner's literal «Codex session» — a pipeline stage card must name
+       its role even before any board task links up. */
     const ownerTask = taskFor(file.conversationId ? canonical(file.conversationId) : null, file.path);
     const subject = subjectOfTask(ownerTask);
     if (subject) titles.set(file.path, `${subject} — ${role}`);
+    else if (GENERIC_SESSION_TITLES.has(file.title)) {
+      titles.set(file.path, role.charAt(0).toUpperCase() + role.slice(1));
+    }
   }
   return titles;
 }
