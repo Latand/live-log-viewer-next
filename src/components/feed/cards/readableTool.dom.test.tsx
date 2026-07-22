@@ -153,15 +153,14 @@ test("a poll-dominated run collapses its empty polls into one counted row", () =
   expect(firstBlock.textContent).toContain("30s");
   // No empty "no output captured" apology chip survives from the polls/keystroke.
   expect(host.textContent).not.toContain(en("tools.noOutput"));
-  // The parent and meaningful keystroke retain provenance; the 6 empty polls
-  // contribute no raw-record toggles.
+  // The raw-record noise toggle is gone from every call (compact-feed pass).
   const rawToggles = [...host.querySelectorAll("button")].filter((b) => (b.textContent ?? "") === en("tools.rawRecord"));
-  expect(rawToggles).toHaveLength(2);
+  expect(rawToggles).toHaveLength(0);
   // The trailing keystroke write_stdin stays readable.
   expect(host.textContent).toContain("y⏎");
 });
 
-test("meaningful empty-output stdin retains complete redacted raw provenance", () => {
+test("meaningful empty-output stdin renders without a raw-record toggle", () => {
   const tail = "final-provenance-suffix";
   const sensitiveKey = String.fromCharCode(112, 97, 115, 115, 119, 111, 114, 100);
   const privateMarker = "REDACTION_VALUE_MARKER";
@@ -188,11 +187,10 @@ test("meaningful empty-output stdin retains complete redacted raw provenance", (
     </RawLineProvider>,
   );
   expect(event.summary).not.toContain(tail);
+  // The raw-record disclosure is gone (compact-feed pass); no secret material
+  // reaches the DOM through the removed provenance path.
   const provenance = [...host.querySelectorAll("button")].find((button) => button.textContent === en("tools.rawRecord"));
-  expect(provenance).toBeTruthy();
-  flushSync(() => provenance!.click());
-  expect(host.textContent).toContain(tail);
-  expect(host.textContent).toContain(`${sensitiveKey}=[redacted]`);
+  expect(provenance).toBeUndefined();
   expect(host.textContent).not.toContain(privateMarker);
 });
 

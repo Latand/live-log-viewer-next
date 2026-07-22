@@ -23,8 +23,6 @@ export function OutputPreview({
   copyLabel,
   heading,
   tone = "out",
-  emptyLabel,
-  emptyTip,
   showAllLabel,
 }: {
   output: string;
@@ -35,24 +33,15 @@ export function OutputPreview({
   heading?: string;
   /** `err` tints the block and heading for the stderr stream. */
   tone?: "out" | "err";
-  emptyLabel?: string;
-  emptyTip?: string;
   showAllLabel?: string;
 }) {
   const [all, setAll] = useState(false);
   const label = heading ? (
     <div className={`mb-0.5 text-[10.5px] font-semibold uppercase tracking-wide ${tone === "err" ? "text-danger" : "text-muted"}`}>{heading}</div>
   ) : null;
-  if (!output.trim()) {
-    return (
-      <div className="mt-1.5">
-        {label}
-        <span className="text-[11px] text-muted" title={emptyTip ?? tr("tools.noOutputTip")}>
-          {emptyLabel ?? tr("tools.noOutput")}
-        </span>
-      </div>
-    );
-  }
+  /* Absent output renders nothing at all: an "no output captured" apology row
+     is pure noise the operator scrolls past (compact-feed pass). */
+  if (!output.trim()) return null;
   const lines = output.split("\n");
   const overflow = lines.length > PREVIEW_LINES || output.length > PREVIEW_CHARS;
   const shown = all ? output : lines.slice(0, PREVIEW_LINES).join("\n").slice(0, PREVIEW_CHARS);
