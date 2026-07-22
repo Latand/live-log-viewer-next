@@ -527,6 +527,52 @@ test("a dead structured send is durable before predecessor recovery", async () =
   }]);
 });
 
+test("runtime synchronization without published ownership durably admits a selected-account handoff", async () => {
+  const { registry, conversation } = registryWithConversation("seat-source", "claude");
+  registry.setEngineRouting("claude", "seat-active");
+  let migrationTicks = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "unpublished-account-reseat",
+    text: "continue after runtime ownership synchronizes",
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => { migrationTicks += 1; },
+  });
+
+  expect(result).toMatchObject({
+    ok: true,
+    structured: true,
+    target: conversation.id,
+    outcome: "held",
+  });
+  expect(migrationTicks).toBe(1);
+  expect(registry.conversation(conversation.id)).toMatchObject({
+    id: conversation.id,
+    migration: { targetId: "seat-active", phase: "requested" },
+  });
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "unpublished-account-reseat",
+    state: "held",
+    generationId: null,
+  }]);
+
+  const restarted = new AgentRegistry(registry.filename);
+  expect(restarted.conversation(conversation.id)).toMatchObject({
+    id: conversation.id,
+    migration: { targetId: "seat-active", phase: "requested" },
+  });
+  expect(restarted.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "unpublished-account-reseat",
+    state: "held",
+    generationId: null,
+  }]);
+});
+
 test("a matching account keeps the direct structured delivery path", async () => {
   const { registry, conversation } = registryWithConversation();
   registry.setEngineRouting("codex", "seat-source");
