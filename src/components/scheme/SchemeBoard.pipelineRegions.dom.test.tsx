@@ -4,11 +4,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
 import type { Pipeline } from "@/lib/pipelines/types";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 import { directReviewFlows } from "@/components/flows/directReviewGroups";
 import { buildBranchGroups } from "@/components/projectModel";
 
 import { SchemeBoard } from "./SchemeBoard";
+import { taskBoxHeight } from "./taskGeometry";
 
 /*
  * DOM regressions for issue #531: on the rendered production board every
@@ -71,10 +73,10 @@ const stages = [
   { id: "polish", kind: "run", prompt: "", next: null, effectiveRole: stageRole("read-write") },
 ];
 
-const pipe = (id: string, agentPath: string, attemptState = "running"): Pipeline =>
+const pipe = (id: string, agentPath: string, attemptState = "running", taskIds: string[] = []): Pipeline =>
   ({
     id, task: `Region ${id}`, project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b",
-    baseBranch: "main", baseRef: "a", lastPassedCommit: "a", stages,
+    baseBranch: "main", baseRef: "a", lastPassedCommit: "a", stages, taskIds,
     runs: [{ stageId: "build", attempts: [{ n: 1, state: attemptState, agentPath, flowId: null }] }],
     cursor: { stageId: "build", state: attemptState, input: null, activatedBy: null },
     state: attemptState === "needs_decision" ? "needs_decision" : "running",
@@ -150,7 +152,7 @@ function expectSceneGeometry(host: HTMLElement, surfacesByPipeline: Map<string, 
   }
 }
 
-function mountScene(files: FileEntry[], pipelines: Pipeline[]): HTMLElement {
+function mountScene(files: FileEntry[], pipelines: Pipeline[], tasks: BoardTask[] = []): HTMLElement {
   const groups = buildBranchGroups(files, "demo");
   const reviewGroups = directReviewFlows({ files, flows: [], tasks: [] });
   const host = document.createElement("div");
@@ -167,7 +169,7 @@ function mountScene(files: FileEntry[], pipelines: Pipeline[]): HTMLElement {
       reviewGroups={reviewGroups}
       pipelines={pipelines}
       surfacePipelines={pipelines}
-      tasks={[]}
+      tasks={tasks}
       drafts={[]}
       focus={null}
       onSelect={() => {}}
@@ -198,13 +200,38 @@ const directReviewer = entry({
   },
 });
 
+/* The pipeline's board task — a pinned sticky note whose lattice position is far
+   outside the region; region ownership must pull the card inside. */
+const linkedTask = (id: string): BoardTask =>
+  ({
+    id,
+    project: "demo",
+    status: "assigned",
+    text: `Deliver ${id}`,
+    placement: "pinned",
+    pos: { x: 4200, y: 4200 },
+    assignments: [],
+    createdAt: "2026-07-05T00:00:00Z",
+    updatedAt: "2026-07-05T00:00:00Z",
+  }) as unknown as BoardTask;
+
+function linkedTaskRect(host: HTMLElement, task: BoardTask): DomRect {
+  const card = host.querySelector(`[data-scheme-task="${task.id}"]`) as HTMLElement | null;
+  expect(card, `task card ${task.id} must render`).toBeTruthy();
+  const rect = rectOf(card!);
+  /* TaskCard's root carries transform + width; the card's world height is the
+     shared geometry estimate every placement consumer uses. */
+  return { ...rect, h: taskBoxHeight(task, false) };
+}
+
 test("at 62% lite zoom every pipeline surface stays inside its region and neighboring regions keep their gap", async () => {
   /* The user parked the desktop camera at 62% — the lite far-zoom band where the
      production overlap was captured. World geometry must be identical to any
      other zoom: regions disjoint, every surface contained. */
   dom.sessionStorage.setItem("llvCam:demo", JSON.stringify({ x: 0, y: 0, z: 0.62 }));
   const files = [origin, builderA, builderB, directReviewer];
-  const host = mountScene(files, [pipe("pa", "/origin/a"), pipe("pb", "/origin/b")]);
+  const taskA = linkedTask("t-a");
+  const host = mountScene(files, [pipe("pa", "/origin/a", "running", ["t-a"]), pipe("pb", "/origin/b")], [taskA]);
   await settle();
 
   const viewport = host.querySelector('[aria-label^="Agent board"]') as HTMLElement;
@@ -218,16 +245,23 @@ test("at 62% lite zoom every pipeline surface stays inside its region and neighb
     ["pb", ["/origin/b", "slot::pb::review", "slot::pb::polish"]],
   ]);
   expectSceneGeometry(host, surfaces);
+  /* The pipeline's linked task card is owned by pa's region — inside pa, clear
+     of pb. */
+  const halos = haloRects(host);
+  const taskCard = linkedTaskRect(host, taskA);
+  expect(contains(halos.get("pa")!, taskCard), "the linked task card escapes its pipeline region").toBe(true);
+  expect(disjointWithGap(halos.get("pb")!, taskCard, 0), "the linked task card leaks into the neighbor region").toBe(true);
 
   /* Fit All reframes the camera only — the world rects must not move. */
-  const before = [...host.querySelectorAll("[data-scheme-node]")].map((card) => (card as HTMLElement).style.transform);
+  const before = [...host.querySelectorAll("[data-scheme-node], [data-scheme-task]")].map((card) => (card as HTMLElement).style.transform);
   const fit = [...host.querySelectorAll("button")].find((button) => button.title.startsWith("Fit all")) as HTMLButtonElement;
   expect(fit).toBeTruthy();
   flushSync(() => fit.click());
   await settle();
-  const after = [...host.querySelectorAll("[data-scheme-node]")].map((card) => (card as HTMLElement).style.transform);
+  const after = [...host.querySelectorAll("[data-scheme-node], [data-scheme-task]")].map((card) => (card as HTMLElement).style.transform);
   expect(after).toEqual(before);
   expectSceneGeometry(host, surfaces);
+  expect(contains(haloRects(host).get("pa")!, linkedTaskRect(host, taskA))).toBe(true);
 });
 
 test("host loss / delayed materialization: unscanned published transcripts keep two separated shell regions", async () => {
@@ -236,7 +270,8 @@ test("host loss / delayed materialization: unscanned published transcripts keep 
      conversation-shaped shell; the two pipelines still own disjoint regions and
      every shell stays inside its own. */
   const files = [origin];
-  const host = mountScene(files, [pipe("pa", "/lost/a"), pipe("pb", "/lost/b")]);
+  const taskA = linkedTask("t-lost");
+  const host = mountScene(files, [pipe("pa", "/lost/a", "running", ["t-lost"]), pipe("pb", "/lost/b")], [taskA]);
   await settle();
 
   expectSceneGeometry(host, new Map([
@@ -248,6 +283,11 @@ test("host loss / delayed materialization: unscanned published transcripts keep 
   for (const halo of haloRects(host).values()) {
     expect(disjointWithGap(halo, originRect, 0), "a pipeline region covers a foreign conversation").toBe(true);
   }
+  /* The linked task rides the shell region through the publish-to-scan gap. */
+  const halos = haloRects(host);
+  const taskCard = linkedTaskRect(host, taskA);
+  expect(contains(halos.get("pa")!, taskCard), "the linked task card escapes its host-lost pipeline region").toBe(true);
+  expect(disjointWithGap(halos.get("pb")!, taskCard, 0)).toBe(true);
 });
 
 test("parked and completed stage cards stay inside their regions beside a live neighbor", async () => {
