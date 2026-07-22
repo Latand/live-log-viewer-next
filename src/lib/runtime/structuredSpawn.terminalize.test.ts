@@ -16,6 +16,7 @@ import {
 const DEAD_RUNTIME_CLIENT = {
   operationStatus: async () => null,
   snapshot: async () => ({ revision: 0, sessions: [] }),
+  effectBatch: async () => [],
 } as unknown as RuntimeHostClient;
 
 function registry(): AgentRegistry {
