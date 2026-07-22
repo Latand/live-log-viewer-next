@@ -1167,6 +1167,44 @@ test("a pinned refresh serves stale data then advances the shared global slot wi
   expect(scans).toBe(2);
 });
 
+test("a pin already present in the global snapshot does not start an exclusive scan", async () => {
+  const pinnedPath = "/sessions/visible-pin.jsonl";
+  scannedFiles = [file("/sessions/global.jsonl"), file(pinnedPath)];
+  await cachedFileScan();
+
+  const pinned = await cachedFileScan(undefined, pinnedPath, Date.now());
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  expect(pinned.snapshot.files.map((entry) => entry.path)).toEqual([
+    "/sessions/global.jsonl",
+    pinnedPath,
+  ]);
+  expect(pinned.pinOverlayPaths).toBeUndefined();
+  expect(scans).toBe(1);
+});
+
+test("visible pins share one revision generation across browser scopes", async () => {
+  const firstPath = "/sessions/visible-a.jsonl";
+  const secondPath = "/sessions/visible-b.jsonl";
+  scannedFiles = [file(firstPath), file(secondPath)];
+  await cachedFileScan();
+
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  await Promise.all([
+    cachedFileScan(undefined, firstPath, Date.now(), 580),
+    cachedFileScan(undefined, secondPath, Date.now(), 580),
+  ]);
+  await Promise.resolve();
+  expect(scans).toBe(2);
+
+  release();
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  expect(scans).toBe(2);
+});
+
 test("pinned response projection cannot mutate the shared global scan rows", async () => {
   const sharedPath = "/sessions/shared-registry-row.jsonl";
   const pinnedPath = "/archive/pin-only-row.jsonl";
