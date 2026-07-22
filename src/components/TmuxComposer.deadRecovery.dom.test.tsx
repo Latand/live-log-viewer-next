@@ -4,8 +4,8 @@
  *
  *   - Send stays enabled: text is admitted durably and delivered after the
  *     host recovers (the capability matrix's `dead` row keeps send ENABLED);
- *   - the image restriction is explained inline (the matrix disables images
- *     with `composer.imagesBlockedDuringRecovery` while the host is down);
+ *   - the image picker stays usable: images queue in the local draft and the
+ *     old inline restriction line is gone (compact-feed pass);
  *   - the model/reasoning pill is NOT offered (the matrix hides `runtime` on
  *     the dead surface), so no committed evidence may depict one.
  *
@@ -193,9 +193,9 @@ test.each(["en", "uk"] as const)(
     expect(send.getAttribute("aria-disabled")).toBe("false");
     expect(send.disabled).toBe(false);
 
-    /* The image restriction is explained inline in the current locale — a
-       phone has no tooltip, so the disabled picker alone would be mute. */
-    expect(host.textContent).toContain(translate(locale, "composer.imagesBlockedDuringRecovery"));
+    /* Images stay draftable while the host is down (compact-feed pass): no
+       blocking explainer renders and the picker is not disabled. */
+    expect(host.textContent).not.toContain(translate(locale, "composer.imagesBlockedDuringRecovery"));
 
     /* Production capability visibility: the matrix hides the runtime control
        on the dead surface, so no model/reasoning pill may render. */
