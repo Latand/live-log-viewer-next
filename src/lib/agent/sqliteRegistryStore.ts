@@ -29,7 +29,7 @@ const META_FIELDS = [
   "quotaObservations",
 ] as const satisfies ReadonlyArray<keyof RegistryFile>;
 
-type RowCollection = (typeof ROW_COLLECTIONS)[number];
+export type RowCollection = (typeof ROW_COLLECTIONS)[number];
 type StoredRow = { collection: string; row_key: string; value_json: string; row_order: number };
 type MetaRow = { key: string; value: string };
 
@@ -59,6 +59,7 @@ export interface SqliteRegistryStoreOptions {
   normalize(value: unknown): RegistryFile;
   onWriterWait?(durationMs: number): void;
   onSnapshotLoad?(): void;
+  onRowPayloadRead?(collection: RowCollection, count: number): void;
 }
 
 interface LazyRegistrySnapshot extends SqliteRegistrySnapshot {
@@ -98,6 +99,7 @@ export class SqliteAgentRegistryStore {
   private readonly normalize: (value: unknown) => RegistryFile;
   private readonly onWriterWait: ((durationMs: number) => void) | undefined;
   private readonly onSnapshotLoad: (() => void) | undefined;
+  private readonly onRowPayloadRead: ((collection: RowCollection, count: number) => void) | undefined;
   private readOnlyCache: SqliteRegistrySnapshot | null = null;
 
   constructor(readonly filename: string, options: SqliteRegistryStoreOptions) {
@@ -109,6 +111,7 @@ export class SqliteAgentRegistryStore {
     this.normalize = options.normalize;
     this.onWriterWait = options.onWriterWait;
     this.onSnapshotLoad = options.onSnapshotLoad;
+    this.onRowPayloadRead = options.onRowPayloadRead;
     this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS registry_meta (
@@ -262,33 +265,131 @@ export class SqliteAgentRegistryStore {
   private loadLazyInTransaction(trackMutations = true): LazyRegistrySnapshot {
     const file = this.normalize({ version: 2, entries: {}, receipts: {} });
     const loadedCollections = new Map<RowCollection, RegistryFile[RowCollection]>();
-    const baselineCollections = new Map<RowCollection, Map<string, string>>();
+    const baselineCollections = new Map<RowCollection, Map<string, string | null>>();
     const dirtyRows = new Map<RowCollection, Set<string>>();
     const reorderedCollections = new Set<RowCollection>();
     for (const collection of ROW_COLLECTIONS) {
       let loaded = false;
       let value = file[collection];
+      let loadAllBaseline = () => {};
       const load = () => {
         if (loaded) return;
-        const storedValue = {} as typeof value;
-        const baseline = new Map<string, string>();
-        for (const row of this.db.query<StoredRow, [string]>(
-          "SELECT collection, row_key, value_json, row_order FROM registry_rows WHERE collection = ? ORDER BY row_order",
-        ).all(collection)) {
-          (storedValue as Record<string, unknown>)[row.row_key] = JSON.parse(row.value_json);
-          baseline.set(row.row_key, row.value_json);
-        }
-        const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
-        input[collection] = storedValue;
-        if (collection === "deliveryOperationOwners") input.heldDeliveries = file.heldDeliveries;
-        value = this.normalize(input)[collection] as typeof value;
         const dirty = new Set<string>();
-        if (trackMutations) {
+        const baseline = new Map<string, string | null>();
+        if (!trackMutations || collection === "deliveryOperationOwners") {
+          const storedValue = {} as typeof value;
+          const storedRows = this.db.query<StoredRow, [string]>(
+            "SELECT collection, row_key, value_json, row_order FROM registry_rows WHERE collection = ? ORDER BY row_order",
+          ).all(collection);
+          this.onRowPayloadRead?.(collection, storedRows.length);
+          for (const row of storedRows) {
+            (storedValue as Record<string, unknown>)[row.row_key] = JSON.parse(row.value_json);
+            baseline.set(row.row_key, row.value_json);
+          }
+          const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
+          input[collection] = storedValue;
+          if (collection === "deliveryOperationOwners") input.heldDeliveries = file.heldDeliveries;
+          value = this.normalize(input)[collection] as typeof value;
+          if (trackMutations) {
+            const rowProxies = new Map<string, WeakMap<object, object>>();
+            value = new Proxy(value as Record<string, unknown>, {
+              get: (target, property, receiver) => {
+                const row = Reflect.get(target, property, receiver);
+                if (typeof property !== "string" || !Object.hasOwn(target, property)) return row;
+                let seen = rowProxies.get(property);
+                if (!seen) {
+                  seen = new WeakMap<object, object>();
+                  rowProxies.set(property, seen);
+                }
+                return trackMutableJson(row, () => dirty.add(property), seen);
+              },
+              set: (target, property, next) => {
+                if (typeof property === "string") dirty.add(property);
+                return Reflect.set(target, property, next);
+              },
+              deleteProperty: (target, property) => {
+                if (typeof property === "string") dirty.add(property);
+                return Reflect.deleteProperty(target, property);
+              },
+              defineProperty: (target, property, descriptor) => {
+                if (typeof property === "string") dirty.add(property);
+                return Reflect.defineProperty(target, property, descriptor);
+              },
+            }) as typeof value;
+          }
+          loadAllBaseline = () => {};
+        } else {
+          const rows = {} as Record<string, unknown>;
+          const deleted = new Set<string>();
+          let orderedKeys: string[] | null = null;
+          let storedKeySet: Set<string> | null = null;
+          let allRowsLoaded = false;
+          let storedPayloadRows: Pick<StoredRow, "row_key" | "value_json">[] | null = null;
           const rowProxies = new Map<string, WeakMap<object, object>>();
-          value = new Proxy(value as Record<string, unknown>, {
+          const storedRow = this.db.query<Pick<StoredRow, "value_json">, [string, string]>(
+            "SELECT value_json FROM registry_rows WHERE collection = ? AND row_key = ?",
+          );
+          const storedRows = this.db.query<Pick<StoredRow, "row_key" | "value_json">, [string]>(
+            "SELECT row_key, value_json FROM registry_rows WHERE collection = ? ORDER BY row_order",
+          );
+          const readAllStoredRows = () => {
+            if (storedPayloadRows) return storedPayloadRows;
+            storedPayloadRows = storedRows.all(collection);
+            this.onRowPayloadRead?.(collection, storedPayloadRows.length);
+            orderedKeys = storedPayloadRows.map((row) => row.row_key);
+            storedKeySet = new Set(orderedKeys);
+            for (const row of storedPayloadRows) baseline.set(row.row_key, row.value_json);
+            return storedPayloadRows;
+          };
+          loadAllBaseline = () => {
+            readAllStoredRows();
+          };
+          const readBaseline = (key: string): string | null => {
+            if (baseline.has(key)) return baseline.get(key)!;
+            const stored = storedRow.get(collection, key)?.value_json ?? null;
+            this.onRowPayloadRead?.(collection, stored === null ? 0 : 1);
+            baseline.set(key, stored);
+            return stored;
+          };
+          const readRow = (key: string): unknown => {
+            if (Object.hasOwn(rows, key)) return rows[key];
+            if (deleted.has(key)) return undefined;
+            const stored = readBaseline(key);
+            if (stored === null) return undefined;
+            const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
+            input[collection] = { [key]: JSON.parse(stored) };
+            const normalized = this.normalize(input)[collection] as Record<string, unknown>;
+            if (!Object.hasOwn(normalized, key)) return undefined;
+            rows[key] = normalized[key];
+            return rows[key];
+          };
+          const loadAllRows = () => {
+            if (allRowsLoaded) return;
+            const stored = readAllStoredRows();
+            const unloaded: Record<string, unknown> = {};
+            for (const row of stored) {
+              if (!Object.hasOwn(rows, row.row_key) && !deleted.has(row.row_key)) {
+                unloaded[row.row_key] = JSON.parse(row.value_json);
+              }
+            }
+            const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
+            input[collection] = unloaded;
+            const normalized = this.normalize(input)[collection] as Record<string, unknown>;
+            for (const [key, row] of Object.entries(normalized)) rows[key] = row;
+            allRowsLoaded = true;
+          };
+          const keys = (): string[] => {
+            loadAllRows();
+            return [
+              ...orderedKeys!.filter((key) => !deleted.has(key)),
+              ...Object.keys(rows).filter((key) => !storedKeySet!.has(key)),
+            ];
+          };
+          value = new Proxy(rows, {
             get: (target, property, receiver) => {
-              const row = Reflect.get(target, property, receiver);
-              if (typeof property !== "string" || !Object.hasOwn(target, property)) return row;
+              if (typeof property !== "string") return Reflect.get(target, property, receiver);
+              const row = readRow(property);
+              if (row === undefined) return undefined;
               let seen = rowProxies.get(property);
               if (!seen) {
                 seen = new WeakMap<object, object>();
@@ -297,16 +398,41 @@ export class SqliteAgentRegistryStore {
               return trackMutableJson(row, () => dirty.add(property), seen);
             },
             set: (target, property, next) => {
-              if (typeof property === "string") dirty.add(property);
+              if (typeof property === "string") {
+                readBaseline(property);
+                dirty.add(property);
+                deleted.delete(property);
+                rowProxies.delete(property);
+              }
               return Reflect.set(target, property, next);
             },
             deleteProperty: (target, property) => {
-              if (typeof property === "string") dirty.add(property);
+              if (typeof property === "string") {
+                readBaseline(property);
+                dirty.add(property);
+                deleted.add(property);
+                rowProxies.delete(property);
+              }
               return Reflect.deleteProperty(target, property);
             },
             defineProperty: (target, property, descriptor) => {
-              if (typeof property === "string") dirty.add(property);
+              if (typeof property === "string") {
+                readBaseline(property);
+                dirty.add(property);
+                deleted.delete(property);
+                rowProxies.delete(property);
+              }
               return Reflect.defineProperty(target, property, descriptor);
+            },
+            has: (_target, property) => typeof property === "string"
+              ? readRow(property) !== undefined
+              : Reflect.has(rows, property),
+            ownKeys: () => keys(),
+            getOwnPropertyDescriptor: (_target, property) => {
+              if (typeof property !== "string") return undefined;
+              const row = readRow(property);
+              if (row === undefined) return undefined;
+              return { configurable: true, enumerable: true, writable: true, value: row };
             },
           }) as typeof value;
         }
@@ -324,6 +450,7 @@ export class SqliteAgentRegistryStore {
         },
         set: (next: typeof value) => {
           load();
+          loadAllBaseline();
           value = next;
           loadedCollections.set(collection, value);
           reorderedCollections.add(collection);
