@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 
-import { auditGithubPublication } from "./privacy-github-audit";
+import { auditGithubPublication, shouldFailGithubAudit } from "./privacy-github-audit";
 import { formatPrivacyReport } from "./privacy-publication-gate";
 
 const gate = join(import.meta.dir, "privacy-publication-gate.ts");
@@ -1346,6 +1346,18 @@ exec "$LLV_TEST_REAL_GIT" "$@"
       "PUBLICATION_ISSUE_COMMENT_ID: ${{ github.event_name == 'issue_comment' && github.event.comment.id || '' }}",
     );
     expect(workflow).toContain('--issue-comment "$PUBLICATION_ISSUE_COMMENT_ID"');
+  });
+
+  test("reports post-publication tracker findings without hiding audit failures", () => {
+    const workflow = readFileSync(join(import.meta.dir, "..", ".github", "workflows", "privacy-tracker-audit.yml"), "utf8");
+
+    expect(workflow).not.toContain("continue-on-error: true");
+    expect(workflow).toContain('bun scripts/privacy-github-audit.ts "${arguments[@]}" --report-only');
+    expect(shouldFailGithubAudit(new Map([["resource_identifier", 1]]), true)).toBe(false);
+    expect(shouldFailGithubAudit(new Map([["home_path", 1]]), true)).toBe(false);
+    expect(shouldFailGithubAudit(new Map([["inspection_error", 1]]), true)).toBe(true);
+    expect(shouldFailGithubAudit(new Map([["configuration_error", 1]]), true)).toBe(true);
+    expect(shouldFailGithubAudit(new Map([["resource_identifier", 1]]), false)).toBe(true);
   });
 
   test("uses trusted scanner and fingerprints when every candidate gate surface is tampered", () => {
