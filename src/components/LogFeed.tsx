@@ -12,6 +12,9 @@ import type { FileEntry } from "@/lib/types";
 
 import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 
+import { LaunchChips } from "./conversation/LaunchChips";
+import { OutboxBubbles } from "./conversation/OutboxBubbles";
+import { useOutbox, visibleOutbox } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
 import { FeedItem } from "./feed/FeedItem";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
@@ -87,6 +90,12 @@ function rowForAnchor(scroller: HTMLElement, key: string): HTMLElement | null {
   return feedRows(scroller).find((row) => row.dataset.feedKey === key) ?? null;
 }
 
+/** Wall-clock read hoisted out of the component so the React Compiler's purity
+    check does not see a bare `Date.now()` in a render-scope closure. */
+function nowMs(): number {
+  return Date.now();
+}
+
 interface Props {
   file: FileEntry | null;
   showSvc: boolean;
@@ -96,11 +105,22 @@ interface Props {
   follow: boolean;
   setFollow: (follow: boolean) => void;
   compact?: boolean;
+  /** Opens a fresh editable draft from a terminal structured launch receipt —
+      wired through so the launch chips keep their retry inside the window. */
+  onLaunchRetry?: () => void;
 }
 
-export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, setFollow, compact = false }: Props) {
+export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, setFollow, compact = false, onLaunchRetry }: Props) {
   const { locale, t } = useLocale();
   const memoryKey = file ? conversationIdentity(file) : null;
+  /* The conversation's own outbox (issue #561): submitted drafts render as
+     optimistic user bubbles at the tail of THIS feed, before any transcript
+     flush, and retire the moment their real bubble lands. */
+  const outbox = useOutbox(memoryKey ?? "");
+  /* Launch/delivery facts of the launch that created this conversation, or of
+     the launch that is still becoming it (issue #569) — the same chips either
+     way, because it is the same window. */
+  const launch = file?.launch ?? file?.spawn ?? null;
   /* Live streaming text: `delta` events from the structured host render the
      in-flight assistant reply immediately, ahead of the transcript flush. */
   const liveTurn = useRuntimeSessionByArtifact(file?.path ?? null)?.session.liveTurn ?? null;
@@ -365,6 +385,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     setMagnet(true, true);
   };
 
+  /* Optimistic bubbles retire against the transcript's own clock: once the file
+     grew past a delivered submission, the real bubble is what the reader sees. */
+  const pendingOutbox = file ? visibleOutbox(outbox, file.mtime * 1000, nowMs()) : [];
+  /* Anything the window shows below the transcript. While it is present an
+     empty transcript is not "no output" — it is a conversation mid-launch. */
+  const windowTail = Boolean(liveTurn?.text) || pendingOutbox.length > 0 || Boolean(launch);
+
   /* The floating pill is centered on every surface — the same axis as the
      pinned TurnStatusBar below, per the issue #268 operator note: the two
      bottom elements share one axis and separate slots, so they can never
@@ -469,40 +496,19 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             ) : null}
             {compact ? null : <TaskHeader file={file} />}
             {feed.items.length ? (
-              <>
-                {visibleItems.map(({ anchorKey, key, item }, visibleIndex) => {
-                  const answer = speakableAnswer(feed.items, visibleStartIndex + visibleIndex);
-                  const speakText = answer?.firstIndex === visibleStartIndex + visibleIndex ? answer.text : undefined;
-                  return (
-                    /* Session-stable keys: a row keeps its DOM node while the
-                       window slides. Compact panes live on the zoomable canvas:
-                       off-screen rows skip layout/paint via content-visibility. */
-                    <div key={key} data-feed-key={anchorKey ?? undefined} className={compact ? "feed-cv" : undefined}>
-                      <FeedItem item={item} speakText={speakText} />
-                    </div>
-                  );
-                })}
-                {liveTurn?.text ? (
-                  <div data-live-turn className="my-2 ml-9 whitespace-pre-wrap [overflow-wrap:anywhere] text-ui text-primary">
-                    {liveTurn.text}
-                    <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-[2px] bg-accent align-text-bottom" aria-hidden />
+              visibleItems.map(({ anchorKey, key, item }, visibleIndex) => {
+                const answer = speakableAnswer(feed.items, visibleStartIndex + visibleIndex);
+                const speakText = answer?.firstIndex === visibleStartIndex + visibleIndex ? answer.text : undefined;
+                return (
+                  /* Session-stable keys: a row keeps its DOM node while the
+                     window slides. Compact panes live on the zoomable canvas:
+                     off-screen rows skip layout/paint via content-visibility. */
+                  <div key={key} data-feed-key={anchorKey ?? undefined} className={compact ? "feed-cv" : undefined}>
+                    <FeedItem item={item} speakText={speakText} />
                   </div>
-                ) : null}
-                <ConversationAttention file={file} />
-                {!file.pendingQuestion && !file.waitingInput && endedQuestion ? (
-                  <div className="my-4 rounded-[8px] border border-border bg-sunken px-4 py-3 text-[13px] font-semibold text-muted">{endedQuestion}</div>
-                ) : null}
-                {file.activity === "recent" && isAwaitingUser(file) ? (
-                  <div className="mt-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-warning">
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" aria-hidden /> {t("feed.finishedTurn")}
-                  </div>
-                ) : file.activity === "recent" && isSubagent(file) && file.proc !== "running" ? (
-                  <div className="mt-2 flex items-center gap-1 text-[11.5px] font-semibold text-accent">
-                    <CornerDownRight className="h-3.5 w-3.5" aria-hidden /> {t("feed.returnedResult")}
-                  </div>
-                ) : null}
-              </>
-            ) : (
+                );
+              })
+            ) : windowTail ? null : (
               <div className="mt-[14vh] text-center text-muted">
                 {tail.loading
                   ? t("common.loadingCap")
@@ -523,7 +529,32 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                 ) : null}
               </div>
             )}
-            {feed.items.length ? null : <ConversationAttention file={file} />}
+            {/* One window tail for every lifecycle state (issue #569): the live
+                assistant delta, the operator's own queued bubbles, and the
+                launch chips all render here whether or not the transcript has
+                flushed a single item yet — a queued launch, a delivering first
+                message, and a live conversation are the same feed. */}
+            {liveTurn?.text ? (
+              <div data-live-turn className="my-2 ml-9 whitespace-pre-wrap [overflow-wrap:anywhere] text-ui text-primary">
+                {liveTurn.text}
+                <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-[2px] bg-accent align-text-bottom" aria-hidden />
+              </div>
+            ) : null}
+            {memoryKey && pendingOutbox.length ? <OutboxBubbles cardId={memoryKey} entries={pendingOutbox} /> : null}
+            {launch ? <LaunchChips launch={launch} onRetry={onLaunchRetry} /> : null}
+            <ConversationAttention file={file} />
+            {feed.items.length && !file.pendingQuestion && !file.waitingInput && endedQuestion ? (
+              <div className="my-4 rounded-[8px] border border-border bg-sunken px-4 py-3 text-[13px] font-semibold text-muted">{endedQuestion}</div>
+            ) : null}
+            {feed.items.length && file.activity === "recent" && isAwaitingUser(file) ? (
+              <div className="mt-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-warning">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" aria-hidden /> {t("feed.finishedTurn")}
+              </div>
+            ) : feed.items.length && file.activity === "recent" && isSubagent(file) && file.proc !== "running" ? (
+              <div className="mt-2 flex items-center gap-1 text-[11.5px] font-semibold text-accent">
+                <CornerDownRight className="h-3.5 w-3.5" aria-hidden /> {t("feed.returnedResult")}
+              </div>
+            ) : null}
           </>
         )}
         </div>

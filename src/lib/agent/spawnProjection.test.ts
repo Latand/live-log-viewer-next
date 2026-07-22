@@ -8,7 +8,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { FileEntry } from "@/lib/types";
 
 import { AgentRegistry } from "./registry";
-import { preallocatedStructuredSpawnCards } from "./spawnProjection";
+import { preallocatedStructuredSpawnCards, projectLaunchConversations } from "./spawnProjection";
 
 function scannedFile(pathname: string): FileEntry {
   return {
@@ -80,9 +80,80 @@ test("a settled artifact stays projected across restart until inventory observes
   }
 });
 
-test("issue 533: route-recovered late success remains visibly projected after transcript materialization", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-late-success-projection-"));
+/** The #569 live evidence, reproduced: launch f6b3cf69 settles `route-recovered`
+    with `artifactLifecycle: materialized` while its Codex transcript is already
+    scanned and running. */
+function lateSuccessLaunch(directory: string): { registry: AgentRegistry; artifactPath: string; launchId: string; conversationId: string; createdAt: number } {
   const artifactPath = path.join(directory, "late-success.jsonl");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex", cwd: directory, transport: "structured", accountId: "work",
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+  });
+  if (begun.kind !== "created") throw new Error("expected structured launch creation");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "late-success" }, artifactPath, cwd: directory,
+    accountId: "work", launchProfile: emptyLaunchProfile({ cwd: directory }), status: "idle",
+    host: null, structuredHost: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+  }, "route-recovered");
+  observeArtifact(registry, artifactPath, directory);
+  return {
+    registry,
+    artifactPath,
+    launchId: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    createdAt: Date.parse(begun.receipt.createdAt),
+  };
+}
+
+test("issue 569: a materialized live conversation retires the duplicate launch card and keeps the launch as transient facts", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-late-success-projection-"));
+  try {
+    const launch = lateSuccessLaunch(directory);
+    const scanned = scannedFile(launch.artifactPath);
+    scanned.activity = "live";
+
+    /* The operator's 12:26–12:30 window: the transcript is live and the launch
+       is `live-late-success`. Exactly one board entry — the conversation — and
+       the launch renders inside it, never as a second card saying "queued". */
+    const fresh = projectLaunchConversations([scanned], launch.registry.snapshot(), launch.createdAt + 60_000);
+    expect(fresh.cards).toEqual([]);
+    expect(fresh.facts.get(launch.artifactPath)).toMatchObject({ state: "live-late-success", initialMessage: "delivered" });
+    /* Issue #533 stays satisfied: the late success is still visible — as the
+       live conversation's own chip, which is what the operator was looking for. */
+    expect(preallocatedStructuredSpawnCards([scanned], launch.registry.snapshot(), launch.createdAt + 60_000)).toEqual([]);
+
+    /* Transient: past the freshness horizon the chips stop rendering, and the
+       conversation window is unchanged underneath. */
+    const later = projectLaunchConversations([scanned], launch.registry.snapshot(), launch.createdAt + 16 * 60_000);
+    expect(later.cards).toEqual([]);
+    expect(later.facts.get(launch.artifactPath)).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 569: the launch route resolves to the canonical conversation long after the card retires", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-late-success-route-"));
+  try {
+    const launch = lateSuccessLaunch(directory);
+    const scanned = scannedFile(launch.artifactPath);
+    const route = `spawn:${launch.launchId}`;
+
+    /* The operator's second failure phase: 14 minutes in, and again after the
+       15-minute card cutoff, `#c=spawn:<launchId>` must still name the live
+       conversation rather than dead-ending on Overview. */
+    for (const offset of [60_000, 14 * 60_000, 16 * 60_000, 23 * 60 * 60_000]) {
+      expect(projectLaunchConversations([scanned], launch.registry.snapshot(), launch.createdAt + offset).routes[route])
+        .toBe(launch.conversationId);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 569: a launch with no materialized transcript still projects the conversation window itself", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-late-success-unmaterialized-"));
   try {
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
@@ -90,19 +161,11 @@ test("issue 533: route-recovered late success remains visibly projected after tr
       launchProfile: emptyLaunchProfile({ cwd: directory }),
     });
     if (begun.kind !== "created") throw new Error("expected structured launch creation");
-    registry.settleSpawn(begun.receipt.launchId, {
-      key: { engine: "codex", sessionId: "late-success" }, artifactPath, cwd: directory,
-      accountId: "work", launchProfile: emptyLaunchProfile({ cwd: directory }), status: "idle",
-      host: null, structuredHost: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
-    }, "route-recovered");
-    observeArtifact(registry, artifactPath, directory);
-    const scanned = scannedFile(artifactPath);
-    scanned.conversationId = begun.receipt.conversationId;
-    const created = Date.parse(begun.receipt.createdAt);
 
-    expect(preallocatedStructuredSpawnCards([scanned], registry.snapshot(), created + 60_000))
-      .toEqual([expect.objectContaining({ spawn: expect.objectContaining({ state: "live-late-success" }) })]);
-    expect(preallocatedStructuredSpawnCards([scanned], registry.snapshot(), created + 16 * 60_000)).toEqual([]);
+    const projection = projectLaunchConversations([], registry.snapshot());
+    expect(projection.cards).toEqual([expect.objectContaining({ path: `spawn:${begun.receipt.launchId}` })]);
+    expect(projection.facts.size).toBe(0);
+    expect(projection.routes[`spawn:${begun.receipt.launchId}`]).toBe(begun.receipt.conversationId);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

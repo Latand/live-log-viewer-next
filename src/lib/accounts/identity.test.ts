@@ -4,6 +4,7 @@ import type { FileEntry } from "@/lib/types";
 
 import {
   conversationIdentity,
+  currentConversationFile,
   formatConversationHash,
   isArchivedPredecessor,
   isMigrationSuccessor,
@@ -127,4 +128,45 @@ test("resolveConversationTarget follows chained aliases and survives cycles", ()
   expect(resolveConversationTarget([current], hash, { conversation_A: "conversation_B", conversation_B: "conversation_C" })).toBe(current);
   /* A malformed cyclic map terminates at the last unvisited id. */
   expect(resolveConversationTarget([current], hash, { conversation_A: "conversation_B", conversation_B: "conversation_A" })).toBeNull();
+});
+
+describe("issue 569: launch routes resolve to the canonical live conversation", () => {
+  const live = file({ path: "/repo/live.jsonl", conversationId: "conversation_9f374e8a", activity: "live" });
+  const placeholder = file({ path: "spawn:f6b3cf69", conversationId: "conversation_9f374e8a", activity: "live" });
+  const routes = { "spawn:f6b3cf69": "conversation_9f374e8a" };
+
+  test("a spawn deep link lands on the live transcript, not the placeholder", () => {
+    /* Both projections in one payload was the #569 duplicate; even then the
+       link must name the conversation, never the launch surface. */
+    for (const hash of [
+      { conversationId: "spawn:f6b3cf69", filePath: null, project: null },
+      { conversationId: null, filePath: "spawn:f6b3cf69", project: null },
+    ]) {
+      expect(resolveConversationTarget([placeholder, live], hash, {}, routes)).toBe(live);
+    }
+  });
+
+  test("a spawn deep link survives the placeholder retiring by age", () => {
+    /* The operator's refresh 15+ minutes in: the launch card is gone from the
+       payload entirely, and the link previously dead-ended on Overview. */
+    const hash = { conversationId: "spawn:f6b3cf69", filePath: null, project: null };
+    expect(resolveConversationTarget([live], hash, {}, routes)).toBe(live);
+    expect(resolveConversationTarget([live], hash, {}, {})).toBeNull();
+  });
+
+  test("a spawn deep link falls back to the placeholder before anything materializes", () => {
+    const hash = { conversationId: "spawn:f6b3cf69", filePath: null, project: null };
+    expect(resolveConversationTarget([placeholder], hash, {}, routes)).toBe(placeholder);
+  });
+
+  test("a launch route honors a conversation-id alias", () => {
+    const canonical = file({ path: "/repo/canonical.jsonl", conversationId: "conversation_canonical" });
+    const hash = { conversationId: "spawn:f6b3cf69", filePath: null, project: null };
+    expect(resolveConversationTarget([canonical], hash, { conversation_9f374e8a: "conversation_canonical" }, routes)).toBe(canonical);
+  });
+
+  test("currentConversationFile prefers a materialized transcript over the launch placeholder", () => {
+    expect(currentConversationFile([placeholder, live], "conversation_9f374e8a")).toBe(live);
+    expect(currentConversationFile([placeholder], "conversation_9f374e8a")).toBe(placeholder);
+  });
 });

@@ -10,6 +10,7 @@ import { useLocale } from "@/lib/i18n";
 import type { UseComposerReturn } from "@/hooks/useComposer";
 import { prewarmLiveToken } from "@/hooks/useDictation";
 
+import { recallHistory } from "./composerHistory";
 import { Hint } from "./Hint";
 import { ImagePickerButton, ImagePreviewStrip } from "./imageAttachments";
 import { MicButtonView } from "./MicButton";
@@ -68,7 +69,13 @@ export interface ComposerBarProps {
       #25). Rendered under the status line; absent while the runtime bus is off,
       so the composer is unchanged on the landing-disabled path. */
   receipts?: ReactNode;
+  /** Previously submitted messages, newest first — queued ones ahead of sent
+      ones (issue #561). ArrowUp/ArrowDown recall them while the composer is
+      empty; absent (the default) leaves the arrows as plain caret movement. */
+  history?: readonly string[];
 }
+
+const NO_HISTORY: readonly string[] = [];
 
 function SendMenu({ label, actions, onClose }: { label: string; actions: SendMenuAction[]; onClose: () => void }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -151,6 +158,7 @@ export function ComposerBar({
   onSendBlockedRecover,
   sendPayloadAvailable = false,
   receipts,
+  history = NO_HISTORY,
 }: ComposerBarProps) {
   const {
     displayText,
@@ -182,6 +190,10 @@ export function ComposerBar({
      single inline second row, so the flags only gate the phone. Paste/drop
      attachment behavior lives on the textarea and is unaffected by the fold. */
   const [optionsOpen, setOptionsOpen] = useState(false);
+  /* Empty-composer history recall (issue #561). -1 is "the operator's own
+     draft"; any index at or above 0 is a recalled message, and typing drops
+     straight back out of recall so navigation never fights editing. */
+  const [historyIndex, setHistoryIndex] = useState(-1);
   const optionsRowId = useId();
   const hasSecondaryRow = Boolean(leftSlot) || showImage;
   /* The phone fold now holds only the attachment picker; with images hidden
@@ -257,7 +269,11 @@ export function ComposerBar({
                     if (sendBlocked || !effectiveCanSend) {
                       event.preventDefault();
                       event.stopPropagation();
+                      return;
                     }
+                    /* A submitted recall is a new message, not a position in
+                       the list: the next ArrowUp starts from the top again. */
+                    setHistoryIndex(-1);
                   }
             }
             disabled={sendDisabled}
@@ -304,7 +320,10 @@ export function ComposerBar({
           value={displayText}
           rows={1}
           readOnly={Boolean(dictation.liveText)}
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => {
+            setHistoryIndex(-1);
+            setText(event.target.value);
+          }}
           /* Focusing the composer often precedes a dictation; minting the live
              token here hides its round-trip from the eventual mic press. */
           onFocus={prewarmLiveToken}
@@ -345,6 +364,25 @@ export function ComposerBar({
             if (!imageDisabled) (onImageFiles ?? attachments.addFiles)(files);
           }}
           onKeyDown={(event) => {
+            /* ArrowUp/ArrowDown recall previously queued and sent messages
+               while the composer is empty (issue #561) — the shell convention.
+               Once recall is active the arrows keep walking the list, so a
+               recalled multi-line message can be stepped past; the first edit
+               releases the arrows back to caret movement. */
+            if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !dictationRecording && !event.metaKey && !event.ctrlKey && !event.altKey) {
+              const recall = recallHistory(historyIndex, event.key, history, displayText.length === 0);
+              if (recall) {
+                event.preventDefault();
+                setHistoryIndex(recall.index);
+                setText(recall.text);
+                requestAnimationFrame(() => {
+                  const el = inputRef.current;
+                  if (!el) return;
+                  el.setSelectionRange(el.value.length, el.value.length);
+                });
+                return;
+              }
+            }
             /* Enter sends like the old single-line input; Shift+Enter makes a
                new line. Composition guard keeps IME confirms from sending.
                Enter honors the exact admission gate of the Send button (PR
@@ -356,6 +394,7 @@ export function ComposerBar({
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               if (sendBlocked || !effectiveCanSend || imageSendBlocked) return;
+              setHistoryIndex(-1);
               if (dictation.phase === "rec") void stopAndSend();
               else void submit();
             }

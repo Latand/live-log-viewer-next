@@ -37,19 +37,25 @@ export interface AttachCommand {
   note?: "subagent-root";
 }
 
-/** Build the {@link AttachCommand} from an already-resolved resume spec. Pure. */
+/** Build the {@link AttachCommand} from an already-resolved resume spec. Pure.
+    `cwd` overrides the spec's own working directory: the resume spec re-derives
+    it by sniffing the transcript head and silently falls back to `$HOME` when
+    that read comes up empty, which is exactly the wrong-path command #561
+    reported. The conversation's recorded cwd is authoritative, so when the
+    caller knows it, it wins. */
 export function attachCommandFromSpec(
   spec: ResumeSpec,
-  meta: { accountId: string; accountLabel: string; note?: "subagent-root" },
+  meta: { accountId: string; accountLabel: string; note?: "subagent-root"; cwd?: string | null },
 ): AttachCommand {
+  const cwd = meta.cwd || spec.cwd;
   return {
     engine: spec.engine,
     accountId: meta.accountId,
     accountLabel: meta.accountLabel,
-    cwd: spec.cwd,
+    cwd,
     command: spec.command,
-    cdCommand: `cd ${shellQuote(spec.cwd)}`,
-    fullCommand: `cd ${shellQuote(spec.cwd)} && ${spec.command}`,
+    cdCommand: `cd ${shellQuote(cwd)}`,
+    fullCommand: `cd ${shellQuote(cwd)} && ${spec.command}`,
     ...(meta.note ? { note: meta.note } : {}),
   };
 }
@@ -92,6 +98,7 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
     value: attachCommandFromSpec(spec, {
       accountId,
       accountLabel: deps.accountLabelFor(spec.engine, accountId),
+      cwd: target.entry.cwd ?? entry.cwd ?? null,
       ...(target.viaRoot ? { note: "subagent-root" as const } : {}),
     }),
   };

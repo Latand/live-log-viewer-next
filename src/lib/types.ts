@@ -218,6 +218,11 @@ export interface FileEntry {
   migration?: ConversationMigration;
   /** Durable launch projection shown before its transcript enters the scan. */
   spawn?: StructuredSpawnCardState;
+  /** Transient launch/delivery facts of the launch that CREATED this live
+      conversation (issue #569). The launch never projects a second board entry
+      once its transcript exists — it folds into this conversation's own window
+      as compact status chips, and drops off once it stops being news. */
+  launch?: StructuredSpawnCardState;
 }
 
 /** Per-session migration annotation carried on a {@link FileEntry} while an
@@ -283,6 +288,10 @@ export interface FilesResponse {
   /** Durable conversation-id aliases (old id → canonical id), so a deep link
       copied before provisional-id adoption still resolves its card. */
   conversationAliases?: Record<string, string>;
+  /** Durable launch routes (`spawn:<launchId>` → canonical conversation id), so
+      a refresh or a copied launch link lands on the live conversation instead
+      of a placeholder that outlived its own success (issue #569). */
+  launchRoutes?: Record<string, string>;
 }
 
 export type PlanStepStatus = "pending" | "in_progress" | "completed";

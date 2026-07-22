@@ -10,7 +10,7 @@ import { attachCommandFromSpec, attachTargetPath, resolveAttachCommand, type Att
  */
 
 function spec(overrides: Partial<ResumeSpec> = {}): ResumeSpec {
-  return { command: "claude --resume 22222222", cwd: "/home/latand/Projects/atlas", windowName: "atlas", engine: "claude", ...overrides };
+  return { command: "claude --resume 22222222", cwd: "/home/user/Projects/atlas", windowName: "atlas", engine: "claude", ...overrides };
 }
 
 function file(overrides: Partial<FileEntry> = {}): FileEntry {
@@ -59,6 +59,28 @@ test("resolveAttachCommand resolves a live/finished conversation to its own resu
     expect(res.value.accountId).toBe("d");
     expect(res.value.cwd).toBe("/cwd/root.jsonl");
     expect(res.value.note).toBeUndefined();
+  }
+});
+
+test("issue 561: the command uses the conversation's recorded cwd, not the spec's sniffed fallback", () => {
+  /* The resume spec re-derives cwd by sniffing the transcript head and falls
+     back to $HOME when that read is empty — the wrong-path symptom #561 filed.
+     When the conversation's own cwd is known it must win. */
+  const meta = { accountId: "d", accountLabel: "l", cwd: "/real/project/dir" };
+  const cmd = attachCommandFromSpec(spec({ cwd: "/home/user" /* sniffed fallback */ }), meta);
+  expect(cmd.cwd).toBe("/real/project/dir");
+  expect(cmd.cdCommand).toBe("cd '/real/project/dir'");
+  expect(cmd.fullCommand).toBe("cd '/real/project/dir' && claude --resume 22222222");
+});
+
+test("issue 561: resolveAttachCommand carries the entry's recorded cwd into the command", () => {
+  const f = file({ path: "/root.jsonl", engine: "codex", root: "codex-sessions", cwd: "/home/user/atlas" });
+  const res = resolveAttachCommand("/root.jsonl", deps([f]));
+  expect(res.ok).toBe(true);
+  if (res.ok) {
+    /* The recorded cwd overrides the resolver's `/cwd/root.jsonl` spec fallback. */
+    expect(res.value.cwd).toBe("/home/user/atlas");
+    expect(res.value.fullCommand.startsWith("cd '/home/user/atlas' && ")).toBe(true);
   }
 });
 

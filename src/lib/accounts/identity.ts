@@ -82,16 +82,30 @@ export function formatConversationHash(file: Pick<FileEntry, "conversationId" | 
     : "#f=" + encodeURIComponent(file.path);
 }
 
+/** A projected launch placeholder (`spawn:<launchId>`) rather than a scanned
+    transcript. It is the SAME conversation in an earlier state, so it never
+    outranks the materialized transcript of that conversation (issue #569). */
+export function isLaunchPlaceholder(file: Pick<FileEntry, "path">): boolean {
+  return file.path.startsWith("spawn:");
+}
+
 /** The current, visible entry for a stable id: the one generation that is not an
-    archived predecessor. */
+    archived predecessor. A materialized transcript always wins over the launch
+    placeholder of the same conversation — the placeholder is that conversation's
+    earlier state, never a second card (issue #569). */
 export function currentConversationFile(files: readonly FileEntry[], conversationId: string): FileEntry | null {
+  let placeholder: FileEntry | null = null;
   let fallback: FileEntry | null = null;
   for (const file of files) {
     if (file.conversationId !== conversationId) continue;
+    if (isLaunchPlaceholder(file)) {
+      placeholder = placeholder ?? file;
+      continue;
+    }
     fallback = fallback ?? file;
     if (!isArchivedPredecessor(file)) return file;
   }
-  return fallback;
+  return fallback ?? placeholder;
 }
 
 /**
@@ -114,7 +128,42 @@ export function canonicalizeConversationId(id: string, conversationAliases: Read
   return current;
 }
 
-export function resolveConversationTarget(files: FileEntry[], hash: ConversationHash, conversationAliases: Readonly<Record<string, string>> = {}): FileEntry | null {
+/**
+ * A `spawn:<launchId>` deep link is a LAUNCH route, not a transcript path: the
+ * durable receipt already names the conversation it created, so the link must
+ * land on that conversation the moment it materializes — never on a placeholder
+ * that survived its own success, and never on Overview once the placeholder
+ * ages out (issue #569). Falls back to the still-projected placeholder while
+ * nothing has materialized yet.
+ */
+function resolveLaunchRoute(
+  files: readonly FileEntry[],
+  target: string,
+  launchRoutes: Readonly<Record<string, string>>,
+  conversationAliases: Readonly<Record<string, string>>,
+): FileEntry | null {
+  const conversationId = launchRoutes[target];
+  if (conversationId) {
+    const live = currentConversationFile(files, canonicalizeConversationId(conversationId, conversationAliases));
+    if (live) return live;
+  }
+  const placeholder = files.find((file) => file.path === target) ?? null;
+  if (placeholder?.conversationId) {
+    return currentConversationFile(files, canonicalizeConversationId(placeholder.conversationId, conversationAliases)) ?? placeholder;
+  }
+  return placeholder;
+}
+
+export function resolveConversationTarget(
+  files: FileEntry[],
+  hash: ConversationHash,
+  conversationAliases: Readonly<Record<string, string>> = {},
+  launchRoutes: Readonly<Record<string, string>> = {},
+): FileEntry | null {
+  const launchTarget = hash.conversationId ?? hash.filePath;
+  if (launchTarget && launchTarget.startsWith("spawn:")) {
+    return resolveLaunchRoute(files, launchTarget, launchRoutes, conversationAliases);
+  }
   if (hash.conversationId) {
     /* A link copied before provisional-id adoption carries an old alias;
        files annotate the canonical id, so canonicalize before matching. */

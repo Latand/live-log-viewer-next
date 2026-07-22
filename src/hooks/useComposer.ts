@@ -49,6 +49,11 @@ export interface UseComposerOptions {
       `fieldsDisabled` and `canSend` exactly like the in-flight flags. */
   disabled?: boolean;
   imageCapability?: RuntimeImageCapability | null;
+  /** Whether an in-flight delivery locks the text field. Queue-first composers
+      (issue #561) pass `false`: a submitted message is already in the durable
+      queue, so the input must stay typable while it is delivered — there is no
+      long-lived "sending" state holding the draft hostage. */
+  holdInputWhileBusy?: boolean;
 }
 
 /**
@@ -59,7 +64,7 @@ export interface UseComposerOptions {
  * own delivery (`submit`) and its own surrounding chrome; everything below the
  * text lives in `ComposerBar`.
  */
-export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null }: UseComposerOptions) {
+export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, holdInputWhileBusy = true }: UseComposerOptions) {
   /* A remount mid-typing (column reshuffles, draft handovers) restores the
      draft from storage; the ref always holds the latest text so async
      dictation callbacks append to what the user typed meanwhile instead of
@@ -193,7 +198,7 @@ export function useComposer({ initialText, persistText, submit, disabled = false
 
   const dictationRecording = dictation.phase === "rec";
   const dictationBusy = dictation.phase === "busy";
-  const fieldsDisabled = busy || voiceSending || disabled;
+  const fieldsDisabled = (holdInputWhileBusy && busy) || voiceSending || disabled;
   /* An attachment still decoding, or one that failed to read, blocks Send with a
      visible reason (issue #419): a send now would silently drop that image, so
      the composer waits for every slot to settle (or be removed/retried). */

@@ -7,7 +7,7 @@ import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { accountIdFromPath } from "@/lib/accounts/badge";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
-import { listFiles } from "@/lib/scanner";
+import { cachedFileScan } from "@/lib/scanner/scanCache";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
@@ -49,7 +49,12 @@ export async function GET(req: NextRequest): Promise<NextResponse<AttachCommand 
        subagent resumes through its ROOT session — so the fence checks the
        target's conversation too, or a held root's command would leak out via
        its subagent path (#257). */
-    const files = await listFiles();
+    /* Instant by construction (#561): the command is composed from data the
+       viewer already holds — the account home, the resume session id, and the
+       conversation's recorded cwd. Reading the shared scan snapshot instead of
+       launching a private full-corpus scan removes the multi-second wait the
+       operator saw; the snapshot is the same one the board is rendering. */
+    const files = (await cachedFileScan(undefined, path)).snapshot.files;
     const fencePaths = new Set([path]);
     const targetPath = attachTargetPath(path, files);
     if (targetPath) fencePaths.add(targetPath);
