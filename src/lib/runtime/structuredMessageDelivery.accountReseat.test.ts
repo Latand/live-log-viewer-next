@@ -11,6 +11,7 @@ import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot, RuntimeTurnAxis } from "./contracts";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import type { StructuredImageRef } from "./structuredContent";
+import { StructuredDeliveryControllerUnavailableError } from "./structuredDeliveryController";
 
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 
@@ -527,6 +528,52 @@ test("a dead structured send is durable before predecessor recovery", async () =
   }]);
 });
 
+test("runtime synchronization without published ownership durably admits a selected-account handoff", async () => {
+  const { registry, conversation } = registryWithConversation("seat-source", "claude");
+  registry.setEngineRouting("claude", "seat-active");
+  let migrationTicks = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "unpublished-account-reseat",
+    text: "continue after runtime ownership synchronizes",
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => { migrationTicks += 1; },
+  });
+
+  expect(result).toMatchObject({
+    ok: true,
+    structured: true,
+    target: conversation.id,
+    outcome: "held",
+  });
+  expect(migrationTicks).toBe(1);
+  expect(registry.conversation(conversation.id)).toMatchObject({
+    id: conversation.id,
+    migration: { targetId: "seat-active", phase: "requested" },
+  });
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "unpublished-account-reseat",
+    state: "held",
+    generationId: null,
+  }]);
+
+  const restarted = new AgentRegistry(registry.filename);
+  expect(restarted.conversation(conversation.id)).toMatchObject({
+    id: conversation.id,
+    migration: { targetId: "seat-active", phase: "requested" },
+  });
+  expect(restarted.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "unpublished-account-reseat",
+    state: "held",
+    generationId: null,
+  }]);
+});
+
 test("a matching account keeps the direct structured delivery path", async () => {
   const { registry, conversation } = registryWithConversation();
   registry.setEngineRouting("codex", "seat-source");
@@ -825,4 +872,84 @@ test("restart preserves one Viewer conversation and drains once after account ad
     text: "",
     generationId: successorId,
   }]);
+});
+
+test("controller startup retry publishes one selected-account successor and drains once for both engines", async () => {
+  for (const engine of ["claude", "codex"] as const) {
+    const { registry, conversation } = registryWithConversation("seat-source", engine);
+    registry.setEngineRouting(engine, "seat-active");
+    const clientMessageId = `${engine}-controller-startup-reseat`;
+    expect(await enqueueStructuredMessage({
+      path: artifactPath,
+      conversationId: conversation.id,
+      clientMessageId,
+      text: `continue ${engine} after controller startup`,
+    }, {
+      enabled: () => true,
+      client: () => null,
+      registry: () => registry,
+      requestMigrationTick: () => {},
+    })).toMatchObject({ ok: true, outcome: "held" });
+
+    const successorId = `${engine}-controller-successor`;
+    const successorPath = `/sessions/${successorId}.jsonl`;
+    let creates = 0;
+    let publications = 0;
+    const provider: SuccessorProviderPort = {
+      virtualSource: true,
+      async create(input) {
+        creates += 1;
+        return {
+          operationId: input.operationId,
+          nativeId: successorId,
+          path: successorPath,
+          continuityPaths: [successorPath],
+          historyHash: `${engine}-controller-history`,
+          host: {
+            kind: engine === "claude" ? "claude-stream" : "codex-app-server",
+            identity: successorId,
+            epoch: 1,
+            verifiedAt: "2026-07-21T00:01:00.000Z",
+          },
+        };
+      },
+      async verify() {},
+      async publishHost() {
+        publications += 1;
+        if (publications === 1) throw new StructuredDeliveryControllerUnavailableError();
+      },
+    };
+
+    const duringStartup = new AgentRegistry(registry.filename);
+    await advanceConversationMigration(conversation.id, duringStartup, provider, { deferBoardRepair: true });
+    expect(duringStartup.conversation(conversation.id)?.migration).toMatchObject({
+      phase: "verifying",
+      providerReceipt: { nativeId: successorId, path: successorPath },
+    });
+    expect(duringStartup.pendingDeliveries(conversation.id)).toMatchObject([{
+      clientMessageId,
+      state: "held",
+      generationId: null,
+    }]);
+
+    const controllerReady = new AgentRegistry(registry.filename);
+    await advanceConversationMigration(conversation.id, controllerReady, provider, { deferBoardRepair: true });
+    const delivered: string[] = [];
+    const delivery = {
+      async deliver(input: { clientMessageId: string; path: string }) {
+        delivered.push(input.clientMessageId);
+        expect(input.path).toBe(successorPath);
+        return "delivered" as const;
+      },
+    };
+    await drainHeldDeliveries(conversation.id, delivery, controllerReady);
+    await drainHeldDeliveries(conversation.id, delivery, controllerReady);
+
+    expect({ creates, publications, delivered }).toEqual({
+      creates: 1,
+      publications: 2,
+      delivered: [clientMessageId],
+    });
+    expect(controllerReady.conversation(conversation.id)?.migration?.phase).toBe("committed");
+  }
 });

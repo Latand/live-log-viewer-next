@@ -54,6 +54,29 @@ const state: ControllerState = controllerStore.__llvStructuredDeliveryController
   stopActive: () => {},
 };
 
+const CONTROLLER_UNAVAILABLE_CODE = "structured-delivery-controller-unavailable";
+
+export class StructuredDeliveryControllerUnavailableError extends Error {
+  readonly code = CONTROLLER_UNAVAILABLE_CODE;
+
+  constructor() {
+    super("structured delivery controller is unavailable");
+    this.name = "StructuredDeliveryControllerUnavailableError";
+  }
+}
+
+export function isStructuredDeliveryControllerUnavailable(error: unknown): boolean {
+  return error instanceof StructuredDeliveryControllerUnavailableError
+    || (typeof error === "object" && error !== null && "code" in error
+      && error.code === CONTROLLER_UNAVAILABLE_CODE);
+}
+
+export function requireStructuredDeliveryControllerPublication(): NonNullable<ControllerState["registerActiveHost"]> {
+  const publish = state.registerActiveHost;
+  if (!publish) throw new StructuredDeliveryControllerUnavailableError();
+  return publish;
+}
+
 function entryForHost(registry: AgentRegistry, adopted: StructuredDeliveryHost): AgentRegistryEntry | null {
   return registry.readOnlySnapshot().entries[sessionKeyId(adopted.key)] ?? null;
 }
@@ -651,14 +674,13 @@ export async function publishStructuredDeliveryHost(
   item: StructuredDeliveryHost,
   ownsOperation?: () => Promise<boolean>,
 ): Promise<() => Promise<void>> {
-  if (!state.registerActiveHost) throw new Error("structured delivery controller is unavailable");
-  return state.registerActiveHost(item, ownsOperation);
+  return requireStructuredDeliveryControllerPublication()(item, ownsOperation);
 }
 
 export async function completeStructuredDeliveryQueueStartup(
   adopted: readonly StructuredDeliveryHost[],
 ): Promise<void> {
-  if (!state.completeActive) throw new Error("structured delivery controller is unavailable");
+  if (!state.completeActive) throw new StructuredDeliveryControllerUnavailableError();
   await state.completeActive(adopted);
 }
 

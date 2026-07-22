@@ -224,11 +224,26 @@ function holdDuringRuntimeSynchronization(
   requestTick: () => void,
 ): StructuredMessageResult | null {
   const owner = persistedCurrentOwner(request, registry);
-  if (!owner) return ownershipUnavailable();
-  const rejectedHold = supersededRejection(registry, owner.conversation);
+  const unresolvedConversation = request.conversationId?.startsWith("conversation_")
+    ? registry.conversation(request.conversationId as ViewerConversationId)
+    : registry.conversationForPath(request.path);
+  const unresolvedGeneration = unresolvedConversation?.generations.at(-1);
+  const activeAccountId = unresolvedConversation
+    ? registry.engineRouting(unresolvedConversation.engine).activeAccountId
+    : null;
+  const accountReseatWithoutOwner = !owner
+    && unresolvedConversation !== null
+    && unresolvedConversation !== undefined
+    && unresolvedGeneration?.accountId !== null
+    && unresolvedGeneration?.accountId !== undefined
+    && activeAccountId !== null
+    && unresolvedGeneration.accountId !== activeAccountId;
+  if (!owner && !accountReseatWithoutOwner) return ownershipUnavailable();
+  const persistedConversation = owner?.conversation ?? unresolvedConversation!;
+  const rejectedHold = supersededRejection(registry, persistedConversation);
   if (rejectedHold) return rejectedHold;
-  if (owner.kind === "legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
-  let { conversation } = owner;
+  if (owner?.kind === "legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
+  let conversation = persistedConversation;
   if (request.hasImages || request.images?.length) {
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }

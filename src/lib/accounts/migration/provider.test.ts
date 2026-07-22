@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +7,9 @@ import { emptyLaunchProfile, sameProviderReceiptOutcome, type NativeGeneration, 
 import { RegisteredSuccessorProvider, type ProviderDependencies } from "./provider";
 import type { CodexAppServerClient } from "@/lib/accounts/codexAppServer";
 import { AgentRegistry, type ConversationObservation, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { ClaudeStreamBrokerHost } from "@/lib/runtime/claudeStreamBrokerHost";
+import type { EngineHost, HostState } from "@/lib/runtime/engineHost";
+import { StructuredDeliveryControllerUnavailableError } from "@/lib/runtime/structuredDeliveryController";
 
 const roots: string[] = [];
 
@@ -171,6 +174,133 @@ test("Claude successor cleanup releases its published broker owner", async () =>
   expect(publications).toBe(1);
   expect(cleanups).toBe(1);
   expect(legacyCancellations).toBe(0);
+});
+
+test("Claude publication waits for controller startup before replacing its verified successor", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-controller-startup-"));
+  roots.push(base);
+  const source = accountRoot("claude", base, "source");
+  const target = accountRoot("claude", base, "target");
+  const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
+  const nativeId = "47474747-4747-\x34474-8747-474747474747";
+  const transcript = path.join(target.transcriptRoot, `${nativeId}.jsonl`);
+  fs.writeFileSync(transcript, JSON.stringify({ sessionId: nativeId }) + "\n", { mode: 0o600 });
+  const tmux = claudeHost("%47", 4747);
+  let tmuxLive = true;
+  let cancellations = 0;
+  let adoptions = 0;
+  let releases = 0;
+  const state: HostState = {
+    status: "idle",
+    sessionKey: nativeId,
+    endpoint: "stdio:claude-controller-startup",
+    pid: process.pid,
+    processStartIdentity: null,
+    eventCursor: 0,
+    protocolVersion: "test-v1",
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+    account: null,
+  };
+  let stateListener: ((state: HostState) => void) | null = null;
+  const fakeHost = {
+    identity: { sessionId: nativeId },
+    setWriterFence() {},
+    health: async () => state,
+    onStateChange(listener: (next: HostState) => void) {
+      stateListener = listener;
+      return () => { stateListener = null; };
+    },
+    release: async () => {
+      releases += 1;
+      stateListener?.({ ...state, status: "dead", endpoint: "stdio:released", pid: null });
+    },
+  } as unknown as ClaudeStreamBrokerHost & EngineHost;
+  const adopt = spyOn(ClaudeStreamBrokerHost, "adopt").mockImplementation(async () => {
+    adoptions += 1;
+    return fakeHost;
+  });
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    verifyClaudeHost: async () => tmuxLive,
+    cancelClaude: async () => {
+      if (!tmuxLive) return "absent";
+      cancellations += 1;
+      tmuxLive = false;
+      return true;
+    },
+    registry,
+    now: () => "2026-07-22T09:00:00.000Z",
+  });
+  const receipt: ProviderReceipt = {
+    operationId: "claude-controller-startup",
+    nativeId,
+    path: transcript,
+    continuityPaths: [transcript],
+    historyHash: "claude-controller-startup-history",
+    host: {
+      kind: "claude-stream",
+      identity: "%47:4747",
+      epoch: 1,
+      verifiedAt: "2026-07-22T09:00:00.000Z",
+      tmuxHost: tmux,
+    },
+  };
+  const input = {
+    engine: "claude" as const,
+    conversationId: "conversation_claude_controller_startup" as const,
+    targetAccountId: "target",
+    launchProfile: emptyLaunchProfile({ cwd: base }),
+  };
+  const structuredFlag = process.env.LLV_STRUCTURED_HOSTS;
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  const controller = (process as typeof process & {
+    __llvStructuredDeliveryController?: { registerActiveHost: ((item: unknown) => Promise<() => Promise<void>>) | null };
+  }).__llvStructuredDeliveryController!;
+  const originalRegister = controller.registerActiveHost;
+  controller.registerActiveHost = null;
+  try {
+    await provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: input.launchProfile });
+    await expect(provider.publishHost(receipt, input)).rejects.toThrow("controller is unavailable");
+    expect({ tmuxLive, cancellations, adoptions, releases }).toEqual({
+      tmuxLive: true,
+      cancellations: 0,
+      adoptions: 0,
+      releases: 0,
+    });
+
+    controller.registerActiveHost = async () => {
+      controller.registerActiveHost = null;
+      throw new StructuredDeliveryControllerUnavailableError();
+    };
+    await expect(provider.publishHost(receipt, input)).rejects.toThrow("controller is unavailable");
+    expect({ tmuxLive, cancellations, adoptions, releases }).toEqual({
+      tmuxLive: false,
+      cancellations: 1,
+      adoptions: 1,
+      releases: 1,
+    });
+
+    controller.registerActiveHost = async () => async () => {};
+    await provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: input.launchProfile });
+    await provider.publishHost(receipt, input);
+    await provider.cleanup(receipt);
+    expect({ tmuxLive, cancellations, adoptions, releases }).toEqual({
+      tmuxLive: false,
+      cancellations: 1,
+      adoptions: 2,
+      releases: 2,
+    });
+  } finally {
+    controller.registerActiveHost = originalRegister;
+    adopt.mockRestore();
+    if (structuredFlag === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = structuredFlag;
+  }
 });
 
 test("a fenced Claude publication keeps receipt cleanup available", async () => {

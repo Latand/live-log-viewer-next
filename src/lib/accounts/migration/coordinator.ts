@@ -14,6 +14,7 @@ import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { listFiles } from "@/lib/scanner";
 import { recordTranscriptComposerRelease, transcriptTurnResult } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
+import { isStructuredDeliveryControllerUnavailable } from "@/lib/runtime/structuredDeliveryController";
 
 import {
   emptyLaunchProfile,
@@ -566,6 +567,7 @@ export async function advanceConversationMigration(
   } catch (error) {
     const latest = registry.conversation(conversation.id);
     if (error instanceof SuccessorPendingError) return latest ?? conversation;
+    if (isStructuredDeliveryControllerUnavailable(error)) return latest ?? conversation;
     const durableReceipt = latest?.migration?.providerReceipt;
     const fencedByDurableReceipt = receipt !== null && durableReceipt !== null && durableReceipt !== undefined
       && !sameProviderReceiptOutcome(durableReceipt, receipt);
