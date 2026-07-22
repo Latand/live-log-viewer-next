@@ -252,16 +252,37 @@ function encodeComment(comment: string): Uint8Array {
 
 export function createLogTailEventStream(subs: LogStreamSub[], signal?: AbortSignal): ReadableStream<Uint8Array> {
   let session: LogTailStreamSession | null = null;
+  let stopped = false;
   return new ReadableStream<Uint8Array>({
     start(controller) {
+      const enqueue = (payload: Uint8Array) => {
+        if (stopped) return;
+        /* A stale SSE response can outlive its browser connection under the
+           production Next/Bun adapter. Stop at the first queued chunk: the
+           EventSource reconnect resumes from the browser's durable offset,
+           while an abandoned response cannot buffer transcript data forever. */
+        if ((controller.desiredSize ?? 1) <= 0) {
+          stopped = true;
+          session?.close();
+          try { controller.close(); } catch { /* response already closed */ }
+          return;
+        }
+        try {
+          controller.enqueue(payload);
+        } catch {
+          stopped = true;
+          session?.close();
+        }
+      };
       session = new LogTailStreamSession(subs, {
         signal,
-        onEvent: (event) => controller.enqueue(encodeChunk(event)),
-        onComment: (comment) => controller.enqueue(encodeComment(comment)),
+        onEvent: (event) => enqueue(encodeChunk(event)),
+        onComment: (comment) => enqueue(encodeComment(comment)),
       });
       session.start();
     },
     cancel() {
+      stopped = true;
       session?.close();
       session = null;
     },
