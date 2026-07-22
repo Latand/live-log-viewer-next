@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
 import { useLogTail } from "@/hooks/useLogTail";
+import { useRuntimeSessionByArtifact } from "@/hooks/useRuntime";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -100,6 +101,9 @@ interface Props {
 export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, setFollow, compact = false }: Props) {
   const { locale, t } = useLocale();
   const memoryKey = file ? conversationIdentity(file) : null;
+  /* Live streaming text: `delta` events from the structured host render the
+     in-flight assistant reply immediately, ahead of the transcript flush. */
+  const liveTurn = useRuntimeSessionByArtifact(file?.path ?? null)?.session.liveTurn ?? null;
   /* The scroll magnet lives per feed instance, so each column remembers its
      own state across polls: glued to the live tail, or released by the user.
      A remount inherits the transcript's remembered state. */
@@ -478,6 +482,12 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                     </div>
                   );
                 })}
+                {liveTurn?.text ? (
+                  <div data-live-turn className="my-2 ml-9 whitespace-pre-wrap [overflow-wrap:anywhere] text-ui text-primary">
+                    {liveTurn.text}
+                    <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-[2px] bg-accent align-text-bottom" aria-hidden />
+                  </div>
+                ) : null}
                 <ConversationAttention file={file} />
                 {!file.pendingQuestion && !file.waitingInput && endedQuestion ? (
                   <div className="my-4 rounded-[8px] border border-border bg-sunken px-4 py-3 text-[13px] font-semibold text-muted">{endedQuestion}</div>
