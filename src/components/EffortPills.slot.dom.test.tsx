@@ -151,7 +151,7 @@ test("narrow scheme node (360px): the in-node pane keeps the bars in-flow with n
   const entry = fableRoot({ path: "/node.jsonl", name: "node.jsonl" });
   const node: SchemeNode = { file: entry, tasks: [], under: [], isRoot: true, x: 0, y: 0, w: 360, h: 780 };
   const layout: SchemeLayout = {
-    nodes: [node], edges: [], stacks: [], decks: [], loops: [], groups: [], links: [], drafts: [], slots: [],
+    nodes: [node], edges: [], stacks: [], decks: [], loops: [], groups: [], links: [], drafts: [], slots: [], regionTasks: [],
     byPath: new Map([[entry.path, node]]), width: 2000, height: 1000,
   };
   const { host, root } = mount();

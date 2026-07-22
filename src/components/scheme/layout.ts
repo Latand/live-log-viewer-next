@@ -1,5 +1,6 @@
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import type { DeckRound } from "@/components/flows/RoundDeck";
@@ -20,6 +21,8 @@ import {
   type SchemeGroupSpec,
 } from "./agentLinks";
 import { PIPELINE_PLACEHOLDER_STATES, latestAttempt, pipelinePlaceholderStages, stageAttempts } from "@/components/pipelines/pipelineModel";
+import { linkedPipelineTasks } from "./pipelineAnchor";
+import { TASK_W, isPlacedTask, taskBoxHeight } from "./taskGeometry";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex, projectDescendantsOf } from "@/components/projectModel";
 import { cleanTitle, engineColor } from "@/components/utils";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -185,6 +188,17 @@ export interface StageSlot extends SchemeRect {
   incoming?: "run" | "review-loop";
 }
 
+/** A board task card owned by a pipeline region (#531): the layout places it
+    inside the pipeline's colored halo (after the stage chain), overriding the
+    sticky note's lattice position so the pipeline's work item can never sit
+    detached from — or inside a neighbor of — the region it belongs to. */
+export interface RegionTask extends SchemeRect {
+  /** Board key, `task::<id>` — the same key the camera/minimap already use. */
+  key: string;
+  taskId: string;
+  pipelineId: string;
+}
+
 /** Implement↔review pair on the scheme: the corridor the cycle arcs live in. */
 export interface FlowLoop {
   key: string;
@@ -212,6 +226,8 @@ export interface SchemeLayout {
   drafts: DraftNode[];
   /** Dashed placeholder windows for planned pipeline stages (issue #196). */
   slots: StageSlot[];
+  /** Task cards placed inside their pipeline regions (#531). */
+  regionTasks: RegionTask[];
   byPath: Map<string, SchemeRect>;
   width: number;
   height: number;
@@ -258,6 +274,12 @@ export function buildSchemeLayout(
   /** Explicit compact-history inspections render as one pane. Their descendant
       chain remains represented by the pipeline evidence rail. */
   isolatedManualPaths: ReadonlySet<string> = new Set(),
+  /** Board task cards; the ones linked to a surfaced pipeline are placed inside
+      that pipeline's region (#531) and returned as `regionTasks`. */
+  tasks: readonly BoardTask[] = [],
+  /** Session-only expanded-text task ids — an expanded card grows taller, and
+      the region reserves that footprint so containment holds live. */
+  taskTextExpanded: ReadonlySet<string> = new Set(),
 ): SchemeLayout {
   const byAll = new Map(files.map((file) => [file.path, file]));
   const kids = kidsIndex(files);
@@ -336,17 +358,34 @@ export function buildSchemeLayout(
     return false;
   };
 
-  /* ── Pipeline stage rows, classified BEFORE placement (#531) ─────────────────
+  /* ── Pipeline stage chains, classified BEFORE placement (#531) ───────────────
      Every declared stage resolves to exactly one surface (#507 F2): a live full
      pane (its transcript will be a placed node), a completed full card, or a
      placeholder. What the pass will place is fully knowable up front — nodes are
      exactly the branch-group columns plus the manual roots, and a deck lays out
-     exactly when its flow's implementer is such a node — so each pipeline's slot
-     row is planned here and RESERVED inside the tree layout as a child block of
-     its tip. Reserving the row's footprint during placement (instead of dropping
-     it onto the finished board and nudging it around collisions) is what keeps
-     two neighboring pipeline regions from ever intersecting: sibling subtree
-     widths include the rows, so the existing group-boundary gaps apply. */
+     exactly when its flow's implementer is such a node — so each pipeline's
+     stage chain is planned here and RESERVED inside the tree layout. Reserving
+     the chain's footprint during placement (instead of dropping it onto the
+     finished board and nudging it around collisions) is what keeps two
+     neighboring pipeline regions from ever intersecting: sibling subtree widths
+     include the chains, so the existing group-boundary gaps apply.
+
+     Anchoring (#531 round 1 — stable per-stage positions from lineage): stage
+     transcripts materialize as children of the pipeline's lineage host — the
+     conversation the pipeline was launched from (srcPath), which is also the
+     tree parent of every already-placed stage. When that host is a placed node,
+     the WHOLE chain lives in the host's child band at stage-indexed pitch
+     (SLOT_W + SLOT_GAP): stage i's surface — placeholder, completed card, or
+     the live pane the tree places for it — owns the anchor
+     `chainStart + i·pitch` from the very first unscanned render, so a
+     materializing stage lands exactly on its placeholder's coordinates and no
+     neighbor stage's surface moves (unscanned → materialized → host-loss keep
+     identical world anchors), and history reads chronologically left→right:
+     completed → live → future. A wide stage subtree (a spawned agent tree or a
+     folded review deck beside the pane) pushes later anchors right rather than
+     ever overlapping. Without a placed host the chain keeps the round-1
+     behavior: a row reserved under the chain's tip, or a docked row below all
+     content when nothing of the pipeline is placed yet. */
   const prePlacedNodePaths = new Set<string>([
     ...groups.flatMap((group) => group.columns.map((column) => column.file.path)),
     ...manual.map((file) => file.path),
@@ -356,14 +395,20 @@ export function buildSchemeLayout(
     if (prePlacedNodePaths.has(candidate.implementerPath)) prePlacedDeckFlowIds.add(candidate.id);
   }
   type SlotStage = { stage: PipelineStage; index: number; presentation: "placeholder" | "completed"; attempt?: PipelineStageAttempt };
-  interface StageRowPlan {
+  type ChainEntry =
+    | { kind: "node"; index: number; path: string }
+    | { kind: "slot"; index: number; slotStage: SlotStage };
+  interface StageChainPlan {
     pipeline: Pipeline;
-    slotStages: SlotStage[];
-    rowW: number;
+    /** Stage surfaces in stage order: placed child nodes of the host + slots. */
+    entries: ChainEntry[];
+    /** Linked board tasks (#531): placed after the chain, inside the region. */
+    tasks: Array<{ task: BoardTask; h: number }>;
     placed: boolean;
   }
-  const rowPlansByTip = new Map<string, StageRowPlan[]>();
-  const stageRowPlans: StageRowPlan[] = [];
+  const chainPlansByHost = new Map<string, StageChainPlan[]>();
+  const rowPlansByTip = new Map<string, StageChainPlan[]>();
+  const stageChainPlans: StageChainPlan[] = [];
   {
     /* Only THIS project's pipelines may grow memberless slot rows — the global
        list serves cross-project stage membership, so without this fence a
@@ -376,6 +421,8 @@ export function buildSchemeLayout(
       seen.add(pipeline.id);
       return true;
     });
+    /* Each placed task card belongs to at most one pipeline region. */
+    const claimedTaskIds = new Set<string>();
     for (const pipeline of pool) {
       const placeholderIds = new Set(pipelinePlaceholderStages(pipeline, prePlacedNodePaths, prePlacedDeckFlowIds).map((stage) => stage.id));
       /* Completed cards only grow on an active pipeline, and never for the cursor
@@ -383,10 +430,10 @@ export function buildSchemeLayout(
          (folded into an under-deck) has no live pane and shelves (#343), rather
          than resurfacing as a card. */
       const growsHistory = PIPELINE_PLACEHOLDER_STATES.has(pipeline.state);
-      const slotStages: SlotStage[] = [];
+      const stageEntries: ChainEntry[] = [];
       const memberPaths = new Set<string>();
       /* The chain's tip: the LAST stage (in chain order) whose live pane will be
-         a placed node. The slot row anchors as its first child block. */
+         a placed node. */
       let tipPath: string | null = null;
       for (let index = 0; index < pipeline.stages.length; index += 1) {
         const stage = pipeline.stages[index]!;
@@ -396,6 +443,7 @@ export function buildSchemeLayout(
         if (livePath && prePlacedNodePaths.has(livePath)) {
           memberPaths.add(livePath);
           tipPath = livePath;
+          stageEntries.push({ kind: "node", index, path: livePath });
           continue;
         }
         /* A folded review-loop resolves to its flow implementer node (deck laid
@@ -404,10 +452,11 @@ export function buildSchemeLayout(
         if (implPath && prePlacedNodePaths.has(implPath)) {
           memberPaths.add(implPath);
           tipPath = implPath;
+          stageEntries.push({ kind: "node", index, path: implPath });
           continue;
         }
         if (placeholderIds.has(stage.id)) {
-          slotStages.push({ stage, index, presentation: "placeholder" });
+          stageEntries.push({ kind: "slot", index, slotStage: { stage, index, presentation: "placeholder" } });
           continue;
         }
         /* Any materialized attempt (the operational latest or a folded historical
@@ -417,15 +466,33 @@ export function buildSchemeLayout(
         if (!growsHistory || stage.id === pipeline.cursor?.stageId) continue;
         const materialized = stageAttempts(pipeline, stage.id).findLast((candidate) => candidate.agentPath || candidate.flowId);
         if (materialized) {
-          slotStages.push({ stage, index, presentation: "completed", attempt: materialized });
+          stageEntries.push({ kind: "slot", index, slotStage: { stage, index, presentation: "completed", attempt: materialized } });
         }
       }
       if (!surfaceIds.has(pipeline.id) && !memberPaths.size) continue;
-      if (!slotStages.length) continue;
-      const rowW = slotStages.length * SLOT_W + (slotStages.length - 1) * SLOT_GAP;
-      const plan: StageRowPlan = { pipeline, slotStages, rowW, placed: false };
-      stageRowPlans.push(plan);
-      if (tipPath) {
+      const slotCount = stageEntries.filter((entry) => entry.kind === "slot").length;
+      const linkedTasks = linkedPipelineTasks(pipeline, tasks)
+        .filter((task) => isPlacedTask(task) && !claimedTaskIds.has(task.id))
+        .map((task) => ({ task, h: taskBoxHeight(task, taskTextExpanded.has(task.id)) }));
+      if (!slotCount && !linkedTasks.length) continue;
+      for (const { task } of linkedTasks) claimedTaskIds.add(task.id);
+      const plan: StageChainPlan = { pipeline, entries: stageEntries, tasks: linkedTasks, placed: false };
+      stageChainPlans.push(plan);
+      /* The lineage host: the placed conversation the stage transcripts hang
+         under — the tip's tree parent once anything is placed, else the src
+         conversation the pipeline was launched from. */
+      const tipParent = tipPath ? byAll.get(tipPath)?.parent ?? null : null;
+      const hostPath =
+        tipPath && tipParent && prePlacedNodePaths.has(tipParent)
+          ? tipParent
+          : !tipPath && pipeline.srcPath && prePlacedNodePaths.has(pipeline.srcPath)
+            ? pipeline.srcPath
+            : null;
+      if (hostPath) {
+        const list = chainPlansByHost.get(hostPath);
+        if (list) list.push(plan);
+        else chainPlansByHost.set(hostPath, [plan]);
+      } else if (tipPath) {
         const list = rowPlansByTip.get(tipPath);
         if (list) list.push(plan);
         else rowPlansByTip.set(tipPath, [plan]);
@@ -433,36 +500,61 @@ export function buildSchemeLayout(
     }
   }
   const slots: StageSlot[] = [];
-  const slotKeysByPipeline = new Map<string, string[]>();
-  const emitStageRow = (plan: StageRowPlan, sx: number, sy: number) => {
+  const regionTasks: RegionTask[] = [];
+  const regionKeysByPipeline = new Map<string, string[]>();
+  const regionKeys = (pipelineId: string): string[] => {
+    const list = regionKeysByPipeline.get(pipelineId);
+    if (list) return list;
+    const fresh: string[] = [];
+    regionKeysByPipeline.set(pipelineId, fresh);
+    return fresh;
+  };
+  const emitSlot = (plan: StageChainPlan, slotStage: SlotStage, x: number, y: number, previous: SlotStage | null) => {
+    const { stage, index, presentation, attempt } = slotStage;
+    /* The handoff badge renders only between chain-adjacent slots — a gap (a
+       live pane between them) breaks the visual chain. */
+    const adjacent = previous !== null && plan.pipeline.stages[index - 1]?.id === previous.stage.id;
+    const slot: StageSlot = {
+      key: stageSlotKey(plan.pipeline.id, stage.id),
+      pipeline: plan.pipeline,
+      stage,
+      index,
+      total: plan.pipeline.stages.length,
+      presentation,
+      ...(attempt ? { attempt } : {}),
+      ...(adjacent ? { incoming: stage.kind } : {}),
+      x,
+      y,
+      w: SLOT_W,
+      /* Every slot is a full-size card — completed and placeholder alike share
+         the live conversation's footprint (#507 F2). */
+      h: SLOT_H,
+    };
+    slots.push(slot);
+    regionKeys(plan.pipeline.id).push(slot.key);
+  };
+  const emitRegionTask = (plan: StageChainPlan, task: BoardTask, h: number, x: number, y: number) => {
+    const rect: RegionTask = { key: "task::" + task.id, taskId: task.id, pipelineId: plan.pipeline.id, x, y, w: TASK_W, h };
+    regionTasks.push(rect);
+    regionKeys(plan.pipeline.id).push(rect.key);
+  };
+  /* A tip-anchored or docked plan: slots in a compact row, tasks trailing. */
+  const emitCompactRow = (plan: StageChainPlan, sx: number, sy: number) => {
     plan.placed = true;
-    const keys = slotKeysByPipeline.get(plan.pipeline.id) ?? [];
-    plan.slotStages.forEach((entry, i) => {
-      const { stage, index, presentation, attempt } = entry;
-      const previous = i > 0 ? plan.slotStages[i - 1]! : null;
-      /* The handoff badge renders only between chain-adjacent slots — a gap (a
-         live pane between them) breaks the visual chain. */
-      const adjacent = previous !== null && plan.pipeline.stages[index - 1]?.id === previous.stage.id;
-      const slot: StageSlot = {
-        key: stageSlotKey(plan.pipeline.id, stage.id),
-        pipeline: plan.pipeline,
-        stage,
-        index,
-        total: plan.pipeline.stages.length,
-        presentation,
-        ...(attempt ? { attempt } : {}),
-        ...(adjacent ? { incoming: stage.kind } : {}),
-        x: sx + i * (SLOT_W + SLOT_GAP),
-        y: sy,
-        w: SLOT_W,
-        /* Every slot is a full-size card — completed and placeholder alike share
-           the live conversation's footprint (#507 F2). */
-        h: SLOT_H,
-      };
-      slots.push(slot);
-      keys.push(slot.key);
-    });
-    slotKeysByPipeline.set(plan.pipeline.id, keys);
+    let x = sx;
+    let previous: SlotStage | null = null;
+    for (const entry of plan.entries) {
+      if (entry.kind !== "slot") continue;
+      emitSlot(plan, entry.slotStage, x, sy, previous);
+      previous = entry.slotStage;
+      x += SLOT_W + SLOT_GAP;
+    }
+    for (const { task, h } of plan.tasks) {
+      emitRegionTask(plan, task, h, x, sy);
+      x += TASK_W + SLOT_GAP;
+    }
+    /* Right edge of the emitted block (the trailing gap excluded). */
+    return x - SLOT_GAP;
   };
 
   /* Handoff drafts hang under their source pane like a child; drafts whose
@@ -542,35 +634,78 @@ export function buildSchemeLayout(
         });
       const childTop = y + rowH + (boundaryChild ? GROUP_CHILD_GAP : GAP_Y);
       let cx = x + INDENT;
-      /* This pane is a pipeline chain's tip: its planned/completed stage row
-         takes the first child block, RESERVING its footprint inside the subtree
-         width. Anchoring at x + INDENT keeps the hand-off positionally exact —
-         the live window the tree later places for the next stage lands on the
-         placeholder's own coordinates (#196) — and the group-sibling gap after
-         the row keeps any foreign child subtree clear of this pipeline's region. */
-      for (const plan of rowPlansByTip.get(col.file.path) ?? []) {
-        emitStageRow(plan, cx, childTop);
-        cx += plan.rowW + GROUP_SIBLING_GAP;
-      }
-      for (let i = 0; i < children.length; i += 1) {
-        const child = children[i]!;
+      const placeChild = (child: { file: FileEntry; tasks: FileEntry[] }, atX: number): number => {
         edges.push({
           to: child.file.path,
           sourceConversationId: conversationIdentity(col.file),
           targetConversationId: conversationIdentity(child.file),
           x1: x + 40,
           y1: y + h,
-          x2: cx + NODE_W / 2,
+          x2: atX + NODE_W / 2,
           y2: childTop,
           color: engineColor(child.file),
           live: child.file.activity === "live",
         });
+        return place(child, atX, childTop, depth + 1);
+      };
+      /* This pane is a pipeline chain's LINEAGE HOST: the whole stage chain —
+         placed stage children, placeholder/completed slots, and the linked task
+         cards — lays out in this child band at stage-indexed pitch, RESERVING
+         its footprint inside the subtree width. Anchoring stage i at
+         `chainStart + i·pitch` keeps every stage's world anchor identical from
+         the first unscanned render through materialization and host loss
+         (#531 round 1), keeps the hand-off positionally exact (#196: the live
+         window the tree places for a stage lands on its placeholder's own
+         coordinates), and reads chronologically completed → live → future. A
+         stage subtree wider than one card (a spawned agent tree, a folded review
+         deck) pushes the later anchors right instead of overlapping. The
+         group-sibling gap after each chain keeps any foreign child subtree —
+         and the next pipeline's chain — clear of this region. */
+      const chainPlans = chainPlansByHost.get(col.file.path) ?? [];
+      const chainChildPaths = new Set<string>();
+      for (const plan of chainPlans) {
+        for (const entry of plan.entries) if (entry.kind === "node") chainChildPaths.add(entry.path);
+      }
+      const childByPath = new Map(children.map((child) => [child.file.path, child] as const));
+      for (const plan of chainPlans) {
+        plan.placed = true;
+        const baseIndex = plan.entries[0]?.index ?? 0;
+        const chainX0 = cx;
+        let localCx = cx;
+        let previous: SlotStage | null = null;
+        for (const entry of plan.entries) {
+          const ex = Math.max(chainX0 + (entry.index - baseIndex) * (SLOT_W + SLOT_GAP), localCx);
+          if (entry.kind === "slot") {
+            emitSlot(plan, entry.slotStage, ex, childTop, previous);
+            previous = entry.slotStage;
+            localCx = ex + SLOT_W + SLOT_GAP;
+          } else {
+            const child = childByPath.get(entry.path);
+            if (!child) continue;
+            const width = placeChild(child, ex);
+            localCx = ex + Math.max(width, SLOT_W) + SLOT_GAP;
+          }
+        }
+        for (const { task, h: taskH } of plan.tasks) {
+          emitRegionTask(plan, task, taskH, localCx, childTop);
+          localCx += TASK_W + SLOT_GAP;
+        }
+        cx = localCx - SLOT_GAP + GROUP_SIBLING_GAP;
+      }
+      /* This pane is a chain's tip WITHOUT a placed lineage host: the remaining
+         stage row reserves the first child block below, exactly like round 1. */
+      for (const plan of rowPlansByTip.get(col.file.path) ?? []) {
+        cx = emitCompactRow(plan, cx, childTop) + GROUP_SIBLING_GAP;
+      }
+      const looseChildren = children.filter((child) => !chainChildPaths.has(child.file.path));
+      for (let i = 0; i < looseChildren.length; i += 1) {
+        const child = looseChildren[i]!;
         /* Widen the gap only at a flow/pipeline group boundary so two sibling
            halos never overlap (issue #136); the last slot keeps GAP_X, which the
            `used` width below subtracts back off. */
-        const nextChild = children[i + 1];
+        const nextChild = looseChildren[i + 1];
         const gap = nextChild && isGroupBoundary(child.file, nextChild.file) ? GROUP_SIBLING_GAP : GAP_X;
-        cx += place(child, cx, childTop, depth + 1) + gap;
+        cx += placeChild(child, cx) + gap;
       }
       const quiet = stackFor.get(col.file.path)?.filter((entry) => !claimed.has(entry.path));
       if (quiet?.length) {
@@ -743,10 +878,11 @@ export function buildSchemeLayout(
     for (const stack of stacks) bandBottom = Math.max(bandBottom, stack.y + stack.h);
     for (const draft of drafts) bandBottom = Math.max(bandBottom, draft.y + draft.h);
     for (const slot of slots) bandBottom = Math.max(bandBottom, slot.y + slot.h);
+    for (const rect of regionTasks) bandBottom = Math.max(bandBottom, rect.y + rect.h);
   }
   const restTop = hasFavorites ? bandBottom + FAV_BAND_GAP : PAD;
 
-  type PlacementMark = { nodes: number; edges: number; stacks: number; decks: number; loops: number; drafts: number; slots: number };
+  type PlacementMark = { nodes: number; edges: number; stacks: number; decks: number; loops: number; drafts: number; slots: number; regionTasks: number };
   const markPlacement = (): PlacementMark => ({
     nodes: nodes.length,
     edges: edges.length,
@@ -755,6 +891,7 @@ export function buildSchemeLayout(
     loops: loops.length,
     drafts: drafts.length,
     slots: slots.length,
+    regionTasks: regionTasks.length,
   });
   const shiftPlacement = (mark: PlacementMark, dx: number, dy: number) => {
     for (const rect of nodes.slice(mark.nodes)) { rect.x += dx; rect.y += dy; }
@@ -764,6 +901,7 @@ export function buildSchemeLayout(
     for (const loop of loops.slice(mark.loops)) { loop.x1 += dx; loop.x2 += dx; loop.y += dy; }
     for (const rect of drafts.slice(mark.drafts)) { rect.x += dx; rect.y += dy; }
     for (const rect of slots.slice(mark.slots)) { rect.x += dx; rect.y += dy; }
+    for (const rect of regionTasks.slice(mark.regionTasks)) { rect.x += dx; rect.y += dy; }
   };
   const placementBottom = (mark: PlacementMark): number => {
     let value = 0;
@@ -772,6 +910,7 @@ export function buildSchemeLayout(
     for (const rect of decks.slice(mark.decks)) value = Math.max(value, rect.y + rect.h);
     for (const rect of drafts.slice(mark.drafts)) value = Math.max(value, rect.y + rect.h);
     for (const rect of slots.slice(mark.slots)) value = Math.max(value, rect.y + rect.h);
+    for (const rect of regionTasks.slice(mark.regionTasks)) value = Math.max(value, rect.y + rect.h);
     return value;
   };
 
@@ -821,15 +960,14 @@ export function buildSchemeLayout(
      sit on top of a laid-out card or another pipeline's region. */
   {
     let contentBottom = 0;
-    for (const rect of [...nodes, ...stacks, ...decks, ...drafts, ...slots]) {
+    for (const rect of [...nodes, ...stacks, ...decks, ...drafts, ...slots, ...regionTasks]) {
       contentBottom = Math.max(contentBottom, rect.y + rect.h);
     }
     let dockX = PAD;
     const dockY = contentBottom > 0 ? contentBottom + GROUP_GAP : restTop;
-    for (const plan of stageRowPlans) {
+    for (const plan of stageChainPlans) {
       if (plan.placed) continue;
-      emitStageRow(plan, dockX, dockY);
-      dockX += plan.rowW + GROUP_GAP;
+      dockX = emitCompactRow(plan, dockX, dockY) + GROUP_GAP;
     }
   }
 
@@ -840,6 +978,7 @@ export function buildSchemeLayout(
   for (const deck of decks) { bottom = Math.max(bottom, deck.y + deck.h); right = Math.max(right, deck.x + deck.w); }
   for (const draft of drafts) { bottom = Math.max(bottom, draft.y + draft.h); right = Math.max(right, draft.x + draft.w); }
   for (const slot of slots) { bottom = Math.max(bottom, slot.y + slot.h); right = Math.max(right, slot.x + slot.w); }
+  for (const rect of regionTasks) { bottom = Math.max(bottom, rect.y + rect.h); right = Math.max(right, rect.x + rect.w); }
   /* Links resolve against what this pass actually placed, so geometry and
      link endpoints can never disagree. */
   const anchors = buildAnchorIndex(
@@ -857,6 +996,7 @@ export function buildSchemeLayout(
     ...stacks.map((stack) => [stack.key, stack] as const),
     ...decks.map((deck) => [deck.key, deck] as const),
     ...slots.map((slot) => [slot.key, slot] as const),
+    ...regionTasks.map((rect) => [rect.key, rect] as const),
   ]);
   const flowImplementerPath = (flowId: string) => flows.find((flow) => flow.id === flowId)?.implementerPath ?? null;
 
@@ -921,7 +1061,7 @@ export function buildSchemeLayout(
   const pipelineSpecById = new Map(specs.filter((spec) => spec.pipeline).map((spec) => [spec.pipeline!.id, spec] as const));
   const pipelineById = new Map<string, Pipeline>();
   for (const pipeline of [...surfacePipelines, ...pipelines]) if (!pipelineById.has(pipeline.id)) pipelineById.set(pipeline.id, pipeline);
-  for (const [pipelineId, keys] of slotKeysByPipeline) {
+  for (const [pipelineId, keys] of regionKeysByPipeline) {
     const existing = pipelineSpecById.get(pipelineId);
     if (existing) {
       existing.members = [...existing.members, ...keys];
@@ -964,6 +1104,7 @@ export function buildSchemeLayout(
     ],
     drafts,
     slots,
+    regionTasks,
     byPath,
     width: Math.max(
       right + PAD,

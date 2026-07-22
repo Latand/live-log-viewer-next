@@ -87,7 +87,7 @@ function node(entry: FileEntry, x: number): SchemeNode {
 
 function layout(nodes: SchemeNode[]): SchemeLayout {
   return {
-    nodes, edges: [], stacks: [], decks: [], loops: [], groups: [], links: [], drafts: [], slots: [],
+    nodes, edges: [], stacks: [], decks: [], loops: [], groups: [], links: [], drafts: [], slots: [], regionTasks: [],
     byPath: new Map(), width: 2000, height: 1000,
   };
 }

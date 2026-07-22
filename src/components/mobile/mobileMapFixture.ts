@@ -111,6 +111,7 @@ export function buildMobileMapFixture(nodeCount = 500): MobileMapFixture {
     links: [],
     drafts,
     slots: [],
+    regionTasks: [],
     byPath,
     width: maxX + COL_GAP,
     height: maxY + ROW_GAP,

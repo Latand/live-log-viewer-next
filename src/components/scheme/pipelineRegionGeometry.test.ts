@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { directReviewFlows } from "@/components/flows/directReviewGroups";
@@ -270,6 +271,141 @@ describe("neighboring pipeline regions never intersect (#531)", () => {
   });
 });
 
+describe("stage surfaces keep stable lineage anchors (#531 round 1)", () => {
+  /* The pipeline was launched from /origin (srcPath lineage). Stage transcripts
+     materialize as children of that conversation, in stage order. The stage
+     chain must therefore anchor at the SAME world coordinates from the very
+     first unscanned render: a stage's placeholder and the live pane that later
+     replaces it share one anchor, and no other stage's surface moves when a
+     neighbor materializes. */
+  const anchorOfSurface = (layout: SchemeLayout, pipelineId: string, stageId: string, nodePath: string): { x: number; y: number } => {
+    const node = layout.nodes.find((candidate) => candidate.file.path === nodePath);
+    if (node) return { x: node.x, y: node.y };
+    const slot = layout.slots.find((candidate) => candidate.pipeline.id === pipelineId && candidate.stage.id === stageId);
+    expect(slot, `stage ${stageId} must own a surface`).toBeTruthy();
+    return { x: slot!.x, y: slot!.y };
+  };
+
+  test("anchors are identical across unscanned → materialized → host-loss", () => {
+    const origin = entry({ path: "/origin", activity: "live" });
+    const buildFile = entry({ path: "/origin/build", parent: "/origin", kind: "subagent", activity: "live" });
+    const stages = [
+      { id: "build", kind: "run", prompt: "", next: "review" },
+      { id: "review", kind: "review-loop", prompt: "", next: null },
+    ];
+    const pipeline = () => pipe({
+      srcPath: "/origin",
+      stages,
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/origin/build", flowId: null }] }],
+    });
+    const layoutOf = (files: FileEntry[]) => {
+      const p = pipeline();
+      return buildSchemeLayout(buildBranchGroups(files, "demo"), [], files, [], [], [p], [p]);
+    };
+
+    /* A: publish-to-scan gap (also the host-loss-before-scan shape): /origin/build
+       is published but not yet a scene file. */
+    const unscanned = layoutOf([origin]);
+    /* B: the build transcript materialized as a child of the src conversation. */
+    const materialized = layoutOf([origin, buildFile]);
+    /* C: host loss after materialization: the transcript file survives idle. */
+    const hostLost = layoutOf([origin, { ...buildFile, activity: "idle" as const }]);
+
+    const buildA = anchorOfSurface(unscanned, "p1", "build", "/origin/build");
+    const buildB = anchorOfSurface(materialized, "p1", "build", "/origin/build");
+    const buildC = anchorOfSurface(hostLost, "p1", "build", "/origin/build");
+    expect(materialized.nodes.map((node) => node.file.path)).toContain("/origin/build");
+    expect(buildB).toEqual(buildA);
+    expect(buildC).toEqual(buildA);
+
+    const reviewA = anchorOfSurface(unscanned, "p1", "review", "/none");
+    const reviewB = anchorOfSurface(materialized, "p1", "review", "/none");
+    const reviewC = anchorOfSurface(hostLost, "p1", "review", "/none");
+    expect(reviewB).toEqual(reviewA);
+    expect(reviewC).toEqual(reviewA);
+    /* The chain reads left→right in stage order on one band. */
+    expect(reviewA.x).toBeGreaterThan(buildA.x);
+    expect(reviewA.y).toBe(buildA.y);
+    expectRegionsSeparated(materialized);
+    expectMembersContained(materialized, "p1");
+  });
+
+  test("sequentially materializing stages land exactly on their reserved anchors", () => {
+    const origin = entry({ path: "/origin", activity: "live" });
+    const s1 = entry({ path: "/origin/s1", parent: "/origin", kind: "subagent", activity: "live" });
+    const s2 = entry({ path: "/origin/s2", parent: "/origin", kind: "subagent", activity: "live" });
+    const stages = [
+      { id: "one", kind: "run", prompt: "", next: "two" },
+      { id: "two", kind: "run", prompt: "", next: "three" },
+      { id: "three", kind: "run", prompt: "", next: null },
+    ];
+    const pipelineAt = (materializedCount: number) => pipe({
+      srcPath: "/origin",
+      stages,
+      cursor: { stageId: stages[materializedCount - 1]!.id, state: "running", input: null, activatedBy: null },
+      runs: [
+        { stageId: "one", attempts: [{ n: 1, state: materializedCount > 1 ? "passed" : "running", agentPath: "/origin/s1", flowId: null }] },
+        ...(materializedCount > 1 ? [{ stageId: "two", attempts: [{ n: 1, state: "running", agentPath: "/origin/s2", flowId: null }] }] : []),
+      ],
+    });
+    const layoutOf = (files: FileEntry[], p: Pipeline) =>
+      buildSchemeLayout(buildBranchGroups(files, "demo"), [], files, [], [], [p], [p]);
+
+    const first = layoutOf([origin, s1], pipelineAt(1));
+    const second = layoutOf([origin, s1, s2], pipelineAt(2));
+
+    const anchor = (layout: SchemeLayout, stageId: string, nodePath: string) => anchorOfSurface(layout, "p1", stageId, nodePath);
+    /* Stage two's live pane lands exactly on its placeholder's coordinates. */
+    expect(anchor(second, "two", "/origin/s2")).toEqual(anchor(first, "two", "/none"));
+    /* Neither the already-live stage one nor the future stage three moves. */
+    expect(anchor(second, "one", "/origin/s1")).toEqual(anchor(first, "one", "/origin/s1"));
+    expect(anchor(second, "three", "/none")).toEqual(anchor(first, "three", "/none"));
+  });
+
+  test("completed stages read chronologically left of the live pane, future stages to its right", () => {
+    /* Stage history must read left→right: completed cards, then the live
+       cursor pane, then the future placeholders — never a completed card
+       dropping BELOW the live conversation. */
+    const origin = entry({ path: "/origin", activity: "live" });
+    const live = entry({ path: "/origin/polish", parent: "/origin", kind: "subagent", activity: "live" });
+    const files = [origin, live];
+    const stages = [
+      { id: "build", kind: "run", prompt: "", next: "verify" },
+      { id: "verify", kind: "run", prompt: "", next: "polish" },
+      { id: "polish", kind: "run", prompt: "", next: "ship" },
+      { id: "ship", kind: "run", prompt: "", next: null },
+    ];
+    const pipeline = pipe({
+      srcPath: "/origin",
+      stages,
+      cursor: { stageId: "polish", state: "running", input: null, activatedBy: null },
+      runs: [
+        { stageId: "build", attempts: [{ n: 1, state: "passed", agentPath: "/hist/build", flowId: null }] },
+        { stageId: "verify", attempts: [{ n: 1, state: "passed", agentPath: "/hist/verify", flowId: null }] },
+        { stageId: "polish", attempts: [{ n: 1, state: "running", agentPath: "/origin/polish", flowId: null }] },
+      ],
+    });
+    const groups = buildBranchGroups(files, "demo");
+    const layout = buildSchemeLayout(groups, [], files, [], [], [pipeline], [pipeline]);
+
+    const slotOf = (stageId: string) => layout.slots.find((candidate) => candidate.stage.id === stageId)!;
+    const liveNode = layout.nodes.find((candidate) => candidate.file.path === "/origin/polish")!;
+    const buildSlot = slotOf("build");
+    const verifySlot = slotOf("verify");
+    const shipSlot = slotOf("ship");
+    expect(buildSlot.presentation).toBe("completed");
+    expect(verifySlot.presentation).toBe("completed");
+    expect(shipSlot.presentation).toBe("placeholder");
+    /* One chain band, chronological order. */
+    for (const rect of [buildSlot, verifySlot, shipSlot]) expect(rect.y).toBe(liveNode.y);
+    expect(buildSlot.x).toBeLessThan(verifySlot.x);
+    expect(verifySlot.x).toBeLessThan(liveNode.x);
+    expect(liveNode.x).toBeLessThan(shipSlot.x);
+    expectMembersContained(layout, "p1");
+  });
+});
+
 describe("every pipeline conversation surface stays inside its colored region (#531)", () => {
   test("quiet history and a direct one-shot review deck stay inside the pipeline region", () => {
     /* Production shape: the builder conversation of a live pipeline carries a
@@ -350,6 +486,46 @@ describe("every pipeline conversation surface stays inside its colored region (#
     expect(deck).toBeTruthy();
     expect(contains(halo, deck!), "the review deck escapes the pipeline region").toBe(true);
     expectMembersContained(layout, "p1");
+    expectRegionsSeparated(layout);
+  });
+
+  test("a task card linked to the pipeline is owned by the pipeline region (#531 round 1)", () => {
+    /* The pipeline's board task (its work item) is a first-class member of the
+       colored region: the layout places it inside the pipeline chain and the
+       halo contains it, instead of leaving the sticky note wherever the lattice
+       dropped it. */
+    const builder = entry({ path: "/builder", activity: "live" });
+    const files = [builder];
+    const pipeline = pipe({
+      taskIds: ["t-1"],
+      stages: [
+        { id: "build", kind: "run", prompt: "", next: "review" },
+        { id: "review", kind: "review-loop", prompt: "", next: null },
+      ],
+      cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/builder", flowId: null }] }],
+    });
+    const task: BoardTask = {
+      id: "t-1",
+      project: "demo",
+      status: "assigned",
+      text: "P0 #531 keep pipeline regions stable",
+      placement: "pinned",
+      pos: { x: 4000, y: 4000 },
+      assignments: [],
+      createdAt: "2026-07-05T00:00:00Z",
+      updatedAt: "2026-07-05T00:00:00Z",
+    } as unknown as BoardTask;
+    const groups = buildBranchGroups(files, "demo");
+    const layout = buildSchemeLayout(groups, [], files, [], [], [pipeline], [pipeline], new Set(), new Set(), [task]);
+
+    const region = layout.regionTasks.find((candidate) => candidate.taskId === "t-1");
+    expect(region, "the linked task must be placed by the pipeline region").toBeTruthy();
+    expect(region!.pipelineId).toBe("p1");
+    const halo = haloOf(layout, "p1");
+    expect(contains(halo, region!), "the linked task card escapes the pipeline region").toBe(true);
+    expect(layout.byPath.get("task::t-1")).toBe(region!);
+    expect(halo.members).toContain("task::t-1");
     expectRegionsSeparated(layout);
   });
 

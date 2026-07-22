@@ -64,6 +64,30 @@ function pipelineLineage(pipeline: Pipeline): { paths: Set<string>; conversation
   return { paths, conversationIds };
 }
 
+/**
+ * Every board task linked to a pipeline (#531): the explicit `taskIds` links
+ * first, then tasks whose source or assignments point into the pipeline's
+ * lineage (src conversation or any stage attempt). One shared definition, so
+ * the region layout and the legacy anchor heuristic can never disagree about
+ * which sticky notes belong to a pipeline.
+ */
+export function linkedPipelineTasks(pipeline: Pipeline, tasks: readonly BoardTask[]): BoardTask[] {
+  const explicit = new Set((pipeline as PipelineWithTaskIds).taskIds ?? []);
+  const lineage = pipelineLineage(pipeline);
+  return tasks.filter((task) =>
+    explicit.has(task.id) ||
+    Boolean(
+      (task.source && lineage.paths.has(task.source.path)) ||
+      task.assignments.some((assignment) =>
+        Boolean(
+          (assignment.path && lineage.paths.has(assignment.path)) ||
+          (assignment.conversationId && lineage.conversationIds.has(assignment.conversationId)),
+        ),
+      ),
+    ),
+  );
+}
+
 function manuallyLinkedTask(pipeline: Pipeline, tasks: readonly BoardTask[]): BoardTask | null {
   const lineage = pipelineLineage(pipeline);
   return tasks.find((task) =>
