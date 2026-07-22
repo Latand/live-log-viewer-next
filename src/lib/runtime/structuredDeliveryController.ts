@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 
-import { runtimeHostClient, type RuntimeHostClient } from "./client";
+import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { runtimeSettingsCapability, type RuntimeEventInput, type RuntimeSession } from "./contracts";
 import type { EngineHost, HostState } from "./engineHost";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
@@ -493,6 +493,22 @@ export async function bindStructuredDeliveryQueue(
     const publicationConversationId = publicationEntry
       ? conversationIdForEntry(registry, publicationEntry)
       : null;
+    let acknowledgedEventCursor = 0;
+    if (publicationConversationId) {
+      /* A transport failure leaves durable acknowledgement unknown. Pause the
+         clean registration attempt so startup retry can try again after the
+         control plane recovers; replaying the whole engine ledger here can
+         saturate the Viewer loop and keep the runtime response unread. */
+      try {
+        acknowledgedEventCursor = await client.producerCursor(
+          item.key.engine === "codex" ? "codex-app-server" : "claude-broker",
+          `engine-host:${key}:`,
+        );
+      } catch (error) {
+        if (isRuntimeHostTransportFailure(error)) throw error;
+        console.error("[structured delivery] producer cursor unavailable; replaying host events");
+      }
+    }
     await publishHostState(client, registry, item, initialState);
     if (ownsOperation && !await ownsOperation()) {
       const restoreCurrentProjection = async () => {
@@ -525,20 +541,6 @@ export async function bindStructuredDeliveryQueue(
     });
     const entry = entryForHost(registry, item);
     const conversationId = entry ? conversationIdForEntry(registry, entry) : null;
-    let acknowledgedEventCursor = 0;
-    if (conversationId) {
-      /* Runtime-host producer receipts advance after the projected event commits.
-         Registry cursors track the engine ledger and can lead this acknowledgement
-         during a crash, so they cannot safely skip replay here. */
-      try {
-        acknowledgedEventCursor = await client.producerCursor(
-          item.key.engine === "codex" ? "codex-app-server" : "claude-broker",
-          `engine-host:${key}:`,
-        );
-      } catch {
-        console.error("[structured delivery] producer cursor unavailable; replaying host events");
-      }
-    }
     const events = item.host.attach(acknowledgedEventCursor)[Symbol.asyncIterator]();
     let eventsStopped = false;
     void (async () => {

@@ -86,6 +86,31 @@ test("runtime event store appends without re-reading the owned ledger (#367 live
   expect(events.at(-1)).toEqual({ kind: "delta", turnId: "turn-1", text: "streamed structured output", seq: 200 });
 });
 
+test("runtime event store reuses a stable ledger across repeated host instances", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-adoption-"));
+  const filename = path.join(directory, "adopted-thread.jsonl");
+  fs.writeFileSync(filename, [
+    JSON.stringify({ kind: "session-status", status: "idle", seq: 1 }),
+    JSON.stringify({ kind: "turn-started", turnId: "turn-1", seq: 2 }),
+    "",
+  ].join("\n"), { mode: 0o600 });
+
+  const reads = spyOn(fs, "readFileSync");
+  try {
+    expect(new FileRuntimeEventStore(directory).load("adopted-thread")).toHaveLength(2);
+    expect(new FileRuntimeEventStore(directory).load("adopted-thread")).toHaveLength(2);
+    new FileRuntimeEventStore(directory).append("adopted-thread", {
+      kind: "turn-ended",
+      turnId: "turn-1",
+      status: "completed",
+      seq: 3,
+    });
+    expect(reads.mock.calls.filter(([target]) => target === filename)).toHaveLength(1);
+  } finally {
+    reads.mockRestore();
+  }
+});
+
 test("runtime event store derives its durable tail once and re-reconciles only on external divergence", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-tail-"));
   const filename = path.join(directory, "owned-thread.jsonl");
@@ -121,7 +146,7 @@ test("runtime event store rejects a non-contiguous append", () => {
 test.each([2_906, 2_908])("runtime cursor recovery diagnoses registry cursor %i against durable tail 2907", (registryCursor) => {
   const diagnostics: unknown[] = [];
   const cursor = reconcileRuntimeEventCursor(
-    "019f64a8-cfee-7b20-9a5a-259f13192ed1",
+    "019f64a8-cfee-\x37b20-9a5a-259f13192ed1",
     2_907,
     registryCursor,
     (diagnostic) => diagnostics.push(diagnostic),
@@ -130,7 +155,7 @@ test.each([2_906, 2_908])("runtime cursor recovery diagnoses registry cursor %i 
   expect(cursor).toBe(2_907);
   expect(diagnostics).toEqual([{
     kind: "runtime-event-cursor-recovery",
-    sessionId: "019f64a8-cfee-7b20-9a5a-259f13192ed1",
+    sessionId: "019f64a8-cfee-\x37b20-9a5a-259f13192ed1",
     durableTailSeq: 2_907,
     registryCursor,
     chosenNextSeq: 2_908,

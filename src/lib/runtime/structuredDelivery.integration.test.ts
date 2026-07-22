@@ -10,7 +10,7 @@ import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } 
 import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
-import type { RuntimeHostClient } from "./client";
+import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import type { EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
 import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
@@ -236,6 +236,60 @@ test("an engine event burst preserves every projection without polling the deliv
     expect(sessionStatusProjections - baselineStatuses).toBeLessThanOrEqual(1);
     expect(effectBatchCalls - baselineEffects).toBeLessThanOrEqual(1);
     expect(snapshotCalls - baselineSnapshots).toBeLessThanOrEqual(1);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+  }
+});
+
+test("a producer-cursor transport failure pauses host registration before ledger replay", async () => {
+  const directory = path.join(sandbox, "controller-cursor-transport-failure");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const artifactPath = path.join(directory, "cursor-failure.jsonl");
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "busy", source: "assistant", terminalAt: null },
+    observedAt: new Date(0).toISOString(),
+  }]);
+  registry.upsert({
+    key: { engine: "codex", sessionId: "cursor-failure" },
+    artifactPath,
+    cwd: directory,
+    accountId: "default",
+    launchProfile: profile,
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:cursor-failure",
+      process: null,
+      eventCursor: 40,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: "turn:cursor-failure",
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const observable = burstyObservableHost();
+  const client = {
+    producerCursor: async () => { throw new RuntimeHostUnavailableError("runtime host request timed out"); },
+    effectBatch: async () => [],
+  } as unknown as RuntimeHostClient;
+
+  try {
+    await expect(bindStructuredDeliveryQueue([{
+      key: { engine: "codex", sessionId: "cursor-failure" },
+      host: observable.host,
+    }], { registry, client })).rejects.toThrow("runtime host request timed out");
+    expect(observable.attachedAfter()).toBeNull();
+    expect(hasStructuredDeliveryHost({ engine: "codex", sessionId: "cursor-failure" })).toBe(false);
   } finally {
     await bindStructuredDeliveryQueue([], { registry, client: null });
   }

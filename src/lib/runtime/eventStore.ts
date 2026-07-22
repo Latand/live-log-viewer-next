@@ -22,6 +22,66 @@ export interface RuntimeEventCursorRecoveryDiagnostic {
 
 export type RuntimeEventCursorRecoveryReporter = (diagnostic: RuntimeEventCursorRecoveryDiagnostic) => void;
 
+type LedgerIdentity = Pick<fs.Stats, "dev" | "ino" | "size" | "mtimeMs" | "ctimeMs">;
+type CachedLedger = { identity: LedgerIdentity; events: RuntimeEvent[] };
+
+const MAX_CACHED_LEDGER_BYTES = 64 * 1024 * 1024;
+const MAX_CACHED_LEDGERS = 64;
+const eventStoreGlobals = globalThis as typeof globalThis & {
+  __llvRuntimeEventLedgers?: Map<string, CachedLedger>;
+};
+
+function ledgerCache(): Map<string, CachedLedger> {
+  eventStoreGlobals.__llvRuntimeEventLedgers ??= new Map();
+  return eventStoreGlobals.__llvRuntimeEventLedgers;
+}
+
+function ledgerIdentity(stats: fs.Stats): LedgerIdentity {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    ctimeMs: stats.ctimeMs,
+  };
+}
+
+function sameLedgerIdentity(left: LedgerIdentity, right: LedgerIdentity): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
+function cachedLedger(filename: string, identity: LedgerIdentity): RuntimeEvent[] | null {
+  const cache = ledgerCache();
+  const cached = cache.get(filename);
+  if (!cached || !sameLedgerIdentity(cached.identity, identity)) return null;
+  cache.delete(filename);
+  cache.set(filename, cached);
+  return cached.events.slice();
+}
+
+function rememberLedger(filename: string, identity: LedgerIdentity, events: RuntimeEvent[]): void {
+  const cache = ledgerCache();
+  cache.delete(filename);
+  cache.set(filename, { identity, events: events.slice() });
+  let bytes = 0;
+  for (const entry of cache.values()) bytes += entry.identity.size;
+  while (cache.size > MAX_CACHED_LEDGERS || bytes > MAX_CACHED_LEDGER_BYTES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    const removed = cache.get(oldest);
+    cache.delete(oldest);
+    bytes -= removed?.identity.size ?? 0;
+  }
+}
+
+function forgetLedger(filename: string): void {
+  ledgerCache().delete(filename);
+}
+
 const MAX_DIAGNOSTIC_SESSION_ID_LENGTH = 160;
 
 function reportRuntimeEventCursorRecovery(diagnostic: RuntimeEventCursorRecoveryDiagnostic): void {
@@ -117,6 +177,18 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
 
   load(threadId: string): RuntimeEvent[] {
     const filename = this.filename(threadId);
+    let before: fs.Stats;
+    try { before = fs.statSync(filename); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        forgetLedger(filename);
+        return [];
+      }
+      throw error;
+    }
+    const identity = ledgerIdentity(before);
+    const cached = cachedLedger(filename, identity);
+    if (cached) return cached;
     let contents: string;
     try { contents = fs.readFileSync(filename, "utf8"); }
     catch (error) {
@@ -144,6 +216,10 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
       }
       events.push(parsed);
     }
+    try {
+      const after = ledgerIdentity(fs.statSync(filename));
+      if (sameLedgerIdentity(identity, after)) rememberLedger(filename, after, events);
+    } catch { /* a concurrent replacement stays uncached */ }
     return events;
   }
 
@@ -153,7 +229,7 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
     const filename = this.filename(threadId);
     const fd = fs.openSync(filename, "a+", 0o600);
     try {
-      fs.fchmodSync(fd, 0o600);
+      if ((fs.fstatSync(fd).mode & 0o777) !== 0o600) fs.fchmodSync(fd, 0o600);
       let tail = this.tails.get(threadId);
       if (!tail || fs.fstatSync(fd).size !== tail.bytes) {
         tail = this.reconcileTail(threadId, filename, fd);
@@ -164,7 +240,15 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
       const line = `${JSON.stringify(event)}\n`;
       fs.writeSync(fd, line);
       fs.fsyncSync(fd);
-      this.tails.set(threadId, { lastSeq: event.seq, bytes: tail.bytes + Buffer.byteLength(line) });
+      const nextTail = { lastSeq: event.seq, bytes: tail.bytes + Buffer.byteLength(line) };
+      this.tails.set(threadId, nextTail);
+      const cached = ledgerCache().get(filename);
+      const current = fs.fstatSync(fd);
+      if (cached && cached.identity.size === tail.bytes && (cached.events.at(-1)?.seq ?? 0) === tail.lastSeq) {
+        rememberLedger(filename, ledgerIdentity(current), [...cached.events, event]);
+      } else {
+        forgetLedger(filename);
+      }
     } finally {
       fs.closeSync(fd);
     }
@@ -180,8 +264,11 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
       return empty;
     }
     const events = this.load(threadId);
-    const contents = fs.readFileSync(filename, "utf8");
-    if (!contents.endsWith("\n")) {
+    const size = fs.fstatSync(fd).size;
+    const trailingByte = Buffer.allocUnsafe(1);
+    const terminated = size > 0 && fs.readSync(fd, trailingByte, 0, 1, size - 1) === 1 && trailingByte[0] === 0x0a;
+    if (!terminated) {
+      const contents = fs.readFileSync(filename, "utf8");
       const boundary = contents.lastIndexOf("\n") + 1;
       const tailRecord = contents.slice(boundary);
       let parsed: unknown;
@@ -189,8 +276,10 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
       if (validEvent(parsed)) fs.writeSync(fd, "\n");
       else fs.ftruncateSync(fd, Buffer.byteLength(contents.slice(0, boundary)));
     }
-    const tail = { lastSeq: events.at(-1)?.seq ?? 0, bytes: fs.fstatSync(fd).size };
+    const current = fs.fstatSync(fd);
+    const tail = { lastSeq: events.at(-1)?.seq ?? 0, bytes: current.size };
     this.tails.set(threadId, tail);
+    rememberLedger(filename, ledgerIdentity(current), events);
     return tail;
   }
 
