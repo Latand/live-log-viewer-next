@@ -975,7 +975,7 @@ function addStructuredRestartConversation(
   input: {
     engine?: "codex" | "claude";
     sessionId: string;
-    status: "live" | "dead";
+    status: "live" | "dead" | "unhosted";
     turn: "busy" | "terminal" | "unknown";
     activeTurnRef?: string | null;
     transcriptRecords?: Record<string, unknown>[];
@@ -1520,6 +1520,38 @@ test("startup adoption reads terminal transcripts before booting production-shap
   const startedAt = performance.now();
   expect(await startupAdoptionAttempts(registry)).toEqual([`codex:${activeSessionId}`]);
   expect(performance.now() - startedAt).toBeLessThan(1_000);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup transcript refresh skips historical structured hosts", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-historical-refresh-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const live = addStructuredRestartConversation(registry, directory, {
+    sessionId: "41000000-0000-\x34000-8000-000000000010",
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "live-turn",
+    transcriptRecords: [
+      { timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started", turn_id: "live-turn" } },
+      { timestamp: "2026-07-15T10:00:01.000Z", payload: { type: "task_complete", turn_id: "live-turn" } },
+    ],
+  });
+  const historical = (["dead", "unhosted"] as const).flatMap((status, statusIndex) =>
+    Array.from({ length: 32 }, (_, index) => addStructuredRestartConversation(registry, directory, {
+      sessionId: `5${statusIndex}${String(index).padStart(6, "0")}-0000-4000-8000-000000000010`,
+      status,
+      turn: "busy",
+      activeTurnRef: `historical-${status}-${index}`,
+      transcriptRecords: [
+        { timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started", turn_id: `historical-${index}` } },
+        { timestamp: "2026-07-15T10:00:01.000Z", payload: { type: "task_complete", turn_id: `historical-${index}` } },
+      ],
+    }).conversation));
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([]);
+  expect(registry.conversation(live.conversation.id)?.turn.state).toBe("terminal");
+  expect(historical.every((conversation) => registry.conversation(conversation.id)?.turn.state === "busy")).toBeTrue();
 
   fs.rmSync(directory, { recursive: true, force: true });
 });
