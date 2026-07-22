@@ -1,7 +1,6 @@
 import fs from "node:fs";
 
 import { statePath } from "@/lib/configDir";
-import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { markStructuredHostStartupFailed, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential";
@@ -26,6 +25,8 @@ interface StructuredHostStartupOptions {
   schedule?: (callback: () => void, delayMs: number) => ActivationTimer;
   initialRetryMs?: number;
   maxRetryMs?: number;
+  jitterRatio?: number;
+  random?: () => number;
 }
 
 interface ViewerReleaseActivationOptions {
@@ -184,6 +185,8 @@ export async function runStructuredHostStartup(
 ): Promise<void> {
   const schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
   const maxRetryMs = options.maxRetryMs ?? 1_000;
+  const jitterRatio = Math.min(Math.max(options.jitterRatio ?? 0.2, 0), 1);
+  const random = options.random ?? Math.random;
   let retryMs = options.initialRetryMs ?? 100;
   let retryPending = false;
   let attempts = 0;
@@ -200,12 +203,9 @@ export async function runStructuredHostStartup(
         log("[structured hosts] startup adoption failed", error);
         throw error;
       }
-      if (!(error instanceof RuntimeHostUnavailableError)) {
-        log("[structured hosts] startup adoption failed", error);
-        return;
-      }
       if (retryPending) return;
-      const delayMs = retryMs;
+      const jitter = 1 + ((Math.min(Math.max(random(), 0), 1) * 2) - 1) * jitterRatio;
+      const delayMs = Math.min(maxRetryMs, Math.max(0, Math.round(retryMs * jitter)));
       retryMs = Math.min(retryMs * 2, maxRetryMs);
       retryPending = true;
       if (attempts === 1) log("[structured hosts] startup adoption failed; retry scheduled", error);

@@ -279,21 +279,42 @@ test("server startup mints the operator capability and rotates it on request", a
   }
 });
 
-test("structured-host startup logs the thrown adoption error object", async () => {
+test("structured-host startup retries an arbitrary recoverable adoption error", async () => {
   const failure = new Error("container adoption failed");
   const logged: unknown[][] = [];
+  const scheduled: Array<() => void> = [];
+  let attempts = 0;
 
   try {
     await runStructuredHostStartup(
-      async () => { throw failure; },
+      async () => {
+        attempts += 1;
+        if (attempts === 1) throw failure;
+      },
       (...args) => { logged.push(args); },
+      {
+        random: () => 0.5,
+        schedule: (callback) => {
+          scheduled.push(callback);
+          return { unref() {} };
+        },
+      },
     );
 
-    expect(logged).toEqual([["[structured hosts] startup adoption failed", failure]]);
+    expect(logged).toEqual([["[structured hosts] startup adoption failed; retry scheduled", failure]]);
     expect(didStructuredHostStartupFail()).toBe(true);
-    await runStructuredHostStartup(async () => undefined, (...args) => { logged.push(args); });
+    expect(scheduled).toHaveLength(1);
+
+    scheduled.shift()!();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(attempts).toBe(2);
     expect(didStructuredHostStartupFail()).toBe(false);
-    expect(logged).toHaveLength(1);
+    expect(logged).toEqual([
+      ["[structured hosts] startup adoption failed; retry scheduled", failure],
+      ["[structured hosts] startup adoption recovered", { attempts: 2 }],
+    ]);
   } finally {
     markStructuredHostStartupReady();
   }
@@ -312,6 +333,7 @@ test("structured-host startup self-heals after the runtime socket becomes ready"
       },
       (...args) => { logged.push(args); },
       {
+        random: () => 0.5,
         schedule: (callback, delayMs) => {
           scheduled.push({ callback, delayMs });
           return { unref() {} };
@@ -358,6 +380,7 @@ test("structured-host startup uses bounded backoff with one pending retry", asyn
       {
         initialRetryMs: 25,
         maxRetryMs: 50,
+        random: () => 0.5,
         schedule: (callback, delayMs) => {
           scheduled.push({ callback, delayMs });
           return { unref() {} };
@@ -388,6 +411,32 @@ test("structured-host startup uses bounded backoff with one pending retry", asyn
       ],
       ["[structured hosts] startup adoption recovered", { attempts: 5 }],
     ]);
+  } finally {
+    markStructuredHostStartupReady();
+  }
+});
+
+test("structured-host startup applies bounded jitter to recoverable retries", async () => {
+  const delays: number[] = [];
+
+  try {
+    await runStructuredHostStartup(
+      async () => { throw new Error("transient registry contention"); },
+      () => {},
+      {
+        initialRetryMs: 100,
+        maxRetryMs: 1_000,
+        jitterRatio: 0.2,
+        random: () => 1,
+        schedule: (_callback, delayMs) => {
+          delays.push(delayMs);
+          return { unref() {} };
+        },
+      },
+    );
+
+    expect(delays).toEqual([120]);
+    expect(didStructuredHostStartupFail()).toBe(true);
   } finally {
     markStructuredHostStartupReady();
   }
