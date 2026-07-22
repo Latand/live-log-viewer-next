@@ -635,3 +635,35 @@ test("proven compaction chains survive restart after predecessor growth", async 
   expect(predecessor.parent as string | null).toBe(successor.path);
   expect(bytesRead).toBeLessThanOrEqual(512 * 1024);
 });
+
+test("runtime callbacks advance while a large lineage projection is linking", async () => {
+  const pathname = path.join(SANDBOX, "cooperative-linking.jsonl");
+  fs.writeFileSync(pathname, "{}\n");
+  let runtimeCallbackAdvanced = false;
+  const callback = new Promise<void>((resolve) => {
+    setImmediate(() => {
+      runtimeCallbackAdvanced = true;
+      resolve();
+    });
+  });
+  const entries = Array.from({ length: 96 }, (_, index) => {
+    const projected = entry(pathname, `cooperative-${index}`, index);
+    Object.defineProperty(projected, "root", {
+      configurable: true,
+      get() {
+        const deadline = performance.now() + 2;
+        while (performance.now() < deadline) {
+          // Reproduce CPU-heavy synchronous projection work in production scans.
+        }
+        return "system";
+      },
+    });
+    projected.path = `${pathname}-${index}`;
+    return projected;
+  });
+
+  await linkEntries(entries, { persist: false });
+
+  expect(runtimeCallbackAdvanced).toBe(true);
+  await callback;
+});

@@ -103,9 +103,10 @@ export interface HeldStructuredMessageDependencies {
   startupFailed?: () => boolean;
   startupRecovered?: () => void;
   republish?: (key: RuntimeSession["sessionKey"]) => Promise<boolean>;
+  recover?: typeof recoverDeadStructuredConversation;
 }
 
-export type HeldStructuredMessageOutcome = "delivered" | "failed" | "delivery-uncertain" | null;
+export type HeldStructuredMessageOutcome = "delivered" | "failed" | "delivery-uncertain" | "held" | null;
 
 function structuredHostsEnabled(): boolean {
   return process.env.LLV_STRUCTURED_HOSTS === "1";
@@ -402,21 +403,41 @@ export async function deliverHeldStructuredMessage(
   dependencies: HeldStructuredMessageDependencies = {},
 ): Promise<HeldStructuredMessageOutcome> {
   if (!(dependencies.enabled ?? structuredHostsEnabled)()) return null;
+  const registry = (dependencies.registry ?? agentRegistry)();
   const client = (dependencies.client ?? runtimeHostClient)();
   if (!client) {
-    return heldOutcomeDuringRuntimeSynchronization(request, (dependencies.registry ?? agentRegistry)());
+    return heldOutcomeDuringRuntimeSynchronization(request, registry);
   }
   let snapshot: Awaited<ReturnType<RuntimeHostClient["snapshot"]>>;
   try {
     snapshot = await client.snapshot();
   } catch (error) {
     console.error("[structured delivery] runtime snapshot failed", error);
-    return heldOutcomeDuringRuntimeSynchronization(request, (dependencies.registry ?? agentRegistry)());
+    return heldOutcomeDuringRuntimeSynchronization(request, registry);
   }
   recordStructuredRuntimeRecovery(snapshot, dependencies.startupRecovered ?? markStructuredHostStartupReady);
   let session = snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
-  if (!session) return heldOutcomeDuringRuntimeSynchronization(request, (dependencies.registry ?? agentRegistry)());
+  if (!session) {
+    if (persistedCurrentOwner(request, registry)?.kind !== "structured") {
+      return heldOutcomeDuringRuntimeSynchronization(request, registry);
+    }
+    try {
+      const recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({
+        path: request.path,
+        conversationId: request.conversationId,
+      }, {
+        registry,
+        client,
+        requestDeliveryDrain: () => {
+          void (dependencies.kick ?? kickStructuredDeliveryQueue)();
+        },
+      });
+      return recovered ? "held" : "delivery-uncertain";
+    } catch {
+      return "delivery-uncertain";
+    }
+  }
   try {
     const refreshed = await refreshRepublishedSession(
       session,

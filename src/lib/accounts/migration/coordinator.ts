@@ -241,7 +241,12 @@ function terminalMigrationPhase(phase: string): boolean {
 }
 
 function successorCreationReady(conversation: RegistryConversation, registry: AgentRegistry): boolean {
-  if (conversation.turn.state !== "terminal" && conversation.turn.state !== "idle") return false;
+  const sourcePath = conversation.generations.at(-1)?.path;
+  const unmaterializedEmptyTurn = conversation.turn.state === "unknown"
+    && conversation.turn.source === "empty"
+    && Boolean(sourcePath)
+    && !fs.existsSync(sourcePath!);
+  if (conversation.turn.state !== "terminal" && conversation.turn.state !== "idle" && !unmaterializedEmptyTurn) return false;
   return !registry.pendingDeliveries(conversation.id).some((delivery) => delivery.state === "delivery-uncertain");
 }
 

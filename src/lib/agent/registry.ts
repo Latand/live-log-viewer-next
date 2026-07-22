@@ -464,7 +464,7 @@ function migrationReadiness(
   file: RegistryFile,
   conversation: RegistryConversation,
 ): "idle" | "busy" | "deferred" {
-  if (conversation.turn.state === "busy" || conversation.turn.state === "unknown") return "busy";
+  if (migrationTurnIsBusy(file, conversation)) return "busy";
   const deliveryInFlight = Object.values(file.heldDeliveries).some((delivery) =>
     delivery.conversationId === conversation.id && delivery.state === "delivery-uncertain");
   if (deliveryInFlight) return "busy";
@@ -476,6 +476,19 @@ function migrationReadiness(
   const hasPendingDelivery = Object.values(file.heldDeliveries).some((delivery) =>
     delivery.conversationId === conversation.id && delivery.state !== "delivered");
   return hasPendingDelivery ? "idle" : "deferred";
+}
+
+function migrationTurnIsBusy(file: RegistryFile, conversation: RegistryConversation): boolean {
+  const currentPath = conversation.generations.at(-1)?.path;
+  const hasPendingDelivery = Object.values(file.heldDeliveries).some((delivery) =>
+    delivery.conversationId === conversation.id && delivery.state !== "delivered");
+  const unmaterializedEmptyTurn = conversation.turn.state === "unknown"
+    && conversation.turn.source === "empty"
+    && Boolean(currentPath)
+    && !fs.existsSync(currentPath!)
+    && !hasPendingDelivery;
+  return conversation.turn.state === "busy"
+    || (conversation.turn.state === "unknown" && !unmaterializedEmptyTurn);
 }
 
 function resumeCanRebaseMigration(migration: ConversationMigration | null): boolean {
@@ -3592,7 +3605,7 @@ export class AgentRegistry {
     if (activeIntent && source && source.accountId !== activeIntent.targetId && !conversation.migration) {
       conversation.migration = {
         intentId: activeIntent.id,
-        phase: conversation.turn.state === "busy" || conversation.turn.state === "unknown" ? "waiting-turn" : "requested",
+        phase: migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
         targetId: activeIntent.targetId,
         revision: activeIntent.revision,
         error: null,
@@ -5103,7 +5116,7 @@ export class AgentRegistry {
       if (!source) throw new Error("conversation has no source generation");
       conversation.migration = {
         ...current,
-        phase: conversation.turn.state === "busy" || conversation.turn.state === "unknown" ? "waiting-turn" : "requested",
+        phase: migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
         targetId: intent.targetId,
         revision: intent.revision,
         operationId: current.errorCode === "codex-fork-outcome-unknown" ? current.operationId : crypto.randomUUID(),

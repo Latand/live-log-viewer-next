@@ -6,14 +6,14 @@ import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { advanceConversationMigration, drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
-import { emptyLaunchProfile, type SuccessorProviderPort, type TurnState } from "@/lib/accounts/migration/contracts";
+import { emptyLaunchProfile, type HeldDelivery, type SuccessorProviderPort, type TurnState } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot, RuntimeTurnAxis } from "./contracts";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import type { StructuredImageRef } from "./structuredContent";
 import { StructuredDeliveryControllerUnavailableError } from "./structuredDeliveryController";
 
-import { enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 
 const artifactPath = "/sessions/native-source.jsonl";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-reseat-"));
@@ -26,6 +26,7 @@ function registryWithConversation(
   accountId = "seat-source",
   engine: "codex" | "claude" = "codex",
   turnState: Exclude<TurnState["state"], "terminal"> = "idle",
+  turnSource: TurnState["source"] = turnState === "idle" ? "empty" : "assistant",
 ) {
   const registry = new AgentRegistry(path.join(sandbox, `registry-${registryNumber += 1}.json`));
   registry.reconcileConversations([{
@@ -33,7 +34,7 @@ function registryWithConversation(
     path: artifactPath,
     accountId,
     launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "project" }),
-    turn: { state: turnState, source: turnState === "idle" ? "empty" : "assistant", terminalAt: null },
+    turn: { state: turnState, source: turnSource, terminalAt: null },
     observedAt: "2026-07-21T00:00:00.000Z",
   }]);
   return { registry, conversation: registry.conversationForPath(artifactPath)! };
@@ -694,6 +695,139 @@ test("an explicit migration opt-out keeps a synchronization hold assigned to the
   await drainHeldDeliveries(conversation.id, delivery, restarted);
   await drainHeldDeliveries(conversation.id, delivery, restarted);
   expect(sourceDeliveries).toEqual(["synchronization-opted-out-send"]);
+});
+
+test("a fresh empty-turn spawn on a draining source account reaches one successor", async () => {
+  const { registry, conversation } = registryWithConversation("seat-source", "codex", "unknown", "empty");
+  registry.setEngineRouting("codex", "seat-active");
+  let predecessorCommands = 0;
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "fresh-empty-turn-send",
+    text: "start on the selected account",
+  }, {
+    enabled: () => true,
+    client: () => deliveredClient(conversation.id, () => { predecessorCommands += 1; }, "unknown"),
+    registry: () => registry,
+    requestMigrationTick: () => {},
+  });
+
+  expect(result).toMatchObject({ ok: true, outcome: "held" });
+  expect(predecessorCommands).toBe(0);
+  expect(registry.conversation(conversation.id)?.migration?.phase).toBe("requested");
+
+  let successorCreates = 0;
+  const successorPath = "/sessions/fresh-empty-successor.jsonl";
+  await advanceConversationMigration(conversation.id, registry, {
+    virtualSource: true,
+    async create(input) {
+      successorCreates += 1;
+      return {
+        operationId: input.operationId,
+        nativeId: "fresh-empty-successor",
+        path: successorPath,
+        continuityPaths: [successorPath],
+        historyHash: "fresh-empty-history",
+        host: { kind: "codex-app-server", identity: "fresh-empty-successor", epoch: 1, verifiedAt: new Date().toISOString() },
+      };
+    },
+    async verify() {},
+  }, { deferBoardRepair: true });
+  const delivered: string[] = [];
+  const port = {
+    async deliver(input: { path: string; clientMessageId: string }) {
+      expect(input.path).toBe(successorPath);
+      delivered.push(input.clientMessageId);
+      return "delivered" as const;
+    },
+  };
+  await drainHeldDeliveries(conversation.id, port, registry);
+  await drainHeldDeliveries(conversation.id, port, registry);
+
+  expect({ successorCreates, delivered }).toEqual({
+    successorCreates: 1,
+    delivered: ["fresh-empty-turn-send"],
+  });
+  expect(registry.conversation(conversation.id)?.migration?.phase).toBe("committed");
+});
+
+test("a post-rollback stale busy owner recovers its missing host and drains once", async () => {
+  const { registry, conversation } = registryWithConversation("seat-source", "codex", "busy");
+  recordStructuredOwner(registry, conversation);
+  registry.setEngineRouting("codex", "seat-active");
+  const admitted = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "stale-busy-post-rollback",
+    text: "continue after the orphaned turn",
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+  });
+  expect(admitted).toMatchObject({ ok: true, outcome: "held" });
+  registry.rollbackConversationMigration(conversation.id, registry.conversation(conversation.id)!.migration!.revision);
+
+  let hostAvailable = false;
+  let recoveries = 0;
+  let commands = 0;
+  const client = {
+    snapshot: async () => hostAvailable ? snapshot(conversation.id, "codex", "hosted", "idle") : {
+      ...snapshot(conversation.id, "codex", "dead", "unknown"),
+      sessions: [],
+    },
+    command: async (command: { operationId: string; idempotencyKey: string; conversationId: string }) => {
+      commands += 1;
+      return {
+        operationId: command.operationId,
+        replayed: false,
+        receipt: {
+          operationId: command.operationId,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: command.conversationId,
+          kind: "send" as const,
+          status: "delivered" as const,
+          at: "2026-07-22T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+    operationStatus: async () => null,
+  } as unknown as RuntimeHostClient;
+  const port = {
+    async deliver(input: { delivery: { id: string; conversationId: string; text: string; command: HeldDelivery["command"] }; path: string; clientMessageId: string }) {
+      return await deliverHeldStructuredMessage({
+        conversationId: input.delivery.conversationId,
+        path: input.path,
+        deliveryId: input.delivery.id,
+        clientMessageId: input.clientMessageId,
+        text: input.delivery.text,
+        command: input.delivery.command,
+      }, {
+        enabled: () => true,
+        client: () => client,
+        registry: () => registry,
+        kick: () => {},
+        recover: async () => {
+          recoveries += 1;
+          hostAvailable = true;
+          return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+        },
+      }) ?? "delivery-uncertain";
+    },
+  };
+  await drainHeldDeliveries(conversation.id, port, registry);
+  await drainHeldDeliveries(conversation.id, port, registry);
+  await drainHeldDeliveries(conversation.id, port, registry);
+
+  expect({ recoveries, commands }).toEqual({ recoveries: 1, commands: 1 });
+  expect(Object.values(registry.snapshot().heldDeliveries)).toMatchObject([{
+    clientMessageId: "stale-busy-post-rollback",
+    state: "delivered",
+    attempts: 2,
+  }]);
 });
 
 test("runtime synchronization preserves an already-claimed source delivery during reseat", async () => {
