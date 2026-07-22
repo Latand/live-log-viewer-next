@@ -202,6 +202,82 @@ test("attempt 93c42855 recovers a failed registry receipt from transcript eviden
   });
 });
 
+test("issue 533: restart recovery adopts late child delivery after released-main parent failure", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `released-parent-late-child-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const key = { engine: "codex" as const, sessionId: id };
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "work",
+    status: "unhosted",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    cwd,
+    "prompt": "late child delivery",
+    accountId: "work",
+    parentConversationId: null,
+  });
+  await client.append({
+    scope: { type: "session", id: begun.receipt.conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId: begun.receipt.conversationId,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      accountId: "work",
+      cwd,
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+  const childOperationId = `spawn_message_${begun.receipt.launchId}`;
+  await client.command({
+    kind: "send",
+    operationId: childOperationId,
+    conversationId: begun.receipt.conversationId,
+    idempotencyKey: `spawn_${begun.receipt.launchId}`,
+    text: "late child delivery",
+    policy: "queue",
+  });
+  await client.transitionOperation(childOperationId, "delivered");
+  await client.transitionOperation(begun.receipt.launchId, "failed", { reason: "released timeout failure" });
+  registry.failStructuredSpawn(begun.receipt.launchId, "released timeout failure");
+
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "completed",
+    completionMode: "route-recovered",
+    error: null,
+  });
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("failed");
+  expect((await client.operationStatus(childOperationId))?.receipt.status).toBe("delivered");
+});
+
 test("clientAttemptId replay materializes its reserved conversation from runtime evidence", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `runtime-replay-${id}`);

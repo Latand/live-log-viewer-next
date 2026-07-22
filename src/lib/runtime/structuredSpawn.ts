@@ -532,6 +532,8 @@ export async function recoverPendingStructuredSpawns(
   for (const receipt of Object.values(snapshot.receipts)) {
     const effect = spawnEffects.get(receipt.launchId);
     if (receipt.state === "failed" && receipt.transport !== "tmux") {
+      const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, client);
+      if (reconciled.state === "completed") continue;
       /* The durable launch receipt failed, but its runtime spawn operation can
          survive as queued when the terminal transition itself timed out. The
          placeholder session then sits registering/unknown until someone closes
