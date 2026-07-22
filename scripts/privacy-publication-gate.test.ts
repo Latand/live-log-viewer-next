@@ -497,6 +497,20 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     expect(result.stderr.toString()).toBe("");
   });
 
+  test("scans several text files after one large source file", () => {
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-multi-text-"));
+    temporaryDirectories.push(directory);
+    const paths = ["large.ts", "second.ts", "third.ts", "fourth.ts"].map((name) => join(directory, name));
+    writeFileSync(paths[0]!, "export const fixture = true;\n".repeat(12_000));
+    for (const path of paths.slice(1)) writeFileSync(path, "export const fixture = true;\n");
+
+    const result = runGate(paths);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("detects quoted credential assignments containing punctuation", () => {
     const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-"));
     temporaryDirectories.push(directory);
