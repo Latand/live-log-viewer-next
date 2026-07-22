@@ -159,6 +159,35 @@ For a local clone, point the client at the launcher:
 }
 ```
 
+Quick install from the CLI:
+
+```bash
+# Claude Code (user scope)
+claude mcp add viewer -s user -- bun /absolute/path/to/live-log-viewer-next/bin/mcp-server.mjs
+
+# Codex — append to ~/.codex/config.toml
+[mcp_servers.viewer]
+command = "bun"
+args = ["/absolute/path/to/live-log-viewer-next/bin/mcp-server.mjs"]
+```
+
+To register the server everywhere at once — the operator's Claude Code and
+Codex configs plus every Viewer-managed account under
+`~/.config/agent-log-viewer/accounts` (their spawned agents each run with
+their own `CLAUDE_CONFIG_DIR`/`CODEX_HOME`, so each account needs its own
+registration) — run the idempotent installer and re-run it after adding
+accounts:
+
+```bash
+scripts/install-mcp.sh                     # registers the repo's bin/mcp-server.mjs
+LLV_MCP_BIN=/path/to/mcp-server.mjs \
+  scripts/install-mcp.sh                   # point at a stable runtime copy instead
+```
+
+The server name must stay `viewer` (or another `isViewerMcpServer()` match:
+`viewer-*`, `agent-log-viewer*`) — transcript calls attributed to other names
+do not render as Viewer cards.
+
 The v1 tools are `spawn_agent`, `send_message`, `create_task`, `update_task`,
 `create_pipeline`, `pipeline_action`, `link_task_to_pipeline`,
 `list_conversations`, `get_conversation`, `deploy_exact_sha`, and
