@@ -1461,48 +1461,51 @@ test("a warm global-only incomplete response retains an out-of-cap pin until its
 });
 
 test("concurrent requests for one files revision share one forced scan", async () => {
-  await GET(new Request("http://127.0.0.1/api/files"));
+  await cachedFileScan();
   let release!: () => void;
   scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
-  const request = () => GET(new Request("http://127.0.0.1/api/files", {
-    headers: { "x-llv-files-revision": "41" },
-  }));
+  const request = () => cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER, 41);
 
   const first = request();
   await Promise.resolve();
   const second = request();
   release();
   await Promise.all([first, second]);
+  await currentFileScan();
 
   expect(scans).toBe(2);
 });
 
-test("a completed client revision cannot suppress a later refresh with the same value", async () => {
-  const request = () => GET(new Request("http://127.0.0.1/api/files", {
-    headers: { "x-llv-files-revision": "41" },
-  }));
+test("a completed revision generation absorbs newer revision noise inside the scan cooldown", async () => {
+  await cachedFileScan();
+  const started = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER, 41);
+  const completed = await currentFileScan();
+  const repeated = await cachedFileScan(undefined, undefined, Date.now(), 42);
 
-  await request();
-  await request();
-
+  expect(started.targetGeneration).toBeGreaterThan(started.generation);
+  expect(repeated.generation).toBe(completed.generation);
+  expect(repeated.targetGeneration).toBe(completed.generation);
   expect(scans).toBe(2);
 });
 
-test("a newer revision waits for a follow-up scan when an older scan is in flight", async () => {
+test("a newer revision during an active scan does not reserve a trailing full-corpus scan", async () => {
+  scannedFiles = [file("/sessions/warm.jsonl")];
+  await cachedFileScan();
   let releaseOlder!: () => void;
   scanGates.push(new Promise<void>((resolve) => { releaseOlder = resolve; }));
   scannedFiles = [file("/sessions/revision-1.jsonl")];
-  const older = cachedFileScan(undefined, undefined, Date.now(), 1);
+  const older = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER, 1);
   await Promise.resolve();
-  expect(scans).toBe(1);
+  expect(scans).toBe(2);
 
   scannedFiles = [file("/sessions/revision-2.jsonl")];
-  const newer = cachedFileScan(undefined, undefined, Date.now(), 2);
+  const newer = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER, 2);
   releaseOlder();
-  await older;
-  const result = await newer;
+  const completed = await currentFileScan();
 
-  expect(result.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/revision-2.jsonl"]);
+  expect(older.targetGeneration).toBeGreaterThan(older.generation);
+  expect(newer.targetGeneration).toBe(newer.generation);
+  expect(completed.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/revision-1.jsonl"]);
   expect(scans).toBe(2);
 });
 
@@ -1532,24 +1535,20 @@ test("a persisted legacy cache slot serves stale data during fresh hydration", a
   expect(next.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/upgraded-fresh.jsonl"]);
 });
 
-test("an arbitrary client revision cannot suppress a later background refresh", async () => {
+test("an arbitrary client revision cannot suppress a later refresh beyond the cooldown", async () => {
   scannedFiles = [file("/sessions/untrusted-watermark.jsonl")];
   await GET(new Request("http://127.0.0.1/api/files", {
     headers: { "x-llv-files-revision": String(Number.MAX_SAFE_INTEGER) },
   }));
 
   scannedFiles = [file("/sessions/genuine-revision.jsonl")];
-  const response = await GET(new Request("http://127.0.0.1/api/files", {
-    headers: { "x-llv-files-revision": "7" },
-  }));
-  const body = await response.json() as { files: FileEntry[] };
+  const stale = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER, 7);
 
-  expect(body.files.map((entry) => entry.path)).toEqual(["/sessions/untrusted-watermark.jsonl"]);
+  expect(stale.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/untrusted-watermark.jsonl"]);
   expect(scans).toBe(2);
 
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const next = await GET(new Request("http://127.0.0.1/api/files"));
-  expect((await next.json()).files.map((entry: FileEntry) => entry.path)).toEqual(["/sessions/genuine-revision.jsonl"]);
+  const completed = await currentFileScan();
+  expect(completed.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/genuine-revision.jsonl"]);
 });
 
 test("a client generation above the issued watermark cannot advance the server counter", async () => {

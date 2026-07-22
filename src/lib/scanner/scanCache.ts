@@ -660,6 +660,32 @@ export async function cachedFileScan(
   const scanPinnedPath = pinnedPath && !slot.snapshot?.files.some((file) => file.path === pinnedPath)
     ? pinnedPath
     : undefined;
+  const completedPinned = scanPinnedPath ? slot.pinnedSnapshots?.get(scanPinnedPath) : undefined;
+  const hasCompletedScope = scanPinnedPath === undefined || completedPinned !== undefined;
+  const scopeRefreshedAt = completedPinned?.refreshedAt ?? slot.refreshedAt;
+
+  /* Transcript appends can publish many runtime revisions during one full
+     inventory scan. A completed scope remains authoritative for the existing
+     fallback cadence, and an active scan absorbs newer revision noise. The log
+     stream carries message bytes immediately; the next bounded inventory pass
+     reconciles metadata without reserving an endless chain of full scans. */
+  if (
+    requiredRevision !== undefined
+    && slot.snapshot
+    && hasCompletedScope
+    && (
+      (slot.refresh !== undefined && slot.refresh.generation > (completedPinned?.generation ?? slot.snapshotGeneration))
+      || (slot.lastScan?.reason === "revision" && now - scopeRefreshedAt < FILE_SCAN_ORDINARY_REFRESH_MS)
+    )
+  ) {
+    const completedGeneration = completedPinned?.generation ?? slot.snapshotGeneration;
+    return completedScan(
+      slot,
+      scanPinnedPath,
+      completedGeneration,
+      slot.refresh ? "stale" : "hit",
+    );
+  }
 
   let targetGeneration = requiredGeneration !== undefined && requiredGeneration <= slot.requestedGeneration
     ? requiredGeneration
