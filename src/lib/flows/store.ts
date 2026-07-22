@@ -318,10 +318,19 @@ function comparableFlow(flow: Flow): string {
   return JSON.stringify(content);
 }
 
+function replaceFlow(target: Flow, source: Flow): void {
+  for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
+  Object.assign(target, structuredClone(source));
+}
+
 function saveFlowsUnlocked(flows: Flow[]): void {
   const storedById = new Map(loadFlows().map((flow) => [flow.id, flow] as const));
   for (const flow of flows) {
     const stored = storedById.get(flow.id);
+    if (stored && flow.revision !== undefined && flow.revision < (stored.revision ?? 0)) {
+      replaceFlow(flow, stored);
+      continue;
+    }
     flow.revision = stored && comparableFlow(stored) === comparableFlow(flow)
       ? stored.revision ?? 0
       : (stored?.revision ?? 0) + 1;

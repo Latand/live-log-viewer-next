@@ -973,7 +973,14 @@ export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>)
         ? { ...round, reviewerRole: diskRound.reviewerRole }
         : round;
     });
-    return { ...tick, rounds, roles: diskFlow.roles, roundLimit: diskFlow.roundLimit, mode: diskFlow.mode };
+    return {
+      ...tick,
+      revision: diskFlow.revision,
+      rounds,
+      roles: diskFlow.roles,
+      roundLimit: diskFlow.roundLimit,
+      mode: diskFlow.mode,
+    };
   });
   saveFlows(merged);
 }
