@@ -12,7 +12,7 @@ process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-
 const engineModule = await import("./engine");
 const { adoptAttempt, defaultPipelinePorts, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reviewNote, tickPipelines } = engineModule;
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
-const { captureReviewHead, newRound } = await import("@/lib/flows/engine");
+const { newRound } = await import("@/lib/flows/engine");
 const rawCreatePipelineFromRequest = engineModule.createPipelineFromRequest;
 const createPipelineFromRequest: typeof rawCreatePipelineFromRequest = async (request, ports, options) =>
   await rawCreatePipelineFromRequest({ src: "/codex/creator.jsonl", ...request }, ports, options);
@@ -105,6 +105,10 @@ function harness() {
       if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return { code: 0, stdout: "main\n", stderr: "" };
       if (args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]?.branch ?? ""}\n`, stderr: "" };
+      if (args[0] === "ls-remote") {
+        const branch = loadPipelines()[0]?.branch ?? "pipeline/test";
+        return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\trefs/heads/${branch}\n`, stderr: "" };
+      }
       if (args[0] === "rev-parse") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
@@ -143,7 +147,7 @@ function harness() {
     pipelineAdoptionCandidates: () => [],
     createFlow: async (req) => {
       calls.push(`flow:${req.implementerPath}:${req.baseRef}:${req.targetSha}:${req.spec}`);
-      const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, targetSha: req.targetSha, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
+      const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, headRef: req.headRef, targetSha: req.targetSha, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
       flows.set(flow.id, flow);
       return { flow };
     },
@@ -1927,9 +1931,10 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
 
   const launchedFlow = h.flows.get("flow-2")!;
   const launchedRound = newRound(launchedFlow, "button", null);
-  captureReviewHead(launchedFlow, launchedRound);
+  launchedRound.reviewHeadSha = repairHead;
   launchedFlow.rounds.push(launchedRound);
   expect(launchedFlow.targetSha).toBe(repairHead);
+  expect(launchedFlow.headRef).toBe(pipeline.branch);
   expect(launchedRound.reviewHeadSha).toBe(repairHead);
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
@@ -2246,6 +2251,44 @@ test("a later approval stays parked when its reviewed head differs from the curr
   });
   expect((await tickPipelines([], h.ports)).changed).toBe(false);
   expect(loadPipelines()[0]!.stateDetail).toBe(parked.stateDetail);
+});
+
+test("issue 533: approval parks when the reviewed repair is absent from the remote pipeline branch", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  const repairHead = "5".repeat(40);
+  const staleRemoteHead = "d".repeat(40);
+  const flow = h.flows.get("flow-1")!;
+  flow.rounds.push({ n: 1, reviewHeadSha: repairHead } as never);
+  flow.state = "approved";
+  const baseExec = h.ports.exec;
+  h.ports.exec = (command, args, cwd) => {
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+      return { code: 0, stdout: `${repairHead}\n`, stderr: "" };
+    }
+    if (command === "git" && args[0] === "ls-remote") {
+      return { code: 0, stdout: `${staleRemoteHead}\trefs/heads/${pipeline.branch}\n`, stderr: "" };
+    }
+    return baseExec(command, args, cwd);
+  };
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain(`remote pipeline head is ${staleRemoteHead}`);
+  expect(parked.runs[1]!.attempts[0]).toMatchObject({
+    expectedReviewHeadSha: repairHead,
+    reviewHeadSha: repairHead,
+    state: "needs_decision",
+  });
 });
 
 test("an approval parks when the clean head advances during final settlement (#526)", async () => {

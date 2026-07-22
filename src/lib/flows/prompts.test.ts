@@ -44,9 +44,11 @@ const round: Round = {
 };
 
 test("reviewer prompt includes pinned specification and acceptance criteria", () => {
-  const prompt = reviewerPrompt(flow("Add flow specs\nAC1: Fresh reviewers receive the spec"), round);
+  const reviewHeadSha = "5".repeat(40);
+  const prompt = reviewerPrompt(flow("Add flow specs\nAC1: Fresh reviewers receive the spec"), { ...round, reviewHeadSha });
   expect(prompt).toContain("Pinned flow specification and acceptance criteria:");
   expect(prompt).toContain("AC1: Fresh reviewers receive the spec");
+  expect(prompt).toContain(`Exact review HEAD: ${reviewHeadSha}`);
 });
 
 test("kickoff requests spec.md before review when the flow has no pinned specification", () => {

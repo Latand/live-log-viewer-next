@@ -276,6 +276,61 @@ test("clientAttemptId replay materializes its reserved conversation from runtime
   expect(registry.snapshot().conversations[begun.receipt.conversationId]?.generations).toHaveLength(1);
 });
 
+test("issue 533: matching runtime evidence preserves a claimed path-pending structured host", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `claimed-runtime-replay-${id}`);
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const key = { engine: "codex" as const, sessionId: id };
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key, artifactPath, cwd, accountId: "work", status: "idle", host: null,
+    structuredHost: {
+      kind: "codex-app-server", endpoint: "stdio:claimed",
+      process: { pid: process.pid, startIdentity: "claimed-runtime-host" },
+      eventCursor: 3, protocolVersion: "1", writerClaimEpoch: 7,
+      activeTurnRef: "turn-initial", pendingAttention: [], activeFlags: [],
+    },
+    claimEpoch: 7, claimOwner: "claim-runtime-owner", pendingAction: "spawn",
+  });
+  const client = {
+    operationStatus: async (operationId: string) => operationId === `spawn_message_${begun.receipt.launchId}` ? {
+      receipt: {
+        operationId, idempotencyKey: `spawn_${begun.receipt.launchId}`,
+        conversationId: begun.receipt.conversationId, kind: "send" as const,
+        status: "delivered" as const, at: new Date().toISOString(), revision: 4,
+      }, replayed: true,
+    } : null,
+    snapshot: async () => ({
+      schemaVersion: 1, snapshotSeq: 4, retentionFloorSeq: 0,
+      serverTime: new Date().toISOString(), runtime: { hostEpoch: 1, health: "ready" as const }, filesRevision: 0,
+      sessions: [{
+        conversationId: begun.receipt.conversationId, sessionKey: key,
+        hostKind: "codex-app-server" as const, host: "hosted" as const,
+        turn: "running" as const, provenance: "structured" as const, revision: 4,
+        attentionIds: [], recentReceipts: [], accountId: "work", parentConversationId: null,
+        flowId: null, workflowId: null, cwd, artifactPath,
+        capabilities: { steer: true, structuredAttention: true }, activeTurnId: "turn-initial",
+      }],
+      attentions: [], recentOperations: [], edges: [], flows: [], workflows: [], tasks: [], deployments: [],
+    }),
+  } as unknown as RuntimeHostClient;
+
+  const recovered = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client);
+
+  expect(recovered).toMatchObject({ state: "completed", initialMessage: "delivered" });
+  expect(registry.snapshot().entries[`codex:${id}`]).toMatchObject({
+    claimOwner: "claim-runtime-owner", claimEpoch: 7, pendingAction: "spawn",
+    structuredHost: {
+      endpoint: "stdio:claimed",
+      process: { pid: process.pid, startIdentity: "claimed-runtime-host" },
+      writerClaimEpoch: 7,
+    },
+  });
+});
+
 test("completed replay preserves its live structured host ownership", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `completed-live-replay-${id}`);
@@ -1269,6 +1324,7 @@ test("issue 533: a 30 second initial-message timeout releases admission ownershi
     pendingAction: "spawn",
     structuredHost: { process: { pid: process.pid, startIdentity: "timeout-host" } },
   });
+  const claimedBeforeRecovery = registry.snapshot().entries[`codex:${id}`]!;
   expect(host.releaseCount).toBe(0);
 
   fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "continue after timeout" } })}\n`);
@@ -1278,6 +1334,12 @@ test("issue 533: a 30 second initial-message timeout releases admission ownershi
   expect(first).toMatchObject({ state: "completed", initialMessage: "delivered" });
   expect(replay).toMatchObject({ state: "completed", initialMessage: "delivered" });
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "completed", completionMode: "route-recovered" });
+  expect(registry.snapshot().entries[`codex:${id}`]).toMatchObject({
+    claimOwner: claimedBeforeRecovery.claimOwner,
+    claimEpoch: claimedBeforeRecovery.claimEpoch,
+    pendingAction: claimedBeforeRecovery.pendingAction,
+    structuredHost: { process: claimedBeforeRecovery.structuredHost!.process },
+  });
   expect(host.releaseCount).toBe(0);
 });
 

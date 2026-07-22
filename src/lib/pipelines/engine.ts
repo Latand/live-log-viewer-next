@@ -26,7 +26,7 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { requestPipelineTick } from "./controllerSignal";
 import { durableStageTurnEvidence, type StageTurnEvidence } from "./durableEvidence";
-import { commitPipelineStage, currentPipelineBranchHead, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
+import { commitPipelineStage, currentPipelineBranchHead, currentPipelineRemoteBranchHead, provisionPipelineWorktree, resetPipelineStage, resolvePipelineBase, synchronizePipelineRetryHead } from "./git";
 import {
   DEFAULT_FAIL_EDGE_ROUNDS,
   MAX_FAIL_EDGE_ROUNDS,
@@ -1128,6 +1128,7 @@ async function tickReviewStage(
       roles: { implementer: implementerRole, reviewer: reviewerRole },
       baseMode: "head",
       baseRef: pipeline.baseRef,
+      headRef: pipeline.branch,
       targetSha: attempt.expectedReviewHeadSha,
       spec: pipeline.spec ?? pipeline.task,
       mode: "auto",
@@ -1260,10 +1261,20 @@ const RECONCILABLE_BOUND_FLOW_ERRORS = [
 ] as const;
 
 function reviewHeadFenceError(pipeline: Pipeline, attempt: PipelineStageAttempt, ports: PipelinePorts): string | null {
+  if (!attempt.reviewHeadSha || attempt.expectedReviewHeadSha !== attempt.reviewHeadSha) {
+    return `approved review flow envelope mismatch: expected ${attempt.expectedReviewHeadSha ?? "no exact head"}, reviewed ${attempt.reviewHeadSha ?? "no exact head"}`;
+  }
   const currentHead = currentPipelineBranchHead(pipeline, ports.exec);
   if (!currentHead.ok) return `approved review flow could not verify the current pipeline head: ${currentHead.error}`;
-  if (attempt.reviewHeadSha === currentHead.sha) return null;
-  return `approved review flow head mismatch: reviewed ${attempt.reviewHeadSha ?? "no exact head"}, current pipeline head is ${currentHead.sha}`;
+  if (attempt.reviewHeadSha !== currentHead.sha) {
+    return `approved review flow head mismatch: reviewed ${attempt.reviewHeadSha}, current pipeline head is ${currentHead.sha}`;
+  }
+  const remoteHead = currentPipelineRemoteBranchHead(pipeline, ports.exec);
+  if (!remoteHead.ok) return `approved review flow could not verify the remote pipeline head: ${remoteHead.error}`;
+  if (attempt.reviewHeadSha !== remoteHead.sha) {
+    return `approved review flow head mismatch: reviewed ${attempt.reviewHeadSha}, remote pipeline head is ${remoteHead.sha}`;
+  }
+  return null;
 }
 
 function terminalReviewFlowError(flow: Flow): string | null {

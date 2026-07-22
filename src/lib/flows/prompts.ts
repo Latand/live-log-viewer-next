@@ -31,6 +31,7 @@ export function reviewerPrompt(flow: Flow, round: Round): string {
     "",
     `Working directory: ${flow.cwd}`,
     `Review scope: git diff ${flow.baseRef}...HEAD plus uncommitted changes in the same working tree.`,
+    `Exact review HEAD: ${round.reviewHeadSha ?? "unavailable"}`,
     "",
     "Pinned flow specification and acceptance criteria:",
     flow.spec?.trim() || "No pinned specification was supplied for this flow.",

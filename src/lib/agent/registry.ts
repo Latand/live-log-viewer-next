@@ -3728,7 +3728,19 @@ export class AgentRegistry {
         void updatedAt;
         storedEvidence = entry;
       }
-      const candidate = evidence ?? storedEvidence;
+      /* Runtime snapshots prove delivery and session identity, while the
+         registry remains authoritative for an active writer claim. Merge the
+         live claim inside this mutation so synthesized evidence cannot clear
+         ownership between its read and late-success settlement. */
+      const candidate = evidence && storedEvidence
+        && (storedEvidence.structuredHost?.process || storedEvidence.claimOwner) ? {
+        ...evidence,
+        host: storedEvidence.host,
+        structuredHost: storedEvidence.structuredHost,
+        claimEpoch: storedEvidence.claimEpoch,
+        claimOwner: storedEvidence.claimOwner,
+        pendingAction: storedEvidence.pendingAction,
+      } : evidence ?? storedEvidence;
       if (!candidate
         || (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(candidate.key))
         || (receipt.artifactPath && receipt.artifactPath !== candidate.artifactPath)) {

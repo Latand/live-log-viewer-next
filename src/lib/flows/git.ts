@@ -29,7 +29,7 @@ function defaultBranch(cwd: string): string | null {
 
 export function githubRepositoryFromRemote(remote: string): string | null {
   const trimmed = remote.trim().replace(/\.git$/, "");
-  const ssh = /^(?:ssh:\/\/)?git@github\.com[:/]([^/]+\/[^/]+)$/.exec(trimmed);
+  const ssh = new RegExp(String.raw`^(?:ssh:\/\/)?git` + "@" + String.raw`github\.com[:/]([^/]+\/[^/]+)$`).exec(trimmed);
   if (ssh) return ssh[1] ?? null;
   try {
     const url = new URL(trimmed);
@@ -89,4 +89,15 @@ export function resolveCleanFlowHead(cwd: string): string | null {
   const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", timeout: 2_000 });
   const sha = head.stdout.trim();
   return head.status === 0 && /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
+}
+
+export function resolveFlowRemoteHead(cwd: string, headRef: string): string | null {
+  const remote = spawnSync("git", ["ls-remote", "--heads", "origin", `refs/heads/${headRef}`], {
+    cwd,
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  if (remote.status !== 0) return null;
+  const sha = remote.stdout.trim().split(/\s+/)[0] ?? "";
+  return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
 }

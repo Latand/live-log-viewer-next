@@ -22,7 +22,7 @@ import {
   startHeadlessReview,
   type HeadlessReviewLaunch,
 } from "./exec";
-import { resolveCleanFlowHead } from "./git";
+import { resolveCleanFlowHead, resolveFlowRemoteHead } from "./git";
 import {
   fallbackReviewFromTranscript,
   lastAssistantMessage,
@@ -223,6 +223,16 @@ export function reserveReviewerSpawn(
 export function captureReviewHead(flow: Flow, round: Round): string {
   const headSha = resolveCleanFlowHead(flow.cwd);
   if (!headSha) throw new Error("review requires a clean committed HEAD");
+  if (flow.headRef) {
+    const remoteSha = resolveFlowRemoteHead(flow.cwd, flow.headRef);
+    if (remoteSha !== headSha) {
+      const detail = remoteSha
+        ? `review remote head mismatch before launch: local ${headSha}, origin/${flow.headRef} ${remoteSha}`
+        : `review remote head is unavailable before launch: origin/${flow.headRef}`;
+      markNeedsDecision(flow, detail);
+      throw new Error(detail);
+    }
+  }
   if (round.n === 1 && flow.targetSha && headSha.toLowerCase() !== flow.targetSha.toLowerCase()) {
     const detail = `review target changed before launch: expected ${flow.targetSha}, found ${headSha}`;
     markNeedsDecision(flow, detail);
