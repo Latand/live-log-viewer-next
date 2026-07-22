@@ -292,14 +292,18 @@ describe("deriveRoleSessionTitles", () => {
     expect(titles.get("/orchestrator")).toBe("#42 Wire the burndown rail — orchestrator");
   });
 
-  test("stable fallback: a taskless builder keeps its scan title; a self-review carries no round", () => {
+  test("a taskless builder upgrades its generic scan title to the bare role; a self-review carries no round", () => {
     const builder = worker("/builder", "builder", { id: "conversation-builder", title: "Claude session" });
+    const named = worker("/named", "builder", { id: "conversation-named", title: "Fix the spawn race" });
     const selfReviewer = worker("/self", "reviewer", { id: "conversation-self", reviews: "conversation-self", mtime: 2_000 });
     const boardTask = task({ id: "task-1", assignments: [assignment("conversation-self")] });
 
-    const titles = deriveRoleSessionTitles({ files: [builder, selfReviewer], flows: [], tasks: [boardTask] });
+    const titles = deriveRoleSessionTitles({ files: [builder, named, selfReviewer], flows: [], tasks: [boardTask] });
 
-    expect(titles.has("/builder")).toBe(false);
+    // A literal «Codex/Claude session» carries nothing — the bare role beats it.
+    expect(titles.get("/builder")).toBe("Builder");
+    // A meaningful scan title stays untouched.
+    expect(titles.has("/named")).toBe(false);
     expect(titles.get("/self")).toBe("#325 — Group review rounds per task — reviewer");
   });
 
