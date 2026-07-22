@@ -5,7 +5,8 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 
-import { AgentRegistry, RegistryParityError } from "./registry";
+import { AgentRegistry, normalizeRegistry, RegistryParityError } from "./registry";
+import { SqliteAgentRegistryStore } from "./sqliteRegistryStore";
 
 const CHILD = path.join(import.meta.dir, "registry.sqliteChild.ts");
 
@@ -17,6 +18,34 @@ function percentile(values: number[], quantile: number): number {
   const ordered = [...values].sort((left, right) => left - right);
   return ordered[Math.min(ordered.length - 1, Math.ceil(ordered.length * quantile) - 1)]!;
 }
+
+test("a keyed SQLite mutation reads only the targeted row payload", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-keyed-row-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const seed = new AgentRegistry(filename);
+  const template = seed.beginSpawn("codex", "/row-read-seed");
+  const initial = seed.snapshot();
+  for (let index = 0; index < 2_000; index += 1) {
+    const launchId = `row-read-${String(index).padStart(4, "0")}`;
+    initial.receipts[launchId] = { ...structuredClone(template), launchId };
+  }
+  let receiptPayloadReads = 0;
+  const store = new SqliteAgentRegistryStore(path.join(directory, "agent-registry.sqlite"), {
+    initialSnapshot: initial,
+    normalize: normalizeRegistry,
+    onRowPayloadRead: (collection, count) => {
+      if (collection === "receipts") receiptPayloadReads += count;
+    },
+  });
+  receiptPayloadReads = 0;
+
+  store.mutate((file) => {
+    file.receipts["row-read-1000"]!.error = "updated";
+  }, false);
+
+  expect(receiptPayloadReads).toBe(1);
+  expect(store.snapshot().file.receipts["row-read-1000"]?.error).toBe("updated");
+});
 
 test("SQLite first boot imports JSON and preserves membership and capability digest paths", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-import-"));
