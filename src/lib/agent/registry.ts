@@ -5718,7 +5718,10 @@ export class AgentRegistry {
   }
 }
 
-const registryProcessState = globalThis as typeof globalThis & {
+/* Next standalone evaluates instrumentation and route handlers in separate
+   bundle realms. The injected process object is shared by those realms and
+   carries one SQLite connection, snapshot cache, and revision cache. */
+const registryProcessState = process as typeof process & {
   __llvAgentRegistry?: AgentRegistry | null;
 };
 
