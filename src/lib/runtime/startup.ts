@@ -129,7 +129,7 @@ async function enqueueInterruptedCodexContinuations(
     const conversationId = interrupted.get(key);
     if (!conversationId) continue;
     if (pendingContinuationConversationIds.has(conversationId)) continue;
-    const entry = registry.snapshot().entries[key];
+    const entry = registry.readOnlySnapshot().entries[key];
     if (!entry) throw new Error(`adopted Codex registry row disappeared: ${key}`);
     const operationId = interruptedCodexContinuationOperationId(item.key.sessionId, entry.claimEpoch);
     const existing = existingByKey.get(key);
@@ -168,7 +168,7 @@ async function interruptedCodexContinuations(
   const existingByKey = new Map<string, RuntimeOperationResult>();
   for (const item of adopted) {
     const key = sessionKeyId(item.key);
-    const entry = registry.snapshot().entries[key];
+    const entry = registry.readOnlySnapshot().entries[key];
     if (!entry) continue;
     const current = await client.operationStatus(
       interruptedCodexContinuationOperationId(item.key.sessionId, entry.claimEpoch),

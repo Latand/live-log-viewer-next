@@ -546,19 +546,19 @@ export function sensitiveClasses(text: string): Set<FindingClass> {
     findings.add("known_value");
   }
   const unixHomePattern = /(?:^|[\s"'(=:/])\/(?:home|Users)\/([A-Za-z0-9._-]+)(?:\/|$)/gm;
-  for (const match of searchableText.matchAll(unixHomePattern)) {
+  for (let match = unixHomePattern.exec(searchableText); match; match = unixHomePattern.exec(searchableText)) {
     if (match[1].toLowerCase() === "user") continue;
     findings.add("home_path");
     break;
   }
   const windowsHomePattern = /(?:^|[\s"'(])[A-Za-z]:\\Users\\([A-Za-z0-9._-]+)(?:\\|$)/gim;
-  for (const match of searchableText.matchAll(windowsHomePattern)) {
+  for (let match = windowsHomePattern.exec(searchableText); match; match = windowsHomePattern.exec(searchableText)) {
     if (match[1].toLowerCase() === "user") continue;
     findings.add("home_path");
     break;
   }
   const emailPattern = /\b[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([A-Z0-9.-]+\.[A-Z]{2,})\b/gi;
-  for (const match of searchableText.matchAll(emailPattern)) {
+  for (let match = emailPattern.exec(searchableText); match; match = emailPattern.exec(searchableText)) {
     const domain = match[1].toLowerCase();
     if (domain === "example.com" || domain === "example.net" || domain === "example.org" || domain.endsWith(".invalid")) continue;
     findings.add("email_address");
@@ -579,7 +579,8 @@ export function sensitiveClasses(text: string): Set<FindingClass> {
     `s${separator}k`,
   ].join("|") + String.raw`[^a-z0-9\r\n]{0,8}?[_-][^a-z0-9\r\n]*`, "gi");
   for (const line of searchableText.split(/\r?\n/)) {
-    for (const match of line.matchAll(splitTokenPrefix)) {
+    splitTokenPrefix.lastIndex = 0;
+    for (let match = splitTokenPrefix.exec(line); match; match = splitTokenPrefix.exec(line)) {
       const compactTail = compactSensitiveText(line.slice(match.index));
       if (/^(?:githubpat|gh[pousr]|xox[baprs]|sk)[a-z0-9]{12,}/i.test(compactTail)) {
         findings.add("credential");

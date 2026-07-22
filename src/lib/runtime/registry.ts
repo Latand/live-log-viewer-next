@@ -334,7 +334,7 @@ export async function demoteSkippedStructuredRegistryHosts(
   registry: AgentRegistry,
   shouldAdopt: StructuredHostAdoptionFilter,
 ): Promise<void> {
-  const rows = Object.values(registry.snapshot().entries).filter((entry) =>
+  const rows = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
     entry.structuredHost && !shouldAdopt(entry));
   for (const entry of rows) {
     const host = entry.structuredHost!;
@@ -349,7 +349,7 @@ export async function demoteSkippedStructuredRegistryHosts(
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
-        const current = registry.snapshot().entries[sessionKeyId(entry.key)];
+        const current = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];
         if (!current?.structuredHost || shouldAdopt(current)) return;
         /* A PID-only claim cannot prove ownership across reboot. Runtime and
            transcript signals already excluded this row from adoption, so the
@@ -360,7 +360,7 @@ export async function demoteSkippedStructuredRegistryHosts(
           reclaimUnverifiedOwner: true,
         });
         if (!claimed) {
-          const current = registry.snapshot().entries[sessionKeyId(entry.key)];
+          const current = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];
           const orphan = current?.structuredHost?.kind === "claude-broker"
             ? current.structuredHost.process
             : null;
@@ -396,7 +396,7 @@ export async function adoptCodexRegistryHosts(
   shouldAdopt: StructuredHostAdoptionFilter = () => true,
 ): Promise<AdoptedCodexHost[]> {
   if (!structuredHostsEnabled(env)) return [];
-  const rows = Object.values(registry.snapshot().entries).filter((entry) =>
+  const rows = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
     entry.key.engine === "codex"
     && entry.structuredHost?.kind === "codex-app-server"
     && shouldAdopt(entry));
@@ -456,7 +456,7 @@ export async function adoptClaudeRegistryHosts(
   shouldAdopt: StructuredHostAdoptionFilter = () => true,
 ): Promise<AdoptedClaudeHost[]> {
   if (!structuredHostsEnabled(env)) return [];
-  const rows = Object.values(registry.snapshot().entries).filter((entry) =>
+  const rows = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
     entry.key.engine === "claude"
     && entry.structuredHost?.kind === "claude-broker"
     && shouldAdopt(entry));
@@ -467,7 +467,7 @@ export async function adoptClaudeRegistryHosts(
       await registry.withOperationLock(entry.key, owner, async () => {
         let claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
         if (!claimed) {
-          const current = registry.snapshot().entries[`claude:${entry.key.sessionId}`];
+          const current = registry.readOnlySnapshot().entries[`claude:${entry.key.sessionId}`];
           const orphan = current?.structuredHost?.kind === "claude-broker"
             ? current.structuredHost.process
             : null;

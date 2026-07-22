@@ -122,7 +122,7 @@ async function reconcileTerminalDeliveries(
   client: RuntimeHostClient,
   isCurrent: () => boolean,
 ): Promise<void> {
-  const unsettledDeliveries = Object.values(registry.snapshot().heldDeliveries)
+  const unsettledDeliveries = Object.values(registry.readOnlySnapshot().heldDeliveries)
     .filter((delivery) => delivery.state === "delivery-uncertain" || delivery.state === "failed");
   const pendingOutcomes: Parameters<AgentRegistry["recordDeliveryOutcomesForOperations"]>[0][number][] = [];
   const flushOutcomes = () => {
@@ -270,7 +270,7 @@ export async function bindStructuredDeliveryQueue(
         );
         if (status === "delivered" && operationId.startsWith("spawn_message_")) {
           const launchId = operationId.slice("spawn_message_".length);
-          const receipt = registry.snapshot().receipts[launchId];
+          const receipt = registry.readOnlySnapshot().receipts[launchId];
           if (receipt?.conversationId === conversationId && receipt.state !== "completed") {
             const { reconcileStructuredSpawnReplay } = await import("./structuredSpawn");
             await reconcileStructuredSpawnReplay(launchId, registry, client);
@@ -636,7 +636,7 @@ export async function bindStructuredDeliveryQueue(
     completion = completion.catch(() => {}).then(async () => {
       if (stopped || state.activeQueue !== queue) return;
       for (const item of items) await register(item);
-      const startupSnapshot = registry.snapshot();
+      const startupSnapshot = registry.readOnlySnapshot();
       const runtimeSnapshot = typeof client.snapshot === "function"
         ? await client.snapshot().catch(() => null)
         : null;

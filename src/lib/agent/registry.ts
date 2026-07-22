@@ -5718,12 +5718,15 @@ export class AgentRegistry {
   }
 }
 
-let registry: AgentRegistry | null = null;
+const registryProcessState = globalThis as typeof globalThis & {
+  __llvAgentRegistry?: AgentRegistry | null;
+};
+
 export function agentRegistry(): AgentRegistry {
-  registry ??= new AgentRegistry();
-  return registry;
+  registryProcessState.__llvAgentRegistry ??= new AgentRegistry();
+  return registryProcessState.__llvAgentRegistry;
 }
 
 export function setAgentRegistryForTests(value: AgentRegistry | null): void {
-  registry = value;
+  registryProcessState.__llvAgentRegistry = value;
 }
