@@ -1307,6 +1307,37 @@ function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boo
   return true;
 }
 
+function reconcileParkedStructuredSpawn(pipeline: Pipeline, ports: PipelinePorts): boolean {
+  if (pipeline.state !== "needs_decision") return false;
+  const stage = currentStage(pipeline);
+  if (!stage || stage.kind !== "run") return false;
+  const attempt = currentAttempt(pipeline, stage.id);
+  if (!attempt?.launchId || attempt.paneId || attempt.verdict || attempt.completedAt) return false;
+  if (!isStructuredSpawnPark(pipeline, attempt)) return false;
+  const receipt = ports.spawnReceipt(attempt.launchId);
+  if (
+    receipt?.state !== "completed"
+    || receipt.launchId !== attempt.launchId
+    || receipt.conversationId !== attempt.conversationId
+  ) return false;
+  attempt.sessionId = receipt.sessionId;
+  attempt.agentPath = receipt.transcript;
+  attempt.paneId = receipt.paneId;
+  attempt.state = "running";
+  attempt.error = null;
+  pipeline.state = "running";
+  pipeline.stateDetail = null;
+  setCursorState(pipeline, stage.id, "running");
+  return true;
+}
+
+function isStructuredSpawnPark(pipeline: Pipeline, attempt: PipelineStageAttempt): boolean {
+  const failure = attempt.error ?? pipeline.stateDetail ?? "";
+  return failure.startsWith("stage spawn")
+    || failure.includes("structured initial message")
+    || failure.includes("runtime host request timed out");
+}
+
 export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts = defaultPipelinePorts()): Promise<{ pipelines: Pipeline[]; changed: boolean }> {
   if (tickStore.__llvPipelineTick) return { pipelines: [], changed: false };
   tickStore.__llvPipelineTick = true;
@@ -1318,6 +1349,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         let pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports);
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
+        pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
           pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
@@ -1956,27 +1988,46 @@ export async function patchPipeline(
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
-      const receiptRetry = req.stageId !== undefined || req.launchId !== undefined;
-      if (receiptRetry && (typeof req.stageId !== "string" || typeof req.launchId !== "string")) {
+      const explicitReceiptRetry = req.stageId !== undefined || req.launchId !== undefined;
+      if (explicitReceiptRetry && (typeof req.stageId !== "string" || typeof req.launchId !== "string")) {
         return { error: "receipt retry requires both stageId and launchId", status: 400 };
       }
-      if (receiptRetry && stage?.id !== req.stageId) {
+      const retryStageId = explicitReceiptRetry ? req.stageId! : stage?.id ?? null;
+      const retryLaunchId = explicitReceiptRetry ? req.launchId! : attempt?.launchId ?? null;
+      const receiptRetry = (explicitReceiptRetry || attempt?.paneId === null)
+        && retryStageId !== null
+        && retryLaunchId !== null;
+      if (explicitReceiptRetry && stage?.id !== retryStageId) {
         return { error: "the clicked launch belongs to a different pipeline stage", status: 409 };
       }
-      if (receiptRetry && attempt?.launchId !== req.launchId) {
+      if (explicitReceiptRetry && attempt?.launchId !== retryLaunchId) {
         return { error: "the clicked launch is no longer the current failed attempt", status: 409 };
       }
-      const validateRetryReceipt = (): { error: string; status: number } | null => {
-        if (!receiptRetry) return null;
-        const receipt = ports.spawnReceipt(req.launchId!);
-        if (!receipt) return { error: "the clicked launch receipt is no longer available", status: 409 };
-        if (receipt.state !== "failed" && receipt.state !== "conflicted") {
-          return { error: `the clicked launch settled as ${receipt.state}; retry was cancelled`, status: 409 };
+      const validateRetryReceipt = (settlementWasPending = false): { conflict: { error: string; status: number } | null; claimRequired: boolean } => {
+        if (!receiptRetry) return { conflict: null, claimRequired: false };
+        const receipt = ports.spawnReceipt(retryLaunchId);
+        if (!receipt) return {
+          conflict: { error: "the clicked launch receipt is no longer available", status: 409 },
+          claimRequired: false,
+        };
+        if (receipt.state === "failed" || receipt.state === "conflicted") {
+          return { conflict: null, claimRequired: true };
         }
-        return null;
+        if (
+          explicitReceiptRetry
+          || settlementWasPending
+          || (attempt !== null && isStructuredSpawnPark(pipeline, attempt))
+          || receipt.state !== "completed"
+        ) {
+          return {
+            conflict: { error: `the clicked launch settled as ${receipt.state}; retry was cancelled`, status: 409 },
+            claimRequired: false,
+          };
+        }
+        return { conflict: null, claimRequired: false };
       };
-      const initialReceiptConflict = validateRetryReceipt();
-      if (initialReceiptConflict) return initialReceiptConflict;
+      const initialReceipt = validateRetryReceipt();
+      if (initialReceipt.conflict) return initialReceipt.conflict;
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
       if (flow && flow.state !== "closed") {
@@ -1989,10 +2040,13 @@ export async function patchPipeline(
       }
       /* Pane/flow cleanup can yield while a structured receipt reconciles.
          This final durable read fences the synchronous reset and cursor update. */
-      const settledReceiptConflict = validateRetryReceipt();
-      if (settledReceiptConflict) return settledReceiptConflict;
-      if (receiptRetry) {
-        const claim = ports.claimSpawnRetry(req.launchId!, `${pipeline.id}:${stage!.id}:${req.launchId}`);
+      const settledReceipt = validateRetryReceipt(initialReceipt.claimRequired);
+      if (settledReceipt.conflict) return settledReceipt.conflict;
+      if (settledReceipt.claimRequired) {
+        if (!retryLaunchId || !retryStageId) {
+          return { error: "structured retry identity is unavailable", status: 409 };
+        }
+        const claim = ports.claimSpawnRetry(retryLaunchId, `${pipeline.id}:${retryStageId}:${retryLaunchId}`);
         if (claim !== "claimed") {
           return {
             error: claim === "settled"

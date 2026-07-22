@@ -1651,6 +1651,15 @@ test("a genuinely terminal turn without a valid verdict stays parked and retry p
   const parked = loadPipelines()[0]!;
   expect(parked.state).toBe("needs_decision");
   expect(parked.stateDetail).toContain("without a valid final JSON verdict");
+  const attempt = parked.runs[0]!.attempts[0]!;
+  h.ports.spawnReceipt = (launchId) => launchId === attempt.launchId ? {
+    state: "completed",
+    launchId,
+    conversationId: attempt.conversationId!,
+    sessionId: attempt.sessionId,
+    "transcript": attempt.agentPath,
+    paneId: null,
+  } : null;
 
   const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
   expect(retried.pipeline?.state).toBe("running");
@@ -2676,10 +2685,18 @@ test("issue 533: a matching receipt that settles late cannot spawn a retry", asy
   const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
-  await tickPipelines([h.finish("/codex/stage-1.jsonl", "fail", "blocked")], h.ports);
-  const attempt = loadPipelines()[0]!.runs[0]!.attempts[0]!;
+  const parked = loadPipelines()[0]!;
+  const attempt = parked.runs[0]!.attempts[0]!;
   expect(attempt.launchId).toBeString();
   const launchId = attempt.launchId!;
+  attempt.state = "needs_decision";
+  attempt.sessionId = null;
+  attempt.agentPath = null;
+  attempt.paneId = null;
+  attempt.error = "stage spawn cannot recover from receipt state failed";
+  parked.state = "needs_decision";
+  parked.stateDetail = attempt.error;
+  savePipelines([parked]);
   const spawnCount = h.calls.filter((call) => call.startsWith("spawn:")).length;
   h.ports.spawnReceipt = (candidate) => candidate === launchId ? {
     state: "completed",
@@ -2692,17 +2709,26 @@ test("issue 533: a matching receipt that settles late cannot spawn a retry", asy
 
   expect(await patchPipeline(pipeline.id, {
     action: "retry-stage",
-    stageId: "plan",
-    launchId,
   }, h.ports)).toMatchObject({ status: 409, error: expect.stringContaining("settled") });
   expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(false);
 
-  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "recovered")], h.ports);
+  await tickPipelines([], h.ports);
   expect(h.calls.filter((call) => call.startsWith("spawn:")).length).toBe(spawnCount);
   const afterTick = loadPipelines()[0]!;
-  expect(afterTick.state).toBe("needs_decision");
+  expect(afterTick).toMatchObject({
+    state: "running",
+    stateDetail: null,
+    cursor: { stageId: "plan", state: "running" },
+  });
   expect(afterTick.runs[0]!.attempts).toEqual([
-    expect.objectContaining({ launchId, conversationId: attempt.conversationId }),
+    expect.objectContaining({
+      state: "running",
+      launchId,
+      conversationId: attempt.conversationId,
+      sessionId: "late-success",
+      agentPath: "/codex/stage-1.jsonl",
+      error: null,
+    }),
   ]);
 });
 
@@ -2752,7 +2778,7 @@ test("issue 533: a cross-process late recovery loses atomically to a claimed ret
   const spawnCount = h.calls.filter((call) => call.startsWith("spawn:")).length;
 
   expect((await patchPipeline(pipeline.id, {
-    action: "retry-stage", stageId: "plan", launchId: begun.receipt.launchId,
+    action: "retry-stage",
   }, h.ports)).pipeline?.state).toBe("running");
   expect(lateRecovery).toMatchObject({ kind: "conflict" });
   expect(competingRegistry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({

@@ -788,7 +788,11 @@ async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: st
     registry: () => input.registry,
     enabled: () => true,
   });
-  if (!delivered?.ok) throw new Error(delivered?.error ?? "structured spawn first-message delivery was unavailable");
+  if (!delivered?.ok) {
+    const message = delivered?.error ?? "structured spawn first-message delivery was unavailable";
+    if (delivered?.transportUncertain) throw new StructuredInitialMessageTimeoutError(message);
+    throw new Error(message);
+  }
   if (delivered.outcome === "held") return "held";
   if (delivered.outcome !== "delivered") {
     await waitForStructuredInitialMessage(input.client, delivered.operationId);
