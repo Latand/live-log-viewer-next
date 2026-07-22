@@ -82,16 +82,10 @@ function candidateFor(
   const snapshot = registry.readOnlySnapshot();
   const entry = snapshot.entries[sessionKeyId(key)];
   if (entry?.host) return null;
-  const structuredReceipt = Object.values(snapshot.receipts).some((receipt) =>
-    receipt.transport === "structured"
-      && receipt.state === "completed"
-      && registry.canonicalConversationId(receipt.conversationId) === conversation.id);
-  /* Interactive Claude tmux resumes are prohibited after structured cutover.
-     Registered legacy transcripts reach the pane-less broker through this
-     recovery path, including conversations that predate registry entries. */
-  const legacyClaudeBridge = conversation.engine === "claude";
-  if (!entry && !legacyClaudeBridge) return null;
-  if (entry && !entry.structuredHost && !structuredReceipt && !legacyClaudeBridge) return null;
+  /* Structured cutover covers every registered transcript. Historical Codex
+     and Claude sessions reach their pane-less host through this recovery path,
+     including conversations that predate registry entries. A verified live
+     tmux owner returned above keeps ownership until that process exits. */
   const terminal = entry?.status === "dead" || entry?.status === "unhosted";
   const publishReady = Boolean(structuredHostProcessAlive(entry?.structuredHost?.process ?? null)
     && entry?.claimOwner

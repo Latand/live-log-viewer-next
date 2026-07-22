@@ -200,6 +200,8 @@ test("server startup delegates managed rows with file credentials and their laun
     model: "gpt-5.4-mini",
     effort: "high",
     allowSubagents: true,
+    readOnly: true,
+    permissionMode: "plan",
   });
   expect(claudeOptions).toMatchObject({
     env: { LLV_SPAWN_CAPABILITY: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) },

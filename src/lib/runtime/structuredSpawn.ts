@@ -3,7 +3,7 @@ import path from "node:path";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
 import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
-import type { AgentEngine, ResumeSpec } from "@/lib/agent/cli";
+import { effectiveClaudePermissionMode, type AgentEngine, type ResumeSpec } from "@/lib/agent/cli";
 import type { AgentRegistry, AgentRegistryEntry, SpawnReceipt, StructuredHostColumns } from "@/lib/agent/registry";
 import { sessionKey, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import type { SpawnResponse } from "@/lib/agent/spawnResponse";
@@ -806,7 +806,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     readOnly: profile.readOnly === true,
     model: profile.model ?? undefined,
     effort: profile.effort ?? undefined,
-    permissionMode: profile.permissionMode ?? "default",
+    permissionMode: effectiveClaudePermissionMode(profile),
     initialEventCursor,
     env,
   };

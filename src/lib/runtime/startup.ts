@@ -3,6 +3,7 @@ import { claudeSettingsPath } from "@/lib/accounts/claude";
 import { turnStateFromRecords } from "@/lib/accounts/migration/turnState";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type RegistryFile } from "@/lib/agent/registry";
+import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 import { VIEWER_SPAWN_CAPABILITY_ENV } from "@/lib/agent/spawnPolicy";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
@@ -421,10 +422,11 @@ export async function adoptStructuredHostsAtStartup(
         claudeProjectsDir: owner?.transcriptRoot,
         spawnPolicyBaseSettingsPath: owner?.kind === "managed" ? claudeSettingsPath() : null,
         allowSubagents: entry.launchProfile?.allowSubagents ?? false,
+        readOnly: entry.launchProfile?.readOnly === true,
         env,
         model: entry.launchProfile?.model ?? undefined,
         effort: entry.launchProfile?.effort ?? undefined,
-        permissionMode: entry.launchProfile?.permissionMode ?? undefined,
+        permissionMode: effectiveClaudePermissionMode(entry.launchProfile ?? {}),
       };
     },
     startupEnvironment,
