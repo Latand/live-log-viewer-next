@@ -9,12 +9,15 @@ const stateIcon = {
   starting: LoaderCircle,
   binding: LoaderCircle,
   queued: Clock3,
+  reconciling: LoaderCircle,
+  "recoverable-timeout": Clock3,
+  "live-late-success": CircleCheck,
   failed: CircleX,
   recovered: CircleCheck,
 } as const;
 
 function iconTone(state: StructuredSpawnCardState["state"]): string {
-  if (state === "starting" || state === "binding") return "animate-spin text-accent";
+  if (state === "starting" || state === "binding" || state === "reconciling") return "animate-spin text-accent";
   if (state === "failed") return "text-danger";
   return "text-success";
 }

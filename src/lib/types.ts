@@ -18,7 +18,7 @@ export interface StructuredSpawnCardState {
   launchId: string;
   clientAttemptId: string | null;
   accountId: string | null;
-  state: "starting" | "binding" | "queued" | "failed" | "recovered";
+  state: "starting" | "binding" | "queued" | "reconciling" | "recoverable-timeout" | "live-late-success" | "failed" | "recovered";
   initialMessage: "pending" | "queued" | "delivered" | "failed";
   retrySafe: boolean;
   error: string | null;

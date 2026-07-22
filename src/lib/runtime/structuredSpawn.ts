@@ -59,6 +59,13 @@ export async function withRuntimeAdmissionRetry<T>(
 const INITIAL_MESSAGE_DELIVERED = new Set(["delivered", "turn-started", "steered"]);
 const INITIAL_MESSAGE_FAILED = new Set(["failed", "rejected", "uncertain", "interrupted"]);
 
+export class StructuredInitialMessageTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StructuredInitialMessageTimeoutError";
+  }
+}
+
 function structuredSpawnFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : "structured spawn failed";
   return hardenedRedact(message).replace(/\s+/g, " ").trim().slice(0, 240) || "structured spawn failed";
@@ -96,6 +103,14 @@ function settleInitialMessageReservation(registry: AgentRegistry, launchId: stri
   }
 }
 
+function markInitialMessageTimeout(registry: AgentRegistry, launchId: string, error: StructuredInitialMessageTimeoutError): void {
+  const reservation = Object.values(registry.snapshot().heldDeliveries)
+    .find((delivery) => delivery.clientMessageId === `spawn_${launchId}`);
+  if (reservation && reservation.state !== "delivered") {
+    registry.recordDeliveryOutcome(reservation.id, "delivery-uncertain", error.message);
+  }
+}
+
 export async function waitForStructuredInitialMessage(
   client: RuntimeHostClient,
   operationId: string,
@@ -129,9 +144,9 @@ export async function waitForStructuredInitialMessage(
     }
     if (now() >= deadline) {
       if (lastReadError) {
-        throw new Error(`structured initial message status remained unavailable for ${timeoutMs}ms: ${lastReadError}`);
+        throw new StructuredInitialMessageTimeoutError(`structured initial message status remained unavailable for ${timeoutMs}ms: ${lastReadError}`);
       }
-      throw new Error(`structured initial message remained ${status ?? "pending"} for ${timeoutMs}ms`);
+      throw new StructuredInitialMessageTimeoutError(`structured initial message remained ${status ?? "pending"} for ${timeoutMs}ms`);
     }
     await sleep(Math.min(pollMs, deadline - now()));
   }
@@ -320,7 +335,7 @@ export interface StructuredSpawnInput {
   receipt: SpawnReceipt;
   spec: ResumeSpec;
   account: AccountContext;
-  prompt: string;
+  "prompt": string;
   imageRefs?: StructuredImageRef[];
   registry: AgentRegistry;
   client: RuntimeHostClient;
@@ -776,7 +791,18 @@ async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: st
   if (!delivered?.ok) throw new Error(delivered?.error ?? "structured spawn first-message delivery was unavailable");
   if (delivered.outcome === "held") return "held";
   if (delivered.outcome !== "delivered") {
-    await waitForStructuredInitialMessage(input.client, delivered.operationId);
+    try {
+      await waitForStructuredInitialMessage(input.client, delivered.operationId);
+    } catch (error) {
+      /* The request and host are already durable. Keep the launch queued so a
+         late acknowledgement, reload, or controller restart can reconcile the
+         same launch id without releasing a turn that may already be live. */
+      if (error instanceof StructuredInitialMessageTimeoutError) {
+        markInitialMessageTimeout(input.registry, input.receipt.launchId, error);
+        return "held";
+      }
+      throw error;
+    }
     settleInitialMessageReservation(input.registry, input.receipt.launchId);
   }
 }
@@ -830,7 +856,7 @@ export async function spawnStructuredConversation(
       conversationId: input.receipt.conversationId,
       engine: input.engine,
       cwd: input.spec.cwd,
-      prompt: content?.content.text ?? "",
+      "prompt": content?.content.text ?? "",
       ...(content?.content.images.length ? { images: content.content.images } : {}),
       ...(content ? { contentDigest: content.contentDigest } : {}),
       accountId: input.account.accountId,

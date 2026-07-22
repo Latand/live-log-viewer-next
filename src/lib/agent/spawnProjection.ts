@@ -45,8 +45,14 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
     state = "failed";
     initialMessage = "failed";
   } else if (delivered) {
-    state = "recovered";
+    state = receipt.completionMode === "route-recovered" ? "live-late-success" : "recovered";
     initialMessage = "delivered";
+  } else if (delivery?.state === "delivery-uncertain" && delivery.error?.startsWith("structured initial message")) {
+    state = "recoverable-timeout";
+    initialMessage = "queued";
+  } else if (delivery?.state === "delivery-uncertain") {
+    state = "reconciling";
+    initialMessage = "queued";
   } else if (queued) {
     state = "queued";
     initialMessage = "queued";

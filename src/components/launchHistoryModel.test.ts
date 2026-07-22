@@ -2,13 +2,13 @@ import { expect, test } from "bun:test";
 
 import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
 
-import { isHistoricalLaunchReceipt, LAUNCH_HISTORY_HORIZON_MS, launchHistoryFor } from "./launchHistoryModel";
+import { isHistoricalLaunchReceipt, LAUNCH_HISTORY_HORIZON_MS, launchHistoryFor, pipelineRetryTarget } from "./launchHistoryModel";
 
 const NOW = Date.parse("2026-07-17T12:00:00.000Z");
 
 function spawnState(overrides: Partial<StructuredSpawnCardState>): StructuredSpawnCardState {
   return {
-    launchId: "86b16558-cf8b-4049-aff4-f7e2c4133366",
+    launchId: "launch-history-fixture-533",
     clientAttemptId: null,
     accountId: "default",
     state: "failed",
@@ -71,4 +71,28 @@ test("launchHistoryFor scopes to the project and orders freshest first", () => {
   ];
   const rows = launchHistoryFor(files, "-agents-tools-live-log-viewer-next", NOW);
   expect(rows.map((row) => row.spawn!.launchId)).toEqual(["bbbb", "aaaa"]);
+});
+
+test("issue 533: a pipeline-owned failed launch retries its durable stage", () => {
+  const file = receipt(3_600_000, {
+    durableLineage: {
+      kind: "spawn",
+      role: "builder",
+      parentConversationId: "conversation_creator",
+      reviewsConversationId: null,
+      memberships: [{
+        kind: "pipeline",
+        containerId: "pipeline-533",
+        role: "builder",
+        slot: "build:1",
+        stageId: "build",
+        stageOrder: 0,
+        round: 1,
+        parentConversationId: "conversation_creator",
+      }],
+    },
+  });
+
+  expect(pipelineRetryTarget(file)).toEqual({ pipelineId: "pipeline-533", stageId: "build" });
+  expect(pipelineRetryTarget(receipt(3_600_000))).toBeNull();
 });

@@ -7,7 +7,7 @@ import type { StructuredSpawnCardState } from "@/lib/types";
 import { StructuredSpawnStatusView } from "./StructuredSpawnStatus";
 
 const base: StructuredSpawnCardState = {
-  launchId: "9173e9a2-2f14-4a70-818a-bd4052a1ad4a",
+  launchId: "structured-state-fixture-533",
   clientAttemptId: "p0_282_spawn_visibility_20260716_a1",
   accountId: "terra",
   state: "starting",
@@ -19,11 +19,15 @@ const base: StructuredSpawnCardState = {
 test("structured spawn card renders every durable launch state in English and Ukrainian", () => {
   for (const locale of ["en", "uk"] as const) {
     const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate(locale, key, params);
-    for (const state of ["starting", "binding", "queued", "failed", "recovered"] as const) {
+    for (const state of ["starting", "binding", "queued", "reconciling", "recoverable-timeout", "live-late-success", "failed", "recovered"] as const) {
       const spawn = {
         ...base,
         state,
-        initialMessage: state === "queued" ? "queued" as const : state === "recovered" ? "delivered" as const : state === "failed" ? "failed" as const : "pending" as const,
+        initialMessage: ["queued", "reconciling", "recoverable-timeout"].includes(state)
+          ? "queued" as const
+          : state === "recovered" || state === "live-late-success"
+            ? "delivered" as const
+            : state === "failed" ? "failed" as const : "pending" as const,
         retrySafe: state === "failed",
         error: state === "failed" ? "structured host ownership is unavailable" : null,
       };

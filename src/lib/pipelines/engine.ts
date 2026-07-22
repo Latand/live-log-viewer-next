@@ -1180,6 +1180,10 @@ async function tickReviewStage(
   attachReviewFlowAttempt(attempt, flow);
   const capturedReviewHead = flow.rounds.findLast((round) => round.reviewHeadSha)?.reviewHeadSha ?? null;
   if (capturedReviewHead && attempt.reviewHeadSha !== capturedReviewHead) {
+    /* Each repair round establishes a new immutable approval fence. Persist
+       both fields together so restart/reload cannot retain the pre-repair SHA
+       while the active reviewer and worktree have advanced. */
+    attempt.expectedReviewHeadSha = capturedReviewHead;
     attempt.reviewHeadSha = capturedReviewHead;
     persist();
   }

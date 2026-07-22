@@ -1943,7 +1943,7 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
   expect(h.calls.indexOf("flow-close:flow-1")).toBeLessThan(h.calls.indexOf(`git merge --ff-only refs/remotes/origin/${pipeline.branch}`));
 });
 
-test("a pipeline persists the immutable SHA captured by the launched review round (#522)", async () => {
+test("issue 533: an in-loop repair advances expectedReviewHeadSha with reviewHeadSha from d03cc211 to 5755f992", async () => {
   const h = harness();
   const stages = [
     { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: "review" },
@@ -1953,14 +1953,19 @@ test("a pipeline persists the immutable SHA captured by the launched review roun
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  const beforeRepair = "d03cc2118d7d02b4e3afdfc2af3bb4bf2b9e7d2a";
+  const persisted = loadPipelines()[0]!;
+  persisted.lastPassedCommit = beforeRepair;
+  savePipelines([persisted]);
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
-  const actualReviewHead = "d".repeat(40);
+  const actualReviewHead = "5755f992b195cc8637fd7129d9be4049c10494fa";
+  expect(loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts[0]!.expectedReviewHeadSha).toBe(beforeRepair);
   h.flows.get("flow-1")!.rounds.push({ n: 1, reviewHeadSha: actualReviewHead } as never);
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
   const attempt = loadPipelines()[0]!.runs.find((run) => run.stageId === "review")!.attempts[0]!;
-  expect(attempt.expectedReviewHeadSha).toBe(ORIGIN_MAIN_SHA);
+  expect(attempt.expectedReviewHeadSha).toBe(actualReviewHead);
   expect(attempt.reviewHeadSha).toBe(actualReviewHead);
 });
 

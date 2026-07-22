@@ -48,3 +48,12 @@ export function launchHistoryFor(files: readonly FileEntry[], project: string, n
     .filter((file) => projectKey(file) === project && isHistoricalLaunchReceipt(file, nowMs))
     .sort((a, b) => b.mtime - a.mtime);
 }
+
+/** Routes retry back through the owning pipeline, whose durable attempt keeps
+    the full launch envelope and provisioned worktree authority. */
+export function pipelineRetryTarget(file: FileEntry): { pipelineId: string; stageId: string } | null {
+  const membership = file.durableLineage?.memberships.find((item) => item.kind === "pipeline" && item.stageId);
+  return membership?.stageId
+    ? { pipelineId: membership.containerId, stageId: membership.stageId }
+    : null;
+}
