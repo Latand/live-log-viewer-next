@@ -13,6 +13,7 @@ import {
 import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { listFiles } from "@/lib/scanner";
 import { recordTranscriptComposerRelease, transcriptTurnResult } from "@/lib/scanner/activity";
+import { writingHolders } from "@/lib/scanner/process";
 import type { FileEntry } from "@/lib/types";
 import { isStructuredDeliveryControllerUnavailable } from "@/lib/runtime/structuredDeliveryController";
 
@@ -300,7 +301,19 @@ function completeProviderTurnObservation(
     return false;
   }
   if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return false;
-  return observed.turn.state === "terminal" || observed.composerReleased;
+  if (observed.turn.state === "terminal" || observed.composerReleased) return true;
+
+  /* A crashed Codex rollout can retain its final task_started record forever.
+     An inventory release plus a stable file with no writable holder proves
+     that this generation has no provider turn left to preserve. */
+  const releasedAt = conversation.turn.observedAt ? Date.parse(conversation.turn.observedAt) : Number.NaN;
+  const deadCodexSourceWasReleased = conversation.engine === "codex"
+    && conversation.turn.state === "idle"
+    && source.host === null
+    && Number.isFinite(releasedAt)
+    && releasedAt >= after.mtimeMs
+    && !writingHolders([source.path], true).has(source.path);
+  return deadCodexSourceWasReleased;
 }
 
 export interface MigrationCoordinatorOptions {

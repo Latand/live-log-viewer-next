@@ -3250,6 +3250,39 @@ describe("durable account migration coordinator", () => {
     expect(advanced.migration?.phase).toBe("committed");
   });
 
+  test("a released dead Codex source can migrate after an unclosed transcript turn", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "released-dead-codex.jsonl");
+    fs.writeFileSync(pathname, JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-07-22T15:00:00.000Z",
+      payload: { type: "task_started" },
+    }) + "\n");
+    const releasedAt = new Date(fs.statSync(pathname).mtimeMs + 1_000).toISOString();
+    store.reconcileConversations([{ ...observation(pathname, "limited", "busy"), observedAt: releasedAt }]);
+    const conversation = store.conversationForPath(pathname)!;
+    expect(store.requestConversationReseat(conversation.id, "healthy").migration?.phase).toBe("waiting-turn");
+    store.reconcileConversations([{
+      ...observation(pathname, "limited", "idle"),
+      expectedTurnObservedAt: store.conversation(conversation.id)?.turn.observedAt,
+      observedAt: releasedAt,
+    }]);
+
+    const counts = { create: 0, verify: 0 };
+    const writable = fs.openSync(pathname, "a");
+    try {
+      await advanceConversationMigration(conversation.id, store, provider(["/released-successor.jsonl"], counts));
+      expect(counts.create).toBe(0);
+      expect(store.conversation(conversation.id)?.migration?.phase).toBe("requested");
+    } finally {
+      fs.closeSync(writable);
+    }
+
+    const advanced = await advanceConversationMigration(conversation.id, store, provider(["/released-successor.jsonl"], counts));
+    expect(counts.create).toBe(1);
+    expect(advanced.migration?.phase).toBe("committed");
+  });
+
   test("a registered structured host keeps a stalled open turn fenced", async () => {
     const store = registry();
     const pathname = path.join(path.dirname(store.filename), "hosted-stalled-turn.jsonl");
