@@ -120,7 +120,7 @@ test("Claude spawn policy seeds a fresh account from the shared user settings sn
   expect(settings.hooks.PreToolUse).toHaveLength(1);
 });
 
-test("Claude spawn settings force Viewer into a custom allowlist and omit unrelated servers", () => {
+test("Claude native MCP config forces Viewer into a custom allowlist and omits unrelated servers", () => {
   const accountHome = home();
   fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
     mcpServers: {
@@ -135,17 +135,17 @@ test("Claude spawn settings force Viewer into a custom allowlist and omit unrela
     cwd: "/repo",
     mcpServers: ["agent-browser"],
   });
-  const settings = JSON.parse(fs.readFileSync(installed.settingsPath, "utf8")) as {
+  const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
     mcpServers: Record<string, unknown>;
   };
 
-  expect(settings.mcpServers).toEqual({
+  expect(mcpConfig.mcpServers).toEqual({
     viewer: { type: "stdio", command: "viewer-mcp", args: ["--viewer"] },
     "agent-browser": { type: "stdio", command: "browser-mcp" },
   });
 });
 
-test("Claude spawn settings default to the registered Viewer server only", () => {
+test("Claude native MCP config defaults to the registered Viewer server only", () => {
   const accountHome = home();
   fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
     mcpServers: {
@@ -155,11 +155,12 @@ test("Claude spawn settings default to the registered Viewer server only", () =>
   }));
 
   const installed = applyClaudeSpawnPolicy(accountHome, { profileId: "default-mcp", cwd: "/repo" });
-  const settings = JSON.parse(fs.readFileSync(installed.settingsPath, "utf8")) as {
+  const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
     mcpServers: Record<string, unknown>;
   };
 
-  expect(settings.mcpServers).toEqual({ viewer: { type: "stdio", command: "viewer-mcp" } });
+  expect(mcpConfig.mcpServers).toEqual({ viewer: { type: "stdio", command: "viewer-mcp" } });
+  expect(JSON.parse(fs.readFileSync(installed.settingsPath, "utf8"))).not.toHaveProperty("mcpServers");
 });
 
 test("allowSubagents uses an isolated profile while the denied profile stays enforced", () => {

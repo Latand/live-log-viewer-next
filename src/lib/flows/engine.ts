@@ -271,6 +271,7 @@ export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, F
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
     allowSubagents: agentRegistry().launchProfileForPath(entry.path)?.allowSubagents,
+    mcpServers: agentRegistry().launchProfileForPath(entry.path)?.mcpServers,
   });
   if (!spec) throw new Error("implementer session cannot be resumed");
   const outcome = await deliverToTranscriptHost({ entry, spec, payload: text });

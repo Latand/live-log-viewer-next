@@ -37,6 +37,7 @@ export const CODEX_VIEWER_SPAWN_FEATURES = {
 
 export interface ClaudeSpawnPolicyResult {
   settingsPath: string;
+  mcpConfigPath: string;
   hookPath: string;
   command: string;
 }
@@ -46,6 +47,7 @@ export function claudeSpawnPolicyPaths(home: string, profileId: string): ClaudeS
   const hookPath = path.join(home, MANAGED_DIR, "hooks", MANAGED_HOOK);
   return {
     settingsPath: path.join(home, MANAGED_DIR, "spawn-settings", `${profileId}.json`),
+    mcpConfigPath: path.join(home, MANAGED_DIR, "spawn-mcp", `${profileId}.json`),
     hookPath,
     command: `${MANAGED_HOOK_PREFIX}${shellQuote(hookPath)}`,
   };
@@ -185,7 +187,7 @@ export function applyClaudeSpawnPolicy(
   if (!options.allowSubagents && sourceSettings.allowManagedHooksOnly === true) {
     throw new Error("Claude settings allowManagedHooksOnly prevents the Viewer spawn policy from enforcing native sub-agent denial");
   }
-  const hooks = settings.hooks === undefined ? {} : record(settings.hooks);
+  const hooks = sourceSettings.hooks === undefined ? {} : record(sourceSettings.hooks);
   if (!hooks) throw new Error("Claude settings hooks must contain a JSON object");
 
   const preToolUse = withoutManagedHandlers(hooks.PreToolUse);
@@ -206,11 +208,14 @@ export function applyClaudeSpawnPolicy(
     options.cwd,
     options.mcpServers,
   );
+  const settingsWithoutMcp = Object.fromEntries(
+    Object.entries(enforcedSettings).filter(([key]) => key !== "mcpServers"),
+  );
   atomicWrite(result.settingsPath, JSON.stringify({
-    ...enforcedSettings,
-    mcpServers,
+    ...settingsWithoutMcp,
     hooks: { ...hooks, PreToolUse: preToolUse },
   }, null, 2) + "\n", 0o600);
+  atomicWrite(result.mcpConfigPath, JSON.stringify({ mcpServers }, null, 2) + "\n", 0o600);
   return result;
 }
 

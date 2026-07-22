@@ -35,6 +35,119 @@ test("fresh Codex commands fix CODEX_HOME in the typed shell command", () => {
   expect(spec.launchProfile?.allowSubagents).toBe(false);
 });
 
+test("fresh tmux Codex commands enforce the normalized MCP allowlist at runtime", () => {
+  const home = path.join(SANDBOX, "codex-mcp-runtime");
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, "config.toml"), [
+    "[mcp_servers.viewer]",
+    'command = "viewer-mcp"',
+    "[mcp_servers.agent-browser]",
+    'command = "browser-mcp"',
+    "[mcp_servers.unrelated]",
+    'command = "unrelated-mcp"',
+    "",
+  ].join("\n"));
+
+  const spec = freshSpecFor("codex", "/repo", {
+    codexHome: home,
+    mcpServers: ["agent-browser"],
+  });
+
+  expect(spec.command).toContain("'mcp_servers.viewer.enabled=true'");
+  expect(spec.command).toContain("'mcp_servers.agent-browser.enabled=true'");
+  expect(spec.command).toContain("'mcp_servers.unrelated.enabled=false'");
+  expect(spec.launchProfile?.mcpServers).toEqual(["viewer", "agent-browser"]);
+});
+
+test("fresh tmux Codex defaults disable every configured server outside Viewer", () => {
+  const home = path.join(SANDBOX, "codex-mcp-default");
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, "config.toml"), [
+    "[mcp_servers.viewer]",
+    'command = "viewer-mcp"',
+    "[mcp_servers.agent-browser]",
+    'command = "browser-mcp"',
+    "",
+  ].join("\n"));
+
+  const spec = freshSpecFor("codex", "/repo", { codexHome: home });
+
+  expect(spec.command).toContain("'mcp_servers.viewer.enabled=true'");
+  expect(spec.command).toContain("'mcp_servers.agent-browser.enabled=false'");
+  expect(spec.launchProfile?.mcpServers).toEqual(["viewer"]);
+});
+
+test("tmux Codex enumerates MCP servers from the launched working directory", () => {
+  const home = path.join(SANDBOX, "codex-mcp-cwd");
+  const cwd = path.join(SANDBOX, "codex-project");
+  const binary = path.join(SANDBOX, "codex-mcp-list-cwd");
+  const marker = path.join(SANDBOX, "codex-mcp-list.pwd");
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(path.join(home, "config.toml"), "[mcp_servers.viewer]\ncommand = \"viewer-mcp\"\n");
+  fs.writeFileSync(binary, `#!/bin/sh\npwd > ${JSON.stringify(marker)}\nprintf '[{"name":"viewer"},{"name":"project-sentinel"}]'\n`);
+  fs.chmodSync(binary, 0o755);
+  const previousBinary = process.env.LLV_CODEX_BINARY;
+  process.env.LLV_CODEX_BINARY = binary;
+  try {
+    const spec = freshSpecFor("codex", cwd, { codexHome: home });
+    expect(fs.readFileSync(marker, "utf8").trim()).toBe(cwd);
+    expect(spec.command).toContain("'mcp_servers.project-sentinel.enabled=false'");
+  } finally {
+    if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousBinary;
+  }
+});
+
+test("tmux Codex fails closed when fallback cannot enumerate an inline MCP table", () => {
+  const home = path.join(SANDBOX, "codex-mcp-inline");
+  const binary = path.join(SANDBOX, "codex-mcp-list-failure");
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, "config.toml"), [
+    "[mcp_servers.viewer]",
+    'command = "viewer-mcp"',
+    'mcp_servers = { hidden = { command = "hidden-mcp" } }',
+    "",
+  ].join("\n"));
+  fs.writeFileSync(binary, "#!/bin/sh\nexit 1\n");
+  fs.chmodSync(binary, 0o755);
+  const previousBinary = process.env.LLV_CODEX_BINARY;
+  process.env.LLV_CODEX_BINARY = binary;
+  try {
+    expect(() => freshSpecFor("codex", "/repo", { codexHome: home })).toThrow("could not be enumerated safely");
+  } finally {
+    if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousBinary;
+  }
+});
+
+test("fresh tmux Claude uses its exclusive native MCP file", () => {
+  const home = path.join(SANDBOX, "claude-mcp-runtime");
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+    mcpServers: {
+      viewer: { type: "stdio", command: "viewer-mcp" },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+      unrelated: { type: "stdio", command: "unrelated-mcp" },
+    },
+  }));
+
+  const spec = freshSpecFor("claude", "/repo", {
+    claudeConfigDir: home,
+    claudeProjectsDir: path.join(home, "projects"),
+    mcpServers: ["agent-browser"],
+  });
+  const sessionId = path.basename(spec.transcript!, ".jsonl");
+  const mcpConfigPath = path.join(home, ".llv", "spawn-mcp", `${sessionId}.json`);
+
+  expect(spec.command).toContain(`'--strict-mcp-config' '--mcp-config' '${mcpConfigPath}'`);
+  expect(JSON.parse(fs.readFileSync(mcpConfigPath, "utf8"))).toEqual({ mcpServers: {
+    viewer: { type: "stdio", command: "viewer-mcp" },
+    "agent-browser": { type: "stdio", command: "browser-mcp" },
+  } });
+  expect(spec.launchProfile?.mcpServers).toEqual(["viewer", "agent-browser"]);
+});
+
 test("allowSubagents enables Codex multi-agent for fresh and resumed launches", () => {
   const transcript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "14", "rollout-019f5f2f-743a-7f23-7773-3cf2dd4b4168.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
@@ -75,12 +188,21 @@ test("Codex resume derives its owning account home from the transcript path", ()
   const transcript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "09", "rollout-019f423a-d6e9-7903-7597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
   fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: SANDBOX } }) + "\n");
+  fs.writeFileSync(path.join(SANDBOX, "legacy", "config.toml"), [
+    "[mcp_servers.viewer]",
+    'command = "viewer-mcp"',
+    "[mcp_servers.unrelated]",
+    'command = "unrelated-mcp"',
+    "",
+  ].join("\n"));
 
   const spec = resumeSpecFor("codex-sessions", transcript);
 
   expect(spec?.command).toStartWith(
     `env -u LLV_TOKEN CODEX_HOME='${path.join(SANDBOX, "legacy")}' `,
   );
+  expect(spec?.command).toContain("'mcp_servers.viewer.enabled=true'");
+  expect(spec?.command).toContain("'mcp_servers.unrelated.enabled=false'");
   expect(spec?.command).toContain("--disable multi_agent");
   expect(spec?.command).toContain("resume 019f423a-d6e9-7903-7597-3e676b6ff3d4");
 });
@@ -99,9 +221,9 @@ test("resume preserves the transcript model and reasoning effort for both engine
   expect(codex?.command).toContain("-m 'gpt-5.6-terra'");
   expect(codex?.command).toContain("model_reasoning_effort=xhigh");
   expect(codex?.command).toContain("CODEX_HOME='");
-  expect(claude?.command).toContain("--model 'opus'");
-  expect(claude?.command).toContain("--effort 'max'");
-  expect(claude?.command).toContain("--dangerously-skip-permissions");
+  expect(claude?.command).toContain("'--model' 'opus'");
+  expect(claude?.command).toContain("'--effort' 'max'");
+  expect(claude?.command).toContain("'--dangerously-skip-permissions'");
   expect(claude?.launchProfile).toMatchObject({ permissionMode: "bypassPermissions" });
 });
 
@@ -117,8 +239,8 @@ test("resume preserves read-only execution policy for both engines", () => {
   expect(codex?.command).toContain("--sandbox read-only");
   expect(codex?.command).toContain("--ask-for-approval 'never'");
   expect(codex?.launchProfile).toMatchObject({ readOnly: true, permissionMode: "never" });
-  expect(claude?.command).toContain("--permission-mode plan --disallowedTools Edit,Write,NotebookEdit");
-  expect(claude?.command).not.toContain("--dangerously-skip-permissions");
+  expect(claude?.command).toContain("'--permission-mode' 'plan' '--disallowedTools' 'Edit,Write,NotebookEdit'");
+  expect(claude?.command).not.toContain("'--dangerously-skip-permissions'");
   expect(claude?.launchProfile).toMatchObject({ readOnly: true, permissionMode: "plan" });
 });
 
@@ -128,9 +250,9 @@ test("Claude resume normalizes transcript families and omits unknown model overr
   fs.writeFileSync(transcript, JSON.stringify({ cwd: SANDBOX }) + "\n");
 
   expect(resumeSpecFor("claude-projects", transcript, { model: "claude-fable-20260701" })?.command)
-    .toContain("--model 'fable'");
+    .toContain("'--model' 'fable'");
   expect(resumeSpecFor("claude-projects", transcript, { model: "mythos-1" })?.command)
-    .not.toContain("--model");
+    .not.toContain("'--model'");
 });
 
 test("managed Codex commands pin file-backed credential storage", () => {
@@ -166,6 +288,7 @@ test("managed Claude fresh and resume commands pin the transcript owner and scru
   expect(settings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage")).toBe(true);
   const resumed = resumeSpecFor("claude-projects", transcript)?.command ?? "";
   expect(resumed).toContain(`CLAUDE_CONFIG_DIR='${account.home}'`);
+  expect(resumed).toContain(`'--strict-mcp-config' '--mcp-config' '${path.join(account.home, ".llv", "spawn-mcp", `resume-${sid}.json`)}'`);
   expect(resumed).toContain("--resume");
 });
 

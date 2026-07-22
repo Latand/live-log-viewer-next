@@ -60,10 +60,11 @@ export type AttachResolution =
 
 export interface AttachResolverDeps {
   files: FileEntry[];
-  resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean }) => ResumeSpec | null;
+  resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[] }) => ResumeSpec | null;
   accountIdForPath: (path: string) => string;
   accountLabelFor: (engine: AgentEngine, accountId: string) => string;
   allowSubagentsForPath?: (path: string) => boolean | undefined;
+  mcpServersForPath?: (path: string) => readonly string[] | undefined;
 }
 
 /**
@@ -83,6 +84,7 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
     model: target.entry.launchModel ?? target.entry.model,
     effort: target.entry.effort,
     allowSubagents: deps.allowSubagentsForPath?.(target.entry.path),
+    mcpServers: deps.mcpServersForPath?.(target.entry.path),
   });
   if (!spec) return { ok: false, error: "this conversation cannot be attached", status: 409 };
 

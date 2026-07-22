@@ -99,7 +99,7 @@ function recordedProcess(markerPath: string): { pid: number; identity: string } 
   return { pid, identity };
 }
 
-function nativeViewerCall(event: RuntimeEvent, pipelineId: string): boolean {
+function nativeViewerCall(event: RuntimeEvent, pipelineId: string, server: string): boolean {
   if (event.kind !== "item" || event.phase !== "completed") return false;
   const item = event.item as {
     type?: string;
@@ -110,7 +110,7 @@ function nativeViewerCall(event: RuntimeEvent, pipelineId: string): boolean {
     error?: unknown;
   };
   return item.type === "mcpToolCall"
-    && item.server === "viewer"
+    && item.server === server
     && item.tool === "get_pipeline"
     && item.status === "completed"
     && item.error == null
@@ -120,13 +120,14 @@ function nativeViewerCall(event: RuntimeEvent, pipelineId: string): boolean {
 async function exerciseNativeViewer(
   host: CodexAppServerHost,
   pipelineId: string,
-  label: "fresh" | "adopted",
+  label: "fresh" | "adopted" | "custom",
+  server = "viewer",
 ): Promise<void> {
   const cursor = (await host.health()).eventCursor;
   const events = host.attach(cursor)[Symbol.asyncIterator]();
   const started = await host.send({
     id: `issue-607-${label}-${crypto.randomUUID()}`,
-    text: `Call the native Viewer MCP tool get_pipeline with clientRequestId "issue-607-${label}" and pipelineId "${pipelineId}". Shell execution is prohibited. After the successful tool result, reply exactly VIEWER_NATIVE_${label.toUpperCase()}.`,
+    text: `Call the native ${server} MCP tool get_pipeline with clientRequestId "issue-607-${label}" and pipelineId "${pipelineId}". Shell execution is prohibited. After the successful tool result, reply exactly VIEWER_NATIVE_${label.toUpperCase()}.`,
   });
   expect(started.outcome).toBe("turn-started");
   const observed: RuntimeEvent[] = [];
@@ -145,7 +146,7 @@ async function exerciseNativeViewer(
       : event);
     throw new Error(`${String(error)}; health=${JSON.stringify(health)}; processes=${JSON.stringify(processes)}; events=${JSON.stringify(eventSummary)}`);
   }
-  if (!observed.some((event) => nativeViewerCall(event, pipelineId))) {
+  if (!observed.some((event) => nativeViewerCall(event, pipelineId, server))) {
     const itemKinds = observed
       .filter((event) => event.kind === "item")
       .map((event) => JSON.stringify(event.item).slice(0, 500));
@@ -235,7 +236,7 @@ test.skipIf(!isolatedHome)("real Codex subscription supports late attach, steeri
   }
 }, 180_000);
 
-test.skipIf(!mcpHome)("real Codex exposes native Viewer tools on fresh start and adoption with complete MCP cleanup", async () => {
+test.skipIf(!mcpHome)("real structured Codex enforces default and custom MCP allowlists across fresh and adopted hosts with complete cleanup", async () => {
   if (!mcpHome) throw new Error("isolated Codex subscription home is unavailable");
   const pipeline = buildPipeline({
     id: "mcp-native-proof",
@@ -266,7 +267,9 @@ test.skipIf(!mcpHome)("real Codex exposes native Viewer tools on fresh start and
   const markerPath = path.join(mcpHome.directory, "unrelated-started");
   const sentinelPath = path.join(mcpHome.directory, "unrelated-mcp.ts");
   const viewerPidPath = path.join(mcpHome.directory, "viewer-pid");
+  const optionalPidPath = path.join(mcpHome.directory, "optional-pid");
   const viewerWrapperPath = path.join(mcpHome.directory, "viewer-mcp.ts");
+  const optionalWrapperPath = path.join(mcpHome.directory, "optional-mcp.ts");
   const viewerLauncher = path.resolve(import.meta.dir, "../../../bin/mcp-server.mjs");
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(stateDir, "pipelines.json"), JSON.stringify({
@@ -282,11 +285,25 @@ test.skipIf(!mcpHome)("real Codex exposes native Viewer tools on fresh start and
     "process.exitCode = await child.exited;",
     "",
   ].join("\n"), { mode: 0o600 });
+  fs.writeFileSync(optionalWrapperPath, [
+    `await Bun.write(${JSON.stringify(optionalPidPath)}, String(process.pid));`,
+    `const child = Bun.spawn({ cmd: [${JSON.stringify(Bun.which("bun") ?? "bun")}, ${JSON.stringify(viewerLauncher)}], stdin: "inherit", stdout: "inherit", stderr: "inherit", env: process.env });`,
+    'process.on("SIGTERM", () => child.kill("SIGTERM"));',
+    'process.on("SIGINT", () => child.kill("SIGINT"));',
+    "process.exitCode = await child.exited;",
+    "",
+  ].join("\n"), { mode: 0o600 });
   fs.writeFileSync(path.join(mcpHome.codexHome, "config.toml"), [
     "[mcp_servers.viewer]",
     `command = ${JSON.stringify(Bun.which("bun") ?? "bun")}`,
     `args = [${JSON.stringify(viewerWrapperPath)}]`,
     "[mcp_servers.viewer.env]",
+    `LLV_STATE_DIR = ${JSON.stringify(stateDir)}`,
+    "[mcp_servers.agent-browser]",
+    `command = ${JSON.stringify(Bun.which("bun") ?? "bun")}`,
+    `args = [${JSON.stringify(optionalWrapperPath)}]`,
+    'default_tools_approval_mode = "approve"',
+    "[mcp_servers.agent-browser.env]",
     `LLV_STATE_DIR = ${JSON.stringify(stateDir)}`,
     "[mcp_servers.unrelated]",
     `command = ${JSON.stringify(Bun.which("bun") ?? "bun")}`,
@@ -311,10 +328,12 @@ test.skipIf(!mcpHome)("real Codex exposes native Viewer tools on fresh start and
   };
   let fresh: CodexAppServerHost | null = null;
   let adopted: CodexAppServerHost | null = null;
+  let custom: CodexAppServerHost | null = null;
   try {
     fresh = await CodexAppServerHost.start(options);
     await exerciseNativeViewer(fresh, pipeline.id, "fresh");
     expect(fs.existsSync(markerPath)).toBeFalse();
+    expect(fs.existsSync(optionalPidPath)).toBeFalse();
     const freshHealth = await fresh.health();
     if (!freshHealth.pid) throw new Error("fresh app-server pid is unavailable");
     const freshProcesses = processTree(freshHealth.pid);
@@ -331,6 +350,7 @@ test.skipIf(!mcpHome)("real Codex exposes native Viewer tools on fresh start and
     adopted = await CodexAppServerHost.adopt(threadId, { ...options, initialEventCursor: cursor });
     await exerciseNativeViewer(adopted, pipeline.id, "adopted");
     expect(fs.existsSync(markerPath)).toBeFalse();
+    expect(fs.existsSync(optionalPidPath)).toBeFalse();
     const adoptedHealth = await adopted.health();
     if (!adoptedHealth.pid) throw new Error("adopted app-server pid is unavailable");
     const adoptedProcesses = processTree(adoptedHealth.pid);
@@ -341,9 +361,28 @@ test.skipIf(!mcpHome)("real Codex exposes native Viewer tools on fresh start and
     adopted = null;
     await expectProcessesReaped(adoptedProcesses);
     expect(fs.existsSync(markerPath)).toBeFalse();
+
+    fs.rmSync(viewerPidPath);
+    custom = await CodexAppServerHost.start({ ...options, mcpServers: ["agent-browser"] });
+    await exerciseNativeViewer(custom, pipeline.id, "custom", "agent-browser");
+    expect(fs.existsSync(markerPath)).toBeFalse();
+    const customHealth = await custom.health();
+    if (!customHealth.pid) throw new Error("custom app-server pid is unavailable");
+    const customProcesses = processTree(customHealth.pid);
+    const customViewer = recordedProcess(viewerPidPath);
+    const customOptional = recordedProcess(optionalPidPath);
+    addProcessTree(customProcesses, customViewer.pid);
+    addProcessTree(customProcesses, customOptional.pid);
+    expect(customProcesses.get(customViewer.pid)).toBe(customViewer.identity);
+    expect(customProcesses.get(customOptional.pid)).toBe(customOptional.identity);
+    await custom.release();
+    custom = null;
+    await expectProcessesReaped(customProcesses);
+    expect(fs.existsSync(markerPath)).toBeFalse();
   } finally {
     await fresh?.release();
     await adopted?.release();
+    await custom?.release();
     mcpHome.cleanup();
   }
 }, 300_000);
