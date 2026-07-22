@@ -570,6 +570,63 @@ test("replay measures the delivery timeout from initial-message admission", asyn
   expect(released).toBe(0);
 });
 
+test.each(["hosted", "recovering"] as const)("a matching %s session keeps its queued first message recoverable at the timeout threshold", async (host) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `${host}-queued-threshold-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const key = { engine: "codex" as const, sessionId: id };
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "work",
+    status: "starting",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  const admittedAt = Date.parse(begun.receipt.createdAt);
+  const client = {
+    snapshot: async () => ({
+      sessions: [{
+        conversationId: begun.receipt.conversationId,
+        sessionKey: key,
+        cwd,
+        artifactPath,
+        host,
+      }],
+    }),
+    operationStatus: async (operationId: string) => operationId === `spawn_message_${begun.receipt.launchId}` ? {
+      receipt: {
+        operationId,
+        idempotencyKey: `spawn_${begun.receipt.launchId}`,
+        conversationId: begun.receipt.conversationId,
+        kind: "send" as const,
+        status: "queued" as const,
+        at: new Date(admittedAt).toISOString(),
+        revision: 1,
+      },
+      replayed: true,
+    } : null,
+  } as unknown as RuntimeHostClient;
+  let released = 0;
+
+  const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
+    now: () => admittedAt + INITIAL_MESSAGE_TIMEOUT_MS,
+    releaseHost: async () => { released += 1; return true; },
+  });
+
+  expect(reconciled).toMatchObject({ state: "path-pending", initialMessage: "queued", error: null });
+  expect(released).toBe(0);
+});
+
 test("replay terminalizes an explicit initial-message failure before the stage timeout", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `explicit-failure-${id}`);
@@ -651,18 +708,19 @@ test("p0_282 empty-host replay terminalizes the receipt and releases its stale g
   });
   const client = {
     snapshot: async () => ({ sessions: [] }),
-    operationStatus: async (operationId: string) => ({
+    operationStatus: async (operationId: string) => operationId === begun.receipt.launchId ? ({
       receipt: {
         operationId,
         idempotencyKey: operationId,
         conversationId: begun.receipt.conversationId,
-        kind: operationId === begun.receipt.launchId ? "spawn" as const : "send" as const,
-        status: operationId === begun.receipt.launchId ? "delivered" as const : "queued" as const,
+        kind: "spawn" as const,
+        status: "delivered" as const,
         at: begun.receipt.createdAt,
         revision: 1,
       },
       replayed: true,
-    }),
+    }) : null,
+    effectBatch: async () => [],
   } as unknown as RuntimeHostClient;
   let released = 0;
 

@@ -266,12 +266,13 @@ export async function reconcileStructuredSpawnReplay(
   const messageStatus = operation?.receipt.status;
   const runtimeSession = runtime?.sessions.find((candidate) => candidate.conversationId === current.conversationId) ?? null;
   const entry = current.key ? registry.snapshot().entries[sessionKeyId(current.key)] : null;
-  const liveRegisteringSession = Boolean(runtimeSession
+  const matchingRuntimeSession = Boolean(runtimeSession
     && current.key
-    && runtimeSession.host === "registering"
     && sessionKeyId(runtimeSession.sessionKey) === sessionKeyId(current.key)
     && runtimeSession.cwd === current.cwd
-    && runtimeSession.artifactPath === current.artifactPath
+    && runtimeSession.artifactPath === current.artifactPath);
+  const liveRegisteringSession = Boolean(matchingRuntimeSession
+    && runtimeSession?.host === "registering"
     && entry?.structuredHostOperationId === launchId
     && entry.pendingAction === "spawn"
     && entry.claimOwner
@@ -279,6 +280,15 @@ export async function reconcileStructuredSpawnReplay(
     && entry.structuredHost.writerClaimEpoch === entry.claimEpoch
     && entry.status !== "dead"
     && entry.status !== "unhosted");
+  const liveHostedSession = Boolean(matchingRuntimeSession
+    && runtimeSession
+    && (runtimeSession.host === "hosted" || runtimeSession.host === "recovering"));
+  const durableQueuedMessage = Boolean(operation
+    && operation.receipt.conversationId === current.conversationId
+    && (operation.receipt.status === "pending"
+      || operation.receipt.status === "queued"
+      || operation.receipt.status === "delivering"));
+  const recoverableDelivery = liveRegisteringSession || liveHostedSession || durableQueuedMessage;
   const operationStartedAt = operation ? Date.parse(operation.receipt.at) : Number.NaN;
   const stageStartedAt = Number.isFinite(operationStartedAt) ? operationStartedAt : Date.parse(current.createdAt);
   const ageMs = (options.now ?? Date.now)() - stageStartedAt;
@@ -288,7 +298,7 @@ export async function reconcileStructuredSpawnReplay(
   if (!terminalReason
     && current.state !== "failed"
     && runtime
-    && !liveRegisteringSession
+    && !recoverableDelivery
     && ageMs >= timeoutMs) {
     terminalReason = runtimeSession
       ? `structured initial message remained ${messageStatus ?? "pending"} for ${timeoutMs}ms`
