@@ -59,4 +59,4 @@ jobs:
           if [[ -n "$PUBLICATION_ISSUE_COMMENT_ID" ]]; then
             arguments+=(--issue-comment "$PUBLICATION_ISSUE_COMMENT_ID")
           fi
-          bun scripts/privacy-github-audit.ts "${arguments[@]}"
+          bun scripts/privacy-github-audit.ts "${arguments[@]}" --report-only

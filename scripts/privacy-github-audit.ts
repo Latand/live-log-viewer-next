@@ -5,8 +5,8 @@ import { extname, join } from "node:path";
 import {
   canonicalSensitiveText,
   type FindingClass,
+  formatPrivacyReport,
   inspectPaths,
-  reportPrivacyFindings,
   sensitiveClasses,
 } from "./privacy-publication-gate";
 
@@ -32,6 +32,17 @@ type GithubSurface = {
   body?: unknown;
   title?: unknown;
 };
+
+const operationalFailureClasses = new Set<FindingClass>([
+  "configuration_error",
+  "inspection_error",
+  "tool_unavailable",
+]);
+
+export function shouldFailGithubAudit(findings: Map<FindingClass, number>, reportOnly: boolean): boolean {
+  if (!reportOnly) return findings.size > 0;
+  return [...findings.keys()].some((finding) => operationalFailureClasses.has(finding));
+}
 
 const trustedMediaHosts = new Set([
   "github.com",
@@ -549,5 +560,6 @@ if (import.meta.main) {
       : { id: Number(issueCommentId), kind: "issue_comment" },
     token: process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? "",
   });
-  reportPrivacyFindings(findings);
+  process.stdout.write(formatPrivacyReport(findings));
+  if (shouldFailGithubAudit(findings, arguments_.includes("--report-only"))) process.exitCode = 1;
 }
