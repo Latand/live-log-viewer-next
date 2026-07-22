@@ -25,6 +25,9 @@ import type { Workflow } from "@/lib/workflows/types";
 import type { RuntimePendingReconfigure, RuntimeSettingsCapability, ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
+/** Cap on buffered live-turn text: enough for any readable reply, never a leak. */
+const LIVE_TURN_TEXT_LIMIT = 64 * 1024;
+
 /* ------------------------------------------------------------------ *
  * Vocabulary (frozen)                                                 *
  * ------------------------------------------------------------------ */
@@ -246,6 +249,9 @@ export interface RuntimeSession {
   pendingReconfigure?: RuntimePendingReconfigure | null;
   /** Unresolved drift notice, if any. */
   drift?: RuntimeDrift | null;
+  /** In-flight assistant text accumulated from live `delta` events, rendered
+      as a streaming bubble until the transcript materializes the item. */
+  liveTurn?: { turnId: string; text: string } | null;
 }
 
 /**
@@ -471,7 +477,34 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
         ...s,
         turn: "running",
         activeTurnId: p.turnId ?? s.activeTurnId,
+        liveTurn: null,
       }));
+      break;
+    }
+    case "delta": {
+      /* Live assistant text: append the streamed fragment so the feed can
+         render the reply the moment tokens arrive, without waiting for the
+         transcript flush + tail poll. Bounded so a runaway turn cannot grow
+         the store without limit. */
+      const p = env.payload as { conversationId?: string; turnId?: string; text?: string };
+      const fragment = typeof p.text === "string" ? p.text : "";
+      if (!fragment) break;
+      updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => {
+        const turnId = p.turnId ?? s.activeTurnId ?? "unknown";
+        const prev = s.liveTurn && s.liveTurn.turnId === turnId ? s.liveTurn.text : "";
+        return { ...s, liveTurn: { turnId, text: (prev + fragment).slice(-LIVE_TURN_TEXT_LIMIT) } };
+      });
+      break;
+    }
+    case "item": {
+      /* A completed item means the engine has materialized the streamed text —
+         the transcript tail will carry it momentarily, so the live buffer
+         retires instead of double-rendering. */
+      const p = env.payload as { conversationId?: string; phase?: string };
+      if (p.phase !== "completed") break;
+      updateSession(store, p.conversationId ?? env.scope.id, revision, (s) =>
+        s.liveTurn ? { ...s, liveTurn: null } : s,
+      );
       break;
     }
     case "turn-ended": {
@@ -480,6 +513,7 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
         ...s,
         turn: "idle",
         activeTurnId: null,
+        liveTurn: null,
       }));
       break;
     }

@@ -140,6 +140,32 @@ function receipt(overrides: Partial<RuntimeReceipt> & { operationId: string; con
   };
 }
 
+/* --------------------- live turn streaming --------------------- */
+
+describe("live turn delta buffering", () => {
+  test("delta events accumulate per turn and clear on item completion and turn end", () => {
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, { conversationId: "conv_a", turnId: "t1" }));
+    store = apply(store, env("delta", { type: "session", id: "conv_a" }, 5, { conversationId: "conv_a", turnId: "t1", text: "Hel" }));
+    store = apply(store, env("delta", { type: "session", id: "conv_a" }, 6, { conversationId: "conv_a", turnId: "t1", text: "lo" }));
+    expect(store.sessions["conv_a"]?.liveTurn).toEqual({ turnId: "t1", text: "Hello" });
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 7, { conversationId: "conv_a", turnId: "t1", phase: "completed", item: {} }));
+    expect(store.sessions["conv_a"]?.liveTurn).toBeNull();
+    store = apply(store, env("delta", { type: "session", id: "conv_a" }, 8, { conversationId: "conv_a", turnId: "t1", text: "more" }));
+    expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("more");
+    store = apply(store, env("turn-ended", { type: "session", id: "conv_a" }, 9, { conversationId: "conv_a", turnId: "t1", outcome: "completed" }));
+    expect(store.sessions["conv_a"]?.liveTurn).toBeNull();
+  });
+
+  test("a started item leaves the live buffer alone", () => {
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, { conversationId: "conv_a", turnId: "t1" }));
+    store = apply(store, env("delta", { type: "session", id: "conv_a" }, 5, { conversationId: "conv_a", turnId: "t1", text: "streaming" }));
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, { conversationId: "conv_a", turnId: "t1", phase: "started", item: {} }));
+    expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("streaming");
+  });
+});
+
 /* --------------------- strict revision guard --------------------- */
 
 describe("applyEvent revision guard", () => {

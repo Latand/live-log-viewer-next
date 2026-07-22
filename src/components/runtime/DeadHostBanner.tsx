@@ -51,24 +51,27 @@ export function DeadHostBannerView({
   respawnError = null,
   recheckError = null,
 }: DeadHostBannerViewProps) {
+  /* Compact contract: the dead host is one quiet row, not a screen-eating
+     explainer. A sent message queues durably and auto-delivers on recovery, so
+     the row only names the state and offers Respawn plus a terminal escape
+     hatch; the re-check affordance folds into the small refresh icon. */
   return (
     <div
       role="status"
       aria-live="polite"
       data-dead-host-banner
-      className="flex shrink-0 flex-col gap-1.5 border-b border-danger/45 bg-danger-soft px-2.5 py-2"
+      className="shrink-0 border-b border-danger/45 bg-danger-soft px-2.5 py-1"
     >
-      <div className="flex items-center gap-1.5 text-label font-bold text-danger">
-        <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden />
-        <span className="min-w-0 truncate">{t("deadHost.title", { since: sinceLabel })}</span>
-      </div>
-      <p className="text-caption font-semibold text-secondary">{t("deadHost.body")}</p>
-      <div className="flex flex-wrap items-center gap-1.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />
+        <span className="min-w-0 flex-1 truncate text-label font-bold text-danger">
+          {t("deadHost.title", { since: sinceLabel })}
+        </span>
         <button
           type="button"
           onClick={onRespawn}
           disabled={respawnBusy}
-          className="inline-flex min-h-11 items-center gap-1 rounded-control border border-accent bg-accent px-2.5 text-label font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-60 sm:min-h-8"
+          className="inline-flex min-h-7 items-center gap-1 rounded-control border border-accent bg-accent px-2 text-label font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-60 [@media(pointer:coarse)]:min-h-11"
         >
           {respawnBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Play className="h-3.5 w-3.5" aria-hidden />}
           {t("deadHost.respawn")}
@@ -76,25 +79,28 @@ export function DeadHostBannerView({
         <button
           type="button"
           onClick={onAttach}
-          className="inline-flex min-h-11 items-center gap-1 rounded-control border border-border bg-canvas px-2.5 text-label font-semibold text-secondary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-8"
+          title={t("deadHost.attach")}
+          aria-label={t("deadHost.attach")}
+          className="inline-flex min-h-7 items-center gap-1 rounded-control border border-border bg-canvas px-2 text-label font-semibold text-secondary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [@media(pointer:coarse)]:min-h-11"
         >
-          <SquareTerminal className="h-3.5 w-3.5" aria-hidden /> {t("deadHost.attach")}
+          <SquareTerminal className="h-3.5 w-3.5" aria-hidden />
         </button>
         <button
           type="button"
           onClick={onRecheck}
           disabled={recheckBusy}
-          className="inline-flex min-h-11 items-center gap-1 rounded-control border border-border bg-canvas px-2.5 text-label font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 sm:min-h-8"
+          title={t("deadHost.recheck")}
+          aria-label={t("deadHost.recheck")}
+          className="inline-flex min-h-7 items-center rounded-control border border-border bg-canvas px-1.5 text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 [@media(pointer:coarse)]:min-h-11"
         >
           {recheckBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden />}
-          {t("deadHost.recheck")}
         </button>
       </div>
       {respawnError ? (
-        <p role="alert" className="text-caption font-semibold text-danger">{respawnError}</p>
+        <p role="alert" className="mt-1 text-caption font-semibold text-danger">{respawnError}</p>
       ) : null}
       {recheckError ? (
-        <p role="alert" className="text-caption font-semibold text-danger">{recheckError}</p>
+        <p role="alert" className="mt-1 text-caption font-semibold text-danger">{recheckError}</p>
       ) : null}
     </div>
   );

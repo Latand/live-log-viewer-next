@@ -56,22 +56,21 @@ for (const locale of LOCALES) {
     const facts = FACTS[locale];
     // The line must state the restriction as a restriction (not merely that a
     // selection persists) and tie its release to recovery.
-    expect(line).toMatch(locale === "en" ? /can[’']t be attached|cannot be attached/i : /не можна додат/i);
+    // Drafting stays allowed while the host is down; the line only ties image
+    // delivery to recovery (compact-feed pass).
     expect(line).toMatch(facts.recovery);
   });
 
-  test(`the ${locale} banner renders the truthful body with all three recovery controls`, () => {
+  test(`the ${locale} banner stays one compact row with all three recovery controls`, () => {
     const t: Parameters<typeof DeadHostBannerView>[0]["t"] = (key, params) => translate(locale, key, params);
     const html = renderToStaticMarkup(
       <DeadHostBannerView t={t} sinceLabel="5m" onRespawn={() => {}} onAttach={() => {}} onRecheck={() => {}} />,
     );
-    // The body reaches the DOM (apostrophes are HTML-escaped in static markup,
-    // so assert an escape-free distinctive fragment of each fact).
+    // The explainer body is gone (compact-feed pass): the title states the
+    // queueing contract and every control stays reachable.
     const body = translate(locale, "deadHost.body");
     const escapeFree = (value: string) => value.split(/[&<>'’]/)[0]!.trim();
-    const fragment = escapeFree(body);
-    expect(fragment.length).toBeGreaterThan(10);
-    expect(html).toContain(fragment);
+    expect(html).not.toContain(escapeFree(body));
     for (const control of ["deadHost.respawn", "deadHost.attach", "deadHost.recheck"] as const) {
       expect(html).toContain(translate(locale, control));
     }

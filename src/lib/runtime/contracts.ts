@@ -350,6 +350,9 @@ export interface RuntimeSession {
   activeTurnId: string | null;
   pendingReconfigure?: RuntimePendingReconfigure | null;
   drift?: RuntimeDrift | null;
+  /** In-flight assistant text accumulated from live `delta` events, rendered
+      as a streaming bubble until the transcript materializes the item. */
+  liveTurn?: { turnId: string; text: string } | null;
 }
 
 export interface ScopedEntity<T> {

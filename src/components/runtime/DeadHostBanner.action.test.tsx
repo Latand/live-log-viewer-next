@@ -50,7 +50,9 @@ async function mount(): Promise<{ host: HTMLElement; root: Root }> {
 }
 
 const byLabel = (host: HTMLElement, key: Parameters<typeof translate>[1]) =>
-  [...host.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes(translate("en", key)))!;
+  [...host.querySelectorAll("button")].find((b) =>
+    (b.textContent ?? "").includes(translate("en", key))
+    || (b.getAttribute("aria-label") ?? "").includes(translate("en", key)))!;
 
 const click = async (button: HTMLButtonElement) => {
   await act(async () => {
