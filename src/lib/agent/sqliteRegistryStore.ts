@@ -32,6 +32,7 @@ const META_FIELDS = [
 export type RowCollection = (typeof ROW_COLLECTIONS)[number];
 type StoredRow = { collection: string; row_key: string; value_json: string; row_order: number };
 type MetaRow = { key: string; value: string };
+type CachedRow = { valueJson: string; parsed: unknown };
 
 interface RegistryChanges {
   rows: Map<RowCollection, Set<string>>;
@@ -60,6 +61,7 @@ export interface SqliteRegistryStoreOptions {
   onWriterWait?(durationMs: number): void;
   onSnapshotLoad?(): void;
   onRowPayloadRead?(collection: RowCollection, count: number): void;
+  onRowPayloadParse?(collection: RowCollection, count: number): void;
 }
 
 interface LazyRegistrySnapshot extends SqliteRegistrySnapshot {
@@ -100,6 +102,8 @@ export class SqliteAgentRegistryStore {
   private readonly onWriterWait: ((durationMs: number) => void) | undefined;
   private readonly onSnapshotLoad: (() => void) | undefined;
   private readonly onRowPayloadRead: ((collection: RowCollection, count: number) => void) | undefined;
+  private readonly onRowPayloadParse: ((collection: RowCollection, count: number) => void) | undefined;
+  private readonly rowCache = new Map<RowCollection, Map<string, CachedRow>>();
   private readOnlyCache: SqliteRegistrySnapshot | null = null;
 
   constructor(readonly filename: string, options: SqliteRegistryStoreOptions) {
@@ -112,6 +116,7 @@ export class SqliteAgentRegistryStore {
     this.onWriterWait = options.onWriterWait;
     this.onSnapshotLoad = options.onSnapshotLoad;
     this.onRowPayloadRead = options.onRowPayloadRead;
+    this.onRowPayloadParse = options.onRowPayloadParse;
     this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS registry_meta (
@@ -151,10 +156,14 @@ export class SqliteAgentRegistryStore {
   }
 
   snapshot(): SqliteRegistrySnapshot {
+    return this.loadSnapshot(false);
+  }
+
+  private loadSnapshot(useRowCache: boolean): SqliteRegistrySnapshot {
     this.onSnapshotLoad?.();
     this.db.exec("BEGIN");
     try {
-      const snapshot = this.loadInTransaction();
+      const snapshot = this.loadInTransaction(useRowCache);
       this.db.exec("COMMIT");
       return snapshot;
     } catch (error) {
@@ -170,7 +179,7 @@ export class SqliteAgentRegistryStore {
   readOnlySnapshot(): SqliteRegistrySnapshot {
     const revision = this.revision();
     if (this.readOnlyCache?.revision === revision) return this.readOnlyCache;
-    this.readOnlyCache = this.snapshot();
+    this.readOnlyCache = this.loadSnapshot(true);
     return this.readOnlyCache;
   }
 
@@ -208,7 +217,7 @@ export class SqliteAgentRegistryStore {
       }
       if (changed) {
         this.secureFiles();
-        this.readOnlyCache = null;
+        this.updateCachesAfterCommit(current.file, changes, revision);
       }
       if (includeSnapshot) {
         const committed = this.snapshot();
@@ -230,6 +239,7 @@ export class SqliteAgentRegistryStore {
       this.persistDiff(current.file, file, revision);
       this.db.exec("COMMIT");
       this.secureFiles();
+      this.rowCache.clear();
       this.readOnlyCache = null;
       return { file, revision, replaced: true };
     } catch (error) {
@@ -255,14 +265,14 @@ export class SqliteAgentRegistryStore {
     }
   }
 
-  private loadInTransaction(): SqliteRegistrySnapshot {
-    const snapshot = this.loadLazyInTransaction(false);
+  private loadInTransaction(useRowCache = false): SqliteRegistrySnapshot {
+    const snapshot = this.loadLazyInTransaction(false, useRowCache);
     for (const collection of ROW_COLLECTIONS) void snapshot.file[collection];
     for (const field of META_FIELDS) void snapshot.file[field];
     return snapshot;
   }
 
-  private loadLazyInTransaction(trackMutations = true): LazyRegistrySnapshot {
+  private loadLazyInTransaction(trackMutations = true, useRowCache = trackMutations): LazyRegistrySnapshot {
     const file = this.normalize({ version: 2, entries: {}, receipts: {} });
     const loadedCollections = new Map<RowCollection, RegistryFile[RowCollection]>();
     const baselineCollections = new Map<RowCollection, Map<string, string | null>>();
@@ -283,7 +293,10 @@ export class SqliteAgentRegistryStore {
           ).all(collection);
           this.onRowPayloadRead?.(collection, storedRows.length);
           for (const row of storedRows) {
-            (storedValue as Record<string, unknown>)[row.row_key] = JSON.parse(row.value_json);
+            const parsed = this.parseRow(collection, row.row_key, row.value_json, useRowCache);
+            (storedValue as Record<string, unknown>)[row.row_key] = trackMutations
+              ? structuredClone(parsed)
+              : parsed;
             baseline.set(row.row_key, row.value_json);
           }
           const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
@@ -357,7 +370,7 @@ export class SqliteAgentRegistryStore {
             const stored = readBaseline(key);
             if (stored === null) return undefined;
             const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
-            input[collection] = { [key]: JSON.parse(stored) };
+            input[collection] = { [key]: structuredClone(this.parseRow(collection, key, stored, useRowCache)) };
             const normalized = this.normalize(input)[collection] as Record<string, unknown>;
             if (!Object.hasOwn(normalized, key)) return undefined;
             rows[key] = normalized[key];
@@ -369,7 +382,12 @@ export class SqliteAgentRegistryStore {
             const unloaded: Record<string, unknown> = {};
             for (const row of stored) {
               if (!Object.hasOwn(rows, row.row_key) && !deleted.has(row.row_key)) {
-                unloaded[row.row_key] = JSON.parse(row.value_json);
+                unloaded[row.row_key] = structuredClone(this.parseRow(
+                  collection,
+                  row.row_key,
+                  row.value_json,
+                  useRowCache,
+                ));
               }
             }
             const input: Record<string, unknown> = { version: 2, entries: {}, receipts: {} };
@@ -512,6 +530,83 @@ export class SqliteAgentRegistryStore {
         return changes;
       },
     };
+  }
+
+  private parseRow(
+    collection: RowCollection,
+    key: string,
+    valueJson: string,
+    useCache: boolean,
+  ): unknown {
+    if (!useCache) {
+      this.onRowPayloadParse?.(collection, 1);
+      return JSON.parse(valueJson);
+    }
+    let collectionCache = this.rowCache.get(collection);
+    if (!collectionCache) {
+      collectionCache = new Map();
+      this.rowCache.set(collection, collectionCache);
+    }
+    const cached = collectionCache.get(key);
+    if (cached?.valueJson === valueJson) return cached.parsed;
+    const parsed = JSON.parse(valueJson);
+    this.onRowPayloadParse?.(collection, 1);
+    collectionCache.set(key, { valueJson, parsed });
+    return parsed;
+  }
+
+  private updateCachesAfterCommit(
+    file: RegistryFile,
+    changes: RegistryChanges,
+    revision: number,
+  ): void {
+    const cachedSnapshot = this.readOnlyCache?.revision === revision - 1
+      ? this.readOnlyCache
+      : null;
+    const nextFile = cachedSnapshot ? { ...cachedSnapshot.file } : null;
+
+    for (const [collection, keys] of changes.rows) {
+      const currentRows = file[collection] as Record<string, unknown>;
+      let collectionCache = this.rowCache.get(collection);
+      if (!collectionCache) {
+        collectionCache = new Map();
+        this.rowCache.set(collection, collectionCache);
+      }
+      const nextRows = nextFile
+        ? { ...(cachedSnapshot!.file[collection] as Record<string, unknown>) }
+        : null;
+      for (const key of keys) {
+        if (!Object.hasOwn(currentRows, key)) {
+          collectionCache.delete(key);
+          if (nextRows) delete nextRows[key];
+          continue;
+        }
+        const valueJson = JSON.stringify(currentRows[key]);
+        const parsed = JSON.parse(valueJson) as unknown;
+        collectionCache.set(key, { valueJson, parsed });
+        if (nextRows) nextRows[key] = parsed;
+      }
+      if (nextFile && nextRows) {
+        if (changes.order.has(collection)) {
+          const ordered: Record<string, unknown> = {};
+          for (const key of Object.keys(currentRows)) {
+            if (Object.hasOwn(nextRows, key)) ordered[key] = nextRows[key];
+          }
+          (nextFile as unknown as Record<string, unknown>)[collection] = ordered;
+        } else {
+          (nextFile as unknown as Record<string, unknown>)[collection] = nextRows;
+        }
+      }
+    }
+
+    if (nextFile) {
+      for (const field of changes.meta) {
+        (nextFile as unknown as Record<string, unknown>)[field] = structuredClone(file[field]);
+      }
+      this.readOnlyCache = { file: nextFile, revision };
+    } else {
+      this.readOnlyCache = null;
+    }
   }
 
   private persistAll(file: RegistryFile, revision: number): void {
