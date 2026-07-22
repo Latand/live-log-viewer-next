@@ -25,7 +25,11 @@ export async function readTailChunk(pathname: string, offsetInput: number, budge
   let offset = offsetInput;
   if (!Number.isFinite(offset) || offset < 0) offset = 0;
   if (offset > size) offset = 0;
-  if (offset === 0 && size > MAX_CHUNK) offset = size - MAX_CHUNK;
+  /* A disconnected live subscriber can return with a very old offset. Bound
+     every forward catch-up to the live tail window so reconnect churn cannot
+     replay a multi-hundred-megabyte transcript through the Viewer event loop.
+     Older feed pages remain available through the backward history route. */
+  if (size - offset > MAX_CHUNK) offset = size - MAX_CHUNK;
 
   const want = Math.min(MAX_CHUNK, Math.max(0, budget), Math.max(0, size - offset));
   if (want === 0) return { offset, start: offset, size, data: "" };
