@@ -150,6 +150,46 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
 });
 
+test("generation completion retries skip the stale projection while its refresh is running", async () => {
+  scannedFiles = [file("/sessions/generation-1.jsonl")];
+  const initial = await GET(new Request("http://127.0.0.1/api/files"));
+  const etag = initial.headers.get("etag");
+  expect(initial.headers.get("x-llv-files-generation")).toBe("1");
+
+  let releaseRefresh!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { releaseRefresh = resolve; }));
+  scannedFiles = [file("/sessions/generation-2.jsonl")];
+  try {
+    const revision = await GET(new Request("http://127.0.0.1/api/files", {
+      headers: {
+        "if-none-match": etag!,
+        "x-llv-files-revision": "41",
+      },
+    }));
+    expect(revision.headers.get("x-llv-files-generation")).toBe("1");
+    expect(revision.headers.get("x-llv-files-target-generation")).toBe("2");
+
+    const retry = await GET(new Request("http://127.0.0.1/api/files", {
+      headers: {
+        "if-none-match": etag!,
+        "x-llv-files-generation": "2",
+      },
+    }));
+
+    expect(retry.status).toBe(304);
+    expect(await retry.text()).toBe("");
+    expect(retry.headers.get("etag")).toBe(etag);
+    expect(retry.headers.get("x-llv-files-generation")).toBe("1");
+    expect(retry.headers.get("x-llv-files-target-generation")).toBe("2");
+    expect(retry.headers.get("x-llv-files-cache")).toBe("stale");
+    expect(retry.headers.get("server-timing")).toContain("files-generation-wait");
+    expect(retry.headers.get("server-timing")).not.toContain("files-registry");
+    expect(scans).toBe(2);
+  } finally {
+    releaseRefresh();
+  }
+});
+
 test("issue 532: files response returns the transaction-captured flow generation", async () => {
   const oldFlow = {
     id: "flow-atomic-projection", template: "implement-review-loop", project: "demo", cwd: "/repo",
