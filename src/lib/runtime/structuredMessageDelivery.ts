@@ -203,7 +203,7 @@ function persistedCurrentOwner(
     : registry.conversationForPath(request.path);
   const generation = conversation?.generations.at(-1);
   if (!conversation || !generation) return null;
-  const entry = registry.snapshot().entries[`${conversation.engine}:${generation.id}`];
+  const entry = registry.readOnlySnapshot().entries[`${conversation.engine}:${generation.id}`];
   if (!entry || entry.artifactPath !== generation.path) return null;
   const structured = entry.structuredHost !== null && entry.structuredHost !== undefined;
   const legacy = entry.host !== null;
@@ -352,7 +352,7 @@ function requiresDeadConversationRecovery(
   if (session.host !== "registering" || session.artifactPath !== null) return false;
   const generation = conversation.generations.at(-1);
   if (!generation) return false;
-  const entry = registry.snapshot().entries[`${conversation.engine}:${generation.id}`];
+  const entry = registry.readOnlySnapshot().entries[`${conversation.engine}:${generation.id}`];
   /* Production #389 retained a pre-artifact runtime placeholder after the
      durable current generation had already lost its host and process. */
   return entry?.status === "dead"
@@ -674,7 +674,7 @@ export async function enqueueStructuredMessage(
        blob publication, GC, or registry effects. First admissions publish
        before the reservation references them. */
     const admissionKey = request.clientMessageId?.trim()
-      ? `${conversation.id} ${request.clientMessageId.trim()}`
+      ? `${conversation.id}\u0000${request.clientMessageId.trim()}`
       : null;
     let reservation = await withAdmissionSection(admissionKey, async () => {
       const admit = () => {
