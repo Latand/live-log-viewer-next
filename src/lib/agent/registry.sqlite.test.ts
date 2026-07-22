@@ -98,6 +98,41 @@ test("a committed SQLite mutation patches the read-only snapshot and parsed-row 
   expect(store.readOnlySnapshot().file.receipts[targetLaunchId]?.error).toBe("updated");
 });
 
+test("SQLite read-only snapshots query the durable revision only after a storage change", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-revision-cache-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const seed = new AgentRegistry(filename);
+  const receipt = seed.beginSpawn("codex", "/revision-cache-seed");
+  const sqliteFilename = path.join(directory, "agent-registry.sqlite");
+  let revisionQueries = 0;
+  const first = new SqliteAgentRegistryStore(sqliteFilename, {
+    initialSnapshot: seed.snapshot(),
+    normalize: normalizeRegistry,
+    onRevisionQuery: () => { revisionQueries += 1; },
+  });
+  const external = new SqliteAgentRegistryStore(sqliteFilename, {
+    initialSnapshot: seed.snapshot(),
+    normalize: normalizeRegistry,
+  });
+
+  first.readOnlySnapshot();
+  for (let index = 0; index < 100; index += 1) first.readOnlySnapshot();
+  expect(revisionQueries).toBe(1);
+
+  first.mutate((file) => {
+    file.receipts[receipt.launchId]!.error = "local";
+  }, false);
+  for (let index = 0; index < 100; index += 1) first.readOnlySnapshot();
+  expect(revisionQueries).toBe(1);
+
+  external.mutate((file) => {
+    file.receipts[receipt.launchId]!.error = "external";
+  }, false);
+  expect(first.readOnlySnapshot().file.receipts[receipt.launchId]?.error).toBe("external");
+  for (let index = 0; index < 100; index += 1) first.readOnlySnapshot();
+  expect(revisionQueries).toBe(2);
+});
+
 test("SQLite first boot imports JSON and preserves membership and capability digest paths", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-import-"));
   const filename = path.join(directory, "agent-registry.json");

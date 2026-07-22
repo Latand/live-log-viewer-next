@@ -62,6 +62,7 @@ export interface SqliteRegistryStoreOptions {
   onSnapshotLoad?(): void;
   onRowPayloadRead?(collection: RowCollection, count: number): void;
   onRowPayloadParse?(collection: RowCollection, count: number): void;
+  onRevisionQuery?(): void;
 }
 
 interface LazyRegistrySnapshot extends SqliteRegistrySnapshot {
@@ -103,7 +104,9 @@ export class SqliteAgentRegistryStore {
   private readonly onSnapshotLoad: (() => void) | undefined;
   private readonly onRowPayloadRead: ((collection: RowCollection, count: number) => void) | undefined;
   private readonly onRowPayloadParse: ((collection: RowCollection, count: number) => void) | undefined;
+  private readonly onRevisionQuery: (() => void) | undefined;
   private readonly rowCache = new Map<RowCollection, Map<string, CachedRow>>();
+  private revisionCache: { signature: string; revision: number } | null = null;
   private readOnlyCache: SqliteRegistrySnapshot | null = null;
 
   constructor(readonly filename: string, options: SqliteRegistryStoreOptions) {
@@ -117,6 +120,7 @@ export class SqliteAgentRegistryStore {
     this.onSnapshotLoad = options.onSnapshotLoad;
     this.onRowPayloadRead = options.onRowPayloadRead;
     this.onRowPayloadParse = options.onRowPayloadParse;
+    this.onRevisionQuery = options.onRevisionQuery;
     this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS registry_meta (
@@ -173,7 +177,20 @@ export class SqliteAgentRegistryStore {
   }
 
   revision(): number {
-    return Number(this.meta("revision") ?? 0);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = this.storageSignature();
+      if (this.revisionCache?.signature === before) return this.revisionCache.revision;
+      this.onRevisionQuery?.();
+      const revision = Number(this.meta("revision") ?? 0);
+      const after = this.storageSignature();
+      if (before !== after) continue;
+      this.revisionCache = { signature: after, revision };
+      return revision;
+    }
+    this.onRevisionQuery?.();
+    const revision = Number(this.meta("revision") ?? 0);
+    this.rememberRevision(revision);
+    return revision;
   }
 
   readOnlySnapshot(): SqliteRegistrySnapshot {
@@ -218,6 +235,7 @@ export class SqliteAgentRegistryStore {
       if (changed) {
         this.secureFiles();
         this.updateCachesAfterCommit(current.file, changes, revision);
+        this.rememberRevision(revision);
       }
       if (includeSnapshot) {
         const committed = this.snapshot();
@@ -241,6 +259,7 @@ export class SqliteAgentRegistryStore {
       this.secureFiles();
       this.rowCache.clear();
       this.readOnlyCache = null;
+      this.rememberRevision(revision);
       return { file, revision, replaced: true };
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
@@ -692,5 +711,21 @@ export class SqliteAgentRegistryStore {
     for (const candidate of [this.filename, `${this.filename}-wal`, `${this.filename}-shm`]) {
       if (fs.existsSync(candidate)) fs.chmodSync(candidate, 0o600);
     }
+  }
+
+  private storageSignature(): string {
+    return [this.filename, `${this.filename}-wal`].map((candidate) => {
+      try {
+        const stat = fs.statSync(candidate, { bigint: true });
+        return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+        throw error;
+      }
+    }).join("|");
+  }
+
+  private rememberRevision(revision: number): void {
+    this.revisionCache = { signature: this.storageSignature(), revision };
   }
 }
