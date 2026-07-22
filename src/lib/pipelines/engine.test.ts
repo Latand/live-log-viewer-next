@@ -2456,6 +2456,36 @@ test("issue 532: a four-round embedded flow authoritatively repairs its stale pa
   expect((await tickPipelines([], h.ports)).changed).toBe(false);
 });
 
+test("issue 532: projection rebinds one flow-first partial write and refuses ambiguous candidates", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([], h.ports);
+
+  const parent = loadPipelines()[0]!;
+  const attempt = parent.runs[1]!.attempts[0]!;
+  const flow = h.flows.get("flow-1")!;
+  attempt.flowId = null;
+  attempt.agentPath = null;
+  attempt.conversationId = null;
+
+  /* No scan entries and no runtime host: the files read owns recovery. */
+  expect(reconcileEmbeddedReviewFlows([parent], [flow], "2026-07-22T01:00:00.000Z")).toBe(true);
+  expect(attempt).toMatchObject({ flowId: flow.id, reviewFlowSync: { roundCount: 0 } });
+  expect(reconcileEmbeddedReviewFlows([parent], [flow], "2026-07-22T01:01:00.000Z")).toBe(false);
+
+  attempt.flowId = null;
+  attempt.reviewFlowSync = undefined;
+  const duplicate = { ...structuredClone(flow), id: "flow-duplicate" };
+  expect(reconcileEmbeddedReviewFlows([parent], [flow, duplicate], "2026-07-22T01:02:00.000Z")).toBe(false);
+  expect(attempt.flowId).toBeNull();
+});
+
 for (const terminalState of ["done_comment", "needs_decision"] as const) {
   test(`a later ${terminalState} outcome replaces stale startup evidence once across restart ticks (#526)`, async () => {
     const h = harness();

@@ -114,6 +114,53 @@ test("issue 533: a repair review parks when its remote branch is behind the capt
   }
 });
 
+test("issue 532: a marker-created pipeline round captures its published repair head before spawning", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-marker-head-"));
+  const cwd = path.join(root, "worktree");
+  const remote = path.join(root, "origin.git");
+  fs.mkdirSync(cwd);
+  try {
+    expect(spawnSync("git", ["init", "--bare", remote]).status).toBe(0);
+    expect(spawnSync("git", ["init", "-b", "main"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "flow@example.com"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["remote", "add", "origin", remote], { cwd }).status).toBe(0);
+    fs.writeFileSync(path.join(cwd, "work.txt"), "repair\n");
+    expect(spawnSync("git", ["add", "work.txt"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "repair"], { cwd }).status).toBe(0);
+    expect(spawnSync("git", ["push", "-u", "origin", "main"], { cwd }).status).toBe(0);
+    const repairHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).stdout.trim();
+    const implementer = writeCodexEntry("marker-head-implementer.jsonl", {
+      id: ["059f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+      cwd,
+    }, Date.now() / 1_000);
+    fs.appendFileSync(implementer.path, `${JSON.stringify({
+      timestamp: new Date(Date.now() + 1_000).toISOString(),
+      type: "event_msg",
+      payload: { type: "task_complete", last_agent_message: "REVIEW_READY: published repair" },
+    })}\n`);
+    const stat = fs.statSync(implementer.path);
+    const current = { ...implementer, size: stat.size, mtime: stat.mtimeMs / 1_000 };
+    const flow = raceFlow({
+      id: "flow-marker-head",
+      cwd,
+      headRef: "main",
+      implementerPath: current.path,
+      state: "fixing",
+      rounds: [{ ...newRound(raceFlow({ rounds: [] }), "marker", null), n: 1, reviewedAt: "2026-07-22T00:00:00Z", relayedAt: "2026-07-22T00:01:00Z" }],
+      createdAt: "2026-07-21T00:00:00Z",
+    });
+
+    expect(await tickFlow(flow, [current], new Map([[current.path, current]]), () => {})).toBe(true);
+    expect(flow).toMatchObject({
+      state: "spawning",
+      rounds: [expect.anything(), { n: 2, triggeredBy: "marker", readyNote: "published repair", reviewHeadSha: repairHead }],
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a review round parks when clean HEAD advances past its synchronized target before launch (#522)", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-target-head-"));
   try {

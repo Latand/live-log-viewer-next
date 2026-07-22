@@ -767,8 +767,33 @@ export function reconcileEmbeddedReviewFlows(
   synchronizedAt = new Date().toISOString(),
 ): boolean {
   const byId = new Map(flows.map((flow) => [flow.id, flow] as const));
+  const claimedFlowIds = new Set(pipelines.flatMap((pipeline) =>
+    pipeline.runs.flatMap((run) => run.attempts.flatMap((attempt) => attempt.flowId ? [attempt.flowId] : []))));
   let changed = false;
   for (const pipeline of pipelines) {
+    /* Flow creation commits before the parent can persist flowId. Recover that
+       flow-first crash only from the same unique identity used at creation;
+       ambiguity fails closed so projection cannot claim a foreign flow. */
+    for (const stage of pipeline.stages) {
+      if (stage.kind !== "review-loop") continue;
+      const attempt = currentAttempt(pipeline, stage.id);
+      if (!attempt || attempt.flowId || !attempt.expectedReviewHeadSha) continue;
+      const implementer = latestPassedRun(pipeline, stage.id);
+      if (!implementer?.agentPath) continue;
+      const candidates = flows.filter((flow) =>
+        !claimedFlowIds.has(flow.id)
+        && flow.baseRef === pipeline.baseRef
+        && flow.targetSha === attempt.expectedReviewHeadSha
+        && flow.closedAt === null
+        && flow.state !== "closed"
+        && (flow.implementerPath === implementer.agentPath
+          || Boolean(implementer.conversationId && flow.implementerConversationId === implementer.conversationId)));
+      if (candidates.length === 1) {
+        attempt.flowId = candidates[0]!.id;
+        claimedFlowIds.add(candidates[0]!.id);
+        changed = true;
+      }
+    }
     for (const run of pipeline.runs) {
       for (const attempt of run.attempts) {
         const flow = attempt.flowId ? byId.get(attempt.flowId) : null;

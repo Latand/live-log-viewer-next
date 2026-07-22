@@ -701,9 +701,18 @@ export async function tickFlow(
   if (flow.state === "waiting_ready" || flow.state === "fixing") {
     const note = detectReadyMarker(flow, implementer);
     if (note !== null) {
-      flow.rounds.push(newRound(flow, "marker", note));
-      flow.state = flow.mode === "manual" ? "spawn_pending" : "spawning";
-      flow.stateDetail = null;
+      const markerRound = newRound(flow, "marker", note);
+      flow.rounds.push(markerRound);
+      try {
+        /* Pipeline-owned flows carry headRef. Capture their clean published
+           repair fence in the same durable marker transition, before a delayed
+           reviewer launch or parent reconciliation can expose the prior HEAD. */
+        if (flow.headRef) captureReviewHead(flow, markerRound);
+        flow.state = flow.mode === "manual" ? "spawn_pending" : "spawning";
+        flow.stateDetail = null;
+      } catch (error) {
+        markerRound.error = error instanceof Error ? error.message : "review head capture failed";
+      }
     }
     return JSON.stringify(flow) !== before;
   }
