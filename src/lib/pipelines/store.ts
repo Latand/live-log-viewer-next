@@ -68,6 +68,24 @@ function isVerdict(value: unknown): boolean {
   return value === null || stageVerdictFrom(value) !== null;
 }
 
+function isReviewFlowSync(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const sync = value as Record<string, unknown>;
+  const flowStates = ["waiting_ready", "spawn_pending", "spawning", "reviewing", "relay_pending", "relaying", "fixing", "approved", "done_comment", "needs_decision", "paused", "closed"];
+  return typeof sync.generation === "string"
+    && (sync.sourceRevision === undefined || (Number.isInteger(sync.sourceRevision) && (sync.sourceRevision as number) >= 0))
+    && Number.isInteger(sync.roundCount) && (sync.roundCount as number) >= 0
+    && isNullableString(sync.implementerHeadSha)
+    && isNullableString(sync.reviewerHeadSha)
+    && (sync.verdict === null || ["APPROVE", "REQUEST_CHANGES", "COMMENT"].includes(String(sync.verdict)))
+    && flowStates.includes(String(sync.relayState))
+    && (sync.terminalState === null || flowStates.includes(String(sync.terminalState)))
+    && typeof sync.synchronizedAt === "string"
+    && isNullableString(sync.sourceUpdatedAt)
+    && (sync.lagMs === null || (typeof sync.lagMs === "number" && Number.isFinite(sync.lagMs) && sync.lagMs >= 0));
+}
+
 function isActivation(value: unknown): value is PipelineEdgeActivation | null {
   if (value === null || value === undefined) return true;
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -96,6 +114,7 @@ function isAttempt(value: unknown, index: number): boolean {
     isNullableString(attempt.flowId) &&
     (attempt.expectedReviewHeadSha === undefined || isNullableString(attempt.expectedReviewHeadSha)) &&
     (attempt.reviewHeadSha === undefined || isNullableString(attempt.reviewHeadSha)) &&
+    isReviewFlowSync(attempt.reviewFlowSync) &&
     isNullableString(attempt.startedAt) &&
     isNullableString(attempt.completedAt) &&
     (attempt.input === undefined || isNullableString(attempt.input)) &&
@@ -391,6 +410,7 @@ export function loadPipelines(): Pipeline[] {
             flowId: attempt.flowId ?? null,
             expectedReviewHeadSha: attempt.expectedReviewHeadSha ?? null,
             reviewHeadSha: attempt.reviewHeadSha ?? null,
+            reviewFlowSync: attempt.reviewFlowSync ? { ...attempt.reviewFlowSync } : undefined,
             startedAt: attempt.startedAt ?? null,
             completedAt: attempt.completedAt ?? null,
             input: attempt.input ?? null,

@@ -10,11 +10,12 @@ import { preallocatedStructuredSpawnCards } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { repositoryForProjectRoot } from "@/lib/flows/git";
-import { loadFlows } from "@/lib/flows/store";
+import { loadFlows, withFlowSnapshot } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles } from "@/lib/displayNames";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
-import { loadPipelines } from "@/lib/pipelines/store";
+import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
+import { withPipelineMutation } from "@/lib/pipelines/store";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
@@ -379,30 +380,15 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      with no such lineage are untouched. */
   overlayLineageProjectAffinity(files);
   markTiming("files-project-affinity");
-  const storedFlows = loadFlows();
+  let storedFlows = loadFlows();
   markTiming("files-flow-store");
-  const flows = projectRestoredFlows(storedFlows, files, {
+  let flows = projectRestoredFlows(storedFlows, files, {
     pinnedPaths: visibilityPinnedPaths,
     memberships: registrySnapshot.memberships,
   });
   markTiming("files-flow-restore");
   const storedTasks = loadTasks();
   markTiming("files-task-store");
-  /* Role titles (issue #325): a Viewer-spawned worker whose scan/launch title
-     is machine boilerplate («Codex session», the spawn prompt head) presents
-     its durable identity instead — task subject + role for builders, reviewed
-     subject + round for reviewers. Runs after overlaySessionTitles so an
-     explicit user rename keeps final precedence (the role title becomes its
-     Reset base), and never rewrites native transcripts. */
-  overlayRoleSessionTitles({ files, flows, tasks: storedTasks, conversationAliases: registrySnapshot.conversationAliases });
-  /* Prompt-title fallback (issue #345): sessions the role overlay could not
-     claim — legacy spawns without durable lineage, fresh role spawns with no
-     owning task yet — still show the raw «You are the Orchestrator…» scaffold
-     as their title. Compact those to the role word; user renames keep final
-     precedence exactly as above. */
-  overlayPromptDisplayTitles(files);
-  markTiming("files-role-titles");
-  timings.push(`files-flows;dur=${(performance.now() - flowsStartedAt).toFixed(1)}`);
   /* Human-authorship pin for the board's worker-class auto-collapse (issue
      #112): the reaper's sticky evidence (PR #125) marks any transcript that
      carries a real user message. Both authorship and fail-closed freshness span
@@ -506,7 +492,20 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   let pipelines: Pipeline[] = [];
   let pipelinesError: string | undefined;
   try {
-    pipelines = filterPipelinesForFileScan(loadPipelines(), files, {
+    const reconciled = await withPipelineMutation((current, persist) =>
+      withFlowSnapshot((projectionFlows) => {
+        /* Every cross-store lifecycle path acquires pipeline before flow. The
+           flow lock spans parent persistence and captures the exact array
+           returned below, so the returned deck and parent share a generation. */
+        if (reconcileEmbeddedReviewFlows(current, projectionFlows)) persist();
+        return { pipelines: current, flows: [...projectionFlows] };
+      }));
+    storedFlows = reconciled.flows;
+    flows = projectRestoredFlows(storedFlows, files, {
+      pinnedPaths: visibilityPinnedPaths,
+      memberships: registrySnapshot.memberships,
+    });
+    pipelines = filterPipelinesForFileScan(reconciled.pipelines, files, {
       pinnedPaths: visibilityPinnedPaths,
       memberships: registrySnapshot.memberships,
     });
@@ -514,6 +513,14 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     pipelinesError = error instanceof Error ? error.message : "pipeline registry unreadable";
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
+  /* Role titles (issue #325) and the returned flow read model consume the same
+     transaction-captured flow generation as pipelines. A controller advance
+     during the earlier scan can therefore never mix deck/annotation generation
+     N with parent generation N+1. Explicit user titles keep final precedence. */
+  overlayRoleSessionTitles({ files, flows, tasks: storedTasks, conversationAliases: registrySnapshot.conversationAliases });
+  overlayPromptDisplayTitles(files);
+  markTiming("files-role-titles");
+  timings.push(`files-flows;dur=${(performance.now() - flowsStartedAt).toFixed(1)}`);
   markTiming("files-stores");
   const projectsStartedAt = performance.now();
   const projected = projectRateLimitReadModel(files, flows, registrySnapshot);

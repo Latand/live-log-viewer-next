@@ -43,6 +43,7 @@ beforeEach(() => {
   scanGates = [];
   hydrateScannedFiles = (files) => files;
   tmuxHealth = { status: "healthy" };
+  flowsStore = () => [];
   replaceConversationCatalog([]);
 });
 
@@ -88,7 +89,8 @@ mock.module("@/lib/scanner", () => ({
   },
 }));
 let pipelinesStore: () => unknown[] = () => [];
-mock.module("@/lib/flows/store", () => ({ loadFlows: () => [] }));
+let flowsStore: () => unknown[] = () => [];
+mock.module("@/lib/flows/store", () => ({ loadFlows: () => flowsStore() }));
 mock.module("@/lib/pipelines/store", () => ({ loadPipelines: () => pipelinesStore() }));
 mock.module("@/lib/pipelines/visibility", () => ({ filterPipelinesForFileScan: () => [] }));
 let boardTasksStore: () => unknown[] = () => [];
@@ -146,6 +148,37 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(first.headers.get("server-timing")).toMatch(/files-flow-restore;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-task-store;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
+});
+
+test("issue 532: files response returns the transaction-captured flow generation", async () => {
+  const oldFlow = {
+    id: "flow-atomic-projection", template: "implement-review-loop", project: "demo", cwd: "/repo",
+    implementerPath: "/missing/implementer.jsonl", roles: {
+      implementer: { engine: "codex", model: null, effort: "low" },
+      reviewer: { engine: "codex", model: null, effort: "high" },
+    }, baseRef: "a".repeat(40), baseMode: "head", mode: "auto", reviewerMode: "headless",
+    roundLimit: 5, state: "reviewing", stateDetail: null,
+    rounds: [{ n: 1, reviewerPath: "/reviewer-1.jsonl", reviewHeadSha: "1".repeat(40) }],
+    createdAt: "2026-07-22T00:00:00Z", closedAt: null,
+  };
+  const currentFlow = {
+    ...structuredClone(oldFlow),
+    rounds: [
+      ...oldFlow.rounds,
+      { n: 2, reviewerPath: "/reviewer-2.jsonl", reviewHeadSha: "2".repeat(40) },
+    ],
+  };
+  let reads = 0;
+  flowsStore = () => structuredClone(reads++ === 0 ? [oldFlow] : [currentFlow]);
+  scannedFiles = [];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { flows: Array<{ id: string; rounds: Array<{ n: number }> }> };
+  expect(reads).toBeGreaterThanOrEqual(2);
+  expect(body.flows).toEqual([expect.objectContaining({
+    id: currentFlow.id,
+    rounds: [expect.objectContaining({ n: 1 }), expect.objectContaining({ n: 2 })],
+  })]);
 });
 
 test("volatile registry diagnostics do not invalidate an otherwise stable files ETag", async () => {
