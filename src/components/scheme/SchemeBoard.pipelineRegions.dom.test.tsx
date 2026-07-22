@@ -160,8 +160,10 @@ function mountScene(
   tasks: BoardTask[] = [],
   flows: Flow[] = [],
   manual: FileEntry[] = [],
+  sceneFiles: FileEntry[] = files,
+  isolatedManualPaths: ReadonlySet<string> = new Set(),
 ): HTMLElement {
-  const groups = buildBranchGroups(files, "demo");
+  const groups = buildBranchGroups(sceneFiles, "demo");
   const reviewGroups = directReviewFlows({ files, flows, tasks: [] });
   const host = document.createElement("div");
   document.body.append(host);
@@ -177,6 +179,7 @@ function mountScene(
       reviewGroups={reviewGroups}
       pipelines={pipelines}
       surfacePipelines={pipelines}
+      isolatedManualPaths={isolatedManualPaths}
       tasks={tasks}
       drafts={[]}
       focus={null}
@@ -391,9 +394,9 @@ test("managed fixing and closed-hidden/restored lifecycle panes stay inside thei
     ],
     runs: [
       { stageId: "build", attempts: [{ n: 1, state: "passed", agentPath: fixingBuilder.path, conversationId: fixingBuilder.conversationId, flowId: null }] },
-      { stageId: "review", attempts: [{ n: 1, state: "passed", agentPath: fixingReviewer.path, conversationId: fixingReviewer.conversationId, flowId: fixingFlow.id }] },
+      { stageId: "review", attempts: [{ n: 1, state: "reviewing", agentPath: fixingReviewer.path, conversationId: fixingReviewer.conversationId, flowId: fixingFlow.id }] },
     ],
-    cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+    cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
   } as unknown as Pipeline;
 
   dom.sessionStorage.setItem("llvCam:demo", JSON.stringify({ x: 0, y: 0, z: 0.62 }));
@@ -405,7 +408,11 @@ test("managed fixing and closed-hidden/restored lifecycle panes stay inside thei
   expect(activeHost.querySelectorAll("[data-scheme-node]")).toHaveLength(2);
   expect(activeHost.querySelectorAll('[data-scheme-node="/fix/build"]')).toHaveLength(1);
   expect(activeHost.querySelectorAll('[data-scheme-node="/fix/review"]')).toHaveLength(1);
+  const activeViewport = activeHost.querySelector('[aria-label^="Agent board"]') as HTMLElement;
+  const activeWorld = Array.from(activeViewport.children).find((child) => (child as HTMLElement).style.transform.includes("scale(")) as HTMLElement;
+  expect(activeWorld.style.transform).toContain("scale(0.62)");
 
+  const closedFlow = { ...fixingFlow, state: "closed", closedAt: "2026-07-22T00:03:00Z" } as Flow;
   const closed = {
     ...fixingPipeline,
     state: "closed",
@@ -413,19 +420,37 @@ test("managed fixing and closed-hidden/restored lifecycle panes stay inside thei
     hiddenAt: "2026-07-22T00:03:00Z",
     closedAt: "2026-07-22T00:03:00Z",
   } as unknown as Pipeline;
-  const compact = compactPipelineArtifactPaths([closed], [fixingFlow], [fixingBuilder, fixingReviewer]);
-  const hiddenFiles = excludeCompactPipelineArtifacts([fixingBuilder, fixingReviewer], compact);
-  const hiddenHost = mountScene(hiddenFiles, [], [], []);
+  const fullCatalog = [
+    { ...fixingBuilder, activity: "idle" as const },
+    { ...fixingReviewer, activity: "idle" as const },
+  ];
+  const compact = compactPipelineArtifactPaths([closed], [closedFlow], fullCatalog);
+  const hiddenSceneFiles = excludeCompactPipelineArtifacts(fullCatalog, compact);
+  expect(hiddenSceneFiles).toEqual([]);
+  const hiddenHost = mountScene(fullCatalog, [], [], [closedFlow], [], hiddenSceneFiles);
   await settle();
   expect(hiddenHost.querySelectorAll("[data-scheme-node]")).toHaveLength(0);
   expect(hiddenHost.querySelectorAll('[data-scheme-group="pipeline"]')).toHaveLength(0);
 
   const restored = { ...closed, restored: true } as Pipeline;
-  const restoredReviewer = { ...fixingReviewer, activity: "idle" as const };
-  const restoredHost = mountScene([restoredReviewer], [restored], [], [fixingFlow], [restoredReviewer]);
+  const restoredFlow = { ...closedFlow, restored: true } as Flow;
+  const restoredReviewer = fullCatalog[1]!;
+  dom.sessionStorage.setItem("llvCam:demo", JSON.stringify({ x: 0, y: 0, z: 0.62 }));
+  const restoredHost = mountScene(
+    fullCatalog,
+    [restored],
+    [],
+    [restoredFlow],
+    [restoredReviewer],
+    hiddenSceneFiles,
+    new Set([restoredReviewer.path]),
+  );
   await settle();
   expectSceneGeometry(restoredHost, new Map([["fix-pipeline", [fixingReviewer.path]]]));
   expect(restoredHost.querySelectorAll('[data-scheme-node="/fix/review"]')).toHaveLength(1);
+  const restoredViewport = restoredHost.querySelector('[aria-label^="Agent board"]') as HTMLElement;
+  const restoredWorld = Array.from(restoredViewport.children).find((child) => (child as HTMLElement).style.transform.includes("scale(")) as HTMLElement;
+  expect(restoredWorld.style.transform).toContain("scale(0.62)");
 
   const before = cardRect(restoredHost, fixingReviewer.path);
   const fit = [...restoredHost.querySelectorAll("button")].find((button) => button.title.startsWith("Fit all")) as HTMLButtonElement;
