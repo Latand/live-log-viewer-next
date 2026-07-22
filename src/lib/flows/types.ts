@@ -118,6 +118,8 @@ export type Round = {
 
 export type Flow = {
   id: string;
+  /** Durable store generation used to fence stale cross-store projections. */
+  revision?: number;
   template: FlowTemplateId;
   project: string; // FileEntry.project of the implementer
   cwd: string; // implementer's working directory

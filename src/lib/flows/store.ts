@@ -5,7 +5,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import { forEachCooperatively } from "@/lib/cooperative";
-import { withFileTransaction } from "@/lib/state/fileTransaction";
+import { withFileTransaction, withFileTransactionSync } from "@/lib/state/fileTransaction";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
 import { resolveRole } from "@/lib/roles/registry";
 import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
@@ -174,6 +174,7 @@ export function loadFlows(): Flow[] {
   const flows = Array.isArray(raw?.flows) ? raw.flows.filter(isFlow) : [];
   return flows.map((flow) => ({
     ...flow,
+    revision: flow.revision ?? 0,
     targetSha: flow.targetSha ?? null,
     implementerConversationId: flow.implementerConversationId ?? null,
     reviewerFallback: flow.reviewerFallback === undefined && flow.roles.reviewer.engine === "codex"
@@ -311,16 +312,48 @@ export async function reconcileFlowConversationOwnershipCooperatively(registry: 
   mergeFlowOwnershipPatches(patches);
 }
 
-export function saveFlows(flows: Flow[]): void {
+function comparableFlow(flow: Flow): string {
+  const content: Flow = { ...flow };
+  delete content.revision;
+  return JSON.stringify(content);
+}
+
+function replaceFlow(target: Flow, source: Flow): void {
+  for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
+  Object.assign(target, structuredClone(source));
+}
+
+function saveFlowsUnlocked(flows: Flow[]): void {
+  const storedById = new Map(loadFlows().map((flow) => [flow.id, flow] as const));
+  for (const flow of flows) {
+    const stored = storedById.get(flow.id);
+    if (stored && flow.revision !== undefined && flow.revision < (stored.revision ?? 0)) {
+      replaceFlow(flow, stored);
+      continue;
+    }
+    flow.revision = stored && comparableFlow(stored) === comparableFlow(flow)
+      ? stored.revision ?? 0
+      : (stored?.revision ?? 0) + 1;
+  }
   atomicWriteJson(flowsFile(), { schemaVersion: FLOWS_SCHEMA_VERSION, flows });
+}
+
+export function saveFlows(flows: Flow[]): void {
+  withFileTransactionSync(flowsFile(), "flow state is busy", () => saveFlowsUnlocked(flows));
 }
 
 /** Re-read and mutate flow state under the process-shared state-file lock. */
 export async function withFlowMutation<T>(mutate: (flows: Flow[], persist: () => void) => T): Promise<T> {
   return await withFileTransaction(flowsFile(), "flow state is busy", () => {
     const flows = loadFlows();
-    return mutate(flows, () => saveFlows(flows));
+    return mutate(flows, () => saveFlowsUnlocked(flows));
   });
+}
+
+/** Hold the flow registry lock while a cross-store consumer projects one exact
+    durable generation. The callback cannot mutate flows through this interface. */
+export function withFlowSnapshot<T>(read: (flows: readonly Flow[]) => T): T {
+  return withFileTransactionSync(flowsFile(), "flow state is busy", () => read(loadFlows()));
 }
 
 export function loadPresets(): FlowPreset[] {

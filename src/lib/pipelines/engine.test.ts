@@ -11,7 +11,7 @@ import type { AgentRegistry as AgentRegistryType } from "@/lib/agent/registry";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
 const engineModule = await import("./engine");
-const { adoptAttempt, defaultPipelinePorts, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reviewNote, tickPipelines } = engineModule;
+const { adoptAttempt, defaultPipelinePorts, ensureTaskPipelineForAssignment, patchPipeline, pipelineAttemptTargetForSource, pipelineClaudePermissionMode, reconcileEmbeddedReviewFlows, reviewNote, tickPipelines } = engineModule;
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { newRound } = await import("@/lib/flows/engine");
 const rawCreatePipelineFromRequest = engineModule.createPipelineFromRequest;
@@ -2381,6 +2381,129 @@ test("REQUEST_CHANGES recovery keeps the bound reviewer in the review slot and l
     agentPath: "/codex/reviewer.jsonl",
     conversationId: "conversation_reviewer",
   });
+});
+
+test("issue 532: a four-round embedded flow authoritatively repairs its stale parent once", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  const heads = ["1", "2", "3", "4"].map((digit) => digit.repeat(40));
+  flow.rounds = heads.map((reviewHeadSha, index) => ({
+    n: index + 1,
+    reviewerPath: `/codex/reviewer-${index + 1}.jsonl`,
+    reviewerConversationId: `conversation_reviewer_${index + 1}`,
+    reviewHeadSha,
+    verdict: index < 3 ? "REQUEST_CHANGES" : null,
+    reviewedAt: index < 3 ? `2026-07-22T00:0${index}:00.000Z` : null,
+    relayedAt: index < 3 ? `2026-07-22T00:0${index}:30.000Z` : null,
+  } as never));
+  flow.state = "reviewing";
+
+  const parent = loadPipelines()[0]!;
+  const reviewAttempt = parent.runs[1]!.attempts[0]!;
+  reviewAttempt.agentPath = "/codex/reviewer-2.jsonl";
+  reviewAttempt.conversationId = "conversation_reviewer_2";
+  reviewAttempt.expectedReviewHeadSha = heads[1]!;
+  reviewAttempt.reviewHeadSha = heads[1]!;
+
+  expect(reconcileEmbeddedReviewFlows([parent], [flow], "2026-07-22T00:04:00.000Z")).toBe(true);
+  expect(reviewAttempt).toMatchObject({
+    agentPath: "/codex/reviewer-4.jsonl",
+    conversationId: "conversation_reviewer_4",
+    expectedReviewHeadSha: heads[3],
+    reviewHeadSha: heads[3],
+    reviewFlowSync: {
+      roundCount: 4,
+      implementerHeadSha: heads[3],
+      reviewerHeadSha: heads[3],
+      verdict: null,
+      relayState: "reviewing",
+      terminalState: null,
+      synchronizedAt: "2026-07-22T00:04:00.000Z",
+    },
+  });
+  expect(reconcileEmbeddedReviewFlows([parent], [flow], "2026-07-22T00:05:00.000Z")).toBe(false);
+
+  flow.revision = 2;
+  flow.rounds[3]!.reviewerPath = "/codex/reviewer-new.jsonl";
+  expect(reconcileEmbeddedReviewFlows([parent], [flow], "2026-07-22T00:05:30.000Z")).toBe(true);
+  const equalTimestampStaleFlow = structuredClone(flow);
+  equalTimestampStaleFlow.revision = 1;
+  equalTimestampStaleFlow.rounds[3]!.reviewerPath = "/codex/reviewer-old.jsonl";
+  expect(reconcileEmbeddedReviewFlows([parent], [equalTimestampStaleFlow], "2026-07-22T00:05:31.000Z")).toBe(false);
+  expect(reviewAttempt.agentPath).toBe("/codex/reviewer-new.jsonl");
+
+  /* Model the partial-write crash: flows.json advances with a delayed final
+     marker while pipelines.json still contains generation four. A fresh
+     controller has no scan entries or runtime host and must converge once. */
+  savePipelines([parent]);
+  const finalHead = "5".repeat(40);
+  flow.rounds.push({
+    n: 5,
+    reviewerPath: "/codex/reviewer-5.jsonl",
+    reviewerConversationId: "conversation_reviewer_5",
+    reviewHeadSha: finalHead,
+    verdict: null,
+    startedAt: "2026-07-22T00:06:00.000Z",
+  } as never);
+  flow.revision = 3;
+  expect((await tickPipelines([], h.ports)).changed).toBe(true);
+  const recovered = loadPipelines()[0]!.runs[1]!.attempts[0]!;
+  expect(recovered).toMatchObject({
+    agentPath: "/codex/reviewer-5.jsonl",
+    expectedReviewHeadSha: finalHead,
+    reviewHeadSha: finalHead,
+    reviewFlowSync: { roundCount: 5, relayState: "reviewing" },
+  });
+  expect((await tickPipelines([], h.ports)).changed).toBe(false);
+
+  const staleFlow = structuredClone(flow);
+  staleFlow.rounds = staleFlow.rounds.slice(0, 4);
+  expect(reconcileEmbeddedReviewFlows([loadPipelines()[0]!], [staleFlow], "2026-07-22T00:07:00.000Z")).toBe(false);
+  expect(loadPipelines()[0]!.runs[1]!.attempts[0]).toMatchObject({
+    agentPath: "/codex/reviewer-5.jsonl",
+    expectedReviewHeadSha: finalHead,
+    reviewHeadSha: finalHead,
+    reviewFlowSync: { roundCount: 5 },
+  });
+});
+
+test("issue 532: projection rebinds one flow-first partial write and refuses ambiguous candidates", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([], h.ports);
+
+  const parent = loadPipelines()[0]!;
+  const attempt = parent.runs[1]!.attempts[0]!;
+  const flow = h.flows.get("flow-1")!;
+  attempt.flowId = null;
+  attempt.agentPath = null;
+  attempt.conversationId = null;
+
+  /* No scan entries and no runtime host: the files read owns recovery. */
+  expect(reconcileEmbeddedReviewFlows([parent], [flow], "2026-07-22T01:00:00.000Z")).toBe(true);
+  expect(attempt).toMatchObject({ flowId: flow.id, reviewFlowSync: { roundCount: 0 } });
+  expect(reconcileEmbeddedReviewFlows([parent], [flow], "2026-07-22T01:01:00.000Z")).toBe(false);
+
+  attempt.flowId = null;
+  attempt.reviewFlowSync = undefined;
+  const duplicate = { ...structuredClone(flow), id: "flow-duplicate" };
+  expect(reconcileEmbeddedReviewFlows([parent], [flow, duplicate], "2026-07-22T01:02:00.000Z")).toBe(false);
+  expect(attempt.flowId).toBeNull();
 });
 
 for (const terminalState of ["done_comment", "needs_decision"] as const) {
