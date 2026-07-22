@@ -47,6 +47,57 @@ test("a keyed SQLite mutation reads only the targeted row payload", () => {
   expect(store.snapshot().file.receipts["row-read-1000"]?.error).toBe("updated");
 });
 
+test("a committed SQLite mutation patches the read-only snapshot and parsed-row cache", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-row-cache-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const seed = new AgentRegistry(filename);
+  const template = seed.beginSpawn("codex", "/row-cache-seed");
+  const initial = seed.snapshot();
+  for (let index = 0; index < 2_000; index += 1) {
+    const launchId = `row-cache-${String(index).padStart(4, "0")}`;
+    initial.receipts[launchId] = { ...structuredClone(template), launchId };
+  }
+  const targetLaunchId = "row-cache-1000";
+  let receiptPayloadReads = 0;
+  let receiptPayloadParses = 0;
+  let snapshotLoads = 0;
+  const store = new SqliteAgentRegistryStore(path.join(directory, "agent-registry.sqlite"), {
+    initialSnapshot: initial,
+    normalize: normalizeRegistry,
+    onSnapshotLoad: () => { snapshotLoads += 1; },
+    onRowPayloadRead: (collection, count) => {
+      if (collection === "receipts") receiptPayloadReads += count;
+    },
+    onRowPayloadParse: (collection, count) => {
+      if (collection === "receipts") receiptPayloadParses += count;
+    },
+  });
+  const first = store.readOnlySnapshot();
+  expect(first.file.receipts[targetLaunchId]?.error).toBeNull();
+  expect(receiptPayloadParses).toBe(2_001);
+  receiptPayloadReads = 0;
+  receiptPayloadParses = 0;
+  snapshotLoads = 0;
+
+  store.mutate((file) => {
+    file.receipts[targetLaunchId]!.error = "updated";
+  }, false);
+  const second = store.readOnlySnapshot();
+
+  expect(receiptPayloadReads).toBe(1);
+  expect(receiptPayloadParses).toBe(0);
+  expect(snapshotLoads).toBe(0);
+  expect(second.revision).toBe(first.revision + 1);
+  expect(second.file.receipts[targetLaunchId]?.error).toBe("updated");
+  expect(first.file.receipts[targetLaunchId]?.error).toBeNull();
+
+  expect(() => store.mutate((file) => {
+    file.receipts[targetLaunchId]!.error = "rolled back";
+    throw new Error("rollback");
+  }, false)).toThrow("rollback");
+  expect(store.readOnlySnapshot().file.receipts[targetLaunchId]?.error).toBe("updated");
+});
+
 test("SQLite first boot imports JSON and preserves membership and capability digest paths", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-import-"));
   const filename = path.join(directory, "agent-registry.json");
