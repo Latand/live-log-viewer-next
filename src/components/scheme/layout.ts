@@ -70,6 +70,9 @@ export const GROUP_SIBLING_GAP = GROUP_PAD * 2 + GAP_X;
    own, so GAP_Y (130) leaves the two dashed regions overlapping. This corridor
    clears both pads plus a GAP_X lane of visible daylight. */
 export const GROUP_CHILD_GAP = GROUP_PAD * 2 + GROUP_STRIP_HEADROOM + GAP_X;
+/* A memberless pipeline docks below existing content. Its top halo edge includes
+   strip headroom, while the region above extends through its bottom padding. */
+const MEMBERLESS_PIPELINE_GAP = GROUP_PAD * 2 + GROUP_STRIP_HEADROOM + 24;
 /* Pipeline stage placeholder windows (issue #196): node-width dashed cards so a
    stage's live chat window later takes the same footprint in place. The gap
    between two slots carries the handoff arrow badge. */
@@ -964,7 +967,7 @@ export function buildSchemeLayout(
       contentBottom = Math.max(contentBottom, rect.y + rect.h);
     }
     let dockX = PAD;
-    const dockY = contentBottom > 0 ? contentBottom + GROUP_GAP : restTop;
+    const dockY = contentBottom > 0 ? contentBottom + MEMBERLESS_PIPELINE_GAP : restTop;
     for (const plan of stageChainPlans) {
       if (plan.placed) continue;
       dockX = emitCompactRow(plan, dockX, dockY) + GROUP_GAP;

@@ -4,9 +4,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
 import type { Pipeline } from "@/lib/pipelines/types";
+import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 import { directReviewFlows } from "@/components/flows/directReviewGroups";
+import { compactPipelineArtifactPaths, excludeCompactPipelineArtifacts } from "@/components/pipelines/pipelineModel";
 import { buildBranchGroups } from "@/components/projectModel";
 
 import { SchemeBoard } from "./SchemeBoard";
@@ -152,9 +154,15 @@ function expectSceneGeometry(host: HTMLElement, surfacesByPipeline: Map<string, 
   }
 }
 
-function mountScene(files: FileEntry[], pipelines: Pipeline[], tasks: BoardTask[] = []): HTMLElement {
+function mountScene(
+  files: FileEntry[],
+  pipelines: Pipeline[],
+  tasks: BoardTask[] = [],
+  flows: Flow[] = [],
+  manual: FileEntry[] = [],
+): HTMLElement {
   const groups = buildBranchGroups(files, "demo");
-  const reviewGroups = directReviewFlows({ files, flows: [], tasks: [] });
+  const reviewGroups = directReviewFlows({ files, flows, tasks: [] });
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -163,9 +171,9 @@ function mountScene(files: FileEntry[], pipelines: Pipeline[], tasks: BoardTask[
     <SchemeBoard
       project="demo"
       groups={groups}
-      manual={[]}
+      manual={manual}
       files={files}
-      flows={[]}
+      flows={flows}
       reviewGroups={reviewGroups}
       pipelines={pipelines}
       surfacePipelines={pipelines}
@@ -290,6 +298,37 @@ test("host loss / delayed materialization: unscanned published transcripts keep 
   expect(disjointWithGap(halos.get("pb")!, taskCard, 0)).toBe(true);
 });
 
+test("a live pipeline beside a delayed-materialization pipeline keeps 24px of visible halo separation", async () => {
+  /* Production transition: pa already materialized under its source conversation
+     while pb has published a stage transcript that the scanner has not surfaced.
+     The memberless row docks below all live content and must leave the same
+     visible corridor as two materialized pipeline regions. */
+  dom.sessionStorage.setItem("llvCam:demo", JSON.stringify({ x: 0, y: 0, z: 0.62 }));
+  const host = mountScene(
+    [origin, builderA],
+    [pipe("pa", "/origin/a"), pipe("pb", "/lost/b")],
+  );
+  await settle();
+
+  const viewport = host.querySelector('[aria-label^="Agent board"]') as HTMLElement;
+  const world = Array.from(viewport.children).find((child) => (child as HTMLElement).style.transform.includes("scale(")) as HTMLElement;
+  expect(world.style.transform).toContain("scale(0.62)");
+
+  const surfaces = new Map<string, string[]>([
+    ["pa", ["/origin/a", "slot::pa::review", "slot::pa::polish"]],
+    ["pb", ["slot::pb::build", "slot::pb::review", "slot::pb::polish"]],
+  ]);
+  expectSceneGeometry(host, surfaces);
+
+  const before = [...host.querySelectorAll("[data-scheme-node]")].map((card) => (card as HTMLElement).style.transform);
+  const fit = [...host.querySelectorAll("button")].find((button) => button.title.startsWith("Fit all")) as HTMLButtonElement;
+  expect(fit).toBeTruthy();
+  flushSync(() => fit.click());
+  await settle();
+  expect([...host.querySelectorAll("[data-scheme-node]")].map((card) => (card as HTMLElement).style.transform)).toEqual(before);
+  expectSceneGeometry(host, surfaces);
+});
+
 test("parked and completed stage cards stay inside their regions beside a live neighbor", async () => {
   /* pa parked in needs_decision on its builder; pb kept running. The parked
      pipeline's placeholder row and the live neighbor's row keep both regions
@@ -302,4 +341,99 @@ test("parked and completed stage cards stay inside their regions beside a live n
     ["pa", ["/origin/a", "slot::pa::review", "slot::pa::polish"]],
     ["pb", ["/origin/b", "slot::pb::review", "slot::pb::polish"]],
   ]));
+});
+
+test("managed fixing and closed-hidden/restored lifecycle panes stay inside their pipeline region", async () => {
+  const fixingBuilder = entry({ path: "/fix/build", conversationId: "fix-build" });
+  const fixingReviewer = entry({
+    path: "/fix/review",
+    parent: "/fix/build",
+    kind: "subagent",
+    conversationId: "fix-review",
+  });
+  const fixingFlow: Flow = {
+    id: "fix-flow",
+    template: "implement-review-loop",
+    project: "demo",
+    cwd: "/r",
+    implementerPath: fixingBuilder.path,
+    implementerConversationId: fixingBuilder.conversationId,
+    roles: { implementer: { engine: "codex", model: null, effort: "low" }, reviewer: { engine: "codex", model: null, effort: "high" } },
+    baseRef: "a",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "fixing",
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: fixingReviewer.path,
+      reviewerConversationId: fixingReviewer.conversationId,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 2,
+      startedAt: "2026-07-22T00:00:00Z",
+      reviewedAt: "2026-07-22T00:01:00Z",
+      relayedAt: "2026-07-22T00:02:00Z",
+      error: null,
+    }],
+    createdAt: "2026-07-22T00:00:00Z",
+    closedAt: null,
+  };
+  const fixingPipeline = {
+    ...pipe("fix-pipeline", fixingBuilder.path),
+    stages: [
+      { id: "build", kind: "run", prompt: "", next: "review", effectiveRole: stageRole("read-write") },
+      { id: "review", kind: "review-loop", prompt: "", next: null, onFail: { to: "build", maxRounds: 5 }, effectiveRole: stageRole("read-only") },
+    ],
+    runs: [
+      { stageId: "build", attempts: [{ n: 1, state: "passed", agentPath: fixingBuilder.path, conversationId: fixingBuilder.conversationId, flowId: null }] },
+      { stageId: "review", attempts: [{ n: 1, state: "passed", agentPath: fixingReviewer.path, conversationId: fixingReviewer.conversationId, flowId: fixingFlow.id }] },
+    ],
+    cursor: { stageId: "build", state: "running", input: null, activatedBy: null },
+  } as unknown as Pipeline;
+
+  dom.sessionStorage.setItem("llvCam:demo", JSON.stringify({ x: 0, y: 0, z: 0.62 }));
+  const activeHost = mountScene([fixingBuilder, fixingReviewer], [fixingPipeline], [], [fixingFlow]);
+  await settle();
+  expectSceneGeometry(activeHost, new Map([["fix-pipeline", [fixingBuilder.path, fixingReviewer.path]]]));
+  expect(activeHost.querySelectorAll('[data-scheme-group="pipeline"]')).toHaveLength(1);
+  expect(activeHost.querySelectorAll('[data-scheme-group="flow"]')).toHaveLength(0);
+  expect(activeHost.querySelectorAll("[data-scheme-node]")).toHaveLength(2);
+  expect(activeHost.querySelectorAll('[data-scheme-node="/fix/build"]')).toHaveLength(1);
+  expect(activeHost.querySelectorAll('[data-scheme-node="/fix/review"]')).toHaveLength(1);
+
+  const closed = {
+    ...fixingPipeline,
+    state: "closed",
+    cursor: null,
+    hiddenAt: "2026-07-22T00:03:00Z",
+    closedAt: "2026-07-22T00:03:00Z",
+  } as unknown as Pipeline;
+  const compact = compactPipelineArtifactPaths([closed], [fixingFlow], [fixingBuilder, fixingReviewer]);
+  const hiddenFiles = excludeCompactPipelineArtifacts([fixingBuilder, fixingReviewer], compact);
+  const hiddenHost = mountScene(hiddenFiles, [], [], []);
+  await settle();
+  expect(hiddenHost.querySelectorAll("[data-scheme-node]")).toHaveLength(0);
+  expect(hiddenHost.querySelectorAll('[data-scheme-group="pipeline"]')).toHaveLength(0);
+
+  const restored = { ...closed, restored: true } as Pipeline;
+  const restoredReviewer = { ...fixingReviewer, activity: "idle" as const };
+  const restoredHost = mountScene([restoredReviewer], [restored], [], [fixingFlow], [restoredReviewer]);
+  await settle();
+  expectSceneGeometry(restoredHost, new Map([["fix-pipeline", [fixingReviewer.path]]]));
+  expect(restoredHost.querySelectorAll('[data-scheme-node="/fix/review"]')).toHaveLength(1);
+
+  const before = cardRect(restoredHost, fixingReviewer.path);
+  const fit = [...restoredHost.querySelectorAll("button")].find((button) => button.title.startsWith("Fit all")) as HTMLButtonElement;
+  flushSync(() => fit.click());
+  await settle();
+  expect(cardRect(restoredHost, fixingReviewer.path)).toEqual(before);
+  flushSync(() => window.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }) as unknown as Event));
+  await settle();
+  expect(restoredHost.querySelector('[data-scheme-node="/fix/review"] .ring-2')).toBeTruthy();
+  expectSceneGeometry(restoredHost, new Map([["fix-pipeline", [fixingReviewer.path]]]));
 });
