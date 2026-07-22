@@ -477,20 +477,30 @@ export function buildSchemeLayout(
       const linkedTasks = linkedPipelineTasks(pipeline, tasks)
         .filter((task) => isPlacedTask(task) && !claimedTaskIds.has(task.id))
         .map((task) => ({ task, h: taskBoxHeight(task, taskTextExpanded.has(task.id)) }));
-      if (!slotCount && !linkedTasks.length) continue;
+      /* The lineage host: the placed conversation the stage transcripts hang
+         under — the tree parent of the EARLIEST placed stage once anything is
+         placed, else the src conversation the pipeline was launched from. The
+         earliest (not the tip): a later stage that surfaced as its own root
+         (a structured continuation) has no placed parent, while the chain's
+         opening stage anchors where the chain's story begins — and the rootless
+         later member is then pulled to its stage anchor in that same band. */
+      let hostPath: string | null = null;
+      for (const entry of stageEntries) {
+        if (entry.kind !== "node") continue;
+        const parent = byAll.get(entry.path)?.parent ?? null;
+        if (parent && prePlacedNodePaths.has(parent)) { hostPath = parent; break; }
+      }
+      if (!hostPath && !tipPath && pipeline.srcPath && prePlacedNodePaths.has(pipeline.srcPath)) hostPath = pipeline.srcPath;
+      /* A member that is NOT a child of the host is scattered — the plan must
+         survive even slot-less so the claim below can pull that member's root
+         tree to its stage anchor instead of leaving the region to bridge. */
+      const scattered =
+        hostPath !== null &&
+        stageEntries.some((entry) => entry.kind === "node" && (byAll.get(entry.path)?.parent ?? null) !== hostPath);
+      if (!slotCount && !linkedTasks.length && !scattered) continue;
       for (const { task } of linkedTasks) claimedTaskIds.add(task.id);
       const plan: StageChainPlan = { pipeline, entries: stageEntries, tasks: linkedTasks, placed: false };
       stageChainPlans.push(plan);
-      /* The lineage host: the placed conversation the stage transcripts hang
-         under — the tip's tree parent once anything is placed, else the src
-         conversation the pipeline was launched from. */
-      const tipParent = tipPath ? byAll.get(tipPath)?.parent ?? null : null;
-      const hostPath =
-        tipPath && tipParent && prePlacedNodePaths.has(tipParent)
-          ? tipParent
-          : !tipPath && pipeline.srcPath && prePlacedNodePaths.has(pipeline.srcPath)
-            ? pipeline.srcPath
-            : null;
       if (hostPath) {
         const list = chainPlansByHost.get(hostPath);
         if (list) list.push(plan);
@@ -559,6 +569,19 @@ export function buildSchemeLayout(
     /* Right edge of the emitted block (the trailing gap excluded). */
     return x - SLOT_GAP;
   };
+
+  /* Stage members that surfaced as their OWN root trees (structured
+     continuations, rollouts whose lineage host is collapsed) while a sibling
+     stage still sits inside a placed tree: each such root is claimed off the
+     rest band and placed at its stage anchor inside the host-anchored chain,
+     so the pipeline's region stays one tight band instead of a union rect
+     bridging across every foreign tree between the two placements. Declared
+     here (before placeTree) and populated after the favorites split. */
+  type ForeignChainTree =
+    | { kind: "group"; group: BranchGroup; hostRootKey: string }
+    | { kind: "manual"; file: FileEntry; hostRootKey: string };
+  const chainForeignTrees = new Map<string, ForeignChainTree>();
+  const placedForeignChainRoots = new Set<string>();
 
   /* Handoff drafts hang under their source pane like a child; drafts whose
      source is not on the scheme (or plain «+ Agent» ones) trail the row. */
@@ -684,8 +707,23 @@ export function buildSchemeLayout(
             localCx = ex + SLOT_W + SLOT_GAP;
           } else {
             const child = childByPath.get(entry.path);
-            if (!child) continue;
-            const width = placeChild(child, ex);
+            if (child) {
+              const width = placeChild(child, ex);
+              localCx = ex + Math.max(width, SLOT_W) + SLOT_GAP;
+              continue;
+            }
+            /* A claimed foreign root tree lands at its stage anchor: the whole
+               tree (children, quiet stack, drafts) lays out here, and its width
+               reserves chain footprint exactly like a stage child's subtree. */
+            const foreign = chainForeignTrees.get(entry.path);
+            if (!foreign || placedForeignChainRoots.has(entry.path)) continue;
+            placedForeignChainRoots.add(entry.path);
+            const savedCursor = cursor;
+            cursor = ex;
+            if (foreign.kind === "group") placeGroup(foreign.group, childTop);
+            else placeManual(foreign.file, childTop);
+            const width = cursor - GROUP_GAP - ex;
+            cursor = savedCursor;
             localCx = ex + Math.max(width, SLOT_W) + SLOT_GAP;
           }
         }
@@ -870,6 +908,46 @@ export function buildSchemeLayout(
   restManual.sort((a, b) => fileWorkRank(b) - fileWorkRank(a) || recency(b) - recency(a) || a.path.localeCompare(b.path));
   const hasFavorites = favGroups.length + favManual.length > 0;
 
+  /* Claim scattered stage-member roots into their host-anchored chains (see
+     chainForeignTrees above). Only REST roots are claimable — a crowned
+     favorite stays pinned in its band — and never the host's own tree. */
+  {
+    const restGroupByKey = new Map(restGroups.map((group) => [group.key, group] as const));
+    const restManualByPath = new Map(restManual.map((file) => [file.path, file] as const));
+    const rootKeyOfColumn = new Map<string, string>();
+    for (const group of [...favGroups, ...restGroups]) {
+      for (const column of group.columns) rootKeyOfColumn.set(column.file.path, group.key);
+    }
+    for (const file of [...favManual, ...restManual]) rootKeyOfColumn.set(file.path, file.path);
+    for (const [hostPath, plans] of chainPlansByHost) {
+      const hostRootKey = rootKeyOfColumn.get(hostPath) ?? hostPath;
+      for (const plan of plans) {
+        for (const entry of plan.entries) {
+          if (entry.kind !== "node" || entry.path === hostRootKey || chainForeignTrees.has(entry.path)) continue;
+          const group = restGroupByKey.get(entry.path);
+          if (group && group.key !== hostRootKey) {
+            chainForeignTrees.set(entry.path, { kind: "group", group, hostRootKey });
+            continue;
+          }
+          const file = restManualByPath.get(entry.path);
+          if (file && file.path !== hostRootKey) chainForeignTrees.set(entry.path, { kind: "manual", file, hostRootKey });
+        }
+      }
+    }
+    /* A claimed root only ever places while its host root chain terminates in
+       a tree the bands place normally. Any repeat during the host walk means
+       this claim can never resolve — release it back to the rest band. */
+    for (const [root, claim] of [...chainForeignTrees]) {
+      const seen = new Set<string>([root]);
+      let hop: string | undefined = claim.hostRootKey;
+      while (hop && chainForeignTrees.has(hop)) {
+        if (seen.has(hop)) { chainForeignTrees.delete(root); break; }
+        seen.add(hop);
+        hop = chainForeignTrees.get(hop)?.hostRootKey;
+      }
+    }
+  }
+
   for (const group of favGroups) placeGroup(group, PAD);
   for (const file of favManual) placeManual(file, PAD);
 
@@ -921,10 +999,15 @@ export function buildSchemeLayout(
   let rowBottom = restTop;
   let rowStartX = PAD;
   cursor = rowStartX;
-  const placeRestItem = (place: (top: number) => void) => {
+  /* Places one atomic run of rest items: all on the current row, or — when the
+     run started past the row origin and overflowed the band width — shifted as
+     ONE unit onto a fresh row. A run is atomic because a flow/pipeline region
+     may span every tree inside it (below): splitting it across rows would
+     stretch the region's union rect over foreign rows again. */
+  const placeRestRun = (places: ReadonlyArray<(top: number) => void>) => {
     const mark = markPlacement();
     const startX = cursor;
-    place(rowTop);
+    for (const place of places) place(rowTop);
     const endCursor = cursor;
     if (startX > rowStartX && endCursor - GROUP_GAP > PAD + REST_BAND_MAX_W) {
       const nextTop = rowBottom + REST_BAND_ROW_GAP;
@@ -938,16 +1021,63 @@ export function buildSchemeLayout(
     rowBottom = Math.max(rowBottom, placementBottom(mark));
   };
 
-  for (const group of restGroups) placeRestItem((top) => placeGroup(group, top));
-  for (const file of restManual) placeRestItem((top) => placeManual(file, top));
+  /* ── Rest-band clustering ──────────────────────────────────────────────────
+     A flow/pipeline's member conversations don't always share one branch tree:
+     stage transcripts surface as separate ROOTS (structured continuations,
+     rollouts whose lineage host is collapsed). The activity+recency order then
+     interleaves foreign trees between two member trees, and the region's union
+     rect (groupRect over members) swallows everything in between — unrelated
+     cards and other regions' halos. So trees that carry the same group key are
+     placed side by side as one atomic run: the first (highest-ranked) tree
+     anchors the cluster, its satellites follow, and the union halo tightens to
+     exactly the cluster's span. Keyless trees stay single-item runs in their
+     original order. A tree carrying keys of several clusters bridges them —
+     their halos interlock through it, so the clusters merge into one run. */
+  type RestItem = { keys: ReadonlySet<string>; place: (top: number) => void };
+  const restItems: RestItem[] = [
+    ...restGroups
+      .filter((group) => !chainForeignTrees.has(group.key))
+      .map((group) => ({
+        keys: new Set(group.columns.flatMap((column) => [...subtreeGroups(column.file)])),
+        place: (top: number) => placeGroup(group, top),
+      })),
+    ...restManual
+      .filter((file) => !chainForeignTrees.has(file.path))
+      .map((file) => ({
+        keys: subtreeGroups(file),
+        place: (top: number) => placeManual(file, top),
+      })),
+  ];
+  const restClusters: { keys: Set<string>; items: RestItem[] }[] = [];
+  for (const item of restItems) {
+    const matched: typeof restClusters = [];
+    for (const cluster of restClusters) {
+      for (const key of item.keys) {
+        if (cluster.keys.has(key)) { matched.push(cluster); break; }
+      }
+    }
+    const [target] = matched;
+    if (!target) {
+      restClusters.push({ keys: new Set(item.keys), items: [item] });
+      continue;
+    }
+    target.items.push(item);
+    for (const key of item.keys) target.keys.add(key);
+    for (const extra of matched.slice(1)) {
+      target.items.push(...extra.items);
+      for (const key of extra.keys) target.keys.add(key);
+      restClusters.splice(restClusters.indexOf(extra), 1);
+    }
+  }
+  for (const cluster of restClusters) placeRestRun(cluster.items.map((item) => item.place));
 
   /* Remaining drafts join the same bounded band as fresh top-level cards. */
   for (const id of draftIds) {
     if (placedDrafts.has(id)) continue;
-    placeRestItem((top) => {
+    placeRestRun([(top) => {
       drafts.push({ key: "draft::" + id, id, x: cursor, y: top, w: NODE_W, h: ROOT_H });
       cursor += NODE_W + GROUP_GAP;
-    });
+    }]);
   }
 
   /* Planned stages render as conversation-shaped placeholder cards INSIDE the
