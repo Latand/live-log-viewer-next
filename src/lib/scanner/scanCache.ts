@@ -654,13 +654,19 @@ export async function cachedFileScan(
 ): Promise<CachedFileScan> {
   const slot = globalFileScanSlot();
   slot.requestCount = (slot.requestCount ?? 0) + 1;
+  /* A selected conversation that already belongs to the global snapshot needs
+     no private scan scope. Treating every browser hash as exclusive serializes
+     one full-corpus scan per open tab for the same revision. */
+  const scanPinnedPath = pinnedPath && !slot.snapshot?.files.some((file) => file.path === pinnedPath)
+    ? pinnedPath
+    : undefined;
 
   let targetGeneration = requiredGeneration !== undefined && requiredGeneration <= slot.requestedGeneration
     ? requiredGeneration
     : undefined;
   if (targetGeneration !== undefined) {
-    if (pinnedPath) {
-      targetGeneration = rememberPinnedGeneration(slot, pinnedPath, targetGeneration);
+    if (scanPinnedPath) {
+      targetGeneration = rememberPinnedGeneration(slot, scanPinnedPath, targetGeneration);
     }
   } else if (requiredRevision !== undefined) {
     let requestedGeneration: number;
@@ -672,10 +678,10 @@ export async function cachedFileScan(
       slot.forcedGeneration = requestedGeneration;
     }
     targetGeneration = requestedGeneration;
-    if (pinnedPath) {
-      targetGeneration = rememberPinnedGeneration(slot, pinnedPath, requestedGeneration);
+    if (scanPinnedPath) {
+      targetGeneration = rememberPinnedGeneration(slot, scanPinnedPath, requestedGeneration);
     }
-    const refresh = refreshThroughGeneration(slot, targetGeneration, pinnedPath, "revision");
+    const refresh = refreshThroughGeneration(slot, targetGeneration, scanPinnedPath, "revision");
     const clearForcedGeneration = () => {
       if (slot.forcedGeneration === requestedGeneration) {
         slot.forcedRevision = undefined;
@@ -685,7 +691,7 @@ export async function cachedFileScan(
     if (!slot.snapshot) {
       try {
         await refresh;
-        return completedScan(slot, pinnedPath, targetGeneration, "miss");
+        return completedScan(slot, scanPinnedPath, targetGeneration, "miss");
       } finally {
         clearForcedGeneration();
       }
@@ -694,28 +700,28 @@ export async function cachedFileScan(
   }
 
   if (targetGeneration !== undefined) {
-    const refresh = refreshThroughGeneration(slot, targetGeneration, pinnedPath, "generation");
+    const refresh = refreshThroughGeneration(slot, targetGeneration, scanPinnedPath, "generation");
     const missesSnapshot = !slot.snapshot;
     if (missesSnapshot) await refresh;
     else continueRefreshInBackground(refresh);
-    return completedScan(slot, pinnedPath, targetGeneration, missesSnapshot ? "miss" : undefined);
+    return completedScan(slot, scanPinnedPath, targetGeneration, missesSnapshot ? "miss" : undefined);
   }
 
   /* A pin is an overlay on one global snapshot. The scanner marks every row
      outside the global cap, letting one scan publish both views. A completed
      snapshot serves while that shared refresh runs. */
-  if (pinnedPath) {
+  if (scanPinnedPath) {
     slot.pinnedSnapshots ??= new Map();
-    const pinned = cachedPinnedSnapshot(slot, pinnedPath);
+    const pinned = cachedPinnedSnapshot(slot, scanPinnedPath);
     if (pinned && now - pinned.refreshedAt < FILE_SCAN_FRESH_MS) {
-      return completedScan(slot, pinnedPath, pinned.generation);
+      return completedScan(slot, scanPinnedPath, pinned.generation);
     }
-    targetGeneration = pinnedRefreshGeneration(slot, pinnedPath);
-    const refresh = refreshThroughGeneration(slot, targetGeneration, pinnedPath, "pinned");
+    targetGeneration = pinnedRefreshGeneration(slot, scanPinnedPath);
+    const refresh = refreshThroughGeneration(slot, targetGeneration, scanPinnedPath, "pinned");
     const missesSnapshot = !slot.snapshot;
     if (missesSnapshot) await refresh;
     else continueRefreshInBackground(refresh);
-    return completedScan(slot, pinnedPath, targetGeneration, missesSnapshot ? "miss" : undefined);
+    return completedScan(slot, scanPinnedPath, targetGeneration, missesSnapshot ? "miss" : undefined);
   }
 
   if (!slot.snapshot) {
