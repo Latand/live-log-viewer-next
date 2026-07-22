@@ -5,7 +5,7 @@ The registry supports four values for `LLV_AGENT_REGISTRY_SQLITE`:
 - `off` keeps `agent-registry.json` authoritative. This is the default.
 - `dual-write` reads JSON, writes JSON and SQLite under the existing JSON writer lock, and verifies parity after every mutation.
 - `read` reads and transacts through `agent-registry.sqlite` in WAL mode, then refreshes `agent-registry.json` on a bounded five-second checkpoint cadence. Startup and release demotion write a revision-stamped checkpoint.
-- `sqlite` uses SQLite for reads and writes after the parity burn-in. It refreshes the JSON mirror at process start and removes JSON serialization from registry operations.
+- `sqlite` uses SQLite for reads and writes after the parity burn-in. It refreshes the JSON mirror at process start, repairs missing, malformed, stale, or torn mirror state from authoritative SQLite, and removes JSON serialization from registry operations. A mirror revision ahead of SQLite remains fenced because it can indicate durable-state rollback.
 
 The first process that opens any gated SQLite mode creates `agent-registry.sqlite` and imports the normalized contents of `agent-registry.json` in one transaction. An interrupted import has no migration marker, so the next boot retries the complete import. Durable memberships, spawn receipts, capability digests, lineage, conversation generations, migration state, delivery receipts, and routing policy all migrate through the same snapshot.
 

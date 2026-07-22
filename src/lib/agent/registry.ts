@@ -2350,7 +2350,13 @@ export class AgentRegistry {
     if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
       const sqlite = this.sqliteStore!.snapshot();
       const mirrorRevision = sqliteMirrorRevision(this.filename);
-      if (mirrorRevision === null || mirrorRevision === sqlite.revision) this.assertSqliteParity(sqlite);
+      /* `read` is the parity burn-in, so a same-revision mismatch must stop
+         rollout. In authoritative `sqlite` mode the JSON file is a rollback
+         mirror: missing stamps and torn/stale same-revision contents are
+         repaired from the durable SQLite snapshot during every startup. */
+      if (this.sqliteMode === "read" && (mirrorRevision === null || mirrorRevision === sqlite.revision)) {
+        this.assertSqliteParity(sqlite);
+      }
       if (mirrorRevision !== null && mirrorRevision > sqlite.revision) {
         throw new RegistryParityError("agent registry JSON mirror revision is ahead of SQLite");
       }
