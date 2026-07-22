@@ -6,7 +6,7 @@ import { readTailChunk } from "@/lib/logRead";
 import { MAX_CHUNK, ROOTS } from "@/lib/scanner/roots";
 import type { LogChunk } from "@/lib/types";
 
-import { LogTailStreamSession, type LogTailStreamEvent } from "./logTailStream";
+import { createLogTailEventStream, LogTailStreamSession, type LogTailStreamEvent } from "./logTailStream";
 
 fs.mkdirSync(ROOTS["codex-sessions"], { recursive: true });
 const SANDBOX = fs.mkdtempSync(path.join(ROOTS["codex-sessions"], "llv-log-tail-stream-test-"));
@@ -86,15 +86,21 @@ describe("LogTailStreamSession", () => {
   test("file growth pushes the appended bytes", async () => {
     const file = writeLog("growth.log", "one\n");
     const events: LogTailStreamEvent[] = [];
+    let notifyGrowth: () => void = () => undefined;
     const session = new LogTailStreamSession([{ id: "log", path: file, offset: 4 }], {
       restatMs: 60_000,
       heartbeatMs: 60_000,
+      watchFile: (_pathname, onChange) => {
+        notifyGrowth = onChange;
+        return { close: () => undefined };
+      },
       onEvent: (event) => events.push(event),
     });
     try {
       session.start();
       await waitFor(() => events.length >= 1);
       fs.appendFileSync(file, "two\n");
+      notifyGrowth();
       await waitFor(() => events.some((event) => event.id === "log" && !("error" in event.chunk) && event.chunk.data === "two\n"));
     } finally {
       session.close();
@@ -180,5 +186,23 @@ describe("LogTailStreamSession", () => {
     await Bun.sleep(80);
     expect(closeCount).toBe(1);
     expect(comments).toBe(commentsAtClose);
+  });
+
+  test("an unread event stream closes when a second chunk meets backpressure", async () => {
+    const first = writeLog("backpressure-a.log", "first\n");
+    const second = writeLog("backpressure-b.log", "second\n");
+    const reader = createLogTailEventStream([
+      { id: "a", path: first, offset: 0 },
+      { id: "b", path: second, offset: 0 },
+    ]).getReader();
+
+    await Bun.sleep(20);
+    const initial = await reader.read();
+    const terminal = await reader.read();
+    await reader.cancel();
+
+    expect(initial.done).toBe(false);
+    expect(new TextDecoder().decode(initial.value)).toContain('"id":"a"');
+    expect(terminal.done).toBe(true);
   });
 });
