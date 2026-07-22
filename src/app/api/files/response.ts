@@ -492,11 +492,11 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   let pipelines: Pipeline[] = [];
   let pipelinesError: string | undefined;
   try {
-    const reconciled = await withFlowSnapshot(async (projectionFlows) =>
-      await withPipelineMutation((current, persist) => {
-        /* The flow lock spans parent persistence and captures the exact array
-           returned below. Controller transitions cannot split the deck/flow
-           generation from its synchronized parent projection. */
+    const reconciled = await withPipelineMutation((current, persist) =>
+      withFlowSnapshot((projectionFlows) => {
+        /* Every cross-store lifecycle path acquires pipeline before flow. The
+           flow lock spans parent persistence and captures the exact array
+           returned below, so the returned deck and parent share a generation. */
         if (reconcileEmbeddedReviewFlows(current, projectionFlows)) persist();
         return { pipelines: current, flows: [...projectionFlows] };
       }));

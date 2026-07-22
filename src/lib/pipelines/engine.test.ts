@@ -2432,6 +2432,15 @@ test("issue 532: a four-round embedded flow authoritatively repairs its stale pa
   });
   expect(reconcileEmbeddedReviewFlows([parent], [flow], "2026-07-22T00:05:00.000Z")).toBe(false);
 
+  flow.revision = 2;
+  flow.rounds[3]!.reviewerPath = "/codex/reviewer-new.jsonl";
+  expect(reconcileEmbeddedReviewFlows([parent], [flow], "2026-07-22T00:05:30.000Z")).toBe(true);
+  const equalTimestampStaleFlow = structuredClone(flow);
+  equalTimestampStaleFlow.revision = 1;
+  equalTimestampStaleFlow.rounds[3]!.reviewerPath = "/codex/reviewer-old.jsonl";
+  expect(reconcileEmbeddedReviewFlows([parent], [equalTimestampStaleFlow], "2026-07-22T00:05:31.000Z")).toBe(false);
+  expect(reviewAttempt.agentPath).toBe("/codex/reviewer-new.jsonl");
+
   /* Model the partial-write crash: flows.json advances with a delayed final
      marker while pipelines.json still contains generation four. A fresh
      controller has no scan entries or runtime host and must converge once. */
@@ -2445,6 +2454,7 @@ test("issue 532: a four-round embedded flow authoritatively repairs its stale pa
     verdict: null,
     startedAt: "2026-07-22T00:06:00.000Z",
   } as never);
+  flow.revision = 3;
   expect((await tickPipelines([], h.ports)).changed).toBe(true);
   const recovered = loadPipelines()[0]!.runs[1]!.attempts[0]!;
   expect(recovered).toMatchObject({

@@ -74,6 +74,7 @@ function isReviewFlowSync(value: unknown): boolean {
   const sync = value as Record<string, unknown>;
   const flowStates = ["waiting_ready", "spawn_pending", "spawning", "reviewing", "relay_pending", "relaying", "fixing", "approved", "done_comment", "needs_decision", "paused", "closed"];
   return typeof sync.generation === "string"
+    && (sync.sourceRevision === undefined || (Number.isInteger(sync.sourceRevision) && (sync.sourceRevision as number) >= 0))
     && Number.isInteger(sync.roundCount) && (sync.roundCount as number) >= 0
     && isNullableString(sync.implementerHeadSha)
     && isNullableString(sync.reviewerHeadSha)

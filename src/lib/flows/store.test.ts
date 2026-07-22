@@ -139,12 +139,65 @@ test("flow specs persist in the versioned state file and legacy flow entries loa
     fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({ flows: [flow] }));
     expect(loadFlows()).toEqual([{
       ...flow,
+      revision: 0,
       targetSha: null,
       implementerConversationId: null,
       reviewerFallback: configuredReviewerFallback(),
       pausedState: null,
       kickoffDelivery: null,
     }]);
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("flow persistence assigns a monotonic revision to binding-only generations", () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-revision-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  const flow = {
+    id: "revision-flow",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd: "/repo",
+    implementerPath: "/implementer.jsonl",
+    roles: { implementer: { engine: "codex" as const, model: null, effort: "high" }, reviewer: { engine: "codex" as const, model: null, effort: "xhigh" } },
+    baseRef: "base",
+    baseMode: "head" as const,
+    mode: "auto" as const,
+    reviewerMode: "headless" as const,
+    roundLimit: 5,
+    state: "reviewing" as const,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: "/reviewer-new.jsonl",
+      findingsPath: null,
+      triggeredBy: "marker" as const,
+      readyNote: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt: "2026-07-22T10:00:00.000Z",
+      reviewedAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: "2026-07-22T10:00:00.000Z",
+    closedAt: null,
+  } satisfies Flow;
+  try {
+    saveFlows([flow]);
+    const first = loadFlows()[0]!;
+    expect(first.revision).toBe(1);
+
+    first.rounds[0]!.reviewerPath = "/reviewer-next.jsonl";
+    saveFlows([first]);
+    expect(loadFlows()[0]).toMatchObject({
+      revision: 2,
+      rounds: [{ reviewerPath: "/reviewer-next.jsonl" }],
+    });
   } finally {
     if (previousState === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousState;

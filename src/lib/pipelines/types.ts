@@ -129,6 +129,7 @@ export type PipelineStageAttempt = {
       independently committed flow/pipeline writes. */
   reviewFlowSync?: {
     generation: string;
+    sourceRevision?: number;
     roundCount: number;
     implementerHeadSha: string | null;
     reviewerHeadSha: string | null;

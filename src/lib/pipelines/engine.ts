@@ -718,6 +718,7 @@ function synchronizeReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow,
   const sourceMs = sourceUpdatedAt ? Date.parse(sourceUpdatedAt) : Number.NaN;
   const syncMs = Date.parse(synchronizedAt);
   const snapshot = {
+    sourceRevision: flow.revision ?? 0,
     roundCount: flow.rounds.length,
     implementerHeadSha,
     reviewerHeadSha,
@@ -747,6 +748,8 @@ function synchronizeReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow,
   if (attempt.reviewFlowSync?.generation === generation) return false;
   const synchronized = attempt.reviewFlowSync;
   if (synchronized) {
+    const synchronizedRevision = synchronized.sourceRevision ?? 0;
+    if (synchronizedRevision > 0 && snapshot.sourceRevision <= synchronizedRevision) return false;
     if (snapshot.roundCount < synchronized.roundCount) return false;
     const synchronizedSourceMs = synchronized.sourceUpdatedAt ? Date.parse(synchronized.sourceUpdatedAt) : Number.NaN;
     if (snapshot.roundCount === synchronized.roundCount
