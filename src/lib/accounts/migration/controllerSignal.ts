@@ -5,7 +5,10 @@ interface ControllerSignalState {
   scheduled: boolean;
 }
 
-const signalHost = globalThis as typeof globalThis & {
+/* Next route handlers and instrumentation can evaluate this module in
+   separate bundle realms. Their shared process object carries the controller
+   registration and coalescing state across those evaluations. */
+const signalHost = process as typeof process & {
   __llvAccountMigrationSignal?: ControllerSignalState;
 };
 
