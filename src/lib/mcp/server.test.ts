@@ -496,6 +496,167 @@ describe("MCP tool service", () => {
     expect(recoveryArtifacts(directory)).toEqual([]);
   }, 12_000);
 
+  test("successors wait for namespace release before forced inode reuse", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-namespace-handoff-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const pinPath = path.join(directory, "retired-inode-pin");
+    const handoffReadyPath = path.join(directory, "handoff-ready");
+    const handoffReleasePath = path.join(directory, "handoff-release");
+    const reuseReadyPath = path.join(directory, "reuse-ready");
+    const reuseReleasePath = path.join(directory, "reuse-release");
+    const countPath = path.join(directory, "binding-count");
+    const reaperResultPath = path.join(directory, "reaper-result.json");
+    const firstResultPath = path.join(directory, "first-result.json");
+    const secondResultPath = path.join(directory, "second-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "namespace-handoff-owner",
+    }));
+    const staleInode = fs.statSync(lockPath).ino;
+
+    const reaper = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "namespace-handoff-claim",
+        receiptPath,
+        countPath,
+        reaperResultPath,
+        pinPath,
+        handoffReadyPath,
+        handoffReleasePath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(handoffReadyPath)).toBeTrue();
+    expect(fs.existsSync(lockPath)).toBeFalse();
+    expect(fs.statSync(pinPath).ino).toBe(staleInode);
+
+    const first = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "reuse-claim",
+        receiptPath,
+        countPath,
+        firstResultPath,
+        pinPath,
+        reuseReadyPath,
+        reuseReleasePath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const second = Bun.spawn({
+      cmd: [process.execPath, child, "claim", receiptPath, countPath, secondResultPath],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const enteredBeforeRelease = await waitForFile(reuseReadyPath, 250);
+    fs.writeFileSync(handoffReleasePath, "release");
+    expect(await waitForFile(reuseReadyPath)).toBeTrue();
+    expect(Number(fs.readFileSync(reuseReadyPath, "utf8"))).toBe(staleInode);
+    fs.writeFileSync(reuseReleasePath, "release");
+    const processes = await Promise.all([
+      childResult(reaper),
+      childResult(first),
+      childResult(second),
+    ]);
+
+    expect(enteredBeforeRelease).toBeFalse();
+    expect(processes).toEqual([
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+    ]);
+    const results = [reaperResultPath, firstResultPath, secondResultPath]
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+    expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(recoveryArtifacts(directory)).toEqual([]);
+  }, 12_000);
+
+  test("successors remain responsive and bounded while namespace release is paused", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-namespace-busy-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const pinPath = path.join(directory, "retired-inode-pin");
+    const handoffReadyPath = path.join(directory, "handoff-ready");
+    const handoffReleasePath = path.join(directory, "handoff-release");
+    const countPath = path.join(directory, "binding-count");
+    const reaperResultPath = path.join(directory, "reaper-result.json");
+    const firstResultPath = path.join(directory, "first-result.json");
+    const secondResultPath = path.join(directory, "second-result.json");
+    const firstHeartbeatPath = path.join(directory, "first-heartbeat");
+    const secondHeartbeatPath = path.join(directory, "second-heartbeat");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "namespace-busy-owner",
+    }));
+
+    const reaper = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "namespace-handoff-claim",
+        receiptPath,
+        countPath,
+        reaperResultPath,
+        pinPath,
+        handoffReadyPath,
+        handoffReleasePath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(handoffReadyPath)).toBeTrue();
+    const first = Bun.spawn({
+      cmd: [process.execPath, child, "timed-claim", receiptPath, countPath, firstResultPath, firstHeartbeatPath],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const second = Bun.spawn({
+      cmd: [process.execPath, child, "timed-claim", receiptPath, countPath, secondResultPath, secondHeartbeatPath],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(firstResultPath, 6_500)).toBeTrue();
+    expect(await waitForFile(secondResultPath, 6_500)).toBeTrue();
+    const claimants = await Promise.all([childResult(first), childResult(second)]);
+    const results = [firstResultPath, secondResultPath]
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as {
+        outcome: string;
+        error: string;
+        ticks: number;
+        elapsedMs: number;
+      });
+
+    expect(claimants).toEqual([{ exit: 0, error: "" }, { exit: 0, error: "" }]);
+    for (const result of results) {
+      expect(result).toMatchObject({ outcome: "failed", error: "MCP receipt store is busy" });
+      expect(result.ticks).toBeGreaterThan(10);
+      expect(result.elapsedMs).toBeGreaterThanOrEqual(4_900);
+      expect(result.elapsedMs).toBeLessThan(6_000);
+    }
+    expect(fs.existsSync(countPath)).toBeFalse();
+    reaper.kill(9);
+    expect((await childResult(reaper)).exit).not.toBe(0);
+  }, 10_000);
+
   test("multiprocess stale recovery preserves a live replacement and admits one same-key mutation", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-race-"));
     scratch.push(directory);

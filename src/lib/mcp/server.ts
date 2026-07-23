@@ -150,6 +150,7 @@ type ReceiptRecoveryOwnerScan =
   | { kind: "owners"; entries: ReceiptRecoveryOwnerEntry[] }
   | { kind: "retry" };
 type ReceiptRecoveryAttempt = "removed" | "blocked" | "retry";
+type ReceiptRecoveryNamespaceState = "clear" | "blocked" | "retry";
 type PendingRecoveryOwner = {
   pid: number;
   startIdentityTag: string | null;
@@ -545,16 +546,24 @@ function lockReferencesObservation(lockPath: string, observation: ReceiptLockObs
     && readLockMetadata(lockPath).token === observation.token;
 }
 
-async function cleanupAbandonedRecoveryArtifacts(lockPath: string, deadline: number): Promise<void> {
+async function cleanupAbandonedRecoveryArtifacts(
+  lockPath: string,
+  deadline: number,
+): Promise<ReceiptRecoveryNamespaceState> {
   for (const recoveryPath of recoveryPathsForLock(lockPath)) {
     removeDeadRecoveryOwnerAliases(recoveryPath);
     const observation = abandonedRecoveryObservation(recoveryPath);
-    if (!observation || lockReferencesObservation(lockPath, observation)) continue;
+    if (!observation) {
+      if (recoveryPathsForLock(lockPath).includes(recoveryPath)) return "retry";
+      continue;
+    }
+    if (lockReferencesObservation(lockPath, observation)) continue;
     const claim = await claimRecoveryOwnership(recoveryPath, observation, deadline);
-    if (claim === "blocked" || claim === "retry") continue;
+    if (claim === "blocked" || claim === "retry") return claim;
+    let cleaned = false;
     try {
       if (!await recoveryClaimCurrent(recoveryPath, observation, claim, deadline)
-        || lockReferencesObservation(lockPath, observation)) continue;
+        || lockReferencesObservation(lockPath, observation)) return "retry";
       if (sameLock(recoveryPath, observation.identity)
         && readLockMetadata(recoveryPath).token === observation.token) {
         try {
@@ -564,9 +573,11 @@ async function cleanupAbandonedRecoveryArtifacts(lockPath: string, deadline: num
         }
       }
     } finally {
-      await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline);
+      cleaned = await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline);
     }
+    if (!cleaned) return "retry";
   }
+  return "clear";
 }
 
 async function releaseRecoveryOwnership(
@@ -574,10 +585,10 @@ async function releaseRecoveryOwnership(
   observation: ReceiptLockObservation,
   claim: ReceiptRecoveryClaim,
   deadline: number,
-): Promise<void> {
-  if (!await recoveryClaimCurrent(recoveryPath, observation, claim, deadline)) return;
+): Promise<boolean> {
+  if (!await recoveryClaimCurrent(recoveryPath, observation, claim, deadline)) return false;
   const owners = await recoveryOwnersUntil(recoveryPath, observation, deadline);
-  if (!owners) return;
+  if (!owners) return false;
   for (const { ownerPath } of owners.reverse()) {
     try {
       fs.unlinkSync(ownerPath);
@@ -586,6 +597,7 @@ async function releaseRecoveryOwnership(
     }
   }
   removeDeadRecoveryOwnerAliases(recoveryPath);
+  return true;
 }
 
 async function removeObservedLock(
@@ -601,27 +613,29 @@ async function removeObservedLock(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
-      await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline);
-      return "blocked";
+      return await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline)
+        ? "blocked"
+        : "retry";
     }
     if (code !== "EEXIST") {
       await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline);
       throw error;
     }
   }
+  let outcome: ReceiptRecoveryAttempt = "blocked";
   try {
     const recoveryMetadata = readLockMetadata(recoveryPath);
-    if (!await recoveryClaimCurrent(recoveryPath, observation, claim, deadline)
-      || !sameLock(recoveryPath, observation.identity)
-      || recoveryMetadata.token !== observation.token
-      || !sameLock(lockPath, observation.identity)
-      || readLockMetadata(lockPath).token !== observation.token) return "blocked";
-    try {
-      fs.unlinkSync(lockPath);
-      return "removed";
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "blocked";
-      throw error;
+    if (await recoveryClaimCurrent(recoveryPath, observation, claim, deadline)
+      && sameLock(recoveryPath, observation.identity)
+      && recoveryMetadata.token === observation.token
+      && sameLock(lockPath, observation.identity)
+      && readLockMetadata(lockPath).token === observation.token) {
+      try {
+        fs.unlinkSync(lockPath);
+        outcome = "removed";
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
   } finally {
     if (sameLock(recoveryPath, observation.identity)
@@ -632,8 +646,16 @@ async function removeObservedLock(
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline);
+    if (!await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline)) {
+      outcome = "retry";
+    }
   }
+  return outcome;
+}
+
+async function waitForLockRetry(deadline: number): Promise<void> {
+  if (Date.now() >= deadline) throw new Error("MCP receipt store is busy");
+  await waitForRetry(Math.min(10, Math.max(1, deadline - Date.now())));
 }
 
 async function withFileLock<T>(filePath: string, operation: () => T): Promise<T> {
@@ -646,7 +668,11 @@ async function withFileLock<T>(filePath: string, operation: () => T): Promise<T>
     token: crypto.randomUUID(),
   };
   while (true) {
-    await cleanupAbandonedRecoveryArtifacts(lockPath, deadline);
+    const namespaceState = await cleanupAbandonedRecoveryArtifacts(lockPath, deadline);
+    if (namespaceState !== "clear") {
+      await waitForLockRetry(deadline);
+      continue;
+    }
     try {
       const fd = fs.openSync(lockPath, "wx", 0o600);
       let observation: ReceiptLockObservation | null = null;
@@ -666,9 +692,10 @@ async function withFileLock<T>(filePath: string, operation: () => T): Promise<T>
         if (observation) {
           const retirementDeadline = Date.now() + LOCK_WAIT_MS;
           const retired = await removeObservedLock(lockPath, observation, retirementDeadline);
-          if (retired !== "removed"
-            && sameLock(lockPath, observation.identity)
-            && readLockMetadata(lockPath).token === observation.token) {
+          if (retired === "retry"
+            || (retired !== "removed"
+              && sameLock(lockPath, observation.identity)
+              && readLockMetadata(lockPath).token === observation.token)) {
             throw new Error("MCP receipt lock retirement timed out");
           }
         }
@@ -683,8 +710,7 @@ async function withFileLock<T>(filePath: string, operation: () => T): Promise<T>
       const observation = observeLock(lockPath);
       if (observation && staleLock(observation)
         && await removeObservedLock(lockPath, observation, deadline) === "removed") continue;
-      if (Date.now() >= deadline) throw new Error("MCP receipt store is busy");
-      await waitForRetry(Math.min(10, Math.max(1, deadline - Date.now())));
+      await waitForLockRetry(deadline);
     }
   }
 }

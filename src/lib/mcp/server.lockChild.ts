@@ -119,6 +119,55 @@ function installTransientOwnerReadFailure(): void {
   }) as typeof fs.readFileSync;
 }
 
+function installNamespaceHandoffPause(
+  receiptPath: string,
+  pinPath: string,
+  readyPath: string,
+  releasePath: string,
+): void {
+  const lockPath = `${receiptPath}.lock`;
+  const originalUnlink = fs.unlinkSync.bind(fs);
+  let paused = false;
+  fs.unlinkSync = ((filename: fs.PathLike) => {
+    const target = String(filename);
+    if (!paused && target !== lockPath && target.endsWith(".recovering")) {
+      paused = true;
+      fs.linkSync(filename, pinPath);
+      const result = originalUnlink(filename);
+      fs.writeFileSync(readyPath, "ready");
+      waitFor(releasePath);
+      return result;
+    }
+    return originalUnlink(filename);
+  }) as typeof fs.unlinkSync;
+}
+
+function installForcedInodeReuse(
+  receiptPath: string,
+  pinPath: string,
+  readyPath: string,
+  releasePath: string,
+): void {
+  const lockPath = `${receiptPath}.lock`;
+  const originalOpen = fs.openSync.bind(fs);
+  let reused = false;
+  fs.openSync = ((filename: fs.PathLike, flags: string | number, mode?: fs.Mode) => {
+    if (!reused && String(filename) === lockPath && String(flags).includes("x") && fs.existsSync(pinPath)) {
+      try {
+        fs.linkSync(pinPath, lockPath);
+        const descriptor = originalOpen(lockPath, "r+");
+        reused = true;
+        fs.writeFileSync(readyPath, String(fs.fstatSync(descriptor).ino));
+        waitFor(releasePath);
+        return descriptor;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+    }
+    return originalOpen(filename, flags, mode);
+  }) as typeof fs.openSync;
+}
+
 function publishReusedLock(
   recoveryPath: string,
   lockPath: string,
@@ -145,6 +194,33 @@ function publishReusedLock(
     } catch {
       // A settled claimant may already have removed an unreferenced alias.
     }
+  }
+}
+
+async function timedClaim(
+  receiptPath: string,
+  countPath: string,
+  resultPath: string,
+  heartbeatPath: string,
+): Promise<void> {
+  let ticks = 0;
+  const heartbeat = setInterval(() => {
+    ticks += 1;
+    fs.writeFileSync(heartbeatPath, String(ticks));
+  }, 20);
+  const startedAt = Date.now();
+  try {
+    await claimReceipt(receiptPath, countPath, path.join(path.dirname(resultPath), `discarded-${path.basename(resultPath)}`));
+    fs.writeFileSync(resultPath, JSON.stringify({ outcome: "completed", ticks, elapsedMs: Date.now() - startedAt }));
+  } catch (error) {
+    fs.writeFileSync(resultPath, JSON.stringify({
+      outcome: "failed",
+      error: error instanceof Error ? error.message : String(error),
+      ticks,
+      elapsedMs: Date.now() - startedAt,
+    }));
+  } finally {
+    clearInterval(heartbeat);
   }
 }
 
@@ -339,6 +415,27 @@ if (mode === "hold") {
   await claimReceipt(process.argv[3]!, process.argv[4]!, process.argv[5]!);
 } else if (mode === "hold-reused") {
   publishReusedLock(process.argv[3]!, process.argv[4]!, process.argv[5]!, process.argv[6]!);
+} else if (mode === "namespace-handoff-claim") {
+  installNamespaceHandoffPause(
+    process.argv[3]!,
+    process.argv[6]!,
+    process.argv[7]!,
+    process.argv[8]!,
+  );
+  await claimReceipt(process.argv[3]!, process.argv[4]!, process.argv[5]!);
+} else if (mode === "reuse-claim") {
+  installForcedInodeReuse(process.argv[3]!, process.argv[6]!, process.argv[7]!, process.argv[8]!);
+  try {
+    await claimReceipt(process.argv[3]!, process.argv[4]!, process.argv[5]!);
+  } finally {
+    try {
+      fs.unlinkSync(process.argv[6]!);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+} else if (mode === "timed-claim") {
+  await timedClaim(process.argv[3]!, process.argv[4]!, process.argv[5]!, process.argv[6]!);
 } else {
   throw new Error(`unsupported lock child mode: ${String(mode)}`);
 }
