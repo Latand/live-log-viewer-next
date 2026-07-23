@@ -175,6 +175,37 @@ describe("live turn delta buffering", () => {
     store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, { conversationId: "conv_a", turnId: "t1", phase: "started", item: {} }));
     expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("streaming");
   });
+
+  test("issue 626: authoritative completion replaces streamed prefixes and divergent drafts while empty completion preserves the stream", () => {
+    const completed = (streamed: string, finalText: string, itemId: string) => {
+      let store = installSnapshot(snapshot());
+      store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, {
+        conversationId: "conv_a",
+        turnId: "t1",
+      }));
+      store = apply(store, env("delta", { type: "session", id: "conv_a" }, 5, {
+        conversationId: "conv_a",
+        turnId: "t1",
+        text: streamed,
+      }));
+      return apply(store, env("item", { type: "session", id: "conv_a" }, 6, {
+        conversationId: "conv_a",
+        turnId: "t1",
+        phase: "completed",
+        item: { type: "agentMessage", id: itemId, text: finalText },
+      })).sessions["conv_a"]?.liveTurn?.items ?? [];
+    };
+
+    expect(completed("Hel", "Hello", "prefix")).toEqual([
+      expect.objectContaining({ itemId: "prefix", text: "Hello", phase: "awaiting-echo" }),
+    ]);
+    expect(completed("Draft answer", "Rewritten final", "divergent")).toEqual([
+      expect.objectContaining({ itemId: "divergent", text: "Rewritten final", phase: "awaiting-echo" }),
+    ]);
+    expect(completed("Keep streamed text", "", "empty")).toEqual([
+      expect.objectContaining({ itemId: "empty", text: "Keep streamed text", phase: "awaiting-echo" }),
+    ]);
+  });
 });
 
 /* --------------------- strict revision guard --------------------- */

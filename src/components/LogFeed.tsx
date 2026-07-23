@@ -15,7 +15,12 @@ import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 import { LaunchChips } from "./conversation/LaunchChips";
 import { LiveTurnRows } from "./conversation/LiveTurnRows";
 import { OutboxBubbles } from "./conversation/OutboxBubbles";
-import { visibleRuntimeLiveTurnItems } from "./conversation/liveTurnHandoff";
+import {
+  adoptCanonicalAssistantClaims,
+  publishCanonicalAssistantClaims,
+  useCanonicalAssistantClaims,
+  visibleRuntimeLiveTurnItems,
+} from "./conversation/liveTurnHandoff";
 import { orderedConversationTail } from "./conversation/tailOrder";
 import { publishTranscriptEchoes, seedLaunchOutbox, useOutbox, visibleOutbox } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
@@ -120,6 +125,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      optimistic user bubbles at the tail of THIS feed, before any transcript
      flush, and retire the moment their real bubble lands. */
   const outbox = useOutbox(memoryKey ?? "");
+  const assistantClaims = useCanonicalAssistantClaims(memoryKey ?? "");
   /* Launch/delivery facts of the launch that created this conversation, or of
      the launch that is still becoming it (issue #569) — the same chips either
      way, because it is the same window. */
@@ -400,22 +406,26 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      causally by occurrence count. A user text that appears twice is two echoes
      that retire two bubbles; a message that predates a queued bubble leaves it
      visible. The counts carry that occurrence information. */
+  const transcriptEchoes = useMemo(() => {
+    return feed.items.flatMap(({ anchorKey, key, item }) =>
+      item.kind === "user" && item.text.trim()
+        ? [{ id: anchorKey ?? `key:${key}`, text: item.text }]
+        : []);
+  }, [feed.items]);
   const transcriptEchoCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const { item } of feed.items) {
-      if (item.kind === "user" && item.text.trim()) {
-        const key = item.text.trim();
-        counts.set(key, (counts.get(key) ?? 0) + 1);
-      }
+    for (const echo of transcriptEchoes) {
+      const key = echo.text.trim();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     return counts;
-  }, [feed.items]);
-  /* Publish the counts so the composer can watermark a new submission against
-     the echoes that already exist (its `echoBaseline`), keyed on the same
-     conversation identity the queue uses. */
+  }, [transcriptEchoes]);
+  /* Publish stable absolute row anchors so canonical retirement is persisted
+     before a capped tail or filter can remove the matching row. The outbox also
+     derives the composer's repeated-text occurrence watermark from this ledger. */
   useEffect(() => {
-    if (memoryKey) publishTranscriptEchoes(memoryKey, transcriptEchoCounts);
-  }, [memoryKey, transcriptEchoCounts]);
+    if (memoryKey) publishTranscriptEchoes(memoryKey, transcriptEchoes);
+  }, [memoryKey, transcriptEchoes]);
   /* The launch prompt as the conversation's first user bubble on EVERY surface
      (issue #614): the server projects the queued initial prompt onto the launch
      state, so a board that did not run the composer (an MCP spawn, a second tab,
@@ -440,9 +450,14 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     });
   }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt, launch?.promptEcho]);
   const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs()) : [];
+  useEffect(() => {
+    if (!memoryKey || !file) return;
+    adoptCanonicalAssistantClaims(file.path, memoryKey);
+    publishCanonicalAssistantClaims(memoryKey, feed.items);
+  }, [file, memoryKey, feed.items]);
   const visibleLiveTurnItems = useMemo(
-    () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items),
-    [runtimeLiveTurn, feed.items],
+    () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items, assistantClaims),
+    [runtimeLiveTurn, feed.items, assistantClaims],
   );
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */
@@ -489,6 +504,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
            capture measures this scroller's rendered height against the usable
            visual viewport to prove the transcript owns its ≥60% share. */
         data-log-feed-scroller
+        data-tail-lines-start={tail.linesStart}
+        data-tail-line-count={tail.lines.length}
         className={compact ? "min-h-0 flex-1 overflow-y-auto py-3" : "min-h-0 flex-1 overflow-y-auto py-6"}
         onScroll={(event) => {
           const el = event.currentTarget;
@@ -559,7 +576,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                   /* Session-stable keys: a row keeps its DOM node while the
                      window slides. Compact panes live on the zoomable canvas:
                      off-screen rows skip layout/paint via content-visibility. */
-                  <div key={key} data-feed-key={anchorKey ?? undefined} className={compact ? "feed-cv" : undefined}>
+                  <div
+                    key={key}
+                    data-feed-key={anchorKey ?? undefined}
+                    data-feed-kind={item.kind}
+                    data-feed-source-id={"sourceId" in item ? item.sourceId : undefined}
+                    className={compact ? "feed-cv" : undefined}
+                  >
                     <FeedItem item={item} speakText={speakText} />
                   </div>
                 );

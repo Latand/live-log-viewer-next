@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
 export const PRIVACY_GENERATOR_RUNTIME = "1.3.3";
-export const PRIVACY_GENERATOR_VERSION = "issue-626-vector-stills-v1";
+export const PRIVACY_GENERATOR_VERSION = "issue-626-vector-stills-v2";
 
 export interface GeometryEvidence {
   width: number;
@@ -12,8 +12,19 @@ export interface GeometryEvidence {
   composerHeight: number;
   order: string[];
   liveItems: number;
+  runtimeItems: number;
+  runtimeOverflow: number;
+  runtimeOmittedChars: number;
+  tailLinesStart: number;
+  tailLineCount: number;
+  feedRows: number;
   toolRows: number;
+  reviewRows: number;
+  citationRows: number;
+  outboxEntries: number;
   toolOutputVisible: boolean;
+  unrelatedOutboxVisible: boolean;
+  productionWindow: boolean;
   launchId: string;
   conversationId: string;
   path: string;
@@ -40,14 +51,14 @@ export interface EvidenceManifest {
 }
 
 const SOURCE_DIGESTS: Record<string, string> = {
-  "partial-adoption-desktop-1280": "ea0bda315a949dec303a0cdfb90042980330d6cd5a16830fe30601422bda90d8",
-  "partial-adoption-mobile-390": "1d66e797a1c88f07da703e24a502baaa652640747c3b3e43538e5557a49c50ba",
-  "refresh-after-adoption-desktop-1280": "2a0fa0d0d55a0ea0c9bde5776fb5bc74f31600119216d4f9b684e76cfa2af72b",
-  "refresh-after-adoption-mobile-390": "ed9b3d4670e66d8ba33d96072e3c6f096dd1473c8a97da17c4ad13f7879fe228",
-  "refresh-at-tool-transition-desktop-1280": "69c92ef1b13b133147b040929369efafdf51175ab2c1742dd513c9049c2a32a7",
-  "refresh-at-tool-transition-mobile-390": "2fc2ca17ebdd9afccb4b6b1176f607121f119e8b1d7aa34dba329fe38d996e98",
-  "streaming-before-tool-desktop-1280": "96929a8c1a6f4d4d116c9265efcb7b3f69e4a6be40d57588fc27a21d79109486",
-  "streaming-before-tool-mobile-390": "060b250b5786df729ac2aaed78dba1bc804a46d219cc63d7f4e898fa759d2926",
+  "partial-adoption-desktop-1280": "c18da1dd3646fc480cc2b03f56e4562f2d5b3ad7e78a20204b39c10086ba0c5a",
+  "partial-adoption-mobile-390": "bf6edc23f58a4fde7d2b1b5c23130919cb04c25bd30d17e3a65c6977cc8d76a5",
+  "refresh-after-adoption-desktop-1280": "832e81ffeda1035f839d412c789ad17cb67a775e4d74f8aa81d0a73a0a7c23cd",
+  "refresh-after-adoption-mobile-390": "aca9d96783cb5ee5cfd6879ca22503b1b5d75962d912321c2acbf0cbda2c8939",
+  "refresh-at-tool-transition-desktop-1280": "38107e8d9ea1f08b9012be64435562dc5e013138691926b03b39a0d98452b50f",
+  "refresh-at-tool-transition-mobile-390": "77a0605172d1e70a904f171c9acfdd56e23e2cd7d4c7e962b4c03d41088ee777",
+  "streaming-before-tool-desktop-1280": "e25486a7757a1da228e2af26a26cf98bae0e8d452f5d42f0da3af4e251c82364",
+  "streaming-before-tool-mobile-390": "2c74e287804f55ef0732030a4473d0eb6de14022debbe027cf6caa2de7707219",
 };
 
 const directory = import.meta.dir;
@@ -70,6 +81,8 @@ function rowLabel(kind: string): string {
   if (kind === "user") return "canonical user prompt";
   if (kind === "tool") return "tool call + output";
   if (kind === "live") return "live commentary handoff";
+  if (kind === "mem-citation") return "canonical citation card";
+  if (kind === "review") return "canonical structured review";
   return "canonical commentary";
 }
 
@@ -169,7 +182,7 @@ export function buildEvidenceArtifacts(): {
       generatorVersion: PRIVACY_GENERATOR_VERSION,
       generatorSha256,
       sourceDigests: [sourceDigest],
-      description: `Deterministic vector evidence for ${stateLabel(key)}.`,
+      description: `Deterministic vector evidence from the production conversation path for ${stateLabel(key)}.`,
       sha256: sha256(contents),
     };
   });

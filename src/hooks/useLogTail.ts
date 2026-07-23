@@ -33,6 +33,10 @@ interface TailSnapshot {
    so the live subscription continues forward without duplicating cached rows. */
 const tailCache = new Map<string, TailSnapshot>();
 
+export function resetLogTailCacheForTests(): void {
+  tailCache.clear();
+}
+
 function boundedSnapshot(snapshot: TailSnapshot, cap: number): TailSnapshot {
   const limit = cap > 0 ? Math.min(cap, TAIL_CACHE_LINES) : TAIL_CACHE_LINES;
   if (snapshot.win.lines.length <= limit) return snapshot;

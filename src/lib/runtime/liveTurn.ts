@@ -1,5 +1,6 @@
-const LIVE_TURN_TEXT_LIMIT = 64 * 1024;
-const LIVE_TURN_ITEM_LIMIT = 32;
+export const LIVE_TURN_TEXT_LIMIT = 64 * 1024;
+export const LIVE_TURN_ITEM_LIMIT = 32;
+export const LIVE_TURN_OVERFLOW_LIMIT = 512;
 
 export type RuntimeLiveTurnItemPhase = "streaming" | "awaiting-echo";
 
@@ -9,6 +10,11 @@ export interface RuntimeLiveTurnItem {
   phase: RuntimeLiveTurnItemPhase;
   startedAt: string | null;
   completedAt: string | null;
+  /** Characters omitted from the live projection to honor its text bound. The
+      canonical transcript remains authoritative; the UI renders this count. */
+  omittedChars?: number;
+  /** Extremely old descriptors folded into this explicit bounded summary. */
+  omittedItems?: number;
 }
 
 export interface RuntimeLiveTurn {
@@ -17,6 +23,27 @@ export interface RuntimeLiveTurn {
   text: string;
   /** Assistant items awaiting canonical transcript ownership, in response order. */
   items?: RuntimeLiveTurnItem[];
+  /** Older unclaimed items displaced from the 32-item hot window. Descriptors
+      remain durable in journal snapshots and preserve response order/identity. */
+  overflow?: RuntimeLiveTurnItem[];
+}
+
+const utf8Encoder = new TextEncoder();
+const utf8Decoder = new TextDecoder();
+const utf8Length = (value: string) => utf8Encoder.encode(value).length;
+
+function trimUtf8Start(value: string, bytes: number): {
+  omittedChars: number;
+  text: string;
+} {
+  const encoded = utf8Encoder.encode(value);
+  let start = Math.min(bytes, encoded.length);
+  while (start < encoded.length && (encoded[start]! & 0xc0) === 0x80) start += 1;
+  const omitted = utf8Decoder.decode(encoded.subarray(0, start));
+  return {
+    omittedChars: [...omitted].length,
+    text: utf8Decoder.decode(encoded.subarray(start)),
+  };
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -62,17 +89,31 @@ function itemIdentity(value: unknown): { itemId: string | null; text: string } |
   };
 }
 
-function normalizedItems(value: RuntimeLiveTurn): RuntimeLiveTurnItem[] {
-  if (Array.isArray(value.items)) {
-    return value.items
-      .filter((item) => item && typeof item.text === "string" && item.text.length > 0)
+function normalizedList(value: unknown): RuntimeLiveTurnItem[] {
+  if (!Array.isArray(value)) return [];
+  return value
+      .filter((item) =>
+        item
+        && typeof item.text === "string"
+        && (item.text.length > 0 || (item.omittedChars ?? 0) > 0 || (item.omittedItems ?? 0) > 0))
       .map((item) => ({
         itemId: typeof item.itemId === "string" ? item.itemId : null,
         text: item.text,
         phase: item.phase === "awaiting-echo" ? "awaiting-echo" : "streaming",
         startedAt: typeof item.startedAt === "string" ? item.startedAt : null,
         completedAt: typeof item.completedAt === "string" ? item.completedAt : null,
+        ...(typeof item.omittedChars === "number" && item.omittedChars > 0
+          ? { omittedChars: Math.floor(item.omittedChars) }
+          : {}),
+        ...(typeof item.omittedItems === "number" && item.omittedItems > 0
+          ? { omittedItems: Math.floor(item.omittedItems) }
+          : {}),
       }));
+}
+
+function normalizedItems(value: RuntimeLiveTurn): RuntimeLiveTurnItem[] {
+  if (Array.isArray(value.items) || Array.isArray(value.overflow)) {
+    return [...normalizedList(value.overflow), ...normalizedList(value.items)];
   }
   return value.text
     ? [{
@@ -86,18 +127,49 @@ function normalizedItems(value: RuntimeLiveTurn): RuntimeLiveTurnItem[] {
 }
 
 function bounded(turnId: string, items: RuntimeLiveTurnItem[]): RuntimeLiveTurn | null {
-  let kept = items.slice(-LIVE_TURN_ITEM_LIMIT);
-  let excess = kept.reduce((total, item) => total + item.text.length, 0) - LIVE_TURN_TEXT_LIMIT;
+  const descriptorLimit = LIVE_TURN_ITEM_LIMIT + LIVE_TURN_OVERFLOW_LIMIT;
+  const omittedCount = items.length > descriptorLimit
+    ? items.length - descriptorLimit + 1
+    : 0;
+  const omitted = items.slice(0, omittedCount);
+  let kept = omitted.length
+    ? [{
+      itemId: null,
+      text: "",
+      phase: "awaiting-echo" as const,
+      startedAt: omitted[0]?.startedAt ?? null,
+      completedAt: omitted.at(-1)?.completedAt ?? null,
+      omittedItems: omitted.reduce((total, item) =>
+        total + (item.omittedItems ?? 1), 0),
+      omittedChars: omitted.reduce((total, item) =>
+        total + [...item.text].length + (item.omittedChars ?? 0), 0),
+    }, ...items.slice(omittedCount)]
+    : items;
+  let excess = kept.reduce((total, item) => total + utf8Length(item.text), 0) - LIVE_TURN_TEXT_LIMIT;
   if (excess > 0) {
     kept = kept.map((item) => {
       if (excess <= 0) return item;
-      const trim = Math.min(excess, item.text.length);
-      excess -= trim;
-      return { ...item, text: item.text.slice(trim) };
-    }).filter((item) => item.text.length > 0);
+      const before = utf8Length(item.text);
+      const trimmed = trimUtf8Start(item.text, excess);
+      excess -= before - utf8Length(trimmed.text);
+      return {
+        ...item,
+        text: trimmed.text,
+        omittedChars: (item.omittedChars ?? 0) + trimmed.omittedChars,
+      };
+    });
   }
   const latest = kept.at(-1);
-  return latest ? { turnId, text: latest.text, items: kept } : null;
+  if (!latest) return null;
+  const activeStart = Math.max(0, kept.length - LIVE_TURN_ITEM_LIMIT);
+  const overflow = kept.slice(0, activeStart);
+  const active = kept.slice(activeStart);
+  return {
+    turnId,
+    text: latest.text,
+    items: active,
+    ...(overflow.length ? { overflow } : {}),
+  };
 }
 
 function itemsForTurn(
@@ -117,11 +189,12 @@ export function normalizeRuntimeLiveTurn(value: unknown): RuntimeLiveTurn | null
   const live = record(value);
   const turnId = text(live?.turnId);
   const latestText = text(live?.text);
-  if (!turnId || (!latestText && !Array.isArray(live?.items))) return null;
+  if (!turnId || (!latestText && !Array.isArray(live?.items) && !Array.isArray(live?.overflow))) return null;
   return bounded(turnId, normalizedItems({
     turnId,
     text: latestText,
     items: Array.isArray(live?.items) ? live.items as RuntimeLiveTurnItem[] : undefined,
+    overflow: Array.isArray(live?.overflow) ? live.overflow as RuntimeLiveTurnItem[] : undefined,
   }));
 }
 
@@ -167,7 +240,11 @@ export function completeRuntimeLiveTurnItem(
     const items = current.slice();
     items[existingIndex] = {
       ...existing,
-      text: existing.text || identity.text,
+      /* A non-empty completed item is authoritative: it repairs missed streamed
+         suffixes and may legitimately rewrite a divergent draft. Engines that
+         complete with an empty body leave the observed stream intact. */
+      text: identity.text || existing.text,
+      ...(identity.text ? { omittedChars: undefined } : {}),
       phase: "awaiting-echo",
       completedAt: occurredAt,
     };
@@ -180,7 +257,8 @@ export function completeRuntimeLiveTurnItem(
       {
         ...latest,
         itemId: identity.itemId,
-        text: latest.text || identity.text,
+        text: identity.text || latest.text,
+        ...(identity.text ? { omittedChars: undefined } : {}),
         phase: "awaiting-echo",
         completedAt: occurredAt,
       },

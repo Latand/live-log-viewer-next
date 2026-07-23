@@ -148,6 +148,8 @@ export type CitationEntry = {
 };
 export type MemCitationItem = {
   kind: "mem-citation";
+  /** Canonical assistant response that projected this citation card. */
+  sourceId?: string;
   entries: CitationEntry[];
   rolloutIds: string[];
   raw: string;
@@ -202,7 +204,7 @@ export type Item =
   | { kind: "think"; text: string }
   | { kind: "image"; media: string; data: string; w?: number; h?: number; bytes?: number }
   | { kind: "inbox-image"; name: string; path: string }
-  | { kind: "blob"; bytes: number; text: string }
+  | { kind: "blob"; bytes: number; text: string; sourceId?: string }
   | { kind: "sysmsg"; label: string; text: string }
   | { kind: "compact"; ts: unknown; trigger?: string; preTokens?: number; summary?: string }
   | { kind: "raw"; text: string; err: boolean };
@@ -1157,9 +1159,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     return pushSeq++;
   };
 
-  const pushBlobIfHuge = (text: string): boolean => {
+  const pushBlobIfHuge = (text: string, sourceId?: string): boolean => {
     if (!looksLikeBlob(text)) return false;
-    push({ kind: "blob", bytes: text.length, text: redactSecrets(text).slice(0, BLOB_KEEP) });
+    push({
+      kind: "blob",
+      bytes: text.length,
+      text: redactSecrets(text).slice(0, BLOB_KEEP),
+      ...(sourceId ? { sourceId } : {}),
+    });
     return true;
   };
   const pushImage = (block: Record<string, unknown>, fileWrap: Record<string, unknown>) => {
@@ -1185,14 +1192,22 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
      style (prose vs user). Returns true when at least one card was produced.
      `emit` defaults to the session store; the pending-plain-block preview passes
      a transient collector instead. */
-  const pushStructured = (ts: unknown, text: string, fallback: (segment: string) => void, emit: (item: Item) => void = push): boolean => {
+  const pushStructured = (
+    ts: unknown,
+    text: string,
+    fallback: (segment: string) => void,
+    emit: (item: Item) => void = push,
+    sourceId?: string,
+  ): boolean => {
+    const emitOwned = (item: ReviewCardItem | MemCitationItem) =>
+      emit(sourceId ? { ...item, sourceId } : item);
     MEM_CITATION_RE.lastIndex = 0;
     const hasCitation = MEM_CITATION_RE.test(text);
     MEM_CITATION_RE.lastIndex = 0;
     if (!hasCitation) {
       const review = parseReview(text.trim(), ts);
       if (!review) return false;
-      emit(review);
+      emitOwned(review);
       return true;
     }
     let handled = false;
@@ -1202,7 +1217,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (!trimmed) return;
       const review = parseReview(trimmed, ts);
       if (review) {
-        emit(review);
+        emitOwned(review);
         handled = true;
       } else {
         fallback(trimmed);
@@ -1212,7 +1227,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       const whole = match[0];
       const index = match.index ?? 0;
       pushTextPart(text.slice(last, index));
-      emit(parseMemCitation(whole, match[1] ?? "", match[2] ?? ""));
+      emitOwned(parseMemCitation(whole, match[1] ?? "", match[2] ?? ""));
       handled = true;
       last = index + whole.length;
     }
@@ -1239,7 +1254,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   ): { firstSeq: number; lastSeq: number } | null => {
     if (!text.trim()) return null;
     const firstSeq = pushSeq;
-    if (pushBlobIfHuge(text)) return { firstSeq, lastSeq: pushSeq - 1 };
+    if (pushBlobIfHuge(text, sourceId)) return { firstSeq, lastSeq: pushSeq - 1 };
     const engine = cfg.engine === "codex" ? "codex" : "claude";
     if (pushStructured(ts, text, (segment) => push({
       kind: "prose",
@@ -1247,7 +1262,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       text: segment,
       engine,
       ...(sourceId ? { sourceId } : {}),
-    }))) {
+    }), push, sourceId)) {
       return { firstSeq, lastSeq: pushSeq - 1 };
     }
     push({ kind: "prose", ts, text, engine, ...(sourceId ? { sourceId } : {}) });
@@ -1280,8 +1295,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           item: item.kind === "prose"
             ? { ...item, ts: eventTimestamp, ...(sourceId ? { sourceId } : {}) }
             : item.kind === "review"
-              ? { ...item, ts: eventTimestamp }
-              : item,
+              ? { ...item, ts: eventTimestamp, ...(sourceId ? { sourceId } : {}) }
+              : item.kind === "mem-citation" || item.kind === "blob"
+                ? { ...item, ...(sourceId ? { sourceId } : {}) }
+                : item,
         };
       }
       codexAssistantRecord = null;

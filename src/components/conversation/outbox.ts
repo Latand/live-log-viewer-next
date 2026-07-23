@@ -64,6 +64,13 @@ export interface OutboxEntry {
       lands. Absent (legacy/reloaded entries) ⇒ baseline 0, preserving the prior
       "retire once the text is present" reload behaviour. */
   echoBaseline?: number;
+  /** Stable transcript-row anchors present when this entry was submitted. They
+      are the durable occurrence watermark across capped tails and filters. */
+  echoBaselineIds?: string[];
+  /** Stable anchor of the canonical user row that retired this entry. Once set,
+      retirement is monotonic across tail eviction, adoption, and refresh. */
+  retiredEchoId?: string;
+  retiredAt?: number;
 }
 
 /**
@@ -103,10 +110,26 @@ export const OUTBOX_MTIME_GRACE_MS = 2_000;
 export const OUTBOX_DELIVERED_TTL_MS = 10 * 60_000;
 
 const storageKey = (cardId: string) => "llvOutbox:" + cardId;
+const echoStorageKey = (cardId: string) => "llvOutboxEchoes:" + cardId;
 
 const queues = new Map<string, readonly OutboxEntry[]>();
 const listeners = new Set<() => void>();
 const EMPTY: readonly OutboxEntry[] = [];
+
+export interface TranscriptEchoObservation {
+  /** Stable absolute feed anchor, e.g. `row:<source line>:<ordinal>`. */
+  id: string;
+  text: string;
+}
+
+interface PersistedEchoObservation {
+  id: string;
+  key: string;
+}
+
+const ECHO_LEDGER_LIMIT = 512;
+const echoLedgers = new Map<string, readonly PersistedEchoObservation[]>();
+const EMPTY_ECHO_LEDGER: readonly PersistedEchoObservation[] = [];
 
 function isEntry(value: unknown): value is OutboxEntry {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -149,6 +172,39 @@ function persist(cardId: string, queue: readonly OutboxEntry[]): void {
   }
 }
 
+function isPersistedEcho(value: unknown): value is PersistedEchoObservation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  return typeof raw.id === "string" && typeof raw.key === "string";
+}
+
+function readEchoLedger(cardId: string): readonly PersistedEchoObservation[] {
+  const cached = echoLedgers.get(cardId);
+  if (cached) return cached;
+  if (typeof window === "undefined") return EMPTY_ECHO_LEDGER;
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(echoStorageKey(cardId)) ?? "[]") as unknown;
+    const restored = Array.isArray(raw)
+      ? raw.filter(isPersistedEcho).slice(-ECHO_LEDGER_LIMIT)
+      : EMPTY_ECHO_LEDGER;
+    echoLedgers.set(cardId, restored);
+    return restored;
+  } catch {
+    echoLedgers.set(cardId, EMPTY_ECHO_LEDGER);
+    return EMPTY_ECHO_LEDGER;
+  }
+}
+
+function persistEchoLedger(cardId: string, ledger: readonly PersistedEchoObservation[]): void {
+  echoLedgers.set(cardId, ledger);
+  try {
+    if (ledger.length) sessionStorage.setItem(echoStorageKey(cardId), JSON.stringify(ledger));
+    else sessionStorage.removeItem(echoStorageKey(cardId));
+  } catch {
+    /* quota / opaque origin: the in-memory ledger still protects this mount */
+  }
+}
+
 function emit(): void {
   for (const listener of listeners) listener();
 }
@@ -171,7 +227,15 @@ export function readOutbox(cardId: string): readonly OutboxEntry[] {
 
 /** Submit a draft into the queue. Returns the entry the dispatcher will send. */
 export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">): OutboxEntry {
-  const queued: OutboxEntry = { ...entry, state: "queued" };
+  const key = echoKey(entry.echoText ?? entry.text);
+  const baselineIds = entry.echoBaselineIds
+    ?? readEchoLedger(cardId).filter((echo) => echo.key === key).map((echo) => echo.id);
+  const queued: OutboxEntry = {
+    ...entry,
+    echoBaseline: entry.echoBaseline ?? baselineIds.length,
+    ...(baselineIds.length ? { echoBaselineIds: baselineIds } : {}),
+    state: "queued",
+  };
   write(cardId, [...readOutbox(cardId).filter((item) => item.id !== entry.id), queued].slice(-OUTBOX_LIMIT));
   return queued;
 }
@@ -198,11 +262,16 @@ export function seedLaunchOutbox(
        state — one bubble, never a second. Idempotent once attached. */
     if (entry.echoText && entry.echoText !== existing.echoText) {
       write(cardId, queue.map((item) => (item.id === entry.id ? { ...item, echoText: entry.echoText } : item)));
+      reconcileEchoRetirements(cardId, readEchoLedger(cardId));
     }
     return;
   }
   const seeded: OutboxEntry = { ...entry, state: "delivering", launchOwned: true };
   write(cardId, [...queue, seeded].slice(-OUTBOX_LIMIT));
+  /* A refreshed surface can see the canonical transcript row before the launch
+     projection effect seeds its optimistic bubble. Reconcile the persisted row
+     immediately so retirement becomes durable during that same mount. */
+  reconcileEchoRetirements(cardId, readEchoLedger(cardId));
 }
 
 export function updateOutbox(cardId: string, id: string, patch: Partial<Omit<OutboxEntry, "id">>): void {
@@ -251,12 +320,39 @@ export function retryOutbox(cardId: string, id: string): void {
     the new identity win, so an adoption is idempotent. */
 export function adoptOutbox(from: string, to: string): void {
   if (from === to) return;
+  const sourceEchoes = readEchoLedger(from);
+  if (sourceEchoes.length) {
+    const targetEchoes = readEchoLedger(to);
+    const merged = new Map(sourceEchoes.map((echo) => [echo.id, echo]));
+    for (const echo of targetEchoes) {
+      merged.delete(echo.id);
+      merged.set(echo.id, echo);
+    }
+    persistEchoLedger(to, [...merged.values()].slice(-ECHO_LEDGER_LIMIT));
+    persistEchoLedger(from, EMPTY_ECHO_LEDGER);
+  }
   const source = readOutbox(from);
-  if (!source.length) return;
-  const target = readOutbox(to);
-  const seen = new Set(target.map((entry) => entry.id));
-  write(to, [...target, ...source.filter((entry) => !seen.has(entry.id))].slice(-OUTBOX_LIMIT));
-  write(from, EMPTY);
+  if (source.length) {
+    const target = readOutbox(to);
+    const merged = new Map(target.map((entry) => [entry.id, entry]));
+    for (const entry of source) {
+      const existing = merged.get(entry.id);
+      if (!existing) {
+        merged.set(entry.id, entry);
+        continue;
+      }
+      if (entry.retiredEchoId && !existing.retiredEchoId) {
+        merged.set(entry.id, {
+          ...existing,
+          retiredEchoId: entry.retiredEchoId,
+          retiredAt: entry.retiredAt,
+        });
+      }
+    }
+    write(to, [...merged.values()].slice(-OUTBOX_LIMIT));
+    write(from, EMPTY);
+  }
+  reconcileEchoRetirements(to, readEchoLedger(to));
 }
 
 /** The trimmed text of a bubble, used to match its transcript echo. */
@@ -280,17 +376,88 @@ const echoSnapshots = new Map<string, TranscriptEchoCounts>();
 const echoListeners = new Set<() => void>();
 const EMPTY_ECHO_COUNTS: TranscriptEchoCounts = new Map();
 
-/** Publish the transcript's current user-echo counts for a conversation. */
-export function publishTranscriptEchoes(cardId: string, counts: TranscriptEchoCounts): void {
-  if (echoSnapshots.get(cardId) === counts) return;
-  echoSnapshots.set(cardId, counts);
-  for (const listener of echoListeners) listener();
+function countsFromLedger(ledger: readonly PersistedEchoObservation[]): TranscriptEchoCounts {
+  const counts = new Map<string, number>();
+  for (const echo of ledger) counts.set(echo.key, (counts.get(echo.key) ?? 0) + 1);
+  return counts;
+}
+
+function sameCounts(left: TranscriptEchoCounts | undefined, right: TranscriptEchoCounts): boolean {
+  if (!left || left.size !== right.size) return false;
+  for (const [key, count] of right) if (left.get(key) !== count) return false;
+  return true;
+}
+
+function reconcileEchoRetirements(
+  cardId: string,
+  ledger: readonly PersistedEchoObservation[],
+): void {
+  const queue = readOutbox(cardId);
+  if (!queue.length) return;
+  const claimed = new Set(queue.flatMap((entry) => entry.retiredEchoId ? [entry.retiredEchoId] : []));
+  let changed = false;
+  const next = queue.map((entry) => {
+    if (entry.retiredEchoId || entry.responseStartedAt !== undefined) return entry;
+    const baseline = new Set(entry.echoBaselineIds ?? []);
+    const key = echoKey(entry.echoText ?? entry.text);
+    const owner = ledger.find((echo) =>
+      echo.key === key
+      && !baseline.has(echo.id)
+      && !claimed.has(echo.id));
+    if (!owner) return entry;
+    claimed.add(owner.id);
+    changed = true;
+    return { ...entry, retiredEchoId: owner.id, retiredAt: Date.now() };
+  });
+  if (changed) write(cardId, next);
+}
+
+/**
+ * Publish stable transcript user-row observations. The absolute row anchors
+ * form a bounded durable occurrence ledger; matching entries persist the exact
+ * anchor that retired them. The count-map overload keeps older callers and
+ * fixtures compatible while production feeds publish anchor observations.
+ */
+export function publishTranscriptEchoes(
+  cardId: string,
+  observations: TranscriptEchoCounts | readonly TranscriptEchoObservation[],
+): void {
+  if (!Array.isArray(observations)) {
+    const counts = observations as TranscriptEchoCounts;
+    if (sameCounts(echoSnapshots.get(cardId), counts)) return;
+    echoSnapshots.set(cardId, counts);
+    for (const listener of echoListeners) listener();
+    return;
+  }
+
+  const merged = new Map(readEchoLedger(cardId).map((echo) => [echo.id, echo]));
+  for (const observation of observations) {
+    const id = observation.id.trim();
+    const key = echoKey(observation.text);
+    if (!id || !key) continue;
+    merged.set(id, { id, key });
+  }
+  const ledger = [...merged.values()].slice(-ECHO_LEDGER_LIMIT);
+  const previous = readEchoLedger(cardId);
+  const ledgerChanged = previous.length !== ledger.length
+    || previous.some((echo, index) => echo.id !== ledger[index]?.id || echo.key !== ledger[index]?.key);
+  if (ledgerChanged) persistEchoLedger(cardId, ledger);
+  const counts = countsFromLedger(ledger);
+  const countsChanged = !sameCounts(echoSnapshots.get(cardId), counts);
+  if (countsChanged) echoSnapshots.set(cardId, counts);
+  reconcileEchoRetirements(cardId, ledger);
+  if (countsChanged) for (const listener of echoListeners) listener();
 }
 
 /** How many transcript echoes of `text` the feed has published for a
     conversation — the submission watermark a new entry stamps onto itself. */
 export function transcriptEchoCount(cardId: string, text: string): number {
-  return echoSnapshots.get(cardId)?.get(echoKey(text)) ?? 0;
+  let counts = echoSnapshots.get(cardId);
+  if (!counts) {
+    counts = countsFromLedger(readEchoLedger(cardId));
+    echoSnapshots.set(cardId, counts);
+  }
+  return counts.get(echoKey(text)) ?? 0;
 }
 
 /** Reactive transcript-echo snapshot for the composer. Delivery success can
@@ -335,6 +502,7 @@ export function visibleOutbox(
   const consumed = new Map<string, number>();
   const visible: OutboxEntry[] = [];
   for (const entry of queue) {
+    if (entry.retiredEchoId) continue;
     /* A bubble retires on ITS canonical transcript echo — the delivered text,
        which for a role launch is the scaffold-plus-draft carried on `echoText`,
        not the raw draft it displays (issue #615). */
@@ -404,4 +572,5 @@ export function resetOutboxForTests(): void {
   listeners.clear();
   echoSnapshots.clear();
   echoListeners.clear();
+  echoLedgers.clear();
 }

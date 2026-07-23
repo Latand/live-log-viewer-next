@@ -193,6 +193,91 @@ test("finding 2: the composer watermark reads the feed-published echo count", ()
   expect(transcriptEchoCount("unknown-conv", "ping")).toBe(0);
 });
 
+test("issue 626: canonical echo retirement survives eviction, filters, identity adoption, refresh, and repeated text", () => {
+  const launch = "spawn:launch_626";
+  const conversation = "conversation_626";
+  const repeated = "repeat this prompt";
+
+  /* One historical occurrence is visible before the next identical submission.
+     Its stable feed anchor becomes the new entry's occurrence baseline. */
+  publishTranscriptEchoes(launch, [{ id: "row:4:0", text: repeated }]);
+  enqueueOutbox(launch, {
+    id: "repeat-1",
+    text: repeated,
+    images: 0,
+    at: 1_000,
+    echoBaseline: transcriptEchoCount(launch, repeated),
+  });
+  enqueueOutbox(launch, {
+    id: "unrelated",
+    text: "keep me queued",
+    images: 0,
+    at: 1_001,
+    echoBaseline: transcriptEchoCount(launch, "keep me queued"),
+  });
+
+  /* Re-publishing the historical row after a filter toggle cannot retire the
+     fresh occurrence. Its later canonical echo retires only that entry. */
+  publishTranscriptEchoes(launch, [{ id: "row:4:0", text: repeated }]);
+  expect(visibleOutbox(readOutbox(launch), echoes([repeated, 1]), 2_000).map((entry) => entry.id))
+    .toEqual(["repeat-1", "unrelated"]);
+  publishTranscriptEchoes(launch, [
+    { id: "row:4:0", text: repeated },
+    { id: "row:40:0", text: repeated },
+  ]);
+  expect(readOutbox(launch).find((entry) => entry.id === "repeat-1")).toMatchObject({
+    retiredEchoId: "row:40:0",
+  });
+
+  /* The first echo leaves the capped tail, the filter temporarily hides every
+     user row, and the launch adopts its canonical identity. Retirement remains
+     monotonic while the unrelated queued entry stays visible. */
+  publishTranscriptEchoes(launch, []);
+  adoptOutbox(launch, conversation);
+  resetOutboxForTests();
+  expect(visibleOutbox(readOutbox(conversation), echoes(), 3_000).map((entry) => entry.id))
+    .toEqual(["unrelated"]);
+  expect(transcriptEchoCount(conversation, repeated)).toBe(2);
+});
+
+test("issue 626: a refresh that observes the launch echo before seeding persists retirement", () => {
+  const conversation = "conversation_626_refresh";
+  const text = "canonical launch prompt";
+  publishTranscriptEchoes(conversation, [{ id: "row:12:0", text }]);
+  seedLaunchOutbox(conversation, {
+    id: "launch_626_refresh",
+    text,
+    images: 0,
+    at: 1_000,
+  });
+  expect(readOutbox(conversation)[0]).toMatchObject({ retiredEchoId: "row:12:0" });
+
+  publishTranscriptEchoes(conversation, []);
+  resetOutboxForTests();
+  expect(visibleOutbox(readOutbox(conversation), echoes(), 2_000)).toEqual([]);
+});
+
+test("issue 626: adopting an echo ledger immediately retires a queue already on the canonical identity", () => {
+  const provisional = "spawn:launch_626_split";
+  const conversation = "conversation_626_split";
+  const text = "queue and transcript began on different identities";
+
+  enqueueOutbox(conversation, {
+    id: "split-identity-entry",
+    text,
+    images: 0,
+    at: 1_000,
+  });
+  publishTranscriptEchoes(provisional, [{ id: "row:18:0", text }]);
+
+  adoptOutbox(provisional, conversation);
+
+  expect(readOutbox(conversation)[0]).toMatchObject({
+    retiredEchoId: "row:18:0",
+  });
+  expect(visibleOutbox(readOutbox(conversation), echoes(), 2_000)).toEqual([]);
+});
+
 describe("outboxStateForReceiptStatus (P1#4)", () => {
   test("admitted-but-not-delivered stays delivering; only a delivered receipt reads delivered", () => {
     expect(outboxStateForReceiptStatus("queued")).toBe("delivering");

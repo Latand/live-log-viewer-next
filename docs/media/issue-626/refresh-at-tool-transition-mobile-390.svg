@@ -1,17 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844">
-<metadata>{&quot;classification&quot;:&quot;synthetic&quot;,&quot;generator&quot;:&quot;generate-stills.ts&quot;,&quot;generatorVersion&quot;:&quot;issue-626-vector-stills-v1&quot;,&quot;sourceDigest&quot;:&quot;2fc2ca17ebdd9afccb4b6b1176f607121f119e8b1d7aa34dba329fe38d996e98&quot;,&quot;state&quot;:&quot;refresh-at-tool-transition-mobile-390&quot;,&quot;geometry&quot;:{&quot;width&quot;:390,&quot;scrollWidth&quot;:390,&quot;feedHeight&quot;:677,&quot;composerHeight&quot;:86,&quot;order&quot;:[&quot;outbox&quot;,&quot;live&quot;],&quot;liveItems&quot;:1,&quot;toolRows&quot;:0,&quot;toolOutputVisible&quot;:false,&quot;launchId&quot;:&quot;launch_issue_626&quot;,&quot;conversationId&quot;:&quot;conversation_issue_626&quot;,&quot;path&quot;:&quot;spawn:launch_issue_626&quot;,&quot;filesRevision&quot;:&quot;files revision 40&quot;}}</metadata>
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="750" viewBox="0 0 390 750">
+<metadata>{&quot;classification&quot;:&quot;synthetic&quot;,&quot;generator&quot;:&quot;generate-stills.ts&quot;,&quot;generatorVersion&quot;:&quot;issue-626-vector-stills-v2&quot;,&quot;sourceDigest&quot;:&quot;77a0605172d1e70a904f171c9acfdd56e23e2cd7d4c7e962b4c03d41088ee777&quot;,&quot;state&quot;:&quot;refresh-at-tool-transition-mobile-390&quot;,&quot;geometry&quot;:{&quot;width&quot;:390,&quot;scrollWidth&quot;:390,&quot;feedHeight&quot;:543,&quot;composerHeight&quot;:126,&quot;order&quot;:[&quot;outbox&quot;,&quot;live&quot;],&quot;tailLinesStart&quot;:0,&quot;tailLineCount&quot;:0,&quot;feedRows&quot;:0,&quot;toolRows&quot;:0,&quot;reviewRows&quot;:0,&quot;citationRows&quot;:0,&quot;outboxEntries&quot;:1,&quot;toolOutputVisible&quot;:false,&quot;unrelatedOutboxVisible&quot;:false,&quot;productionWindow&quot;:true,&quot;launchId&quot;:&quot;launch_issue_626&quot;,&quot;conversationId&quot;:&quot;conversation_issue_626&quot;,&quot;path&quot;:&quot;spawn:launch_issue_626&quot;,&quot;filesRevision&quot;:&quot;files revision 40&quot;,&quot;liveItems&quot;:1,&quot;runtimeItems&quot;:1,&quot;runtimeOverflow&quot;:0,&quot;runtimeOmittedChars&quot;:0}}</metadata>
 <style>
 text{font-family:Inter,ui-sans-serif,system-ui,sans-serif;fill:#22242b}.title{font-size:16px;font-weight:700}.meta{font-size:11px;fill:#6b7280}.row{font-size:15px}.mono{font-family:ui-monospace,SFMono-Regular,monospace;font-size:11px}.muted{fill:#667085}
 </style>
-<rect width="390" height="844" fill="#f5f6f8"/>
+<rect width="390" height="750" fill="#f5f6f8"/>
 <rect width="390" height="81" fill="#ffffff"/>
 <line x1="0" y1="80.5" x2="390" y2="80.5" stroke="#dfe2e8"/>
 <text x="16" y="27" class="title">Issue 626 · Refresh At Tool Transition</text>
 <text x="16" y="49" class="meta">conversation_issue_626 · launch_issue_626 · files revision 40</text>
 <text x="16" y="67" class="mono muted">spawn:launch_issue_626</text>
 <g data-evidence-row="outbox"><rect x="80" y="132" width="294" height="54" rx="14" fill="#e8e9ef" stroke="#e2e5eb" stroke-width="1"/><text x="98" y="165" class="row">queued user prompt</text></g><g data-evidence-row="live"><rect x="16" y="200" width="294" height="54" rx="14" fill="#ffffff" stroke="#7c3aed" stroke-width="3"/><text x="34" y="233" class="row">live commentary handoff</text></g>
-<rect x="0" y="758" width="390" height="86" fill="#ffffff"/>
-<line x1="0" y1="758.5" x2="390" y2="758.5" stroke="#dfe2e8"/>
-<rect x="12" y="772" width="366" height="58" rx="12" fill="#ffffff" stroke="#d8dce4"/>
-<text x="26" y="805" class="meta">Message this conversation</text>
+<rect x="0" y="624" width="390" height="126" fill="#ffffff"/>
+<line x1="0" y1="624.5" x2="390" y2="624.5" stroke="#dfe2e8"/>
+<rect x="12" y="638" width="366" height="98" rx="12" fill="#ffffff" stroke="#d8dce4"/>
+<text x="26" y="671" class="meta">Message this conversation</text>
 </svg>

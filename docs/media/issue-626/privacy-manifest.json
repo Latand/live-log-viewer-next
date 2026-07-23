@@ -8,13 +8,13 @@
       "source": "deterministic-generator",
       "generator": "generate-stills.ts",
       "generatorRuntime": "bun-1.3.3",
-      "generatorVersion": "issue-626-vector-stills-v1",
-      "generatorSha256": "f3552676e45abb466aea2e0cd514051d0fce46ca256607a7e60f3038572d9de9",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
       "sourceDigests": [
-        "96929a8c1a6f4d4d116c9265efcb7b3f69e4a6be40d57588fc27a21d79109486"
+        "e25486a7757a1da228e2af26a26cf98bae0e8d452f5d42f0da3af4e251c82364"
       ],
-      "description": "Deterministic vector evidence for Streaming Before Tool.",
-      "sha256": "0e6ebdcb861e86daf5d46ec7ac752b55de5bbbed1da269ced08e634f05fcfa89"
+      "description": "Deterministic vector evidence from the production conversation path for Streaming Before Tool.",
+      "sha256": "26b3438de6a9dd3f838f1aa627d249286b836971a8ed80e7386166e922a254d7"
     },
     {
       "path": "refresh-at-tool-transition-desktop-1280.svg",
@@ -22,13 +22,13 @@
       "source": "deterministic-generator",
       "generator": "generate-stills.ts",
       "generatorRuntime": "bun-1.3.3",
-      "generatorVersion": "issue-626-vector-stills-v1",
-      "generatorSha256": "f3552676e45abb466aea2e0cd514051d0fce46ca256607a7e60f3038572d9de9",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
       "sourceDigests": [
-        "69c92ef1b13b133147b040929369efafdf51175ab2c1742dd513c9049c2a32a7"
+        "38107e8d9ea1f08b9012be64435562dc5e013138691926b03b39a0d98452b50f"
       ],
-      "description": "Deterministic vector evidence for Refresh At Tool Transition.",
-      "sha256": "edc92315dcdb72fcfc8a9c514bc9bf266b942be83a4b3926045b6f42800488d6"
+      "description": "Deterministic vector evidence from the production conversation path for Refresh At Tool Transition.",
+      "sha256": "977434420bfe302022c273906608868d0269767deb8dcbb771b8b7ed64abd280"
     },
     {
       "path": "partial-adoption-desktop-1280.svg",
@@ -36,13 +36,13 @@
       "source": "deterministic-generator",
       "generator": "generate-stills.ts",
       "generatorRuntime": "bun-1.3.3",
-      "generatorVersion": "issue-626-vector-stills-v1",
-      "generatorSha256": "f3552676e45abb466aea2e0cd514051d0fce46ca256607a7e60f3038572d9de9",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
       "sourceDigests": [
-        "ea0bda315a949dec303a0cdfb90042980330d6cd5a16830fe30601422bda90d8"
+        "c18da1dd3646fc480cc2b03f56e4562f2d5b3ad7e78a20204b39c10086ba0c5a"
       ],
-      "description": "Deterministic vector evidence for Partial Adoption.",
-      "sha256": "cb8e1c42a18e0d760a4481e53fb24e6b800c1eee6282af68d224959464373196"
+      "description": "Deterministic vector evidence from the production conversation path for Partial Adoption.",
+      "sha256": "560f5b099b88abd19ca7862cfc18d3a56580600f07c7c9ce414f58b87a4155f3"
     },
     {
       "path": "refresh-after-adoption-desktop-1280.svg",
@@ -50,13 +50,13 @@
       "source": "deterministic-generator",
       "generator": "generate-stills.ts",
       "generatorRuntime": "bun-1.3.3",
-      "generatorVersion": "issue-626-vector-stills-v1",
-      "generatorSha256": "f3552676e45abb466aea2e0cd514051d0fce46ca256607a7e60f3038572d9de9",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
       "sourceDigests": [
-        "2a0fa0d0d55a0ea0c9bde5776fb5bc74f31600119216d4f9b684e76cfa2af72b"
+        "832e81ffeda1035f839d412c789ad17cb67a775e4d74f8aa81d0a73a0a7c23cd"
       ],
-      "description": "Deterministic vector evidence for Refresh After Adoption.",
-      "sha256": "022db604468fe8b066f64a05831d780f022a4c408b6c3a984e2785efb466f927"
+      "description": "Deterministic vector evidence from the production conversation path for Refresh After Adoption.",
+      "sha256": "23036d43306e66cd4700349197f0820e9baed03551becb4ad70f31a2c58fc63c"
     },
     {
       "path": "streaming-before-tool-mobile-390.svg",
@@ -64,13 +64,13 @@
       "source": "deterministic-generator",
       "generator": "generate-stills.ts",
       "generatorRuntime": "bun-1.3.3",
-      "generatorVersion": "issue-626-vector-stills-v1",
-      "generatorSha256": "f3552676e45abb466aea2e0cd514051d0fce46ca256607a7e60f3038572d9de9",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
       "sourceDigests": [
-        "060b250b5786df729ac2aaed78dba1bc804a46d219cc63d7f4e898fa759d2926"
+        "2c74e287804f55ef0732030a4473d0eb6de14022debbe027cf6caa2de7707219"
       ],
-      "description": "Deterministic vector evidence for Streaming Before Tool.",
-      "sha256": "7bace7e57628d87310e51aa922736d4dc437c0679b113dc84d83d09f5b49eaca"
+      "description": "Deterministic vector evidence from the production conversation path for Streaming Before Tool.",
+      "sha256": "6069597cbe7cdc996d8496768ff0058e99e11ef6039e6048d74dc2d22a00f00b"
     },
     {
       "path": "refresh-at-tool-transition-mobile-390.svg",
@@ -78,13 +78,13 @@
       "source": "deterministic-generator",
       "generator": "generate-stills.ts",
       "generatorRuntime": "bun-1.3.3",
-      "generatorVersion": "issue-626-vector-stills-v1",
-      "generatorSha256": "f3552676e45abb466aea2e0cd514051d0fce46ca256607a7e60f3038572d9de9",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
       "sourceDigests": [
-        "2fc2ca17ebdd9afccb4b6b1176f607121f119e8b1d7aa34dba329fe38d996e98"
+        "77a0605172d1e70a904f171c9acfdd56e23e2cd7d4c7e962b4c03d41088ee777"
       ],
-      "description": "Deterministic vector evidence for Refresh At Tool Transition.",
-      "sha256": "f6b0fa038e8e0ee57172af2283d58bb15b254447b83d039cee1ba8f6edc9f398"
+      "description": "Deterministic vector evidence from the production conversation path for Refresh At Tool Transition.",
+      "sha256": "4a406f10d4c0efe337a64ba7cfbf925698a65fe6b9fd5560c243e4f28ddf7f02"
     },
     {
       "path": "partial-adoption-mobile-390.svg",
@@ -92,13 +92,13 @@
       "source": "deterministic-generator",
       "generator": "generate-stills.ts",
       "generatorRuntime": "bun-1.3.3",
-      "generatorVersion": "issue-626-vector-stills-v1",
-      "generatorSha256": "f3552676e45abb466aea2e0cd514051d0fce46ca256607a7e60f3038572d9de9",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
       "sourceDigests": [
-        "1d66e797a1c88f07da703e24a502baaa652640747c3b3e43538e5557a49c50ba"
+        "bf6edc23f58a4fde7d2b1b5c23130919cb04c25bd30d17e3a65c6977cc8d76a5"
       ],
-      "description": "Deterministic vector evidence for Partial Adoption.",
-      "sha256": "4c215814f5aeb9dbba76581546762a4b397d1c4851f3356f210be0d49423911f"
+      "description": "Deterministic vector evidence from the production conversation path for Partial Adoption.",
+      "sha256": "96b353529cbe7578227bec59d22598d548e12f9e34e5b7d84740277cbed73117"
     },
     {
       "path": "refresh-after-adoption-mobile-390.svg",
@@ -106,13 +106,13 @@
       "source": "deterministic-generator",
       "generator": "generate-stills.ts",
       "generatorRuntime": "bun-1.3.3",
-      "generatorVersion": "issue-626-vector-stills-v1",
-      "generatorSha256": "f3552676e45abb466aea2e0cd514051d0fce46ca256607a7e60f3038572d9de9",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
       "sourceDigests": [
-        "ed9b3d4670e66d8ba33d96072e3c6f096dd1473c8a97da17c4ad13f7879fe228"
+        "aca9d96783cb5ee5cfd6879ca22503b1b5d75962d912321c2acbf0cbda2c8939"
       ],
-      "description": "Deterministic vector evidence for Refresh After Adoption.",
-      "sha256": "4b1268c3833ec7221058b647145e30b80865f644892d3165132f0470bb1915ae"
+      "description": "Deterministic vector evidence from the production conversation path for Refresh After Adoption.",
+      "sha256": "d8f45286c6d3d626969cc5ca84ee99ad4eb5fade1c91f0dc448a7173a3a0349f"
     }
   ]
 }

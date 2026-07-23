@@ -41,7 +41,7 @@ test("issue 626 geometry pins identity, chronology, tool output, adoption, and 3
     "streaming-before-tool": ["outbox", "live"],
     "refresh-at-tool-transition": ["outbox", "live"],
     "partial-adoption": ["user", "commentary", "tool", "live"],
-    "refresh-after-adoption": ["user", "commentary", "tool", "commentary"],
+    "refresh-after-adoption": ["commentary", "user", "commentary", "mem-citation", "review", "outbox"],
   };
 
   for (const [key, evidence] of Object.entries(geometry)) {
@@ -50,10 +50,23 @@ test("issue 626 geometry pins identity, chronology, tool output, adoption, and 3
     expect(evidence.scrollWidth).toBeLessThanOrEqual(evidence.width + 1);
     expect(evidence.conversationId).toBe("conversation_issue_626");
     expect(evidence.launchId).toBe("launch_issue_626");
-    if (state === "partial-adoption" || state === "refresh-after-adoption") {
+    expect(evidence.productionWindow).toBe(true);
+    if (state === "partial-adoption") {
       expect(evidence.toolRows).toBe(1);
       expect(evidence.toolOutputVisible).toBe(true);
       expect(evidence.path).toContain("rollout-issue-626.jsonl");
+    } else if (state === "refresh-after-adoption") {
+      expect(evidence.path).toContain("rollout-issue-626.jsonl");
+      expect(evidence.tailLinesStart).toBeGreaterThan(0);
+      expect(evidence.tailLineCount).toBe(2500);
+      expect(evidence.liveItems).toBe(0);
+      expect(evidence.runtimeItems).toBe(42);
+      expect(evidence.runtimeOverflow).toBe(10);
+      expect(evidence.runtimeOmittedChars).toBeGreaterThan(0);
+      expect(evidence.reviewRows).toBe(1);
+      expect(evidence.citationRows).toBe(1);
+      expect(evidence.outboxEntries).toBe(1);
+      expect(evidence.unrelatedOutboxVisible).toBe(true);
     } else {
       expect(evidence.filesRevision).toBe("files revision 40");
       expect(evidence.path).toBe("spawn:launch_issue_626");
