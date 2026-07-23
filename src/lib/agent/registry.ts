@@ -181,6 +181,18 @@ export interface SpawnReceipt {
   /** Validated explicit operator project. Becomes durable conversation
       ownership at admission; `launchProfile.project` stays a hint. */
   explicitProject: string | null;
+  /** Durable launch DISPLAY payload (issue #614/#615), captured at receipt birth
+      — before any deferred delivery admission and before receipt publication — so
+      a surface that never ran the composer renders the first user bubble across
+      the WHOLE pre-transcript lifecycle: `starting` (before the held delivery
+      exists), and the delivered-but-scan-lagged interval after the held-delivery
+      text is scrubbed. `prompt` is the operator's RAW draft (user-facing); `echo`
+      is the delivered text (scaffold + draft for role launches) — the canonical
+      identity the transcript echoes, so the optimistic bubble retires on its real
+      message even when display text and delivered text differ. Set only on the
+      operator/UI launch path; successor and resume receipts never inherit it. The
+      projection stops emitting it in the response that adopts the live transcript. */
+  launchDisplay: { prompt: string; images: number; echo: string } | null;
   /** Cross-process CAS fence acquired before a failed launch is retried. */
   retryClaim?: { claimId: string; claimedAt: string };
 }
@@ -250,6 +262,10 @@ export interface SpawnRequest {
   /** Explicit operator project intent; validated and admitted as durable
       conversation ownership. Never inferred from sidebar selection. */
   explicitProject?: string | null;
+  /** Durable launch DISPLAY payload (issue #614/#615): the operator's raw prompt
+      (display), the delivered/scaffolded text (canonical echo identity), and the
+      image count. Only the operator/UI launch path supplies it. */
+  launchDisplay?: { prompt: string; images: number; echo: string } | null;
   memberships?: DurableMembershipInput[];
   conversationId?: ViewerConversationId;
   purpose?: SpawnReceipt["purpose"];
@@ -1996,12 +2012,27 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     rejection: normalizeSpawnRejection(value.rejection),
     launchProfile: emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }),
     explicitProject: validExplicitProject(value.explicitProject),
+    launchDisplay: normalizeLaunchDisplay(value.launchDisplay),
     ...(value.retryClaim
       && typeof value.retryClaim.claimId === "string"
       && typeof value.retryClaim.claimedAt === "string"
       ? { retryClaim: { claimId: value.retryClaim.claimId, claimedAt: value.retryClaim.claimedAt } }
       : {}),
   };
+}
+
+/** Validate a durable launch display payload (issue #614/#615) on load and at
+    admission. A malformed value degrades to null (the window falls back to the
+    held delivery), never a partial payload. `echo` defaults to `prompt` for
+    plain (scaffold-less) launches. */
+function normalizeLaunchDisplay(value: unknown): SpawnReceipt["launchDisplay"] {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as { prompt?: unknown; images?: unknown; echo?: unknown };
+  if (typeof candidate.prompt !== "string") return null;
+  const images = Number.isInteger(candidate.images) && (candidate.images as number) >= 0 ? candidate.images as number : 0;
+  const echo = typeof candidate.echo === "string" ? candidate.echo : candidate.prompt;
+  if (!candidate.prompt.trim() && !echo.trim() && images === 0) return null;
+  return { prompt: candidate.prompt, images, echo };
 }
 
 function normalizeAgentRole(value: unknown): string | null {
@@ -3178,6 +3209,7 @@ export class AgentRegistry {
         rejection,
         launchProfile: profile,
         explicitProject,
+        launchDisplay: normalizeLaunchDisplay(input.launchDisplay),
       };
       file.receipts[receipt.launchId] = receipt;
       /* A rejected launch persists exactly one terminal receipt: no lineage

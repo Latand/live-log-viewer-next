@@ -47,6 +47,13 @@ export interface OutboxEntry {
       drain of the operator's follow-up messages. It retires on its transcript
       echo like any other bubble. */
   launchOwned?: true;
+  /** The canonical text this bubble's transcript echo will carry (issue #615),
+      when it differs from the displayed {@link text}. A role launch DISPLAYS the
+      operator's raw draft but the transcript echoes the delivered scaffold-plus-
+      draft, so retirement matches THIS text while the bubble still shows the raw
+      draft. Absent ⇒ the display text is its own echo identity (plain launches
+      and ordinary composer sends). */
+  echoText?: string;
   /** Submission watermark (round-2 finding 2): how many transcript echoes of THIS
       exact text already existed when the entry was submitted. Retirement consumes
       only echoes BEYOND this baseline, so a freshly queued bubble survives a
@@ -173,10 +180,24 @@ export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">)
  * reached. The entry is `launchOwned` — delivered by the spawn, so it is never
  * dispatched and never blocks the operator's follow-up messages.
  */
-export function seedLaunchOutbox(cardId: string, entry: { id: string; text: string; images: number; at: number }): void {
+export function seedLaunchOutbox(
+  cardId: string,
+  entry: { id: string; text: string; images: number; at: number; echoText?: string },
+): void {
   if (!entry.text.trim() && !entry.images) return;
   const queue = readOutbox(cardId);
-  if (queue.some((item) => item.id === entry.id)) return;
+  const existing = queue.find((item) => item.id === entry.id);
+  if (existing) {
+    /* Reconcile the canonical echo identity onto an already-seeded bubble (issue
+       #615): the composer seeds the RAW draft first, without an echo identity (it
+       never composes the role scaffold); the later server projection supplies it.
+       Attach it while preserving the user-facing raw text and the bubble's current
+       state — one bubble, never a second. Idempotent once attached. */
+    if (entry.echoText && entry.echoText !== existing.echoText) {
+      write(cardId, queue.map((item) => (item.id === entry.id ? { ...item, echoText: entry.echoText } : item)));
+    }
+    return;
+  }
   const seeded: OutboxEntry = { ...entry, state: "delivering", launchOwned: true };
   write(cardId, [...queue, seeded].slice(-OUTBOX_LIMIT));
 }
@@ -279,7 +300,10 @@ export function visibleOutbox(
   const consumed = new Map<string, number>();
   const visible: OutboxEntry[] = [];
   for (const entry of queue) {
-    const key = echoKey(entry.text);
+    /* A bubble retires on ITS canonical transcript echo — the delivered text,
+       which for a role launch is the scaffold-plus-draft carried on `echoText`,
+       not the raw draft it displays (issue #615). */
+    const key = echoKey(entry.echoText ?? entry.text);
     const total = transcriptEchoCounts.get(key) ?? 0;
     /* Echoes below this floor belong to messages submitted before this entry
        (its own baseline) or to earlier queued siblings that already consumed
