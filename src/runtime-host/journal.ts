@@ -34,7 +34,12 @@ import {
   appendRuntimeLiveTurnDelta,
   completeRuntimeLiveTurnItem,
   normalizeRuntimeLiveTurn,
+  retireRuntimeLiveTurnItems,
 } from "@/lib/runtime/liveTurn";
+import {
+  mergeRuntimeCanonicalOwnership,
+  normalizeRuntimeCanonicalOwnership,
+} from "@/lib/runtime/canonicalOwnership";
 import { parseStructuredImageRefs, structuredContent } from "@/lib/runtime/structuredContent";
 import { runtimeImageCapability } from "@/lib/runtime/runtimeImageStore";
 
@@ -202,6 +207,7 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
   const key = record(payload.sessionKey);
   const capabilities = record(payload.capabilities);
   const liveTurn = normalizeRuntimeLiveTurn(payload.liveTurn);
+  const canonicalOwnership = normalizeRuntimeCanonicalOwnership(payload.canonicalOwnership);
   return {
     conversationId: typeof payload.conversationId === "string" ? payload.conversationId : id,
     sessionKey: {
@@ -234,6 +240,7 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
       : null,
     drift: payload.drift && typeof payload.drift === "object" ? payload.drift as RuntimeSession["drift"] : null,
     ...(liveTurn ? { liveTurn } : {}),
+    ...(canonicalOwnership ? { canonicalOwnership } : {}),
   };
 }
 
@@ -1580,6 +1587,18 @@ export class RuntimeJournal {
         ...previous,
         revision: event.revision,
         liveTurn,
+      }, event.seq);
+      return;
+    }
+    if (event.kind === "canonical-ownership") {
+      const previous = this.entity<RuntimeSession>("session", scope.id);
+      if (!previous) return;
+      const canonicalOwnership = mergeRuntimeCanonicalOwnership(previous.canonicalOwnership, payload);
+      this.upsertEntity("session", scope.id, event.revision, {
+        ...previous,
+        revision: event.revision,
+        liveTurn: retireRuntimeLiveTurnItems(previous.liveTurn, payload.assistantItemIds),
+        ...(canonicalOwnership ? { canonicalOwnership } : {}),
       }, event.seq);
       return;
     }

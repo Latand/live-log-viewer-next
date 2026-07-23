@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { chromium, type Browser } from "playwright-core";
@@ -28,7 +28,13 @@ import { LaunchChips } from "./LaunchChips";
 import { LiveTurnRows } from "./LiveTurnRows";
 import { OutboxBubblesView } from "./OutboxBubbles";
 import { visibleRuntimeLiveTurnItems } from "./liveTurnHandoff";
-import type { OutboxEntry } from "./outbox";
+import {
+  markOutboxCanonicalOwned,
+  reconcileOutbox,
+  resetOutboxForTests,
+  seedLaunchOutbox,
+  useOutbox,
+} from "./outbox";
 
 interface LifecycleFixture {
   identity: {
@@ -129,14 +135,6 @@ function feedAt(recordCount: number): FeedEntry[] {
 }
 
 const launchPrompt = "Investigate issue 626.";
-const outboxEntry: OutboxEntry = {
-  id: fixture.identity.launchId,
-  text: launchPrompt,
-  images: 0,
-  at: Date.parse("2026-07-23T09:00:00.000Z"),
-  state: "delivering",
-  launchOwned: true,
-};
 
 interface EvidenceState {
   id: string;
@@ -145,7 +143,6 @@ interface EvidenceState {
   filesRevision: number;
   path: string;
   launch: StructuredSpawnCardState;
-  outbox: boolean;
   expectedOrder: string[];
 }
 
@@ -171,7 +168,6 @@ const STATES: EvidenceState[] = [
     filesRevision: 40,
     path: fixture.identity.startingPath,
     launch: launchBase,
-    outbox: true,
     expectedOrder: ["outbox", "live"],
   },
   {
@@ -181,7 +177,6 @@ const STATES: EvidenceState[] = [
     filesRevision: 40,
     path: fixture.identity.startingPath,
     launch: { ...launchBase, state: "reconciling", initialMessage: "queued" },
-    outbox: true,
     expectedOrder: ["outbox", "live"],
   },
   {
@@ -191,7 +186,6 @@ const STATES: EvidenceState[] = [
     filesRevision: 41,
     path: fixture.identity.adoptedPath,
     launch: { ...launchBase, state: "live-late-success", initialMessage: "delivered" },
-    outbox: false,
     expectedOrder: ["user", "commentary", "tool", "live"],
   },
   {
@@ -201,7 +195,6 @@ const STATES: EvidenceState[] = [
     filesRevision: 41,
     path: fixture.identity.adoptedPath,
     launch: { ...launchBase, state: "live-late-success", initialMessage: "delivered" },
-    outbox: false,
     expectedOrder: ["user", "commentary", "tool", "commentary"],
   },
 ];
@@ -244,6 +237,7 @@ let browser: Browser;
 beforeEach(() => {
   setLocale("en");
   dom.sessionStorage.clear();
+  resetOutboxForTests();
 });
 
 afterEach(() => {
@@ -257,6 +251,49 @@ afterAll(async () => {
 function rowKind(item: FeedEntry["item"]): string {
   if (item.kind === "prose") return "commentary";
   return item.kind;
+}
+
+function EvidenceOutbox({ feed }: { feed: FeedEntry[] }) {
+  const queue = useOutbox(fixture.identity.conversationId);
+  useEffect(() => {
+    seedLaunchOutbox(fixture.identity.conversationId, {
+      id: fixture.identity.launchId,
+      text: launchPrompt,
+      images: 0,
+      at: Date.parse("2026-07-23T09:00:00.000Z"),
+      echoText: launchPrompt,
+    });
+  }, []);
+  const transcriptEchoCounts = new Map<string, number>();
+  for (const { item } of feed) {
+    if (item.kind !== "user" || !item.text.trim()) continue;
+    const text = item.text.trim();
+    transcriptEchoCounts.set(text, (transcriptEchoCounts.get(text) ?? 0) + 1);
+  }
+  const reconciliation = reconcileOutbox(
+    queue,
+    transcriptEchoCounts,
+    Date.parse("2026-07-23T09:05:00.000Z"),
+  );
+  const ownedKey = reconciliation.newlyOwnedEntryIds.join("\u0000");
+  useEffect(() => {
+    if (!reconciliation.newlyOwnedEntryIds.length) return;
+    markOutboxCanonicalOwned(
+      fixture.identity.conversationId,
+      reconciliation.newlyOwnedEntryIds,
+      Date.parse("2026-07-23T09:05:00.000Z"),
+    );
+  }, [ownedKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  return reconciliation.visible.length ? (
+    <div data-evidence-row="outbox">
+      <OutboxBubblesView
+        entries={reconciliation.visible}
+        t={(key) => key}
+        onCancel={() => {}}
+        onRetry={() => {}}
+      />
+    </div>
+  ) : null;
 }
 
 function EvidenceConversation({ state }: { state: EvidenceState }) {
@@ -282,16 +319,7 @@ function EvidenceConversation({ state }: { state: EvidenceState }) {
         <section data-log-feed-scroller className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-[920px] px-4 py-3 sm:px-6">
             <LaunchChips launch={state.launch} />
-            {state.outbox ? (
-              <div data-evidence-row="outbox">
-                <OutboxBubblesView
-                  entries={[outboxEntry]}
-                  t={(key) => key}
-                  onCancel={() => {}}
-                  onRetry={() => {}}
-                />
-              </div>
-            ) : null}
+            <EvidenceOutbox feed={feed} />
             {feed.map((entry) => (
               <div
                 key={entry.key}
@@ -366,6 +394,8 @@ test("issue 626 browser evidence preserves chronology, refresh handoff, tools, a
   const manifest: Record<string, GeometryEvidence> = {};
 
   for (const viewport of VIEWPORTS) {
+    dom.sessionStorage.clear();
+    resetOutboxForTests();
     for (const state of STATES) {
       const rendered = await renderState(state);
       const page = await browser.newPage({

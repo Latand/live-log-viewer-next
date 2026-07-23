@@ -1,5 +1,7 @@
 const LIVE_TURN_TEXT_LIMIT = 64 * 1024;
 const LIVE_TURN_ITEM_LIMIT = 32;
+const LIVE_TURN_OVERFLOW_TEXT_LIMIT = 256 * 1024;
+const LIVE_TURN_OVERFLOW_ITEM_LIMIT = 64;
 
 export type RuntimeLiveTurnItemPhase = "streaming" | "awaiting-echo";
 
@@ -17,6 +19,13 @@ export interface RuntimeLiveTurn {
   text: string;
   /** Assistant items awaiting canonical transcript ownership, in response order. */
   items?: RuntimeLiveTurnItem[];
+  /** Whole older items displaced from the active handoff window. */
+  overflowItems?: RuntimeLiveTurnItem[];
+  /** Bounded durable representation if the overflow tier itself fills. */
+  overflowSummary?: {
+    itemCount: number;
+    textLength: number;
+  };
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -62,9 +71,9 @@ function itemIdentity(value: unknown): { itemId: string | null; text: string } |
   };
 }
 
-function normalizedItems(value: RuntimeLiveTurn): RuntimeLiveTurnItem[] {
-  if (Array.isArray(value.items)) {
-    return value.items
+function normalizedItemList(value: unknown): RuntimeLiveTurnItem[] {
+  if (Array.isArray(value)) {
+    return value
       .filter((item) => item && typeof item.text === "string" && item.text.length > 0)
       .map((item) => ({
         itemId: typeof item.itemId === "string" ? item.itemId : null,
@@ -73,6 +82,31 @@ function normalizedItems(value: RuntimeLiveTurn): RuntimeLiveTurnItem[] {
         startedAt: typeof item.startedAt === "string" ? item.startedAt : null,
         completedAt: typeof item.completedAt === "string" ? item.completedAt : null,
       }));
+  }
+  return [];
+}
+
+function normalizedOverflowSummary(
+  value: RuntimeLiveTurn | null | undefined,
+): RuntimeLiveTurn["overflowSummary"] | undefined {
+  const summary = record(value?.overflowSummary);
+  const itemCount = summary?.itemCount;
+  const textLength = summary?.textLength;
+  return typeof itemCount === "number"
+    && Number.isSafeInteger(itemCount)
+    && itemCount > 0
+    && typeof textLength === "number"
+    && Number.isSafeInteger(textLength)
+    && textLength >= 0
+    ? { itemCount, textLength }
+    : undefined;
+}
+
+function normalizedItems(value: RuntimeLiveTurn): RuntimeLiveTurnItem[] {
+  const overflowItems = normalizedItemList(value.overflowItems);
+  const items = normalizedItemList(value.items);
+  if (overflowItems.length || items.length || Array.isArray(value.items) || Array.isArray(value.overflowItems)) {
+    return [...overflowItems, ...items];
   }
   return value.text
     ? [{
@@ -85,19 +119,46 @@ function normalizedItems(value: RuntimeLiveTurn): RuntimeLiveTurnItem[] {
     : [];
 }
 
-function bounded(turnId: string, items: RuntimeLiveTurnItem[]): RuntimeLiveTurn | null {
-  let kept = items.slice(-LIVE_TURN_ITEM_LIMIT);
-  let excess = kept.reduce((total, item) => total + item.text.length, 0) - LIVE_TURN_TEXT_LIMIT;
-  if (excess > 0) {
-    kept = kept.map((item) => {
-      if (excess <= 0) return item;
-      const trim = Math.min(excess, item.text.length);
-      excess -= trim;
-      return { ...item, text: item.text.slice(trim) };
-    }).filter((item) => item.text.length > 0);
+function bounded(
+  turnId: string,
+  items: RuntimeLiveTurnItem[],
+  existingSummary?: RuntimeLiveTurn["overflowSummary"],
+): RuntimeLiveTurn | null {
+  let activeStart = Math.max(0, items.length - LIVE_TURN_ITEM_LIMIT);
+  let activeTextLength = items
+    .slice(activeStart)
+    .reduce((total, item) => total + item.text.length, 0);
+  while (activeStart < items.length && activeTextLength > LIVE_TURN_TEXT_LIMIT) {
+    activeTextLength -= items[activeStart]!.text.length;
+    activeStart += 1;
   }
-  const latest = kept.at(-1);
-  return latest ? { turnId, text: latest.text, items: kept } : null;
+  const activeItems = items.slice(activeStart);
+  let overflowItems = items.slice(0, activeStart);
+  let overflowTextLength = overflowItems.reduce((total, item) => total + item.text.length, 0);
+  let droppedItemCount = existingSummary?.itemCount ?? 0;
+  let droppedTextLength = existingSummary?.textLength ?? 0;
+  while (
+    overflowItems.length > LIVE_TURN_OVERFLOW_ITEM_LIMIT
+    || overflowTextLength > LIVE_TURN_OVERFLOW_TEXT_LIMIT
+  ) {
+    const [removed, ...rest] = overflowItems;
+    if (!removed) break;
+    overflowItems = rest;
+    overflowTextLength -= removed.text.length;
+    droppedItemCount += 1;
+    droppedTextLength += removed.text.length;
+  }
+  const latest = activeItems.at(-1) ?? overflowItems.at(-1);
+  if (!latest && droppedItemCount === 0) return null;
+  return {
+    turnId,
+    text: latest?.text ?? "",
+    items: activeItems,
+    ...(overflowItems.length ? { overflowItems } : {}),
+    ...(droppedItemCount > 0
+      ? { overflowSummary: { itemCount: droppedItemCount, textLength: droppedTextLength } }
+      : {}),
+  };
 }
 
 function itemsForTurn(
@@ -117,16 +178,47 @@ export function normalizeRuntimeLiveTurn(value: unknown): RuntimeLiveTurn | null
   const live = record(value);
   const turnId = text(live?.turnId);
   const latestText = text(live?.text);
-  if (!turnId || (!latestText && !Array.isArray(live?.items))) return null;
-  return bounded(turnId, normalizedItems({
+  if (
+    !turnId
+    || (
+      !latestText
+      && !Array.isArray(live?.items)
+      && !Array.isArray(live?.overflowItems)
+      && !record(live?.overflowSummary)
+    )
+  ) return null;
+  const normalized = {
     turnId,
     text: latestText,
     items: Array.isArray(live?.items) ? live.items as RuntimeLiveTurnItem[] : undefined,
-  }));
+    overflowItems: Array.isArray(live?.overflowItems)
+      ? live.overflowItems as RuntimeLiveTurnItem[]
+      : undefined,
+    overflowSummary: record(live?.overflowSummary) as RuntimeLiveTurn["overflowSummary"],
+  };
+  return bounded(
+    turnId,
+    normalizedItems(normalized),
+    normalizedOverflowSummary(normalized),
+  );
 }
 
 export function runtimeLiveTurnItems(value: RuntimeLiveTurn | null | undefined): RuntimeLiveTurnItem[] {
   return value ? normalizedItems(value) : [];
+}
+
+export function retireRuntimeLiveTurnItems(
+  value: RuntimeLiveTurn | null | undefined,
+  itemIds: unknown,
+): RuntimeLiveTurn | null {
+  if (!value || !Array.isArray(itemIds)) return value ?? null;
+  const owned = new Set(itemIds.filter((item): item is string => typeof item === "string" && item.length > 0));
+  if (!owned.size) return value;
+  return bounded(
+    value.turnId,
+    normalizedItems(value).filter((item) => !item.itemId || !owned.has(item.itemId)),
+    normalizedOverflowSummary(value),
+  );
 }
 
 export function appendRuntimeLiveTurnDelta(
@@ -147,7 +239,7 @@ export function appendRuntimeLiveTurnDelta(
       startedAt: occurredAt,
       completedAt: null,
     }];
-  return bounded(turnId, items);
+  return bounded(turnId, items, normalizedOverflowSummary(value));
 }
 
 export function completeRuntimeLiveTurnItem(
@@ -167,11 +259,11 @@ export function completeRuntimeLiveTurnItem(
     const items = current.slice();
     items[existingIndex] = {
       ...existing,
-      text: existing.text || identity.text,
+      text: identity.text || existing.text,
       phase: "awaiting-echo",
       completedAt: occurredAt,
     };
-    return bounded(turnId, items);
+    return bounded(turnId, items, normalizedOverflowSummary(value));
   }
   const latest = current.at(-1);
   if (latest?.phase === "streaming") {
@@ -180,11 +272,11 @@ export function completeRuntimeLiveTurnItem(
       {
         ...latest,
         itemId: identity.itemId,
-        text: latest.text || identity.text,
+        text: identity.text || latest.text,
         phase: "awaiting-echo",
         completedAt: occurredAt,
       },
-    ]);
+    ], normalizedOverflowSummary(value));
   }
   if (!identity.text) return value ?? null;
   return bounded(turnId, [...current, {
@@ -193,5 +285,5 @@ export function completeRuntimeLiveTurnItem(
     phase: "awaiting-echo",
     startedAt: occurredAt,
     completedAt: occurredAt,
-  }]);
+  }], normalizedOverflowSummary(value));
 }

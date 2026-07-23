@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { Workflow } from "@/lib/workflows/types";
+import type { RuntimeCanonicalOwnership } from "@/lib/runtime/canonicalOwnership";
 import type { RuntimeLiveTurn } from "@/lib/runtime/liveTurn";
 import type { RuntimeImageCapability, StructuredImageRef } from "./structuredContent";
 
@@ -63,6 +64,7 @@ export type RuntimeEventKind =
   | "turn-started"
   | "turn-ended"
   | "item"
+  | "canonical-ownership"
   | "attention"
   | "attention-resolved"
   | "limits"
@@ -351,6 +353,8 @@ export interface RuntimeSession {
   activeTurnId: string | null;
   pendingReconfigure?: RuntimePendingReconfigure | null;
   drift?: RuntimeDrift | null;
+  /** Durable canonical claims used to retire fresh-session optimistic rows. */
+  canonicalOwnership?: RuntimeCanonicalOwnership;
   /** In-flight assistant text accumulated from live `delta` events, rendered
       as a streaming bubble until the transcript materializes the item. */
   liveTurn?: RuntimeLiveTurn | null;

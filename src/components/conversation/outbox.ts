@@ -64,6 +64,10 @@ export interface OutboxEntry {
       lands. Absent (legacy/reloaded entries) ⇒ baseline 0, preserving the prior
       "retire once the text is present" reload behaviour. */
   echoBaseline?: number;
+  /** This entry's canonical transcript echo was observed. The observation is
+      monotonic and persists through tail eviction and page refresh while its
+      server-side ownership receipt converges. */
+  canonicalOwnedAt?: number;
 }
 
 /**
@@ -225,6 +229,23 @@ export function markOutboxResponded(cardId: string, id: string, at: number): voi
   } : item)));
 }
 
+/** Persist canonical transcript ownership for entries observed by LogFeed. */
+export function markOutboxCanonicalOwned(
+  cardId: string,
+  ids: readonly string[],
+  at: number,
+): void {
+  if (!ids.length) return;
+  const owned = new Set(ids);
+  const queue = readOutbox(cardId);
+  if (!queue.some((entry) => owned.has(entry.id) && entry.canonicalOwnedAt === undefined)) return;
+  write(cardId, queue.map((entry) =>
+    owned.has(entry.id) && entry.canonicalOwnedAt === undefined
+      ? { ...entry, canonicalOwnedAt: at }
+      : entry,
+  ));
+}
+
 /** Remove an entry outright — the operator cancelled a message that never left. */
 export function cancelOutbox(cardId: string, id: string): void {
   const queue = readOutbox(cardId);
@@ -327,13 +348,22 @@ export function useTranscriptEchoes(cardId: string): TranscriptEchoCounts {
  * `transcriptEchoCounts` maps each trimmed transcript user-text to its occurrence
  * count in the rendered transcript.
  */
-export function visibleOutbox(
+export interface OutboxReconciliation {
+  visible: OutboxEntry[];
+  newlyOwnedEntryIds: string[];
+}
+
+const EMPTY_OWNED_ENTRY_IDS: ReadonlySet<string> = new Set();
+
+export function reconcileOutbox(
   queue: readonly OutboxEntry[],
   transcriptEchoCounts: TranscriptEchoCounts,
   nowMs: number,
-): OutboxEntry[] {
+  durableOwnedEntryIds: ReadonlySet<string> = EMPTY_OWNED_ENTRY_IDS,
+): OutboxReconciliation {
   const consumed = new Map<string, number>();
   const visible: OutboxEntry[] = [];
+  const newlyOwnedEntryIds: string[] = [];
   for (const entry of queue) {
     /* A bubble retires on ITS canonical transcript echo — the delivered text,
        which for a role launch is the scaffold-plus-draft carried on `echoText`,
@@ -344,8 +374,13 @@ export function visibleOutbox(
        (its own baseline) or to earlier queued siblings that already consumed
        them — neither retires this bubble. */
     const floor = Math.max(entry.echoBaseline ?? 0, consumed.get(key) ?? 0);
+    if (entry.canonicalOwnedAt !== undefined || durableOwnedEntryIds.has(entry.id)) {
+      consumed.set(key, floor + 1);
+      continue;
+    }
     if (total > floor) {
       consumed.set(key, floor + 1);
+      newlyOwnedEntryIds.push(entry.id);
       continue;
     }
     if (entry.responseStartedAt !== undefined) continue;
@@ -355,7 +390,16 @@ export function visibleOutbox(
     }
     visible.push(entry);
   }
-  return visible;
+  return { visible, newlyOwnedEntryIds };
+}
+
+export function visibleOutbox(
+  queue: readonly OutboxEntry[],
+  transcriptEchoCounts: TranscriptEchoCounts,
+  nowMs: number,
+  durableOwnedEntryIds: ReadonlySet<string> = EMPTY_OWNED_ENTRY_IDS,
+): OutboxEntry[] {
+  return reconcileOutbox(queue, transcriptEchoCounts, nowMs, durableOwnedEntryIds).visible;
 }
 
 /** Submitted texts newest first, for empty-composer ArrowUp/ArrowDown recall:

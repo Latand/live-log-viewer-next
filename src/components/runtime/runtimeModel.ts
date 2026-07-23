@@ -25,8 +25,13 @@ import type { Workflow } from "@/lib/workflows/types";
 import type { RuntimePendingReconfigure, RuntimeSettingsCapability, ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 import {
+  mergeRuntimeCanonicalOwnership,
+  type RuntimeCanonicalOwnership,
+} from "@/lib/runtime/canonicalOwnership";
+import {
   appendRuntimeLiveTurnDelta,
   completeRuntimeLiveTurnItem,
+  retireRuntimeLiveTurnItems,
   type RuntimeLiveTurn,
 } from "@/lib/runtime/liveTurn";
 
@@ -109,6 +114,7 @@ export type RuntimeEventKind =
   | "turn-started"
   | "turn-ended"
   | "item"
+  | "canonical-ownership"
   | "attention"
   | "attention-resolved"
   | "limits"
@@ -251,6 +257,7 @@ export interface RuntimeSession {
   pendingReconfigure?: RuntimePendingReconfigure | null;
   /** Unresolved drift notice, if any. */
   drift?: RuntimeDrift | null;
+  canonicalOwnership?: RuntimeCanonicalOwnership;
   /** In-flight assistant text accumulated from live `delta` events, rendered
       as a streaming bubble until the transcript materializes the item. */
   liveTurn?: RuntimeLiveTurn | null;
@@ -521,6 +528,23 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
           env.occurredAt ?? env.recordedAt ?? null,
         ),
       }));
+      break;
+    }
+    case "canonical-ownership": {
+      const p = env.payload as {
+        conversationId?: string;
+        assistantItemIds?: unknown;
+        launchOutboxIds?: unknown;
+        outboxEntryIds?: unknown;
+      };
+      updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => {
+        const canonicalOwnership = mergeRuntimeCanonicalOwnership(s.canonicalOwnership, p);
+        return {
+          ...s,
+          liveTurn: retireRuntimeLiveTurnItems(s.liveTurn, p.assistantItemIds),
+          ...(canonicalOwnership ? { canonicalOwnership } : {}),
+        };
+      });
       break;
     }
     case "turn-ended": {

@@ -147,14 +147,13 @@ describe("live turn delta buffering", () => {
     let store = installSnapshot(snapshot());
     store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, { conversationId: "conv_a", turnId: "t1" }));
     store = apply(store, env("delta", { type: "session", id: "conv_a" }, 5, { conversationId: "conv_a", turnId: "t1", text: "Hel" }));
-    store = apply(store, env("delta", { type: "session", id: "conv_a" }, 6, { conversationId: "conv_a", turnId: "t1", text: "lo" }));
-    expect(store.sessions["conv_a"]?.liveTurn).toMatchObject({ turnId: "t1", text: "Hello" });
-    store = apply(store, env("item", { type: "session", id: "conv_a" }, 7, {
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, {
       conversationId: "conv_a",
       turnId: "t1",
       phase: "completed",
       item: { type: "agentMessage", id: "assistant-one", text: "Hello" },
     }));
+    expect(store.sessions["conv_a"]?.liveTurn).toMatchObject({ turnId: "t1", text: "Hello" });
     expect(store.sessions["conv_a"]?.liveTurn?.items).toEqual([
       expect.objectContaining({
         itemId: "assistant-one",
@@ -162,9 +161,9 @@ describe("live turn delta buffering", () => {
         phase: "awaiting-echo",
       }),
     ]);
-    store = apply(store, env("delta", { type: "session", id: "conv_a" }, 8, { conversationId: "conv_a", turnId: "t1", text: "more" }));
+    store = apply(store, env("delta", { type: "session", id: "conv_a" }, 7, { conversationId: "conv_a", turnId: "t1", text: "more" }));
     expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("more");
-    store = apply(store, env("turn-ended", { type: "session", id: "conv_a" }, 9, { conversationId: "conv_a", turnId: "t1", outcome: "completed" }));
+    store = apply(store, env("turn-ended", { type: "session", id: "conv_a" }, 8, { conversationId: "conv_a", turnId: "t1", outcome: "completed" }));
     expect(store.sessions["conv_a"]?.liveTurn?.items).toHaveLength(2);
   });
 
@@ -174,6 +173,40 @@ describe("live turn delta buffering", () => {
     store = apply(store, env("delta", { type: "session", id: "conv_a" }, 5, { conversationId: "conv_a", turnId: "t1", text: "streaming" }));
     store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, { conversationId: "conv_a", turnId: "t1", phase: "started", item: {} }));
     expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("streaming");
+  });
+
+  test("canonical ownership removes the matching handoff and projects durable outbox ids", () => {
+    let store = installSnapshot(snapshot({
+      sessions: [session({
+        conversationId: "conv_a",
+        revision: 3,
+        liveTurn: {
+          turnId: "t1",
+          text: "canonical response",
+          items: [{
+            itemId: "assistant-one",
+            text: "canonical response",
+            phase: "awaiting-echo",
+            startedAt: "2026-07-23T12:00:00.000Z",
+            completedAt: "2026-07-23T12:00:01.000Z",
+          }],
+        },
+      })],
+    }));
+    store = apply(store, env("canonical-ownership", { type: "session", id: "conv_a" }, 4, {
+      conversationId: "conv_a",
+      assistantItemIds: ["assistant-one"],
+      launchOutboxIds: ["launch-one"],
+      outboxEntryIds: ["queued-one"],
+    }));
+
+    expect(store.sessions["conv_a"]).toMatchObject({
+      liveTurn: null,
+      canonicalOwnership: {
+        launchOutboxIds: ["launch-one"],
+        outboxEntryIds: ["queued-one"],
+      },
+    });
   });
 });
 

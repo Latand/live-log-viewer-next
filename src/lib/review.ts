@@ -11,6 +11,8 @@ export interface ReviewFinding {
 export interface ReviewCardItem {
   kind: "review";
   ts: unknown;
+  /** Canonical assistant response identity when projected from a transcript row. */
+  sourceId?: string;
   verdict?: "REQUEST_CHANGES" | "APPROVE" | "COMMENT";
   findings: ReviewFinding[];
   summary: string[];

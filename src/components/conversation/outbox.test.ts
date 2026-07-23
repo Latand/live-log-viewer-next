@@ -5,6 +5,7 @@ import {
   adoptOutbox,
   cancelOutbox,
   enqueueOutbox,
+  markOutboxCanonicalOwned,
   markOutboxResponded,
   nextDispatch,
   outboxHistory,
@@ -12,6 +13,7 @@ import {
   outboxStateForReceiptStatus,
   publishTranscriptEchoes,
   readOutbox,
+  reconcileOutbox,
   resetOutboxForTests,
   seedLaunchOutbox,
   transcriptEchoCount,
@@ -118,6 +120,45 @@ test("queued / delivering / launch-owned bubbles stay until their echo lands, ne
   expect(visibleOutbox([queued, delivering, launch], echoes(), far)).toHaveLength(3);
   /* Each retires only on its own echo. */
   expect(visibleOutbox([queued, delivering, launch], echoes("the launch prompt"), far).map((e) => e.id)).toEqual(["k1", "k2"]);
+});
+
+test("issue 626 canonical retirement survives echo eviction and refresh while unrelated queued work stays visible", () => {
+  const conversationId = "conversation-626";
+  seedLaunchOutbox(conversationId, {
+    id: "launch-626",
+    text: "initial prompt",
+    images: 0,
+    at: 1_000,
+  });
+  enqueueOutbox(conversationId, {
+    id: "queued-626",
+    text: "unrelated follow-up",
+    images: 0,
+    at: 2_000,
+  });
+
+  const adopted = reconcileOutbox(
+    readOutbox(conversationId),
+    echoes("initial prompt"),
+    3_000,
+    new Set(),
+  );
+  expect(adopted.visible.map((entry) => entry.id)).toEqual(["queued-626"]);
+  expect(adopted.newlyOwnedEntryIds).toEqual(["launch-626"]);
+  markOutboxCanonicalOwned(conversationId, adopted.newlyOwnedEntryIds, 3_000);
+
+  resetOutboxForTests();
+  const refreshed = readOutbox(conversationId);
+  const afterTailEviction = reconcileOutbox(
+    refreshed,
+    echoes(),
+    4_000,
+    new Set(["launch-626"]),
+  );
+  expect(refreshed.find((entry) => entry.id === "launch-626"))
+    .toMatchObject({ canonicalOwnedAt: 3_000 });
+  expect(afterTailEviction.visible.map((entry) => entry.id)).toEqual(["queued-626"]);
+  expect(afterTailEviction.newlyOwnedEntryIds).toEqual([]);
 });
 
 test("assistant reply evidence settles and retires its delivering outbox bubble", () => {

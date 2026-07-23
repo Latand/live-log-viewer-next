@@ -906,6 +906,72 @@ describe("Codex assistant prose coalescing", () => {
   });
 });
 
+test("issue 626 preserves response identity through review, citation, and blob projections", () => {
+  const citation = [
+    "<oai-mem-citation>",
+    "<citation_entries>",
+    "MEMORY.md:1-1|note=[identity projection]",
+    "</citation_entries>",
+    "<rollout_ids>",
+    "</rollout_ids>",
+    "</oai-mem-citation>",
+  ].join("\n");
+  const records = [
+    {
+      id: "structured-review-626",
+      text: "VERDICT: APPROVE\nNO FINDINGS",
+    },
+    {
+      id: "structured-citation-626",
+      text: citation,
+    },
+    {
+      id: "structured-blob-626",
+      text: "A".repeat(20_001),
+    },
+  ].map(({ id, text }, index) => JSON.stringify({
+    type: "response_item",
+    timestamp: `2026-07-23T12:00:0${index}.000Z`,
+    payload: {
+      type: "message",
+      id,
+      role: "assistant",
+      content: [{ type: "output_text", text }],
+    },
+  }));
+
+  const items = buildFeed(codexFile, records, false, "").items;
+  expect(items.map((item) => item.kind)).toEqual(["review", "mem-citation", "blob"]);
+  expect(items.map((item) => "sourceId" in item ? item.sourceId : undefined)).toEqual([
+    "structured-review-626",
+    "structured-citation-626",
+    "structured-blob-626",
+  ]);
+});
+
+test("issue 626 exposes canonical response ownership even when a display filter hides the row", () => {
+  const sourceId = "filtered-assistant-626";
+  const session = createFeedSession({
+    engine: "codex",
+    fmt: "codex",
+    showSvc: false,
+    lineFilter: "a filter that misses the payload",
+  });
+  const snapshot = session.feed([JSON.stringify({
+    type: "response_item",
+    timestamp: "2026-07-23T12:30:00.000Z",
+    payload: {
+      type: "message",
+      id: sourceId,
+      role: "assistant",
+      content: [{ type: "output_text", text: "Canonical despite the active filter." }],
+    },
+  })], 0, false);
+
+  expect(snapshot.items).toEqual([]);
+  expect(snapshot.canonicalAssistantItemIds).toEqual([sourceId]);
+});
+
 describe("Codex functions.exec orchestration", () => {
   const orch = (input: string, callId: string, ts = "t") =>
     JSON.stringify({ type: "response_item", timestamp: ts, payload: { type: "custom_tool_call", id: "ctc-" + callId, call_id: callId, name: "exec", status: "completed", input } });

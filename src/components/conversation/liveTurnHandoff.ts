@@ -18,26 +18,50 @@ function timestamp(value: unknown): number | null {
 }
 
 function canonicalAssistantItems(feed: readonly FeedEntry[]): CanonicalAssistantItem[] {
-  return feed.flatMap(({ item }) => item.kind === "prose"
-    ? [{
+  return feed.flatMap(({ item }) => {
+    if (item.kind === "prose") {
+      return [{
       sourceId: item.sourceId ?? null,
       text: item.text.trim(),
       at: timestamp(item.ts),
-    }]
-    : []);
+      }];
+    }
+    if (
+      (item.kind === "review" || item.kind === "mem-citation" || item.kind === "blob")
+      && item.sourceId
+    ) {
+      return [{
+        sourceId: item.sourceId,
+        text: "",
+        at: item.kind === "review" ? timestamp(item.ts) : null,
+      }];
+    }
+    return [];
+  });
 }
 
 /**
  * Canonical transcript rows claim completed live items by response identity.
  * Older engine records without ids use a timestamp-fenced text echo.
  */
-export function visibleRuntimeLiveTurnItems(
+export interface RuntimeLiveTurnReconciliation {
+  visible: RuntimeLiveTurnItem[];
+  newlyOwnedItemIds: string[];
+}
+
+export function reconcileRuntimeLiveTurnItems(
   liveTurn: RuntimeLiveTurn | null | undefined,
   feed: readonly FeedEntry[],
-): RuntimeLiveTurnItem[] {
+  canonicalAssistantItemIds: readonly string[] = [],
+): RuntimeLiveTurnReconciliation {
   const canonical = canonicalAssistantItems(feed);
+  const visibleSourceIds = new Set(canonical.flatMap((item) => item.sourceId ? [item.sourceId] : []));
+  for (const sourceId of canonicalAssistantItemIds) {
+    if (!visibleSourceIds.has(sourceId)) canonical.push({ sourceId, text: "", at: null });
+  }
   const claimed = new Set<number>();
-  return runtimeLiveTurnItems(liveTurn).filter((live) => {
+  const newlyOwnedItemIds: string[] = [];
+  const visible = runtimeLiveTurnItems(liveTurn).filter((live) => {
     if (live.phase === "streaming") return true;
     let owner = live.itemId
       ? canonical.findIndex((item, index) => !claimed.has(index) && item.sourceId === live.itemId)
@@ -52,6 +76,15 @@ export function visibleRuntimeLiveTurnItems(
     }
     if (owner < 0) return true;
     claimed.add(owner);
+    if (live.itemId) newlyOwnedItemIds.push(live.itemId);
     return false;
   });
+  return { visible, newlyOwnedItemIds };
+}
+
+export function visibleRuntimeLiveTurnItems(
+  liveTurn: RuntimeLiveTurn | null | undefined,
+  feed: readonly FeedEntry[],
+): RuntimeLiveTurnItem[] {
+  return reconcileRuntimeLiveTurnItems(liveTurn, feed).visible;
 }

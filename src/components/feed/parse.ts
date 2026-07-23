@@ -148,6 +148,8 @@ export type CitationEntry = {
 };
 export type MemCitationItem = {
   kind: "mem-citation";
+  /** Canonical assistant response identity when projected from a transcript row. */
+  sourceId?: string;
   entries: CitationEntry[];
   rolloutIds: string[];
   raw: string;
@@ -202,7 +204,7 @@ export type Item =
   | { kind: "think"; text: string }
   | { kind: "image"; media: string; data: string; w?: number; h?: number; bytes?: number }
   | { kind: "inbox-image"; name: string; path: string }
-  | { kind: "blob"; bytes: number; text: string }
+  | { kind: "blob"; bytes: number; text: string; sourceId?: string }
   | { kind: "sysmsg"; label: string; text: string }
   | { kind: "compact"; ts: unknown; trigger?: string; preTokens?: number; summary?: string }
   | { kind: "raw"; text: string; err: boolean };
@@ -219,6 +221,9 @@ export interface FeedEntry {
 export interface FeedSnapshot {
   items: FeedEntry[];
   hiddenServiceCount: number;
+  /** Canonical assistant response ids present in the retained source window,
+      including rows hidden by the current display filter. */
+  canonicalAssistantItemIds: string[];
 }
 
 export interface FeedSessionConfig {
@@ -1120,6 +1125,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   /* Hidden service rows are counted, not stored; per-line counts let the
      total shrink when their source lines slide out of the window. */
   const hiddenSvcBySrc = new Map<number, number>();
+  const canonicalAssistantIdsBySrc = new Map<number, string[]>();
   let hiddenServiceCount = 0;
   let pushSeq = 0;
   let curSrc = 0;
@@ -1157,9 +1163,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     return pushSeq++;
   };
 
-  const pushBlobIfHuge = (text: string): boolean => {
+  const pushBlobIfHuge = (text: string, sourceId?: string): boolean => {
     if (!looksLikeBlob(text)) return false;
-    push({ kind: "blob", bytes: text.length, text: redactSecrets(text).slice(0, BLOB_KEEP) });
+    push({
+      kind: "blob",
+      bytes: text.length,
+      text: redactSecrets(text).slice(0, BLOB_KEEP),
+      ...(sourceId ? { sourceId } : {}),
+    });
     return true;
   };
   const pushImage = (block: Record<string, unknown>, fileWrap: Record<string, unknown>) => {
@@ -1185,14 +1196,25 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
      style (prose vs user). Returns true when at least one card was produced.
      `emit` defaults to the session store; the pending-plain-block preview passes
      a transient collector instead. */
-  const pushStructured = (ts: unknown, text: string, fallback: (segment: string) => void, emit: (item: Item) => void = push): boolean => {
+  const pushStructured = (
+    ts: unknown,
+    text: string,
+    fallback: (segment: string) => void,
+    emit: (item: Item) => void = push,
+    sourceId?: string,
+  ): boolean => {
+    const emitAssistantItem = (item: Item) => emit(
+      sourceId && (item.kind === "review" || item.kind === "mem-citation")
+        ? { ...item, sourceId }
+        : item,
+    );
     MEM_CITATION_RE.lastIndex = 0;
     const hasCitation = MEM_CITATION_RE.test(text);
     MEM_CITATION_RE.lastIndex = 0;
     if (!hasCitation) {
       const review = parseReview(text.trim(), ts);
       if (!review) return false;
-      emit(review);
+      emitAssistantItem(review);
       return true;
     }
     let handled = false;
@@ -1202,7 +1224,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (!trimmed) return;
       const review = parseReview(trimmed, ts);
       if (review) {
-        emit(review);
+        emitAssistantItem(review);
         handled = true;
       } else {
         fallback(trimmed);
@@ -1212,7 +1234,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       const whole = match[0];
       const index = match.index ?? 0;
       pushTextPart(text.slice(last, index));
-      emit(parseMemCitation(whole, match[1] ?? "", match[2] ?? ""));
+      emitAssistantItem(parseMemCitation(whole, match[1] ?? "", match[2] ?? ""));
       handled = true;
       last = index + whole.length;
     }
@@ -1239,7 +1261,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   ): { firstSeq: number; lastSeq: number } | null => {
     if (!text.trim()) return null;
     const firstSeq = pushSeq;
-    if (pushBlobIfHuge(text)) return { firstSeq, lastSeq: pushSeq - 1 };
+    if (pushBlobIfHuge(text, sourceId)) return { firstSeq, lastSeq: pushSeq - 1 };
     const engine = cfg.engine === "codex" ? "codex" : "claude";
     if (pushStructured(ts, text, (segment) => push({
       kind: "prose",
@@ -1247,7 +1269,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       text: segment,
       engine,
       ...(sourceId ? { sourceId } : {}),
-    }))) {
+    }), push, sourceId)) {
       return { firstSeq, lastSeq: pushSeq - 1 };
     }
     push({ kind: "prose", ts, text, engine, ...(sourceId ? { sourceId } : {}) });
@@ -2016,19 +2038,51 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (pushBlobIfHuge(line)) return;
     push({ kind: "raw", text: redactSecrets(line), err: /error|failed|traceback|exception/i.test(line) });
   };
+
+  const observeCanonicalAssistantIdentity = (obj: Record<string, unknown>) => {
+    if (cfg.fmt === "codex" && obj.type === "response_item") {
+      const payload = rec(obj.payload);
+      const sourceId = textPart(payload.id);
+      const assistantText = payload.type === "message" && payload.role === "assistant"
+        ? normalizeCodexUserContent(payload.content).text
+        : "";
+      if (sourceId && assistantText) {
+        canonicalAssistantIdsBySrc.set(curSrc, [sourceId]);
+        snapshot = null;
+      }
+      return;
+    }
+    if (cfg.fmt === "claude" && obj.type === "assistant" && obj.message) {
+      const sourceId = textPart(obj.uuid);
+      const hasAssistantText = arr(rec(obj.message).content)
+        .some((part) => part.type === "text" && textPart(part.text).trim());
+      if (sourceId && hasAssistantText) {
+        canonicalAssistantIdsBySrc.set(curSrc, [sourceId]);
+        snapshot = null;
+      }
+    }
+  };
+
   const consume = (line: string) => {
-    if (lineFilter && !line.toLowerCase().includes(lineFilter)) return;
     if (jsonl) {
       try {
         const obj = JSON.parse(line);
         if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+          observeCanonicalAssistantIdentity(obj);
+          if (lineFilter && !line.toLowerCase().includes(lineFilter)) return;
           if (cfg.fmt === "claude") renderClaude(obj);
           else renderCodex(obj);
-        } else addRecord(null, "malformed_record", { value: obj });
+        } else if (!lineFilter || line.toLowerCase().includes(lineFilter)) {
+          addRecord(null, "malformed_record", { value: obj });
+        }
       } catch {
-        addRecord(null, "malformed_record", { source: line });
+        if (!lineFilter || line.toLowerCase().includes(lineFilter)) {
+          addRecord(null, "malformed_record", { source: line });
+        }
       }
-    } else renderPlain(line);
+    } else if (!lineFilter || line.toLowerCase().includes(lineFilter)) {
+      renderPlain(line);
+    }
   };
 
   const reset = () => {
@@ -2038,6 +2092,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     tmsgSeqs.clear();
     tmsgKeyBySeq.clear();
     hiddenSvcBySrc.clear();
+    canonicalAssistantIdsBySrc.clear();
     hiddenServiceCount = 0;
     codexAssistantRecord = null;
     pendingCodexUsers = [];
@@ -2074,6 +2129,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (src >= start) break;
       hiddenServiceCount -= count;
       hiddenSvcBySrc.delete(src);
+      snapshot = null;
+    }
+    for (const src of canonicalAssistantIdsBySrc.keys()) {
+      if (src >= start) break;
+      canonicalAssistantIdsBySrc.delete(src);
       snapshot = null;
     }
     if (codexAssistantRecord && codexAssistantRecord.src < start) codexAssistantRecord = null;
@@ -2176,7 +2236,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     }
     prevGroups = nextGroups;
     pendingPlainItems().forEach((item, idx) => out.push({ anchorKey: null, key: "pb" + idx, item }));
-    return { items: out, hiddenServiceCount };
+    return {
+      items: out,
+      hiddenServiceCount,
+      canonicalAssistantItemIds: [...new Set(Array.from(canonicalAssistantIdsBySrc.values()).flat())],
+    };
   };
 
   const feed = (lines: string[], start: number, isLive: boolean): FeedSnapshot => {
