@@ -29,6 +29,7 @@ import {
   transcriptEchoCount,
   updateOutbox,
   useOutbox,
+  useTranscriptEchoes,
   type OutboxEntry,
   type OutboxState,
 } from "./conversation/outbox";
@@ -1008,6 +1009,10 @@ export function TmuxComposer({
      moment they are submitted, so the feed can render them as optimistic user
      bubbles while the composer clears and stays typable. */
   const outbox = useOutbox(cardId);
+  /* Exact transcript user echoes are the authoritative retirement signal for
+     temporary delivered rows. The feed publishes them reactively because the
+     transcript write commonly precedes the final delivered receipt. */
+  const transcriptEchoCounts = useTranscriptEchoes(cardId);
   /* Attachment bytes for queued submissions. Memory-only: a refresh restores
      the queue's text but not its images, and the restore path marks any
      image-bearing entry as needing re-attachment rather than silently sending
@@ -1076,7 +1081,13 @@ export function TmuxComposer({
      quiet one-line echoes derived from the receipt stream (issue #264 rule 2).
      They self-clear the moment the transcript grows — the bubble in the feed
      is the real confirmation — so success never accumulates chrome. */
-  const echoedReceipts = deliveryEchoes(displayedRuntimeReceipts, file.mtime * 1000, dismissedReceipts, nowMs());
+  const echoedReceipts = deliveryEchoes(
+    displayedRuntimeReceipts,
+    file.mtime * 1000,
+    dismissedReceipts,
+    nowMs(),
+    transcriptEchoCounts,
+  );
 
   const persistPendingDeliveries = (next: PendingDelivery[]) => {
     pendingDeliveries.current = next;

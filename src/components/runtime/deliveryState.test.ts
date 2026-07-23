@@ -133,6 +133,32 @@ test("a delivered send echoes only until the transcript grows past the delivery 
   expect(deliveryEchoes([delivered], staleMtime, new Set(["op-echo"]), now)).toEqual([]);
 });
 
+test("an exact feed echo retires a delivered row while queued and delivering receipts stay active", () => {
+  const now = Date.parse("2026-07-18T10:00:05.000Z");
+  const text = "already visible in the feed";
+  const delivered = receipt({
+    operationId: "op-delivered",
+    status: "delivered",
+    text,
+    at: "2026-07-18T10:00:04.000Z",
+  });
+  const active = [
+    receipt({ operationId: "op-queued", status: "queued", text: "waiting in queue" }),
+    receipt({ operationId: "op-delivering", status: "delivering", text: "on the wire" }),
+  ];
+
+  /* Production ordering writes the transcript user bubble before the runtime
+     receipt reaches `delivered`, so mtime alone can remain older than receipt.at. */
+  expect(deliveryEchoes(
+    [delivered],
+    Date.parse("2026-07-18T10:00:03.000Z"),
+    new Set(),
+    now,
+    new Map([[text, 1]]),
+  )).toEqual([]);
+  expect(deliveryAttemptGroups(active).map((group) => group.current.status)).toEqual(["queued", "delivering"]);
+});
+
 test("active, problem, and interrupted receipts never echo", () => {
   const now = Date.parse("2026-07-18T10:00:05.000Z");
   const mtime = 0;

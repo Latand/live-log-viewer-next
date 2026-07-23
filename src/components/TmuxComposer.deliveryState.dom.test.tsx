@@ -68,6 +68,7 @@ afterAll(() => {
   mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
 });
 
+const { publishTranscriptEchoes, resetOutboxForTests } = await import("./conversation/outbox");
 const { RuntimeComposerReceipts, TmuxComposer } = await import("./TmuxComposer");
 
 const realFetch = globalThis.fetch;
@@ -79,6 +80,7 @@ afterEach(() => {
   document.body.replaceChildren();
   localStorage.clear();
   sessionStorage.clear();
+  resetOutboxForTests();
 });
 
 const receipt = (overrides: Partial<RuntimeReceipt> & { operationId: string }): RuntimeReceipt => ({
@@ -242,7 +244,7 @@ test("a dismissed failure stays dismissed across a composer remount", async () =
   await act(async () => second.root.unmount());
 });
 
-test("a delivered send shows one quiet echo line that clears when the bubble lands in the feed", async () => {
+test("a delivered send shows one quiet echo line that clears when the exact bubble lands in the feed", async () => {
   setLocale("uk");
   mockTargets();
   const delivered = receipt({ operationId: "op-echo", status: "delivered", text: "я хочу стрілочками переміщатися" });
@@ -258,8 +260,9 @@ test("a delivered send shows one quiet echo line that clears when the bubble lan
   expect(host.querySelector("[data-receipt-status]")).toBeNull();
   expect(host.querySelector("[data-runtime-receipt-stack]")).toBeNull();
 
-  // The transcript grew past the delivery moment — the bubble is the receipt.
-  await settle(() => root.render(<TmuxComposer file={file((Date.now() + 5_000) / 1000)} />));
+  // The exact transcript bubble is authoritative even when its mtime predates
+  // the final delivered receipt.
+  await settle(() => publishTranscriptEchoes("conv-quiet", new Map([[delivered.text!, 1]])));
   expect(host.querySelector("[data-delivery-echo]")).toBeNull();
   await act(async () => root.unmount());
 });

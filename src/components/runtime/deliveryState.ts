@@ -97,25 +97,27 @@ export function visibleStandaloneReceipts(
     && !(receiptIsTerminal(receipt.status) && dismissed.has(receipt.operationId)));
 }
 
-/** The echo self-clears once the transcript grows past the delivery moment
-    (small grace: the bubble's write IS what bumps the mtime). */
+/** The mtime fallback self-clears an echo once the transcript grows past the
+    delivery moment (small grace: the bubble's write bumps the mtime). */
 export const DELIVERY_ECHO_MTIME_GRACE_MS = 2_000;
 /** Hard cap so a conversation whose transcript never grows again (finished
     pane, lost poll) cannot keep echoes around forever. */
 export const DELIVERY_ECHO_TTL_MS = 10 * 60_000;
+const EMPTY_TRANSCRIPT_ECHO_COUNTS: ReadonlyMap<string, number> = new Map();
 
 /**
  * Successful sends whose bubble has not landed in the visible feed yet: the
  * quiet one-line echo above the composer (rule 2). Derived, never stored — one
- * echo per idempotency key, only while the receipt's delivery moment is newer
- * than the transcript's mtime and younger than the TTL. `interrupted` resolves
- * quiet but delivered nothing, so it never echoes.
+ * echo per idempotency key. An exact user-text occurrence in the rendered feed
+ * retires it immediately. The mtime and TTL checks cover legacy or temporarily
+ * incomplete feed snapshots. `interrupted` resolves quietly and never echoes.
  */
 export function deliveryEchoes(
   receipts: readonly RuntimeReceipt[],
   fileMtimeMs: number,
   dismissed: ReadonlySet<string>,
   nowMs: number,
+  transcriptEchoCounts: ReadonlyMap<string, number> = EMPTY_TRANSCRIPT_ECHO_COUNTS,
 ): RuntimeReceipt[] {
   const seenKeys = new Set<string>();
   const echoes: RuntimeReceipt[] = [];
@@ -127,6 +129,8 @@ export function deliveryEchoes(
     seenKeys.add(receipt.idempotencyKey);
     if (!deliveryResolved(receipt.status) || receipt.status === "interrupted") continue;
     if (dismissed.has(receipt.operationId)) continue;
+    const text = receipt.text?.trim();
+    if (text && (transcriptEchoCounts.get(text) ?? 0) > 0) continue;
     const at = Date.parse(receipt.at);
     if (!Number.isFinite(at)) continue;
     if (fileMtimeMs >= at + DELIVERY_ECHO_MTIME_GRACE_MS) continue;
