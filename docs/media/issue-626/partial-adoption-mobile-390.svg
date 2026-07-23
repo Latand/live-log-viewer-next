@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844">
+<metadata>{&quot;classification&quot;:&quot;synthetic&quot;,&quot;generator&quot;:&quot;generate-stills.ts&quot;,&quot;generatorVersion&quot;:&quot;issue-626-vector-stills-v1&quot;,&quot;sourceDigest&quot;:&quot;1d66e797a1c88f07da703e24a502baaa652640747c3b3e43538e5557a49c50ba&quot;,&quot;state&quot;:&quot;partial-adoption-mobile-390&quot;,&quot;geometry&quot;:{&quot;width&quot;:390,&quot;scrollWidth&quot;:390,&quot;feedHeight&quot;:677,&quot;composerHeight&quot;:86,&quot;order&quot;:[&quot;user&quot;,&quot;commentary&quot;,&quot;tool&quot;,&quot;live&quot;],&quot;liveItems&quot;:1,&quot;toolRows&quot;:1,&quot;toolOutputVisible&quot;:true,&quot;launchId&quot;:&quot;launch_issue_626&quot;,&quot;conversationId&quot;:&quot;conversation_issue_626&quot;,&quot;path&quot;:&quot;/workspace/.codex/sessions/2026/07/23/rollout-issue-626.jsonl&quot;,&quot;filesRevision&quot;:&quot;files revision 41&quot;}}</metadata>
+<style>
+text{font-family:Inter,ui-sans-serif,system-ui,sans-serif;fill:#22242b}.title{font-size:16px;font-weight:700}.meta{font-size:11px;fill:#6b7280}.row{font-size:15px}.mono{font-family:ui-monospace,SFMono-Regular,monospace;font-size:11px}.muted{fill:#667085}
+</style>
+<rect width="390" height="844" fill="#f5f6f8"/>
+<rect width="390" height="81" fill="#ffffff"/>
+<line x1="0" y1="80.5" x2="390" y2="80.5" stroke="#dfe2e8"/>
+<text x="16" y="27" class="title">Issue 626 · Partial Adoption</text>
+<text x="16" y="49" class="meta">conversation_issue_626 · launch_issue_626 · files revision 41</text>
+<text x="16" y="67" class="mono muted">/workspace/.codex/sessions/2026/07/23/rollout-issue-626.jsonl</text>
+<g data-evidence-row="user"><rect x="80" y="132" width="294" height="54" rx="14" fill="#e8e9ef" stroke="#e2e5eb" stroke-width="1"/><text x="98" y="165" class="row">canonical user prompt</text></g><g data-evidence-row="commentary"><rect x="16" y="200" width="294" height="54" rx="14" fill="#ffffff" stroke="#e2e5eb" stroke-width="1"/><text x="34" y="233" class="row">canonical commentary</text></g><g data-evidence-row="tool"><rect x="50" y="268" width="324" height="108" rx="14" fill="#ffffff" stroke="#d6dae3" stroke-width="1"/><text x="68" y="301" class="row">tool call + output</text><text x="68" y="338" class="mono muted">TOOL_OUTPUT_626 · visible</text></g><g data-evidence-row="live"><rect x="16" y="390" width="294" height="54" rx="14" fill="#ffffff" stroke="#7c3aed" stroke-width="3"/><text x="34" y="423" class="row">live commentary handoff</text></g>
+<rect x="0" y="758" width="390" height="86" fill="#ffffff"/>
+<line x1="0" y1="758.5" x2="390" y2="758.5" stroke="#dfe2e8"/>
+<rect x="12" y="772" width="366" height="58" rx="12" fill="#ffffff" stroke="#d8dce4"/>
+<text x="26" y="805" class="meta">Message this conversation</text>
+</svg>
