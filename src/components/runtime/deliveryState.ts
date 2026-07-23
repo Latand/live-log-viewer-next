@@ -34,6 +34,21 @@ function isMessage(receipt: RuntimeReceipt): boolean {
 
 const newestFirst = (left: RuntimeReceipt, right: RuntimeReceipt) => Date.parse(right.at) - Date.parse(left.at);
 
+/** Message receipt causally owned by the assistant turn that emitted a live
+    delta. Claude commonly uses the operation id as its native turn id while
+    the intermediate delivering receipt still carries a null `turnId`. */
+export function messageReceiptForAssistantTurn(
+  receipts: readonly RuntimeReceipt[],
+  assistantTurnId: string | null | undefined,
+): RuntimeReceipt | null {
+  if (!assistantTurnId) return null;
+  return [...receipts]
+    .sort(newestFirst)
+    .find((receipt) =>
+      isMessage(receipt)
+      && (receipt.turnId === assistantTurnId || receipt.operationId === assistantTurnId)) ?? null;
+}
+
 export interface DeliveryAttemptGroup {
   /** Newest visible attempt — carries the current state and the action set. */
   current: RuntimeReceipt;
@@ -103,7 +118,25 @@ export const DELIVERY_ECHO_MTIME_GRACE_MS = 2_000;
 /** Hard cap so a conversation whose transcript never grows again (finished
     pane, lost poll) cannot keep echoes around forever. */
 export const DELIVERY_ECHO_TTL_MS = 10 * 60_000;
+/** Runtime-host receipts carry a bounded display summary of the submitted text. */
+const RECEIPT_TEXT_SUMMARY_LIMIT = 240;
 const EMPTY_TRANSCRIPT_ECHO_COUNTS: ReadonlyMap<string, number> = new Map();
+const EMPTY_RESPONDED_KEYS: ReadonlySet<string> = new Set();
+
+function consumeTranscriptEcho(
+  receiptText: string,
+  remaining: Map<string, number>,
+): boolean {
+  const summary = receiptText.trim();
+  for (const [transcriptText, count] of remaining) {
+    if (count <= 0) continue;
+    const echo = transcriptText.trim();
+    if (echo !== summary && (summary.length !== RECEIPT_TEXT_SUMMARY_LIMIT || !echo.startsWith(summary))) continue;
+    remaining.set(transcriptText, count - 1);
+    return true;
+  }
+  return false;
+}
 
 /**
  * Successful sends whose bubble has not landed in the visible feed yet: the
@@ -118,19 +151,37 @@ export function deliveryEchoes(
   dismissed: ReadonlySet<string>,
   nowMs: number,
   transcriptEchoCounts: ReadonlyMap<string, number> = EMPTY_TRANSCRIPT_ECHO_COUNTS,
+  respondedIdempotencyKeys: ReadonlySet<string> = EMPTY_RESPONDED_KEYS,
 ): RuntimeReceipt[] {
   const seenKeys = new Set<string>();
-  const echoes: RuntimeReceipt[] = [];
-  const sorted = receipts
+  const currentReceipts: RuntimeReceipt[] = [];
+  for (const receipt of receipts
     .filter((receipt) => isMessage(receipt) && Boolean(receipt.text))
-    .sort(newestFirst);
-  for (const receipt of sorted) {
+    .sort(newestFirst)) {
     if (seenKeys.has(receipt.idempotencyKey)) continue;
     seenKeys.add(receipt.idempotencyKey);
+    currentReceipts.push(receipt);
+  }
+
+  /* Match oldest sends first so each transcript occurrence confirms one
+     logical message when identical text was submitted more than once. */
+  const remainingTranscriptEchoes = new Map(transcriptEchoCounts);
+  const echoedOperationIds = new Set<string>();
+  for (const receipt of [...currentReceipts].reverse()) {
     if (!deliveryResolved(receipt.status) || receipt.status === "interrupted") continue;
     if (dismissed.has(receipt.operationId)) continue;
     const text = receipt.text?.trim();
-    if (text && (transcriptEchoCounts.get(text) ?? 0) > 0) continue;
+    if (!text) continue;
+    if (!consumeTranscriptEcho(text, remainingTranscriptEchoes)) continue;
+    echoedOperationIds.add(receipt.operationId);
+  }
+
+  const echoes: RuntimeReceipt[] = [];
+  for (const receipt of currentReceipts) {
+    if (!deliveryResolved(receipt.status) || receipt.status === "interrupted") continue;
+    if (dismissed.has(receipt.operationId)) continue;
+    if (respondedIdempotencyKeys.has(receipt.idempotencyKey)) continue;
+    if (echoedOperationIds.has(receipt.operationId)) continue;
     const at = Date.parse(receipt.at);
     if (!Number.isFinite(at)) continue;
     if (fileMtimeMs >= at + DELIVERY_ECHO_MTIME_GRACE_MS) continue;

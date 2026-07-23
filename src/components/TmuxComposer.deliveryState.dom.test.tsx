@@ -13,7 +13,8 @@ import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
+import { emptyStore, type RuntimeReceipt } from "@/components/runtime/runtimeModel";
+import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { FileEntry } from "@/lib/types";
 import { setLocale, translate } from "@/lib/i18n";
 
@@ -47,14 +48,35 @@ Object.assign(globalThis, {
    pendingImages harness: receipts arrive the way production delivers them. */
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const receiptListeners = new Set<() => void>();
+const runtimeStore = emptyStore();
 let busReceipts: RuntimeReceipt[] = [];
+let runtimeView: RuntimeSessionView | null = null;
 function publishReceipts(next: RuntimeReceipt[]): void {
   busReceipts = next;
   for (const listener of receiptListeners) listener();
 }
+function publishRuntimeView(next: RuntimeSessionView | null): void {
+  runtimeView = next;
+  for (const listener of receiptListeners) listener();
+}
 mock.module("@/hooks/useRuntime", () => ({
   ...actualRuntimeHooks,
-  useRuntimeSession: () => null,
+  useRuntime: () => ({
+    enabled: runtimeView !== null,
+    structuredHostsEnabled: runtimeView !== null,
+    connection: runtimeView ? "live" : "offline",
+    resyncedAt: null,
+    store: runtimeStore,
+  }),
+  useRuntimeSession: () => useSyncExternalStore(
+    (listener) => {
+      receiptListeners.add(listener);
+      return () => receiptListeners.delete(listener);
+    },
+    () => runtimeView,
+    () => runtimeView,
+  ),
+  useRuntimeSessionByArtifact: () => null,
   useRuntimeReceiptsForArtifact: () => useSyncExternalStore(
     (listener) => {
       receiptListeners.add(listener);
@@ -68,7 +90,13 @@ afterAll(() => {
   mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
 });
 
-const { publishTranscriptEchoes, resetOutboxForTests } = await import("./conversation/outbox");
+const {
+  enqueueOutbox,
+  publishTranscriptEchoes,
+  readOutbox,
+  resetOutboxForTests,
+  updateOutbox,
+} = await import("./conversation/outbox");
 const { RuntimeComposerReceipts, TmuxComposer } = await import("./TmuxComposer");
 
 const realFetch = globalThis.fetch;
@@ -77,6 +105,7 @@ afterEach(() => {
   setLocale("en");
   globalThis.fetch = realFetch;
   publishReceipts([]);
+  publishRuntimeView(null);
   document.body.replaceChildren();
   localStorage.clear();
   sessionStorage.clear();
@@ -92,6 +121,36 @@ const receipt = (overrides: Partial<RuntimeReceipt> & { operationId: string }): 
   at: new Date().toISOString(),
   revision: 1,
   ...overrides,
+});
+
+const structuredRuntimeView = (
+  liveTurn: { turnId: string; text: string } | null,
+): RuntimeSessionView => ({
+  session: {
+    conversationId: "conv-quiet",
+    sessionKey: { engine: "codex", sessionId: "conv-quiet" },
+    hostKind: "codex-app-server",
+    host: "hosted",
+    turn: liveTurn ? "running" : "idle",
+    provenance: "structured",
+    revision: 1,
+    attentionIds: [],
+    recentReceipts: busReceipts,
+    accountId: null,
+    parentConversationId: null,
+    flowId: null,
+    workflowId: null,
+    cwd: "/repo",
+    artifactPath: "/codex-quiet.jsonl",
+    capabilities: { steer: true, structuredAttention: true },
+    activeTurnId: liveTurn?.turnId ?? null,
+    liveTurn,
+  },
+  uiState: liveTurn ? "working" : "idle",
+  attentions: [],
+  receipts: busReceipts,
+  legacy: false,
+  structuredControlsEnabled: true,
 });
 
 const file = (mtimeSeconds: number): FileEntry => ({
@@ -264,6 +323,40 @@ test("a delivered send shows one quiet echo line that clears when the exact bubb
   // the final delivered receipt.
   await settle(() => publishTranscriptEchoes("conv-quiet", new Map([[delivered.text!, 1]])));
   expect(host.querySelector("[data-delivery-echo]")).toBeNull();
+  await act(async () => root.unmount());
+});
+
+test("a streaming assistant reply retires its delivering outbox bubble", async () => {
+  mockTargets();
+  const responding = receipt({
+    operationId: "turn-replied",
+    idempotencyKey: "key-replied",
+    status: "delivering",
+    turnId: null,
+    text: "the assistant is answering this",
+  });
+  enqueueOutbox("conv-quiet", {
+    id: responding.idempotencyKey,
+    text: responding.text!,
+    images: 0,
+    at: Date.parse(responding.at),
+  });
+  updateOutbox("conv-quiet", responding.idempotencyKey, { state: "delivering" });
+  publishReceipts([responding]);
+  publishRuntimeView(structuredRuntimeView(null));
+
+  const { root } = await renderInto(<TmuxComposer file={file(1)} />);
+  expect(readOutbox("conv-quiet")[0]).toMatchObject({ state: "delivering" });
+
+  await settle(() => publishRuntimeView(structuredRuntimeView({
+    turnId: responding.operationId,
+    text: "streaming reply",
+  })));
+  expect(readOutbox("conv-quiet")[0]).toMatchObject({
+    id: responding.idempotencyKey,
+    state: "delivered",
+  });
+  expect(readOutbox("conv-quiet")[0]!.responseStartedAt).toBeNumber();
   await act(async () => root.unmount());
 });
 

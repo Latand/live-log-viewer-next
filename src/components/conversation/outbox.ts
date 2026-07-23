@@ -36,6 +36,9 @@ export interface OutboxEntry {
   state: OutboxState;
   /** Moment the entry left `queued`/`delivering` (ms), for the hard-cap TTL. */
   settledAt?: number;
+  /** Assistant output began for the turn created by this submission. This is
+      causal delivery proof and permanently retires the optimistic bubble. */
+  responseStartedAt?: number;
   error?: string;
   /** The attachment bytes of this submission did not survive a page refresh
       (previews are memory-only). The entry is held back rather than delivered
@@ -208,6 +211,20 @@ export function updateOutbox(cardId: string, id: string, patch: Partial<Omit<Out
   write(cardId, queue.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)));
 }
 
+/** Settle one submission when the assistant starts its matching runtime turn.
+    The entry remains in recent history while its optimistic bubble retires. */
+export function markOutboxResponded(cardId: string, id: string, at: number): void {
+  const queue = readOutbox(cardId);
+  const entry = queue.find((item) => item.id === id);
+  if (!entry || entry.responseStartedAt !== undefined) return;
+  write(cardId, queue.map((item) => (item.id === id ? {
+    ...item,
+    state: "delivered",
+    settledAt: item.settledAt ?? at,
+    responseStartedAt: at,
+  } : item)));
+}
+
 /** Remove an entry outright — the operator cancelled a message that never left. */
 export function cancelOutbox(cardId: string, id: string): void {
   const queue = readOutbox(cardId);
@@ -331,6 +348,7 @@ export function visibleOutbox(
       consumed.set(key, floor + 1);
       continue;
     }
+    if (entry.responseStartedAt !== undefined) continue;
     if (entry.state === "delivered") {
       const settledAt = entry.settledAt ?? entry.at;
       if (nowMs - settledAt >= OUTBOX_DELIVERED_TTL_MS) continue;
