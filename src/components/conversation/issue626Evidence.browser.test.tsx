@@ -29,9 +29,12 @@ import { installActEnv } from "@/test-helpers/actEnv";
 
 import { resetCanonicalAssistantClaimsForTests } from "./liveTurnHandoff";
 import {
+  adoptOutbox,
   enqueueOutbox,
-  readOutbox,
+  markOutboxResponded,
+  OUTBOX_LIMIT,
   resetOutboxForTests,
+  updateOutbox,
 } from "./outbox";
 
 interface LifecycleFixture {
@@ -268,6 +271,7 @@ interface EvidenceState {
   path: string;
   launch: StructuredSpawnCardState;
   logMode: LogMode;
+  logOverride?: string;
   expectedOrder: string[];
 }
 
@@ -455,6 +459,7 @@ afterAll(async () => {
 });
 
 function stateLog(state: EvidenceState): string {
+  if (state.logOverride !== undefined) return state.logOverride;
   if (state.logMode === "partial") return partialLog;
   if (state.logMode === "final") return finalLog;
   return "";
@@ -712,42 +717,120 @@ test("issue 626 production evidence preserves lifecycle ownership and bounded ha
   );
 }, 120_000);
 
-test("issue 626 production feed namespaces identical row anchors by transcript path", async () => {
-  const firstPath = "/workspace/.codex/sessions/generation-one.jsonl";
-  const secondPath = "/workspace/.codex/sessions/generation-two.jsonl";
-  const firstState: EvidenceState = {
-    ...STATES[2]!,
-    id: "generation-one",
-    path: firstPath,
-  };
-  const secondState: EvidenceState = {
-    ...STATES[2]!,
-    id: "generation-two",
-    path: secondPath,
-  };
-
-  enqueueOutbox(CONVERSATION_ID, {
-    id: "generation-one-entry",
-    text: launchPrompt,
-    images: 0,
-    at: Date.parse("2026-07-23T09:00:00.000Z"),
+test("issue 626 production DOM keeps delayed duplicate ownership across transcript generations at 1280px and 390px", async () => {
+  const css = productionCss();
+  expect(css.length).toBeGreaterThan(10_000);
+  const repeated = "Issue 626 repeated row-anchor ownership.";
+  const provisional = "spawn:launch_issue_626_occurrence";
+  const firstPath = "/synthetic/issue-626-generation-1.jsonl";
+  const secondPath = "/synthetic/issue-626-generation-2.jsonl";
+  const generationState = (id: string, transcriptPath: string): EvidenceState => ({
+    id,
+    envelopeCount: 0,
+    filesRevision: 42,
+    path: transcriptPath,
+    launch: adoptedLaunch,
+    logMode: "empty",
+    logOverride: serialize([userMessage(repeated, "2026-07-23T09:03:00.000Z")]),
+    expectedOrder: ["user", "outbox"],
   });
-  await renderState(firstState);
-  const firstEchoId = readOutbox(CONVERSATION_ID)[0]?.retiredEchoId;
-  expect(firstEchoId).toBeString();
+  const evidenceBrowser = await chromium.launch({ executablePath: chromium.executablePath() });
 
-  enqueueOutbox(CONVERSATION_ID, {
-    id: "generation-two-entry",
-    text: launchPrompt,
-    images: 0,
-    at: Date.parse("2026-07-23T09:00:10.000Z"),
-  });
-  await renderState(secondState);
-  const entries = readOutbox(CONVERSATION_ID);
-  expect(entries.map((entry) => entry.id)).toEqual([
-    "generation-one-entry",
-    "generation-two-entry",
-  ]);
-  expect(entries[1]?.retiredEchoId).toBeString();
-  expect(entries[1]?.retiredEchoId).not.toBe(firstEchoId);
-});
+  try {
+    for (const viewport of VIEWPORTS) {
+      mobile = viewport.mobile;
+      dom.sessionStorage.clear();
+      resetOutboxForTests();
+      resetCanonicalAssistantClaimsForTests();
+      resetLogTailCacheForTests();
+      logs.clear();
+      getRuntimeBus().stop();
+
+      enqueueOutbox(provisional, {
+        id: "older-response-settled",
+        text: repeated,
+        images: 0,
+        at: Date.parse("2026-07-23T09:02:00.000Z"),
+        launchOwned: true,
+      });
+      updateOutbox(provisional, "older-response-settled", { state: "delivering" });
+      markOutboxResponded(
+        provisional,
+        "older-response-settled",
+        Date.parse("2026-07-23T09:02:01.000Z"),
+      );
+      enqueueOutbox(provisional, {
+        id: "newer-pending",
+        text: repeated,
+        images: 0,
+        at: Date.parse("2026-07-23T09:02:02.000Z"),
+        launchOwned: true,
+      });
+      updateOutbox(provisional, "newer-pending", { state: "delivering" });
+      for (let index = 0; index < OUTBOX_LIMIT - 1; index += 1) {
+        const id = `browser-filler-${index}`;
+        enqueueOutbox(provisional, {
+          id,
+          text: `Browser filler ${index}`,
+          images: 0,
+          at: Date.parse("2026-07-23T09:02:03.000Z") + index,
+          launchOwned: true,
+        });
+        updateOutbox(provisional, id, { state: "delivering" });
+      }
+      adoptOutbox(provisional, CONVERSATION_ID);
+      resetOutboxForTests();
+
+      const delayed = await renderState(generationState("delayed-older-echo", firstPath));
+      const delayedPage = await evidenceBrowser.newPage({
+        viewport: { width: viewport.width, height: viewport.height },
+        deviceScaleFactor: 1,
+      });
+      await delayedPage.setContent(pageHtml(delayed.html, css), { waitUntil: "load" });
+      const delayedEvidence = await delayedPage.evaluate((text) => {
+        const body = document.body.textContent ?? "";
+        return {
+          occurrences: body.split(text).length - 1,
+          outboxEntries: document.querySelectorAll("[data-outbox-entry]").length,
+          scrollWidth: document.documentElement.scrollWidth,
+        };
+      }, repeated);
+      expect(delayedEvidence.occurrences).toBe(2);
+      expect(delayedEvidence.outboxEntries).toBe(OUTBOX_LIMIT);
+      expect(delayedEvidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
+      await delayedPage.screenshot({
+        path: path.join(EVIDENCE_DIR, `delayed-occurrence-${viewport.id}.png`),
+        fullPage: false,
+      });
+      await delayedPage.close();
+
+      resetOutboxForTests();
+      resetLogTailCacheForTests();
+      logs.clear();
+      const successor = await renderState(generationState("successor-generation-echo", secondPath));
+      const successorPage = await evidenceBrowser.newPage({
+        viewport: { width: viewport.width, height: viewport.height },
+        deviceScaleFactor: 1,
+      });
+      await successorPage.setContent(pageHtml(successor.html, css), { waitUntil: "load" });
+      const successorEvidence = await successorPage.evaluate((text) => {
+        const body = document.body.textContent ?? "";
+        return {
+          occurrences: body.split(text).length - 1,
+          outboxEntries: document.querySelectorAll("[data-outbox-entry]").length,
+          scrollWidth: document.documentElement.scrollWidth,
+        };
+      }, repeated);
+      expect(successorEvidence.occurrences).toBe(1);
+      expect(successorEvidence.outboxEntries).toBe(OUTBOX_LIMIT - 1);
+      expect(successorEvidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
+      await successorPage.screenshot({
+        path: path.join(EVIDENCE_DIR, `successor-generation-${viewport.id}.png`),
+        fullPage: false,
+      });
+      await successorPage.close();
+    }
+  } finally {
+    await evidenceBrowser.close();
+  }
+}, 120_000);
