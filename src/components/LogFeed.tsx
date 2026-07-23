@@ -13,7 +13,9 @@ import type { FileEntry } from "@/lib/types";
 import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 
 import { LaunchChips } from "./conversation/LaunchChips";
+import { LiveTurnRows } from "./conversation/LiveTurnRows";
 import { OutboxBubbles } from "./conversation/OutboxBubbles";
+import { visibleRuntimeLiveTurnItems } from "./conversation/liveTurnHandoff";
 import { orderedConversationTail } from "./conversation/tailOrder";
 import { publishTranscriptEchoes, seedLaunchOutbox, useOutbox, visibleOutbox } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
@@ -128,7 +130,10 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      launch the file path is still `spawn:<launchId>` with no artifact, so an
      artifact-only lookup would miss the live host and drop the first deltas; the
      transcript path stays a fallback for subagents that carry no bus id. */
-  const liveTurn = useRuntimeSessionForConversation(file?.conversationId ?? null, file?.path ?? null)?.session.liveTurn ?? null;
+  const runtimeLiveTurn = useRuntimeSessionForConversation(
+    file?.conversationId ?? null,
+    file?.path ?? null,
+  )?.session.liveTurn ?? null;
   /* The scroll magnet lives per feed instance, so each column remembers its
      own state across polls: glued to the live tail, or released by the user.
      A remount inherits the transcript's remembered state. */
@@ -435,9 +440,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     });
   }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt, launch?.promptEcho]);
   const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs()) : [];
+  const visibleLiveTurnItems = useMemo(
+    () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items),
+    [runtimeLiveTurn, feed.items],
+  );
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */
-  const windowTail = Boolean(liveTurn?.text) || pendingOutbox.length > 0 || Boolean(launch);
+  const windowTail = visibleLiveTurnItems.length > 0 || pendingOutbox.length > 0 || Boolean(launch);
 
   /* The floating pill is centered on every surface — the same axis as the
      pinned TurnStatusBar below, per the issue #268 operator note: the two
@@ -587,16 +596,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             {orderedConversationTail({
               launch: Boolean(launch),
               outbox: Boolean(memoryKey && pendingOutbox.length),
-              delta: Boolean(liveTurn?.text),
+              delta: visibleLiveTurnItems.length > 0,
             }).map((section) => {
               if (section === "launch") return <LaunchChips key="launch" launch={launch!} onRetry={onLaunchRetry} />;
               if (section === "outbox") return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} />;
-              return (
-                <div key="delta" data-live-turn className="my-2 ml-9 whitespace-pre-wrap [overflow-wrap:anywhere] text-ui text-primary">
-                  {liveTurn!.text}
-                  <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-[2px] bg-accent align-text-bottom" aria-hidden />
-                </div>
-              );
+              return <LiveTurnRows key="delta" items={visibleLiveTurnItems} />;
             })}
             <ConversationAttention file={file} />
             {feed.items.length && !file.pendingQuestion && !file.waitingInput && endedQuestion ? (

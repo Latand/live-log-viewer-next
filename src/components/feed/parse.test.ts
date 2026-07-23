@@ -800,10 +800,22 @@ describe("Codex assistant prose coalescing", () => {
     ];
 
     expect(itemsOfKind(buildFeed(codexFile, productionOrder, false, ""), "prose")).toEqual([
-      { kind: "prose", ts: "2026-07-10T07:05:12.128Z", text: sevenMsText, engine: "codex" },
+      {
+        kind: "prose",
+        ts: "2026-07-10T07:05:12.128Z",
+        text: sevenMsText,
+        engine: "codex",
+        sourceId: "msg_0393b5967eeb6b3d016a5099a6c6f881918750dcfe9b95b684",
+      },
     ]);
     expect(itemsOfKind(buildFeed(codexFile, reversedOrder, false, ""), "prose")).toEqual([
-      { kind: "prose", ts: "2026-07-10T07:05:24.424Z", text: zeroMsText, engine: "codex" },
+      {
+        kind: "prose",
+        ts: "2026-07-10T07:05:24.424Z",
+        text: zeroMsText,
+        engine: "codex",
+        sourceId: "msg_0393b5967eeb6b3d016a5099b33df88191bfb8b5a7b245ebb7",
+      },
     ]);
   });
 

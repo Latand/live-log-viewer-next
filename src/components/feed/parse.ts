@@ -188,7 +188,7 @@ export type CmdGroupItem = {
   active: boolean;
 };
 export type Item =
-  | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude" }
+  | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude"; sourceId?: string }
   | { kind: "user"; ts: unknown; text: string }
   | { kind: "svc"; text: string }
   | { kind: "note"; text: string }
@@ -1232,18 +1232,33 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       .trim();
     return { cleaned, cites };
   };
-  const addProse = (ts: unknown, text: string): { firstSeq: number; lastSeq: number } | null => {
+  const addProse = (
+    ts: unknown,
+    text: string,
+    sourceId?: string,
+  ): { firstSeq: number; lastSeq: number } | null => {
     if (!text.trim()) return null;
     const firstSeq = pushSeq;
     if (pushBlobIfHuge(text)) return { firstSeq, lastSeq: pushSeq - 1 };
     const engine = cfg.engine === "codex" ? "codex" : "claude";
-    if (pushStructured(ts, text, (segment) => push({ kind: "prose", ts, text: segment, engine }))) {
+    if (pushStructured(ts, text, (segment) => push({
+      kind: "prose",
+      ts,
+      text: segment,
+      engine,
+      ...(sourceId ? { sourceId } : {}),
+    }))) {
       return { firstSeq, lastSeq: pushSeq - 1 };
     }
-    push({ kind: "prose", ts, text, engine });
+    push({ kind: "prose", ts, text, engine, ...(sourceId ? { sourceId } : {}) });
     return { firstSeq, lastSeq: pushSeq - 1 };
   };
-  const addCodexAssistant = (shape: CodexAssistantShape, ts: unknown, text: string) => {
+  const addCodexAssistant = (
+    shape: CodexAssistantShape,
+    ts: unknown,
+    text: string,
+    sourceId?: string,
+  ) => {
     const normalizedText = text.trim();
     const candidate = codexAssistantRecord;
     if (
@@ -1262,14 +1277,18 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         entries[idx] = {
           ...entry,
           src: curSrc,
-          item: item.kind === "prose" || item.kind === "review" ? { ...item, ts: eventTimestamp } : item,
+          item: item.kind === "prose"
+            ? { ...item, ts: eventTimestamp, ...(sourceId ? { sourceId } : {}) }
+            : item.kind === "review"
+              ? { ...item, ts: eventTimestamp }
+              : item,
         };
       }
       codexAssistantRecord = null;
       snapshot = null;
       return;
     }
-    const emitted = addProse(ts, text);
+    const emitted = addProse(ts, text, sourceId);
     codexAssistantRecord = emitted
       ? { shape, text: normalizedText, ts, src: curSrc, firstSeq: emitted.firstSeq, lastSeq: emitted.lastSeq }
       : null;
@@ -1760,7 +1779,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         finalizePendingCodexUsers();
         const text = normalizeCodexUserContent(p.content).text;
         if (!text) return addSvc("message " + textPart(p.role));
-        if (p.role === "assistant") return addCodexAssistant("response-assistant", ts, text);
+        if (p.role === "assistant") {
+          return addCodexAssistant("response-assistant", ts, text, textPart(p.id) || undefined);
+        }
         /* developer/system turns (<permissions instructions>, collaboration
            mode, …) are harness-injected, never something the user typed. */
         return addSysMsg(text, textPart(p.role));
@@ -1870,7 +1891,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         ? { serverName: attributedServer, toolName: attributedTool }
         : null;
       for (const part of arr(rec(obj.message).content)) {
-        if (part.type === "text" && textPart(part.text).trim()) addProse(ts, textPart(part.text));
+        if (part.type === "text" && textPart(part.text).trim()) {
+          addProse(ts, textPart(part.text), textPart(obj.uuid) || undefined);
+        }
         else if (part.type === "thinking" && textPart(part.thinking).trim()) {
           push({ kind: "think", text: textPart(part.thinking).replace(/\s+/g, " ").trim() });
         } else if (part.type === "tool_use" && textPart(part.name) === "SendMessage") {
