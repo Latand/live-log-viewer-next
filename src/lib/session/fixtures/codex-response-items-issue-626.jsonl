@@ -1,0 +1,9 @@
+{"timestamp":"2026-07-23T09:00:00.000Z","type":"session_meta","payload":{"id":"conversation_issue_626","cwd":"/workspace/redacted","model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-23T09:00:01.000Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"First commentary survives the tool transition."}]}}
+{"timestamp":"2026-07-23T09:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_custom_626","id":"item_custom_626","status":"completed","input":"await tools.exec_command({cmd:\"printf issue-626\"});"}}
+{"timestamp":"2026-07-23T09:00:03.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_custom_626","output":[{"type":"input_text","text":"Script completed"},{"type":"input_text","text":"TOOL_OUTPUT_626\nauthorization: Bearer issue626_fixture_token"}]}}
+{"timestamp":"2026-07-23T09:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","call_id":"call_function_626","id":"item_function_626","arguments":"{\"plan\":[{\"step\":\"Capture chronology\",\"status\":\"completed\"}]}"}}
+{"timestamp":"2026-07-23T09:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_function_626","output":"Plan updated"}}
+{"timestamp":"2026-07-23T09:00:06.000Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Second commentary follows the tool output."}]}}
+{"timestamp":"2026-07-23T09:00:07.000Z","type":"response_item","payload":{"item":{"type":"function_call","name":"nested_probe","call_id":"call_nested_626","arguments":"{\"path\":\"/workspace/redacted\"}"}}}
+{"timestamp":"2026-07-23T09:00:08.000Z","type":"response_item","payload":{"item":{"type":"function_call_output","call_id":"call_nested_626","output":"Nested output preserved"}}}

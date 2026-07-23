@@ -284,7 +284,10 @@ async function listConversations(args: McpToolArgs): Promise<McpToolPayload> {
   return redactPayload({ count: conversations.length, conversations });
 }
 
-async function getConversation(args: McpToolArgs): Promise<McpToolPayload> {
+async function getConversation(
+  args: McpToolArgs,
+  dependencies: Pick<ViewerMcpDomainDependencies, "listFiles">,
+): Promise<McpToolPayload> {
   const requestedId = text(args.conversationId);
   const requestedPath = text(args.transcriptPath) || text(args.path);
   if (!requestedId && !requestedPath) throw new Error("conversationId or transcriptPath is required");
@@ -292,7 +295,7 @@ async function getConversation(args: McpToolArgs): Promise<McpToolPayload> {
     ? agentRegistry().conversation(requestedId as `conversation_${string}`)
     : agentRegistry().conversationForPath(requestedPath);
   const transcriptPath = conversation?.generations.at(-1)?.path ?? requestedPath;
-  const files = await listFiles({ fresh: true, persist: false, pin: transcriptPath });
+  const files = await dependencies.listFiles({ fresh: true, persist: false, pin: transcriptPath });
   const entry = files.find((candidate) => candidate.path === transcriptPath);
   if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) throw new Error("conversation not found");
   const session = readSession(entry.path, entry.engine);
@@ -559,7 +562,7 @@ export function viewerMcpBindings(
     pipeline_action: pipelineAction,
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
     list_conversations: listConversations,
-    get_conversation: getConversation,
+    get_conversation: (args) => getConversation(args, domainDependencies),
     deploy_exact_sha: (args) => deployExactSha(args, controlDependencies),
     get_pipeline: getPipeline,
     board_snapshot: (args) => boardSnapshot(args, domainDependencies),

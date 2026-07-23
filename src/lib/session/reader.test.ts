@@ -118,6 +118,56 @@ describe("readSession", () => {
       "x".repeat(1024 * 1024),
     ]);
   });
+
+  test("preserves current direct and nested Codex tool calls, output content, and commentary chronology", () => {
+    const pathname = path.join(import.meta.dir, "fixtures", "codex-response-items-issue-626.jsonl");
+    const result = readSession(pathname, "codex");
+
+    expect(result.messages.map(({ role, phase, text }) => ({ role, phase, text }))).toEqual([
+      {
+        role: "assistant",
+        phase: "commentary",
+        text: "First commentary survives the tool transition.",
+      },
+      {
+        role: "assistant",
+        phase: "commentary",
+        text: "Second commentary follows the tool output.",
+      },
+    ]);
+    expect(result.tools.map(({ kind, name, text }) => ({ kind, name, text }))).toEqual([
+      {
+        kind: "tool_call",
+        name: "exec",
+        text: "await tools.exec_command({cmd:\"printf issue-626\"});",
+      },
+      {
+        kind: "tool_result",
+        name: undefined,
+        text: "Script completed\nTOOL_OUTPUT_626\nauthorization: Bearer issue626_fixture_token",
+      },
+      {
+        kind: "tool_call",
+        name: "update_plan",
+        text: "{\"plan\":[{\"step\":\"Capture chronology\",\"status\":\"completed\"}]}",
+      },
+      {
+        kind: "tool_result",
+        name: undefined,
+        text: "Plan updated",
+      },
+      {
+        kind: "tool_call",
+        name: "nested_probe",
+        text: "{\"path\":\"/workspace/redacted\"}",
+      },
+      {
+        kind: "tool_result",
+        name: undefined,
+        text: "Nested output preserved",
+      },
+    ]);
+  });
 });
 
 test("authorship scan reports malformed and oversized records as incomplete", () => {
