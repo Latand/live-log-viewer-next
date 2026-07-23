@@ -260,16 +260,34 @@ export type TranscriptEchoCounts = ReadonlyMap<string, number>;
  * the same stable conversation identity as the queue itself.
  */
 const echoSnapshots = new Map<string, TranscriptEchoCounts>();
+const echoListeners = new Set<() => void>();
+const EMPTY_ECHO_COUNTS: TranscriptEchoCounts = new Map();
 
 /** Publish the transcript's current user-echo counts for a conversation. */
 export function publishTranscriptEchoes(cardId: string, counts: TranscriptEchoCounts): void {
+  if (echoSnapshots.get(cardId) === counts) return;
   echoSnapshots.set(cardId, counts);
+  for (const listener of echoListeners) listener();
 }
 
 /** How many transcript echoes of `text` the feed has published for a
     conversation — the submission watermark a new entry stamps onto itself. */
 export function transcriptEchoCount(cardId: string, text: string): number {
   return echoSnapshots.get(cardId)?.get(echoKey(text)) ?? 0;
+}
+
+/** Reactive transcript-echo snapshot for the composer. Delivery success can
+    arrive after its user bubble was already written, so exact feed evidence
+    retires the temporary receipt row immediately. */
+export function useTranscriptEchoes(cardId: string): TranscriptEchoCounts {
+  return useSyncExternalStore(
+    (listener) => {
+      echoListeners.add(listener);
+      return () => echoListeners.delete(listener);
+    },
+    () => echoSnapshots.get(cardId) ?? EMPTY_ECHO_COUNTS,
+    () => EMPTY_ECHO_COUNTS,
+  );
 }
 
 /**
@@ -367,4 +385,5 @@ export function resetOutboxForTests(): void {
   queues.clear();
   listeners.clear();
   echoSnapshots.clear();
+  echoListeners.clear();
 }
