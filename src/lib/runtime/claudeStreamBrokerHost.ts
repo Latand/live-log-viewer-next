@@ -179,6 +179,8 @@ export interface ClaudeStreamBrokerHostOptions {
   claudeProjectsDir?: string;
   spawnPolicyBaseSettingsPath?: string | null;
   allowSubagents?: boolean;
+  mcpServers?: string[];
+  mcpStatePath?: string;
   readOnly?: boolean;
   binary?: string;
   model?: string;
@@ -552,7 +554,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     }
     const args = [
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-      "--safe-mode", "--include-partial-messages", "--replay-user-messages",
+      "--include-partial-messages", "--replay-user-messages",
       "--permission-prompt-tool", "stdio",
       "--permission-mode", effectiveClaudePermissionMode(options),
     ];
@@ -567,9 +569,15 @@ export class ClaudeStreamBrokerHost implements EngineHost {
         allowSubagents: options.allowSubagents,
         baseSettingsPath: options.spawnPolicyBaseSettingsPath,
         profileId,
+        cwd: options.cwd,
+        mcpServers: options.mcpServers,
+        mcpStatePath: options.mcpStatePath,
       });
-      args.push("--settings", settings.settingsPath);
-    }
+      args.push(
+        "--settings", settings.settingsPath,
+        "--strict-mcp-config", "--mcp-config", settings.mcpConfigPath,
+      );
+    } else args.push("--strict-mcp-config");
     if (resume) args.push("--resume", sessionId);
     else args.push("--session-id", sessionId);
     if (options.model) args.push("--model", options.model);

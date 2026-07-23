@@ -22,7 +22,7 @@ export interface CodexAppServerChild {
   kill(signal?: NodeJS.Signals): boolean;
 }
 
-export type CodexAppServerSpawn = (home: string) => CodexAppServerChild;
+export type CodexAppServerSpawn = (home: string, args: readonly string[]) => CodexAppServerChild;
 
 export interface CodexAppServerClock {
   now(): number;
@@ -96,6 +96,13 @@ export interface CodexAppServerLifecycleEvent {
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const MAX_STDOUT_BUFFER_BYTES = 1024 * 1024;
+const CODEX_ACCOUNT_APP_SERVER_ARGS = [
+  "-c",
+  "cli_auth_credentials_store=file",
+  "-c",
+  "mcp_servers={}",
+  "app-server",
+] as const;
 const defaultClock: CodexAppServerClock = {
   now: () => Date.now(),
   setTimeout: (callback, ms) => setTimeout(callback, ms),
@@ -106,8 +113,8 @@ export function codexAppServerEnvironment(home: string): NodeJS.ProcessEnv {
   return { ...withoutWakatimeCredential(process.env), CODEX_HOME: home };
 }
 
-function spawnCodexAppServer(home: string): CodexAppServerChild {
-  const child = spawn(process.env.LLV_CODEX_BINARY || "codex", ["-c", "cli_auth_credentials_store=file", "-c", "mcp_servers={}", "app-server"], {
+function spawnCodexAppServer(home: string, args: readonly string[]): CodexAppServerChild {
+  const child = spawn(process.env.LLV_CODEX_BINARY || "codex", [...args], {
     env: codexAppServerEnvironment(home),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
@@ -205,7 +212,7 @@ export class CodexAppServerClient {
 
   static async start(options: CodexAppServerOptions): Promise<CodexAppServerClient> {
     const client = new CodexAppServerClient(
-      (options.spawn ?? spawnCodexAppServer)(options.home),
+      (options.spawn ?? spawnCodexAppServer)(options.home, CODEX_ACCOUNT_APP_SERVER_ARGS),
       options.clock ?? defaultClock,
       options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS,
       options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS,

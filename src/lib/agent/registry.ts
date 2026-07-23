@@ -629,6 +629,7 @@ function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfi
     permissionMode: requested.permissionMode ?? current.permissionMode,
     readOnly: requested.readOnly ?? current.readOnly,
     allowSubagents: current.allowSubagents || requested.allowSubagents,
+    mcpServers: current.mcpServers,
     title: requested.title ?? current.title,
     project: requested.project ?? current.project,
     parentConversationId: requested.parentConversationId ?? current.parentConversationId,
@@ -2183,6 +2184,7 @@ function compactLaunchProfile(profile: LaunchProfile): Partial<LaunchProfile> {
   if (compact.cwd === "") delete compact.cwd;
   if (compact.role === "worker") delete compact.role;
   if (compact.allowSubagents === false) delete compact.allowSubagents;
+  if (compact.mcpServers?.length === 1 && compact.mcpServers[0] === "viewer") delete compact.mcpServers;
   return compact;
 }
 
@@ -4384,6 +4386,7 @@ export class AgentRegistry {
           fast: generation.launchProfile.fast ?? observation.launchProfile.fast,
           permissionMode: generation.launchProfile.permissionMode ?? observation.launchProfile.permissionMode,
           readOnly: generation.launchProfile.readOnly ?? observation.launchProfile.readOnly,
+          mcpServers: generation.launchProfile.mcpServers,
           title: generation.launchProfile.title ?? observation.launchProfile.title,
           project: observation.launchProfile.project ?? generation.launchProfile.project,
           parentConversationId: lineage?.source === "viewer-spawn"

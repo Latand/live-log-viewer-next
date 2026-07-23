@@ -114,6 +114,7 @@ describe("MCP tool service", () => {
       const spawnSchema = listed.tools.find((tool) => tool.name === "spawn_agent")?.inputSchema;
       expect(spawnSchema?.properties).toHaveProperty("cwd");
       expect(spawnSchema?.properties).toHaveProperty("prompt");
+      expect(spawnSchema?.properties).toHaveProperty("mcpServers");
       const deploySchema = listed.tools.find((tool) => tool.name === "deploy_exact_sha")?.inputSchema;
       expect(deploySchema?.properties).toHaveProperty("confirm");
       const called = await client.callTool({

@@ -311,6 +311,9 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     parentConversationId: z.string().optional(),
     project: z.string().optional(),
     allowSubagents: z.boolean().optional(),
+    mcpServers: z.array(z.string().regex(/^[^\s\u0000-\u001f\u007f]{1,128}$/u))
+      .optional()
+      .describe("Per-spawn MCP server allowlist. Viewer is always included; omission selects Viewer only."),
     images: z.array(z.unknown()).optional(),
   }).passthrough(),
   send_message: z.object({

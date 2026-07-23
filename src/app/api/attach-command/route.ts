@@ -75,6 +75,7 @@ function resolveLaunchPath(launchId: string, files: FileEntry[]): NextResponse<A
       accountIdForPath: accountIdFromPath,
       accountLabelFor,
       allowSubagentsForPath: (p) => registry.launchProfileForPath(p)?.allowSubagents,
+      mcpServersForPath: (p) => registry.launchProfileForPath(p)?.mcpServers,
     }),
     resumeSpecForSession,
     homeForAccount,
@@ -141,6 +142,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<AttachCommand 
       accountIdForPath: accountIdFromPath,
       accountLabelFor,
       allowSubagentsForPath: (p) => agentRegistry().launchProfileForPath(p)?.allowSubagents,
+      mcpServersForPath: (p) => agentRegistry().launchProfileForPath(p)?.mcpServers,
     });
     if (!resolution.ok) {
       return NextResponse.json({ error: resolution.error }, { status: resolution.status, headers: { "Cache-Control": "no-store" } });

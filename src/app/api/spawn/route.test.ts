@@ -76,6 +76,64 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
   };
 }
 
+test("spawn admission rejects malformed MCP allowlists", async () => {
+  const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ engine: "codex", cwd: routeSandbox, prompt: "inspect", mcpServers: "viewer" }),
+  }), structuredRouteDependencies(routeSandbox));
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "mcpServers must be an array of non-empty server names" });
+});
+
+test("spawn admission persists Viewer-only defaults and normalized custom MCP allowlists", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "mcp-allowlist-"));
+  const store = registry();
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const dependencies = { ...structuredRouteDependencies(cwd), registry: () => store };
+    const capability = rotateOperatorSpawnCapability();
+    const post = async (clientAttemptId: string, mcpServers?: unknown) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: {
+        origin: "http://127.0.0.1",
+        host: "127.0.0.1",
+        "content-type": "application/json",
+        "x-llv-spawn-capability": capability,
+      },
+      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "inspect", role: "builder", clientAttemptId, ...(mcpServers === undefined ? {} : { mcpServers }) }),
+    }), dependencies);
+
+    const defaultResponse = await post("mcp_default_20260723");
+    expect({ status: defaultResponse.status, body: await defaultResponse.clone().json() }).toMatchObject({ status: 202 });
+    expect((await post("mcp_custom_20260723", ["agent-browser", "viewer", "agent-browser"])).status).toBe(202);
+
+    expect(store.spawnReceiptForClientAttempt("mcp_default_20260723")?.launchProfile.mcpServers).toEqual(["viewer"]);
+    expect(store.spawnReceiptForClientAttempt("mcp_custom_20260723")?.launchProfile.mcpServers).toEqual(["viewer", "agent-browser"]);
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
 test("a materialized structured child is offered for pipeline attempt adoption", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "pipeline-adoption-"));
   const store = registry();
@@ -1104,6 +1162,10 @@ test("operator and agent structured Claude role launches both retain bypass perm
 
 test("structured replay keeps its admitted account after routing changes", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-rotation-replay-"));
+  const previousCodexBinary = process.env.LLV_CODEX_BINARY;
+  const codexBinary = path.join(cwd, "codex-mcp-list");
+  fs.writeFileSync(codexBinary, "#!/bin/sh\nprintf '[]'\n");
+  fs.chmodSync(codexBinary, 0o755);
   const store = registry();
   const deferred: Array<() => Promise<void>> = [];
   const effects: string[] = [];
@@ -1176,6 +1238,7 @@ test("structured replay keeps its admitted account after routing changes", async
   process.env.LLV_RUNTIME_EVENTS = "1";
   process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
   process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  process.env.LLV_CODEX_BINARY = codexBinary;
   const alternateCwd = fs.mkdtempSync(path.join(routeSandbox, "account-rotation-conflict-"));
   const alternateParent = store.ensureConversation("claude", path.join(cwd, "alternate-parent.jsonl"), "account-a");
   const request = (overrides: Record<string, unknown> = {}) => new NextRequest("http://127.0.0.1:8898/api/spawn", {
@@ -1246,6 +1309,8 @@ test("structured replay keeps its admitted account after routing changes", async
     else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
     if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
     else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+    if (previousCodexBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousCodexBinary;
   }
 });
 
@@ -1892,6 +1957,7 @@ function digestForParent(body: { parentConversationId: string }): string {
     fast: false,
     accountId: "terra",
     role: "worker",
+    mcpServers: ["viewer"],
     parent: spawnParentSelector(body),
     "prompt": "implement",
     images: [],

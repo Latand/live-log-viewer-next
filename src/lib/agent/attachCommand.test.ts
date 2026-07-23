@@ -1,9 +1,32 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import type { FileEntry } from "@/lib/types";
 import type { ResumeSpec } from "./cli";
 import { resumeSpecForSession } from "./cli";
 import { attachCommandFromSpec, attachTargetPath, resolveAttachCommand, resolveLaunchAttachCommand, type AttachResolverDeps, type LaunchAttachDeps } from "./attachCommand";
+
+/* The codex resume command now enumerates MCP servers via `codex mcp list --json`
+   (PR #610). Stub that binary so the pure P1#6 launch-attach composition below
+   stays hermetic and does not depend on a real codex install being present. */
+const MCP_STUB_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-attach-mcp-"));
+const MCP_STUB = path.join(MCP_STUB_DIR, "codex-mcp-stub");
+fs.writeFileSync(MCP_STUB, `#!/bin/sh\nprintf '[{"name":"viewer"}]'\n`);
+fs.chmodSync(MCP_STUB, 0o755);
+/* spawnSync chdir's into the launch cwd to enumerate MCP servers, so it must be a
+   real directory. */
+const WORKTREE = path.join(MCP_STUB_DIR, "worktree");
+fs.mkdirSync(WORKTREE, { recursive: true });
+const OLD_CODEX_BINARY = process.env.LLV_CODEX_BINARY;
+process.env.LLV_CODEX_BINARY = MCP_STUB;
+
+afterAll(() => {
+  if (OLD_CODEX_BINARY === undefined) delete process.env.LLV_CODEX_BINARY;
+  else process.env.LLV_CODEX_BINARY = OLD_CODEX_BINARY;
+  fs.rmSync(MCP_STUB_DIR, { recursive: true, force: true });
+});
 
 /**
  * Pure attach-command composition (design §6). No spawning, no waiting — every
@@ -139,7 +162,7 @@ function launchDeps(over: Partial<LaunchAttachDeps> = {}): LaunchAttachDeps {
   return {
     receipt: {
       engine: "codex",
-      cwd: "/repo/worktree",
+      cwd: WORKTREE,
       accountId: "work",
       key: { engine: "codex", sessionId: SESSION_ID },
       launchProfile: { model: "gpt-5.4", effort: "high", fast: null },
@@ -157,10 +180,12 @@ test("P1#6: a queued launch (no transcript yet) composes a real resume command f
   const res = resolveLaunchAttachCommand(launchDeps());
   expect(res.ok).toBe(true);
   if (res.ok) {
-    expect(res.value.cwd).toBe("/repo/worktree");
+    expect(res.value.cwd).toBe(WORKTREE);
     expect(res.value.command).toContain(`resume ${SESSION_ID}`);
     expect(res.value.command).toContain("CODEX_HOME='/repo/.codex-home'");
-    expect(res.value.fullCommand.startsWith("cd '/repo/worktree' && ")).toBe(true);
+    /* The launch's recorded MCP allowlist is re-applied on resume (PR #610). */
+    expect(res.value.command).toContain("'mcp_servers.viewer.enabled=true'");
+    expect(res.value.fullCommand.startsWith(`cd '${WORKTREE}' && `)).toBe(true);
     expect(res.value.accountLabel).toBe("work · codex");
   }
 });

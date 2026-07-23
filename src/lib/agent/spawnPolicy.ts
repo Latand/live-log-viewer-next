@@ -3,12 +3,18 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 import type { AgentEngine } from "./cli";
+import { normalizeSpawnMcpServers } from "./mcpAllowlist";
 
 type JsonObject = Record<string, unknown>;
 
 const MANAGED_HOOK_PREFIX = "LLV_MANAGED_NATIVE_SUBAGENT_DENY=1 ";
 const MANAGED_DIR = ".llv";
 const MANAGED_HOOK = "deny-native-subagents.sh";
+const MCP_APPROVAL_SETTINGS = [
+  "enableAllProjectMcpServers",
+  "enabledMcpjsonServers",
+  "disabledMcpjsonServers",
+] as const;
 
 /** Every native multi-agent entry point in the installed Claude CLI (#381 audit,
     CLI 2.1.214): subagent spawns (Task, Agent), Workflow orchestration scripts,
@@ -36,6 +42,7 @@ export const CODEX_VIEWER_SPAWN_FEATURES = {
 
 export interface ClaudeSpawnPolicyResult {
   settingsPath: string;
+  mcpConfigPath: string;
   hookPath: string;
   command: string;
 }
@@ -45,6 +52,7 @@ export function claudeSpawnPolicyPaths(home: string, profileId: string): ClaudeS
   const hookPath = path.join(home, MANAGED_DIR, "hooks", MANAGED_HOOK);
   return {
     settingsPath: path.join(home, MANAGED_DIR, "spawn-settings", `${profileId}.json`),
+    mcpConfigPath: path.join(home, MANAGED_DIR, "spawn-mcp", `${profileId}.json`),
     hookPath,
     command: `${MANAGED_HOOK_PREFIX}${shellQuote(hookPath)}`,
   };
@@ -81,6 +89,48 @@ function readSettings(pathname: string): JsonObject {
   const settings = record(parsed);
   if (!settings) throw new Error(`Claude settings must contain a JSON object: ${pathname}`);
   return settings;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function claudeProjectMcpServers(cwd: string | undefined): JsonObject {
+  if (!cwd) return {};
+  const launchDirectory = path.resolve(cwd);
+  let projectRoot = launchDirectory;
+  for (let directory = launchDirectory; ; directory = path.dirname(directory)) {
+    if (fs.existsSync(path.join(directory, ".git"))) {
+      projectRoot = directory;
+      break;
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+  }
+  const configPath = path.join(projectRoot, ".mcp.json");
+  if (!fs.existsSync(configPath)) return {};
+  return record(readSettings(configPath).mcpServers) ?? {};
+}
+
+function claudeMcpServers(
+  pathname: string,
+  cwd: string | undefined,
+  allowlist: readonly string[] | undefined,
+): JsonObject {
+  if (!fs.existsSync(pathname)) return {};
+  const state = readSettings(pathname);
+  const rootServers = record(state.mcpServers) ?? {};
+  const projects = record(state.projects);
+  const project = cwd && projects ? record(projects[cwd]) : null;
+  const sharedProjectServers = claudeProjectMcpServers(cwd);
+  const localProjectServers = record(project?.mcpServers) ?? {};
+  const registered = { ...rootServers, ...sharedProjectServers, ...localProjectServers };
+  const normalized = normalizeSpawnMcpServers(allowlist);
+  const names = normalized.ok ? normalized.value : ["viewer"];
+  return Object.fromEntries(names.flatMap((name) => {
+    const definition = record(registered[name]);
+    return definition ? [[name, definition]] : [];
+  }));
 }
 
 /** Seeds the mutable Claude home state before a managed bypass launch. */
@@ -141,7 +191,14 @@ function withoutManagedHandlers(value: unknown): unknown[] {
 /** Reconciles the Viewer-owned Claude hook while preserving every user key and handler. */
 export function applyClaudeSpawnPolicy(
   home: string,
-  options: { allowSubagents?: boolean; baseSettingsPath?: string | null; profileId?: string } = {},
+  options: {
+    allowSubagents?: boolean;
+    baseSettingsPath?: string | null;
+    profileId?: string;
+    cwd?: string;
+    mcpServers?: readonly string[];
+    mcpStatePath?: string;
+  } = {},
 ): ClaudeSpawnPolicyResult {
   const sourceSettingsPath = path.join(home, "settings.json");
   const profileId = options.profileId ?? crypto.randomUUID();
@@ -157,7 +214,7 @@ export function applyClaudeSpawnPolicy(
   if (!options.allowSubagents && sourceSettings.allowManagedHooksOnly === true) {
     throw new Error("Claude settings allowManagedHooksOnly prevents the Viewer spawn policy from enforcing native sub-agent denial");
   }
-  const hooks = settings.hooks === undefined ? {} : record(settings.hooks);
+  const hooks = sourceSettings.hooks === undefined ? {} : record(sourceSettings.hooks);
   if (!hooks) throw new Error("Claude settings hooks must contain a JSON object");
 
   const preToolUse = withoutManagedHandlers(hooks.PreToolUse);
@@ -173,7 +230,35 @@ export function applyClaudeSpawnPolicy(
   const enforcedSettings = options.allowSubagents
     ? settings
     : { ...settings, disableAllHooks: false, allowManagedHooksOnly: false };
-  atomicWrite(result.settingsPath, JSON.stringify({ ...enforcedSettings, hooks: { ...hooks, PreToolUse: preToolUse } }, null, 2) + "\n", 0o600);
+  const mcpServers = claudeMcpServers(
+    options.mcpStatePath ?? path.join(home, ".claude.json"),
+    options.cwd,
+    options.mcpServers,
+  );
+  const includedMcpServers = new Set(Object.keys(mcpServers));
+  const excludedProjectMcpServers = Object.keys(claudeProjectMcpServers(options.cwd))
+    .filter((name) => !includedMcpServers.has(name));
+  const settingsWithoutMcp = Object.fromEntries(
+    Object.entries(enforcedSettings).filter(([key]) => key !== "mcpServers"),
+  );
+  const approvalSettings: JsonObject = Object.fromEntries(MCP_APPROVAL_SETTINGS.flatMap((key) => (
+    sourceSettings[key] === undefined ? [] : [[key, sourceSettings[key]]]
+  )));
+  if (sourceSettings.enabledMcpjsonServers !== undefined) {
+    approvalSettings.enabledMcpjsonServers = stringArray(sourceSettings.enabledMcpjsonServers)
+      .filter((name) => includedMcpServers.has(name));
+  }
+  const disabledMcpjsonServers = [...new Set([
+    ...stringArray(sourceSettings.disabledMcpjsonServers),
+    ...excludedProjectMcpServers,
+  ])];
+  if (disabledMcpjsonServers.length > 0) approvalSettings.disabledMcpjsonServers = disabledMcpjsonServers;
+  atomicWrite(result.settingsPath, JSON.stringify({
+    ...settingsWithoutMcp,
+    ...approvalSettings,
+    hooks: { ...hooks, PreToolUse: preToolUse },
+  }, null, 2) + "\n", 0o600);
+  atomicWrite(result.mcpConfigPath, JSON.stringify({ mcpServers }, null, 2) + "\n", 0o600);
   return result;
 }
 

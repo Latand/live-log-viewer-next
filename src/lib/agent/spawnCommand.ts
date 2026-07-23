@@ -11,6 +11,7 @@ import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migrati
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
+import { normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
 import { codexModelSupportsImages, modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
@@ -139,12 +140,15 @@ export async function executeSpawnRequest(
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; project?: unknown; supersedes?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; mcpServers?: unknown; project?: unknown; supersedes?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
+
+  const mcpServers = normalizeSpawnMcpServers(body.mcpServers);
+  if (!mcpServers.ok) return NextResponse.json({ error: mcpServers.error }, { status: 400 });
 
   const lineageError = agentSpawnLineageError(req, body);
   if (lineageError) return NextResponse.json({ error: lineageError }, { status: 400 });
@@ -330,6 +334,7 @@ export async function executeSpawnRequest(
       fast: reasoning.fast,
       accountId: account.accountId,
       role: role.value?.role ?? null,
+      mcpServers: mcpServers.value,
       ...(body.allowSubagents === true ? { allowSubagents: true } : {}),
       ...(explicitProject ? { project: explicitProject } : {}),
       parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
@@ -349,6 +354,7 @@ export async function executeSpawnRequest(
       claudeConfigDir: engine === "claude" ? account.home : null,
       claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
       allowSubagents: body.allowSubagents === true,
+      mcpServers: mcpServers.value,
       deferClaudeSpawnPolicy: true,
     });
     const permissionMode = engine === "claude" && transport === "structured"
@@ -365,6 +371,7 @@ export async function executeSpawnRequest(
         cwd,
         parentConversationId,
         allowSubagents: body.allowSubagents === true,
+        mcpServers: mcpServers.value,
         permissionMode,
         ...(explicitProject ? { project: explicitProject } : {}),
       }),
@@ -534,6 +541,11 @@ export async function executeSpawnRequest(
         allowSubagents: body.allowSubagents === true,
         baseSettingsPath: isManagedClaudeHome(account.home) ? claudeSettingsPath() : null,
         profileId,
+        cwd,
+        mcpServers: mcpServers.value,
+        mcpStatePath: account.kind === "managed"
+          ? path.join(account.home, ".claude.json")
+          : path.join(path.dirname(account.home), ".claude.json"),
       });
     }
     if (transport === "structured") {

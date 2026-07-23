@@ -120,6 +120,117 @@ test("Claude spawn policy seeds a fresh account from the shared user settings sn
   expect(settings.hooks.PreToolUse).toHaveLength(1);
 });
 
+test("Claude native MCP config forces Viewer into a custom allowlist and omits unrelated servers", () => {
+  const accountHome = home();
+  fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
+    mcpServers: {
+      viewer: { type: "stdio", command: "viewer-mcp", args: ["--viewer"] },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+      "telegram-readonly": { type: "stdio", command: "telegram-mcp" },
+    },
+  }));
+
+  const installed = applyClaudeSpawnPolicy(accountHome, {
+    profileId: "custom-mcp",
+    cwd: "/repo",
+    mcpServers: ["agent-browser"],
+  });
+  const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+
+  expect(mcpConfig.mcpServers).toEqual({
+    viewer: { type: "stdio", command: "viewer-mcp", args: ["--viewer"] },
+    "agent-browser": { type: "stdio", command: "browser-mcp" },
+  });
+});
+
+test("Claude native MCP config defaults to the registered Viewer server only", () => {
+  const accountHome = home();
+  fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
+    mcpServers: {
+      viewer: { type: "stdio", command: "viewer-mcp" },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+    },
+  }));
+
+  const installed = applyClaudeSpawnPolicy(accountHome, { profileId: "default-mcp", cwd: "/repo" });
+  const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+
+  expect(mcpConfig.mcpServers).toEqual({ viewer: { type: "stdio", command: "viewer-mcp" } });
+  expect(JSON.parse(fs.readFileSync(installed.settingsPath, "utf8"))).not.toHaveProperty("mcpServers");
+});
+
+test("Claude native MCP config merges project scope between user and local scopes", () => {
+  const accountHome = home();
+  const projectRoot = home();
+  const cwd = path.join(projectRoot, "packages", "worker");
+  fs.mkdirSync(path.join(projectRoot, ".git"), { recursive: true });
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(path.join(accountHome, "settings.json"), JSON.stringify({
+    enabledMcpjsonServers: ["project-allowed"],
+  }));
+  fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
+    mcpServers: {
+      viewer: { type: "stdio", command: "viewer-user" },
+      "project-allowed": { type: "stdio", command: "user-version" },
+      "local-wins": { type: "stdio", command: "user-local" },
+    },
+    projects: {
+      [cwd]: {
+        mcpServers: {
+          "local-wins": { type: "stdio", command: "local-version", env: { LOCAL_AUTH: "kept" } },
+        },
+      },
+    },
+  }));
+  fs.writeFileSync(path.join(projectRoot, ".mcp.json"), JSON.stringify({
+    mcpServers: {
+      "project-allowed": {
+        type: "stdio",
+        command: "project-version",
+        args: ["--project"],
+        env: { PROJECT_AUTH: "kept" },
+        timeout: 12_345,
+        alwaysLoad: true,
+      },
+      "local-wins": { type: "stdio", command: "project-local" },
+      "project-unrelated": { type: "stdio", command: "unrelated-project" },
+    },
+  }));
+
+  const installed = applyClaudeSpawnPolicy(accountHome, {
+    profileId: "project-scopes",
+    cwd,
+    mcpServers: ["project-allowed", "local-wins"],
+  });
+  const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+  const settings = JSON.parse(fs.readFileSync(installed.settingsPath, "utf8")) as {
+    enabledMcpjsonServers: string[];
+    disabledMcpjsonServers: string[];
+  };
+
+  expect(mcpConfig.mcpServers).toEqual({
+    viewer: { type: "stdio", command: "viewer-user" },
+    "project-allowed": {
+      type: "stdio",
+      command: "project-version",
+      args: ["--project"],
+      env: { PROJECT_AUTH: "kept" },
+      timeout: 12_345,
+      alwaysLoad: true,
+    },
+    "local-wins": { type: "stdio", command: "local-version", env: { LOCAL_AUTH: "kept" } },
+  });
+  expect(mcpConfig.mcpServers).not.toHaveProperty("project-unrelated");
+  expect(settings.enabledMcpjsonServers).toEqual(["project-allowed"]);
+  expect(settings.disabledMcpjsonServers).toEqual(["project-unrelated"]);
+});
+
 test("allowSubagents uses an isolated profile while the denied profile stays enforced", () => {
   const accountHome = home();
   const shared = path.join(home(), "settings.json");

@@ -11,13 +11,14 @@ export interface SpawnRequestIdentity {
   accountId: string | null;
   role: string | null;
   allowSubagents?: boolean;
+  mcpServers: string[];
   /** Explicit operator project ownership; absent for cwd-attributed spawns. */
   project?: string;
   parent: SpawnParentSelector;
   reviews?: SpawnParentSelector;
   /** Predecessor conversation this spawn terminally supersedes (issue #383). */
   supersedes?: SpawnParentSelector;
-  prompt: string;
+  "prompt": string;
   images: Array<{ mime: string; digest: string }>;
 }
 

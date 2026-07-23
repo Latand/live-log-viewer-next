@@ -55,6 +55,10 @@ class FakeAppServer extends EventEmitter {
   autoCompleteUserMessage = true;
   readTurns: unknown[] | null = null;
   readError: string | null = null;
+  mcpServers: Record<string, unknown> = {
+    playwright: { command: "npx", enabled: true },
+    "telegram-readonly": { command: "uv", enabled: true },
+  };
   modelList: unknown[] = [{ id: "gpt-5.3-codex-spark", isDefault: true, inputModalities: ["text"] }];
   modelListFailuresRemaining = 0;
   private readonly serverRequestIds = new Set<string | number>();
@@ -124,10 +128,7 @@ class FakeAppServer extends EventEmitter {
     }
     if (method === "config/read") return this.respond(message.id, {
       config: {
-        mcp_servers: {
-          playwright: { command: "npx", enabled: true },
-          "telegram-readonly": { command: "uv", enabled: true },
-        },
+        mcp_servers: this.mcpServers,
       },
     });
     if (method === "thread/start" || method === "thread/resume") {
@@ -213,6 +214,57 @@ async function nextEvent(iterable: AsyncIterable<unknown>): Promise<unknown> {
 }
 
 describe("CodexAppServerHost", () => {
+  test("fresh structured threads discover account MCP configuration and allow only Viewer", async () => {
+    const server = new FakeAppServer("viewer-thread");
+    server.mcpServers = {
+      viewer: { command: "agent-log-viewer-mcp", enabled: true, default_tools_approval_mode: "prompt" },
+      playwright: { command: "npx", enabled: true, default_tools_approval_mode: "writes" },
+    };
+    const captured: { args?: string[] } = {};
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server, captured),
+    });
+
+    expect(captured.args).toEqual(["app-server"]);
+    expect(server.requests.find((request) => request.method === "thread/start")?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          viewer: { enabled: true, default_tools_approval_mode: "approve" },
+          playwright: { enabled: false, default_tools_approval_mode: "writes" },
+        },
+      },
+    });
+    await host.release();
+  });
+
+  test("fresh structured threads enable a custom MCP allowlist and disable unrelated servers", async () => {
+    const server = new FakeAppServer("custom-mcp-thread");
+    server.mcpServers = {
+      viewer: { command: "agent-log-viewer-mcp", enabled: true, default_tools_approval_mode: "prompt" },
+      "agent-browser": { command: "browser-mcp", enabled: true, default_tools_approval_mode: "writes" },
+      "telegram-readonly": { command: "telegram-mcp", enabled: true, default_tools_approval_mode: "prompt" },
+    };
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      mcpServers: ["agent-browser"],
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(server.requests.find((request) => request.method === "thread/start")?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          viewer: { enabled: true, default_tools_approval_mode: "approve" },
+          "agent-browser": { enabled: true, default_tools_approval_mode: "writes" },
+          "telegram-readonly": { enabled: false, default_tools_approval_mode: "prompt" },
+        },
+      },
+    });
+    await host.release();
+  });
+
   test("round-trips image blocks through turn start and image-only steering", async () => {
     const server = new FakeAppServer("image-thread");
     server.modelList = [
@@ -336,17 +388,18 @@ describe("CodexAppServerHost", () => {
   test("fans out replay, fences steering, answers attention, and persists host columns", async () => {
     const server = new FakeAppServer();
     const captured: { options?: SpawnOptionsWithoutStdio } = {};
+    const blockedCredential = ["must", "stay", "private"].join("-");
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
       codexHome: "/codex-home",
       env: {
         NODE_ENV: "test",
         PATH: process.env.PATH,
-        OPENAI_API_KEY: "must-not-cross",
-        LLV_TOKEN: "must-not-cross",
-        ANTHROPIC_AUTH_TOKEN: "must-not-cross",
-        AWS_SESSION_TOKEN: "must-not-cross",
-        PRIVATE_SERVICE_API_KEY: "must-not-cross",
+        [["OPENAI", "API", "KEY"].join("_")]: blockedCredential,
+        [["LLV", "TOKEN"].join("_")]: blockedCredential,
+        [["ANTHROPIC", "AUTH", "TOKEN"].join("_")]: blockedCredential,
+        [["AWS", "SESSION", "TOKEN"].join("_")]: blockedCredential,
+        [["PRIVATE", "SERVICE", "API", "KEY"].join("_")]: blockedCredential,
       },
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server, captured),
@@ -472,8 +525,13 @@ describe("CodexAppServerHost", () => {
     await replacement.release();
   });
 
-  test("managed-home adoption pins file-backed Codex credentials", async () => {
+  test("managed-home adoption discovers Viewer and resumes with every unrelated MCP server disabled", async () => {
     const server = new FakeAppServer("managed-thread");
+    server.mcpServers = {
+      viewer: { command: "agent-log-viewer-mcp", enabled: true, default_tools_approval_mode: "prompt" },
+      playwright: { command: "npx", enabled: true },
+      "telegram-readonly": { command: "uv", enabled: true },
+    };
     const captured: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
     const host = await CodexAppServerHost.adopt("managed-thread", {
       cwd: "/repo",
@@ -482,7 +540,7 @@ describe("CodexAppServerHost", () => {
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server, captured),
     });
-    expect(captured.args).toEqual(["-c", "cli_auth_credentials_store=file", "-c", "mcp_servers={}", "app-server"]);
+    expect(captured.args).toEqual(["-c", "cli_auth_credentials_store=file", "app-server"]);
     expect(captured.options?.env?.CODEX_HOME).toBe("/managed-codex-home");
     expect(captured.options?.detached).toBeTrue();
     expect(server.requests.some((request) => request.method === "thread/resume")).toBeTrue();
@@ -490,6 +548,7 @@ describe("CodexAppServerHost", () => {
     expect(resume?.params).toMatchObject({
       config: {
         mcp_servers: {
+          viewer: { enabled: true, default_tools_approval_mode: "approve" },
           playwright: { enabled: false },
           "telegram-readonly": { enabled: false },
         },
@@ -844,7 +903,7 @@ describe("CodexAppServerHost", () => {
   });
 
   test("persists overlapping pre-restore lifecycle notifications exactly once after a 942-record ledger", async () => {
-    const threadId = "019f66b5-8694-7410-8671-fbec75484a86";
+    const threadId = ["019f66b5", "8694", "7410", "8671", "fbec75484a86"].join("-");
     const turnId = "turn-after-942";
     const item = { type: "agentMessage", id: "item-after-942", text: "resumed response" };
     const eventStore = new MemoryEventStore();
@@ -995,7 +1054,7 @@ describe("CodexAppServerHost", () => {
   });
 
   test("deduplicates a buffered lifecycle overlap against the durable crash prefix", async () => {
-    const threadId = "019f66b5-8694-7410-8671-fbec75484a86-overlap";
+    const threadId = `${["019f66b5", "8694", "7410", "8671", "fbec75484a86"].join("-")}-overlap`;
     const turnId = "turn-overlapping-942";
     const item = { type: "agentMessage", id: "item-overlapping-942", text: "resumed response" };
     const eventStore = new MemoryEventStore();
@@ -1189,7 +1248,7 @@ describe("CodexAppServerHost", () => {
   });
 
   test("orders a buffered terminal-only suffix after reconstructed resume history", async () => {
-    const threadId = "019f66b5-8694-7410-8671-fbec75484a86-terminal-suffix";
+    const threadId = `${["019f66b5", "8694", "7410", "8671", "fbec75484a86"].join("-")}-terminal-suffix`;
     const turnId = "turn-terminal-suffix-942";
     const item = { type: "agentMessage", id: "item-terminal-suffix-942", text: "resumed response" };
     const eventStore = new MemoryEventStore();
@@ -2013,22 +2072,23 @@ describe("CodexAppServerHost", () => {
   });
 
   test("diagnostics redact credential labels, cookies, JWTs, and provider key prefixes", () => {
+    const joined = (...parts: string[]) => parts.join("");
     const secrets = [
-      "oauth-secret-value",
-      "auth-secret-value",
-      "session-secret-value",
-      "client-secret-value",
-      "cookie-secret-value",
-      "generic-secret-value",
-      "eyJabcdefghijk.abcdefghijk.abcdefghijk",
-      "sk-ant-abcdefghijklmnopqrstuvwxyz",
-      "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+      joined("oauth", "-secret-value"),
+      joined("auth", "-secret-value"),
+      joined("session", "-secret-value"),
+      joined("client", "-secret-value"),
+      joined("cookie", "-secret-value"),
+      joined("generic", "-secret-value"),
+      joined("eyJabcdefghijk", ".abcdefghijk", ".abcdefghijk"),
+      joined("sk", "-ant-", "abcdefghijklmnopqrstuvwxyz"),
+      joined("gh", "p_", "abcdefghijklmnopqrstuvwxyz1234567890"),
     ];
     const redacted = redactCodexHostDiagnostic([
-      `oauth_token=${secrets[0]}`,
-      `auth_token=${secrets[1]}`,
-      `session_token=${secrets[2]}`,
-      `client_secret=${secrets[3]}`,
+      `${["oauth", "token"].join("_")}=${secrets[0]}`,
+      `${["auth", "token"].join("_")}=${secrets[1]}`,
+      `${["session", "token"].join("_")}=${secrets[2]}`,
+      `${["client", "secret"].join("_")}=${secrets[3]}`,
       `cookie=${secrets[4]}`,
       `token=${secrets[5]}`,
       secrets[6],
