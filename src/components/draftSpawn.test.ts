@@ -144,11 +144,11 @@ describe("classifySpawnResponse — server → card outcome", () => {
       conversationId: "conversation_9",
       launchId: "launch-1",
       target: "sess:3.0",
-      error: "Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry.",
+      error: "Claude account work-2 needs re-login. Open Accounts, sign in, and retry.",
     });
     expect(out).toEqual({
       kind: "failed-launch",
-      message: "Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry.",
+      message: "Claude account work-2 needs re-login. Open Accounts, sign in, and retry.",
       target: "sess:3.0",
       conversationId: "conversation_9",
       launchId: "launch-1",
