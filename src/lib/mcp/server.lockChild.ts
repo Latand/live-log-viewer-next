@@ -6,10 +6,17 @@ import { procBackend } from "@/lib/proc";
 
 import type { McpToolBindings } from "./server";
 
+type RaceRole = "winner" | "contender";
+
 function waitFor(filename: string): void {
   while (!fs.existsSync(filename)) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
   }
+}
+
+function pauseAt(directory: string, role: RaceRole, phase: string): void {
+  fs.writeFileSync(path.join(directory, `${role}-${phase}-ready`), "ready");
+  waitFor(path.join(directory, `${role}-${phase}-release`));
 }
 
 function publishLock(lockPath: string, readyPath: string, releasePath: string): void {
@@ -40,9 +47,55 @@ async function claimReceipt(
   resultPath: string,
   pausePath?: string,
   pauseReleasePath?: string,
+  raceRole?: RaceRole,
+  raceDirectory?: string,
 ): Promise<void> {
   const lockPath = `${receiptPath}.lock`;
-  if (pausePath && pauseReleasePath) {
+  if (raceRole && raceDirectory) {
+    const originalOpen = fs.openSync.bind(fs);
+    const originalUnlink = fs.unlinkSync.bind(fs);
+    const originalLink = fs.linkSync.bind(fs);
+    let linked = false;
+    let unlinked = false;
+    let blockAcquire = false;
+    fs.openSync = ((filename: fs.PathLike, flags: string | number, mode?: fs.Mode) => {
+      if (raceRole === "contender" && blockAcquire && String(filename) === lockPath) {
+        pauseAt(raceDirectory, raceRole, "acquire");
+        blockAcquire = false;
+      }
+      return originalOpen(filename, flags, mode);
+    }) as typeof fs.openSync;
+    fs.unlinkSync = ((filename: fs.PathLike) => {
+      if (raceRole === "contender" && !unlinked && String(filename) === lockPath) {
+        pauseAt(raceDirectory, raceRole, "before-unlink");
+        unlinked = true;
+      }
+      const result = originalUnlink(filename);
+      if (raceRole === "winner" && !unlinked && String(filename) === lockPath) {
+        unlinked = true;
+        pauseAt(raceDirectory, raceRole, "after-unlink");
+      }
+      return result;
+    }) as typeof fs.unlinkSync;
+    fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+      try {
+        const result = originalLink(existingPath, newPath);
+        if (raceRole === "winner" && !linked && String(existingPath) === lockPath) {
+          linked = true;
+          pauseAt(raceDirectory, raceRole, "after-link");
+        }
+        return result;
+      } catch (error) {
+        if (raceRole === "contender"
+          && (error as NodeJS.ErrnoException).code === "EEXIST"
+          && String(existingPath) === lockPath) {
+          blockAcquire = true;
+          fs.writeFileSync(path.join(raceDirectory, `${raceRole}-eexist-seen`), "seen");
+        }
+        throw error;
+      }
+    }) as typeof fs.linkSync;
+  } else if (pausePath && pauseReleasePath) {
     const originalUnlink = fs.unlinkSync.bind(fs);
     const originalLink = fs.linkSync.bind(fs);
     let paused = false;
@@ -88,6 +141,16 @@ if (mode === "hold") {
     process.argv[5]!,
     process.argv[6] || undefined,
     process.argv[7] || undefined,
+  );
+} else if (mode === "race-claim") {
+  await claimReceipt(
+    process.argv[3]!,
+    process.argv[4]!,
+    process.argv[5]!,
+    undefined,
+    undefined,
+    process.argv[6] as RaceRole,
+    process.argv[7]!,
   );
 } else {
   throw new Error(`unsupported lock child mode: ${String(mode)}`);

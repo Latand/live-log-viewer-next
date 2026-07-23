@@ -40,6 +40,16 @@ async function waitForFile(filename: string, timeoutMs = 3_000): Promise<boolean
   return fs.existsSync(filename);
 }
 
+async function waitForAnyFile(filenames: string[], timeoutMs = 3_000): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const existing = filenames.find((filename) => fs.existsSync(filename));
+    if (existing) return existing;
+    await Bun.sleep(10);
+  }
+  return filenames.find((filename) => fs.existsSync(filename)) ?? null;
+}
+
 async function childResult(child: { exited: Promise<number>; stderr: ReadableStream<Uint8Array> }): Promise<{
   exit: number;
   error: string;
@@ -302,6 +312,104 @@ describe("MCP tool service", () => {
       { exit: 0, error: "" },
     ]);
     const results = [firstResultPath, secondResultPath]
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+    expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("only the recovery-link creator can retire a stale lock", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-authority-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const raceDirectory = path.join(directory, "race");
+    const holderReadyPath = path.join(directory, "replacement-ready");
+    const holderReleasePath = path.join(directory, "replacement-release");
+    const countPath = path.join(directory, "binding-count");
+    const winnerResultPath = path.join(directory, "winner-result.json");
+    const contenderResultPath = path.join(directory, "contender-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    const env = { ...process.env };
+    const phase = (role: "winner" | "contender", name: string, state: "ready" | "release") =>
+      path.join(raceDirectory, `${role}-${name}-${state}`);
+    fs.mkdirSync(raceDirectory);
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "shared-stale-owner",
+    }));
+
+    const winner = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "race-claim",
+        receiptPath,
+        countPath,
+        winnerResultPath,
+        "winner",
+        raceDirectory,
+      ],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(phase("winner", "after-link", "ready"))).toBeTrue();
+    const contender = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "race-claim",
+        receiptPath,
+        countPath,
+        contenderResultPath,
+        "contender",
+        raceDirectory,
+      ],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(path.join(raceDirectory, "contender-eexist-seen"))).toBeTrue();
+    const contenderBeforeUnlink = phase("contender", "before-unlink", "ready");
+    const contenderBeforeAcquire = phase("contender", "acquire", "ready");
+    const contenderPhase = await waitForAnyFile([contenderBeforeUnlink, contenderBeforeAcquire]);
+    const contenderGainedUnlinkAuthority = contenderPhase === contenderBeforeUnlink;
+
+    fs.writeFileSync(phase("winner", "after-link", "release"), "release");
+    expect(await waitForFile(phase("winner", "after-unlink", "ready"))).toBeTrue();
+    const replacement = Bun.spawn({
+      cmd: [process.execPath, child, "hold", lockPath, holderReadyPath, holderReleasePath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(holderReadyPath)).toBeTrue();
+    fs.writeFileSync(phase("contender", "before-unlink", "release"), "release");
+    expect(await waitForFile(contenderBeforeAcquire)).toBeTrue();
+    fs.writeFileSync(phase("winner", "after-unlink", "release"), "release");
+    await Bun.sleep(100);
+    const replacementSurvived = fs.existsSync(lockPath);
+    const mutationRanWhileHeld = fs.existsSync(countPath);
+
+    fs.writeFileSync(holderReleasePath, "release");
+    fs.writeFileSync(phase("contender", "acquire", "release"), "release");
+    const processes = await Promise.all([
+      childResult(winner),
+      childResult(contender),
+      childResult(replacement),
+    ]);
+
+    expect(contenderPhase).not.toBeNull();
+    expect(contenderGainedUnlinkAuthority).toBeFalse();
+    expect(replacementSurvived).toBeTrue();
+    expect(mutationRanWhileHeld).toBeFalse();
+    expect(processes).toEqual([
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+    ]);
+    const results = [winnerResultPath, contenderResultPath]
       .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
     expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
     expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);

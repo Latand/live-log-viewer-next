@@ -244,16 +244,8 @@ function removeObservedLock(lockPath: string, observation: ReceiptLockObservatio
     fs.linkSync(lockPath, recoveryPath);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return false;
-    if (code === "EEXIST"
-      && sameLock(recoveryPath, observation.identity)
-      && readLockMetadata(recoveryPath).token === observation.token) {
-      // An existing link to this inode can complete the same fenced retirement.
-    } else if (code === "EEXIST") {
-      return false;
-    } else {
-      throw error;
-    }
+    if (code === "ENOENT" || code === "EEXIST") return false;
+    throw error;
   }
   try {
     const recoveryMetadata = readLockMetadata(recoveryPath);
@@ -311,10 +303,7 @@ function withFileLock<T>(filePath: string, operation: () => T): T {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const observation = observeLock(lockPath);
-      if (observation && staleLock(observation)) {
-        removeObservedLock(lockPath, observation);
-        continue;
-      }
+      if (observation && staleLock(observation) && removeObservedLock(lockPath, observation)) continue;
       if (Date.now() >= deadline) throw new Error("MCP receipt store is busy");
       Atomics.wait(sleepCell, 0, 0, 10);
     }
