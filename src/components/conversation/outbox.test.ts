@@ -210,6 +210,32 @@ describe("seedLaunchOutbox (P1#2)", () => {
     expect(readOutbox("spawn:launch_1")).toHaveLength(0);
     expect(readOutbox("conversation_live")[0]).toMatchObject({ id: "launch_1", launchOwned: true });
   });
+
+  test("issue 614: a server-projected seed and the composer's own seed (identical launch id and text) are ONE bubble that survives a refresh and retires on its own echo — never a duplicate", () => {
+    const identical = "LLV614_CANONICAL_PROBE_20260723";
+    /* The board that ran the composer seeds under the canonical identity. */
+    seedLaunchOutbox("conversation_614", { id: "launch_614", text: identical, images: 0, at: 1_000 });
+    /* A later /api/files poll carries the server-projected launch prompt; LogFeed
+       re-seeds by the SAME launch id with the SAME text — idempotent, no second
+       bubble. This is also the ONLY seed a surface that never ran the composer
+       (an MCP spawn observer, a second tab) receives. */
+    seedLaunchOutbox("conversation_614", { id: "launch_614", text: identical, images: 0, at: 2_000 });
+    expect(readOutbox("conversation_614")).toHaveLength(1);
+
+    /* A page refresh (fresh module state) rehydrates exactly one launch-owned
+       bubble from sessionStorage — the prompt is preserved, never re-queued. */
+    resetOutboxForTests();
+    const refreshed = readOutbox("conversation_614");
+    expect(refreshed).toHaveLength(1);
+    expect(refreshed[0]).toMatchObject({ id: "launch_614", text: identical, state: "delivering", launchOwned: true });
+
+    /* Before the transcript flush the bubble is the only representation of the
+       prompt (visible). */
+    expect(visibleOutbox(refreshed, echoes(), 5_000).map((entry) => entry.id)).toEqual(["launch_614"]);
+    /* Transcript adoption: the flushed transcript echoes the prompt exactly once,
+       which retires the launch-owned bubble — one window, zero duplicate. */
+    expect(visibleOutbox(refreshed, echoes(identical), 5_000)).toEqual([]);
+  });
 });
 
 test("adoption moves a queue onto the materialized conversation identity idempotently", () => {

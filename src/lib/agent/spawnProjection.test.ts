@@ -212,6 +212,95 @@ test("issue 569: a launch with no materialized transcript still projects the con
   }
 });
 
+test("issue 614: a transcript-less launch projects the queued prompt as the first user bubble across multiple polls", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-614-pre-transcript-prompt-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex", cwd: directory, transport: "structured", accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    /* The queued initial delivery the spawn holds for this launch — the durable
+       source of the first user bubble on EVERY surface, not only the browser
+       that ran the composer. */
+    registry.holdDelivery(begun.receipt.conversationId, "LLV614_CANONICAL_PROBE_20260723", `spawn_${begun.receipt.launchId}`);
+
+    const createdMs = Date.parse(begun.receipt.createdAt);
+    /* The launch stays transcript-less across several projection polls (the
+       production regression sampled ~0s / ~17s / ~32s). Every poll keeps ONE
+       window carrying the prompt as its first user bubble — never an empty shell
+       under status chips, and never a vanished window. */
+    for (const offset of [0, 17_000, 32_000, 4 * 60_000]) {
+      const projection = projectLaunchConversations([], registry.snapshot(), createdMs + offset);
+      expect(projection.cards).toHaveLength(1);
+      expect(projection.cards[0]!.spawn).toMatchObject({
+        state: "queued",
+        initialMessage: "queued",
+        promptImages: 0,
+        promptAt: createdMs, prompt: "LLV614_CANONICAL_PROBE_20260723",
+      });
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 614: a materialized launch whose transcript a scoped scan omits keeps its window until the live conversation is in the response", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-614-pre-adoption-continuity-"));
+  const artifactPath = path.join(directory, "019f8dbe_e6cc_9e62_40df_06fb8f88b8a1.jsonl");
+  try {
+    fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "LLV614_CANONICAL_PROBE_20260723" })}\n`);
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex", cwd: directory, transport: "structured", accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId: "019f8dbe-" + "e6cc-9e62-40df-06fb8f88b8a1" },
+      artifactPath,
+      cwd: directory,
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      status: "idle",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    observeArtifact(registry, artifactPath, directory);
+    const createdMs = Date.parse(begun.receipt.createdAt);
+    const snapshot = registry.snapshot();
+    expect(snapshot.receipts[begun.receipt.launchId]?.artifactLifecycle).toBe("materialized");
+
+    /* The #614 vanish: inventory materialized the transcript, but the canonical
+       project poll that the operator is watching has not carried it yet. The
+       window must NOT blink out — the launch keeps its window while the
+       transcript still exists on disk and the launch is recent. */
+    const gap = projectLaunchConversations([], snapshot, createdMs + 17_000);
+    expect(gap.cards).toHaveLength(1);
+    expect(gap.cards[0]!).toMatchObject({ path: `spawn:${begun.receipt.launchId}` });
+
+    /* The receipt-to-transcript handoff in ONE response: the live transcript
+       arrives, the launch folds into that single window as transient facts, and
+       there is exactly one card — never a duplicate. */
+    const adopted = projectLaunchConversations([scannedFile(artifactPath)], snapshot, createdMs + 20_000);
+    expect(adopted.cards).toEqual([]);
+    expect(adopted.facts.get(artifactPath)).toMatchObject({ state: "recovered", initialMessage: "delivered" });
+
+    /* Aged past the pre-adoption grace with the transcript still outside the
+       scoped scan: it folds into history rather than resurrecting a phantom. */
+    expect(projectLaunchConversations([], snapshot, createdMs + 16 * 60_000).cards).toEqual([]);
+
+    /* A genuinely deleted transcript retires the window rather than lingering. */
+    fs.unlinkSync(artifactPath);
+    expect(projectLaunchConversations([], snapshot, createdMs + 17_000).cards).toEqual([]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("terminal synthetic spawn cards join compact history after the scanner freshness horizon", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-terminal-age-"));
   const filename = path.join(directory, "agent-registry.json");

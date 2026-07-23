@@ -110,9 +110,22 @@ const QUEUED_LAUNCH: StructuredSpawnCardState = {
   state: "queued", initialMessage: "queued", retrySafe: false, error: null,
 };
 const DELIVERED_LAUNCH: StructuredSpawnCardState = { ...QUEUED_LAUNCH, state: "live-late-success", initialMessage: "delivered" };
+/* The #614 pre-transcript launch: a transcript-less `spawn:` window whose queued
+   prompt the server projected onto the launch state, so LogFeed seeds it as the
+   first user bubble even on a surface that never ran the composer. */
+const PRE_TRANSCRIPT_PROMPT = "LLV614_CANONICAL_PROBE_20260723";
+const PROMPTED_LAUNCH: StructuredSpawnCardState = {
+  ...QUEUED_LAUNCH, launchId: "launch_evidence_614",
+  promptImages: 0, promptAt: 1, prompt: PRE_TRANSCRIPT_PROMPT,
+};
 
-const STATES: Array<{ id: string; file: FileEntry; seedOutbox?: "delivering" }> = [
+const STATES: Array<{ id: string; file: FileEntry; seedOutbox?: "delivering"; expectPrompt?: string }> = [
   { id: "queued", file: baseFile({ path: "spawn:launch_evidence", name: "spawn:launch_evidence", spawn: QUEUED_LAUNCH }) },
+  {
+    id: "pre-transcript-prompt",
+    file: baseFile({ path: "spawn:launch_evidence_614", name: "spawn:launch_evidence_614", size: 0, spawn: PROMPTED_LAUNCH }),
+    expectPrompt: PRE_TRANSCRIPT_PROMPT,
+  },
   { id: "delivering", file: baseFile({ launch: DELIVERED_LAUNCH }), seedOutbox: "delivering" },
   { id: "live", file: baseFile({ launch: DELIVERED_LAUNCH }) },
 ];
@@ -181,6 +194,13 @@ test("browser-rendered conversation-window evidence: geometry, overflow, and lif
         updateOutbox(CONV, "op_evidence", { state: "delivering" });
       }
       const inner = await renderWindow(<BranchPane file={state.file} tasks={[]} isRoot />);
+      /* #614: the projected launch prompt renders as the first user bubble on a
+         surface that never ran the composer — the server-seeded launch-owned
+         bubble, present at both desktop and 390px. */
+      if (state.expectPrompt) {
+        expect(inner).toContain(state.expectPrompt);
+        expect(inner).toContain("data-outbox");
+      }
 
       const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height }, deviceScaleFactor: 1 });
       await page.setContent(pageHtml(inner, viewport.width), { waitUntil: "load" });
@@ -229,6 +249,12 @@ test("browser-rendered conversation-window evidence: geometry, overflow, and lif
   expect(manifest["queued-desktop"]!.launchChips).toBe(true);
   expect(manifest["delivering-desktop"]!.outbox).toBe(true);
   expect(manifest["delivering-mobile-390"]!.outbox).toBe(true);
+  /* #614: the pre-transcript launch shows its queued prompt as the first user
+     bubble (data-outbox) alongside its launch chips, at desktop and 390px — the
+     window is a conversation mid-launch, never an empty shell. */
+  expect(manifest["pre-transcript-prompt-desktop"]!.outbox).toBe(true);
+  expect(manifest["pre-transcript-prompt-desktop"]!.launchChips).toBe(true);
+  expect(manifest["pre-transcript-prompt-mobile-390"]!.outbox).toBe(true);
 
   fs.writeFileSync(path.join(EVIDENCE_DIR, "geometry.json"), JSON.stringify(manifest, null, 2));
 

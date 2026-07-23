@@ -10,6 +10,17 @@
     "launchChips": true,
     "outbox": false
   },
+  "pre-transcript-prompt-desktop": {
+    "scrollWidth": 1280,
+    "viewportWidth": 1280,
+    "feedHeight": 667.75,
+    "composerHeight": 99,
+    "controlStrip": true,
+    "mobileDetailsToggle": false,
+    "textarea": true,
+    "launchChips": true,
+    "outbox": true
+  },
   "delivering-desktop": {
     "scrollWidth": 1280,
     "viewportWidth": 1280,
@@ -42,6 +53,17 @@
     "textarea": true,
     "launchChips": true,
     "outbox": false
+  },
+  "pre-transcript-prompt-mobile-390": {
+    "scrollWidth": 390,
+    "viewportWidth": 390,
+    "feedHeight": 653,
+    "composerHeight": 105,
+    "controlStrip": false,
+    "mobileDetailsToggle": true,
+    "textarea": true,
+    "launchChips": true,
+    "outbox": true
   },
   "delivering-mobile-390": {
     "scrollWidth": 390,

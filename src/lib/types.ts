@@ -22,6 +22,19 @@ export interface StructuredSpawnCardState {
   initialMessage: "pending" | "queued" | "delivered" | "failed";
   retrySafe: boolean;
   error: string | null;
+  /** The initial launch prompt (issue #614), sourced from the queued initial
+      delivery so ANY surface — not only the browser that ran the composer —
+      renders it as the conversation's first user bubble while the transcript is
+      still absent. Present only while the delivery still carries its text (it is
+      cleared once delivered, by which point the transcript echoes it); the seed
+      it produces is keyed by {@link launchId}, so it survives a refresh and
+      transcript adoption and never duplicates the composer's own seed. */
+  prompt?: string;
+  /** How many images rode with the launch prompt, for the bubble's count chip. */
+  promptImages?: number;
+  /** Submission moment (ms) of the launch prompt — the receipt's creation time —
+      so the seeded bubble orders ahead of any follow-up the operator queues. */
+  promptAt?: number;
 }
 
 /** Current quota wall affecting a hosted conversation. Account provenance

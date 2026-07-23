@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 
 import type { RegistryFile, SpawnReceipt } from "./registry";
@@ -30,6 +31,18 @@ function initialDelivery(snapshot: RegistryFile, receipt: SpawnReceipt) {
       && delivery.clientMessageId === `spawn_${receipt.launchId}`) ?? null;
 }
 
+/** The initial launch prompt still recoverable from the queued initial delivery
+    (issue #614). The held delivery carries the operator's launch text until it is
+    delivered, after which the registry clears it (the transcript then echoes it),
+    so this returns a value only during the pre-transcript window — exactly when a
+    surface that did not run the composer would otherwise show an empty feed. */
+function launchPromptOf(delivery: ReturnType<typeof initialDelivery>): { prompt: string; promptImages: number } | null {
+  if (!delivery) return null;
+  const promptImages = delivery.runtimeImages.length;
+  if (!delivery.text.trim() && !promptImages) return null;
+  return { prompt: delivery.text, promptImages };
+}
+
 function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpawnCardState {
   const delivery = initialDelivery(snapshot, receipt);
   const failed = receipt.state === "failed" || receipt.state === "conflicted";
@@ -59,6 +72,7 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
   } else if (binding) {
     state = "binding";
   }
+  const launchPrompt = launchPromptOf(delivery);
   return {
     launchId: receipt.launchId,
     clientAttemptId: receipt.clientAttemptId,
@@ -67,6 +81,9 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
     initialMessage,
     retrySafe: receipt.state === "failed",
     error: receipt.error,
+    ...(launchPrompt
+      ? { prompt: launchPrompt.prompt, promptImages: launchPrompt.promptImages, promptAt: Date.parse(receipt.createdAt) || undefined }
+      : {}),
   };
 }
 
@@ -156,6 +173,30 @@ function transientLaunchFact(spawn: StructuredSpawnCardState, createdAt: string,
   return !Number.isFinite(createdMs) || nowMs - createdMs < TERMINAL_SPAWN_RECENT_MS;
 }
 
+/** The pre-adoption grace (issue #614): a launch whose transcript inventory
+    already materialized but which THIS scan did not carry stays projected only
+    while it is this recent — long enough to cover a project-scoped or
+    cache-lagged poll before the live transcript reaches the same view, short
+    enough that an aged materialized receipt whose transcript legitimately lives
+    outside a scoped scan folds into history instead of resurrecting a phantom
+    placeholder. */
+function withinAdoptionGrace(receipt: SpawnReceipt, nowMs: number): boolean {
+  const createdMs = Date.parse(receipt.createdAt);
+  return !Number.isFinite(createdMs) || nowMs - createdMs < TERMINAL_SPAWN_RECENT_MS;
+}
+
+/** Disk existence of a materialized artifact, the discriminator between the
+    #614 pre-adoption gap (the transcript exists but this scan omitted it — keep
+    the window) and a deleted transcript (gone — retire the window). Injected so
+    the projection stays a deterministic read model in tests. */
+function artifactOnDisk(pathname: string): boolean {
+  try {
+    return fs.existsSync(pathname);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The one launch read-model (issue #569). Every structured launch receipt
  * resolves to exactly ONE conversation surface:
@@ -181,6 +222,7 @@ export function projectLaunchConversations(
   files: readonly FileEntry[],
   snapshot: RegistryFile,
   nowMs = Date.now(),
+  artifactExists: (pathname: string) => boolean = artifactOnDisk,
 ): LaunchProjection {
   const byPath = new Map(files.map((file) => [file.path, file]));
   const scannedPaths = new Set(byPath.keys());
@@ -193,18 +235,28 @@ export function projectLaunchConversations(
   for (const receipt of receipts) {
     const spawn = cardState(snapshot, receipt);
     /* The materialized live conversation immediately retires the duplicate
-       spawn projection (#569): the launch folds into that window as chips. */
+       spawn projection (#569/#614): the launch folds into that window as chips.
+       Retirement happens ONLY here — when the adopted live conversation is
+       available in the SAME response — so the window never blinks out before its
+       transcript reaches the view. */
     const live = materializedEntry(byPath, files, snapshot, receipt);
     if (live) {
       if (transientLaunchFact(spawn, receipt.createdAt, nowMs)) facts.set(live.path, spawn);
       continue;
     }
-    /* No live transcript in this payload: the launch still owns the window.
-       A receipt whose artifact inventory already materialized elsewhere (a
-       project-scoped or capped scan that simply did not carry it) must not
-       resurrect a phantom placeholder. */
-    if (receipt.artifactLifecycle !== "pending") continue;
-    if (receipt.artifactPath && scannedPaths.has(receipt.artifactPath)) continue;
+    /* No live transcript in this payload: the launch still owns the window
+       across every pre-adoption state (starting/queued/reconciling/delivering).
+       A receipt whose artifact inventory already materialized keeps its window
+       only while the transcript still exists on disk (a project-scoped or
+       cache-lagged scan that simply did not carry it — issue #614) and the
+       launch is still recent; a gone transcript, or an aged materialized receipt
+       whose transcript legitimately lives outside a scoped scan, retires instead
+       of resurrecting a phantom placeholder. A still-`pending` launch always
+       projects — inventory has never materialized its artifact. */
+    if (receipt.artifactLifecycle !== "pending") {
+      const present = Boolean(receipt.artifactPath && artifactExists(receipt.artifactPath));
+      if (!present || !withinAdoptionGrace(receipt, nowMs)) continue;
+    }
     cards.push(spawnCard(snapshot, receipt, spawn, scannedPaths, nowMs));
   }
   return { cards, facts, routes };

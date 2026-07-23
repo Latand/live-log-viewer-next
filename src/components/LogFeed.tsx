@@ -15,7 +15,7 @@ import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 import { LaunchChips } from "./conversation/LaunchChips";
 import { OutboxBubbles } from "./conversation/OutboxBubbles";
 import { orderedConversationTail } from "./conversation/tailOrder";
-import { publishTranscriptEchoes, useOutbox, visibleOutbox } from "./conversation/outbox";
+import { publishTranscriptEchoes, seedLaunchOutbox, useOutbox, visibleOutbox } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
 import { FeedItem } from "./feed/FeedItem";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
@@ -411,6 +411,25 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   useEffect(() => {
     if (memoryKey) publishTranscriptEchoes(memoryKey, transcriptEchoCounts);
   }, [memoryKey, transcriptEchoCounts]);
+  /* The launch prompt as the conversation's first user bubble on EVERY surface
+     (issue #614): the server projects the queued initial prompt onto the launch
+     state, so a board that did not run the composer (an MCP spawn, a second tab,
+     a fresh refresh) seeds the same launch-owned bubble the composer path seeds.
+     Keyed by the launch id under the stable conversation identity, so it is
+     idempotent with the composer's own seed (no duplicate), survives a refresh,
+     folds through transcript adoption, and retires on its transcript echo. */
+  useEffect(() => {
+    if (!memoryKey || !launch?.launchId) return;
+    const promptText = launch.prompt ?? "";
+    const promptImages = launch.promptImages ?? 0;
+    if (!promptText.trim() && !promptImages) return;
+    seedLaunchOutbox(memoryKey, {
+      id: launch.launchId,
+      text: promptText,
+      images: promptImages,
+      at: launch.promptAt ?? Date.now(),
+    });
+  }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt]);
   const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs()) : [];
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */
