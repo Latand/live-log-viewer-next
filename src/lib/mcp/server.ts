@@ -37,6 +37,22 @@ export const MCP_TOOL_NAMES = [
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
+type ReceiptRetention = "bounded" | "durable";
+
+const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
+  "spawn_agent",
+  "send_message",
+  "create_task",
+  "update_task",
+  "create_pipeline",
+  "pipeline_action",
+  "link_task_to_pipeline",
+  "deploy_exact_sha",
+  "flow_action",
+  "conversation_action",
+  "conversation_migration",
+]);
+
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
 export type McpToolPayload = Record<string, unknown>;
 export type McpToolBinding = (args: McpToolArgs) => Promise<McpToolPayload>;
@@ -73,8 +89,8 @@ export type ReceiptClaim =
   | { kind: "conflict" };
 
 export interface McpReceiptStore {
-  claim(key: string, digest: string): ReceiptClaim;
-  complete(key: string, digest: string, result: McpToolResult): void;
+  claim(key: string, digest: string, retention: ReceiptRetention): ReceiptClaim;
+  complete(key: string, digest: string, result: McpToolResult, retention: ReceiptRetention): void;
 }
 
 export class MemoryMcpReceiptStore implements McpReceiptStore {
@@ -98,14 +114,19 @@ export class MemoryMcpReceiptStore implements McpReceiptStore {
 }
 
 type ReceiptFile = {
-  version: 1;
-  receipts: Record<string, Receipt>;
+  version: 2;
+  readReceipts: Record<string, Receipt>;
+  mutationReceipts: Record<string, Receipt>;
 };
 
 const FILE_RECEIPT_CAP = 500;
 const LOCK_WAIT_MS = 5_000;
 const LOCK_STALE_MS = 30_000;
 const sleepCell = new Int32Array(new SharedArrayBuffer(4));
+
+function isReceiptRecord(value: unknown): value is Record<string, Receipt> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
 
 function processAlive(pid: number): boolean {
   try {
@@ -155,14 +176,32 @@ function withFileLock<T>(filePath: string, operation: () => T): T {
 
 function readReceiptFile(filePath: string): ReceiptFile {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<ReceiptFile>;
-    if (parsed.version === 1 && parsed.receipts && typeof parsed.receipts === "object" && !Array.isArray(parsed.receipts)) {
-      return { version: 1, receipts: parsed.receipts as Record<string, Receipt> };
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    if (
+      parsed.version === 2
+      && isReceiptRecord(parsed.readReceipts)
+      && isReceiptRecord(parsed.mutationReceipts)
+    ) {
+      return {
+        version: 2,
+        readReceipts: parsed.readReceipts,
+        mutationReceipts: parsed.mutationReceipts,
+      };
+    }
+    if (parsed.version === 1 && isReceiptRecord(parsed.receipts)) {
+      const readReceipts: Record<string, Receipt> = {};
+      const mutationReceipts: Record<string, Receipt> = {};
+      for (const [key, receipt] of Object.entries(parsed.receipts)) {
+        const toolName = key.slice(0, key.indexOf(":"));
+        const target = MUTATING_MCP_TOOL_NAMES.has(toolName as McpToolName) ? mutationReceipts : readReceipts;
+        target[key] = receipt;
+      }
+      return { version: 2, readReceipts, mutationReceipts };
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  return { version: 1, receipts: {} };
+  return { version: 2, readReceipts: {}, mutationReceipts: {} };
 }
 
 function writeReceiptFile(filePath: string, state: ReceiptFile): void {
@@ -175,28 +214,36 @@ function writeReceiptFile(filePath: string, state: ReceiptFile): void {
 export class FileMcpReceiptStore implements McpReceiptStore {
   constructor(private readonly filePath: string) {}
 
-  claim(key: string, digest: string): ReceiptClaim {
+  claim(key: string, digest: string, retention: ReceiptRetention): ReceiptClaim {
     return withFileLock(this.filePath, () => {
       const state = readReceiptFile(this.filePath);
-      const receipt = state.receipts[key];
+      const receipt = state.mutationReceipts[key] ?? state.readReceipts[key];
       if (receipt) {
         if (receipt.digest !== digest) return { kind: "conflict" };
         return receipt.result ? { kind: "replay", result: receipt.result } : { kind: "pending" };
       }
-      state.receipts[key] = { digest };
-      const keys = Object.keys(state.receipts);
-      for (const expired of keys.slice(0, Math.max(0, keys.length - FILE_RECEIPT_CAP))) delete state.receipts[expired];
+      const target = retention === "durable" ? state.mutationReceipts : state.readReceipts;
+      target[key] = { digest };
+      const keys = Object.keys(state.readReceipts);
+      for (const expired of keys.slice(0, Math.max(0, keys.length - FILE_RECEIPT_CAP))) delete state.readReceipts[expired];
       writeReceiptFile(this.filePath, state);
       return { kind: "fresh" };
     });
   }
 
-  complete(key: string, digest: string, result: McpToolResult): void {
+  complete(key: string, digest: string, result: McpToolResult, retention: ReceiptRetention): void {
     withFileLock(this.filePath, () => {
       const state = readReceiptFile(this.filePath);
-      const receipt = state.receipts[key];
+      const receipt = state.mutationReceipts[key] ?? state.readReceipts[key];
       if (!receipt || receipt.digest !== digest) throw new Error("MCP receipt ownership changed");
-      state.receipts[key] = { digest, result };
+      if (retention === "durable") {
+        delete state.readReceipts[key];
+        state.mutationReceipts[key] = { digest, result };
+      } else if (state.mutationReceipts[key]) {
+        state.mutationReceipts[key] = { digest, result };
+      } else {
+        state.readReceipts[key] = { digest, result };
+      }
       writeReceiptFile(this.filePath, state);
     });
   }
@@ -244,6 +291,7 @@ export function createMcpToolService(
         return failure(toolName, clientRequestId(args), "unknown_tool", `Unknown viewer tool: ${toolName}`, false);
       }
       const typedTool = toolName as McpToolName;
+      const retention: ReceiptRetention = MUTATING_MCP_TOOL_NAMES.has(typedTool) ? "durable" : "bounded";
       const requestId = clientRequestId(args);
       if (!requestId) return failure(toolName, null, "invalid_request", "clientRequestId is required", false);
 
@@ -256,7 +304,7 @@ export function createMcpToolService(
         }
         return { ...await active.result, replayed: true };
       }
-      const claim = receipts.claim(key, digest);
+      const claim = receipts.claim(key, digest, retention);
       if (claim.kind === "conflict") {
         return failure(toolName, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
       }
@@ -279,7 +327,7 @@ export function createMcpToolService(
             true,
           );
         }
-        receipts.complete(key, digest, settled);
+        receipts.complete(key, digest, settled, retention);
         return settled;
       })();
       inFlight.set(key, { digest, result });

@@ -20,6 +20,17 @@ afterEach(() => {
   for (const directory of scratch.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
 });
 
+function rewriteReceiptFileAsV1(receiptPath: string): void {
+  const current = JSON.parse(fs.readFileSync(receiptPath, "utf8")) as {
+    readReceipts: Record<string, unknown>;
+    mutationReceipts: Record<string, unknown>;
+  };
+  fs.writeFileSync(receiptPath, JSON.stringify({
+    version: 1,
+    receipts: { ...current.readReceipts, ...current.mutationReceipts },
+  }));
+}
+
 describe("MCP tool service", () => {
   test("each v1 tool returns structured ids and replays a duplicate clientRequestId", async () => {
     const calls = new Map<string, number>();
@@ -77,6 +88,107 @@ describe("MCP tool service", () => {
 
     release();
     await first;
+  });
+
+  test("mutations retain replay and conflict protection after read receipt churn and restart", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const actionCalls = new Map<string, number>();
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    const cases = [
+      {
+        toolName: "flow_action" as const,
+        args: { clientRequestId: "request-flow-acceptance", flowId: "flow_acceptance", action: "pause" },
+        changedArgs: { clientRequestId: "request-flow-acceptance", flowId: "flow_acceptance", action: "resume" },
+      },
+      {
+        toolName: "conversation_action" as const,
+        args: { clientRequestId: "request-conversation-acceptance", conversationId: "conversation_acceptance", action: "interrupt" },
+        changedArgs: { clientRequestId: "request-conversation-acceptance", conversationId: "conversation_acceptance", action: "kill" },
+      },
+      {
+        toolName: "conversation_migration" as const,
+        args: { clientRequestId: "request-migration-acceptance", conversationId: "conversation_acceptance", action: "rollback", expectedRevision: 1 },
+        changedArgs: { clientRequestId: "request-migration-acceptance", conversationId: "conversation_acceptance", action: "retry", expectedRevision: 1 },
+      },
+    ];
+    for (const mutation of cases) {
+      bindings[mutation.toolName] = async () => {
+        actionCalls.set(mutation.toolName, (actionCalls.get(mutation.toolName) ?? 0) + 1);
+        return { operationId: `operation_${mutation.toolName}_acceptance` };
+      };
+    }
+    const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+    const firstResults = new Map<string, Awaited<ReturnType<typeof service.callTool>>>();
+    for (const mutation of cases) {
+      firstResults.set(mutation.toolName, await service.callTool(mutation.toolName, mutation.args));
+    }
+    rewriteReceiptFileAsV1(receiptPath);
+    for (let index = 0; index < 501; index += 1) {
+      await service.callTool("list_flows", { clientRequestId: `request-read-${index}`, limit: 1 });
+    }
+
+    const restarted = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+    for (const mutation of cases) {
+      const firstResult = firstResults.get(mutation.toolName);
+      if (!firstResult) throw new Error(`missing first result for ${mutation.toolName}`);
+      expect(await restarted.callTool(mutation.toolName, mutation.args)).toEqual({
+        ...firstResult,
+        replayed: true,
+      });
+      expect(await restarted.callTool(mutation.toolName, mutation.changedArgs)).toMatchObject({
+        ok: false,
+        code: "idempotency_conflict",
+        replayed: true,
+      });
+      expect(actionCalls.get(mutation.toolName)).toBe(1);
+    }
+  });
+
+  test("a pending mutation remains claimed while read receipts churn", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    let release!: () => void;
+    let markStarted!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let actionCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.conversation_action = async () => {
+      actionCalls += 1;
+      markStarted();
+      await held;
+      return { operationId: "operation_pending_acceptance" };
+    };
+    const args = { clientRequestId: "request-pending-acceptance", conversationId: "conversation_acceptance", action: "interrupt" };
+    const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+    const first = service.callTool("conversation_action", args);
+    await started;
+    rewriteReceiptFileAsV1(receiptPath);
+    for (let index = 0; index < 501; index += 1) {
+      await service.callTool("list_tasks", { clientRequestId: `request-pending-read-${index}`, limit: 1 });
+    }
+
+    const restarted = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+    expect(await restarted.callTool("conversation_action", args)).toMatchObject({
+      ok: false,
+      code: "call_interrupted",
+      replayed: true,
+    });
+    expect(await restarted.callTool("conversation_action", { ...args, action: "kill" })).toMatchObject({
+      ok: false,
+      code: "idempotency_conflict",
+      replayed: true,
+    });
+    expect(actionCalls).toBe(1);
+
+    release();
+    const completed = await first;
+    const completedRestart = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+    expect(await completedRestart.callTool("conversation_action", args)).toEqual({ ...completed, replayed: true });
+    expect(actionCalls).toBe(1);
   });
 
   test("a concurrent duplicate waits for the active call and returns it as a replay", async () => {
