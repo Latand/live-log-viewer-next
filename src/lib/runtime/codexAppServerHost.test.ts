@@ -61,6 +61,7 @@ class FakeAppServer extends EventEmitter {
   };
   modelList: unknown[] = [{ id: "gpt-5.3-codex-spark", isDefault: true, inputModalities: ["text"] }];
   modelListFailuresRemaining = 0;
+  realtimeStartError: string | null = null;
   private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
 
@@ -172,6 +173,29 @@ class FakeAppServer extends EventEmitter {
       return;
     }
     if (method === "turn/interrupt") return this.respond(message.id, {});
+    if (method === "thread/realtime/start") {
+      this.respond(message.id, {});
+      if (this.realtimeStartError) {
+        this.notify("thread/realtime/error", {
+          threadId: this.threadId,
+          message: this.realtimeStartError,
+        });
+      } else {
+        this.notify("thread/realtime/started", {
+          threadId: this.threadId,
+          realtimeSessionId: "realtime-1",
+          version: "v3",
+        });
+        this.notify("thread/realtime/sdp", {
+          threadId: this.threadId,
+          sdp: "v=0\r\nanswer",
+        });
+      }
+      return;
+    }
+    if (method === "thread/realtime/appendSpeech" || method === "thread/realtime/stop") {
+      return this.respond(message.id, {});
+    }
   }
 
   private respond(id: number, result: unknown): void {
@@ -227,7 +251,7 @@ describe("CodexAppServerHost", () => {
       spawnProcess: fakeSpawn(server, captured),
     });
 
-    expect(captured.args).toEqual(["app-server"]);
+    expect(captured.args).toEqual(["app-server", "--enable", "realtime_conversation"]);
     expect(server.requests.find((request) => request.method === "thread/start")?.params).toMatchObject({
       config: {
         mcp_servers: {
@@ -236,6 +260,53 @@ describe("CodexAppServerHost", () => {
         },
       },
     });
+    await host.release();
+  });
+
+  test("starts a client-managed V3 WebRTC call on the hosted thread", async () => {
+    const server = new FakeAppServer("voice-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    await expect(host.startRealtimeWebRtc("v=0\r\noffer")).resolves.toEqual({
+      sdp: "v=0\r\nanswer",
+      realtimeSessionId: "realtime-1",
+    });
+    expect(server.requests.find((request) => request.method === "thread/realtime/start")?.params).toEqual({
+      threadId: "voice-thread",
+      version: "v3",
+      outputModality: "audio",
+      transport: { type: "webrtc", sdp: "v=0\r\noffer" },
+      clientManagedHandoffs: true,
+      codexResponsesAsItems: true,
+      includeStartupContext: true,
+    });
+
+    await host.appendRealtimeSpeech("Worker inspected package.json");
+    expect(server.requests.find((request) => request.method === "thread/realtime/appendSpeech")?.params).toEqual({
+      threadId: "voice-thread",
+      text: "Worker inspected package.json",
+    });
+    await host.stopRealtime();
+    expect(server.requests.find((request) => request.method === "thread/realtime/stop")?.params).toEqual({
+      threadId: "voice-thread",
+    });
+    await host.release();
+  });
+
+  test("surfaces the app-server realtime admission error", async () => {
+    const server = new FakeAppServer("voice-error-thread");
+    server.realtimeStartError = "AVAS route unavailable";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    await expect(host.startRealtimeWebRtc("v=0\r\noffer")).rejects.toThrow("AVAS route unavailable");
     await host.release();
   });
 
@@ -540,7 +611,13 @@ describe("CodexAppServerHost", () => {
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server, captured),
     });
-    expect(captured.args).toEqual(["-c", "cli_auth_credentials_store=file", "app-server"]);
+    expect(captured.args).toEqual([
+      "-c",
+      "cli_auth_credentials_store=file",
+      "app-server",
+      "--enable",
+      "realtime_conversation",
+    ]);
     expect(captured.options?.env?.CODEX_HOME).toBe("/managed-codex-home");
     expect(captured.options?.detached).toBeTrue();
     expect(server.requests.some((request) => request.method === "thread/resume")).toBeTrue();
