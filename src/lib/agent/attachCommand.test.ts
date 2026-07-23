@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 
 import type { FileEntry } from "@/lib/types";
 import type { ResumeSpec } from "./cli";
-import { attachCommandFromSpec, attachTargetPath, resolveAttachCommand, type AttachResolverDeps } from "./attachCommand";
+import { resumeSpecForSession } from "./cli";
+import { attachCommandFromSpec, attachTargetPath, resolveAttachCommand, resolveLaunchAttachCommand, type AttachResolverDeps, type LaunchAttachDeps } from "./attachCommand";
 
 /**
  * Pure attach-command composition (design §6). No spawning, no waiting — every
@@ -123,4 +124,61 @@ test("attachTargetPath resolves the path the composed command actually resumes (
   // unknown paths and orphaned subagents resolve to nothing
   expect(attachTargetPath("/nope.jsonl", [root, sub])).toBeNull();
   expect(attachTargetPath("/orphan.jsonl", [file({ path: "/orphan.jsonl", kind: "subagent", parent: "/gone.jsonl" })])).toBeNull();
+});
+
+/*
+ * P1#6 (round-1 review): a queued launch window's path is the synthetic
+ * `spawn:<launchId>`. Its "Open in terminal" must resolve through the durable
+ * launch receipt — real account home, cwd, and session id — and compose a
+ * working command, never hand the synthetic path to a filesystem endpoint (the
+ * HTTP 400 the review flagged).
+ */
+const SESSION_ID = "00000000-0000-0000-0000-000000000001";
+
+function launchDeps(over: Partial<LaunchAttachDeps> = {}): LaunchAttachDeps {
+  return {
+    receipt: {
+      engine: "codex",
+      cwd: "/repo/worktree",
+      accountId: "work",
+      key: { engine: "codex", sessionId: SESSION_ID },
+      launchProfile: { model: "gpt-5.4", effort: "high", fast: null },
+    },
+    materializedPath: null,
+    resolveByPath: () => ({ ok: false, error: "not scanned yet", status: 404 }),
+    resumeSpecForSession,
+    homeForAccount: () => "/repo/.codex-home",
+    accountLabelFor: (_engine, accountId) => `${accountId} · codex`,
+    ...over,
+  };
+}
+
+test("P1#6: a queued launch (no transcript yet) composes a real resume command from its receipt — not a 400", () => {
+  const res = resolveLaunchAttachCommand(launchDeps());
+  expect(res.ok).toBe(true);
+  if (res.ok) {
+    expect(res.value.cwd).toBe("/repo/worktree");
+    expect(res.value.command).toContain(`resume ${SESSION_ID}`);
+    expect(res.value.command).toContain("CODEX_HOME='/repo/.codex-home'");
+    expect(res.value.fullCommand.startsWith("cd '/repo/worktree' && ")).toBe(true);
+    expect(res.value.accountLabel).toBe("work · codex");
+  }
+});
+
+test("P1#6: a materialized transcript is preferred and resolved through the full path flow", () => {
+  const byPath = { ok: true as const, value: { engine: "codex" as const, accountId: "work", accountLabel: "work · codex", cwd: "/repo/worktree", command: "codex resume from-path", cdCommand: "cd '/repo/worktree'", fullCommand: "cd '/repo/worktree' && codex resume from-path" } };
+  const res = resolveLaunchAttachCommand(launchDeps({ materializedPath: "/repo/rollout.jsonl", resolveByPath: () => byPath }));
+  expect(res).toEqual(byPath);
+});
+
+test("P1#6: a launch whose session has not bound yet is a clear 409, never a 400", () => {
+  const res = resolveLaunchAttachCommand(launchDeps({ receipt: { engine: "codex", cwd: "/repo/worktree", accountId: "work", key: null, launchProfile: { model: null, effort: null, fast: null } } }));
+  expect(res.ok).toBe(false);
+  if (!res.ok) expect(res.status).toBe(409);
+});
+
+test("P1#6: an unknown launch id is a 404", () => {
+  const res = resolveLaunchAttachCommand(launchDeps({ receipt: null }));
+  expect(res.ok).toBe(false);
+  if (!res.ok) expect(res.status).toBe(404);
 });

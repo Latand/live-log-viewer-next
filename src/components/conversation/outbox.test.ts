@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 
 import {
@@ -8,9 +8,10 @@ import {
   nextDispatch,
   outboxHistory,
   OUTBOX_DELIVERED_TTL_MS,
-  OUTBOX_MTIME_GRACE_MS,
+  outboxStateForReceiptStatus,
   readOutbox,
   resetOutboxForTests,
+  seedLaunchOutbox,
   updateOutbox,
   visibleOutbox,
   type OutboxEntry,
@@ -75,20 +76,84 @@ test("empty-composer history lists queued messages ahead of sent, newest first, 
   expect(outboxHistory(readOutbox("conv"))).toEqual(["still queued", "newer sent", "old sent"]);
 });
 
-test("a delivered bubble retires once the transcript grows past it", () => {
+test("a bubble retires only on ITS OWN transcript echo, not on an unrelated mtime bump (P1#4)", () => {
   const at = 1_000_000;
-  const entry: OutboxEntry = { id: "k1", text: "done", images: 0, at, state: "delivered", settledAt: at };
-  /* Transcript mtime still behind the delivery → the optimistic bubble stays. */
-  expect(visibleOutbox([entry], at - 5_000, at + 1_000)).toHaveLength(1);
-  /* Transcript grew past the grace window → the real bubble owns it now. */
-  expect(visibleOutbox([entry], at + OUTBOX_MTIME_GRACE_MS + 1, at + 3_000)).toHaveLength(0);
-  /* A conversation whose transcript never grows still retires by the TTL. */
-  expect(visibleOutbox([entry], 0, at + OUTBOX_DELIVERED_TTL_MS + 1)).toHaveLength(0);
+  const entry: OutboxEntry = { id: "k1", text: "my message", images: 0, at, state: "delivered", settledAt: at };
+  /* An unrelated earlier turn wrote to the transcript — the echo set carries
+     someone else's text, NOT this bubble's. The bubble must stay. This is the
+     exact premature-removal the mtime rule caused. */
+  expect(visibleOutbox([entry], new Set(["a reply from an earlier turn"]), at + 3_000)).toHaveLength(1);
+  /* This bubble's OWN text lands in the transcript → it retires. */
+  expect(visibleOutbox([entry], new Set(["my message"]), at + 3_000)).toHaveLength(0);
+  /* Trimming is applied so whitespace differences still match the echo. */
+  expect(visibleOutbox([{ ...entry, text: "  my message  " }], new Set(["my message"]), at + 3_000)).toHaveLength(0);
 });
 
-test("a queued or delivering entry is always visible regardless of transcript mtime", () => {
+test("a delivered bubble whose echo never arrives still retires at the hard TTL", () => {
+  const at = 1_000_000;
+  const entry: OutboxEntry = { id: "k1", text: "done", images: 0, at, state: "delivered", settledAt: at };
+  expect(visibleOutbox([entry], new Set<string>(), at + 3_000)).toHaveLength(1);
+  expect(visibleOutbox([entry], new Set<string>(), at + OUTBOX_DELIVERED_TTL_MS + 1)).toHaveLength(0);
+});
+
+test("queued / delivering / launch-owned bubbles stay until their echo lands, never by TTL", () => {
   const queued: OutboxEntry = { id: "k1", text: "waiting", images: 0, at: 1_000, state: "queued" };
-  expect(visibleOutbox([queued], 9_999_999, 9_999_999)).toHaveLength(1);
+  const delivering: OutboxEntry = { id: "k2", text: "in flight", images: 0, at: 1_000, state: "delivering" };
+  const launch: OutboxEntry = { id: "k3", text: "the launch prompt", images: 0, at: 1_000, state: "delivering", launchOwned: true };
+  const far = 1_000 + OUTBOX_DELIVERED_TTL_MS * 10;
+  expect(visibleOutbox([queued, delivering, launch], new Set<string>(), far)).toHaveLength(3);
+  /* Each retires only on its own echo. */
+  expect(visibleOutbox([queued, delivering, launch], new Set(["the launch prompt"]), far).map((e) => e.id)).toEqual(["k1", "k2"]);
+});
+
+describe("outboxStateForReceiptStatus (P1#4)", () => {
+  test("admitted-but-not-delivered stays delivering; only a delivered receipt reads delivered", () => {
+    expect(outboxStateForReceiptStatus("queued")).toBe("delivering");
+    expect(outboxStateForReceiptStatus("delivering")).toBe("delivering");
+    expect(outboxStateForReceiptStatus("delivered")).toBe("delivered");
+    expect(outboxStateForReceiptStatus("applied")).toBe("delivered");
+    expect(outboxStateForReceiptStatus("rejected")).toBe("failed");
+    expect(outboxStateForReceiptStatus("failed")).toBe("failed");
+  });
+});
+
+describe("seedLaunchOutbox (P1#2)", () => {
+  test("seeds the initial launch prompt as a launch-owned delivering bubble, idempotently", () => {
+    seedLaunchOutbox("conversation_live", { id: "launch_1", text: "the launch prompt", images: 0, at: 1_000 });
+    const queue = readOutbox("conversation_live");
+    expect(queue).toHaveLength(1);
+    expect(queue[0]).toMatchObject({ id: "launch_1", text: "the launch prompt", state: "delivering", launchOwned: true });
+    /* A re-seed (re-render / reload replay) is a no-op — the state is preserved. */
+    updateOutbox("conversation_live", "launch_1", { state: "delivered" });
+    seedLaunchOutbox("conversation_live", { id: "launch_1", text: "the launch prompt", images: 0, at: 2_000 });
+    expect(readOutbox("conversation_live")[0]!.state).toBe("delivered");
+  });
+
+  test("a launch-owned bubble never dispatches and never blocks the operator's follow-up messages", () => {
+    seedLaunchOutbox("conv", { id: "launch_1", text: "the launch prompt", images: 0, at: 1_000 });
+    // The dispatcher ignores the launch-owned entry entirely.
+    expect(nextDispatch(readOutbox("conv"))).toBeNull();
+    // A follow-up the operator queues dispatches immediately, despite the
+    // launch-owned bubble still being "delivering".
+    submit("conv", "k2", "follow-up message");
+    expect(nextDispatch(readOutbox("conv"))?.id).toBe("k2");
+  });
+
+  test("a launch-owned bubble survives a refresh unchanged (never re-queued or re-dispatched)", () => {
+    seedLaunchOutbox("conv", { id: "launch_1", text: "the launch prompt", images: 0, at: 1_000 });
+    resetOutboxForTests();
+    const restored = readOutbox("conv");
+    expect(restored[0]).toMatchObject({ state: "delivering", launchOwned: true });
+    expect(nextDispatch(restored)).toBeNull();
+  });
+
+  test("the seeded launch bubble is adopted into the materialized conversation identity", () => {
+    // Seeded under the launch placeholder, then the composer adopts it forward.
+    seedLaunchOutbox("spawn:launch_1", { id: "launch_1", text: "the launch prompt", images: 0, at: 1_000 });
+    adoptOutbox("spawn:launch_1", "conversation_live");
+    expect(readOutbox("spawn:launch_1")).toHaveLength(0);
+    expect(readOutbox("conversation_live")[0]).toMatchObject({ id: "launch_1", launchOwned: true });
+  });
 });
 
 test("adoption moves a queue onto the materialized conversation identity idempotently", () => {

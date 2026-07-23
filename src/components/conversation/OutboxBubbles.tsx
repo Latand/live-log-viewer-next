@@ -1,12 +1,12 @@
 "use client";
 
-import { Clock3, TriangleAlert } from "lucide-react";
+import { Clock3, RotateCcw, TriangleAlert } from "lucide-react";
 
 import { Loader2, X } from "@/components/icons";
 
 import { type TFunction, useLocale } from "@/lib/i18n";
 
-import { cancelOutbox, type OutboxEntry } from "./outbox";
+import { cancelOutbox, retryOutbox, type OutboxEntry } from "./outbox";
 
 /**
  * Optimistic user bubbles for the conversation outbox (issue #561).
@@ -43,10 +43,12 @@ export function OutboxBubblesView({
   entries,
   t,
   onCancel,
+  onRetry,
 }: {
   entries: readonly OutboxEntry[];
   t: TFunction;
   onCancel: (id: string) => void;
+  onRetry: (id: string) => void;
 }) {
   if (!entries.length) return null;
   return (
@@ -79,6 +81,21 @@ export function OutboxBubblesView({
               <div className={`flex items-center gap-1 text-caption font-semibold ${chip.className}`}>
                 {chip.icon}
                 <span data-outbox-status className="min-w-0 truncate">{chip.label}</span>
+                {/* A failed message that carried its payload can be retried in
+                    place: the entry re-queues under its ORIGINAL idempotency key,
+                    so the dispatcher replays it idempotently (round-1 P1#4). */}
+                {entry.state === "failed" && !entry.needsReattach ? (
+                  <button
+                    type="button"
+                    data-outbox-retry={entry.id}
+                    aria-label={t("outbox.retry")}
+                    title={t("outbox.retry")}
+                    onClick={() => onRetry(entry.id)}
+                    className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+                  >
+                    <RotateCcw className="h-3 w-3" aria-hidden />
+                  </button>
+                ) : null}
                 {/* Only a message that has not left for the wire can be taken
                     back — cancelling a delivering send would be a lie. */}
                 {entry.state === "queued" || entry.state === "failed" ? (
@@ -104,5 +121,12 @@ export function OutboxBubblesView({
 
 export function OutboxBubbles({ cardId, entries }: { cardId: string; entries: readonly OutboxEntry[] }) {
   const { t } = useLocale();
-  return <OutboxBubblesView entries={entries} t={t} onCancel={(id) => cancelOutbox(cardId, id)} />;
+  return (
+    <OutboxBubblesView
+      entries={entries}
+      t={t}
+      onCancel={(id) => cancelOutbox(cardId, id)}
+      onRetry={(id) => retryOutbox(cardId, id)}
+    />
+  );
 }

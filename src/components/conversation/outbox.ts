@@ -21,6 +21,8 @@
 
 import { useSyncExternalStore } from "react";
 
+import type { ReceiptStatus } from "@/components/runtime/runtimeModel";
+
 export type OutboxState = "queued" | "delivering" | "delivered" | "failed";
 
 export interface OutboxEntry {
@@ -32,13 +34,45 @@ export interface OutboxEntry {
   /** Submission moment (ms). Ordering and history navigation read this. */
   at: number;
   state: OutboxState;
-  /** Moment the entry left `queued`/`delivering` (ms), for echo retirement. */
+  /** Moment the entry left `queued`/`delivering` (ms), for the hard-cap TTL. */
   settledAt?: number;
   error?: string;
   /** The attachment bytes of this submission did not survive a page refresh
       (previews are memory-only). The entry is held back rather than delivered
       text-only, and says so, so no image is ever silently dropped. */
   needsReattach?: true;
+  /** The initial launch prompt (issue #561/#569): the SPAWN delivers it, not the
+      composer. It renders as the conversation's first optimistic user bubble but
+      is never dispatched by the composer's queue and never blocks the serial
+      drain of the operator's follow-up messages. It retires on its transcript
+      echo like any other bubble. */
+  launchOwned?: true;
+}
+
+/**
+ * Map a durable receipt status to the outbox bubble state it PROVES (round-1
+ * P1#4). `queued`/`delivering` are admitted-but-not-delivered — the server holds
+ * the message but it has not reached the agent — so the bubble stays
+ * `delivering`, never prematurely `delivered`. Only a status that proves the
+ * message is in the turn/transcript settles the bubble to `delivered`;
+ * `rejected`/`failed` settle it to `failed`.
+ */
+export function outboxStateForReceiptStatus(status: ReceiptStatus): OutboxState {
+  switch (status) {
+    case "queued":
+    case "delivering":
+    case "applying":
+    case "pending":
+    case "uncertain":
+      // Admitted-but-not-delivered, or genuinely unknown: still in flight.
+      return "delivering";
+    case "rejected":
+    case "failed":
+      return "failed";
+    default:
+      // delivered, applied, answered, steered, turn-started, interrupted
+      return "delivered";
+  }
 }
 
 /** Bounded per conversation: the queue is working state plus recent history for
@@ -69,6 +103,10 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
     if (!Array.isArray(raw)) return EMPTY;
     return raw.filter(isEntry).slice(-OUTBOX_LIMIT).map((entry) => {
       const images = typeof entry.images === "number" ? entry.images : 0;
+      /* The initial launch prompt is owned by the spawn, not the composer: it
+         survives a refresh exactly as it was (never re-dispatched, never
+         re-queued) and retires on its transcript echo. */
+      if (entry.launchOwned) return { ...entry, images };
       const unsettled = entry.state === "delivering" || entry.state === "queued";
       /* A `delivering` entry recorded before a refresh has no owner in this
          mount: it returns to the queue so the serial dispatcher replays it
@@ -121,6 +159,21 @@ export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">)
   return queued;
 }
 
+/**
+ * Seed the initial launch prompt as the conversation's first optimistic user
+ * bubble (round-1 P1#2). Idempotent: a re-render or reload-replay that seeds the
+ * same launch id is a no-op, preserving whatever state the entry already
+ * reached. The entry is `launchOwned` — delivered by the spawn, so it is never
+ * dispatched and never blocks the operator's follow-up messages.
+ */
+export function seedLaunchOutbox(cardId: string, entry: { id: string; text: string; images: number; at: number }): void {
+  if (!entry.text.trim() && !entry.images) return;
+  const queue = readOutbox(cardId);
+  if (queue.some((item) => item.id === entry.id)) return;
+  const seeded: OutboxEntry = { ...entry, state: "delivering", launchOwned: true };
+  write(cardId, [...queue, seeded].slice(-OUTBOX_LIMIT));
+}
+
 export function updateOutbox(cardId: string, id: string, patch: Partial<Omit<OutboxEntry, "id">>): void {
   const queue = readOutbox(cardId);
   if (!queue.some((entry) => entry.id === id)) return;
@@ -132,6 +185,20 @@ export function cancelOutbox(cardId: string, id: string): void {
   const queue = readOutbox(cardId);
   const next = queue.filter((entry) => entry.id !== id);
   if (next.length !== queue.length) write(cardId, next);
+}
+
+/**
+ * Retry a failed submission (round-1 P1#4). The entry returns to `queued` under
+ * its ORIGINAL id — which is its idempotency key — so the serial dispatcher
+ * re-sends it with the same key: an idempotent replay, never a second distinct
+ * message. An entry whose payload cannot be replayed (`needsReattach` — its
+ * images were memory-only) is left for the operator to re-attach instead.
+ */
+export function retryOutbox(cardId: string, id: string): void {
+  const queue = readOutbox(cardId);
+  const entry = queue.find((item) => item.id === id);
+  if (!entry || entry.state !== "failed" || entry.needsReattach) return;
+  write(cardId, queue.map((item) => (item.id === id ? { ...item, state: "queued", error: undefined } : item)));
 }
 
 /** Move a whole queue onto a new conversation identity (provisional-id adoption,
@@ -147,21 +214,36 @@ export function adoptOutbox(from: string, to: string): void {
   write(from, EMPTY);
 }
 
+/** The trimmed text of a bubble, used to match its transcript echo. */
+function echoKey(text: string): string {
+  return text.trim();
+}
+
 /**
- * The entries that still render as optimistic bubbles: everything not yet
- * settled, plus a delivered entry whose real transcript bubble has not landed
- * yet. Pure, so the retirement rule is directly testable.
+ * The entries that still render as optimistic bubbles (round-1 P1#4). A bubble
+ * retires the moment ITS OWN text lands in the transcript — echo identity, not a
+ * generic mtime bump. This is the fix for the premature-removal bug: an
+ * unrelated transcript write from an earlier active turn advances the file mtime
+ * but does NOT carry this bubble's text, so the bubble stays until its real
+ * echo appears. A `delivered`/`failed` bubble whose echo never arrives (a lost
+ * poll, a finished pane) still retires at a hard TTL so nothing lingers forever;
+ * queued / delivering / launch-owned bubbles persist until their echo lands.
+ *
+ * `transcriptEchoes` is the set of trimmed user-message texts already in the
+ * rendered transcript.
  */
 export function visibleOutbox(
   queue: readonly OutboxEntry[],
-  fileMtimeMs: number,
+  transcriptEchoes: ReadonlySet<string>,
   nowMs: number,
 ): OutboxEntry[] {
   return queue.filter((entry) => {
-    if (entry.state !== "delivered") return true;
-    const settledAt = entry.settledAt ?? entry.at;
-    if (fileMtimeMs >= settledAt + OUTBOX_MTIME_GRACE_MS) return false;
-    return nowMs - settledAt < OUTBOX_DELIVERED_TTL_MS;
+    if (transcriptEchoes.has(echoKey(entry.text))) return false;
+    if (entry.state === "delivered") {
+      const settledAt = entry.settledAt ?? entry.at;
+      return nowMs - settledAt < OUTBOX_DELIVERED_TTL_MS;
+    }
+    return true;
   });
 }
 
@@ -179,10 +261,12 @@ export function outboxHistory(queue: readonly OutboxEntry[]): string[] {
   return ordered.filter((text, index) => text !== ordered[index - 1]);
 }
 
-/** The next entry the serial dispatcher may send: nothing while one is already
-    on the wire, otherwise the oldest queued submission. */
+/** The next entry the serial dispatcher may send: nothing while one of the
+    operator's OWN messages is already on the wire, otherwise the oldest queued
+    submission. A `launchOwned` entry is delivered by the spawn, not the
+    composer, so it neither dispatches nor blocks the drain (round-1 P1#2/#4). */
 export function nextDispatch(queue: readonly OutboxEntry[]): OutboxEntry | null {
-  if (queue.some((entry) => entry.state === "delivering")) return null;
+  if (queue.some((entry) => entry.state === "delivering" && !entry.launchOwned)) return null;
   return queue.find((entry) => entry.state === "queued") ?? null;
 }
 

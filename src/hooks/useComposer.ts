@@ -3,6 +3,7 @@
 import { useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { useImageAttachments } from "@/components/imageAttachments";
+import { performVoiceSend } from "@/hooks/composerVoiceSend";
 import { useAutosizePinned } from "@/hooks/useAutosizePinned";
 import { useDictation } from "@/hooks/useDictation";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -178,23 +179,20 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      append it to whatever is already typed, then hand off to submit — no
      second tap on a separate send button. A transcription failure leaves the
      typed text untouched and never submits; useDictation already reported the
-     error through onError above. */
-  const stopAndSend = async () => {
-    if (busy || voiceSending) return;
-    setVoiceSending(true);
-    try {
-      const spoken = await dictation.stop();
-      if (spoken === null) return;
-      /* Read through the ref: live commits and typing may have grown the draft
-         while this closure's render was in flight. In realtime mode `spoken`
-         is just the uncommitted tail — often empty. */
-      const combined = spoken ? (textRef.current ? textRef.current.trimEnd() + " " + spoken : spoken) : textRef.current;
-      setText(combined);
-      await submit(combined);
-    } finally {
-      setVoiceSending(false);
-    }
-  };
+     error through onError above. The orchestration lives in a pure, injected
+     helper (`performVoiceSend`) so the "same submit as click/Enter" unification
+     is provable without a leaky useDictation module mock (round-1 P1#1). The
+     draft is read live through the ref: realtime commits and typing may have
+     grown it while this closure's render was in flight. */
+  const stopAndSend = () => performVoiceSend({
+    busy,
+    voiceSending,
+    setVoiceSending,
+    stop: dictation.stop,
+    currentText: () => textRef.current,
+    setText,
+    submit,
+  });
 
   const dictationRecording = dictation.phase === "rec";
   const dictationBusy = dictation.phase === "busy";

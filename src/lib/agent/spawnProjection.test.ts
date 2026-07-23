@@ -152,6 +152,47 @@ test("issue 569: the launch route resolves to the canonical conversation long af
   }
 });
 
+test("issue 560 P1#5: routes keep every retained launch id — a second launch never invalidates the earlier link", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-launch-routes-multi-"));
+  const filename = path.join(directory, "agent-registry.json");
+  try {
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const first = registry.beginSpawnRequest({
+      engine: "codex", cwd: directory, transport: "structured", accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (first.kind !== "created") throw new Error("expected structured launch creation");
+    const conversationId = first.receipt.conversationId;
+
+    /* Forge a SECOND launch receipt for the SAME conversation (a fresh launch id
+       and a newer timestamp), and age the first into terminal history >24h. This
+       is the exact production shape the review named: two launch ids, one
+       conversation, and an aged durable receipt. */
+    const raw = JSON.parse(fs.readFileSync(filename, "utf8")) as { receipts: Record<string, Record<string, unknown>> };
+    const firstReceipt = raw.receipts[first.receipt.launchId]!;
+    firstReceipt.state = "completed";
+    firstReceipt.createdAt = new Date(Date.now() - 26 * 60 * 60 * 1_000).toISOString();
+    const secondLaunchId = "launch_second_" + "aaaaaaaa";
+    raw.receipts[secondLaunchId] = {
+      ...firstReceipt,
+      launchId: secondLaunchId,
+      state: "prompt-delivered",
+      createdAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(filename, JSON.stringify(raw));
+
+    const snapshot = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" }).snapshot();
+    const routes = projectLaunchConversations([], snapshot).routes;
+
+    /* BOTH launch links resolve to the conversation: the newer one AND the aged
+       terminal one. Freshness rules affect only cards/chips, never routing. */
+    expect(routes[`spawn:${secondLaunchId}`]).toBe(conversationId);
+    expect(routes[`spawn:${first.receipt.launchId}`]).toBe(conversationId);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("issue 569: a launch with no materialized transcript still projects the conversation window itself", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-late-success-unmaterialized-"));
   try {

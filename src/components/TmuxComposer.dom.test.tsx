@@ -10,6 +10,7 @@ import type { FileEntry } from "@/lib/types";
 import { setLocale, translate } from "@/lib/i18n";
 
 import { appendComposerDraft, mergeRuntimeReceipts, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
+import { readOutbox, resetOutboxForTests, retryOutbox } from "./conversation/outbox";
 
 const dom = new Window();
 installActEnv();
@@ -45,6 +46,7 @@ afterEach(() => {
   document.body.replaceChildren();
   localStorage.clear();
   sessionStorage.clear();
+  resetOutboxForTests();
 });
 
 /** Render into a fresh root, flushing mount effects (target poll) inside act. */
@@ -1014,17 +1016,27 @@ test("receipt editing stays disabled while a newer send is in flight", async () 
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   const form = textarea.closest("form")!;
 
+  /* Queue-first: the first submit clears the composer and its bubble is rejected
+     (a delivery-key rejection), surfacing an Edit affordance in the durable
+     receipt stack. */
   await settle(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await settle(() => appendComposerDraft("conv-race", "second attempt"));
-  expect(textarea.value).toBe("first attempt\n\nsecond attempt");
+  expect(textarea.value).toBe("");
 
+  /* A second, distinct message is submitted and its dispatch is in flight
+     (busy). */
+  await settle(() => appendComposerDraft("conv-race", "second attempt"));
+  expect(textarea.value).toBe("second attempt");
   await settle(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  expect(textarea.value).toBe("");
   expect(tmuxRequests).toBe(2);
+
+  /* Editing the rejected receipt back into the composer is disabled while the
+     newer send is on the wire — it must never race the in-flight delivery. */
   const edit = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Edit")) as HTMLButtonElement;
   expect(edit).toBeDefined();
   expect(edit.disabled).toBe(true);
   await settle(() => edit.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  expect(textarea.value).toBe("first attempt\n\nsecond attempt");
+  expect(textarea.value).toBe("");
 
   await settle(() => resolveSecond({
     ok: true,
@@ -1038,7 +1050,7 @@ test("receipt editing stays disabled while a newer send is in flight", async () 
         conversationId: "conv-race",
         kind: "send",
         status: "queued",
-        text: "first attempt\n\nsecond attempt",
+        text: "second attempt",
         at: "2026-07-13T00:00:01.000Z",
         revision: 1,
       },
@@ -1048,7 +1060,7 @@ test("receipt editing stays disabled while a newer send is in flight", async () 
   await act(async () => root.unmount());
 });
 
-test("an idempotent retry whose first attempt already landed clears the draft", async () => {
+test("queue-first: retrying a failed bubble replays the same key and settles on the landed delivery", async () => {
   const sentKeys: string[] = [];
   globalThis.fetch = (async (input, init) => {
     if (String(input) === "/api/tmux/targets") {
@@ -1105,30 +1117,34 @@ test("an idempotent retry whose first attempt already landed clears the draft", 
     waitingInput: null,
   } as FileEntry;
   sessionStorage.setItem("llvDraft:conv-replay", "deploy the hotfix");
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  flushSync(() => root.render(<TmuxComposer file={file} />));
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   const form = textarea.closest("form")!;
 
-  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  expect(textarea.value).toBe("deploy the hotfix");
+  /* Queue-first (round-1 P1#1): the submit clears the composer immediately and
+     the message lives in the durable outbox; the dispatcher takes it to the
+     wire, where the lost first attempt marks the bubble failed. */
+  await settle(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  expect(textarea.value).toBe("");
+  const failedEntry = readOutbox("conv-replay")[0]!;
+  expect(failedEntry.text).toBe("deploy the hotfix");
+  expect(failedEntry.state).toBe("failed");
 
-  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  /* Retry from the failed bubble re-queues the SAME entry under its original
+     idempotency key, so the dispatcher replays it idempotently — never a second
+     distinct message. */
+  await settle(() => retryOutbox("conv-replay", failedEntry.id));
 
-  /* Idempotent retry: the same delivery key both times, and the accepted
-     delivery clears the draft from storage and the input. */
   expect(sentKeys).toHaveLength(2);
   expect(sentKeys[1]).toBe(sentKeys[0]);
+  expect(sentKeys[1]).toBe(failedEntry.id);
+  /* The delivered replay settles the bubble; the composer stayed clear. */
+  expect(readOutbox("conv-replay")[0]!.state).toBe("delivered");
   expect(textarea.value).toBe("");
-  expect(sessionStorage.getItem("llvDraft:conv-replay")).toBe(null);
   flushSync(() => root.unmount());
 });
 
-test("a stale delivered replay never wipes a draft rewritten for the next turn", async () => {
+test("queue-first: a stale delivered replay of one turn never bleeds across to another turn's bubble", async () => {
   let requests = 0;
   globalThis.fetch = (async (input, init) => {
     if (String(input) === "/api/tmux/targets") {
@@ -1181,35 +1197,40 @@ test("a stale delivered replay never wipes a draft rewritten for the next turn",
     waitingInput: null,
   } as FileEntry;
   sessionStorage.setItem("llvDraft:conv-stale", "old turn ask");
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  flushSync(() => root.render(<TmuxComposer file={file} />));
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   const form = textarea.closest("form")!;
 
-  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  /* Queue-first: the first submit clears the composer and its failed bubble is
+     the OLD turn, distinct in the outbox. */
+  await settle(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  expect(textarea.value).toBe("");
+  const oldEntry = readOutbox("conv-stale").find((e) => e.text === "old turn ask")!;
+  expect(oldEntry.state).toBe("failed");
 
-  /* The user gives up on the old ask and rewrites the draft for a new turn. */
-  sessionStorage.setItem("llvDraft:conv-stale", "");
+  /* The operator moves on to a NEW turn: a distinct submission under a fresh
+     key becomes its own outbox entry. */
   flushSync(() => appendComposerDraft("conv-stale", "brand new ask"));
   expect(textarea.value).toBe("brand new ask");
+  await settle(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  expect(textarea.value).toBe("");
+  const newEntry = readOutbox("conv-stale").find((e) => e.text === "brand new ask")!;
+  expect(newEntry.id).not.toBe(oldEntry.id);
 
-  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-
-  /* The second submit sends the NEW text under a fresh key; the delivered
-     replay of the OLD turn must not clear the new draft's storage beyond what
-     the accepted delivery covers. The new ask stays intact. */
-  expect(textarea.value).toBe("brand new ask");
-  expect(sessionStorage.getItem("llvDraft:conv-stale")).toBe("brand new ask");
+  /* A stale delivered replay of the OLD turn settles only the OLD entry by its
+     own key. The NEW turn's bubble keeps its own identity and text — a stale
+     replay never bleeds across keys. */
+  await settle(() => retryOutbox("conv-stale", oldEntry.id));
+  expect(readOutbox("conv-stale").find((e) => e.id === oldEntry.id)!.state).toBe("delivered");
+  const newAfter = readOutbox("conv-stale").find((e) => e.id === newEntry.id)!;
+  expect(newAfter.id).toBe(newEntry.id);
+  expect(newAfter.text).toBe("brand new ask");
   flushSync(() => root.unmount());
 });
 
 /* ── Issue #272: timeout followed by durable queued admission ───────────── */
 
-/** Production shape of operation ac0223c0-2bef-46dd-a26e-143b758f66dc: the
+/** Production shape of operation op-timeout-terminal-0001: the
     first `/api/tmux` send times out with an `uncertain` receipt, the operator
     types more while the fate is unknown, and the idempotent retry comes back
     `queued`. Queue admission is durable, so exactly the submitted generation
@@ -1239,7 +1260,7 @@ async function runTimeoutThenQueuedAdmission(locale: "en" | "uk", viewportWidth:
           structured: true,
           error: "runtime host request timed out",
           receipt: {
-            operationId: "ac0223c0-2bef-46dd-a26e-143b758f66dc",
+            operationId: "op-timeout-terminal-0001",
             idempotencyKey: body.clientMessageId,
             conversationId,
             kind: "send",
@@ -1261,7 +1282,7 @@ async function runTimeoutThenQueuedAdmission(locale: "en" | "uk", viewportWidth:
         structured: true,
         error: "idempotency key already accepted",
         receipt: {
-          operationId: "ac0223c0-2bef-46dd-a26e-143b758f66dc",
+          operationId: "op-timeout-terminal-0001",
           idempotencyKey: body.clientMessageId,
           conversationId,
           kind: "send",
@@ -1298,35 +1319,32 @@ async function runTimeoutThenQueuedAdmission(locale: "en" | "uk", viewportWidth:
   if (viewportWidth <= 430) host.style.width = `${viewportWidth}px`;
   document.body.append(host);
   const root = createRoot(host);
-  flushSync(() => root.render(<TmuxComposer file={file} />));
+  await act(async () => {
+    root.render(<TmuxComposer file={file} />);
+    await new Promise((r) => setTimeout(r, 0));
+  });
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   const form = textarea.closest("form")!;
-  const submit = async () => {
-    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  };
 
   try {
-    await submit();
-    /* The timeout is a truthful failure: the draft stays editable and the
-       error is announced. */
-    expect(textarea.value).toBe(prompt);
+    /* Queue-first (round-1 P1#1): the submit clears the composer immediately and
+       the durable outbox carries the message. The timeout is a truthful failure
+       — the bubble reads failed and the receipt announces the timeout. */
+    await settle(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    expect(textarea.value).toBe("");
+    const entry = readOutbox(conversationId).find((e) => e.text === prompt)!;
+    expect(entry.state).toBe("failed");
     expect(host.textContent).toContain("runtime host request timed out");
 
-    /* The operator keeps typing while the first attempt's fate is unknown. */
-    flushSync(() => appendComposerDraft(conversationId, "додатково: also add tests"));
-    expect(textarea.value).toBe(`${prompt}\n\nдодатково: also add tests`);
-
-    await submit();
-    /* Same delivery key both times — an uncertain receipt never rotates it,
-       so the retry replays instead of double-sending. */
+    /* Retrying the failed bubble replays the SAME key — an uncertain receipt
+       never rotates it, so the retry never double-sends. */
+    await settle(() => retryOutbox(conversationId, entry.id));
     expect(sentKeys).toHaveLength(2);
     expect(sentKeys[1]).toBe(sentKeys[0]);
-    /* Durable queue admission clears exactly the submitted generation: the
-       typing that followed survives, in the editor and in storage. */
-    expect(textarea.value).toBe("додатково: also add tests");
-    expect(sessionStorage.getItem(`llvDraft:${conversationId}`)).toBe("додатково: also add tests");
-    /* No stale failure lingers after admission. */
+    expect(sentKeys[1]).toBe(entry.id);
+    /* Durable queue admission settles the bubble to delivering (admitted, not
+       yet delivered — round-1 P1#4) and no stale failure lingers. */
+    expect(readOutbox(conversationId).find((e) => e.id === entry.id)!.state).toBe("delivering");
     expect(host.textContent).not.toContain("runtime host request timed out");
     expect(host.textContent).not.toContain(translate(locale, "common.failedSend"));
     /* The payload lives on in a compact truthful receipt: queued, pending
@@ -1347,7 +1365,7 @@ async function runTimeoutThenQueuedAdmission(locale: "en" | "uk", viewportWidth:
     /* Mobile keeps the 44px summary row; desktop keeps the compact stack. */
     expect(summary.className.split(/\s+/)).toContain("min-h-11");
   } finally {
-    flushSync(() => root.unmount());
+    await act(async () => root.unmount());
     host.remove();
     (dom as unknown as { innerWidth: number }).innerWidth = 1024;
   }

@@ -105,6 +105,7 @@ afterAll(() => {
 
 const { TmuxComposer } = await import("./TmuxComposer");
 const { writeProfile } = await import("./runtimeProfile");
+const { readOutbox, resetOutboxForTests, retryOutbox } = await import("./conversation/outbox");
 
 const realFetch = globalThis.fetch;
 
@@ -115,7 +116,16 @@ afterEach(() => {
   document.body.replaceChildren();
   localStorage.clear();
   sessionStorage.clear();
+  resetOutboxForTests();
 });
+
+/** Queue-first retry (round-1 P1#1): the failed bubble re-queues under its
+    original idempotency key, so the dispatcher replays it — the queue-first
+    equivalent of the old "re-submit the retained draft" retry. */
+function retryFailed(conversationId = "conv-snapshot"): void {
+  const failed = readOutbox(conversationId).find((entry) => entry.state === "failed");
+  if (failed) retryOutbox(conversationId, failed.id);
+}
 
 const file: FileEntry = {
   path: "/codex-snapshot.jsonl", root: "codex-sessions", name: "codex-snapshot.jsonl", project: "viewer",
@@ -340,7 +350,10 @@ test("structured recovery state is bounded and exposes retry details", async () 
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   expect(host.textContent).toContain("recovery attempt failed; retry is available");
-  expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("preserve this recovery draft");
+  /* Queue-first: the recovery draft is not stranded in the composer — it is the
+     durable outbox bubble, marked failed and retryable, so nothing is lost. */
+  const failed = readOutbox("conv-snapshot").find((entry) => entry.state === "failed");
+  expect(failed?.text).toBe("preserve this recovery draft");
   await act(async () => root.unmount());
 });
 
@@ -364,7 +377,8 @@ test("a same-key retry re-sends the ORIGINAL runtime snapshot even after the sel
   // Between the failure and the retry the user flips the pill to low.
   writeProfile(file, { effort: "low" });
 
-  await settle(() => submit());
+  // Queue-first retry: re-queue the failed bubble under its original key.
+  await settle(() => retryFailed());
   expect(sends).toHaveLength(2);
   // Same idempotency key ⇒ byte-identical runtime snapshot (issue #390 §10):
   // the frozen first-attempt settings ride, never the current selection.
@@ -404,7 +418,9 @@ test("a remounted same-key retry restores the original runtime snapshot", async 
     root.render(<TmuxComposer file={file} />);
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  await settle(() => composerControls(host).submit());
+  /* The failed bubble rehydrated from durable storage; retrying it replays the
+     original key and its frozen runtime snapshot across the remount. */
+  await settle(() => retryFailed());
 
   expect(sends).toHaveLength(2);
   expect(sends[1]!.idempotencyKey).toBe(sends[0]!.idempotencyKey);
@@ -461,7 +477,7 @@ test("a send with no explicit selection rides no runtime override, on first atte
     root.render(<TmuxComposer file={file} />);
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  await settle(() => composerControls(host).submit());
+  await settle(() => retryFailed());
 
   expect(sends).toHaveLength(2);
   expect(sends[0]!.runtime).toBeUndefined();

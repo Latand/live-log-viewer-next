@@ -413,6 +413,7 @@ export const en = {
   "outbox.delivered": "Delivered",
   "outbox.failed": "Not delivered",
   "outbox.cancel": "Cancel this message",
+  "outbox.retry": "Retry sending this message",
   "outbox.reattach": "Not sent — re-attach the images and send again",
 
   "draft.readPrompt": "Read the agent conversation in file {src} and continue from there: ",

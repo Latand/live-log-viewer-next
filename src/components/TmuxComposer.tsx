@@ -25,9 +25,11 @@ import {
   cancelOutbox,
   enqueueOutbox,
   outboxHistory,
+  outboxStateForReceiptStatus,
   updateOutbox,
   useOutbox,
   type OutboxEntry,
+  type OutboxState,
 } from "./conversation/outbox";
 import {
   COMPOSER_ADMISSION_DEADLINE_MS,
@@ -835,7 +837,7 @@ function ComposerFocusContinuity({ claimKeys }: {
      sides of a deletion pass. */
   const anchorRef = useRef<HTMLElement>(null);
   const keys = [...new Set(claimKeys)];
-  const keysSignature = keys.join(" ");
+  const keysSignature = keys.join("\u0000");
   useLayoutEffect(() => {
     const composerField = () => anchorRef.current?.closest("form")?.querySelector("textarea") ?? null;
     const el = composerField();
@@ -1270,9 +1272,15 @@ export function TmuxComposer({
     for (const settlement of settled) {
       markSettled(settlement.entry.key);
       /* A queued submission already left the composer at submit time: clearing
-         the draft again here would eat text typed for the NEXT message. */
+         the draft again here would eat text typed for the NEXT message. Its
+         bubble takes the state the receipt actually PROVES (round-1 P1#4): a
+         `queued`/`delivering` admission keeps the bubble `delivering`, only a
+         truly delivered receipt marks it `delivered`. */
       if (outboxKeys.current.has(settlement.entry.key)) {
-        updateOutbox(cardId, settlement.entry.key, { state: "delivered", settledAt: nowMs() });
+        const receipt = displayedRuntimeReceipts.find((candidate) =>
+          candidate.idempotencyKey === settlement.entry.key && receiptIsAdmitted(candidate.status));
+        const state = receipt ? outboxStateForReceiptStatus(receipt.status) : "delivered";
+        updateOutbox(cardId, settlement.entry.key, { state, settledAt: nowMs() });
       } else {
         const next = draftAfterDelivery(textRef.current, settlement.text);
         if (next !== textRef.current) setText(next);
@@ -1282,8 +1290,33 @@ export function TmuxComposer({
          next message from being replay-deduped into silence server-side. */
       if (settlement.entry.key === idempotencyKey.current) idempotencyKey.current = mintIdempotencyKey();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef/attachments are hook-stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef/attachments/persistPendingDeliveries/finishReceiptReconciliation are hook-stable
   }, [displayedRuntimeReceipts, cardId]);
+
+  /* Receipt-state progression for the outbox bubble (round-1 P1#4). The durable
+     receipt stream is authoritative for a bubble's state: a `delivering` bubble
+     advances to `delivered` when its delivery receipt lands (so it never sits
+     "delivering" forever and blocks the serial dispatcher), and a bubble
+     prematurely marked `failed` by a possibly-accepted 5xx recovers to
+     `delivering` once a receipt PROVES admission (queued/delivering) — the
+     message was admitted after all. A `delivered` bubble is terminal-good and is
+     never downgraded; a repeat failure never re-churns an already-failed
+     bubble. Launch-owned bubbles retire on their echo, not on a receipt. */
+  useEffect(() => {
+    for (const entry of outbox) {
+      if (entry.launchOwned || entry.state === "delivered") continue;
+      const receipt = displayedRuntimeReceipts.find((candidate) =>
+        candidate.idempotencyKey === entry.id
+        && (receiptIsAdmitted(candidate.status) || receiptIsTerminal(candidate.status)));
+      if (!receipt) continue;
+      const next = outboxStateForReceiptStatus(receipt.status);
+      if (next === entry.state) continue;
+      /* A failed bubble only advances on PROVEN admission — never on another
+         failure, and never to "delivering" off an unproven receipt. */
+      if (entry.state === "failed" && !(next === "delivered" || (next === "delivering" && receiptIsAdmitted(receipt.status)))) continue;
+      updateOutbox(cardId, entry.id, { state: next, settledAt: nowMs() });
+    }
+  }, [displayedRuntimeReceipts, outbox, cardId]);
 
   /* A link-arrow drop appended to the stored draft; reload it and put the
      caret at the end so the ask can be typed straight away. Goes through the
@@ -1411,12 +1444,15 @@ export function TmuxComposer({
     const requestedImages: PendingImage[] = (outboxId ? outboxImages.current.get(outboxId) ?? [] : attachments.imagesRef.current)
       .map((image) => ({ ...image }));
     /** Records a queued submission's fate on the queue itself. A no-op for a
-        direct (non-queued) send, which reports through the status line. */
-    const settleOutbox = (state: "delivered" | "failed", error?: string) => {
+        direct (non-queued) send, which reports through the status line. The
+        bubble takes the state the receipt PROVES: a bare admission stays
+        `delivering`, only a delivered receipt reads `delivered` (round-1 P1#4). */
+    const settleOutbox = (state: OutboxState, error?: string) => {
       if (!outboxId) return;
       updateOutbox(cardId, outboxId, { state, settledAt: nowMs(), ...(error ? { error } : {}) });
       if (state === "delivered") outboxImages.current.delete(outboxId);
     };
+    const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => settleOutbox(outboxStateForReceiptStatus(receipt.status));
     /* Resolve the key before selecting the payload. A generation retained after
        uncertain admission owns an immutable text/image snapshot; later edits
        stay in the composer for the following generation while an explicit
@@ -1544,7 +1580,9 @@ export function TmuxComposer({
         && candidate.operationId !== unconfirmedReceiptOperationId(clientMessageId)));
       if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
       settleGeneration(payloadText, attempt?.images ?? sentImages);
-      settleOutbox("delivered");
+      /* A legacy pane send that reached the pane is delivered; a migration
+         hold/queue is still in flight to the successor (round-1 P1#4). */
+      settleOutbox(held ? "delivering" : "delivered");
       setStatus({
         kind: held ? "info" : "ok",
         text: held
@@ -1628,7 +1666,7 @@ export function TmuxComposer({
               ? json.receipt.text
               : attempt?.text ?? payloadText;
             settleGeneration(admitted, attempt?.images ?? sentImages);
-            settleOutbox("delivered");
+            settleOutboxFromReceipt(receipt);
             if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
             if (receipt.status === "delivered") setStatus({ kind: "ok", text: t("common.sent") });
             if (!outboxId) inputRef.current?.focus();
@@ -1674,7 +1712,7 @@ export function TmuxComposer({
         persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
         if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
         settleGeneration(payloadText, attempt?.images ?? sentImages);
-        settleOutbox("delivered");
+        settleOutboxFromReceipt(json.receipt);
         if (!outboxId) inputRef.current?.focus();
         return;
       }
@@ -1762,9 +1800,15 @@ export function TmuxComposer({
     });
   };
 
+  /* Every submission method funnels through the queue-first path (round-1 P1#1):
+     the Send button (this form submit), the Enter key (ComposerBar → the
+     composer's `submit`), and one-tap dictation (`stopAndSend` → the same
+     `submit`) all call `queueSubmit`. Clicking Send therefore gets the identical
+     optimistic bubble, composer clear, and queue inspection/cancellation as
+     Enter — never a bypassed direct `send()`. */
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    void send();
+    queueSubmit();
   };
 
   /* Mode chip, interrupt, compact, and attach-terminal now live in the unified

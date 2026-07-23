@@ -269,11 +269,42 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     if (!/^[0-9a-f-]{36}$/.test(sid)) return null;
     const home = claudeHomeOwningTranscript(pathname);
     if (!home) return null;
+    return resumeSpecForSession("claude", sid, resumeCwd(pathname), home, options);
+  }
+  if (root === "codex-sessions" && base.endsWith(".jsonl")) {
+    const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
+    if (!id) return null;
+    const home = codexHomeOwningSessionPath(pathname);
+    if (!home) return null;
+    return resumeSpecForSession("codex", id, resumeCwd(pathname), home, options);
+  }
+  return null;
+}
+
+/**
+ * Compose the resume/attach command from an explicit engine + session id + cwd +
+ * account home, without needing the transcript file to exist yet (round-1 P1#6).
+ * The transcript-path form {@link resumeSpecFor} delegates here after sniffing
+ * the session id and home off the path; the launch-receipt form (a queued
+ * `spawn:<launchId>` window whose transcript has not materialized) passes the
+ * durable receipt's recorded session id, cwd, and account home directly, so
+ * "Open in terminal" composes a real working command instead of 400-ing on a
+ * synthetic path.
+ */
+export function resumeSpecForSession(
+  engine: AgentEngine,
+  sessionId: string,
+  cwd: string,
+  home: string,
+  options: ResumeSpecOptions = {},
+): ResumeSpec | null {
+  if (!/^[0-9a-f-]{36}$/.test(sessionId)) return null;
+  if (engine === "claude") {
     const managed = isManagedClaudeHome(home);
     const settings = applyClaudeSpawnPolicy(home, {
       allowSubagents: options.allowSubagents,
       baseSettingsPath: managed ? claudeSettingsPath() : null,
-      profileId: `resume-${sid}`,
+      profileId: `resume-${sessionId}`,
     }).settingsPath;
     let command = shellQuote(resolveBinary("claude"));
     const permissionMode = effectiveClaudePermissionMode(options);
@@ -288,40 +319,33 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     const launchModel = normalizeClaudeLaunchModel(options.model);
     if (launchModel) command += ` --model ${shellQuote(launchModel)}`;
     if (options.effort) command += ` --effort ${shellQuote(options.effort)}`;
-    command += ` --resume ${shellQuote(sid)}`;
+    command += ` --resume ${shellQuote(sessionId)}`;
     return {
       command: managed ? `${claudeEnvPrefix(home)} ${command}` : command,
-      cwd: resumeCwd(pathname),
+      cwd,
       windowName: "claude-resume",
       engine: "claude",
-      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode, allowSubagents: options.allowSubagents ?? false },
+      launchProfile: { ...emptyLaunchProfileForResume(cwd, launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode, allowSubagents: options.allowSubagents ?? false },
     };
   }
-  if (root === "codex-sessions" && base.endsWith(".jsonl")) {
-    const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
-    if (!id) return null;
-    const home = codexHomeOwningSessionPath(pathname);
-    if (!home) return null;
-    let command = `${resolveBinary("codex")}`;
-    if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
-    if (options.model) command += ` -m ${shellQuote(options.model)}`;
-    if (options.effort) command += ` -c ${shellQuote(`model_reasoning_effort=${options.effort}`)}`;
-    if (options.fast != null) command += ` -c ${shellQuote(`service_tier=${options.fast ? "priority" : "standard"}`)}`;
-    if (options.readOnly) command += " --sandbox read-only";
-    if (options.permissionMode && ["untrusted", "on-request", "never"].includes(options.permissionMode)) {
-      command += ` --ask-for-approval ${shellQuote(options.permissionMode)}`;
-    }
-    if (!options.allowSubagents) command += " --disable multi_agent";
-    command += ` resume ${id}`;
-    return {
-      command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
-      cwd: resumeCwd(pathname),
-      windowName: "codex-resume",
-      engine: "codex",
-      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false },
-    };
+  let command = `${resolveBinary("codex")}`;
+  if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
+  if (options.model) command += ` -m ${shellQuote(options.model)}`;
+  if (options.effort) command += ` -c ${shellQuote(`model_reasoning_effort=${options.effort}`)}`;
+  if (options.fast != null) command += ` -c ${shellQuote(`service_tier=${options.fast ? "priority" : "standard"}`)}`;
+  if (options.readOnly) command += " --sandbox read-only";
+  if (options.permissionMode && ["untrusted", "on-request", "never"].includes(options.permissionMode)) {
+    command += ` --ask-for-approval ${shellQuote(options.permissionMode)}`;
   }
-  return null;
+  if (!options.allowSubagents) command += " --disable multi_agent";
+  command += ` resume ${sessionId}`;
+  return {
+    command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
+    cwd,
+    windowName: "codex-resume",
+    engine: "codex",
+    launchProfile: { ...emptyLaunchProfileForResume(cwd, options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false },
+  };
 }
 
 function emptyLaunchProfileForResume(cwd: string, model: string | null, effort: string | null): LaunchProfile {

@@ -5,7 +5,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
 import { useLogTail } from "@/hooks/useLogTail";
-import { useRuntimeSessionByArtifact } from "@/hooks/useRuntime";
+import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -14,6 +14,7 @@ import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 
 import { LaunchChips } from "./conversation/LaunchChips";
 import { OutboxBubbles } from "./conversation/OutboxBubbles";
+import { orderedConversationTail } from "./conversation/tailOrder";
 import { useOutbox, visibleOutbox } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
 import { FeedItem } from "./feed/FeedItem";
@@ -122,8 +123,12 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      way, because it is the same window. */
   const launch = file?.launch ?? file?.spawn ?? null;
   /* Live streaming text: `delta` events from the structured host render the
-     in-flight assistant reply immediately, ahead of the transcript flush. */
-  const liveTurn = useRuntimeSessionByArtifact(file?.path ?? null)?.session.liveTurn ?? null;
+     in-flight assistant reply immediately, ahead of the transcript flush. The
+     host is resolved by conversation identity FIRST (round-1 P1#3): during
+     launch the file path is still `spawn:<launchId>` with no artifact, so an
+     artifact-only lookup would miss the live host and drop the first deltas; the
+     transcript path stays a fallback for subagents that carry no bus id. */
+  const liveTurn = useRuntimeSessionForConversation(file?.conversationId ?? null, file?.path ?? null)?.session.liveTurn ?? null;
   /* The scroll magnet lives per feed instance, so each column remembers its
      own state across polls: glued to the live tail, or released by the user.
      A remount inherits the transcript's remembered state. */
@@ -385,9 +390,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     setMagnet(true, true);
   };
 
-  /* Optimistic bubbles retire against the transcript's own clock: once the file
-     grew past a delivered submission, the real bubble is what the reader sees. */
-  const pendingOutbox = file ? visibleOutbox(outbox, file.mtime * 1000, nowMs()) : [];
+  /* Optimistic bubbles retire on their OWN transcript echo (round-1 P1#4): a
+     bubble disappears the moment a user message with the same text lands in the
+     rendered feed, never merely because an unrelated earlier turn advanced the
+     file mtime. */
+  const transcriptEchoes = useMemo(() => {
+    const echoes = new Set<string>();
+    for (const { item } of feed.items) {
+      if (item.kind === "user" && item.text.trim()) echoes.add(item.text.trim());
+    }
+    return echoes;
+  }, [feed.items]);
+  const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoes, nowMs()) : [];
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */
   const windowTail = Boolean(liveTurn?.text) || pendingOutbox.length > 0 || Boolean(launch);
@@ -529,19 +543,28 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                 ) : null}
               </div>
             )}
-            {/* One window tail for every lifecycle state (issue #569): the live
-                assistant delta, the operator's own queued bubbles, and the
-                launch chips all render here whether or not the transcript has
-                flushed a single item yet — a queued launch, a delivering first
-                message, and a live conversation are the same feed. */}
-            {liveTurn?.text ? (
-              <div data-live-turn className="my-2 ml-9 whitespace-pre-wrap [overflow-wrap:anywhere] text-ui text-primary">
-                {liveTurn.text}
-                <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-[2px] bg-accent align-text-bottom" aria-hidden />
-              </div>
-            ) : null}
-            {memoryKey && pendingOutbox.length ? <OutboxBubbles cardId={memoryKey} entries={pendingOutbox} /> : null}
-            {launch ? <LaunchChips launch={launch} onRetry={onLaunchRetry} /> : null}
+            {/* One window tail for every lifecycle state (issue #569), rendered
+                strictly in the canonical chronological order owned by
+                `orderedConversationTail` (round-1 P1#3): launch/delivery status
+                chips, THEN the operator's own pending user bubbles (the prompt),
+                THEN the streaming assistant delta (the reply). Driving the order
+                from that pure helper keeps prompt→reply chronology even while the
+                file path is still `spawn:<launchId>` and the transcript has not
+                flushed a single item, and makes the order directly testable. */}
+            {orderedConversationTail({
+              launch: Boolean(launch),
+              outbox: Boolean(memoryKey && pendingOutbox.length),
+              delta: Boolean(liveTurn?.text),
+            }).map((section) => {
+              if (section === "launch") return <LaunchChips key="launch" launch={launch!} onRetry={onLaunchRetry} />;
+              if (section === "outbox") return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} />;
+              return (
+                <div key="delta" data-live-turn className="my-2 ml-9 whitespace-pre-wrap [overflow-wrap:anywhere] text-ui text-primary">
+                  {liveTurn!.text}
+                  <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-[2px] bg-accent align-text-bottom" aria-hidden />
+                </div>
+              );
+            })}
             <ConversationAttention file={file} />
             {feed.items.length && !file.pendingQuestion && !file.waitingInput && endedQuestion ? (
               <div className="my-4 rounded-[8px] border border-border bg-sunken px-4 py-3 text-[13px] font-semibold text-muted">{endedQuestion}</div>

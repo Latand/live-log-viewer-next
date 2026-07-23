@@ -104,6 +104,75 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
   };
 }
 
+/** The launch-receipt fields the terminal command is composed from (round-1
+    P1#6). Everything here is durable registry state, so a queued launch window —
+    whose transcript path is the synthetic `spawn:<launchId>` — still yields a
+    real working command from the recorded account home, cwd, and session id. */
+export interface LaunchAttachReceipt {
+  engine: AgentEngine;
+  cwd: string;
+  accountId: string | null;
+  key: { engine: AgentEngine; sessionId: string } | null;
+  launchProfile: { model: string | null; effort: string | null; fast: boolean | null; allowSubagents?: boolean };
+}
+
+export interface LaunchAttachDeps {
+  receipt: LaunchAttachReceipt | null;
+  /** The conversation's materialized transcript path, when it is already in the
+      scan — preferred, so a launch that has since materialized resolves through
+      the full path flow (subagent walk, cwd override). */
+  materializedPath: string | null;
+  resolveByPath: (path: string) => AttachResolution;
+  resumeSpecForSession: (
+    engine: AgentEngine,
+    sessionId: string,
+    cwd: string,
+    home: string,
+    options?: { model?: string | null; effort?: string | null; fast?: boolean | null; allowSubagents?: boolean },
+  ) => ResumeSpec | null;
+  homeForAccount: (engine: AgentEngine, accountId: string) => string | null;
+  accountLabelFor: (engine: AgentEngine, accountId: string) => string;
+}
+
+/**
+ * Resolve the terminal command for a `spawn:<launchId>` launch window (round-1
+ * P1#6). Prefers the materialized transcript once it exists; before then it
+ * composes the resume command directly from the durable receipt's recorded
+ * account home, cwd, and session id — never handing the synthetic launch path to
+ * a filesystem-path endpoint (the HTTP 400 the review flagged). Pure: all I/O is
+ * injected.
+ */
+export function resolveLaunchAttachCommand(deps: LaunchAttachDeps): AttachResolution {
+  const receipt = deps.receipt;
+  if (!receipt) return { ok: false, error: "the launch is unknown to the viewer", status: 404 };
+  if (deps.materializedPath) {
+    const byPath = deps.resolveByPath(deps.materializedPath);
+    if (byPath.ok) return byPath;
+    /* A transient path-resolution miss (scan lag) falls through to the durable
+       receipt composition below rather than surfacing the path error. */
+  }
+  if (!receipt.key) {
+    return { ok: false, error: "the launch is still starting — the terminal command is available once its session binds", status: 409 };
+  }
+  const home = receipt.accountId ? deps.homeForAccount(receipt.engine, receipt.accountId) : null;
+  if (!home) return { ok: false, error: "the launch account is unavailable for a terminal command", status: 409 };
+  const spec = deps.resumeSpecForSession(receipt.engine, receipt.key.sessionId, receipt.cwd, home, {
+    model: receipt.launchProfile.model,
+    effort: receipt.launchProfile.effort,
+    fast: receipt.launchProfile.fast,
+    allowSubagents: receipt.launchProfile.allowSubagents,
+  });
+  if (!spec) return { ok: false, error: "this launch cannot be attached", status: 409 };
+  return {
+    ok: true,
+    value: attachCommandFromSpec(spec, {
+      accountId: receipt.accountId ?? "",
+      accountLabel: deps.accountLabelFor(receipt.engine, receipt.accountId ?? ""),
+      cwd: receipt.cwd,
+    }),
+  };
+}
+
 /**
  * The transcript path the composed command actually resumes: the entry itself
  * when resumable, otherwise its nearest resumable ancestor (Claude subagent →

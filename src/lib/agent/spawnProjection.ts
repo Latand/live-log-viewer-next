@@ -99,14 +99,38 @@ export function isSpawnPlaceholderPath(pathname: string): boolean {
   return pathname.startsWith("spawn:");
 }
 
+/** Every structured launch receipt still retained in the registry. */
+function allLaunchReceipts(snapshot: RegistryFile): SpawnReceipt[] {
+  return Object.values(snapshot.receipts).filter(
+    (receipt) => receipt.transport === "structured" && receipt.purpose === "launch",
+  );
+}
+
+/**
+ * Durable launch routes (`spawn:<launchId>` → conversation id) for EVERY
+ * retained launch receipt (round-1 P1#5). Routing is not subject to the card /
+ * chip freshness rules: a second launch to the same conversation must not
+ * invalidate the earlier `spawn:<launchId>` link, and an aged terminal receipt's
+ * link must still resolve. Freshness affects only what RENDERS (cards/facts),
+ * never what a deep link RESOLVES to.
+ */
+function allLaunchRoutes(snapshot: RegistryFile): Record<string, string> {
+  const routes: Record<string, string> = {};
+  for (const receipt of allLaunchReceipts(snapshot)) {
+    routes[`spawn:${receipt.launchId}`] = receipt.conversationId;
+  }
+  return routes;
+}
+
 /** The newest launch receipt per conversation, minus receipts aged out of the
     board entirely. Materialization is NOT filtered here: the caller decides
     whether a receipt projects a placeholder card (no live transcript) or
-    annotates the live conversation with transient launch facts (issue #569). */
+    annotates the live conversation with transient launch facts (issue #569).
+    This governs CARDS and CHIPS only — routing spans every retained receipt via
+    {@link allLaunchRoutes}. */
 function newestLaunchReceipts(snapshot: RegistryFile, nowMs: number): SpawnReceipt[] {
   const byConversation = new Map<string, SpawnReceipt>();
-  for (const receipt of Object.values(snapshot.receipts)) {
-    if (receipt.transport !== "structured" || receipt.purpose !== "launch") continue;
+  for (const receipt of allLaunchReceipts(snapshot)) {
     const current = byConversation.get(receipt.conversationId);
     if (!current || current.createdAt < receipt.createdAt) byConversation.set(receipt.conversationId, receipt);
   }
@@ -163,9 +187,10 @@ export function projectLaunchConversations(
   const receipts = newestLaunchReceipts(snapshot, nowMs);
   const cards: FileEntry[] = [];
   const facts = new Map<string, StructuredSpawnCardState>();
-  const routes: Record<string, string> = {};
+  /* Routes span EVERY retained launch receipt (round-1 P1#5); cards/facts below
+     apply the freshness rules to only the newest per conversation. */
+  const routes = allLaunchRoutes(snapshot);
   for (const receipt of receipts) {
-    routes[`spawn:${receipt.launchId}`] = receipt.conversationId;
     const spawn = cardState(snapshot, receipt);
     /* The materialized live conversation immediately retires the duplicate
        spawn projection (#569): the launch folds into that window as chips. */

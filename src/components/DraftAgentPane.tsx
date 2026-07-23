@@ -6,6 +6,7 @@ import { roleDescription, roleName, roleParamDescription, roleParamLabel, rolePa
 import { Play, X } from "@/components/icons";
 import { Select } from "@/components/ui/Select";
 import { useComposer } from "@/hooks/useComposer";
+import { seedLaunchOutbox } from "@/components/conversation/outbox";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { codexModelSupportsImages, defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
@@ -676,6 +677,23 @@ export function DraftAgentPane({
       const outcome = classifySpawnResponse(res.status, res.ok, json);
       if (typeof json?.launchId === "string" && typeof json.conversationId === "string") requestFilesRefresh();
       if (outcome.kind === "launched") {
+        /* Seed the operator's launch prompt as the conversation's first
+           optimistic user bubble (round-1 P1#2): the SPAWN delivers it, so the
+           queued launch window shows the message immediately instead of an empty
+           feed under status chips. Keyed on the durable conversation identity
+           (the same identity the spawn placeholder and the materialized
+           transcript share) and by the launch id, so a reload-replay is a no-op.
+           When only the launch id is known yet, seed under the `spawn:` route so
+           the window's composer adopts it forward onto the conversation. */
+        const outboxCardId = outcome.conversationId ?? (outcome.launchId ? `spawn:${outcome.launchId}` : null);
+        if (outboxCardId && outcome.launchId) {
+          seedLaunchOutbox(outboxCardId, {
+            id: outcome.launchId,
+            text: candidate.prompt,
+            images: candidate.request.images.length,
+            at: candidate.at,
+          });
+        }
         setAttempt(applySpawnOutcome(candidate, outcome));
       } else if (outcome.kind === "failed-launch") {
         setAttempt(applySpawnFailure(candidate, outcome));

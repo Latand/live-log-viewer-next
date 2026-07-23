@@ -348,6 +348,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "outbox.delivered": "Доставлено",
   "outbox.failed": "Не доставлено",
   "outbox.cancel": "Скасувати це повідомлення",
+  "outbox.retry": "Повторити надсилання цього повідомлення",
   "outbox.reattach": "Не надіслано — додайте зображення знову та надішліть",
 
   // Agent control strip (issue #241)
