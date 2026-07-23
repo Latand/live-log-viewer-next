@@ -11,12 +11,14 @@ import { freshSpecFor, shellQuote } from "./cli";
 const codexBinary = process.env.LLV_CODEX_BINARY ?? "codex";
 const defaultHome = prepareCodexIntegrationTestHome(codexBinary);
 const customHome = prepareCodexIntegrationTestHome(codexBinary);
+const layeredHome = prepareCodexIntegrationTestHome(codexBinary);
 const claudeBinary = process.env.LLV_CLAUDE_BINARY ?? "claude";
 const claudeProjectHome = prepareClaudeIntegrationTestHome(claudeBinary);
 
 afterAll(() => {
   defaultHome?.cleanup();
   customHome?.cleanup();
+  layeredHome?.cleanup();
   claudeProjectHome?.cleanup();
 });
 
@@ -97,19 +99,28 @@ async function waitFor<T>(read: () => T | null, timeoutMs = 120_000): Promise<T>
 
 function nativeClaudeMcpResult(filename: string, server: string, pipelineId: string): string | null {
   if (!fs.existsSync(filename)) return null;
-  let sawTool = false;
-  let sawResult = false;
+  const toolUseIds = new Set<string>();
   for (const line of fs.readFileSync(filename, "utf8").split("\n")) {
     try {
-      const serialized = JSON.stringify(JSON.parse(line));
-      if (serialized.includes('"type":"tool_use"') && serialized.includes(`"name":"mcp__${server}__get_pipeline"`)) sawTool = true;
-      if (serialized.includes('"tool_use_result"')
-        && serialized.includes(pipelineId)
-        && !serialized.includes("Permission to use")
-        && !serialized.includes("has been denied")) sawResult = true;
+      const event = JSON.parse(line) as {
+        message?: { content?: Array<{ type?: unknown; id?: unknown; name?: unknown; tool_use_id?: unknown; content?: unknown }> };
+      };
+      if (!Array.isArray(event.message?.content)) continue;
+      for (const content of event.message.content) {
+        if (content.type === "tool_use"
+          && content.name === `mcp__${server}__get_pipeline`
+          && typeof content.id === "string") toolUseIds.add(content.id);
+        if (content.type !== "tool_result"
+          || typeof content.tool_use_id !== "string"
+          || !toolUseIds.has(content.tool_use_id)) continue;
+        const serialized = JSON.stringify(content.content);
+        if (serialized.includes(pipelineId)
+          && !serialized.includes("Permission to use")
+          && !serialized.includes("has been denied")) return filename;
+      }
     } catch { /* a partial transcript line remains pending */ }
   }
-  return sawTool && sawResult ? filename : null;
+  return null;
 }
 
 function nativeMcpResult(home: string, server: string, pipelineId: string): string | null {
@@ -255,6 +266,33 @@ test.skipIf(!defaultHome)("real default tmux Codex exposes Viewer, excludes othe
   await exerciseTmuxCodex({ home: defaultHome, expectedServer: "viewer" });
 }, 300_000);
 
+test.skipIf(!layeredHome)("native Codex enumeration enforces the allowlist for trusted project configuration", () => {
+  if (!layeredHome) throw new Error("isolated Codex subscription home is unavailable");
+  const projectRoot = path.join(layeredHome.directory, "trusted-project");
+  fs.mkdirSync(path.join(projectRoot, ".git"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(projectRoot, ".codex"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(layeredHome.codexHome, "config.toml"), [
+    `[projects.${JSON.stringify(projectRoot)}]`,
+    'trust_level = "trusted"',
+    "",
+  ].join("\n"), { mode: 0o600 });
+  fs.writeFileSync(path.join(projectRoot, ".codex", "config.toml"), [
+    "[mcp_servers.project-allowed]",
+    'command = "/bin/true"',
+    "[mcp_servers.project-unrelated]",
+    'command = "/bin/true"',
+    "",
+  ].join("\n"), { mode: 0o600 });
+
+  const spec = freshSpecFor("codex", projectRoot, {
+    codexHome: layeredHome.codexHome,
+    mcpServers: ["project-allowed"],
+  });
+
+  expect(spec.command).toContain("'mcp_servers.project-allowed.enabled=true'");
+  expect(spec.command).toContain("'mcp_servers.project-unrelated.enabled=false'");
+});
+
 test.skipIf(!customHome)("real custom tmux Codex enables the optional server, force-enables Viewer, excludes sentinels, and reaps its MCP processes", async () => {
   if (!customHome) throw new Error("isolated Codex subscription home is unavailable");
   await exerciseTmuxCodex({ home: customHome, mcpServers: ["agent-browser"], expectedServer: "agent-browser" });
@@ -310,12 +348,21 @@ test.skipIf(!claudeProjectHome)("real tmux Claude loads an allowed project MCP s
   fs.writeFileSync(path.join(claudeProjectHome.claudeConfigDir, "settings.json"), JSON.stringify({
     enabledMcpjsonServers: ["agent-browser"],
   }), { mode: 0o600 });
-  fs.writeFileSync(path.join(claudeProjectHome.directory, ".claude.json"), JSON.stringify({
+  const nativeState = {
     hasCompletedOnboarding: true,
+    bypassPermissionsModeAccepted: true,
+    projects: {
+      [projectRoot]: {
+        hasTrustDialogAccepted: true,
+        hasCompletedProjectOnboarding: true,
+      },
+    },
     mcpServers: {
       viewer: { type: "stdio", command: bun, args: [viewerWrapperPath], env: { LLV_STATE_DIR: stateDir } },
     },
-  }), { mode: 0o600 });
+  };
+  fs.writeFileSync(path.join(claudeProjectHome.directory, ".claude.json"), JSON.stringify(nativeState), { mode: 0o600 });
+  fs.writeFileSync(path.join(claudeProjectHome.claudeConfigDir, ".claude.json"), JSON.stringify(nativeState), { mode: 0o600 });
   fs.writeFileSync(path.join(projectRoot, ".mcp.json"), JSON.stringify({
     mcpServers: {
       "agent-browser": {
@@ -351,17 +398,32 @@ test.skipIf(!claudeProjectHome)("real tmux Claude loads an allowed project MCP s
       "spawn-mcp",
       `${sessionId}.json`,
     ), "utf8")) as { mcpServers: Record<string, unknown> };
+    const launchSettings = JSON.parse(fs.readFileSync(path.join(
+      claudeProjectHome.claudeConfigDir,
+      ".llv",
+      "spawn-settings",
+      `${sessionId}.json`,
+    ), "utf8")) as { enabledMcpjsonServers?: string[]; disabledMcpjsonServers?: string[] };
     expect(mcpConfig.mcpServers["agent-browser"]).toMatchObject({
       env: { PROJECT_AUTH: "preserved" },
       timeout: 120_000,
       alwaysLoad: true,
     });
     expect(mcpConfig.mcpServers).not.toHaveProperty("project-unrelated");
-    const prompt = `Call the native agent-browser MCP tool get_pipeline with clientRequestId "tmux-claude-project" and pipelineId "${pipeline.id}". Shell execution is prohibited. Reply after the successful result.`;
-    const launched = await runTmux(tmuxTmpdir, ["send-keys", "-t", `${session}:0.0`, "-l", `${spec.command} ${shellQuote(prompt)}`]);
+    expect(launchSettings.enabledMcpjsonServers).toEqual(["agent-browser"]);
+    expect(launchSettings.disabledMcpjsonServers).toEqual(["project-unrelated"]);
+    const prompt = `Call the exact native tool mcp__agent-browser__get_pipeline with clientRequestId "tmux-claude-project" and pipelineId "${pipeline.id}". Do not use mcp__viewer__get_pipeline or shell execution. Reply after the successful result.`;
+    const isolatedCommand = `env HOME=${shellQuote(claudeProjectHome.directory)} CLAUDE_CONFIG_DIR=${shellQuote(claudeProjectHome.claudeConfigDir)} ${spec.command}`;
+    const launched = await runTmux(tmuxTmpdir, ["send-keys", "-t", `${session}:0.0`, "-l", `${isolatedCommand} -- ${shellQuote(prompt)}`]);
     if (launched.code !== 0) throw new Error(launched.stderr || "tmux command delivery failed");
     await runTmux(tmuxTmpdir, ["send-keys", "-t", `${session}:0.0`, "Enter"]);
-    await waitFor(() => nativeClaudeMcpResult(spec.transcript!, "agent-browser", pipeline.id));
+    try {
+      await waitFor(() => nativeClaudeMcpResult(spec.transcript!, "agent-browser", pipeline.id));
+    } catch (error) {
+      const pane = await runTmux(tmuxTmpdir, ["capture-pane", "-p", "-S", "-200", "-t", `${session}:0.0`]);
+      const transcript = fs.existsSync(spec.transcript!) ? fs.readFileSync(spec.transcript!, "utf8") : "<missing>";
+      throw new Error(`${String(error)}\n--- tmux pane ---\n${pane.stdout}${pane.stderr}\n--- transcript ---\n${transcript}`);
+    }
     expect(fs.existsSync(viewerPidPath)).toBeTrue();
     expect(fs.existsSync(optionalPidPath)).toBeTrue();
     expect(fs.existsSync(unrelatedPath)).toBeFalse();

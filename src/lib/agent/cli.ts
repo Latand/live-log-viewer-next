@@ -126,25 +126,7 @@ function normalizedMcpServers(value: readonly string[] | undefined): string[] {
   return normalized.value;
 }
 
-function configuredCodexMcpServersFromToml(contents: string): string[] | null {
-  if (/^\s*mcp_servers\s*=/m.test(contents)) return null;
-  const names = new Set<string>();
-  const table = /^\s*\[\s*mcp_servers\s*\.\s*("(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_-]+)(?:\s*\.|\s*\])/;
-  for (const line of contents.split("\n")) {
-    const match = line.match(table);
-    if (!match) continue;
-    const segment = match[1]!;
-    if (segment.startsWith('"')) {
-      try { names.add(JSON.parse(segment) as string); } catch { return null; }
-    } else if (segment.startsWith("'")) names.add(segment.slice(1, -1));
-    else names.add(segment);
-  }
-  return [...names];
-}
-
 function configuredCodexMcpServers(home: string, cwd: string): string[] {
-  const configPath = path.join(home, "config.toml");
-  if (!fs.existsSync(configPath)) return [];
   const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: home };
   delete env.LLV_TOKEN;
   const listed = spawnSync(process.env.LLV_CODEX_BINARY ?? resolveBinary("codex"), ["mcp", "list", "--json"], {
@@ -160,10 +142,8 @@ function configuredCodexMcpServers(home: string, cwd: string): string[] {
       if (Array.isArray(parsed) && parsed.every((server) => server && typeof server === "object" && typeof (server as { name?: unknown }).name === "string")) {
         return parsed.map((server) => (server as { name: string }).name);
       }
-    } catch { /* use the local configuration fallback below */ }
+    } catch { /* fail closed below */ }
   }
-  const fallback = configuredCodexMcpServersFromToml(fs.readFileSync(configPath, "utf8"));
-  if (fallback) return fallback;
   throw new Error("Codex MCP configuration could not be enumerated safely");
 }
 

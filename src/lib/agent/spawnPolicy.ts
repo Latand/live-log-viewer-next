@@ -91,6 +91,10 @@ function readSettings(pathname: string): JsonObject {
   return settings;
 }
 
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
 function claudeProjectMcpServers(cwd: string | undefined): JsonObject {
   if (!cwd) return {};
   const launchDirectory = path.resolve(cwd);
@@ -231,12 +235,24 @@ export function applyClaudeSpawnPolicy(
     options.cwd,
     options.mcpServers,
   );
+  const includedMcpServers = new Set(Object.keys(mcpServers));
+  const excludedProjectMcpServers = Object.keys(claudeProjectMcpServers(options.cwd))
+    .filter((name) => !includedMcpServers.has(name));
   const settingsWithoutMcp = Object.fromEntries(
     Object.entries(enforcedSettings).filter(([key]) => key !== "mcpServers"),
   );
-  const approvalSettings = Object.fromEntries(MCP_APPROVAL_SETTINGS.flatMap((key) => (
+  const approvalSettings: JsonObject = Object.fromEntries(MCP_APPROVAL_SETTINGS.flatMap((key) => (
     sourceSettings[key] === undefined ? [] : [[key, sourceSettings[key]]]
   )));
+  if (sourceSettings.enabledMcpjsonServers !== undefined) {
+    approvalSettings.enabledMcpjsonServers = stringArray(sourceSettings.enabledMcpjsonServers)
+      .filter((name) => includedMcpServers.has(name));
+  }
+  const disabledMcpjsonServers = [...new Set([
+    ...stringArray(sourceSettings.disabledMcpjsonServers),
+    ...excludedProjectMcpServers,
+  ])];
+  if (disabledMcpjsonServers.length > 0) approvalSettings.disabledMcpjsonServers = disabledMcpjsonServers;
   atomicWrite(result.settingsPath, JSON.stringify({
     ...settingsWithoutMcp,
     ...approvalSettings,

@@ -211,6 +211,7 @@ test("Claude native MCP config merges project scope between user and local scope
   };
   const settings = JSON.parse(fs.readFileSync(installed.settingsPath, "utf8")) as {
     enabledMcpjsonServers: string[];
+    disabledMcpjsonServers: string[];
   };
 
   expect(mcpConfig.mcpServers).toEqual({
@@ -227,6 +228,7 @@ test("Claude native MCP config merges project scope between user and local scope
   });
   expect(mcpConfig.mcpServers).not.toHaveProperty("project-unrelated");
   expect(settings.enabledMcpjsonServers).toEqual(["project-allowed"]);
+  expect(settings.disabledMcpjsonServers).toEqual(["project-unrelated"]);
 });
 
 test("allowSubagents uses an isolated profile while the denied profile stays enforced", () => {

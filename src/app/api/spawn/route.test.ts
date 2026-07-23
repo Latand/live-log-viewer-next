@@ -1162,6 +1162,10 @@ test("operator and agent structured Claude role launches both retain bypass perm
 
 test("structured replay keeps its admitted account after routing changes", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-rotation-replay-"));
+  const previousCodexBinary = process.env.LLV_CODEX_BINARY;
+  const codexBinary = path.join(cwd, "codex-mcp-list");
+  fs.writeFileSync(codexBinary, "#!/bin/sh\nprintf '[]'\n");
+  fs.chmodSync(codexBinary, 0o755);
   const store = registry();
   const deferred: Array<() => Promise<void>> = [];
   const effects: string[] = [];
@@ -1234,6 +1238,7 @@ test("structured replay keeps its admitted account after routing changes", async
   process.env.LLV_RUNTIME_EVENTS = "1";
   process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
   process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  process.env.LLV_CODEX_BINARY = codexBinary;
   const alternateCwd = fs.mkdtempSync(path.join(routeSandbox, "account-rotation-conflict-"));
   const alternateParent = store.ensureConversation("claude", path.join(cwd, "alternate-parent.jsonl"), "account-a");
   const request = (overrides: Record<string, unknown> = {}) => new NextRequest("http://127.0.0.1:8898/api/spawn", {
@@ -1304,6 +1309,8 @@ test("structured replay keeps its admitted account after routing changes", async
     else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
     if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
     else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+    if (previousCodexBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousCodexBinary;
   }
 });
 

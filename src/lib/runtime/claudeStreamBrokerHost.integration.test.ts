@@ -445,7 +445,7 @@ test.skipIf(!mcpCustomHome)("real Claude custom MCP policy force-includes Viewer
       ".llv",
       "spawn-settings",
       `${profileId}.json`,
-    ), "utf8")) as { enabledMcpjsonServers: string[] };
+    ), "utf8")) as { enabledMcpjsonServers: string[]; disabledMcpjsonServers: string[] };
     expect(freshMcpConfig.mcpServers["agent-browser"]).toMatchObject({
       env: { PROJECT_AUTH: "preserved" },
       timeout: 120_000,
@@ -453,9 +453,10 @@ test.skipIf(!mcpCustomHome)("real Claude custom MCP policy force-includes Viewer
     });
     expect(freshMcpConfig.mcpServers).not.toHaveProperty("project-unrelated");
     expect(freshSettings.enabledMcpjsonServers).toEqual(["agent-browser"]);
+    expect(freshSettings.disabledMcpjsonServers).toEqual(["project-unrelated"]);
     await exerciseClaudeTool(fresh, {
-      name: "mcp__viewer__get_pipeline",
-      request: `Call the native Viewer MCP tool get_pipeline with clientRequestId "claude-custom-fresh" and pipelineId "${fixture.pipelineId}". Reply after the successful result.`,
+      name: "mcp__agent-browser__get_pipeline",
+      request: `Call the exact native tool mcp__agent-browser__get_pipeline with clientRequestId "claude-custom-fresh" and pipelineId "${fixture.pipelineId}". Do not use mcp__viewer__get_pipeline or shell execution. Reply after the successful result.`,
       expectedResult: fixture.pipelineId,
     });
     expect(fs.existsSync(fixture.viewerPidPath)).toBeTrue();
@@ -476,8 +477,13 @@ test.skipIf(!mcpCustomHome)("real Claude custom MCP policy force-includes Viewer
     fs.rmSync(fixture.optionalPidPath);
     adopted = await ClaudeStreamBrokerHost.adopt(sessionId, { ...options, initialEventCursor: cursor });
     await exerciseClaudeTool(adopted, {
+      name: "mcp__agent-browser__get_pipeline",
+      request: `Call the exact native tool mcp__agent-browser__get_pipeline with clientRequestId "claude-adopted" and pipelineId "${fixture.pipelineId}". Do not use mcp__viewer__get_pipeline or shell execution. Reply after the successful result.`,
+      expectedResult: fixture.pipelineId,
+    });
+    await exerciseClaudeTool(adopted, {
       name: "mcp__viewer__get_pipeline",
-      request: `Call the native Viewer MCP tool get_pipeline with clientRequestId "claude-adopted" and pipelineId "${fixture.pipelineId}". Reply after the successful result.`,
+      request: `Call the exact native tool mcp__viewer__get_pipeline with clientRequestId "claude-adopted-viewer" and pipelineId "${fixture.pipelineId}". Shell execution is prohibited. Reply after the successful result.`,
       expectedResult: fixture.pipelineId,
     });
     expect(fs.existsSync(fixture.viewerPidPath)).toBeTrue();

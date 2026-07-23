@@ -27,7 +27,8 @@ afterAll(() => {
 
 test("fresh Codex commands fix CODEX_HOME in the typed shell command", () => {
   const home = path.join(SANDBOX, "account with space");
-  const spec = freshSpecFor("codex", "/repo", { codexHome: home });
+  fs.mkdirSync(home, { recursive: true });
+  const spec = freshSpecFor("codex", SANDBOX, { codexHome: home });
 
   expect(spec.command).toStartWith(`env -u LLV_TOKEN CODEX_HOME='${home}' `);
   expect(spec.command).toContain("codex");
@@ -48,7 +49,7 @@ test("fresh tmux Codex commands enforce the normalized MCP allowlist at runtime"
     "",
   ].join("\n"));
 
-  const spec = freshSpecFor("codex", "/repo", {
+  const spec = freshSpecFor("codex", SANDBOX, {
     codexHome: home,
     mcpServers: ["agent-browser"],
   });
@@ -70,7 +71,7 @@ test("fresh tmux Codex defaults disable every configured server outside Viewer",
     "",
   ].join("\n"));
 
-  const spec = freshSpecFor("codex", "/repo", { codexHome: home });
+  const spec = freshSpecFor("codex", SANDBOX, { codexHome: home });
 
   expect(spec.command).toContain("'mcp_servers.viewer.enabled=true'");
   expect(spec.command).toContain("'mcp_servers.agent-browser.enabled=false'");
@@ -99,22 +100,79 @@ test("tmux Codex enumerates MCP servers from the launched working directory", ()
   }
 });
 
-test("tmux Codex fails closed when fallback cannot enumerate an inline MCP table", () => {
-  const home = path.join(SANDBOX, "codex-mcp-inline");
-  const binary = path.join(SANDBOX, "codex-mcp-list-failure");
+test("fresh and resumed tmux Codex enumerate project and system MCP servers when user config is absent", () => {
+  const home = process.env.LLV_CODEX_HOME!;
+  const cwd = path.join(SANDBOX, "codex-project-only");
+  const binary = path.join(SANDBOX, "codex-mcp-list-project-only");
+  const marker = path.join(SANDBOX, "codex-mcp-list-project-only.called");
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, "config.toml"), [
-    "[mcp_servers.viewer]",
-    'command = "viewer-mcp"',
-    'mcp_servers = { hidden = { command = "hidden-mcp" } }',
+  fs.rmSync(path.join(home, "config.toml"), { force: true });
+  fs.mkdirSync(path.join(cwd, ".codex"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ".codex", "config.toml"), [
+    "[mcp_servers.project-sentinel]",
+    'command = "project-mcp"',
     "",
   ].join("\n"));
+  const transcript = path.join(home, "sessions", "2026", "07", "23", "rollout-019fa1b2-c3d4-0567-8899-aabbccddeeff.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n");
+  fs.writeFileSync(binary, `#!/bin/sh\nprintf called > ${JSON.stringify(marker)}\nprintf '[{"name":"project-sentinel"},{"name":"system-sentinel"}]'\n`);
+  fs.chmodSync(binary, 0o755);
+  const previousBinary = process.env.LLV_CODEX_BINARY;
+  process.env.LLV_CODEX_BINARY = binary;
+  try {
+    const spec = freshSpecFor("codex", cwd, { codexHome: home });
+    expect(fs.existsSync(marker)).toBeTrue();
+    expect(spec.command).toContain("'mcp_servers.project-sentinel.enabled=false'");
+    expect(spec.command).toContain("'mcp_servers.system-sentinel.enabled=false'");
+    const resumed = resumeSpecFor("codex-sessions", transcript);
+    expect(resumed?.command).toContain("'mcp_servers.project-sentinel.enabled=false'");
+    expect(resumed?.command).toContain("'mcp_servers.system-sentinel.enabled=false'");
+  } finally {
+    if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousBinary;
+  }
+});
+
+test("fresh and resumed tmux Codex fail closed when layered enumeration fails without user config", () => {
+  const home = process.env.LLV_CODEX_HOME!;
+  const cwd = path.join(SANDBOX, "codex-enumeration-failure");
+  const binary = path.join(SANDBOX, "codex-mcp-list-no-user-failure");
+  const transcript = path.join(home, "sessions", "2026", "07", "23", "rollout-019fa1b2-c3d4-0567-8899-aabbccddee00.jsonl");
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.rmSync(path.join(home, "config.toml"), { force: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n");
   fs.writeFileSync(binary, "#!/bin/sh\nexit 1\n");
   fs.chmodSync(binary, 0o755);
   const previousBinary = process.env.LLV_CODEX_BINARY;
   process.env.LLV_CODEX_BINARY = binary;
   try {
-    expect(() => freshSpecFor("codex", "/repo", { codexHome: home })).toThrow("could not be enumerated safely");
+    expect(() => freshSpecFor("codex", cwd, { codexHome: home })).toThrow("could not be enumerated safely");
+    expect(() => resumeSpecFor("codex-sessions", transcript)).toThrow("could not be enumerated safely");
+  } finally {
+    if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousBinary;
+  }
+});
+
+test("tmux Codex rejects invalid native enumeration even when user config is locally parseable", () => {
+  const home = path.join(SANDBOX, "codex-mcp-invalid-native-output");
+  const binary = path.join(SANDBOX, "codex-mcp-list-invalid-output");
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, "config.toml"), [
+    "[mcp_servers.viewer]",
+    'command = "viewer-mcp"',
+    "[mcp_servers.unrelated]",
+    'command = "unrelated-mcp"',
+    "",
+  ].join("\n"));
+  fs.writeFileSync(binary, "#!/bin/sh\nprintf invalid-json\n");
+  fs.chmodSync(binary, 0o755);
+  const previousBinary = process.env.LLV_CODEX_BINARY;
+  process.env.LLV_CODEX_BINARY = binary;
+  try {
+    expect(() => freshSpecFor("codex", SANDBOX, { codexHome: home })).toThrow("could not be enumerated safely");
   } finally {
     if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
     else process.env.LLV_CODEX_BINARY = previousBinary;
@@ -153,7 +211,7 @@ test("allowSubagents enables Codex multi-agent for fresh and resumed launches", 
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
   fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: SANDBOX } }) + "\n");
 
-  const fresh = freshSpecFor("codex", "/repo", { allowSubagents: true });
+  const fresh = freshSpecFor("codex", SANDBOX, { allowSubagents: true });
   const resumed = resumeSpecFor("codex-sessions", transcript, { allowSubagents: true });
 
   expect(fresh.command).not.toContain("--disable");
@@ -164,10 +222,10 @@ test("allowSubagents enables Codex multi-agent for fresh and resumed launches", 
 
 test("Viewer spawn capability is scoped into the launched agent command", () => {
   const capability = "A".repeat(43);
-  const spec = withSpawnCapability(freshSpecFor("codex", "/repo"), capability);
+  const spec = withSpawnCapability(freshSpecFor("codex", SANDBOX), capability);
 
   expect(spec.command).toStartWith(`env LLV_SPAWN_CAPABILITY='${capability}' `);
-  expect(spec.launchProfile?.cwd).toBe("/repo");
+  expect(spec.launchProfile?.cwd).toBe(SANDBOX);
 });
 
 test("Claude commands do not gain Codex environment assignments", () => {
@@ -257,7 +315,7 @@ test("Claude resume normalizes transcript families and omits unknown model overr
 
 test("managed Codex commands pin file-backed credential storage", () => {
   const account = createManagedCodexAccount("Review");
-  const fresh = freshSpecFor("codex", "/repo", { codexHome: account.home, model: "gpt-5" });
+  const fresh = freshSpecFor("codex", SANDBOX, { codexHome: account.home, model: "gpt-5" });
   const transcript = path.join(account.sessionsDir, "2026", "07", "09", "rollout-019f423a-d6e9-7903-7597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
   fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: SANDBOX } }) + "\n");
