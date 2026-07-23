@@ -66,7 +66,7 @@ export type AttachResolution =
 
 export interface AttachResolverDeps {
   files: FileEntry[];
-  resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[] }) => ResumeSpec | null;
+  resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[]; cwd?: string | null }) => ResumeSpec | null;
   accountIdForPath: (path: string) => string;
   accountLabelFor: (engine: AgentEngine, accountId: string) => string;
   allowSubagentsForPath?: (path: string) => boolean | undefined;
@@ -86,11 +86,20 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
   const target = resolvableTarget(entry, deps.files);
   if (!target) return { ok: false, error: "this conversation cannot be attached", status: 409 };
 
+  /* One effective cwd, chosen BEFORE the resume spec is generated (finding 1):
+     the conversation's recorded cwd (the resolvable target's, so a subagent keeps
+     its ROOT's project dir) drives the MCP policy enumeration, materialization,
+     and rendered command alike. The resume spec's transcript-sniffed `$HOME`
+     fallback would otherwise enumerate project-scoped MCP servers in the wrong
+     directory before the recorded cwd is applied to the display command. When no
+     cwd is recorded, `resumeSpecFor` falls back to the sniff, exactly as before. */
+  const effectiveCwd = target.entry.cwd ?? entry.cwd ?? null;
   const spec = deps.resumeSpecFor(target.entry.root, target.entry.path, {
     model: target.entry.launchModel ?? target.entry.model,
     effort: target.entry.effort,
     allowSubagents: deps.allowSubagentsForPath?.(target.entry.path),
     mcpServers: deps.mcpServersForPath?.(target.entry.path),
+    cwd: effectiveCwd,
   });
   if (!spec) return { ok: false, error: "this conversation cannot be attached", status: 409 };
 
@@ -100,7 +109,7 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
     value: attachCommandFromSpec(spec, {
       accountId,
       accountLabel: deps.accountLabelFor(spec.engine, accountId),
-      cwd: target.entry.cwd ?? entry.cwd ?? null,
+      cwd: effectiveCwd,
       ...(target.viaRoot ? { note: "subagent-root" as const } : {}),
     }),
   };

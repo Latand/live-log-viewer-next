@@ -14,7 +14,7 @@ import { requestFilesRefresh } from "@/lib/filesEvents";
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
 import type { RoleDefinition } from "@/lib/roles/types";
 import type { FileEntry } from "@/lib/types";
-import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
+import { conversationIdentity, withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 import { ComposerBar } from "./ComposerBar";
@@ -625,12 +625,28 @@ export function DraftAgentPane({
     }).catch(() => {});
   }, []);
 
-  /* The handover uses the exact receipt path or conversation id. A nearby
-     transcript can be a simultaneous draft, so it cannot establish ownership. */
+  /* The handover uses the exact receipt path, conversation id, or — when the
+     accepted POST's response was lost — the durable projection's exact
+     clientAttemptId (finding 3). A nearby transcript can be a simultaneous draft,
+     so it cannot establish ownership. */
   useEffect(() => {
     if (!attempt) return;
     const hit = matchSpawnedFile(attempt, files);
-    if (hit) onSpawned(hit);
+    if (!hit) return;
+    /* Lost-response recovery: with no response, submitAttempt never seeded the
+       launch prompt. Seed it now under the canonical identity, keyed by the
+       launch id so the success-path seed (or a reload replay) is a no-op — the
+       queued canonical window shows the initial prompt exactly once. */
+    const launchId = hit.spawn?.launchId ?? attempt.launchId;
+    if (launchId && (attempt.prompt.trim() || attempt.hasImages)) {
+      seedLaunchOutbox(conversationIdentity(hit), {
+        id: launchId,
+        text: attempt.prompt,
+        images: attempt.request?.images.length ?? 0,
+        at: attempt.at,
+      });
+    }
+    onSpawned(hit);
   }, [files, attempt, onSpawned]);
 
   /* One bounded timer per attempt: a known-path boot only earns the slow hint

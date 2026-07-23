@@ -9,9 +9,11 @@ import {
   outboxHistory,
   OUTBOX_DELIVERED_TTL_MS,
   outboxStateForReceiptStatus,
+  publishTranscriptEchoes,
   readOutbox,
   resetOutboxForTests,
   seedLaunchOutbox,
+  transcriptEchoCount,
   updateOutbox,
   visibleOutbox,
   type OutboxEntry,
@@ -19,6 +21,17 @@ import {
 
 const dom = new Window();
 Object.assign(globalThis, { window: dom, sessionStorage: dom.sessionStorage });
+
+/** Build a transcript-echo count map (finding 2): each listed text counted once,
+    or with an explicit [text, count] pair for identical-message occurrences. */
+function echoes(...entries: (string | [string, number])[]): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    const [text, count] = typeof entry === "string" ? [entry, 1] : entry;
+    counts.set(text, (counts.get(text) ?? 0) + count);
+  }
+  return counts;
+}
 
 beforeEach(() => {
   dom.sessionStorage.clear();
@@ -82,18 +95,18 @@ test("a bubble retires only on ITS OWN transcript echo, not on an unrelated mtim
   /* An unrelated earlier turn wrote to the transcript — the echo set carries
      someone else's text, NOT this bubble's. The bubble must stay. This is the
      exact premature-removal the mtime rule caused. */
-  expect(visibleOutbox([entry], new Set(["a reply from an earlier turn"]), at + 3_000)).toHaveLength(1);
+  expect(visibleOutbox([entry], echoes("a reply from an earlier turn"), at + 3_000)).toHaveLength(1);
   /* This bubble's OWN text lands in the transcript → it retires. */
-  expect(visibleOutbox([entry], new Set(["my message"]), at + 3_000)).toHaveLength(0);
+  expect(visibleOutbox([entry], echoes("my message"), at + 3_000)).toHaveLength(0);
   /* Trimming is applied so whitespace differences still match the echo. */
-  expect(visibleOutbox([{ ...entry, text: "  my message  " }], new Set(["my message"]), at + 3_000)).toHaveLength(0);
+  expect(visibleOutbox([{ ...entry, text: "  my message  " }], echoes("my message"), at + 3_000)).toHaveLength(0);
 });
 
 test("a delivered bubble whose echo never arrives still retires at the hard TTL", () => {
   const at = 1_000_000;
   const entry: OutboxEntry = { id: "k1", text: "done", images: 0, at, state: "delivered", settledAt: at };
-  expect(visibleOutbox([entry], new Set<string>(), at + 3_000)).toHaveLength(1);
-  expect(visibleOutbox([entry], new Set<string>(), at + OUTBOX_DELIVERED_TTL_MS + 1)).toHaveLength(0);
+  expect(visibleOutbox([entry], echoes(), at + 3_000)).toHaveLength(1);
+  expect(visibleOutbox([entry], echoes(), at + OUTBOX_DELIVERED_TTL_MS + 1)).toHaveLength(0);
 });
 
 test("queued / delivering / launch-owned bubbles stay until their echo lands, never by TTL", () => {
@@ -101,9 +114,52 @@ test("queued / delivering / launch-owned bubbles stay until their echo lands, ne
   const delivering: OutboxEntry = { id: "k2", text: "in flight", images: 0, at: 1_000, state: "delivering" };
   const launch: OutboxEntry = { id: "k3", text: "the launch prompt", images: 0, at: 1_000, state: "delivering", launchOwned: true };
   const far = 1_000 + OUTBOX_DELIVERED_TTL_MS * 10;
-  expect(visibleOutbox([queued, delivering, launch], new Set<string>(), far)).toHaveLength(3);
+  expect(visibleOutbox([queued, delivering, launch], echoes(), far)).toHaveLength(3);
   /* Each retires only on its own echo. */
-  expect(visibleOutbox([queued, delivering, launch], new Set(["the launch prompt"]), far).map((e) => e.id)).toEqual(["k1", "k2"]);
+  expect(visibleOutbox([queued, delivering, launch], echoes("the launch prompt"), far).map((e) => e.id)).toEqual(["k1", "k2"]);
+});
+
+test("finding 2: a pre-existing identical user message leaves a freshly queued bubble visible", () => {
+  const at = 1_000_000;
+  /* The operator earlier said "yes"; it is already an echo in the transcript.
+     Now they queue a NEW "yes" — its baseline records that one pre-existing
+     echo, so the new bubble (and its cancel affordance) must stay visible. */
+  const fresh: OutboxEntry = { id: "k1", text: "yes", images: 0, at, state: "queued", echoBaseline: 1 };
+  expect(visibleOutbox([fresh], echoes(["yes", 1]), at + 1_000)).toHaveLength(1);
+  /* When the new message's OWN echo lands (a second occurrence), it retires. */
+  expect(visibleOutbox([fresh], echoes(["yes", 2]), at + 1_000)).toHaveLength(0);
+});
+
+test("finding 2: each later echo retires exactly one matching queued entry, oldest first", () => {
+  const at = 1_000_000;
+  /* Two identical messages queued back-to-back, both watermarked at 0 echoes. */
+  const first: OutboxEntry = { id: "k1", text: "go", images: 0, at, state: "delivering", echoBaseline: 0 };
+  const second: OutboxEntry = { id: "k2", text: "go", images: 0, at: at + 1, state: "queued", echoBaseline: 0 };
+  /* No echoes yet → both bubbles visible. */
+  expect(visibleOutbox([first, second], echoes(), at + 1_000).map((e) => e.id)).toEqual(["k1", "k2"]);
+  /* One echo lands → exactly the oldest retires, the newer stays. */
+  expect(visibleOutbox([first, second], echoes(["go", 1]), at + 1_000).map((e) => e.id)).toEqual(["k2"]);
+  /* A second echo lands → the second retires too. */
+  expect(visibleOutbox([first, second], echoes(["go", 2]), at + 1_000)).toHaveLength(0);
+});
+
+test("finding 2: a reloaded entry with no watermark still retires once its text is present", () => {
+  const at = 1_000_000;
+  /* Legacy/reloaded entry — no echoBaseline field — preserves the prior reload
+     retirement: the moment its text is in the transcript it is gone. */
+  const legacy: OutboxEntry = { id: "k1", text: "done", images: 0, at, state: "delivered", settledAt: at };
+  expect(visibleOutbox([legacy], echoes("done"), at + 1_000)).toHaveLength(0);
+});
+
+test("finding 2: the composer watermark reads the feed-published echo count", () => {
+  /* The feed publishes the transcript's user-echo counts; the composer stamps a
+     new submission's baseline from them, so occurrence consumption is causal. */
+  publishTranscriptEchoes("conv-wm", echoes(["ping", 2], "other"));
+  expect(transcriptEchoCount("conv-wm", "ping")).toBe(2);
+  expect(transcriptEchoCount("conv-wm", "  ping  ")).toBe(2); // trimmed key
+  expect(transcriptEchoCount("conv-wm", "other")).toBe(1);
+  expect(transcriptEchoCount("conv-wm", "absent")).toBe(0);
+  expect(transcriptEchoCount("unknown-conv", "ping")).toBe(0);
 });
 
 describe("outboxStateForReceiptStatus (P1#4)", () => {

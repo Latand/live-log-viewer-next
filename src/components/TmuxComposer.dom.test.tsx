@@ -10,7 +10,7 @@ import type { FileEntry } from "@/lib/types";
 import { setLocale, translate } from "@/lib/i18n";
 
 import { appendComposerDraft, mergeRuntimeReceipts, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
-import { readOutbox, resetOutboxForTests, retryOutbox } from "./conversation/outbox";
+import { enqueueOutbox, nextDispatch, readOutbox, resetOutboxForTests, retryOutbox, updateOutbox } from "./conversation/outbox";
 
 const dom = new Window();
 installActEnv();
@@ -954,6 +954,43 @@ test("an unresolved-host composer exposes no quick-ack action (finding: unresolv
   await openSendMenu(host);
   expect(host.querySelector('[role="menu"]')).toBeNull();
   expect(quickAckItems(host).length).toBe(0);
+  await act(async () => root.unmount());
+});
+
+test("finding 5: quick-ack is queue-first — queues behind an active delivery, keeps its own key, and leaves the draft intact", async () => {
+  globalThis.fetch = (async () => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as unknown as typeof fetch;
+  /* An operator message is already on the wire (delivering) for this
+     conversation, so the ack must queue BEHIND it. */
+  enqueueOutbox("conv-child", { id: "inflight", text: "earlier message", images: 0, at: Date.now() });
+  updateOutbox("conv-child", "inflight", { state: "delivering" });
+
+  const { host, root } = await renderInto(<TmuxComposer file={relaySubagent} />);
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  /* The operator is composing a NEW draft when they reach for quick-ack. */
+  await settle(() => appendComposerDraft("conv-child", "draft in progress"));
+  expect(textarea.value).toBe("draft in progress");
+
+  await openSendMenu(host);
+  const ack = quickAckItems(host)[0] as HTMLButtonElement;
+  await settle(() => ack.click());
+
+  const queue = readOutbox("conv-child");
+  const ackText = translate("en", "composer.quickAck");
+  /* Rendered immediately as an entry, queued behind the active delivery. */
+  expect(queue.map((entry) => [entry.text, entry.state])).toEqual([
+    ["earlier message", "delivering"],
+    [ackText, "queued"],
+  ]);
+  /* Serial dispatch: nothing new leaves while the first is on the wire — the ack
+     dispatches exactly once, after it. */
+  expect(nextDispatch(queue)).toBeNull();
+  /* Its own idempotency key, distinct from the in-flight message's. */
+  expect(queue[1]!.id).not.toBe(queue[0]!.id);
+  /* The operator's in-progress draft is untouched. */
+  expect(textarea.value).toBe("draft in progress");
+  /* And it is a durable, cancellable queue entry (round-1 outbox contract). */
+  expect(queue[1]!.state).toBe("queued");
+
   await act(async () => root.unmount());
 });
 

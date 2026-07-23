@@ -26,6 +26,7 @@ import {
   enqueueOutbox,
   outboxHistory,
   outboxStateForReceiptStatus,
+  transcriptEchoCount,
   updateOutbox,
   useOutbox,
   type OutboxEntry,
@@ -1398,9 +1399,14 @@ export function TmuxComposer({
    * Every pre-flight refusal happens HERE, so nothing is ever queued into a
    * wall — the queue only ever holds messages that may still be delivered.
    */
-  const queueSubmit = (overrideText?: string) => {
+  /* `preserveDraft` queues a message that is NOT the operator's current draft —
+     the quick-ack (finding 5). It carries no attachments, mints its OWN
+     idempotency key (leaving the draft's key intact), and leaves the composer's
+     typed text and staged tiles exactly where they were. */
+  const queueSubmit = (overrideText?: string, options?: { preserveDraft?: boolean }) => {
+    const preserveDraft = options?.preserveDraft ?? false;
     const requestedText = overrideText ?? textRef.current;
-    const requestedImages: PendingImage[] = attachments.imagesRef.current.map((image) => ({ ...image }));
+    const requestedImages: PendingImage[] = preserveDraft ? [] : attachments.imagesRef.current.map((image) => ({ ...image }));
     if (voiceSending || reconcilingSend) return;
     if (!requestedText.trim() && !requestedImages.length) return;
     if (deadHost && !structuredSession) {
@@ -1418,9 +1424,10 @@ export function TmuxComposer({
     if (structuredSession && requestedImages.length && !attachments.validate()) return;
     /* The entry owns the idempotency key of its generation; the composer mints
        a fresh one straight away so the next message is a different generation
-       even if it is submitted before this one leaves. */
-    const clientMessageId = idempotencyKey.current;
-    idempotencyKey.current = mintIdempotencyKey();
+       even if it is submitted before this one leaves. A `preserveDraft` ack takes
+       its own fresh key and does not disturb the draft's pending key. */
+    const clientMessageId = preserveDraft ? mintIdempotencyKey() : idempotencyKey.current;
+    if (!preserveDraft) idempotencyKey.current = mintIdempotencyKey();
     outboxImages.current.set(clientMessageId, requestedImages);
     outboxKeys.current.add(clientMessageId);
     enqueueOutbox(cardId, {
@@ -1428,9 +1435,15 @@ export function TmuxComposer({
       text: requestedText,
       images: requestedImages.length,
       at: nowMs(),
+      /* Submission watermark (finding 2): the echoes of this exact text that
+         already exist, so a pre-existing identical message never retires this
+         fresh bubble — only its own later echo does. */
+      echoBaseline: transcriptEchoCount(cardId, requestedText),
     });
-    setText("");
-    attachments.clearAll();
+    if (!preserveDraft) {
+      setText("");
+      attachments.clearAll();
+    }
     setStatus(null);
     inputRef.current?.focus();
   };
@@ -1970,14 +1983,22 @@ export function TmuxComposer({
                   description: t("composer.quickAck"),
                   disabled: quickAckDisabled,
                   tone: "ok",
-                  onSelect: () => void send(t("composer.quickAck")),
+                  /* Queue-first like every other submission (finding 5): the ack
+                     enqueues behind any active delivery, renders immediately, is
+                     cancellable, joins history, and dispatches once — while the
+                     operator's typed draft and staged tiles stay put. */
+                  onSelect: () => queueSubmit(t("composer.quickAck"), { preserveDraft: true }),
                 },
               ]
             : []
         }
         showImage={!deadHostBlocksSend}
-        imageDisabled={structuredImagesDisabled && caps.surface !== "dead"}
-        imageDisabledReason={caps.surface === "dead" ? undefined : structuredImagesReason}
+        /* A dead structured surface can still recover TEXT, but its image pipeline
+           is unavailable until the host recovers (finding 4): the picker stays
+           visible so staged tiles remain removable, but disabled with the
+           localized recovery reason so no image submission is attempted. */
+        imageDisabled={structuredImagesDisabled}
+        imageDisabledReason={structuredImagesReason}
         sendPayloadAvailable={replayGenerationAvailable}
         sendDisabledReason={deadHostBlocksSend
           ? t("deadHost.sendBlocked")

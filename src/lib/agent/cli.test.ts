@@ -3,6 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { resolveAttachCommand } from "./attachCommand";
+import type { FileEntry } from "@/lib/types";
+
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-cli-account-test-"));
 const OLD_STATE = process.env.LLV_STATE_DIR;
 const OLD_HOME = process.env.LLV_CODEX_HOME;
@@ -128,6 +131,55 @@ test("fresh and resumed tmux Codex enumerate project and system MCP servers when
     const resumed = resumeSpecFor("codex-sessions", transcript);
     expect(resumed?.command).toContain("'mcp_servers.project-sentinel.enabled=false'");
     expect(resumed?.command).toContain("'mcp_servers.system-sentinel.enabled=false'");
+  } finally {
+    if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousBinary;
+  }
+});
+
+test("finding 1: attach enumerates MCP servers at the RECORDED project cwd, not the transcript-sniffed $HOME fallback", () => {
+  const home = process.env.LLV_CODEX_HOME!;
+  const project = path.join(SANDBOX, "finding1-recorded-project");
+  const binary = path.join(SANDBOX, "codex-mcp-list-finding1");
+  const marker = path.join(SANDBOX, "codex-mcp-list-finding1.pwd");
+  fs.mkdirSync(home, { recursive: true });
+  fs.rmSync(path.join(home, "config.toml"), { force: true });
+  fs.mkdirSync(project, { recursive: true });
+  const transcript = path.join(home, "sessions", "2026", "07", "24", "rollout-019fa1b2-c3d4-0567-8899-aabbccddef01.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  /* EMPTY transcript head — no recorded cwd — so the resume spec's own sniff
+     falls back to $HOME. The recorded project cwd must still drive enumeration. */
+  fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: {} }) + "\n");
+  /* The stub records the directory `codex mcp list` actually ran in, and reports
+     one project-scoped server beyond viewer. */
+  fs.writeFileSync(binary, `#!/bin/sh\npwd > ${JSON.stringify(marker)}\nprintf '[{"name":"viewer"},{"name":"project-sentinel"}]'\n`);
+  fs.chmodSync(binary, 0o755);
+  const previousBinary = process.env.LLV_CODEX_BINARY;
+  process.env.LLV_CODEX_BINARY = binary;
+  try {
+    const file = {
+      path: transcript, root: "codex-sessions", name: path.basename(transcript), project: "proj", title: "t",
+      engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 1, activity: "idle",
+      proc: null, pid: null, model: null, effort: null, fast: false, pendingQuestion: null, waitingInput: null,
+      cwd: project,
+    } as unknown as FileEntry;
+    const res = resolveAttachCommand(transcript, {
+      files: [file],
+      resumeSpecFor,
+      accountIdForPath: () => "terra",
+      accountLabelFor: (engine, id) => `${id} · ${engine}`,
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      /* Enumeration ran in the RECORDED project dir (finding 1), never $HOME. */
+      expect(fs.realpathSync(fs.readFileSync(marker, "utf8").trim())).toBe(fs.realpathSync(project));
+      expect(res.value.cwd).toBe(project);
+      /* Every enumerated project server gets an explicit allowlist override: the
+         default allowlist is viewer-only, so viewer is enabled and the project
+         server is disabled — computed against the recorded-cwd enumeration. */
+      expect(res.value.command).toContain("'mcp_servers.viewer.enabled=true'");
+      expect(res.value.command).toContain("'mcp_servers.project-sentinel.enabled=false'");
+    }
   } finally {
     if (previousBinary === undefined) delete process.env.LLV_CODEX_BINARY;
     else process.env.LLV_CODEX_BINARY = previousBinary;

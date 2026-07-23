@@ -47,6 +47,13 @@ export interface OutboxEntry {
       drain of the operator's follow-up messages. It retires on its transcript
       echo like any other bubble. */
   launchOwned?: true;
+  /** Submission watermark (round-2 finding 2): how many transcript echoes of THIS
+      exact text already existed when the entry was submitted. Retirement consumes
+      only echoes BEYOND this baseline, so a pre-existing identical user message
+      never retires a freshly queued bubble — its own echo, which lands later,
+      does. Absent (legacy/reloaded entries) ⇒ baseline 0, preserving the prior
+      "retire once the text is present" reload behaviour. */
+  echoBaseline?: number;
 }
 
 /**
@@ -219,32 +226,76 @@ function echoKey(text: string): string {
   return text.trim();
 }
 
+/** Occurrence counts of the trimmed user-message texts in a rendered transcript,
+    keyed by {@link echoKey}. A count (not a set) is what causal retirement needs:
+    two identical user messages are two echoes that retire two bubbles. */
+export type TranscriptEchoCounts = ReadonlyMap<string, number>;
+
 /**
- * The entries that still render as optimistic bubbles (round-1 P1#4). A bubble
- * retires the moment ITS OWN text lands in the transcript — echo identity, not a
- * generic mtime bump. This is the fix for the premature-removal bug: an
- * unrelated transcript write from an earlier active turn advances the file mtime
- * but does NOT carry this bubble's text, so the bubble stays until its real
- * echo appears. A `delivered`/`failed` bubble whose echo never arrives (a lost
- * poll, a finished pane) still retires at a hard TTL so nothing lingers forever;
- * queued / delivering / launch-owned bubbles persist until their echo lands.
+ * Per-conversation snapshot of the transcript's user-echo counts, published by
+ * the feed (LogFeed) and read by the composer at submit time so a new entry can
+ * record how many identical echoes already existed — its {@link
+ * OutboxEntry.echoBaseline} watermark (round-2 finding 2). Module state keyed on
+ * the same stable conversation identity as the queue itself.
+ */
+const echoSnapshots = new Map<string, TranscriptEchoCounts>();
+
+/** Publish the transcript's current user-echo counts for a conversation. */
+export function publishTranscriptEchoes(cardId: string, counts: TranscriptEchoCounts): void {
+  echoSnapshots.set(cardId, counts);
+}
+
+/** How many transcript echoes of `text` the feed has published for a
+    conversation — the submission watermark a new entry stamps onto itself. */
+export function transcriptEchoCount(cardId: string, text: string): number {
+  return echoSnapshots.get(cardId)?.get(echoKey(text)) ?? 0;
+}
+
+/**
+ * The entries that still render as optimistic bubbles (round-1 P1#4, round-2
+ * finding 2). A bubble retires the moment ITS OWN echo lands in the transcript —
+ * resolved causally, by occurrence consumption, never by bare set membership.
  *
- * `transcriptEchoes` is the set of trimmed user-message texts already in the
- * rendered transcript.
+ * Each transcript echo of a text retires exactly ONE entry with that text,
+ * oldest-first, and only echoes BEYOND an entry's submission watermark
+ * (`echoBaseline` — the echoes that already existed when it was queued) can
+ * retire it. So a pre-existing identical user message leaves a freshly queued
+ * bubble (and its cancel affordance) visible; the entry's own later echo retires
+ * it; and a second identical send waits for a second echo. An entry with no
+ * watermark (legacy/reloaded) treats the baseline as 0, so it still retires once
+ * its text is present — preserving reload retirement.
+ *
+ * A `delivered` bubble whose echo never arrives (a lost poll, a finished pane)
+ * still retires at a hard TTL so nothing lingers forever.
+ *
+ * `transcriptEchoCounts` maps each trimmed transcript user-text to its occurrence
+ * count in the rendered transcript.
  */
 export function visibleOutbox(
   queue: readonly OutboxEntry[],
-  transcriptEchoes: ReadonlySet<string>,
+  transcriptEchoCounts: TranscriptEchoCounts,
   nowMs: number,
 ): OutboxEntry[] {
-  return queue.filter((entry) => {
-    if (transcriptEchoes.has(echoKey(entry.text))) return false;
+  const consumed = new Map<string, number>();
+  const visible: OutboxEntry[] = [];
+  for (const entry of queue) {
+    const key = echoKey(entry.text);
+    const total = transcriptEchoCounts.get(key) ?? 0;
+    /* Echoes below this floor belong to messages submitted before this entry
+       (its own baseline) or to earlier queued siblings that already consumed
+       them — neither retires this bubble. */
+    const floor = Math.max(entry.echoBaseline ?? 0, consumed.get(key) ?? 0);
+    if (total > floor) {
+      consumed.set(key, floor + 1);
+      continue;
+    }
     if (entry.state === "delivered") {
       const settledAt = entry.settledAt ?? entry.at;
-      return nowMs - settledAt < OUTBOX_DELIVERED_TTL_MS;
+      if (nowMs - settledAt >= OUTBOX_DELIVERED_TTL_MS) continue;
     }
-    return true;
-  });
+    visible.push(entry);
+  }
+  return visible;
 }
 
 /** Submitted texts newest first, for empty-composer ArrowUp/ArrowDown recall:
@@ -291,4 +342,5 @@ export function useOutbox(cardId: string): readonly OutboxEntry[] {
 export function resetOutboxForTests(): void {
   queues.clear();
   listeners.clear();
+  echoSnapshots.clear();
 }

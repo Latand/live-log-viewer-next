@@ -15,7 +15,7 @@ import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 import { LaunchChips } from "./conversation/LaunchChips";
 import { OutboxBubbles } from "./conversation/OutboxBubbles";
 import { orderedConversationTail } from "./conversation/tailOrder";
-import { useOutbox, visibleOutbox } from "./conversation/outbox";
+import { publishTranscriptEchoes, useOutbox, visibleOutbox } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
 import { FeedItem } from "./feed/FeedItem";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
@@ -390,18 +390,28 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     setMagnet(true, true);
   };
 
-  /* Optimistic bubbles retire on their OWN transcript echo (round-1 P1#4): a
-     bubble disappears the moment a user message with the same text lands in the
-     rendered feed, never merely because an unrelated earlier turn advanced the
-     file mtime. */
-  const transcriptEchoes = useMemo(() => {
-    const echoes = new Set<string>();
+  /* Optimistic bubbles retire on their OWN transcript echo (round-1 P1#4,
+     round-2 finding 2): a bubble disappears the moment ITS echo lands, resolved
+     causally by occurrence count. A user text that appears twice is two echoes
+     that retire two bubbles, and a message that predates a queued bubble does not
+     retire it. Counts (not a set) carry that occurrence information. */
+  const transcriptEchoCounts = useMemo(() => {
+    const counts = new Map<string, number>();
     for (const { item } of feed.items) {
-      if (item.kind === "user" && item.text.trim()) echoes.add(item.text.trim());
+      if (item.kind === "user" && item.text.trim()) {
+        const key = item.text.trim();
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
     }
-    return echoes;
+    return counts;
   }, [feed.items]);
-  const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoes, nowMs()) : [];
+  /* Publish the counts so the composer can watermark a new submission against
+     the echoes that already exist (its `echoBaseline`), keyed on the same
+     conversation identity the queue uses. */
+  useEffect(() => {
+    if (memoryKey) publishTranscriptEchoes(memoryKey, transcriptEchoCounts);
+  }, [memoryKey, transcriptEchoCounts]);
+  const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs()) : [];
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */
   const windowTail = Boolean(liveTurn?.text) || pendingOutbox.length > 0 || Boolean(launch);

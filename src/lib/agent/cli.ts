@@ -118,6 +118,13 @@ export interface ResumeSpecOptions {
   permissionMode?: string | null;
   allowSubagents?: boolean;
   mcpServers?: readonly string[];
+  /** The conversation's authoritative working directory. When set it is the ONE
+      effective cwd used for MCP policy enumeration, materialization, and the
+      rendered command — never the transcript-sniffed fallback. The resume spec
+      otherwise re-derives cwd by sniffing the transcript head and silently falls
+      back to `$HOME`, which enumerates project-scoped MCP servers in the wrong
+      directory (finding 1). Absent/empty ⇒ safe fallback to the sniffed cwd. */
+  cwd?: string | null;
 }
 
 function normalizedMcpServers(value: readonly string[] | undefined): string[] {
@@ -325,19 +332,23 @@ export function claudeSuccessorSpecFor(input: {
  */
 export function resumeSpecFor(root: string, pathname: string, options: ResumeSpecOptions = {}): ResumeSpec | null {
   const base = path.basename(pathname);
+  /* One effective cwd, chosen before the spec (and its MCP policy enumeration)
+     is generated: the caller's recorded cwd is authoritative; only when it is
+     absent do we sniff the transcript head (finding 1). */
+  const recordedCwd = options.cwd && options.cwd.trim() ? options.cwd : null;
   if (root === "claude-projects" && base.endsWith(".jsonl") && !pathname.includes(path.sep + "subagents" + path.sep)) {
     const sid = base.slice(0, -".jsonl".length);
     if (!/^[0-9a-f-]{36}$/.test(sid)) return null;
     const home = claudeHomeOwningTranscript(pathname);
     if (!home) return null;
-    return resumeSpecForSession("claude", sid, resumeCwd(pathname), home, options);
+    return resumeSpecForSession("claude", sid, recordedCwd ?? resumeCwd(pathname), home, options);
   }
   if (root === "codex-sessions" && base.endsWith(".jsonl")) {
     const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
     if (!id) return null;
     const home = codexHomeOwningSessionPath(pathname);
     if (!home) return null;
-    return resumeSpecForSession("codex", id, resumeCwd(pathname), home, options);
+    return resumeSpecForSession("codex", id, recordedCwd ?? resumeCwd(pathname), home, options);
   }
   return null;
 }
