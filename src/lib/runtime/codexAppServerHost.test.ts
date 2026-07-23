@@ -525,6 +525,29 @@ describe("CodexAppServerHost", () => {
     await replacement.release();
   });
 
+  test("accepts a legal resume response above the legacy frame guard", async () => {
+    const threadId = "long-durable-thread";
+    const eventStore = new MemoryEventStore();
+    eventStore.append(threadId, { kind: "session-status", status: "idle", seq: 1 });
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: "historical-turn",
+      status: "completed",
+      items: [{ type: "agentMessage", text: "x".repeat(5 * 1024 * 1024) }],
+    }]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 1,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(server.requests.find((request) => request.method === "thread/resume")?.params)
+      .toMatchObject({ threadId });
+    expect(await host.health()).toMatchObject({ status: "idle", eventCursor: 5 });
+    await host.release();
+  });
+
   test("managed-home adoption discovers Viewer and resumes with every unrelated MCP server disabled", async () => {
     const server = new FakeAppServer("managed-thread");
     server.mcpServers = {
@@ -1913,6 +1936,25 @@ describe("CodexAppServerHost", () => {
 
     if ("error" in result) throw result.error;
     expect(result.value).toEqual({ outcome: "steered", turnId: "turn-1" });
+    await host.release();
+  });
+
+  test("accepts a legal thread/read response above the legacy frame guard", async () => {
+    const server = new FakeAppServer("large-read-thread");
+    server.readTurns = [{
+      id: "historical-turn",
+      status: "completed",
+      items: [{ type: "agentMessage", text: "x".repeat(5 * 1024 * 1024) }],
+    }];
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "new-delivery", text: "continue" }))
+      .toEqual({ outcome: "turn-started", turnId: "turn-1" });
+    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: "turn-1" });
     await host.release();
   });
 
