@@ -151,7 +151,7 @@ export function parseAccountLimits(raw: unknown): AccountLimits | null {
   return { freshness, session, weekly };
 }
 export type AccountLoadState = "loading" | "ready" | "error";
-export type AccountOperation = "refresh" | "add" | "switch" | "login" | "remove";
+export type AccountOperation = "refresh" | "add" | "switch" | "login" | "remove" | "terminal";
 
 /** A retry action carries exactly the identifier its endpoint needs. */
 export type AccountRetryAction =
@@ -166,6 +166,7 @@ export type AccountNoticeKey =
   | "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened"
   | "accounts.claudeLoginStarted"
   | "accounts.removeBlocked" | "accounts.removeHistoryBlocked" | "accounts.removeFailed" | "accounts.cleanupPending" | "accounts.cleanupManual" | "accounts.cleanupFailed"
+  | "accounts.terminalCopied" | "accounts.terminalFailed"
   | ClaudeLoginErrKey;
 
 export interface AccountNotice {
@@ -173,13 +174,17 @@ export interface AccountNotice {
   operation: AccountOperation;
   messageKey: AccountNoticeKey;
   target?: string;
+  /** Server-reported failure text (the route's `detail`), shown verbatim so a
+      switch failure names its actual cause instead of only the generic copy. */
+  detail?: string;
   action: AccountRetryAction | null;
 }
 
 export function accountNoticeText(t: TFunction, notice: AccountNotice): string {
   // A single carrier field feeds both the codex `{target}` copy and the claude
   // `{label}` copy; interpolate() only substitutes placeholders the message uses.
-  return notice.target ? t(notice.messageKey, { target: notice.target, label: notice.target }) : t(notice.messageKey);
+  const message = notice.target ? t(notice.messageKey, { target: notice.target, label: notice.target }) : t(notice.messageKey);
+  return notice.detail ? `${message} — ${notice.detail}` : message;
 }
 
 export function pendingDeviceAuth(accounts: AccountOption[]): DeviceAuth | null {
@@ -239,6 +244,9 @@ export interface EngineAccountsState extends EngineAccountsSnapshot {
   remove: (accountId: string, force?: boolean) => Promise<boolean>;
   /** Removes safe managed-home directories that have no registry owner. */
   cleanupOrphans: () => Promise<boolean>;
+  /** Copies the account-bound agent CLI command (for a terminal/tmux on the
+      operator's machine) to the clipboard; the notice echoes the command. */
+  copyTerminalCommand: (accountId: string) => Promise<boolean>;
 }
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -316,8 +324,26 @@ function claudeAddFailure(code: string | null | undefined, label: string): Accou
   return { kind: "error", operation: "add", messageKey: claudeLoginErrKey(code), action: { type: "retry", kind: "add", label } };
 }
 
-function switchFailure(accountId: string): AccountNotice {
-  return { kind: "error", operation: "switch", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "switch", accountId } };
+function switchFailure(accountId: string, detail?: string): AccountNotice {
+  return { kind: "error", operation: "switch", messageKey: "accounts.switchFailed", ...(detail ? { detail } : {}), action: { type: "retry", kind: "switch", accountId } };
+}
+
+/** Carries the route's failure text through the select catch without losing
+    it to the generic network-error path. */
+class SwitchRequestError extends Error {
+  constructor(readonly detail?: string) {
+    super(detail ?? "account selection failed");
+    this.name = "SwitchRequestError";
+  }
+}
+
+/** The route's `detail` (real failure text) when present, else its `error`
+    when that is more specific than the generic copy. */
+function failureDetailOf(body: unknown): string | undefined {
+  const record = body as { detail?: unknown; error?: unknown } | null;
+  if (typeof record?.detail === "string" && record.detail) return record.detail;
+  if (typeof record?.error === "string" && record.error && !/selection failed$/i.test(record.error)) return record.error;
+  return undefined;
 }
 
 /** One narrow state store backs every account control of one engine. It owns
@@ -519,9 +545,13 @@ export function createEngineAccountsStore(
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ id, mode: "select" }),
         });
-        if (!response.ok) throw new Error("account selection failed");
-      } catch {
-        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: switchFailure(id) });
+        if (!response.ok) {
+          const detail = failureDetailOf(await response.json().catch(() => null));
+          throw new SwitchRequestError(detail);
+        }
+      } catch (error) {
+        const detail = error instanceof SwitchRequestError ? error.detail : undefined;
+        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: switchFailure(id, detail) });
         const refreshed = await refresh();
         if (refreshed && snapshot.active === id) {
           patchSnapshot({ identityVersion: snapshot.identityVersion + 1, notice: snapshot.notice?.operation === "switch" ? null : snapshot.notice });
@@ -677,6 +707,34 @@ export function createEngineAccountsStore(
     });
   };
 
+  const copyTerminalCommand = (accountId: string): Promise<boolean> => {
+    const target = snapshot.accounts.find((account) => account.id === accountId);
+    if (!target?.authPresent || target.loginPending) return Promise.resolve(false);
+    return runMutation("terminal", async () => {
+      try {
+        const response = await fetcher(`/api/accounts/${engine}/terminal`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: accountId }),
+        });
+        const body = await response.json().catch(() => null) as { command?: unknown; detail?: unknown; error?: unknown } | null;
+        if (!response.ok || typeof body?.command !== "string") {
+          patchSnapshot({ notice: { kind: "error", operation: "terminal", messageKey: "accounts.terminalFailed", target: target.label, ...(failureDetailOf(body) ? { detail: failureDetailOf(body) } : {}), action: null } });
+          return false;
+        }
+        // Clipboard write is best-effort (permissions, non-secure contexts):
+        // the notice always echoes the command, so the operator can still
+        // select it manually when the write is refused.
+        try { await navigator.clipboard.writeText(body.command); } catch { /* echoed below */ }
+        patchSnapshot({ notice: { kind: "success", operation: "terminal", messageKey: "accounts.terminalCopied", target: target.label, detail: body.command, action: null } });
+        return true;
+      } catch {
+        patchSnapshot({ notice: { kind: "error", operation: "terminal", messageKey: "accounts.terminalFailed", target: target.label, action: null } });
+        return false;
+      }
+    });
+  };
+
   const cleanupOrphans = (): Promise<boolean> => {
     return runMutation("remove", async () => {
       try {
@@ -755,6 +813,7 @@ export function createEngineAccountsStore(
     retryLogin,
     remove,
     cleanupOrphans,
+    copyTerminalCommand,
   };
 }
 
@@ -780,5 +839,6 @@ export function useEngineAccounts(engine: Engine): EngineAccountsState {
     retryLogin: store.retryLogin,
     remove: store.remove,
     cleanupOrphans: store.cleanupOrphans,
+    copyTerminalCommand: store.copyTerminalCommand,
   };
 }
