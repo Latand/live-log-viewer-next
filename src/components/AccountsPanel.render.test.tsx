@@ -29,6 +29,7 @@ const base = (over: Partial<EngineAccountsState> = {}): EngineAccountsState => (
   retryLogin: async () => true,
   remove: async () => true,
   cleanupOrphans: async () => true,
+  copyTerminalCommand: async () => true,
   ...over,
 });
 

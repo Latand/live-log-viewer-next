@@ -14,7 +14,7 @@ import {
 import { type TFunction, useLocale } from "@/lib/i18n";
 import { handleOverlayEscape } from "@/lib/overlay";
 
-import { Check, Loader2, X } from "./icons";
+import { Loader2, SquareTerminal, Trash2, X } from "./icons";
 import { Badge } from "./ui/Badge";
 import { formatResetClock, formatResetEta } from "./rateLimit";
 import { engineTintOf } from "./utils";
@@ -60,13 +60,14 @@ function CapacityChip({ account, engine }: { account: AccountOption; engine: "cl
   );
 }
 
-/** Per-account quota detail (issue #40): the session and weekly windows with
-    remaining capacity and reset times, so the switch decision reads without
-    leaving the panel. The collapsed {@link CapacityChip} is the min-window
-    summary of this; here both windows are broken out. Renders nothing when no
-    live/stale read exists; a stale read is dimmed and labeled. Time formatting is
-    shared with the limits footer so both read identically. */
-function AccountLimitsDetail({ account }: { account: AccountOption }) {
+/** Per-account quota detail (issue #40): each window (5h session / weekly)
+    renders as a labeled meter — remaining capacity as a filled track on the
+    limits color ramp — plus the numeric % left and reset time, so the switch
+    decision reads at a glance. The collapsed {@link CapacityChip} is the
+    min-window summary of this. Renders nothing when no live/stale read exists;
+    a stale read is dimmed and labeled. Time formatting is shared with the
+    limits footer so both read identically. */
+function AccountLimitsDetail({ account, engine }: { account: AccountOption; engine: "claude" | "codex" }) {
   const { t } = useLocale();
   // A single reference `now` for the open panel keeps the two windows' reset
   // ETAs consistent and stable across re-renders (they don't tick live here).
@@ -79,11 +80,12 @@ function AccountLimitsDetail({ account }: { account: AccountOption }) {
   ].filter((row): row is { key: string; label: string; window: NonNullable<typeof row.window> } => row.window != null);
   if (windows.length === 0) return null;
   const stale = limits.freshness === "stale";
+  const tint = engineTintOf(engine);
   return (
     <dl
       aria-label={t("accounts.limitsAria", { label: account.label })}
       title={stale ? t("accounts.limitsStaleTip") : undefined}
-      className={`flex flex-col gap-0.5 px-3 pb-1.5 pl-[26px] ${stale ? "opacity-70" : ""}`}
+      className={`flex flex-col gap-1 px-3.5 pb-1 pl-[30px] ${stale ? "opacity-70" : ""}`}
     >
       {/* Freshness is a visible, screen-reader-readable line — not opacity or a
           title tooltip alone (touch has no hover, and `title` AT support is
@@ -91,10 +93,14 @@ function AccountLimitsDetail({ account }: { account: AccountOption }) {
       {stale ? <div className="text-[9.5px] font-semibold text-secondary">{t("accounts.limitsStale")}</div> : null}
       {windows.map(({ key, label, window: w }) => {
         const left = Math.max(0, Math.min(100, 100 - w.usedPercent));
+        const color = capacityColor(left, tint.color);
         return (
-          <div key={key} className="flex items-baseline gap-1.5 text-[10px] leading-snug text-muted">
+          <div key={key} className="flex items-center gap-2 text-[10px] leading-snug text-muted">
             <dt className="w-8 shrink-0 font-semibold">{label}</dt>
-            <dd className="flex min-w-0 flex-1 items-baseline gap-1">
+            <dd className="flex min-w-0 flex-1 items-center gap-2">
+              <span aria-hidden className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-sunken sm:w-20">
+                <span className="block h-full rounded-full" style={{ width: `${left}%`, backgroundColor: color }} />
+              </span>
               <span className="font-bold tabular-nums text-primary">{Math.round(left)}%</span>
               <span>{t("limits.left")}</span>
               {w.resetsAt ? (
@@ -148,11 +154,13 @@ function AuthIdentity({ account }: { account: AccountOption }) {
   );
 }
 
-function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled, focused = false }: { account: AccountOption; engine: "claude" | "codex"; activeId: string; onSelect: () => void; onRemove: () => void; disabled: boolean; focused?: boolean }) {
+function AccountRow({ account, engine, activeId, onSelect, onRemove, onCopyCommand, disabled, focused = false, children }: { account: AccountOption; engine: "claude" | "codex"; activeId: string; onSelect: () => void; onRemove: () => void; onCopyCommand: () => void; disabled: boolean; focused?: boolean; children?: React.ReactNode }) {
   const { t } = useLocale();
   const state = rowState(account, activeId);
   const isActive = account.id === activeId;
-  const selectionDisabled = disabled || !account.authPresent || authHealth(account) === "signed_out" || account.loginPending;
+  const tint = engineTintOf(engine);
+  const usable = account.authPresent && authHealth(account) !== "signed_out" && !account.loginPending;
+  const selectionDisabled = disabled || !usable;
   // Removal deletes the managed home (including its credentials) with no undo,
   // so the unblocked path arms on the first click and only executes on a
   // second, explicit confirm — mirroring the confirm step migration already
@@ -165,34 +173,57 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled, f
     if (focused) selectRef.current?.scrollIntoView({ block: "nearest" });
   }, [focused]);
   return (
-    <div>
+    <div
+      className={`relative ${focused ? "ring-2 ring-inset ring-accent/50" : ""}`}
+      // The active account reads as a tinted wash + hairline identity bar —
+      // no boxed borders, so the list stays one quiet column.
+      style={isActive ? { background: `color-mix(in srgb, ${tint.color} 7%, transparent)`, boxShadow: `inset 2px 0 0 ${tint.color}` } : undefined}
+    >
       <button
         ref={selectRef}
         type="button"
         aria-current={isActive ? "true" : undefined}
         disabled={selectionDisabled}
         onClick={onSelect}
-        className={`flex min-h-[44px] w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-canvas disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 ${focused ? "bg-accent/5 ring-2 ring-inset ring-accent/50" : ""}`}
+        className="flex min-h-[44px] w-full items-center gap-2.5 px-3.5 pt-2.5 pb-1 text-left hover:bg-canvas/60 disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
       >
-        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">{isActive ? <Check className="h-3.5 w-3.5 text-accent" aria-hidden /> : null}</span>
+        <span
+          aria-hidden
+          className="h-2 w-2 shrink-0 rounded-full"
+          style={{ backgroundColor: isActive ? tint.color : "transparent", boxShadow: isActive ? "none" : "inset 0 0 0 1.5px var(--color-border)" }}
+        />
         <span className="min-w-0 flex-1">
-          <span className={`block truncate text-[12.5px] ${isActive ? "font-bold text-primary" : "font-semibold"}`}>{account.label}</span>
+          <span className={`block truncate text-[13px] leading-tight ${isActive ? "font-bold text-primary" : "font-semibold"}`}>{account.label}</span>
           <AuthIdentity account={account} />
         </span>
         <CapacityChip account={account} engine={engine} />
         <StateChip state={state} />
       </button>
+      {children}
       {state === "pending" && account.deviceAuth ? (
-        <div className="flex items-center gap-2 px-3 pb-1.5 pl-[26px] text-[10px] text-muted">
+        <div className="flex items-center gap-2 px-3.5 pb-1.5 text-[10px] text-muted">
           <a href={account.deviceAuth.url} target="_blank" rel="noreferrer" className="inline-flex min-h-[44px] items-center truncate underline sm:min-h-0">{t("accounts.openLogin")}</a>
           <code className="select-all font-semibold text-primary">{account.deviceAuth.code}</code>
         </div>
       ) : null}
-      {account.kind === "managed" ? (
-        <div className="flex items-center gap-2 px-3 pb-1.5 pl-[26px]">
-          {confirmingRemove ? (
+      <div className="flex items-center gap-1 px-3.5 pb-2 pl-[30px]">
+        {/* Copies the account-bound CLI command — tmux/terminals live on the
+            operator's machine, so the panel hands over the command, always. */}
+        <button
+          type="button"
+          aria-label={t("accounts.copyCliAria", { label: account.label })}
+          disabled={disabled || !usable}
+          onClick={onCopyCommand}
+          className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-semibold text-secondary hover:bg-canvas hover:text-primary disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-[28px]"
+        >
+          <SquareTerminal className="h-3.5 w-3.5 text-muted" aria-hidden />
+          {t("accounts.copyCli")}
+        </button>
+        <span className="min-w-0 flex-1" />
+        {account.kind === "managed" ? (
+          confirmingRemove ? (
             <>
-              <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-danger">{t("accounts.removeConfirm")}</span>
+              <span className="min-w-0 flex-1 text-right text-[10.5px] font-semibold text-danger">{t("accounts.removeConfirm")}</span>
               <button
                 type="button"
                 disabled={disabled}
@@ -200,7 +231,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled, f
                   setConfirmingRemove(false);
                   onRemove();
                 }}
-                className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-danger bg-danger px-2 py-0.5 text-[10.5px] font-semibold text-white hover:opacity-90 disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+                className="inline-flex min-h-[44px] shrink-0 items-center rounded-[6px] bg-danger px-2 py-0.5 text-[10.5px] font-semibold text-white hover:opacity-90 disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-[28px]"
               >
                 {t("accounts.removeConfirmCta")}
               </button>
@@ -208,7 +239,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled, f
                 type="button"
                 disabled={disabled}
                 onClick={() => setConfirmingRemove(false)}
-                className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-border bg-canvas px-2 py-0.5 text-[10.5px] font-semibold hover:bg-sunken disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+                className="inline-flex min-h-[44px] shrink-0 items-center rounded-[6px] px-2 py-0.5 text-[10.5px] font-semibold text-secondary hover:bg-canvas disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-[28px]"
               >
                 {t("accounts.removeConfirmCancel")}
               </button>
@@ -219,13 +250,14 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled, f
               aria-label={t("accounts.removeAria", { label: account.label })}
               disabled={disabled}
               onClick={() => setConfirmingRemove(true)}
-              className="inline-flex min-h-[44px] items-center rounded-[7px] border border-border bg-canvas px-2 py-0.5 text-[10.5px] font-semibold text-danger hover:bg-danger-soft disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+              className="inline-flex min-h-[44px] shrink-0 items-center gap-1 rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-semibold text-muted hover:bg-danger-soft hover:text-danger disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-[28px]"
             >
+              <Trash2 className="h-3 w-3" aria-hidden />
               {t("accounts.remove")}
             </button>
-          )}
-        </div>
-      ) : null}
+          )
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -418,6 +450,7 @@ function operationText(operation: AccountOperation, t: TFunction): string {
     case "switch": return t("accounts.operation.switch");
     case "login": return t("accounts.operation.login");
     case "remove": return t("accounts.operation.remove");
+    case "terminal": return t("accounts.operation.terminal");
   }
 }
 
@@ -505,9 +538,10 @@ export function AccountsPanel({
         aria-label={t("accounts.titleFor", { engine: engineName })}
         aria-busy={mutation !== null}
         onKeyDown={(event) => handleOverlayEscape(event, onClose)}
-        className={`fixed bottom-3 left-1/2 z-50 flex w-[min(360px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-2 ${placementClass}`}
+        className={`fixed bottom-3 left-1/2 z-50 flex w-[min(400px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[14px] border border-border bg-card shadow-2 ${placementClass}`}
       >
         <header className="flex items-center gap-2 border-b border-border px-3 py-2">
+          <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: engineTintOf(engine).color }} />
           <span className="text-[12.5px] font-bold">{t("accounts.titleFor", { engine: engineName })}</span>
           <button
             ref={closeRef}
@@ -529,15 +563,14 @@ export function AccountsPanel({
           </div>
         ) : null}
           <>
-            <div className="max-h-[min(300px,50vh)] overflow-y-auto py-1">
-              {status === "loading" ? <div className="px-3 py-2 text-[11px] text-muted">{t("accounts.loading")}</div> : null}
-              {status === "error" && accounts.length === 0 ? <div className="px-3 py-2 text-[11px] text-muted">{t("accounts.noAccounts")}</div> : null}
+            <div className="max-h-[min(420px,60vh)] divide-y divide-border/40 overflow-y-auto">
+              {status === "loading" ? <div className="px-3.5 py-2 text-[11px] text-muted">{t("accounts.loading")}</div> : null}
+              {status === "error" && accounts.length === 0 ? <div className="px-3.5 py-2 text-[11px] text-muted">{t("accounts.noAccounts")}</div> : null}
               {accounts.map((account) => (
-                <Fragment key={account.id}>
-                  <AccountRow account={account} engine={engine} activeId={active} disabled={mutation !== null} focused={account.id === focusAccountId} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} />
-                  <AccountLimitsDetail account={account} />
+                <AccountRow key={account.id} account={account} engine={engine} activeId={active} disabled={mutation !== null} focused={account.id === focusAccountId} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} onCopyCommand={() => void state.copyTerminalCommand(account.id)}>
+                  <AccountLimitsDetail account={account} engine={engine} />
                   {engine === "claude" ? <ClaudeLoginRow key={account.login?.operationId ?? account.id} account={account} state={state} loginBusy={loginBusy} /> : null}
-                </Fragment>
+                </AccountRow>
               ))}
             </div>
             <form onSubmit={onAdd} className="flex items-center gap-2 border-t border-border px-3 py-2">
@@ -567,7 +600,9 @@ export function AccountsPanel({
             </div>
             {notice ? (
               <div className="flex items-center gap-2 border-t border-border px-3 py-1.5">
-                <span className="min-w-0 flex-1 truncate text-[11px] text-muted" title={accountNoticeText(t, notice)}>{accountNoticeText(t, notice)}</span>
+                {/* Failure text may carry the server's real error (`detail`), so it
+                    wraps to two lines instead of truncating away the cause. */}
+                <span className={`min-w-0 flex-1 text-[11px] leading-snug [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden ${notice.kind === "error" ? "text-danger" : "text-muted"}`} title={accountNoticeText(t, notice)}>{accountNoticeText(t, notice)}</span>
                 {notice.action ? (
                   <button
                     type="button"

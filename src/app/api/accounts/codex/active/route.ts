@@ -22,6 +22,12 @@ export async function POST(req: NextRequest) {
     if (error instanceof AccountLoginPendingError) return NextResponse.json({ error: error.message, code: "login_pending" }, { status: 409 });
     if (error instanceof AccountAuthenticationRequiredError) return NextResponse.json({ error: error.message, code: "authentication_required" }, { status: 409 });
     const known = error instanceof UnknownAccountError || error instanceof CorruptCodexAccountsError;
-    return NextResponse.json({ error: known ? error.message : "Codex account selection failed" }, { status: known ? 400 : 500 });
+    if (known) return NextResponse.json({ error: error.message }, { status: 400 });
+    /* The generic 500 hid the real selection failure behind "Could not switch
+       account" with a dead Retry. The true message travels as `detail` so the
+       panel can show it, and the stack lands in the server log. */
+    console.error("[accounts] codex selection failed:", error);
+    const detail = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ error: "Codex account selection failed", detail, code: "selection_failed" }, { status: 500 });
   }
 }

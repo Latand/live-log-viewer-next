@@ -638,3 +638,77 @@ test("a blocked removal's force-remove notice survives the follow-up refresh fai
   expect(store.notice?.action).toMatchObject({ type: "retry", kind: "forceRemove", accountId: "work" });
   unsub();
 });
+
+test("a failed select surfaces the server's real error text and Retry re-issues the select", async () => {
+  let attempts = 0;
+  const { calls, fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return claudePayload();
+    if (url === "/api/accounts/claude/active") {
+      attempts += 1;
+      return new Response(JSON.stringify({ error: "Claude account selection failed", detail: "RegistryParityError: snapshots differ", code: "selection_failed" }), { status: 500 });
+    }
+    return new Response(null, { status: 200 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+
+  expect(await store.select("work")).toBeFalse();
+  expect(store.active).toBe("main");
+  expect(store.notice).toMatchObject({
+    kind: "error",
+    operation: "switch",
+    messageKey: "accounts.switchFailed",
+    detail: "RegistryParityError: snapshots differ",
+    action: { type: "retry", kind: "switch", accountId: "work" },
+  });
+
+  // Retry re-issues the POST (a second attempt, same body).
+  expect(await store.retryNotice()).toBeFalse();
+  expect(attempts).toBe(2);
+  expect(calls.filter((call) => call.url === "/api/accounts/claude/active")).toHaveLength(2);
+});
+
+test("copyTerminalCommand posts the account id and echoes the command in the notice", async () => {
+  const { calls, fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return claudePayload();
+    if (url === "/api/accounts/claude/terminal") {
+      return { ok: true, command: "env CLAUDE_CONFIG_DIR='/homes/work' claude" };
+    }
+    return new Response(null, { status: 200 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+
+  expect(await store.copyTerminalCommand("work")).toBeTrue();
+  const call = calls.find((entry) => entry.url === "/api/accounts/claude/terminal");
+  expect(call?.body).toEqual({ id: "work" });
+  expect(store.notice).toMatchObject({ kind: "success", operation: "terminal", messageKey: "accounts.terminalCopied", target: "Work", detail: "env CLAUDE_CONFIG_DIR='/homes/work' claude" });
+});
+
+test("copyTerminalCommand failures carry the route detail and never fire for unauthenticated accounts", async () => {
+  const { calls, fetcher } = scripted((url) => {
+    if (url === "/api/accounts") {
+      return claudePayload({
+        accounts: [
+          { id: "main", label: "Main", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null },
+          { id: "broken", label: "Broken", authPresent: false, loginPending: false, loginState: "idle", deviceAuth: null },
+        ],
+      });
+    }
+    if (url === "/api/accounts/claude/terminal") {
+      return new Response(JSON.stringify({ error: "Claude terminal command failed", detail: "claude account requires authentication" }), { status: 500 });
+    }
+    return new Response(null, { status: 200 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+
+  expect(await store.copyTerminalCommand("broken")).toBeFalse();
+  expect(calls.some((entry) => entry.url === "/api/accounts/claude/terminal")).toBeFalse();
+
+  expect(await store.copyTerminalCommand("main")).toBeFalse();
+  expect(store.notice).toMatchObject({ kind: "error", operation: "terminal", messageKey: "accounts.terminalFailed", detail: "claude account requires authentication" });
+});
