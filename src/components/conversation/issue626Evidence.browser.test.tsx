@@ -31,6 +31,8 @@ import { resetCanonicalAssistantClaimsForTests } from "./liveTurnHandoff";
 import {
   adoptOutbox,
   enqueueOutbox,
+  markOutboxResponded,
+  OUTBOX_DELIVERED_TTL_MS,
   OUTBOX_LIMIT,
   outboxStateForReceiptStatus,
   publishTranscriptEchoes,
@@ -1050,11 +1052,14 @@ test("issue 626 production LogFeed does not reseed a compacted terminal launch a
         text: "Terminal browser unrelated pending entry",
         images: 0,
         at: promptAt + 20_000,
-        launchOwned: true,
       });
       updateOutbox(CONVERSATION_ID, "terminal-browser-unrelated-pending", { state: "delivering" });
       publishTranscriptEchoes(CONVERSATION_ID, []);
       resetOutboxForTests();
+      expect(readOutbox(CONVERSATION_ID).find(
+        (entry) => entry.id === "terminal-browser-unrelated-pending",
+      )?.state).toBe("queued");
+      updateOutbox(CONVERSATION_ID, "terminal-browser-unrelated-pending", { state: "delivering" });
 
       const rendered = await renderState(state);
       const queue = readOutbox(CONVERSATION_ID);
@@ -1085,6 +1090,157 @@ test("issue 626 production LogFeed does not reseed a compacted terminal launch a
         fullPage: false,
       });
       await page.close();
+    }
+  } finally {
+    await closeOwned();
+  }
+}, 120_000);
+
+test("issue 626 production LogFeed preserves both no-echo terminal launch reasons at 1280px and 390px", async () => {
+  const css = productionCss();
+  expect(css.length).toBeGreaterThan(10_000);
+  const { instance: evidenceBrowser, closeOwned } = await openEvidenceBrowser();
+
+  try {
+    for (const reason of ["response-started", "delivered-ttl"] as const) {
+      for (const viewport of VIEWPORTS) {
+        const provisional = `spawn:launch_issue_626_${reason}`;
+        const launchId = `launch_issue_626_${reason}`;
+        const prompt = `Issue 626 ${reason} terminal launch prompt.`;
+        const promptAt = launchBase.promptAt ?? CAPTURE_NOW;
+        const now = reason === "delivered-ttl"
+          ? promptAt + OUTBOX_DELIVERED_TTL_MS
+          : CAPTURE_NOW;
+        const terminalLaunch: StructuredSpawnCardState = {
+          ...launchBase,
+          launchId,
+          state: "live-late-success",
+          initialMessage: "delivered",
+          ["prompt"]: prompt,
+          promptEcho: prompt,
+          promptAt,
+        };
+        const state: EvidenceState = {
+          id: `terminal-launch-${reason}`,
+          envelopeCount: 0,
+          filesRevision: 44,
+          path: fixture.identity.adoptedPath,
+          launch: terminalLaunch,
+          logMode: "empty",
+          logOverride: "",
+          expectedOrder: ["outbox"],
+        };
+
+        Date.now = () => now;
+        mobile = viewport.mobile;
+        dom.sessionStorage.clear();
+        resetOutboxForTests();
+        resetCanonicalAssistantClaimsForTests();
+        resetLogTailCacheForTests();
+        logs.clear();
+        getRuntimeBus().stop();
+
+        seedLaunchOutbox(provisional, {
+          id: launchId,
+          text: prompt,
+          images: 0,
+          at: promptAt,
+        });
+        if (reason === "response-started") {
+          markOutboxResponded(provisional, launchId, promptAt + 1_000);
+        } else {
+          updateOutbox(provisional, launchId, {
+            state: outboxStateForReceiptStatus("delivered"),
+            settledAt: promptAt,
+          });
+        }
+
+        for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+          enqueueOutbox(provisional, {
+            id: `${reason}-browser-warm-${index}`,
+            text: `${reason} browser warm ${index}`,
+            images: 0,
+            at: promptAt + 2_000 + index,
+          });
+        }
+        expect(readOutbox(provisional).some((entry) => entry.id === launchId)).toBe(false);
+
+        adoptOutbox(provisional, CONVERSATION_ID);
+        for (let index = 0; index < RETENTION_CHURN_COUNT; index += 1) {
+          const id = `${reason}-browser-churn-${index}`;
+          const text = `${reason} browser churn ${index}`;
+          enqueueOutbox(CONVERSATION_ID, {
+            id,
+            text,
+            images: 0,
+            at: promptAt + 3_000 + index,
+          });
+          updateOutbox(CONVERSATION_ID, id, {
+            state: outboxStateForReceiptStatus("delivered"),
+            settledAt: promptAt + 3_000 + index,
+          });
+          publishTranscriptEchoes(CONVERSATION_ID, [{
+            generation: index < 256
+              ? `/synthetic/issue-626-${reason}-generation-1.jsonl`
+              : `/synthetic/issue-626-${reason}-generation-2.jsonl`,
+            id: `row:${reason}-browser-churn:${index}`,
+            text,
+          }]);
+        }
+        const unrelatedId = `${reason}-browser-unrelated-pending`;
+        enqueueOutbox(CONVERSATION_ID, {
+          id: unrelatedId,
+          text: `${reason} browser unrelated pending entry`,
+          images: 0,
+          at: promptAt + 20_000,
+        });
+
+        resetOutboxForTests();
+        expect(readOutbox(CONVERSATION_ID).find((entry) => entry.id === unrelatedId)?.state)
+          .toBe("queued");
+        updateOutbox(CONVERSATION_ID, unrelatedId, { state: "delivering" });
+        const firstRender = await renderState(state);
+        expect(readOutbox(CONVERSATION_ID).some((entry) => entry.id === launchId)).toBe(false);
+        expect(readOutbox(CONVERSATION_ID).find((entry) => entry.id === unrelatedId)?.state)
+          .toBe("delivering");
+
+        resetOutboxForTests();
+        resetLogTailCacheForTests();
+        logs.clear();
+        getRuntimeBus().stop();
+        expect(readOutbox(CONVERSATION_ID).find((entry) => entry.id === unrelatedId)?.state)
+          .toBe("queued");
+        updateOutbox(CONVERSATION_ID, unrelatedId, { state: "delivering" });
+        const refreshedRender = await renderState(state);
+        const queue = readOutbox(CONVERSATION_ID);
+        expect(queue.some((entry) => entry.id === launchId)).toBe(false);
+        expect(queue.find((entry) => entry.id === unrelatedId)?.state).toBe("delivering");
+        expect(firstRender.html).toContain(unrelatedId);
+        expect(refreshedRender.html).toContain(unrelatedId);
+
+        const page = await evidenceBrowser.newPage({
+          viewport: { width: viewport.width, height: viewport.height },
+          deviceScaleFactor: 1,
+        });
+        await page.setContent(pageHtml(refreshedRender.html, css), { waitUntil: "load" });
+        const evidence = await page.evaluate(() => ({
+          ids: Array.from(document.querySelectorAll<HTMLElement>("[data-outbox-entry]"))
+            .map((entry) => entry.dataset.outboxEntry ?? ""),
+          scrollWidth: document.documentElement.scrollWidth,
+          productionWindow: Boolean(document.querySelector("[data-pan-ignore]"))
+            && Boolean(document.querySelector("[data-log-feed-scroller]"))
+            && Boolean(document.querySelector("textarea")),
+        }));
+        expect(evidence.ids).toEqual([unrelatedId]);
+        expect(evidence.ids).not.toContain(launchId);
+        expect(evidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
+        expect(evidence.productionWindow).toBe(true);
+        await page.screenshot({
+          path: path.join(EVIDENCE_DIR, `terminal-launch-${reason}-${viewport.id}.png`),
+          fullPage: false,
+        });
+        await page.close();
+      }
     }
   } finally {
     await closeOwned();

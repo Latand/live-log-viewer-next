@@ -851,6 +851,170 @@ describe("seedLaunchOutbox (P1#2)", () => {
     expect(refreshed[0]?.id).toBe("terminal-launch-filler-0");
   });
 
+  test("issue 626: response-started launch retirement survives ledger rollover, adoption, and recurring seeds", () => {
+    const provisional = "spawn:launch_626_response_terminal";
+    const conversation = "conversation_626_response_terminal";
+    const launchId = "launch_626_response_terminal";
+    const text = "response-started launch without a transcript echo";
+
+    seedLaunchOutbox(provisional, {
+      id: launchId,
+      text,
+      images: 0,
+      at: 1_000,
+    });
+    markOutboxResponded(provisional, launchId, 1_100);
+    expect(visibleOutbox(readOutbox(provisional), echoes(), 1_101)).toEqual([]);
+
+    for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+      enqueueOutbox(provisional, {
+        id: `response-terminal-warm-${index}`,
+        text: `response terminal warm ${index}`,
+        images: 0,
+        at: 2_000 + index,
+      });
+    }
+    expect(readOutbox(provisional).some((entry) => entry.id === launchId)).toBe(false);
+
+    adoptOutbox(provisional, conversation);
+    for (let index = 0; index < 512 + OUTBOX_LIMIT + 1; index += 1) {
+      const id = `response-terminal-churn-${index}`;
+      const churnText = `response terminal churn ${index}`;
+      enqueueOutbox(conversation, {
+        id,
+        text: churnText,
+        images: 0,
+        at: 3_000 + index,
+      });
+      updateOutbox(conversation, id, {
+        state: outboxStateForReceiptStatus("delivered"),
+        settledAt: 3_000 + index,
+      });
+      publishTranscriptEchoes(conversation, [{
+        generation: index < 256
+          ? "/transcripts/626-response-terminal-1.jsonl"
+          : "/transcripts/626-response-terminal-2.jsonl",
+        id: `row:response-terminal:${index}`,
+        text: churnText,
+      }]);
+    }
+    enqueueOutbox(conversation, {
+      id: "response-terminal-unrelated-pending",
+      text: "unrelated pending survives response terminal churn",
+      images: 0,
+      at: 10_000,
+    });
+
+    resetOutboxForTests();
+    seedLaunchOutbox(conversation, {
+      id: launchId,
+      text,
+      images: 0,
+      at: 1_000,
+    });
+    resetOutboxForTests();
+    seedLaunchOutbox(conversation, {
+      id: launchId,
+      text,
+      images: 0,
+      at: 1_000,
+    });
+
+    const refreshed = readOutbox(conversation);
+    expect(refreshed.some((entry) => entry.id === launchId)).toBe(false);
+    expect(refreshed.find((entry) => entry.id === "response-terminal-unrelated-pending")?.state)
+      .toBe("queued");
+    expect(visibleOutbox(refreshed, echoes(), 11_000).some((entry) => entry.id === launchId))
+      .toBe(false);
+  });
+
+  test("issue 626: delivered-TTL launch retirement survives ledger rollover, adoption, and recurring seeds", () => {
+    const originalDateNow = Date.now;
+    const settledAt = 1_100;
+    Date.now = () => settledAt + OUTBOX_DELIVERED_TTL_MS;
+    try {
+      const provisional = "spawn:launch_626_ttl_terminal";
+      const conversation = "conversation_626_ttl_terminal";
+      const launchId = "launch_626_ttl_terminal";
+      const text = "delivered launch whose transcript echo never arrives";
+
+      seedLaunchOutbox(provisional, {
+        id: launchId,
+        text,
+        images: 0,
+        at: 1_000,
+      });
+      updateOutbox(provisional, launchId, {
+        state: outboxStateForReceiptStatus("delivered"),
+        settledAt,
+      });
+      expect(visibleOutbox(readOutbox(provisional), echoes(), Date.now())).toEqual([]);
+
+      for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+        enqueueOutbox(provisional, {
+          id: `ttl-terminal-warm-${index}`,
+          text: `ttl terminal warm ${index}`,
+          images: 0,
+          at: 2_000 + index,
+        });
+      }
+      expect(readOutbox(provisional).some((entry) => entry.id === launchId)).toBe(false);
+
+      adoptOutbox(provisional, conversation);
+      for (let index = 0; index < 512 + OUTBOX_LIMIT + 1; index += 1) {
+        const id = `ttl-terminal-churn-${index}`;
+        const churnText = `ttl terminal churn ${index}`;
+        enqueueOutbox(conversation, {
+          id,
+          text: churnText,
+          images: 0,
+          at: 3_000 + index,
+        });
+        updateOutbox(conversation, id, {
+          state: outboxStateForReceiptStatus("delivered"),
+          settledAt: 3_000 + index,
+        });
+        publishTranscriptEchoes(conversation, [{
+          generation: index < 256
+            ? "/transcripts/626-ttl-terminal-1.jsonl"
+            : "/transcripts/626-ttl-terminal-2.jsonl",
+          id: `row:ttl-terminal:${index}`,
+          text: churnText,
+        }]);
+      }
+      enqueueOutbox(conversation, {
+        id: "ttl-terminal-unrelated-pending",
+        text: "unrelated pending survives TTL terminal churn",
+        images: 0,
+        at: 10_000,
+      });
+
+      resetOutboxForTests();
+      seedLaunchOutbox(conversation, {
+        id: launchId,
+        text,
+        images: 0,
+        at: 1_000,
+      });
+      resetOutboxForTests();
+      seedLaunchOutbox(conversation, {
+        id: launchId,
+        text,
+        images: 0,
+        at: 1_000,
+      });
+
+      const refreshed = readOutbox(conversation);
+      expect(refreshed.some((entry) => entry.id === launchId)).toBe(false);
+      expect(refreshed.find((entry) => entry.id === "ttl-terminal-unrelated-pending")?.state)
+        .toBe("queued");
+      expect(visibleOutbox(refreshed, echoes(), Date.now()).some((entry) => entry.id === launchId))
+        .toBe(false);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
   test("issue 626: terminal launch retirement survives both ledgers churning beyond 512 entries", () => {
     const provisional = "spawn:launch_626_terminal_priority";
     const conversation = "conversation_626_terminal_priority";
@@ -1024,6 +1188,108 @@ describe("seedLaunchOutbox (P1#2)", () => {
     expect(queue.some((entry) => entry.id === "older-terminal-launch")).toBe(true);
     expect(queue.some((entry) => entry.id === "newer-terminal-launch")).toBe(false);
   });
+
+  test("issue 626: delayed-echo and no-echo terminal reasons coexist for one current launch", () => {
+    const originalDateNow = Date.now;
+    const conversation = "conversation_626_current_launch_reasons";
+    Date.now = () => 1_100;
+    try {
+      seedLaunchOutbox(conversation, {
+        id: "launch-with-both-terminal-reasons",
+        text: "launch with delayed echo and response evidence",
+        images: 0,
+        at: 1_000,
+      });
+      publishTranscriptEchoes(conversation, [{
+        generation: "/transcripts/626-current-launch-reasons.jsonl",
+        id: "row:launch:0",
+        text: "launch with delayed echo and response evidence",
+      }]);
+      markOutboxResponded(conversation, "launch-with-both-terminal-reasons", 1_200);
+
+      expect(JSON.parse(
+        dom.sessionStorage.getItem(`llvOutboxCurrentLaunch:${conversation}`) ?? "null",
+      )).toMatchObject({
+        retiredEchoId: expect.any(String),
+        terminalReason: "response-started",
+      });
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test.each(["response-started", "delivered-ttl"] as const)(
+    "issue 626: the current-launch slot deterministically replaces an older %s retirement",
+    (reason) => {
+      const originalDateNow = Date.now;
+      Date.now = () => 1_000_000;
+      try {
+        const conversation = `conversation_626_current_launch_${reason}`;
+        const retire = (id: string, at: number) => {
+          if (reason === "response-started") {
+            markOutboxResponded(conversation, id, at);
+            return;
+          }
+          updateOutbox(conversation, id, {
+            state: outboxStateForReceiptStatus("delivered"),
+            settledAt: at,
+          });
+        };
+
+        seedLaunchOutbox(conversation, {
+          id: "older-no-echo-launch",
+          text: "older no-echo launch text",
+          images: 0,
+          at: 1_000,
+        });
+        retire("older-no-echo-launch", 1_100);
+        for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+          enqueueOutbox(conversation, {
+            id: `older-no-echo-filler-${reason}-${index}`,
+            text: `older no-echo filler ${reason} ${index}`,
+            images: 0,
+            at: 2_000 + index,
+          });
+        }
+
+        seedLaunchOutbox(conversation, {
+          id: "newer-no-echo-launch",
+          text: "newer no-echo launch text",
+          images: 0,
+          at: 3_000,
+        });
+        retire("newer-no-echo-launch", 3_100);
+        for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+          enqueueOutbox(conversation, {
+            id: `newer-no-echo-filler-${reason}-${index}`,
+            text: `newer no-echo filler ${reason} ${index}`,
+            images: 0,
+            at: 4_000 + index,
+          });
+        }
+
+        resetOutboxForTests();
+        seedLaunchOutbox(conversation, {
+          id: "older-no-echo-launch",
+          text: "older no-echo launch text",
+          images: 0,
+          at: 1_000,
+        });
+        seedLaunchOutbox(conversation, {
+          id: "newer-no-echo-launch",
+          text: "newer no-echo launch text",
+          images: 0,
+          at: 3_000,
+        });
+
+        const queue = readOutbox(conversation);
+        expect(queue.some((entry) => entry.id === "older-no-echo-launch")).toBe(true);
+        expect(queue.some((entry) => entry.id === "newer-no-echo-launch")).toBe(false);
+      } finally {
+        Date.now = originalDateNow;
+      }
+    },
+  );
 
   test("the seeded launch bubble is adopted into the materialized conversation identity", () => {
     // Seeded under the launch placeholder, then the composer adopts it forward.

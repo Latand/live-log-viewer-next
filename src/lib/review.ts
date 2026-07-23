@@ -28,10 +28,13 @@ const SEVERITY_RE = /(?:\[(P[0-3])\]|\b(Critical|High|Medium|Low|Info|P[0-3])\b)
 const PATH_RE =
   /((?:\.{1,2}\/|\/|~\/)?[\w@.+-][\w@.+\-/]*\.(?:tsx?|jsx?|mjs|cjs|mts|cts|py|go|rs|md|json|ya?ml|toml|css|scss|html|sql|sh|env|ftl|txt))(?::(\d+))?/i;
 const MARKDOWN_LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/;
+const SECRET_KEYWORD_RE =
+  /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|bearer|secret|password|passwd|pwd|token)/i;
 const SECRET_VALUE_RE =
   /([\w.-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|bearer|secret|password|passwd|pwd|token))\b(\s*[:=]\s*)(["']?)[^\s"',}]+/gi;
 
 export function redactSecrets(text: string): string {
+  if (!SECRET_KEYWORD_RE.test(text)) return text;
   return text.replace(SECRET_VALUE_RE, (_whole, key: string, sep: string, quote: string) => `${key}${sep}${quote}[redacted]`);
 }
 
