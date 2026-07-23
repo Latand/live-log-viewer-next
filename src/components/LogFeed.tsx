@@ -428,8 +428,12 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       text: promptText,
       images: promptImages,
       at: launch.promptAt ?? Date.now(),
+      /* The canonical echo identity (issue #615): the bubble displays the raw
+         draft but retires on the delivered (possibly scaffolded) transcript
+         echo. Reconciled onto a composer-seeded bubble under the same id. */
+      ...(launch.promptEcho ? { echoText: launch.promptEcho } : {}),
     });
-  }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt]);
+  }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt, launch?.promptEcho]);
   const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs()) : [];
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */

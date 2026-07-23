@@ -211,6 +211,54 @@ describe("seedLaunchOutbox (P1#2)", () => {
     expect(readOutbox("conversation_live")[0]).toMatchObject({ id: "launch_1", launchOwned: true });
   });
 
+  test.each([
+    ["builder", "You are a Builder in TDD mode.\n\nLLV615_RAW_PROMPT"],
+    ["reviewer", "You are a Reviewer.\nSafety fences:\n- stay in scope\n\nLLV615_RAW_PROMPT"],
+  ])("issue 615 HIGH2: a %s role launch displays the raw draft but retires on the canonical scaffolded echo", (_role, scaffolded) => {
+    const raw = "LLV615_RAW_PROMPT";
+    /* The composer seeds the RAW operator draft (no scaffold — the server adds
+       it), so the bubble is user-facing. Its canonical echo identity is the
+       delivered scaffolded text the transcript will actually record. */
+    seedLaunchOutbox("conversation_615", { id: "launch_615", text: raw, images: 1, at: 1_000, echoText: scaffolded });
+    const queue = readOutbox("conversation_615");
+    expect(queue).toHaveLength(1);
+    expect(queue[0]).toMatchObject({ text: raw, echoText: scaffolded, launchOwned: true });
+
+    /* Exact-text matching on the RAW draft can NEVER retire it — the transcript
+       echoes the scaffolded text, not the raw draft. The bubble stays visible. */
+    expect(visibleOutbox(queue, echoes(raw), 5_000).map((e) => e.id)).toEqual(["launch_615"]);
+    /* The canonical scaffolded echo landing in the transcript retires it. */
+    expect(visibleOutbox(queue, echoes(scaffolded), 5_000)).toEqual([]);
+  });
+
+  test("issue 615 HIGH2: identical launch id reconciliation attaches the canonical echo identity while preserving the raw draft; refresh, images and zero duplicate hold", () => {
+    const raw = "LLV615_RAW_PROMPT";
+    const scaffolded = "You are a Builder in TDD mode.\n\nLLV615_RAW_PROMPT";
+    /* DraftAgentPane seeds first, immediately, with the RAW draft and no echo
+       identity (the client never composes the scaffold). */
+    seedLaunchOutbox("conversation_615", { id: "launch_615", text: raw, images: 3, at: 1_000 });
+    expect(readOutbox("conversation_615")[0]).toMatchObject({ text: raw, images: 3, launchOwned: true });
+    /* Exact-text matching cannot retire it yet — this is the reported bug. */
+    expect(visibleOutbox(readOutbox("conversation_615"), echoes(scaffolded), 5_000).map((e) => e.id)).toEqual(["launch_615"]);
+
+    /* The next /api/files poll carries the server-projected launch: LogFeed
+       re-seeds the SAME launch id WITH the canonical echo identity. Reconciliation
+       attaches it to the existing bubble — one bubble, RAW draft preserved. */
+    seedLaunchOutbox("conversation_615", { id: "launch_615", text: raw, images: 3, at: 2_000, echoText: scaffolded });
+    const merged = readOutbox("conversation_615");
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ text: raw, images: 3, echoText: scaffolded, launchOwned: true });
+
+    /* A refresh rehydrates the one reconciled bubble, echo identity intact. */
+    resetOutboxForTests();
+    const refreshed = readOutbox("conversation_615");
+    expect(refreshed).toHaveLength(1);
+    expect(refreshed[0]).toMatchObject({ text: raw, images: 3, echoText: scaffolded });
+
+    /* The live scaffolded echo retires it — zero duplicate, zero lingering. */
+    expect(visibleOutbox(refreshed, echoes(scaffolded), 5_000)).toEqual([]);
+  });
+
   test("issue 614: a server-projected seed and the composer's own seed (identical launch id and text) are ONE bubble that survives a refresh and retires on its own echo — never a duplicate", () => {
     const identical = "LLV614_CANONICAL_PROBE_20260723";
     /* The board that ran the composer seeds under the canonical identity. */

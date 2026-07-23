@@ -400,6 +400,15 @@ export async function executeSpawnRequest(
       launchProfile: spec.launchProfile,
       clientAttemptId,
       requestDigest: digest,
+      /* Durable launch DISPLAY payload (issue #614/#615): the RAW operator draft
+         for the first user bubble, the scaffold-composed delivered text as its
+         canonical transcript-echo identity, and the image count — persisted with
+         the receipt so a surface that never ran the composer shows the bubble
+         through starting, scan-lag and text-scrubbed delivery, and retires it on
+         the real (possibly scaffolded) transcript echo. */
+      launchDisplay: (userPrompt.trim() || images.length)
+        ? { prompt: userPrompt, images: images.length, echo: prompt }
+        : null,
       memberships: pipelineAttemptTarget && pipelineSourceConversationId ? [{
         kind: "pipeline",
         containerId: pipelineAttemptTarget.pipelineId,

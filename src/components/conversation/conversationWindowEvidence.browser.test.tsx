@@ -116,7 +116,7 @@ const DELIVERED_LAUNCH: StructuredSpawnCardState = { ...QUEUED_LAUNCH, state: "l
 const PRE_TRANSCRIPT_PROMPT = "LLV614_CANONICAL_PROBE_20260723";
 const PROMPTED_LAUNCH: StructuredSpawnCardState = {
   ...QUEUED_LAUNCH, launchId: "launch_evidence_614",
-  promptImages: 0, promptAt: 1, prompt: PRE_TRANSCRIPT_PROMPT,
+  promptImages: 0, promptAt: 1, prompt: PRE_TRANSCRIPT_PROMPT, promptEcho: PRE_TRANSCRIPT_PROMPT,
 };
 
 const STATES: Array<{ id: string; file: FileEntry; seedOutbox?: "delivering"; expectPrompt?: string }> = [

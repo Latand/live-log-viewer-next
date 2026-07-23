@@ -35,6 +35,11 @@ export interface StructuredSpawnCardState {
   /** Submission moment (ms) of the launch prompt — the receipt's creation time —
       so the seeded bubble orders ahead of any follow-up the operator queues. */
   promptAt?: number;
+  /** The canonical text the transcript will echo for this launch (issue #615) —
+      the delivered message, which for a role launch is the scaffold PLUS the raw
+      draft. The optimistic bubble displays `prompt` (the raw draft) but retires on
+      THIS text, so a scaffolded role launch never lingers and never duplicates. */
+  promptEcho?: string;
 }
 
 /** Current quota wall affecting a hosted conversation. Account provenance

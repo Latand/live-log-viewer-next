@@ -31,16 +31,25 @@ function initialDelivery(snapshot: RegistryFile, receipt: SpawnReceipt) {
       && delivery.clientMessageId === `spawn_${receipt.launchId}`) ?? null;
 }
 
-/** The initial launch prompt still recoverable from the queued initial delivery
-    (issue #614). The held delivery carries the operator's launch text until it is
-    delivered, after which the registry clears it (the transcript then echoes it),
-    so this returns a value only during the pre-transcript window — exactly when a
-    surface that did not run the composer would otherwise show an empty feed. */
-function launchPromptOf(delivery: ReturnType<typeof initialDelivery>): { prompt: string; promptImages: number } | null {
-  if (!delivery) return null;
-  const promptImages = delivery.runtimeImages.length;
-  if (!delivery.text.trim() && !promptImages) return null;
-  return { prompt: delivery.text, promptImages };
+/** The launch DISPLAY payload projected as the conversation's first user bubble
+    (issue #614/#615). The durable `receipt.launchDisplay`, captured at receipt
+    birth, is the authority: it is available across the WHOLE pre-transcript
+    lifecycle — `starting` before any deferred delivery exists, and the
+    delivered-but-scan-lagged interval after the held-delivery text is scrubbed.
+    A legacy receipt with no durable payload falls back to the queued delivery
+    text (its own echo identity), preserving the earlier behavior. */
+function launchPromptOf(
+  receipt: SpawnReceipt,
+  delivery: ReturnType<typeof initialDelivery>,
+): { prompt: string; promptImages: number; promptEcho: string } | null {
+  const display = receipt.launchDisplay;
+  if (display && (display.prompt.trim() || display.echo.trim() || display.images > 0)) {
+    return { prompt: display.prompt, promptImages: display.images, promptEcho: display.echo };
+  }
+  if (delivery && (delivery.text.trim() || delivery.runtimeImages.length)) {
+    return { prompt: delivery.text, promptImages: delivery.runtimeImages.length, promptEcho: delivery.text };
+  }
+  return null;
 }
 
 function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpawnCardState {
@@ -72,7 +81,7 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
   } else if (binding) {
     state = "binding";
   }
-  const launchPrompt = launchPromptOf(delivery);
+  const launchPrompt = launchPromptOf(receipt, delivery);
   return {
     launchId: receipt.launchId,
     clientAttemptId: receipt.clientAttemptId,
@@ -82,9 +91,29 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
     retrySafe: receipt.state === "failed",
     error: receipt.error,
     ...(launchPrompt
-      ? { prompt: launchPrompt.prompt, promptImages: launchPrompt.promptImages, promptAt: Date.parse(receipt.createdAt) || undefined }
+      ? {
+          promptImages: launchPrompt.promptImages,
+          promptAt: Date.parse(receipt.createdAt) || undefined,
+          promptEcho: launchPrompt.promptEcho, prompt: launchPrompt.prompt,
+        }
       : {}),
   };
+}
+
+/** The launch facts INSIDE an adopted live conversation window (issue #615): the
+    transcript now renders the operator's message itself, so the launch stops
+    contributing a prompt bubble in the same response — only its transient status
+    chips remain. Strips every prompt-display field from the state. */
+function launchFactsWithoutPrompt(spawn: StructuredSpawnCardState): StructuredSpawnCardState {
+  if (spawn.prompt === undefined && spawn.promptEcho === undefined && spawn.promptImages === undefined && spawn.promptAt === undefined) {
+    return spawn;
+  }
+  const facts = { ...spawn };
+  delete facts.prompt;
+  delete facts.promptImages;
+  delete facts.promptAt;
+  delete facts.promptEcho;
+  return facts;
 }
 
 /** The scanned transcript entry that already represents a launch's conversation.
@@ -241,7 +270,7 @@ export function projectLaunchConversations(
        transcript reaches the view. */
     const live = materializedEntry(byPath, files, snapshot, receipt);
     if (live) {
-      if (transientLaunchFact(spawn, receipt.createdAt, nowMs)) facts.set(live.path, spawn);
+      if (transientLaunchFact(spawn, receipt.createdAt, nowMs)) facts.set(live.path, launchFactsWithoutPrompt(spawn));
       continue;
     }
     /* No live transcript in this payload: the launch still owns the window

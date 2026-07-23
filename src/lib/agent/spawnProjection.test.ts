@@ -301,6 +301,99 @@ test("issue 614: a materialized launch whose transcript a scoped scan omits keep
   }
 });
 
+test("issue 615 HIGH1: the launch prompt projects from the durable display payload across the whole lifecycle, independent of held-delivery text, and stops on transcript adoption", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-615-durable-display-"));
+  const artifactPath = path.join(directory, "019f8dbe_e6cc_9e62_40df_06fb8f88b8b2.jsonl");
+  try {
+    fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "scaffold\n\nLLV615_RAW_PROMPT" })}\n`);
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex", cwd: directory, transport: "structured", accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      /* Persisted at receipt birth — BEFORE any deferred delivery admission and
+         BEFORE receipt publication. Raw prompt for display, the delivered
+         (scaffolded) text as the canonical echo identity, plus the image count. */
+      launchDisplay: { prompt: "LLV615_RAW_PROMPT", images: 2, echo: "scaffold\n\nLLV615_RAW_PROMPT" },
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    const createdMs = Date.parse(begun.receipt.createdAt);
+
+    /* `starting`, BEFORE the held delivery exists: the display payload still
+       projects the raw prompt, its echo identity, and the image count. */
+    const starting = projectLaunchConversations([], registry.snapshot(), createdMs + 1_000);
+    expect(starting.cards[0]!.spawn).toMatchObject({
+      state: "starting",
+      promptImages: 2,
+      promptAt: createdMs,
+      promptEcho: "scaffold\n\nLLV615_RAW_PROMPT", prompt: "LLV615_RAW_PROMPT",
+    });
+
+    /* Delivered settlement scrubs held-delivery text; the display payload is
+       independent, so the prompt still projects during the scan-lag interval. */
+    registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId: "019f8dbe-" + "e6cc-9e62-40df-06fb8f88b8b2" },
+      artifactPath, cwd: directory, accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      status: "idle", host: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+    });
+    registry.holdDelivery(begun.receipt.conversationId, "scaffold\n\nLLV615_RAW_PROMPT", `spawn_${begun.receipt.launchId}`);
+    registry.recordDeliveryOutcome(
+      Object.values(registry.snapshot().heldDeliveries).find((d) => d.clientMessageId === `spawn_${begun.receipt.launchId}`)!.id,
+      "delivered",
+    );
+    observeArtifact(registry, artifactPath, directory);
+    const snapshot = registry.snapshot();
+    /* The held-delivery text is scrubbed (or the reservation compacted) once
+       delivered — no longer a source for the prompt. */
+    expect(Object.values(snapshot.heldDeliveries).find((d) => d.clientMessageId === `spawn_${begun.receipt.launchId}`)?.text ?? "").toBe("");
+
+    const scanLag = projectLaunchConversations([], snapshot, createdMs + 20_000);
+    expect(scanLag.cards).toHaveLength(1);
+    expect(scanLag.cards[0]!.spawn).toMatchObject({ prompt: "LLV615_RAW_PROMPT", promptImages: 2, promptEcho: "scaffold\n\nLLV615_RAW_PROMPT" });
+
+    /* The response that ADOPTS the live transcript stops projecting the prompt —
+       the transcript now renders the message, so the facts carry no bubble. */
+    const adopted = projectLaunchConversations([scannedFile(artifactPath)], snapshot, createdMs + 21_000);
+    expect(adopted.cards).toEqual([]);
+    const facts = adopted.facts.get(artifactPath)!;
+    expect(facts).toMatchObject({ state: "recovered" });
+    expect(facts.prompt).toBeUndefined();
+    expect(facts.promptEcho).toBeUndefined();
+    expect(facts.promptImages).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 615 HIGH1: the durable display payload survives restart and never leaks into a successor receipt", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-615-display-restart-"));
+  const filename = path.join(directory, "agent-registry.json");
+  try {
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex", cwd: directory, transport: "structured", accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      launchDisplay: { prompt: "LLV615_RAW_PROMPT", images: 0, echo: "LLV615_RAW_PROMPT" },
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+
+    /* A refresh/restart rehydrates the durable payload from disk unchanged. */
+    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    expect(restarted.snapshot().receipts[begun.receipt.launchId]?.launchDisplay)
+      .toEqual({ prompt: "LLV615_RAW_PROMPT", images: 0, echo: "LLV615_RAW_PROMPT" });
+
+    /* A second, unrelated launch never inherits the first launch's display. */
+    const other = restarted.beginSpawnRequest({
+      engine: "codex", cwd: directory, transport: "structured", accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (other.kind !== "created") throw new Error("expected structured launch creation");
+    expect(restarted.snapshot().receipts[other.receipt.launchId]?.launchDisplay).toBeNull();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("terminal synthetic spawn cards join compact history after the scanner freshness horizon", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-terminal-age-"));
   const filename = path.join(directory, "agent-registry.json");
