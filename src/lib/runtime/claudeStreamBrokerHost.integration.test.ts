@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { afterAll, expect, test } from "bun:test";
 
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
@@ -136,6 +137,7 @@ async function exerciseClaudeTool(host: ClaudeStreamBrokerHost, input: {
 
 function configureClaudeMcpFixture(home: NonNullable<typeof mcpDefaultHome>): {
   pipelineId: string;
+  cwd: string;
   viewerPidPath: string;
   optionalPidPath: string;
   unrelatedPath: string;
@@ -168,7 +170,9 @@ function configureClaudeMcpFixture(home: NonNullable<typeof mcpDefaultHome>): {
   const optionalServerPath = path.join(home.directory, "optional-mcp.ts");
   const unrelatedServerPath = path.join(home.directory, "unrelated-mcp.ts");
   const hookScriptPath = path.join(home.directory, "viewer-hook.sh");
+  const projectRoot = path.join(home.directory, "project");
   const viewerLauncher = path.resolve(import.meta.dir, "../../../bin/mcp-server.mjs");
+  fs.mkdirSync(path.join(projectRoot, ".git"), { recursive: true, mode: 0o700 });
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(stateDir, "pipelines.json"), JSON.stringify({
     schemaVersion: PIPELINES_SCHEMA_VERSION,
@@ -193,17 +197,29 @@ function configureClaudeMcpFixture(home: NonNullable<typeof mcpDefaultHome>): {
   fs.writeFileSync(unrelatedServerPath, `await Bun.write(${JSON.stringify(unrelatedPath)}, String(process.pid));\nprocess.stdin.resume();\n`, { mode: 0o600 });
   fs.writeFileSync(hookScriptPath, `#!/bin/sh\nprintf hook > ${JSON.stringify(hookPath)}\n`, { mode: 0o700 });
   fs.writeFileSync(path.join(home.claudeConfigDir, "settings.json"), JSON.stringify({
+    enabledMcpjsonServers: ["agent-browser"],
     hooks: { PreToolUse: [{ matcher: "mcp__viewer__get_pipeline", hooks: [{ type: "command", command: hookScriptPath }] }] },
   }), { mode: 0o600 });
   fs.writeFileSync(path.join(home.directory, ".claude.json"), JSON.stringify({
     hasCompletedOnboarding: true,
     mcpServers: {
       viewer: { type: "stdio", command: Bun.which("bun") ?? "bun", args: [viewerWrapperPath], env: { LLV_STATE_DIR: stateDir } },
-      "agent-browser": { type: "stdio", command: Bun.which("bun") ?? "bun", args: [optionalServerPath], env: { LLV_STATE_DIR: stateDir } },
-      unrelated: { type: "stdio", command: Bun.which("bun") ?? "bun", args: [unrelatedServerPath] },
     },
   }), { mode: 0o600 });
-  return { pipelineId: pipeline.id, viewerPidPath, optionalPidPath, unrelatedPath, hookPath };
+  fs.writeFileSync(path.join(projectRoot, ".mcp.json"), JSON.stringify({
+    mcpServers: {
+      "agent-browser": {
+        type: "stdio",
+        command: Bun.which("bun") ?? "bun",
+        args: [optionalServerPath],
+        env: { LLV_STATE_DIR: stateDir, PROJECT_AUTH: "preserved" },
+        timeout: 120_000,
+        alwaysLoad: true,
+      },
+      "project-unrelated": { type: "stdio", command: Bun.which("bun") ?? "bun", args: [unrelatedServerPath] },
+    },
+  }), { mode: 0o600 });
+  return { pipelineId: pipeline.id, cwd: projectRoot, viewerPidPath, optionalPidPath, unrelatedPath, hookPath };
 }
 
 test.skipIf(!resumeHome)("real Claude subscription supports late attach and restart resume", async () => {
@@ -360,7 +376,7 @@ test.skipIf(!mcpDefaultHome)("real Claude default MCP policy exposes Viewer, pre
   let host: ClaudeStreamBrokerHost | null = null;
   try {
     host = await ClaudeStreamBrokerHost.start({
-      cwd: process.cwd(),
+      cwd: fixture.cwd,
       binary: claudeBinary,
       claudeConfigDir: mcpDefaultHome.claudeConfigDir,
       claudeProjectsDir: mcpDefaultHome.claudeProjectsDir,
@@ -400,7 +416,7 @@ test.skipIf(!mcpCustomHome)("real Claude custom MCP policy force-includes Viewer
   const eventStore = new FileRuntimeEventStore(path.join(mcpCustomHome.directory, "mcp-events"));
   const deliveryLedger = new FileClaudeDeliveryLedger(path.join(mcpCustomHome.directory, "mcp-deliveries"));
   const options = {
-    cwd: process.cwd(),
+    cwd: fixture.cwd,
     binary: claudeBinary,
     claudeConfigDir: mcpCustomHome.claudeConfigDir,
     claudeProjectsDir: mcpCustomHome.claudeProjectsDir,
@@ -417,6 +433,26 @@ test.skipIf(!mcpCustomHome)("real Claude custom MCP policy force-includes Viewer
   let adopted: ClaudeStreamBrokerHost | null = null;
   try {
     fresh = await ClaudeStreamBrokerHost.start(options);
+    const profileId = `structured-${crypto.createHash("sha256").update(fresh.identity.sessionId).digest("hex").slice(0, 24)}`;
+    const freshMcpConfig = JSON.parse(fs.readFileSync(path.join(
+      mcpCustomHome.claudeConfigDir,
+      ".llv",
+      "spawn-mcp",
+      `${profileId}.json`,
+    ), "utf8")) as { mcpServers: Record<string, unknown> };
+    const freshSettings = JSON.parse(fs.readFileSync(path.join(
+      mcpCustomHome.claudeConfigDir,
+      ".llv",
+      "spawn-settings",
+      `${profileId}.json`,
+    ), "utf8")) as { enabledMcpjsonServers: string[] };
+    expect(freshMcpConfig.mcpServers["agent-browser"]).toMatchObject({
+      env: { PROJECT_AUTH: "preserved" },
+      timeout: 120_000,
+      alwaysLoad: true,
+    });
+    expect(freshMcpConfig.mcpServers).not.toHaveProperty("project-unrelated");
+    expect(freshSettings.enabledMcpjsonServers).toEqual(["agent-browser"]);
     await exerciseClaudeTool(fresh, {
       name: "mcp__viewer__get_pipeline",
       request: `Call the native Viewer MCP tool get_pipeline with clientRequestId "claude-custom-fresh" and pipelineId "${fixture.pipelineId}". Reply after the successful result.`,

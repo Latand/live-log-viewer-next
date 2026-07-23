@@ -4,17 +4,20 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
 import { buildPipeline, PIPELINES_SCHEMA_VERSION } from "@/lib/pipelines/store";
-import { prepareCodexIntegrationTestHome } from "@/lib/runtime/integrationTestHome";
+import { prepareClaudeIntegrationTestHome, prepareCodexIntegrationTestHome } from "@/lib/runtime/integrationTestHome";
 
 import { freshSpecFor, shellQuote } from "./cli";
 
 const codexBinary = process.env.LLV_CODEX_BINARY ?? "codex";
 const defaultHome = prepareCodexIntegrationTestHome(codexBinary);
 const customHome = prepareCodexIntegrationTestHome(codexBinary);
+const claudeBinary = process.env.LLV_CLAUDE_BINARY ?? "claude";
+const claudeProjectHome = prepareClaudeIntegrationTestHome(claudeBinary);
 
 afterAll(() => {
   defaultHome?.cleanup();
   customHome?.cleanup();
+  claudeProjectHome?.cleanup();
 });
 
 function processIdentity(pid: number): string | null {
@@ -58,7 +61,7 @@ async function expectProcessesReaped(processes: ReadonlyMap<number, string>): Pr
     await Bun.sleep(25);
   }
   const survivors = [...processes].filter(([pid, identity]) => processIdentity(pid) === identity).map(([pid]) => pid);
-  throw new Error(`tmux Codex processes survived shutdown: ${survivors.join(",")}`);
+  throw new Error(`tmux MCP processes survived shutdown: ${survivors.join(",")}`);
 }
 
 async function runTmux(tmuxTmpdir: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -89,7 +92,24 @@ async function waitFor<T>(read: () => T | null, timeoutMs = 120_000): Promise<T>
     if (value !== null) return value;
     await Bun.sleep(100);
   }
-  throw new Error("native tmux Codex fixture timed out");
+  throw new Error("native tmux MCP fixture timed out");
+}
+
+function nativeClaudeMcpResult(filename: string, server: string, pipelineId: string): string | null {
+  if (!fs.existsSync(filename)) return null;
+  let sawTool = false;
+  let sawResult = false;
+  for (const line of fs.readFileSync(filename, "utf8").split("\n")) {
+    try {
+      const serialized = JSON.stringify(JSON.parse(line));
+      if (serialized.includes('"type":"tool_use"') && serialized.includes(`"name":"mcp__${server}__get_pipeline"`)) sawTool = true;
+      if (serialized.includes('"tool_use_result"')
+        && serialized.includes(pipelineId)
+        && !serialized.includes("Permission to use")
+        && !serialized.includes("has been denied")) sawResult = true;
+    } catch { /* a partial transcript line remains pending */ }
+  }
+  return sawTool && sawResult ? filename : null;
 }
 
 function nativeMcpResult(home: string, server: string, pipelineId: string): string | null {
@@ -238,4 +258,124 @@ test.skipIf(!defaultHome)("real default tmux Codex exposes Viewer, excludes othe
 test.skipIf(!customHome)("real custom tmux Codex enables the optional server, force-enables Viewer, excludes sentinels, and reaps its MCP processes", async () => {
   if (!customHome) throw new Error("isolated Codex subscription home is unavailable");
   await exerciseTmuxCodex({ home: customHome, mcpServers: ["agent-browser"], expectedServer: "agent-browser" });
+}, 300_000);
+
+test.skipIf(!claudeProjectHome)("real tmux Claude loads an allowed project MCP server, excludes its project sentinel, and reaps the fleet", async () => {
+  if (!claudeProjectHome) throw new Error("isolated Claude subscription home is unavailable");
+  const projectRoot = path.join(claudeProjectHome.directory, "project");
+  const stateDir = path.join(claudeProjectHome.directory, "viewer-state");
+  const viewerPidPath = path.join(claudeProjectHome.directory, "viewer-pid");
+  const optionalPidPath = path.join(claudeProjectHome.directory, "optional-pid");
+  const unrelatedPath = path.join(claudeProjectHome.directory, "project-unrelated-started");
+  const viewerWrapperPath = path.join(claudeProjectHome.directory, "viewer-mcp.ts");
+  const optionalWrapperPath = path.join(claudeProjectHome.directory, "optional-mcp.ts");
+  const unrelatedServerPath = path.join(claudeProjectHome.directory, "project-unrelated-mcp.ts");
+  const viewerLauncher = path.resolve(import.meta.dir, "../../../bin/mcp-server.mjs");
+  const bun = Bun.which("bun") ?? "bun";
+  const pipeline = buildPipeline({
+    id: `tmux-claude-project-${path.basename(claudeProjectHome.directory)}`,
+    task: "Prove native tmux Claude project MCP isolation",
+    project: "live-log-viewer-next",
+    repoDir: projectRoot,
+    stages: [{
+      id: "proof",
+      kind: "run",
+      "prompt": "Exercise project MCP",
+      next: null,
+      onFail: null,
+      effectiveRole: { roleId: null, engine: "claude", model: "haiku", effort: "low", access: "read-only", promptScaffold: null },
+    }],
+    srcPath: null,
+    srcConversationId: null,
+    now: "2026-07-23T00:00:00.000Z",
+    state: "draft",
+  });
+  fs.mkdirSync(path.join(projectRoot, ".git"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(stateDir, "pipelines.json"), JSON.stringify({
+    schemaVersion: PIPELINES_SCHEMA_VERSION,
+    pipelines: [pipeline],
+  }), { mode: 0o600 });
+  const wrapper = (markerPath: string) => [
+    `await Bun.write(${JSON.stringify(markerPath)}, String(process.pid));`,
+    `const child = Bun.spawn({ cmd: [${JSON.stringify(bun)}, ${JSON.stringify(viewerLauncher)}], stdin: "inherit", stdout: "inherit", stderr: "inherit", env: process.env });`,
+    'process.on("SIGTERM", () => child.kill("SIGTERM"));',
+    'process.on("SIGINT", () => child.kill("SIGINT"));',
+    "process.exitCode = await child.exited;",
+    "",
+  ].join("\n");
+  fs.writeFileSync(viewerWrapperPath, wrapper(viewerPidPath), { mode: 0o600 });
+  fs.writeFileSync(optionalWrapperPath, wrapper(optionalPidPath), { mode: 0o600 });
+  fs.writeFileSync(unrelatedServerPath, `await Bun.write(${JSON.stringify(unrelatedPath)}, String(process.pid));\nprocess.stdin.resume();\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(claudeProjectHome.claudeConfigDir, "settings.json"), JSON.stringify({
+    enabledMcpjsonServers: ["agent-browser"],
+  }), { mode: 0o600 });
+  fs.writeFileSync(path.join(claudeProjectHome.directory, ".claude.json"), JSON.stringify({
+    hasCompletedOnboarding: true,
+    mcpServers: {
+      viewer: { type: "stdio", command: bun, args: [viewerWrapperPath], env: { LLV_STATE_DIR: stateDir } },
+    },
+  }), { mode: 0o600 });
+  fs.writeFileSync(path.join(projectRoot, ".mcp.json"), JSON.stringify({
+    mcpServers: {
+      "agent-browser": {
+        type: "stdio",
+        command: bun,
+        args: [optionalWrapperPath],
+        env: { LLV_STATE_DIR: stateDir, PROJECT_AUTH: "preserved" },
+        timeout: 120_000,
+        alwaysLoad: true,
+      },
+      "project-unrelated": { type: "stdio", command: bun, args: [unrelatedServerPath] },
+    },
+  }), { mode: 0o600 });
+
+  const tmuxTmpdir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-tmux-mcp-"));
+  fs.chmodSync(tmuxTmpdir, 0o700);
+  const session = `claude-mcp-${crypto.randomUUID().slice(0, 8)}`;
+  let processes = new Map<number, string>();
+  try {
+    const created = await runTmux(tmuxTmpdir, ["new-session", "-d", "-x", "180", "-y", "50", "-s", session, "-c", projectRoot]);
+    if (created.code !== 0) throw new Error(created.stderr || "tmux session creation failed");
+    const spec = freshSpecFor("claude", projectRoot, {
+      claudeConfigDir: claudeProjectHome.claudeConfigDir,
+      claudeProjectsDir: claudeProjectHome.claudeProjectsDir,
+      model: "haiku",
+      permissionMode: "bypassPermissions",
+      mcpServers: ["agent-browser"],
+    });
+    const sessionId = path.basename(spec.transcript!, ".jsonl");
+    const mcpConfig = JSON.parse(fs.readFileSync(path.join(
+      claudeProjectHome.claudeConfigDir,
+      ".llv",
+      "spawn-mcp",
+      `${sessionId}.json`,
+    ), "utf8")) as { mcpServers: Record<string, unknown> };
+    expect(mcpConfig.mcpServers["agent-browser"]).toMatchObject({
+      env: { PROJECT_AUTH: "preserved" },
+      timeout: 120_000,
+      alwaysLoad: true,
+    });
+    expect(mcpConfig.mcpServers).not.toHaveProperty("project-unrelated");
+    const prompt = `Call the native agent-browser MCP tool get_pipeline with clientRequestId "tmux-claude-project" and pipelineId "${pipeline.id}". Shell execution is prohibited. Reply after the successful result.`;
+    const launched = await runTmux(tmuxTmpdir, ["send-keys", "-t", `${session}:0.0`, "-l", `${spec.command} ${shellQuote(prompt)}`]);
+    if (launched.code !== 0) throw new Error(launched.stderr || "tmux command delivery failed");
+    await runTmux(tmuxTmpdir, ["send-keys", "-t", `${session}:0.0`, "Enter"]);
+    await waitFor(() => nativeClaudeMcpResult(spec.transcript!, "agent-browser", pipeline.id));
+    expect(fs.existsSync(viewerPidPath)).toBeTrue();
+    expect(fs.existsSync(optionalPidPath)).toBeTrue();
+    expect(fs.existsSync(unrelatedPath)).toBeFalse();
+    const pane = await runTmux(tmuxTmpdir, ["display-message", "-p", "-t", `${session}:0.0`, "#{pane_pid}"]);
+    const panePid = Number(pane.stdout.trim());
+    if (!Number.isInteger(panePid)) throw new Error("tmux pane pid is unavailable");
+    processes = processTree(panePid);
+    addRecordedProcess(processes, viewerPidPath);
+    addRecordedProcess(processes, optionalPidPath);
+    await runTmux(tmuxTmpdir, ["kill-server"]);
+    await expectProcessesReaped(processes);
+    expect(fs.existsSync(unrelatedPath)).toBeFalse();
+  } finally {
+    await runTmux(tmuxTmpdir, ["kill-server"]);
+    fs.rmSync(tmuxTmpdir, { recursive: true, force: true });
+  }
 }, 300_000);

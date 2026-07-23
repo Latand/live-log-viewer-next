@@ -10,6 +10,11 @@ type JsonObject = Record<string, unknown>;
 const MANAGED_HOOK_PREFIX = "LLV_MANAGED_NATIVE_SUBAGENT_DENY=1 ";
 const MANAGED_DIR = ".llv";
 const MANAGED_HOOK = "deny-native-subagents.sh";
+const MCP_APPROVAL_SETTINGS = [
+  "enableAllProjectMcpServers",
+  "enabledMcpjsonServers",
+  "disabledMcpjsonServers",
+] as const;
 
 /** Every native multi-agent entry point in the installed Claude CLI (#381 audit,
     CLI 2.1.214): subagent spawns (Task, Agent), Workflow orchestration scripts,
@@ -86,6 +91,23 @@ function readSettings(pathname: string): JsonObject {
   return settings;
 }
 
+function claudeProjectMcpServers(cwd: string | undefined): JsonObject {
+  if (!cwd) return {};
+  const launchDirectory = path.resolve(cwd);
+  let projectRoot = launchDirectory;
+  for (let directory = launchDirectory; ; directory = path.dirname(directory)) {
+    if (fs.existsSync(path.join(directory, ".git"))) {
+      projectRoot = directory;
+      break;
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+  }
+  const configPath = path.join(projectRoot, ".mcp.json");
+  if (!fs.existsSync(configPath)) return {};
+  return record(readSettings(configPath).mcpServers) ?? {};
+}
+
 function claudeMcpServers(
   pathname: string,
   cwd: string | undefined,
@@ -96,8 +118,9 @@ function claudeMcpServers(
   const rootServers = record(state.mcpServers) ?? {};
   const projects = record(state.projects);
   const project = cwd && projects ? record(projects[cwd]) : null;
-  const projectServers = record(project?.mcpServers) ?? {};
-  const registered = { ...rootServers, ...projectServers };
+  const sharedProjectServers = claudeProjectMcpServers(cwd);
+  const localProjectServers = record(project?.mcpServers) ?? {};
+  const registered = { ...rootServers, ...sharedProjectServers, ...localProjectServers };
   const normalized = normalizeSpawnMcpServers(allowlist);
   const names = normalized.ok ? normalized.value : ["viewer"];
   return Object.fromEntries(names.flatMap((name) => {
@@ -211,8 +234,12 @@ export function applyClaudeSpawnPolicy(
   const settingsWithoutMcp = Object.fromEntries(
     Object.entries(enforcedSettings).filter(([key]) => key !== "mcpServers"),
   );
+  const approvalSettings = Object.fromEntries(MCP_APPROVAL_SETTINGS.flatMap((key) => (
+    sourceSettings[key] === undefined ? [] : [[key, sourceSettings[key]]]
+  )));
   atomicWrite(result.settingsPath, JSON.stringify({
     ...settingsWithoutMcp,
+    ...approvalSettings,
     hooks: { ...hooks, PreToolUse: preToolUse },
   }, null, 2) + "\n", 0o600);
   atomicWrite(result.mcpConfigPath, JSON.stringify({ mcpServers }, null, 2) + "\n", 0o600);
