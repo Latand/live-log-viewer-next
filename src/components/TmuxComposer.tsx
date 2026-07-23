@@ -19,6 +19,19 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
+import { OutboxDispatcher } from "./conversation/OutboxDispatcher";
+import {
+  adoptOutbox,
+  cancelOutbox,
+  enqueueOutbox,
+  outboxHistory,
+  outboxStateForReceiptStatus,
+  transcriptEchoCount,
+  updateOutbox,
+  useOutbox,
+  type OutboxEntry,
+  type OutboxState,
+} from "./conversation/outbox";
 import {
   COMPOSER_ADMISSION_DEADLINE_MS,
   COMPOSER_RECEIPT_POLL_INTERVAL_MS,
@@ -825,7 +838,7 @@ function ComposerFocusContinuity({ claimKeys }: {
      sides of a deletion pass. */
   const anchorRef = useRef<HTMLElement>(null);
   const keys = [...new Set(claimKeys)];
-  const keysSignature = keys.join(" ");
+  const keysSignature = keys.join("\u0000");
   useLayoutEffect(() => {
     const composerField = () => anchorRef.current?.closest("form")?.querySelector("textarea") ?? null;
     const el = composerField();
@@ -971,14 +984,18 @@ export function TmuxComposer({
       /* A remount that crossed an identity adoption (provisional id →
          canonical id) must find the draft persisted under the old key. */
       adoptComposerState(file.path, cardId);
+      adoptOutbox(file.path, cardId);
       return sessionStorage.getItem(draftKey(cardId)) ?? "";
     },
     persistText: (value) => {
       if (value) sessionStorage.setItem(draftKey(cardId), value);
       else sessionStorage.removeItem(draftKey(cardId));
     },
-    submit: (overrideText) => send(overrideText),
+    submit: (overrideText) => queueSubmit(overrideText),
     imageCapability: structuredSession ? structuredImageCapability ?? null : null,
+    /* Queue-first (issue #561): a submitted message lives in the durable
+       outbox, so the field never locks behind an in-flight delivery. */
+    holdInputWhileBusy: false,
   });
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const attachmentDraftHydrated = useRef(false);
@@ -987,6 +1004,19 @@ export function TmuxComposer({
      control strip (issue #241) — the composer keeps only the message surface
      (text, images, mic, send) and its delivery receipts. */
   const [sent, setSent] = useState<SentEntry[]>([]);
+  /* The queue-first outbox (issue #561): submitted drafts live here from the
+     moment they are submitted, so the feed can render them as optimistic user
+     bubbles while the composer clears and stays typable. */
+  const outbox = useOutbox(cardId);
+  /* Attachment bytes for queued submissions. Memory-only: a refresh restores
+     the queue's text but not its images, and the restore path marks any
+     image-bearing entry as needing re-attachment rather than silently sending
+     a text-only message. */
+  const outboxImages = useRef<Map<string, PendingImage[]>>(new Map());
+  /* Idempotency keys the outbox owns. Their settlement clears the QUEUE, never
+     the editable draft — that draft was already cleared at submit time and
+     anything in it now belongs to the next message. */
+  const outboxKeys = useRef<Set<string>>(new Set());
   const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>([]);
   const [reconcilingSend, setReconcilingSend] = useState(() =>
     typeof window !== "undefined" && readPendingDeliveries(cardId).some((entry) => entry.reconciling));
@@ -1102,6 +1132,9 @@ export function TmuxComposer({
        fenced while the durable receipt stream determines the original fate. */
     setReconcilingSend(receiptReconciliations.current.size > 0 || entry.payloadComplete === false);
     setStatus({ kind: "err", text: t("composer.deliveryUnconfirmed") });
+    if (outboxKeys.current.has(clientMessageId)) {
+      updateOutbox(cardId, clientMessageId, { state: "failed", settledAt: nowMs(), error: t("composer.deliveryUnconfirmed") });
+    }
     setImmediateRuntimeReceipts((current) => [
       unconfirmedReceipt(clientMessageId, cardId, entry.text),
       ...current.filter((candidate) =>
@@ -1154,6 +1187,7 @@ export function TmuxComposer({
        id while this instance stays mounted): move the persisted records onto
        the new key before re-reading them. */
     adoptComposerState(file.path, cardId);
+    adoptOutbox(file.path, cardId);
     setSent(readSent(cardId));
     setImmediateRuntimeReceipts([]);
     setDismissedReceiptIds(readDismissedReceipts(cardId));
@@ -1238,15 +1272,52 @@ export function TmuxComposer({
     persistPendingDeliveries(remaining);
     for (const settlement of settled) {
       markSettled(settlement.entry.key);
-      const next = draftAfterDelivery(textRef.current, settlement.text);
-      if (next !== textRef.current) setText(next);
+      /* A queued submission already left the composer at submit time: clearing
+         the draft again here would eat text typed for the NEXT message. Its
+         bubble takes the state the receipt actually PROVES (round-1 P1#4): a
+         `queued`/`delivering` admission keeps the bubble `delivering`, only a
+         truly delivered receipt marks it `delivered`. */
+      if (outboxKeys.current.has(settlement.entry.key)) {
+        const receipt = displayedRuntimeReceipts.find((candidate) =>
+          candidate.idempotencyKey === settlement.entry.key && receiptIsAdmitted(candidate.status));
+        const state = receipt ? outboxStateForReceiptStatus(receipt.status) : "delivered";
+        updateOutbox(cardId, settlement.entry.key, { state, settledAt: nowMs() });
+      } else {
+        const next = draftAfterDelivery(textRef.current, settlement.text);
+        if (next !== textRef.current) setText(next);
+      }
       attachments.settleDelivered(settlement.entry.images);
       /* The admitted attempt consumed its key: minting a fresh one keeps the
          next message from being replay-deduped into silence server-side. */
       if (settlement.entry.key === idempotencyKey.current) idempotencyKey.current = mintIdempotencyKey();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef/attachments are hook-stable
-  }, [displayedRuntimeReceipts]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef/attachments/persistPendingDeliveries/finishReceiptReconciliation are hook-stable
+  }, [displayedRuntimeReceipts, cardId]);
+
+  /* Receipt-state progression for the outbox bubble (round-1 P1#4). The durable
+     receipt stream is authoritative for a bubble's state: a `delivering` bubble
+     advances to `delivered` when its delivery receipt lands (so it never sits
+     "delivering" forever and blocks the serial dispatcher), and a bubble
+     prematurely marked `failed` by a possibly-accepted 5xx recovers to
+     `delivering` once a receipt PROVES admission (queued/delivering) — the
+     message was admitted after all. A `delivered` bubble is terminal-good and is
+     never downgraded; a repeat failure never re-churns an already-failed
+     bubble. Launch-owned bubbles retire on their echo, not on a receipt. */
+  useEffect(() => {
+    for (const entry of outbox) {
+      if (entry.launchOwned || entry.state === "delivered") continue;
+      const receipt = displayedRuntimeReceipts.find((candidate) =>
+        candidate.idempotencyKey === entry.id
+        && (receiptIsAdmitted(candidate.status) || receiptIsTerminal(candidate.status)));
+      if (!receipt) continue;
+      const next = outboxStateForReceiptStatus(receipt.status);
+      if (next === entry.state) continue;
+      /* A failed bubble only advances on PROVEN admission — never on another
+         failure, and never to "delivering" off an unproven receipt. */
+      if (entry.state === "failed" && !(next === "delivered" || (next === "delivering" && receiptIsAdmitted(receipt.status)))) continue;
+      updateOutbox(cardId, entry.id, { state: next, settledAt: nowMs() });
+    }
+  }, [displayedRuntimeReceipts, outbox, cardId]);
 
   /* A link-arrow drop appended to the stored draft; reload it and put the
      caret at the end so the ask can be typed straight away. Goes through the
@@ -1320,12 +1391,81 @@ export function TmuxComposer({
     sessionStorage.setItem(sentKey(cardId), JSON.stringify(next));
   };
 
-  const send = async (overrideText?: string, retry?: { receiptId: number; clientMessageId?: string }) => {
+  /**
+   * Queue-first submit (issue #561). The draft becomes a durable queue entry
+   * and leaves the composer immediately: the feed renders it as an optimistic
+   * user bubble, the field clears and stays typable, and the operator can
+   * inspect or cancel it before the serial dispatcher takes it to the wire.
+   * Every pre-flight refusal happens HERE, so nothing is ever queued into a
+   * wall — the queue only ever holds messages that may still be delivered.
+   */
+  /* `preserveDraft` queues a message that stands apart from the operator's
+     current draft — the quick-ack (finding 5). It carries no attachments, mints
+     its OWN idempotency key (leaving the draft's key intact), and leaves the
+     composer's typed text and staged tiles exactly where they were. */
+  const queueSubmit = (overrideText?: string, options?: { preserveDraft?: boolean }) => {
+    const preserveDraft = options?.preserveDraft ?? false;
+    const requestedText = overrideText ?? textRef.current;
+    const requestedImages: PendingImage[] = preserveDraft ? [] : attachments.imagesRef.current.map((image) => ({ ...image }));
+    if (voiceSending || reconcilingSend) return;
+    if (!requestedText.trim() && !requestedImages.length) return;
+    if (deadHost && !structuredSession) {
+      setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
+      return;
+    }
+    if (structuredSession && structuredImagesDisabled && requestedImages.length) {
+      setStatus({ kind: "err", text: structuredImagesReason! });
+      return;
+    }
+    if (effectiveSendBlockedReason) {
+      setStatus({ kind: "err", text: effectiveSendBlockedReason });
+      return;
+    }
+    if (structuredSession && requestedImages.length && !attachments.validate()) return;
+    /* The entry owns the idempotency key of its generation; the composer mints
+       a fresh one straight away so the next message is a different generation
+       even if it is submitted before this one leaves. A `preserveDraft` ack takes
+       its own fresh key and does not disturb the draft's pending key. */
+    const clientMessageId = preserveDraft ? mintIdempotencyKey() : idempotencyKey.current;
+    if (!preserveDraft) idempotencyKey.current = mintIdempotencyKey();
+    outboxImages.current.set(clientMessageId, requestedImages);
+    outboxKeys.current.add(clientMessageId);
+    enqueueOutbox(cardId, {
+      id: clientMessageId,
+      text: requestedText,
+      images: requestedImages.length,
+      at: nowMs(),
+      /* Submission watermark (finding 2): the echoes of this exact text that
+         already exist, so a pre-existing identical message never retires this
+         fresh bubble — only its own later echo does. */
+      echoBaseline: transcriptEchoCount(cardId, requestedText),
+    });
+    if (!preserveDraft) {
+      setText("");
+      attachments.clearAll();
+    }
+    setStatus(null);
+    inputRef.current?.focus();
+  };
+
+  const send = async (overrideText?: string, retry?: { receiptId?: number; clientMessageId?: string }, outboxId?: string) => {
     const requestedText = overrideText ?? text;
     /* The generation snapshot: exactly the text and attachments this attempt
        carries onto the wire. Read through the ref so a submit racing a paste
-       still sends and later clears the same set. */
-    const requestedImages: PendingImage[] = attachments.imagesRef.current.map((image) => ({ ...image }));
+       still sends and later clears the same set. A queued submission carries
+       the attachments frozen at submit time instead — the tray has moved on. */
+    const requestedImages: PendingImage[] = (outboxId ? outboxImages.current.get(outboxId) ?? [] : attachments.imagesRef.current)
+      .map((image) => ({ ...image }));
+    /** Records a queued submission's fate on the queue itself. A no-op for a
+        direct (non-queued) send, which reports through the status line. The
+        bubble takes the state the receipt PROVES: a bare admission stays
+        `delivering`, only a delivered receipt reads `delivered` (round-1 P1#4). */
+    const settleOutbox = (state: OutboxState, error?: string) => {
+      if (!outboxId) return;
+      updateOutbox(cardId, outboxId, { state, settledAt: nowMs(), ...(error ? { error } : {}) });
+      if (state === "delivered") outboxImages.current.delete(outboxId);
+    };
+    const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => settleOutbox(outboxStateForReceiptStatus(receipt.status));
     /* Resolve the key before selecting the payload. A generation retained after
        uncertain admission owns an immutable text/image snapshot; later edits
        stay in the composer for the following generation while an explicit
@@ -1336,15 +1476,31 @@ export function TmuxComposer({
     const sentImages: PendingImage[] = replayGeneration
       ? replayGeneration.images.map((image) => ({ ...image }))
       : requestedImages;
-    if (busy || voiceSending || reconcilingSend || (!payloadText.trim() && !sentImages.length)) return;
+    if (!payloadText.trim() && !sentImages.length) {
+      /* Nothing to deliver — a queued entry that lost its payload must leave
+         the queue rather than block the drain forever. */
+      if (outboxId) cancelOutbox(cardId, outboxId);
+      return;
+    }
+    if (busy || voiceSending || reconcilingSend) {
+      /* The composer became unavailable between dispatch and here; the entry
+         returns to the queue and the dispatcher retries when it clears. */
+      if (outboxId) updateOutbox(cardId, outboxId, { state: "queued" });
+      return;
+    }
     /* A legacy dead host keeps its draft local. Structured ownership admits a
-       text-only message durably and uses that request to recover its engine host. */
+       text-only message durably and uses that request to recover its engine host.
+       A conversation whose delivery route disappeared AFTER a message was queued
+       marks that message undelivered with the reason instead of retrying into a
+       wall — the operator keeps the text and the explanation. */
     if (deadHost && !structuredSession) {
       setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
+      settleOutbox("failed", t("deadHost.sendBlocked"));
       return;
     }
     if (structuredSession && structuredImagesDisabled && sentImages.length) {
       setStatus({ kind: "err", text: structuredImagesReason! });
+      settleOutbox("failed", structuredImagesReason!);
       return;
     }
     /* Host not yet resolved under the runtime plane: block the POST so a
@@ -1352,6 +1508,7 @@ export function TmuxComposer({
        path before its real host capability arrives (finding 1). */
     if (effectiveSendBlockedReason) {
       setStatus({ kind: "err", text: effectiveSendBlockedReason });
+      settleOutbox("failed", effectiveSendBlockedReason);
       return;
     }
     if (structuredSession && sentImages.length && !attachments.validate()) return;
@@ -1409,7 +1566,9 @@ export function TmuxComposer({
     const settleGeneration = (clearedText: string, snapshot: readonly PendingImage[]) => {
       if (settledSendKeys.current.has(clientMessageId)) return;
       markSettled(clientMessageId);
-      setText(draftAfterDelivery(textRef.current, clearedText));
+      /* A queued generation left the composer when it was submitted; clearing
+         the draft here would eat text prepared for the next message. */
+      if (!outboxId) setText(draftAfterDelivery(textRef.current, clearedText));
       attachments.settleDelivered(snapshot);
     };
     const settleLegacySuccess = (result: ComposerSendResult) => {
@@ -1434,6 +1593,9 @@ export function TmuxComposer({
         && candidate.operationId !== unconfirmedReceiptOperationId(clientMessageId)));
       if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
       settleGeneration(payloadText, attempt?.images ?? sentImages);
+      /* A legacy pane send that reached the pane is delivered; a migration
+         hold/queue is still in flight to the successor (round-1 P1#4). */
+      settleOutbox(held ? "delivering" : "delivered");
       setStatus({
         kind: held ? "info" : "ok",
         text: held
@@ -1444,7 +1606,9 @@ export function TmuxComposer({
               ? t("composer.sentPaths", { count: result.imagePaths.length })
               : t("common.sent"),
       });
-      inputRef.current?.focus();
+      /* A queued delivery must never steal focus back: the operator may
+         already be typing the next message. */
+      if (!outboxId) inputRef.current?.focus();
     };
     const responseEpoch = legacyResponseEpoch.current;
     let admissionRequest: Promise<ComposerSendResult> | null = null;
@@ -1515,9 +1679,10 @@ export function TmuxComposer({
               ? json.receipt.text
               : attempt?.text ?? payloadText;
             settleGeneration(admitted, attempt?.images ?? sentImages);
+            settleOutboxFromReceipt(receipt);
             if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
             if (receipt.status === "delivered") setStatus({ kind: "ok", text: t("common.sent") });
-            inputRef.current?.focus();
+            if (!outboxId) inputRef.current?.focus();
             return;
           }
           /* A definitive rejection consumed the key — the next submit is a new
@@ -1545,6 +1710,9 @@ export function TmuxComposer({
         }
         // A hard failure keeps the draft text (never cleared) so the message is
         // not lost; the error is announced by the composer's live status region.
+        // A queued submission keeps its own bubble instead, marked undelivered
+        // with a cancel — the text is never silently dropped either way.
+        settleOutbox("failed", json.error ?? t("common.failedSend"));
         setStatus({ kind: "err", text: json.error ?? t("common.failedSend") });
         return;
       }
@@ -1557,7 +1725,8 @@ export function TmuxComposer({
         persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
         if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
         settleGeneration(payloadText, attempt?.images ?? sentImages);
-        inputRef.current?.focus();
+        settleOutboxFromReceipt(json.receipt);
+        if (!outboxId) inputRef.current?.focus();
         return;
       }
       settleLegacySuccess(json);
@@ -1574,6 +1743,7 @@ export function TmuxComposer({
             ? t("composer.admissionTimedOut")
             : t("common.serverUnavailable"),
         });
+        if (!(error instanceof ComposerAdmissionTimeoutError)) settleOutbox("failed", t("common.serverUnavailable"));
         if (error instanceof ComposerAdmissionTimeoutError) {
           persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
             entry.key === clientMessageId ? { ...entry, reconciling: true } : entry));
@@ -1600,6 +1770,14 @@ export function TmuxComposer({
     } finally {
       setBusy(false);
     }
+  };
+
+  /** Takes the oldest queued submission to the wire. Serial: the dispatcher
+      never yields a second entry while this one is in flight. */
+  const dispatchQueued = (entry: OutboxEntry) => {
+    updateOutbox(cardId, entry.id, { state: "delivering" });
+    outboxKeys.current.add(entry.id);
+    void send(entry.text, { clientMessageId: entry.id }, entry.id);
   };
 
   const retryRuntimeReceipt = async (receipt: RuntimeReceipt) => {
@@ -1635,9 +1813,15 @@ export function TmuxComposer({
     });
   };
 
+  /* Every submission method funnels through the queue-first path (round-1 P1#1):
+     the Send button (this form submit), the Enter key (ComposerBar → the
+     composer's `submit`), and one-tap dictation (`stopAndSend` → the same
+     `submit`) all call `queueSubmit`. Clicking Send therefore gets the identical
+     optimistic bubble, composer clear, and queue inspection/cancellation as
+     Enter — never a bypassed direct `send()`. */
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    void send();
+    queueSubmit();
   };
 
   /* Mode chip, interrupt, compact, and attach-terminal now live in the unified
@@ -1650,6 +1834,7 @@ export function TmuxComposer({
   const deadHostBlocksSend = deadHost && !structuredSession;
   const sendBlocked = deadHostBlocksSend || reconcilingSend || Boolean(effectiveSendBlockedReason);
   const canQuickAck = (!spawnMode || relayMode) && !sendBlocked;
+  const composerHistory = outboxHistory(outbox);
   const quickAckDisabled = busy || voiceSending || attachments.images.length > 0;
 
   return (
@@ -1677,6 +1862,13 @@ export function TmuxComposer({
           adoption flap, a pane-target flap hiding the composer), so its
           deletion pass can still see who held focus. */}
       <ComposerFocusContinuity claimKeys={[cardId, file.path]} />
+      {/* Drains the outbox one message at a time (issue #561). Renders nothing;
+          the queued bubbles themselves live in the feed above. */}
+      <OutboxDispatcher
+        entries={outbox}
+        ready={!busy && !voiceSending && !reconcilingSend}
+        onDispatch={dispatchQueued}
+      />
       {/* Proactive hold hint: while the card is switching accounts, the next
           send is queued for the successor rather than delivered live. Shown
           identically under the desktop and mobile composers. */}
@@ -1779,6 +1971,9 @@ export function TmuxComposer({
         sendTitleRecording={t("composer.stopAndSendTitle")}
         sendIdleClassName="border-accent bg-accent hover:opacity-90"
         sendMenuLabel={t("composer.sendMenuTitle")}
+        /* ArrowUp/ArrowDown in an empty composer walk what is queued and what
+           was already sent, newest first (issue #561). */
+        history={composerHistory}
         sendMenuActions={
           canQuickAck
             ? [
@@ -1788,14 +1983,22 @@ export function TmuxComposer({
                   description: t("composer.quickAck"),
                   disabled: quickAckDisabled,
                   tone: "ok",
-                  onSelect: () => void send(t("composer.quickAck")),
+                  /* Queue-first like every other submission (finding 5): the ack
+                     enqueues behind any active delivery, renders immediately, is
+                     cancellable, joins history, and dispatches once — while the
+                     operator's typed draft and staged tiles stay put. */
+                  onSelect: () => queueSubmit(t("composer.quickAck"), { preserveDraft: true }),
                 },
               ]
             : []
         }
         showImage={!deadHostBlocksSend}
-        imageDisabled={structuredImagesDisabled && caps.surface !== "dead"}
-        imageDisabledReason={caps.surface === "dead" ? undefined : structuredImagesReason}
+        /* A dead structured surface can still recover TEXT while its image
+           pipeline waits for the host to recover (finding 4): the picker stays
+           visible so staged tiles remain removable, and disables with the
+           localized recovery reason so an image submission holds until recovery. */
+        imageDisabled={structuredImagesDisabled}
+        imageDisabledReason={structuredImagesReason}
         sendPayloadAvailable={replayGenerationAvailable}
         sendDisabledReason={deadHostBlocksSend
           ? t("deadHost.sendBlocked")

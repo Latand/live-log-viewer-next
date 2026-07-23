@@ -564,22 +564,6 @@ export function ProjectDashboard({
     () => new Set([...board.explicitManual, ...prefs.expanded]),
     [board.explicitManual, prefs.expanded],
   );
-  /* Pipeline review stages remain real conversation cards inside their colored
-     stage group. Standalone flow reviewers still fold into their round decks. */
-  const compactLayoutFlows = useMemo(
-    () => compactPipelineLayoutFlows(pipelines, deckFlows),
-    [pipelines, deckFlows],
-  );
-  const groupFiles = useMemo(
-    () => foldClaimedReviewers(files, compactLayoutFlows),
-    [files, compactLayoutFlows],
-  );
-  /* Earlier retries and superseded bindings live in the stage's compact
-     history. The latest attempt of every launched stage stays in the scene. */
-  const compactPipelinePaths = useMemo(
-    () => compactPipelineArtifactPaths(pipelines, deckFlows, files),
-    [pipelines, deckFlows, files],
-  );
   /* The latest attempt transcript of every current stage on an ACTIVE
      (cursor-bearing) pipeline stays a full-size real stage card (#507 F2). The
      idle-worker auto-collapse (#112) classifies a stage transcript as a
@@ -587,10 +571,33 @@ export function ProjectDashboard({
      into the pipeline worker stack — dropping its real card or duplicating it
      beside the stack. Protecting exactly this full-pane set keeps one surface
      per stage; older retries and completed/closed pipelines are absent, so
-     their compaction is preserved (#507 final review F1). */
+     their compaction is preserved (#507 final review F1).
+     Derived BEFORE `groupFiles` (issue #560): the review stage's current
+     reviewer transcript is one of these full-pane paths, and it must be
+     protected from `foldClaimedReviewers` — that fold runs over every file's
+     durable reviewer membership even for pipeline flows removed from the layout
+     catalog, so without protecting the live reviewer first the stage slot
+     collapses to a prompt placeholder while the round is actually running
+     (task f6c1a774 / Fix #604). */
   const protectedStagePaths = useMemo(
     () => pipelineFullPanePaths(pipelines, deckFlows),
     [pipelines, deckFlows],
+  );
+  /* Pipeline review stages remain real conversation cards inside their colored
+     stage group. Standalone flow reviewers still fold into their round decks. */
+  const compactLayoutFlows = useMemo(
+    () => compactPipelineLayoutFlows(pipelines, deckFlows),
+    [pipelines, deckFlows],
+  );
+  const groupFiles = useMemo(
+    () => foldClaimedReviewers(files, compactLayoutFlows, protectedStagePaths),
+    [files, compactLayoutFlows, protectedStagePaths],
+  );
+  /* Earlier retries and superseded bindings live in the stage's compact
+     history. The latest attempt of every launched stage stays in the scene. */
+  const compactPipelinePaths = useMemo(
+    () => compactPipelineArtifactPaths(pipelines, deckFlows, files),
+    [pipelines, deckFlows, files],
   );
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as

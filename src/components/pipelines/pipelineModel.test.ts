@@ -42,7 +42,10 @@ import {
   resolveStageNavFile,
   partitionPipelineSurfaces,
   pipelineBoardProjection,
+  pipelineFullPanePaths,
   pipelinePlaceholderStages,
+  compactPipelineLayoutFlows,
+  stageHasBoardPresence,
   pipelineStagePresentation,
   stageOverrideBody,
   templateStageInputs,
@@ -54,6 +57,7 @@ import {
   stagePromptExtra,
   stageReceivesPrevOutput,
 } from "./pipelineModel";
+import { foldClaimedReviewers } from "../flows/flowModel";
 import type { Flow } from "@/lib/flows/types";
 
 /** A structural stand-in for the locale function: echoes the key and its vars. */
@@ -366,6 +370,109 @@ describe("compactPipelineArtifactPaths", () => {
       { path: "/current" },
       { path: "/unrelated" },
     ]);
+  });
+});
+
+/**
+ * Issue #560 / Fix #604, the live 2026-07-22 12:55 EEST symptom (flow 02570ccc,
+ * pipeline dbd757cf): review round R1 is executing, `/api/files` carries the
+ * reviewer transcript with durable flow-reviewer membership, `/api/pipelines`
+ * carries it as the review stage's live attempt — yet the stage rendered only
+ * its prompt placeholder because the projection folded the reviewer out before
+ * the stage could be protected. This drives the exact client derivation order.
+ */
+describe("issue 560: a running review round renders its real conversation, not a prompt placeholder", () => {
+  const R1_PATH = "/home/user/.codex/sessions/rollout-R1.jsonl";
+  const CONV_R1 = "conversation_review-r1";
+  const stages = [stage("architect"), stage("builder"), stage("review", "review-loop")];
+
+  const p = pipeline({
+    id: "pipeline_dbd757cf",
+    stages,
+    cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
+    runs: [
+      { stageId: "architect", attempts: [{ state: "passed", agentPath: "/architect" } as never] },
+      { stageId: "builder", attempts: [{ state: "passed", agentPath: "/builder" } as never] },
+      { stageId: "review", attempts: [{ state: "reviewing", agentPath: R1_PATH, flowId: "flow_02570ccc", conversationId: CONV_R1 } as never] },
+    ],
+  });
+  const flows = [{
+    id: "flow_02570ccc",
+    implementerPath: "/builder",
+    rounds: [{ n: 1, reviewerPath: R1_PATH, reviewerConversationId: CONV_R1 }],
+  }] as unknown as Flow[];
+  /* The implementer /builder is on the board too, so the fold resolves the
+     reviewer's anchor through `reviewsConversationId` exactly as production did
+     — which is what dropped the reviewer before it could be protected. */
+  const builderFile = { path: "/builder", conversationId: "conversation-builder" } as unknown as FileEntry;
+  const reviewerFile = {
+    path: R1_PATH,
+    conversationId: CONV_R1,
+    durableLineage: {
+      memberships: [{
+        kind: "flow" as const, containerId: "flow_02570ccc", role: "reviewer",
+        slot: "reviewer:1:binding", round: 1, stageId: null, stageOrder: null,
+        parentConversationId: "conversation-builder",
+      }],
+      reviewsConversationId: "conversation-builder",
+    },
+  } as unknown as FileEntry;
+  const files = [builderFile, reviewerFile];
+
+  test("the reviewer transcript is protected as one of the pipeline's full-pane stage cards", () => {
+    /* pipelineFullPanePaths must claim the live reviewer transcript BEFORE any
+       fold runs — this is the protection ProjectDashboard now applies first. */
+    expect(pipelineFullPanePaths([p], flows).has(R1_PATH)).toBe(true);
+  });
+
+  test("the fold drops the reviewer without protection but keeps it once protected", () => {
+    /* The regression: the pipeline flow is intentionally absent from the layout
+       catalog (compactPipelineLayoutFlows), yet foldClaimedReviewers folds the
+       reviewer by its durable membership anyway — leaving the stage a
+       placeholder. With the current round protected, it survives as a card. */
+    const layoutFlows = compactPipelineLayoutFlows([p], flows);
+    expect(layoutFlows.some((flow) => flow.id === "flow_02570ccc")).toBe(false);
+
+    const unprotected = foldClaimedReviewers(files, layoutFlows);
+    expect(unprotected.some((file) => file.path === R1_PATH)).toBe(false);
+
+    const protectedPaths = pipelineFullPanePaths([p], flows);
+    const groupFiles = foldClaimedReviewers(files, layoutFlows, protectedPaths);
+    expect(groupFiles.some((file) => file.path === R1_PATH)).toBe(true);
+  });
+
+  test("the reviewer transcript stays a full card and never folds into compact evidence", () => {
+    expect(compactPipelineArtifactPaths([p], flows, files).has(R1_PATH)).toBe(false);
+  });
+
+  test("once the reviewer transcript is a placed node the review stage is materialized, not a placeholder", () => {
+    const reviewStage = stages[2]!;
+    const placed = new Set([R1_PATH]);
+    const noFlowDecks = new Set<string>(); // the pipeline folds the flow deck out of layout
+
+    expect(stageHasBoardPresence(p, reviewStage, placed, noFlowDecks)).toBe(true);
+    expect(pipelineStagePresentation(p, reviewStage, placed, noFlowDecks)).toBe("materialized");
+
+    /* And a review stage whose reviewer has NOT been placed yet still needs a
+       surface — it is not silently blank — so it reports as evidence/queued,
+       never "materialized". */
+    const unplaced = pipelineStagePresentation(p, reviewStage, new Set(), noFlowDecks);
+    expect(unplaced).not.toBe("materialized");
+  });
+
+  test("an unrun review stage with no round yet keeps its prompt placeholder", () => {
+    const noRounds = pipeline({
+      stages,
+      cursor: { stageId: "builder", state: "running", input: null, activatedBy: null },
+      runs: [
+        { stageId: "architect", attempts: [{ state: "passed", agentPath: "/architect" } as never] },
+        { stageId: "builder", attempts: [{ state: "running", agentPath: "/builder" } as never] },
+      ],
+    });
+    const reviewStage = stages[2]!;
+    /* No attempt for the review stage → no board presence → the future prompt
+       is still allowed to render. */
+    expect(stageHasBoardPresence(noRounds, reviewStage, new Set(["/builder"]), new Set())).toBe(false);
   });
 });
 

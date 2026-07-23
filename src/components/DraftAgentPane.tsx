@@ -6,6 +6,7 @@ import { roleDescription, roleName, roleParamDescription, roleParamLabel, rolePa
 import { Play, X } from "@/components/icons";
 import { Select } from "@/components/ui/Select";
 import { useComposer } from "@/hooks/useComposer";
+import { seedLaunchOutbox } from "@/components/conversation/outbox";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { codexModelSupportsImages, defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
@@ -13,7 +14,7 @@ import { requestFilesRefresh } from "@/lib/filesEvents";
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
 import type { RoleDefinition } from "@/lib/roles/types";
 import type { FileEntry } from "@/lib/types";
-import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
+import { conversationIdentity, withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 import { ComposerBar } from "./ComposerBar";
@@ -624,12 +625,28 @@ export function DraftAgentPane({
     }).catch(() => {});
   }, []);
 
-  /* The handover uses the exact receipt path or conversation id. A nearby
-     transcript can be a simultaneous draft, so it cannot establish ownership. */
+  /* The handover uses the exact receipt path, conversation id, or — when the
+     accepted POST's response was lost — the durable projection's exact
+     clientAttemptId (finding 3). A nearby transcript can be a simultaneous draft,
+     so it cannot establish ownership. */
   useEffect(() => {
     if (!attempt) return;
     const hit = matchSpawnedFile(attempt, files);
-    if (hit) onSpawned(hit);
+    if (!hit) return;
+    /* Lost-response recovery: with no response, submitAttempt never seeded the
+       launch prompt. Seed it now under the canonical identity, keyed by the
+       launch id so the success-path seed (or a reload replay) is a no-op — the
+       queued canonical window shows the initial prompt exactly once. */
+    const launchId = hit.spawn?.launchId ?? attempt.launchId;
+    if (launchId && (attempt.prompt.trim() || attempt.hasImages)) {
+      seedLaunchOutbox(conversationIdentity(hit), {
+        id: launchId,
+        text: attempt.prompt,
+        images: attempt.request?.images.length ?? 0,
+        at: attempt.at,
+      });
+    }
+    onSpawned(hit);
   }, [files, attempt, onSpawned]);
 
   /* One bounded timer per attempt: a known-path boot only earns the slow hint
@@ -676,6 +693,23 @@ export function DraftAgentPane({
       const outcome = classifySpawnResponse(res.status, res.ok, json);
       if (typeof json?.launchId === "string" && typeof json.conversationId === "string") requestFilesRefresh();
       if (outcome.kind === "launched") {
+        /* Seed the operator's launch prompt as the conversation's first
+           optimistic user bubble (round-1 P1#2): the SPAWN delivers it, so the
+           queued launch window shows the message immediately instead of an empty
+           feed under status chips. Keyed on the durable conversation identity
+           (the same identity the spawn placeholder and the materialized
+           transcript share) and by the launch id, so a reload-replay is a no-op.
+           When only the launch id is known yet, seed under the `spawn:` route so
+           the window's composer adopts it forward onto the conversation. */
+        const outboxCardId = outcome.conversationId ?? (outcome.launchId ? `spawn:${outcome.launchId}` : null);
+        if (outboxCardId && outcome.launchId) {
+          seedLaunchOutbox(outboxCardId, {
+            id: outcome.launchId,
+            text: candidate.prompt,
+            images: candidate.request.images.length,
+            at: candidate.at,
+          });
+        }
         setAttempt(applySpawnOutcome(candidate, outcome));
       } else if (outcome.kind === "failed-launch") {
         setAttempt(applySpawnFailure(candidate, outcome));

@@ -6,7 +6,7 @@ import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
 import { agentRegistry, conversationLookupFromSnapshot, supersedenceChainTail } from "@/lib/agent/registry";
-import { preallocatedStructuredSpawnCards } from "@/lib/agent/spawnProjection";
+import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { repositoryForProjectRoot } from "@/lib/flows/git";
@@ -100,7 +100,15 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
   const registrySnapshot = registry.readOnlySnapshot();
-  files.push(...preallocatedStructuredSpawnCards(files, registrySnapshot));
+  /* One launch read-model (issue #569): a launch either projects the
+     conversation window itself (nothing materialized yet) or folds into the
+     live conversation as transient chips — never both. */
+  const launchProjection = projectLaunchConversations(files, registrySnapshot);
+  files.push(...launchProjection.cards);
+  for (const file of files) {
+    const launch = launchProjection.facts.get(file.path);
+    if (launch) file.launch = launch;
+  }
   const conversationLookup = conversationLookupFromSnapshot(registrySnapshot);
   const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
   const filesByPath = new Map(files.map((file) => [file.path, file]));
@@ -565,6 +573,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     tasks: tasks.tasks,
     systemHealth: { tmux: tmuxEndpointHealth(), registry: registryHealth },
     conversationAliases: registrySnapshot.conversationAliases,
+    ...(Object.keys(launchProjection.routes).length ? { launchRoutes: launchProjection.routes } : {}),
     ...(pipelinesError ? { pipelinesError } : {}),
   } satisfies FilesResponse);
   /* The client re-polls every 10 s and this ~410 KB payload is usually

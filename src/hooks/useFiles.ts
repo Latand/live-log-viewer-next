@@ -42,11 +42,13 @@ export interface FilesData {
   pipelinesError?: string;
   systemHealth: { tmux: TmuxEndpointHealth };
   conversationAliases: Record<string, string>;
+  /** `spawn:<launchId>` → canonical conversation id (issue #569). */
+  launchRoutes: Record<string, string>;
   loaded: boolean;
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
+const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: false };
 
 export function filesApiUrl(_project?: string | null, pinnedPath?: string | null): string {
   const params: string[] = [];
@@ -101,7 +103,7 @@ function patchRows<T>(previous: readonly T[], incoming: readonly T[], keyOf: (va
 
 function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: string): FilesData {
   if (Array.isArray(parsed)) {
-    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true };
+    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: true };
   }
   return {
     files: parsed.files ?? [],
@@ -116,6 +118,7 @@ function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: stri
     pipelinesError: parsed.pipelinesError,
     systemHealth: parsed.systemHealth ?? HEALTHY_SYSTEM,
     conversationAliases: parsed.conversationAliases ?? {},
+    launchRoutes: parsed.launchRoutes ?? {},
     loaded: true,
   };
 }
@@ -134,6 +137,9 @@ function patchFilesData(previous: FilesData, incoming: FilesData): FilesData {
     conversationAliases: equalValue(previous.conversationAliases, incoming.conversationAliases)
       ? previous.conversationAliases
       : incoming.conversationAliases,
+    launchRoutes: equalValue(previous.launchRoutes, incoming.launchRoutes)
+      ? previous.launchRoutes
+      : incoming.launchRoutes,
   };
 }
 

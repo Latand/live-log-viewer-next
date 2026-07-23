@@ -105,7 +105,7 @@ export function Viewer() {
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [catalogPin, dispatchCatalogPin] = useReducer(reduceCatalogPin, null);
-  const { files: allFiles, requestScope, projectCatalog, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
+  const { files: allFiles, requestScope, projectCatalog, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, launchRoutes, loaded } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -245,7 +245,7 @@ export function Viewer() {
        has already folded out of `files`. Resolving against `allFiles` keeps that
        predecessor visible long enough to redirect the link to its current
        generation; the canonical `#c=` id resolves the same way. */
-    const hit = resolveConversationTarget(allFiles, pendingHash, conversationAliases);
+    const hit = resolveConversationTarget(allFiles, pendingHash, conversationAliases, launchRoutes);
     /* A miss keeps the request pending: the pinned `path` param asks the
        scanner to include the exact transcript on the next poll, so a fresh
        `#f=` link to a demoted archived predecessor resolves once that poll
@@ -254,7 +254,7 @@ export function Viewer() {
       openPinnedFile(hit, true);
       setPendingHash(null);
     }
-  }, [pendingHash, allFiles, conversationAliases, openPinnedFile]);
+  }, [pendingHash, allFiles, conversationAliases, launchRoutes, openPinnedFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const releaseCatalogFile = useCallback((path: string) => {

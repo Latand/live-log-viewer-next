@@ -249,17 +249,34 @@ export function claimedReviewerDescendantPaths(files: FileEntry[], flows: Flow[]
  * Explicitly-opened and authorship-protected reviewers that have no round deck
  * are recovered separately by `protectedReviewerNodes` and materialized as
  * standalone nodes (issue #112), so folding here stays unconditional.
+ *
+ * `protectedPaths` is the exception the pipeline lane needs (issue #560): a
+ * pipeline review stage's CURRENT reviewer round is not a standalone flow
+ * reviewer to be folded into a round deck — it is that stage's live conversation
+ * window and must stay a real card inside the pipeline group. The second loop
+ * below folds by durable `reviewer` membership regardless of whether the flow is
+ * in `flows` (a pipeline flow is intentionally removed from the layout catalog
+ * by `compactPipelineLayoutFlows`), so without this guard the current reviewer
+ * is dropped before `pipelineFullPanePaths` can protect it and the stage slot
+ * collapses to a prompt placeholder (task f6c1a774 / Fix #604). Protected
+ * reviewers are never anchors either, so their own children keep their real
+ * parent.
  */
-export function foldClaimedReviewers(files: FileEntry[], flows: Flow[]): FileEntry[] {
+export function foldClaimedReviewers(
+  files: FileEntry[],
+  flows: Flow[],
+  protectedPaths: ReadonlySet<string> = EMPTY_PROTECTED,
+): FileEntry[] {
   const anchorByReviewer = new Map<string, string>();
   for (const flow of flows) {
     for (const round of flow.rounds) {
-      if (round.reviewerPath) anchorByReviewer.set(round.reviewerPath, flow.implementerPath);
+      if (round.reviewerPath && !protectedPaths.has(round.reviewerPath)) anchorByReviewer.set(round.reviewerPath, flow.implementerPath);
     }
   }
   const pathByConversationId = new Map(withoutArchivedPredecessors(files).flatMap((file) =>
     file.conversationId ? [[file.conversationId, file.path] as const] : []));
   for (const file of files) {
+    if (protectedPaths.has(file.path)) continue;
     const membership = file.durableLineage?.memberships.find((candidate) => candidate.kind === "flow" && candidate.role === "reviewer");
     if (!membership) continue;
     const flow = flows.find((candidate) => candidate.id === membership.containerId);
@@ -278,6 +295,8 @@ export function foldClaimedReviewers(files: FileEntry[], flows: Flow[]): FileEnt
   }
   return out;
 }
+
+const EMPTY_PROTECTED: ReadonlySet<string> = new Set();
 
 /** A conversation that can host a new flow: a root claude/codex session without one. */
 export function canStartFlow(file: FileEntry, activeByImplementer: ReadonlyMap<string, Flow>): boolean {

@@ -32,7 +32,6 @@ import { SessionTitle } from "./session/SessionTitle";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { RateLimitBadge } from "./RateLimitBadge";
-import { StructuredSpawnStatus } from "./StructuredSpawnStatus";
 import { TaskRelationStrip } from "./tasks/TaskRelationStrip";
 import type { TaskRelation } from "./tasks/taskRelations";
 import { WakeupChip, wakeupChipKey } from "./WakeupChip";
@@ -475,33 +474,34 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             ))}
           </FlipRow>
         ) : null}
-        {file.spawn ? (
-          <StructuredSpawnStatus spawn={file.spawn} onRetry={onSpawnRetry ? () => onSpawnRetry(file) : undefined} />
-        ) : (
-          <>
-            {/* The "done" seam of a committed migration names the account this
-                conversation continued from, above its transcript. */}
-            <MigrationDivider predecessorLabel={file.predecessorLabel} />
-            <LogFeed
-              file={file}
-              showSvc={false}
-              lineFilter=""
-              onStatus={noop}
-              paused={feedPaused}
-              follow
-              setFollow={noop}
-              compact
-            />
-            {/* Unified control strip (issue #241): the single action surface, mounted
-                once here so it exists on every surface — including `noComposer`
-                review rounds that still need Stop. Renders nothing on surfaces where
-                no control applies. Dormant far-zoom board nodes suppress it entirely
-                (the dormant-node contract): the strip returns on activation, and
-                active review panes keep it regardless of `noComposer`. */}
-            {dormant || !showSecondary ? null : <AgentControlStrip file={file} />}
-            {noComposer || superseded ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} sendBlockedReason={sendBlockedReason} />}
-          </>
-        )}
+        {/* ONE conversation window (issue #569). Queued, delivering, and live
+            are lifecycle states of the same shell, feed, and composer — never a
+            different card type. A launch that has not materialized yet renders
+            here identically; its status lives as compact chips inside the feed
+            (LaunchChips), so the operator can type into the window, watch the
+            first message queue, and see the reply stream in the same place. */}
+        {/* The "done" seam of a committed migration names the account this
+            conversation continued from, above its transcript. */}
+        <MigrationDivider predecessorLabel={file.predecessorLabel} />
+        <LogFeed
+          file={file}
+          showSvc={false}
+          lineFilter=""
+          onStatus={noop}
+          paused={feedPaused}
+          follow
+          setFollow={noop}
+          compact
+          onLaunchRetry={onSpawnRetry && file.spawn ? () => onSpawnRetry(file) : undefined}
+        />
+        {/* Unified control strip (issue #241): the single action surface, mounted
+            once here so it exists on every surface — including `noComposer`
+            review rounds that still need Stop. Renders nothing on surfaces where
+            no control applies. Dormant far-zoom board nodes suppress it entirely
+            (the dormant-node contract): the strip returns on activation, and
+            active review panes keep it regardless of `noComposer`. */}
+        {dormant || !showSecondary ? null : <AgentControlStrip file={file} />}
+        {noComposer || superseded ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} sendBlockedReason={sendBlockedReason} />}
       </section>
     </div>
   );
