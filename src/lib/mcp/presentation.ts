@@ -215,6 +215,160 @@ export function describeMcpCall(
     };
   }
 
+  if (toolName === "board_snapshot") {
+    return {
+      icon: "conversation",
+      verb: "Reading",
+      title: `Reading board snapshot${string(args.project) ? `: ${compact(string(args.project))}` : ""}`,
+      subtitle: replaySubtitle(result, typeof result.count === "number" ? `${result.count} conversations` : ""),
+      links: [],
+    };
+  }
+
+  if (toolName === "list_flows") {
+    return {
+      icon: "pipeline",
+      verb: "Listing",
+      title: `Listing flows${string(args.project) ? `: ${compact(string(args.project))}` : ""}`,
+      subtitle: replaySubtitle(result, typeof result.count === "number" ? `${result.count} found` : ""),
+      links: [],
+    };
+  }
+
+  if (toolName === "get_flow") {
+    const id = string(args.flowId) || string(result.flowId);
+    return {
+      icon: "pipeline",
+      verb: "Opening",
+      title: `Opening flow: ${id || "flow"}`,
+      subtitle: replaySubtitle(result, string(record(result.flow).state)),
+      links: [],
+    };
+  }
+
+  if (toolName === "flow_action") {
+    const id = string(args.flowId) || string(result.flowId);
+    const action = string(args.action);
+    const verbs: Record<string, string> = {
+      pause: "Pausing",
+      resume: "Resuming",
+      advance: "Advancing",
+      "retry-round": "Retrying",
+      "cancel-round": "Cancelling round in",
+      extend: "Extending",
+      "another-round": "Starting another round in",
+      close: "Closing",
+    };
+    const verb = verbs[action] ?? "Updating";
+    return {
+      icon: "pipeline",
+      verb,
+      title: `${verb} flow${id ? ` ${id}` : ""}`,
+      subtitle: replaySubtitle(result, action),
+      links: [],
+    };
+  }
+
+  if (toolName === "list_pipelines") {
+    return {
+      icon: "pipeline",
+      verb: "Listing",
+      title: `Listing pipelines${string(args.project) ? `: ${compact(string(args.project))}` : ""}`,
+      subtitle: replaySubtitle(result, typeof result.count === "number" ? `${result.count} found` : ""),
+      links: [],
+    };
+  }
+
+  if (toolName === "conversation_action") {
+    const conversationId = string(result.conversationId) || string(args.conversationId);
+    const action = string(args.action);
+    const verbs: Record<string, string> = {
+      interrupt: "Interrupting",
+      kill: "Killing",
+      resume: "Resuming",
+      compact: "Compacting",
+      "dialog-key": "Answering dialog in",
+    };
+    const verb = verbs[action] ?? "Controlling";
+    return {
+      icon: "message",
+      verb,
+      title: `${verb} conversation${conversationId ? ` ${conversationId}` : ""}`,
+      subtitle: replaySubtitle(result, string(result.operationId)),
+      links: conversationId
+        ? [{ kind: "conversation", id: conversationId, label: "Open conversation", href: `#c=${encodeURIComponent(conversationId)}` }]
+        : [],
+    };
+  }
+
+  if (toolName === "operator_snapshot") {
+    return {
+      icon: "conversation",
+      verb: "Reading",
+      title: "Reading operator snapshot",
+      subtitle: replaySubtitle(result, string(record(result.view).mode)),
+      links: [],
+    };
+  }
+
+  if (toolName === "list_tasks") {
+    return {
+      icon: "task",
+      verb: "Listing",
+      title: `Listing tasks${string(args.project) ? `: ${compact(string(args.project))}` : ""}`,
+      subtitle: replaySubtitle(result, typeof result.count === "number" ? `${result.count} found` : ""),
+      links: [],
+    };
+  }
+
+  if (toolName === "get_task") {
+    const id = entityId(result, "task") || string(args.taskId);
+    return {
+      icon: "task",
+      verb: "Opening",
+      title: `Opening task: ${id || "task"}`,
+      subtitle: replaySubtitle(result, string(record(result.task).status)),
+      links: entityLink("task", id),
+    };
+  }
+
+  if (toolName === "deployment_status") {
+    const id = string(args.deploymentId) || string(result.deploymentId) || string(args.operationId) || string(result.operationId);
+    return {
+      icon: "deploy",
+      verb: "Reading",
+      title: `Reading deployment status${id ? `: ${id}` : ""}`,
+      subtitle: replaySubtitle(result, string(record(result.deployment).state) || string(record(record(result.operation).receipt).status)),
+      links: [],
+    };
+  }
+
+  if (toolName === "resources") {
+    return {
+      icon: "tool",
+      verb: "Reading",
+      title: "Reading resources",
+      subtitle: replaySubtitle(result, Array.isArray(result.sessions) ? `${result.sessions.length} sessions` : ""),
+      links: [],
+    };
+  }
+
+  if (toolName === "conversation_migration") {
+    const conversationId = string(result.conversationId) || string(args.conversationId);
+    const action = string(args.action);
+    const verbs: Record<string, string> = { reseat: "Reseating", retry: "Retrying", rollback: "Rolling back" };
+    const verb = verbs[action] ?? "Migrating";
+    return {
+      icon: "conversation",
+      verb,
+      title: `${verb} conversation migration${conversationId ? ` for ${conversationId}` : ""}`,
+      subtitle: replaySubtitle(result, string(result.operationId)),
+      links: conversationId
+        ? [{ kind: "conversation", id: conversationId, label: "Open conversation", href: `#c=${encodeURIComponent(conversationId)}` }]
+        : [],
+    };
+  }
+
   return {
     icon: "tool",
     verb: "Running",

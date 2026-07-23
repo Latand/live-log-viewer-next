@@ -20,6 +20,7 @@ export interface StructuredControlRequest {
   path: string;
   conversationId: string;
   action: string;
+  operationId?: string;
   reconfiguration?: Partial<AgentReconfiguration>;
 }
 
@@ -126,7 +127,7 @@ export async function dispatchStructuredControl(
 
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   if (!client) return { status: 503, body: { error: "structured runtime host is unavailable" } };
-  const operationId = (dependencies.operationId ?? newOperationId)();
+  const operationId = request.operationId ?? (dependencies.operationId ?? newOperationId)();
   try {
     const reconfiguration = request.action === "reconfigure"
       ? reconfigurationFromBody(conversation.engine, request.reconfiguration ?? {})

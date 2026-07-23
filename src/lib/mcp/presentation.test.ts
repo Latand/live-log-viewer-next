@@ -39,6 +39,18 @@ describe("describeMcpCall", () => {
       ["get_conversation", { conversationId: "conversation_a" }, "conversation", "Opening conversation"],
       ["deploy_exact_sha", { revision: "abcdef1234567890", confirm: "deploy" }, "deploy", "Deploying revision"],
       ["get_pipeline", { pipelineId: "pipe-a" }, "pipeline", "Opening pipeline"],
+      ["board_snapshot", { project: "viewer" }, "conversation", "Reading board snapshot"],
+      ["list_flows", { project: "viewer" }, "pipeline", "Listing flows"],
+      ["get_flow", { flowId: "flow-a" }, "pipeline", "Opening flow"],
+      ["flow_action", { flowId: "flow-a", action: "pause" }, "pipeline", "Pausing flow"],
+      ["list_pipelines", { project: "viewer" }, "pipeline", "Listing pipelines"],
+      ["conversation_action", { conversationId: "conversation_a", action: "interrupt" }, "message", "Interrupting conversation"],
+      ["operator_snapshot", { scope: { kind: "focused" } }, "conversation", "Reading operator snapshot"],
+      ["list_tasks", { project: "viewer" }, "task", "Listing tasks"],
+      ["get_task", { taskId: "task-a" }, "task", "Opening task"],
+      ["deployment_status", { deploymentId: "deployment-a" }, "deploy", "Reading deployment status"],
+      ["resources", { fresh: true }, "tool", "Reading resources"],
+      ["conversation_migration", { conversationId: "conversation_a", action: "rollback" }, "conversation", "Rolling back conversation migration"],
     ] as const;
 
     for (const [tool, args, icon, prefix] of cases) {
