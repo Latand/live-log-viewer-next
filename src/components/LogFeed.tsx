@@ -409,9 +409,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const transcriptEchoes = useMemo(() => {
     return feed.items.flatMap(({ anchorKey, key, item }) =>
       item.kind === "user" && item.text.trim()
-        ? [{ id: anchorKey ?? `key:${key}`, text: item.text }]
+        ? [{
+            generation: file?.path,
+            id: anchorKey ?? `key:${key}`,
+            text: item.text,
+          }]
         : []);
-  }, [feed.items]);
+  }, [feed.items, file?.path]);
   const transcriptEchoCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const echo of transcriptEchoes) {

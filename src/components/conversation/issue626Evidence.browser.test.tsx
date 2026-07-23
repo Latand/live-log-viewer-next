@@ -30,6 +30,7 @@ import { installActEnv } from "@/test-helpers/actEnv";
 import { resetCanonicalAssistantClaimsForTests } from "./liveTurnHandoff";
 import {
   enqueueOutbox,
+  readOutbox,
   resetOutboxForTests,
 } from "./outbox";
 
@@ -710,3 +711,43 @@ test("issue 626 production evidence preserves lifecycle ownership and bounded ha
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
 }, 120_000);
+
+test("issue 626 production feed namespaces identical row anchors by transcript path", async () => {
+  const firstPath = "/workspace/.codex/sessions/generation-one.jsonl";
+  const secondPath = "/workspace/.codex/sessions/generation-two.jsonl";
+  const firstState: EvidenceState = {
+    ...STATES[2]!,
+    id: "generation-one",
+    path: firstPath,
+  };
+  const secondState: EvidenceState = {
+    ...STATES[2]!,
+    id: "generation-two",
+    path: secondPath,
+  };
+
+  enqueueOutbox(CONVERSATION_ID, {
+    id: "generation-one-entry",
+    text: launchPrompt,
+    images: 0,
+    at: Date.parse("2026-07-23T09:00:00.000Z"),
+  });
+  await renderState(firstState);
+  const firstEchoId = readOutbox(CONVERSATION_ID)[0]?.retiredEchoId;
+  expect(firstEchoId).toBeString();
+
+  enqueueOutbox(CONVERSATION_ID, {
+    id: "generation-two-entry",
+    text: launchPrompt,
+    images: 0,
+    at: Date.parse("2026-07-23T09:00:10.000Z"),
+  });
+  await renderState(secondState);
+  const entries = readOutbox(CONVERSATION_ID);
+  expect(entries.map((entry) => entry.id)).toEqual([
+    "generation-one-entry",
+    "generation-two-entry",
+  ]);
+  expect(entries[1]?.retiredEchoId).toBeString();
+  expect(entries[1]?.retiredEchoId).not.toBe(firstEchoId);
+});
