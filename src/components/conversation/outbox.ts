@@ -155,11 +155,15 @@ const OCCURRENCE_COMPLETED_LIMIT = ECHO_LEDGER_LIMIT;
 const occurrenceTombstones = new Map<string, readonly PersistedOccurrenceTombstone[]>();
 const EMPTY_OCCURRENCE_TOMBSTONES: readonly PersistedOccurrenceTombstone[] = [];
 
+type CurrentLaunchTerminalReason = "response-started" | "delivered-ttl";
+
 interface PersistedCurrentLaunch {
   id: string;
   at: number;
+  settledAt?: number;
   retiredEchoId?: string;
   retiredAt?: number;
+  terminalReason?: CurrentLaunchTerminalReason;
 }
 
 /** One stable conversation has one current launch identity. */
@@ -255,8 +259,12 @@ function isPersistedCurrentLaunch(value: unknown): value is PersistedCurrentLaun
   const raw = value as Record<string, unknown>;
   return typeof raw.id === "string"
     && typeof raw.at === "number"
+    && (raw.settledAt === undefined || typeof raw.settledAt === "number")
     && (raw.retiredEchoId === undefined || typeof raw.retiredEchoId === "string")
-    && (raw.retiredAt === undefined || typeof raw.retiredAt === "number");
+    && (raw.retiredAt === undefined || typeof raw.retiredAt === "number")
+    && (raw.terminalReason === undefined
+      || raw.terminalReason === "response-started"
+      || raw.terminalReason === "delivered-ttl");
 }
 
 function readCurrentLaunch(cardId: string): PersistedCurrentLaunch | null {
@@ -290,17 +298,22 @@ function selectCurrentLaunch(
   if (!current) return candidate;
   if (current.id === candidate.id) {
     const latest = candidate.at > current.at ? candidate : current;
-    const retired = [current, candidate]
-      .filter((launch) => launch.retiredEchoId)
+    const settledAt = Math.max(current.settledAt ?? -Infinity, candidate.settledAt ?? -Infinity);
+    const terminal = [current, candidate]
+      .filter((launch) => launch.retiredEchoId || launch.terminalReason)
       .sort((left, right) => (left.retiredAt ?? left.at) - (right.retiredAt ?? right.at))
       .at(-1);
-    return retired?.retiredEchoId
-      ? {
-          ...latest,
-          retiredEchoId: retired.retiredEchoId,
-          retiredAt: retired.retiredAt,
+    return {
+      ...latest,
+      ...(Number.isFinite(settledAt) ? { settledAt } : {}),
+      ...(terminal
+        ? {
+          ...(terminal.retiredEchoId ? { retiredEchoId: terminal.retiredEchoId } : {}),
+          ...(terminal.retiredAt !== undefined ? { retiredAt: terminal.retiredAt } : {}),
+          ...(terminal.terminalReason ? { terminalReason: terminal.terminalReason } : {}),
         }
-      : latest;
+        : {}),
+    };
   }
   if (candidate.at !== current.at) return candidate.at > current.at ? candidate : current;
   return candidate.id > current.id ? candidate : current;
@@ -312,10 +325,49 @@ function recordCurrentLaunch(cardId: string, candidate: PersistedCurrentLaunch):
 
 function recordCurrentLaunchRetirement(
   cardId: string,
-  candidate: PersistedCurrentLaunch & { retiredEchoId: string },
+  candidate: PersistedCurrentLaunch & (
+    { retiredEchoId: string }
+    | { terminalReason: CurrentLaunchTerminalReason }
+  ),
 ): void {
   const current = readCurrentLaunch(cardId);
   if (current && current.id !== candidate.id) return;
+  recordCurrentLaunch(cardId, candidate);
+}
+
+function terminalReasonForLaunch(
+  launch: Pick<PersistedCurrentLaunch, "settledAt" | "terminalReason">,
+  nowMs: number,
+): CurrentLaunchTerminalReason | undefined {
+  if (launch.terminalReason) return launch.terminalReason;
+  if (
+    launch.settledAt !== undefined
+    && nowMs - launch.settledAt >= OUTBOX_DELIVERED_TTL_MS
+  ) return "delivered-ttl";
+  return undefined;
+}
+
+function recordCurrentLaunchEntry(cardId: string, entry: OutboxEntry, nowMs = Date.now()): void {
+  if (!entry.launchOwned) return;
+  const settledAt = entry.settledAt ?? (entry.state === "delivered" ? entry.at : undefined);
+  const terminalReason = entry.responseStartedAt !== undefined
+    ? "response-started"
+    : terminalReasonForLaunch({ settledAt }, nowMs);
+  const candidate = {
+    id: entry.id,
+    at: entry.at,
+    ...(settledAt !== undefined ? { settledAt } : {}),
+  };
+  if (terminalReason) {
+    recordCurrentLaunchRetirement(cardId, {
+      ...candidate,
+      terminalReason,
+      retiredAt: terminalReason === "response-started"
+        ? entry.responseStartedAt
+        : (settledAt ?? entry.at) + OUTBOX_DELIVERED_TTL_MS,
+    });
+    return;
+  }
   recordCurrentLaunch(cardId, candidate);
 }
 
@@ -437,6 +489,7 @@ function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone |
 function writeBounded(cardId: string, queue: readonly OutboxEntry[]): void {
   const overflow = Math.max(0, queue.length - OUTBOX_LIMIT);
   if (overflow > 0) {
+    for (const entry of queue.slice(0, overflow)) recordCurrentLaunchEntry(cardId, entry);
     const additions = queue
       .slice(0, overflow)
       .map(occurrenceTombstone)
@@ -489,16 +542,29 @@ export function seedLaunchOutbox(
 ): void {
   if (!entry.text.trim() && !entry.images) return;
   const currentLaunch = readCurrentLaunch(cardId);
-  if (currentLaunch?.id === entry.id && currentLaunch.retiredEchoId) return;
+  if (currentLaunch?.id === entry.id) {
+    const terminalReason = terminalReasonForLaunch(currentLaunch, Date.now());
+    if (terminalReason && !currentLaunch.terminalReason) {
+      recordCurrentLaunchRetirement(cardId, {
+        ...currentLaunch,
+        terminalReason,
+        retiredAt: (currentLaunch.settledAt ?? currentLaunch.at) + OUTBOX_DELIVERED_TTL_MS,
+      });
+    }
+    if (currentLaunch.retiredEchoId || terminalReason) return;
+  }
   const queue = readOutbox(cardId);
   const existing = queue.find((item) => item.id === entry.id);
   if (existing) {
-    recordCurrentLaunch(cardId, {
-      id: entry.id,
-      at: entry.at,
-      ...(existing.retiredEchoId ? { retiredEchoId: existing.retiredEchoId } : {}),
-      ...(existing.retiredAt !== undefined ? { retiredAt: existing.retiredAt } : {}),
-    });
+    recordCurrentLaunchEntry(cardId, existing);
+    if (existing.retiredEchoId) {
+      recordCurrentLaunchRetirement(cardId, {
+        id: entry.id,
+        at: entry.at,
+        retiredEchoId: existing.retiredEchoId,
+        ...(existing.retiredAt !== undefined ? { retiredAt: existing.retiredAt } : {}),
+      });
+    }
     /* Reconcile the canonical echo identity onto an already-seeded bubble (issue
        #615): the composer seeds the RAW draft first, without an echo identity (it
        never composes the role scaffold); the later server projection supplies it.
@@ -537,7 +603,10 @@ export function seedLaunchOutbox(
 export function updateOutbox(cardId: string, id: string, patch: Partial<Omit<OutboxEntry, "id">>): void {
   const queue = readOutbox(cardId);
   if (!queue.some((entry) => entry.id === id)) return;
-  write(cardId, queue.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)));
+  const next = queue.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
+  const updated = next.find((entry) => entry.id === id);
+  if (updated) recordCurrentLaunchEntry(cardId, updated);
+  write(cardId, next);
 }
 
 /** Settle one submission when the assistant starts its matching runtime turn.
@@ -546,12 +615,15 @@ export function markOutboxResponded(cardId: string, id: string, at: number): voi
   const queue = readOutbox(cardId);
   const entry = queue.find((item) => item.id === id);
   if (!entry || entry.responseStartedAt !== undefined) return;
-  write(cardId, queue.map((item) => (item.id === id ? {
+  const next = queue.map((item) => (item.id === id ? {
     ...item,
-    state: "delivered",
+    state: "delivered" as const,
     settledAt: item.settledAt ?? at,
     responseStartedAt: at,
-  } : item)));
+  } : item));
+  const updated = next.find((item) => item.id === id);
+  if (updated) recordCurrentLaunchEntry(cardId, updated, at);
+  write(cardId, next);
 }
 
 /** Remove an entry outright — the operator cancelled a message that never left. */
