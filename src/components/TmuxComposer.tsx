@@ -1399,10 +1399,10 @@ export function TmuxComposer({
    * Every pre-flight refusal happens HERE, so nothing is ever queued into a
    * wall — the queue only ever holds messages that may still be delivered.
    */
-  /* `preserveDraft` queues a message that is NOT the operator's current draft —
-     the quick-ack (finding 5). It carries no attachments, mints its OWN
-     idempotency key (leaving the draft's key intact), and leaves the composer's
-     typed text and staged tiles exactly where they were. */
+  /* `preserveDraft` queues a message that stands apart from the operator's
+     current draft — the quick-ack (finding 5). It carries no attachments, mints
+     its OWN idempotency key (leaving the draft's key intact), and leaves the
+     composer's typed text and staged tiles exactly where they were. */
   const queueSubmit = (overrideText?: string, options?: { preserveDraft?: boolean }) => {
     const preserveDraft = options?.preserveDraft ?? false;
     const requestedText = overrideText ?? textRef.current;
@@ -1993,10 +1993,10 @@ export function TmuxComposer({
             : []
         }
         showImage={!deadHostBlocksSend}
-        /* A dead structured surface can still recover TEXT, but its image pipeline
-           is unavailable until the host recovers (finding 4): the picker stays
-           visible so staged tiles remain removable, but disabled with the
-           localized recovery reason so no image submission is attempted. */
+        /* A dead structured surface can still recover TEXT while its image
+           pipeline waits for the host to recover (finding 4): the picker stays
+           visible so staged tiles remain removable, and disables with the
+           localized recovery reason so an image submission holds until recovery. */
         imageDisabled={structuredImagesDisabled}
         imageDisabledReason={structuredImagesReason}
         sendPayloadAvailable={replayGenerationAvailable}

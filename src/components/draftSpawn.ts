@@ -276,10 +276,10 @@ export function classifyTransportLoss(): SpawnOutcome {
  * concurrent draft and must never be adopted here.
  *
  * When the accepted POST's response was lost (transport drop / opaque 5xx) the
- * attempt learned neither path nor conversation id, but the durable launch
+ * attempt learned neither path nor conversation id, while the durable launch
  * projection still surfaces a `spawn` card carrying this attempt's EXACT
- * `clientAttemptId` (round-2 finding 3). That exact id — never a heuristic — lets
- * the draft adopt its own canonical conversation; unrelated launches, whose
+ * `clientAttemptId` (round-2 finding 3). That exact id is a precise match that
+ * lets the draft adopt its own canonical conversation; unrelated launches, whose
  * projected `clientAttemptId` differs or is null, stay unclaimed.
  */
 export function matchSpawnedFile(

@@ -5,9 +5,9 @@
  *   - Send stays enabled: text is admitted durably and delivered after the
  *     host recovers (the capability matrix's `dead` row keeps send ENABLED);
  *   - the image picker is DISABLED with the localized recovery reason (finding
- *     4): the dead host has no image pipeline, so the picker cannot invite a
- *     submission that would be dropped — while staged tiles stay removable and
- *     text still sends;
+ *     4): the dead host has no image pipeline, so the picker holds an image
+ *     submission until recovery, while staged tiles stay removable and text
+ *     still sends;
  *   - the model/reasoning pill is NOT offered (the matrix hides `runtime` on
  *     the dead surface), so no committed evidence may depict one.
  *
@@ -199,8 +199,8 @@ test.each(["en", "uk"] as const)(
     expect(send.disabled).toBe(false);
 
     /* Finding 4: the dead host has no image pipeline, so the picker is DISABLED
-       and names the localized recovery reason — never an enabled picker inviting
-       a submission that would be dropped. */
+       and names the localized recovery reason, keeping a submission on hold until
+       the host recovers. */
     const recoveryReason = translate(locale, "composer.imagesBlockedDuringRecovery");
     const imageButton = host.querySelector(`button[aria-label="${translate(locale, "composer.addImages")}"]`) as HTMLButtonElement;
     expect(imageButton).toBeTruthy();

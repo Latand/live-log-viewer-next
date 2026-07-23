@@ -393,8 +393,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   /* Optimistic bubbles retire on their OWN transcript echo (round-1 P1#4,
      round-2 finding 2): a bubble disappears the moment ITS echo lands, resolved
      causally by occurrence count. A user text that appears twice is two echoes
-     that retire two bubbles, and a message that predates a queued bubble does not
-     retire it. Counts (not a set) carry that occurrence information. */
+     that retire two bubbles; a message that predates a queued bubble leaves it
+     visible. The counts carry that occurrence information. */
   const transcriptEchoCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const { item } of feed.items) {

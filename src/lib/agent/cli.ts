@@ -120,10 +120,10 @@ export interface ResumeSpecOptions {
   mcpServers?: readonly string[];
   /** The conversation's authoritative working directory. When set it is the ONE
       effective cwd used for MCP policy enumeration, materialization, and the
-      rendered command — never the transcript-sniffed fallback. The resume spec
-      otherwise re-derives cwd by sniffing the transcript head and silently falls
-      back to `$HOME`, which enumerates project-scoped MCP servers in the wrong
-      directory (finding 1). Absent/empty ⇒ safe fallback to the sniffed cwd. */
+      rendered command. The resume spec otherwise re-derives cwd by sniffing the
+      transcript head and silently falls back to `$HOME`, which enumerates
+      project-scoped MCP servers in the wrong directory (finding 1). Absent/empty
+      ⇒ safe fallback to the sniffed cwd. */
   cwd?: string | null;
 }
 

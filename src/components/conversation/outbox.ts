@@ -49,9 +49,9 @@ export interface OutboxEntry {
   launchOwned?: true;
   /** Submission watermark (round-2 finding 2): how many transcript echoes of THIS
       exact text already existed when the entry was submitted. Retirement consumes
-      only echoes BEYOND this baseline, so a pre-existing identical user message
-      never retires a freshly queued bubble — its own echo, which lands later,
-      does. Absent (legacy/reloaded entries) ⇒ baseline 0, preserving the prior
+      only echoes BEYOND this baseline, so a freshly queued bubble survives a
+      pre-existing identical user message and retires when its OWN later echo
+      lands. Absent (legacy/reloaded entries) ⇒ baseline 0, preserving the prior
       "retire once the text is present" reload behaviour. */
   echoBaseline?: number;
 }
@@ -227,8 +227,8 @@ function echoKey(text: string): string {
 }
 
 /** Occurrence counts of the trimmed user-message texts in a rendered transcript,
-    keyed by {@link echoKey}. A count (not a set) is what causal retirement needs:
-    two identical user messages are two echoes that retire two bubbles. */
+    keyed by {@link echoKey}. Causal retirement needs the counts: two identical
+    user messages are two echoes that retire two bubbles. */
 export type TranscriptEchoCounts = ReadonlyMap<string, number>;
 
 /**
@@ -253,8 +253,8 @@ export function transcriptEchoCount(cardId: string, text: string): number {
 
 /**
  * The entries that still render as optimistic bubbles (round-1 P1#4, round-2
- * finding 2). A bubble retires the moment ITS OWN echo lands in the transcript —
- * resolved causally, by occurrence consumption, never by bare set membership.
+ * finding 2). A bubble retires the moment ITS OWN echo lands in the transcript,
+ * resolved causally through occurrence consumption of the echo counts.
  *
  * Each transcript echo of a text retires exactly ONE entry with that text,
  * oldest-first, and only echoes BEYOND an entry's submission watermark

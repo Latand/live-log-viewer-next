@@ -137,7 +137,7 @@ test("fresh and resumed tmux Codex enumerate project and system MCP servers when
   }
 });
 
-test("finding 1: attach enumerates MCP servers at the RECORDED project cwd, not the transcript-sniffed $HOME fallback", () => {
+test("finding 1: attach enumerates MCP servers at the RECORDED project cwd even when the transcript head sniffs to $HOME", () => {
   const home = process.env.LLV_CODEX_HOME!;
   const project = path.join(SANDBOX, "finding1-recorded-project");
   const binary = path.join(SANDBOX, "codex-mcp-list-finding1");
@@ -171,7 +171,7 @@ test("finding 1: attach enumerates MCP servers at the RECORDED project cwd, not 
     });
     expect(res.ok).toBe(true);
     if (res.ok) {
-      /* Enumeration ran in the RECORDED project dir (finding 1), never $HOME. */
+      /* Enumeration ran in the RECORDED project dir (finding 1). */
       expect(fs.realpathSync(fs.readFileSync(marker, "utf8").trim())).toBe(fs.realpathSync(project));
       expect(res.value.cwd).toBe(project);
       /* Every enumerated project server gets an explicit allowlist override: the
