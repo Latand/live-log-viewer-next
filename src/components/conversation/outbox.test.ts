@@ -312,6 +312,35 @@ test("issue 626: response evidence still reserves the first later identical user
     .toMatchObject({ retiredEchoId: "row:30:0" });
 });
 
+test("issue 626: identity adoption preserves submission order for identical occurrences", () => {
+  const provisional = "spawn:launch_626_order";
+  const conversation = "conversation_626_order";
+  const text = "same text across identity adoption";
+
+  enqueueOutbox(provisional, {
+    id: "older-provisional",
+    text,
+    images: 0,
+    at: 1_000,
+  });
+  enqueueOutbox(conversation, {
+    id: "newer-canonical",
+    text,
+    images: 0,
+    at: 2_000,
+  });
+
+  adoptOutbox(provisional, conversation);
+  expect(readOutbox(conversation).map((entry) => entry.id))
+    .toEqual(["older-provisional", "newer-canonical"]);
+
+  publishTranscriptEchoes(conversation, [{ id: "row:40:0", text }]);
+  expect(readOutbox(conversation).find((entry) => entry.id === "older-provisional"))
+    .toMatchObject({ retiredEchoId: "row:40:0" });
+  expect(readOutbox(conversation).find((entry) => entry.id === "newer-canonical")?.retiredEchoId)
+    .toBeUndefined();
+});
+
 describe("outboxStateForReceiptStatus (P1#4)", () => {
   test("admitted-but-not-delivered stays delivering; only a delivered receipt reads delivered", () => {
     expect(outboxStateForReceiptStatus("queued")).toBe("delivering");

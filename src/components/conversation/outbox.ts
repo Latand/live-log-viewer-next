@@ -349,7 +349,12 @@ export function adoptOutbox(from: string, to: string): void {
         });
       }
     }
-    write(to, [...merged.values()].slice(-OUTBOX_LIMIT));
+    write(
+      to,
+      [...merged.values()]
+        .sort((left, right) => left.at - right.at)
+        .slice(-OUTBOX_LIMIT),
+    );
     write(from, EMPTY);
   }
   reconcileEchoRetirements(to, readEchoLedger(to));
