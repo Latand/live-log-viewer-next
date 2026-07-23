@@ -1,0 +1,146 @@
+{
+  "streaming-before-tool-desktop-1280": {
+    "width": 1280,
+    "scrollWidth": 1280,
+    "feedHeight": 733,
+    "composerHeight": 86,
+    "order": [
+      "outbox",
+      "live"
+    ],
+    "liveItems": 1,
+    "toolRows": 0,
+    "toolOutputVisible": false,
+    "launchId": "launch_issue_626",
+    "conversationId": "conversation_issue_626",
+    "path": "spawn:launch_issue_626",
+    "filesRevision": "files revision 40"
+  },
+  "refresh-at-tool-transition-desktop-1280": {
+    "width": 1280,
+    "scrollWidth": 1280,
+    "feedHeight": 733,
+    "composerHeight": 86,
+    "order": [
+      "outbox",
+      "live"
+    ],
+    "liveItems": 1,
+    "toolRows": 0,
+    "toolOutputVisible": false,
+    "launchId": "launch_issue_626",
+    "conversationId": "conversation_issue_626",
+    "path": "spawn:launch_issue_626",
+    "filesRevision": "files revision 40"
+  },
+  "partial-adoption-desktop-1280": {
+    "width": 1280,
+    "scrollWidth": 1280,
+    "feedHeight": 733,
+    "composerHeight": 86,
+    "order": [
+      "user",
+      "commentary",
+      "tool",
+      "live"
+    ],
+    "liveItems": 1,
+    "toolRows": 1,
+    "toolOutputVisible": true,
+    "launchId": "launch_issue_626",
+    "conversationId": "conversation_issue_626",
+    "path": "/workspace/.codex/sessions/2026/07/23/rollout-issue-626.jsonl",
+    "filesRevision": "files revision 41"
+  },
+  "refresh-after-adoption-desktop-1280": {
+    "width": 1280,
+    "scrollWidth": 1280,
+    "feedHeight": 733,
+    "composerHeight": 86,
+    "order": [
+      "user",
+      "commentary",
+      "tool",
+      "commentary"
+    ],
+    "liveItems": 0,
+    "toolRows": 1,
+    "toolOutputVisible": true,
+    "launchId": "launch_issue_626",
+    "conversationId": "conversation_issue_626",
+    "path": "/workspace/.codex/sessions/2026/07/23/rollout-issue-626.jsonl",
+    "filesRevision": "files revision 41"
+  },
+  "streaming-before-tool-mobile-390": {
+    "width": 390,
+    "scrollWidth": 390,
+    "feedHeight": 677,
+    "composerHeight": 86,
+    "order": [
+      "outbox",
+      "live"
+    ],
+    "liveItems": 1,
+    "toolRows": 0,
+    "toolOutputVisible": false,
+    "launchId": "launch_issue_626",
+    "conversationId": "conversation_issue_626",
+    "path": "spawn:launch_issue_626",
+    "filesRevision": "files revision 40"
+  },
+  "refresh-at-tool-transition-mobile-390": {
+    "width": 390,
+    "scrollWidth": 390,
+    "feedHeight": 677,
+    "composerHeight": 86,
+    "order": [
+      "outbox",
+      "live"
+    ],
+    "liveItems": 1,
+    "toolRows": 0,
+    "toolOutputVisible": false,
+    "launchId": "launch_issue_626",
+    "conversationId": "conversation_issue_626",
+    "path": "spawn:launch_issue_626",
+    "filesRevision": "files revision 40"
+  },
+  "partial-adoption-mobile-390": {
+    "width": 390,
+    "scrollWidth": 390,
+    "feedHeight": 677,
+    "composerHeight": 86,
+    "order": [
+      "user",
+      "commentary",
+      "tool",
+      "live"
+    ],
+    "liveItems": 1,
+    "toolRows": 1,
+    "toolOutputVisible": true,
+    "launchId": "launch_issue_626",
+    "conversationId": "conversation_issue_626",
+    "path": "/workspace/.codex/sessions/2026/07/23/rollout-issue-626.jsonl",
+    "filesRevision": "files revision 41"
+  },
+  "refresh-after-adoption-mobile-390": {
+    "width": 390,
+    "scrollWidth": 390,
+    "feedHeight": 677,
+    "composerHeight": 86,
+    "order": [
+      "user",
+      "commentary",
+      "tool",
+      "commentary"
+    ],
+    "liveItems": 0,
+    "toolRows": 1,
+    "toolOutputVisible": true,
+    "launchId": "launch_issue_626",
+    "conversationId": "conversation_issue_626",
+    "path": "/workspace/.codex/sessions/2026/07/23/rollout-issue-626.jsonl",
+    "filesRevision": "files revision 41"
+  }
+}

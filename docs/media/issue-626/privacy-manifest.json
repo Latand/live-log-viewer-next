@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "partial-adoption-desktop-1280.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "bb48b7161921ec89242b5329394e56ab32dc6f651700c432e205b2a12f18f19a",
+      "sourceDigests": [
+        "ea0bda315a949dec303a0cdfb90042980330d6cd5a16830fe30601422bda90d8"
+      ],
+      "description": "Redacted placeholder retaining the desktop partial canonical-adoption evidence.",
+      "sha256": "de23a52df5e8b2a888c3380d4659e8ee21d8750b8c1c3668cb92d3dae4424c6d"
+    },
+    {
+      "path": "partial-adoption-mobile-390.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "bb48b7161921ec89242b5329394e56ab32dc6f651700c432e205b2a12f18f19a",
+      "sourceDigests": [
+        "1d66e797a1c88f07da703e24a502baaa652640747c3b3e43538e5557a49c50ba"
+      ],
+      "description": "Redacted placeholder retaining the 390-pixel partial canonical-adoption evidence.",
+      "sha256": "2b65ee498d0d392db89a810eefb004c70b2247b7b0d21c89442362a8301b9a19"
+    },
+    {
+      "path": "refresh-after-adoption-desktop-1280.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "bb48b7161921ec89242b5329394e56ab32dc6f651700c432e205b2a12f18f19a",
+      "sourceDigests": [
+        "2a0fa0d0d55a0ea0c9bde5776fb5bc74f31600119216d4f9b684e76cfa2af72b"
+      ],
+      "description": "Redacted placeholder retaining the desktop post-adoption refresh evidence.",
+      "sha256": "fa290d4fdb60d238e6fd931ba4c00ce3b985b4acd44742edafaef33f813138df"
+    },
+    {
+      "path": "refresh-after-adoption-mobile-390.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "bb48b7161921ec89242b5329394e56ab32dc6f651700c432e205b2a12f18f19a",
+      "sourceDigests": [
+        "ed9b3d4670e66d8ba33d96072e3c6f096dd1473c8a97da17c4ad13f7879fe228"
+      ],
+      "description": "Redacted placeholder retaining the 390-pixel post-adoption refresh evidence.",
+      "sha256": "ced6c12db2876fba5738a8576cab5c5f24e7be82d1ea3a848ed8529b5049bd74"
+    },
+    {
+      "path": "refresh-at-tool-transition-desktop-1280.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "bb48b7161921ec89242b5329394e56ab32dc6f651700c432e205b2a12f18f19a",
+      "sourceDigests": [
+        "69c92ef1b13b133147b040929369efafdf51175ab2c1742dd513c9049c2a32a7"
+      ],
+      "description": "Redacted placeholder retaining the desktop tool-transition refresh evidence.",
+      "sha256": "4157ffbf1e5a6556bea35b67ec6d59c83f589e2a4557c693b1ef42513351c74d"
+    },
+    {
+      "path": "refresh-at-tool-transition-mobile-390.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "bb48b7161921ec89242b5329394e56ab32dc6f651700c432e205b2a12f18f19a",
+      "sourceDigests": [
+        "2fc2ca17ebdd9afccb4b6b1176f607121f119e8b1d7aa34dba329fe38d996e98"
+      ],
+      "description": "Redacted placeholder retaining the 390-pixel tool-transition refresh evidence.",
+      "sha256": "14cfc0e99bfe52323a8fd76f80b7b0fdc72261001b025aacc15390e8b493e12c"
+    },
+    {
+      "path": "streaming-before-tool-desktop-1280.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "bb48b7161921ec89242b5329394e56ab32dc6f651700c432e205b2a12f18f19a",
+      "sourceDigests": [
+        "96929a8c1a6f4d4d116c9265efcb7b3f69e4a6be40d57588fc27a21d79109486"
+      ],
+      "description": "Redacted placeholder retaining the desktop pre-tool streaming evidence.",
+      "sha256": "8cc7d69e5ba3f88afb96552c18d87a8bfa3ca3bd4994a22e36a4753aa77c1d7b"
+    },
+    {
+      "path": "streaming-before-tool-mobile-390.png",
+      "classification": "redacted-placeholder",
+      "source": "redacted-live-capture",
+      "generator": "../../../scripts/generate-privacy-placeholders.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "privacy-placeholders-v2",
+      "generatorSha256": "bb48b7161921ec89242b5329394e56ab32dc6f651700c432e205b2a12f18f19a",
+      "sourceDigests": [
+        "060b250b5786df729ac2aaed78dba1bc804a46d219cc63d7f4e898fa759d2926"
+      ],
+      "description": "Redacted placeholder retaining the 390-pixel pre-tool streaming evidence.",
+      "sha256": "795c068e7803a48e737cc28f47558df7737daaa747a6f3bcd8d864a62f20e387"
+    }
+  ]
+}

@@ -51,6 +51,14 @@ const placeholders: Placeholder[] = [
   { path: "docs/media/issue-292/task-card-expanded-desktop.png", width: 2880, height: 1800, description: "Redacted placeholder for the expanded desktop task-card evidence." },
   { path: "docs/media/issue-353/edges-desktop.png", width: 1920, height: 1080, description: "Redacted placeholder for the desktop pipeline-edge evidence." },
   { path: "docs/media/issue-353/edges-onestage-desktop.png", width: 1920, height: 1080, description: "Redacted placeholder for the single-stage desktop edge evidence." },
+  { path: "docs/media/issue-626/partial-adoption-desktop-1280.png", width: 1280, height: 900, description: "Redacted placeholder retaining the desktop partial canonical-adoption evidence." },
+  { path: "docs/media/issue-626/partial-adoption-mobile-390.png", width: 390, height: 844, description: "Redacted placeholder retaining the 390-pixel partial canonical-adoption evidence." },
+  { path: "docs/media/issue-626/refresh-after-adoption-desktop-1280.png", width: 1280, height: 900, description: "Redacted placeholder retaining the desktop post-adoption refresh evidence." },
+  { path: "docs/media/issue-626/refresh-after-adoption-mobile-390.png", width: 390, height: 844, description: "Redacted placeholder retaining the 390-pixel post-adoption refresh evidence." },
+  { path: "docs/media/issue-626/refresh-at-tool-transition-desktop-1280.png", width: 1280, height: 900, description: "Redacted placeholder retaining the desktop tool-transition refresh evidence." },
+  { path: "docs/media/issue-626/refresh-at-tool-transition-mobile-390.png", width: 390, height: 844, description: "Redacted placeholder retaining the 390-pixel tool-transition refresh evidence." },
+  { path: "docs/media/issue-626/streaming-before-tool-desktop-1280.png", width: 1280, height: 900, description: "Redacted placeholder retaining the desktop pre-tool streaming evidence." },
+  { path: "docs/media/issue-626/streaming-before-tool-mobile-390.png", width: 390, height: 844, description: "Redacted placeholder retaining the 390-pixel pre-tool streaming evidence." },
   { path: "docs/acceptance/pr-441/pr-441-desktop-badges.png", width: 1040, height: 600, description: "Redacted placeholder retaining the desktop subagent badge anchor viewport." },
   { path: "docs/acceptance/pr-441/pr-441-mobile-390.png", width: 390, height: 844, description: "Redacted placeholder retaining the 390-pixel mobile subagent badge viewport." },
   { path: "docs/issue-440/desktop-1440x1000-0-images.png", width: 1440, height: 1000, description: "Redacted placeholder for the desktop focused-chat state without staged images." },
@@ -99,6 +107,14 @@ const sourceDigests: Record<string, string> = {
   "docs/media/issue-292/task-card-expanded-desktop.png": "7bed3aeebfd4ece12c12774aee3dda4c4089b77aff4b618ddc92445c570ac478",
   "docs/media/issue-353/edges-desktop.png": "386c9349aa6fc59562ae62ad6a57ba4c13c21422cc81a0f7357681937ea72ae2",
   "docs/media/issue-353/edges-onestage-desktop.png": "eed6170341efdbefe837fefa4d284a8680f8c29122a4a8bee49693659df83944",
+  "docs/media/issue-626/partial-adoption-desktop-1280.png": "ea0bda315a949dec303a0cdfb90042980330d6cd5a16830fe30601422bda90d8",
+  "docs/media/issue-626/partial-adoption-mobile-390.png": "1d66e797a1c88f07da703e24a502baaa652640747c3b3e43538e5557a49c50ba",
+  "docs/media/issue-626/refresh-after-adoption-desktop-1280.png": "2a0fa0d0d55a0ea0c9bde5776fb5bc74f31600119216d4f9b684e76cfa2af72b",
+  "docs/media/issue-626/refresh-after-adoption-mobile-390.png": "ed9b3d4670e66d8ba33d96072e3c6f096dd1473c8a97da17c4ad13f7879fe228",
+  "docs/media/issue-626/refresh-at-tool-transition-desktop-1280.png": "69c92ef1b13b133147b040929369efafdf51175ab2c1742dd513c9049c2a32a7",
+  "docs/media/issue-626/refresh-at-tool-transition-mobile-390.png": "2fc2ca17ebdd9afccb4b6b1176f607121f119e8b1d7aa34dba329fe38d996e98",
+  "docs/media/issue-626/streaming-before-tool-desktop-1280.png": "96929a8c1a6f4d4d116c9265efcb7b3f69e4a6be40d57588fc27a21d79109486",
+  "docs/media/issue-626/streaming-before-tool-mobile-390.png": "060b250b5786df729ac2aaed78dba1bc804a46d219cc63d7f4e898fa759d2926",
   "docs/acceptance/pr-441/pr-441-desktop-badges.png": "1ade5a95002485fc4085c03f28cb931a309c18c264b884db43c5d55dfab10131",
   "docs/acceptance/pr-441/pr-441-mobile-390.png": "c41651872641bc8dcf44e48c2c4a0f183153283e18ffc837db54954146b1038f",
   "docs/issue-440/desktop-1440x1000-0-images.png": "0f8a4e25191447a99312f4b3970964c47db29992c962e553c1fcbf471828459f",
@@ -185,11 +201,15 @@ function placeholderPng({ height, path, width }: Placeholder, sourceDigest: stri
 }
 
 const manifests = new Map<string, Array<Record<string, unknown>>>();
+const requestedPrefixes = process.argv.slice(2);
+const selectedPlaceholders = requestedPrefixes.length === 0
+  ? placeholders
+  : placeholders.filter((placeholder) => requestedPrefixes.some((prefix) => placeholder.path.startsWith(prefix)));
 if (Bun.version !== PRIVACY_GENERATOR_RUNTIME) {
   throw new Error("Privacy placeholder generation requires the pinned Bun runtime");
 }
 const generatorSha256 = createHash("sha256").update(readFileSync(generatorPath)).digest("hex");
-for (const placeholder of placeholders) {
+for (const placeholder of selectedPlaceholders) {
   const output = resolve(root, placeholder.path);
   const directory = dirname(output);
   mkdirSync(directory, { recursive: true });
@@ -221,4 +241,4 @@ for (const [directory, assets] of manifests) {
   }, null, 2)}\n`);
 }
 
-process.stdout.write(`Generated ${placeholders.length} deterministic redacted placeholders with provenance.\n`);
+process.stdout.write(`Generated ${selectedPlaceholders.length} deterministic redacted placeholders with provenance.\n`);
