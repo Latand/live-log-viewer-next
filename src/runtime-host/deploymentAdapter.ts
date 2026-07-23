@@ -5,19 +5,26 @@ import { randomUUID } from "node:crypto";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend, type ProcBackend } from "@/lib/proc";
-import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "@/lib/runtime/contracts";
+import type {
+  ViewerHealthEvidence,
+  ViewerMcpRuntimeHealthEvidence,
+  ViewerMcpRuntimeIdentity,
+  ViewerMcpRuntimePublicationEvidence,
+  ViewerReleaseIdentity,
+} from "@/lib/runtime/contracts";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { ViewerDeploymentAdapter } from "./deployment";
 
 type CommandRunner = (action: string, input: Record<string, unknown>) => Promise<unknown>;
-type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "complete-host-handoff";
+type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "current-mcp-runtime" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "complete-host-handoff";
 
 const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "resolve-revision": 110_000,
   "build-candidate": 30 * 60_000,
   "start-candidate": 60_000,
   "current-release": 90_000,
+  "current-mcp-runtime": 90_000,
   "verify-candidate": 90_000,
   promote: 30_000,
   "verify-promoted": 90_000,
@@ -124,7 +131,49 @@ function release(value: unknown): ViewerReleaseIdentity {
   if (typeof item.image !== "string" || typeof item.container !== "string" || typeof item.endpoint !== "string" || typeof item.revision !== "string") {
     throw new Error("deployment adapter returned an invalid release identity");
   }
-  return { image: item.image, container: item.container, endpoint: item.endpoint, revision: item.revision };
+  return {
+    image: item.image,
+    container: item.container,
+    endpoint: item.endpoint,
+    revision: item.revision,
+    ...(item.mcpRuntime === undefined ? {} : { mcpRuntime: mcpRuntime(item.mcpRuntime) }),
+  };
+}
+
+function mcpRuntime(value: unknown): ViewerMcpRuntimeIdentity {
+  const item = object(value);
+  const source = item.source;
+  const releaseId = item.releaseId;
+  const stagedAt = item.stagedAt;
+  if ((source !== "legacy" && source !== "managed")
+    || typeof item.revision !== "string"
+    || !/^[0-9a-f]{40}$/.test(item.revision)
+    || typeof item.artifactDigest !== "string"
+    || !/^[0-9a-f]{64}$/.test(item.artifactDigest)
+    || (source === "managed" && (typeof releaseId !== "string" || !/^[a-z0-9-]+$/.test(releaseId)))
+    || (source === "legacy" && releaseId !== null)
+    || (source === "managed" && typeof stagedAt !== "string")
+    || (source === "legacy" && stagedAt !== null)) {
+    throw new Error("deployment adapter returned an invalid MCP runtime identity");
+  }
+  return {
+    source,
+    revision: item.revision,
+    releaseId: releaseId as string | null,
+    artifactDigest: item.artifactDigest,
+    stagedAt: stagedAt as string | null,
+  };
+}
+
+function publication(value: unknown): ViewerMcpRuntimePublicationEvidence {
+  const item = object(value);
+  const runtime = mcpRuntime(item);
+  if ((item.action !== "activate" && item.action !== "restore")
+    || typeof item.publishedAt !== "string"
+    || item.durable !== true) {
+    throw new Error("deployment adapter returned invalid MCP runtime publication evidence");
+  }
+  return { ...runtime, action: item.action, publishedAt: item.publishedAt, durable: true };
 }
 
 function evidence(value: unknown): ViewerHealthEvidence {
@@ -148,6 +197,38 @@ function evidence(value: unknown): ViewerHealthEvidence {
     authenticatedStatus: item.authenticatedStatus,
     unauthorizedStatus: item.unauthorizedStatus,
     assets: assets.map((asset) => ({ path: asset.path as string, status: asset.status as number })),
+    ...(item.mcpRuntime === undefined ? {} : { mcpRuntime: mcpHealthEvidence(item.mcpRuntime) }),
+    ok: item.ok,
+    ...(typeof item.detail === "string" ? { detail: item.detail } : {}),
+  };
+}
+
+function mcpHealthEvidence(value: unknown): ViewerMcpRuntimeHealthEvidence {
+  const item = object(value);
+  const calls = object(item.calls);
+  if (typeof item.checkedAt !== "string"
+    || typeof item.revision !== "string"
+    || !/^[0-9a-f]{40}$/.test(item.revision)
+    || typeof item.artifactDigest !== "string"
+    || !/^[0-9a-f]{64}$/.test(item.artifactDigest)
+    || typeof item.processReady !== "boolean"
+    || !Array.isArray(item.tools)
+    || item.tools.some((tool) => typeof tool !== "string")
+    || typeof calls.deploymentStatus !== "boolean"
+    || typeof calls.boardSnapshot !== "boolean"
+    || typeof item.ok !== "boolean") {
+    throw new Error("deployment adapter returned invalid MCP runtime health evidence");
+  }
+  return {
+    checkedAt: item.checkedAt,
+    revision: item.revision,
+    artifactDigest: item.artifactDigest,
+    processReady: item.processReady,
+    tools: item.tools as string[],
+    calls: {
+      deploymentStatus: calls.deploymentStatus,
+      boardSnapshot: calls.boardSnapshot,
+    },
     ok: item.ok,
     ...(typeof item.detail === "string" ? { detail: item.detail } : {}),
   };
@@ -228,7 +309,11 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
   }
 
   async buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity> {
-    return release(await this.run("build-candidate", { deploymentId, revision }));
+    const candidate = release(await this.run("build-candidate", { deploymentId, revision }));
+    if (candidate.mcpRuntime?.source !== "managed" || candidate.mcpRuntime.revision !== revision) {
+      throw new Error("deployment adapter candidate MCP runtime does not match its revision");
+    }
+    return candidate;
   }
 
   async startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
@@ -240,20 +325,28 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
     return result === null ? null : release(result);
   }
 
+  async currentMcpRuntime(): Promise<ViewerMcpRuntimeIdentity> {
+    return mcpRuntime(await this.run("current-mcp-runtime", {}));
+  }
+
   async verifyCandidate(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence> {
     return evidence(await this.run("verify-candidate", { candidate }));
   }
 
-  async promote(candidate: ViewerReleaseIdentity): Promise<void> {
-    await this.run("promote", { candidate });
+  async promote(candidate: ViewerReleaseIdentity): Promise<ViewerMcpRuntimePublicationEvidence> {
+    return publication(await this.run("promote", { candidate }));
   }
 
   async verifyPromoted(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence> {
     return evidence(await this.run("verify-promoted", { candidate }));
   }
 
-  async rollback(previous: ViewerReleaseIdentity, candidate: ViewerReleaseIdentity): Promise<void> {
-    await this.run("rollback", { previous, candidate });
+  async rollback(
+    previous: ViewerReleaseIdentity,
+    candidate: ViewerReleaseIdentity,
+    previousMcpRuntime: ViewerMcpRuntimeIdentity,
+  ): Promise<ViewerMcpRuntimePublicationEvidence> {
+    return publication(await this.run("rollback", { previous, candidate, previousMcpRuntime }));
   }
 
   async retire(releaseIdentity: ViewerReleaseIdentity): Promise<void> {

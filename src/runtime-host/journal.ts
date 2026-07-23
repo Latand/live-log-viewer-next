@@ -782,6 +782,7 @@ export class RuntimeJournal {
         terminal: false,
         candidate: null,
         previous: null,
+        mcpRuntime: { candidate: null, previous: null, publications: [] },
         health: [],
         error: null,
         owner,

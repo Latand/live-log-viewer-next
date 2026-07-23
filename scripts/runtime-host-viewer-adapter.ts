@@ -4,7 +4,12 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "../src/lib/runtime/contracts";
+import type {
+  ViewerHealthEvidence,
+  ViewerMcpRuntimeIdentity,
+  ViewerMcpRuntimePublicationEvidence,
+  ViewerReleaseIdentity,
+} from "../src/lib/runtime/contracts";
 import {
   obsoleteManagedViewerContainers,
   viewerAuthenticationTokenFromConfig,
@@ -19,6 +24,8 @@ import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
 import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
+import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
+import { McpRuntimeReleaseStore } from "../src/runtime-host/mcpRuntimeRelease";
 import {
   clearRuntimeHostHandoffIntent,
   readRuntimeHostHandoffIntent,
@@ -47,9 +54,13 @@ const canonicalRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE || "https://gith
 const runtimeSocket = process.env.LLV_RUNTIME_HOST_SOCKET || path.join(stateDir, "runtime-host.sock");
 const stableEndpoint = `http://127.0.0.1:${Number(process.env.LLV_VIEWER_PORT || 8898)}`;
 const runtimeHostImageTag = process.env.LLV_RUNTIME_HOST_IMAGE_TAG || "agent-log-viewer:node22";
+const mcpRuntimeRoot = process.env.LLV_MCP_RUNTIME_ROOT || path.join(process.env.HOME || "/home/user", ".agents", "tools", "llv-mcp-runtime");
+const mcpRuntimeStore = new McpRuntimeReleaseStore({ stateDir, stableRuntimeRoot: mcpRuntimeRoot });
+const deploymentPackageRoot = path.resolve(import.meta.dir, "..");
 
-async function command(argv: string[]): Promise<string> {
+async function command(argv: string[], options: { cwd?: string } = {}): Promise<string> {
   const child = Bun.spawn(["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", ...argv], {
+    cwd: options.cwd,
     stdout: "pipe",
     stderr: "pipe",
     env: withoutWakatimeCredential(process.env),
@@ -110,7 +121,30 @@ function release(value: unknown): ViewerReleaseIdentity {
   if (typeof item.image !== "string" || typeof item.container !== "string" || typeof item.endpoint !== "string" || typeof item.revision !== "string") {
     throw new Error("release identity is invalid");
   }
-  return item as ViewerReleaseIdentity;
+  return {
+    image: item.image,
+    container: item.container,
+    endpoint: item.endpoint,
+    revision: item.revision,
+    ...(item.mcpRuntime === undefined ? {} : { mcpRuntime: mcpRuntime(item.mcpRuntime) }),
+  };
+}
+
+function mcpRuntime(value: unknown): ViewerMcpRuntimeIdentity {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("MCP runtime identity is invalid");
+  const runtime = value as Partial<ViewerMcpRuntimeIdentity>;
+  if ((runtime.source !== "legacy" && runtime.source !== "managed")
+    || typeof runtime.revision !== "string"
+    || !/^[0-9a-f]{40}$/.test(runtime.revision)
+    || typeof runtime.artifactDigest !== "string"
+    || !/^[0-9a-f]{64}$/.test(runtime.artifactDigest)
+    || (runtime.source === "managed" && (typeof runtime.releaseId !== "string" || !/^[a-z0-9-]+$/.test(runtime.releaseId)))
+    || (runtime.source === "legacy" && runtime.releaseId !== null)
+    || (runtime.source === "managed" && typeof runtime.stagedAt !== "string")
+    || (runtime.source === "legacy" && runtime.stagedAt !== null)) {
+    throw new Error("MCP runtime identity is invalid");
+  }
+  return runtime as ViewerMcpRuntimeIdentity;
 }
 
 function runtimeHostGeneration(value: unknown): { image: string; revision: string; container: string } {
@@ -132,6 +166,7 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
   await command(["git", "--git-dir", mirrorDir, "worktree", "add", "--detach", sourceDir, revision]);
   const container = viewerCandidateContainerName(deploymentId);
   const image = viewerCandidateImageName(revision, container);
+  let mcpRuntime: ViewerMcpRuntimeIdentity | null = null;
   try {
     const composeConfig = await command([
       "docker", "compose", "--project-directory", sourceDir, "-f", path.join(sourceDir, "docker-compose.yml"),
@@ -139,19 +174,34 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
     ]);
     writeComposeConfig(container, composeConfig);
     await command(["docker", "build", "--pull", "--label", `dev.live-log-viewer.revision=${revision}`, "-t", image, sourceDir]);
+    await command([process.execPath, "install", "--frozen-lockfile", "--production"], { cwd: sourceDir });
+    await command([process.execPath, "run", "build:mcp"], { cwd: sourceDir });
+    mcpRuntime = mcpRuntimeStore.stagePreparedPackage(sourceDir, deploymentId, revision);
+    mcpRuntimeStore.installStableLauncher(deploymentPackageRoot);
+  } catch (error) {
+    if (mcpRuntime) mcpRuntimeStore.retire(mcpRuntime);
+    try { await command(["docker", "image", "rm", image]); } catch { /* image construction may have failed */ }
+    fs.rmSync(composeConfigFile(container), { force: true });
+    throw error;
   } finally {
     try { await command(["git", "--git-dir", mirrorDir, "worktree", "remove", "--force", sourceDir]); }
     catch { fs.rmSync(sourceDir, { recursive: true, force: true }); }
   }
-  const port = await allocateBuiltCandidatePort(deploymentId, {
-    base: Number(process.env.LLV_VIEWER_CANDIDATE_PORT_BASE || 18_000),
-    slots: 2_000,
-    reservedPorts: managedCandidatePorts,
-    isAvailable: isCandidatePortAvailable,
-    removeImage: async () => { await command(["docker", "image", "rm", image]); },
-    removeComposeSnapshot: () => { fs.rmSync(composeConfigFile(container), { force: true }); },
-  });
-  return { revision, image, container, endpoint: `http://127.0.0.1:${port}` };
+  try {
+    const port = await allocateBuiltCandidatePort(deploymentId, {
+      base: Number(process.env.LLV_VIEWER_CANDIDATE_PORT_BASE || 18_000),
+      slots: 2_000,
+      reservedPorts: managedCandidatePorts,
+      isAvailable: isCandidatePortAvailable,
+      removeImage: async () => { await command(["docker", "image", "rm", image]); },
+      removeComposeSnapshot: () => { fs.rmSync(composeConfigFile(container), { force: true }); },
+    });
+    if (!mcpRuntime) throw new Error("candidate MCP runtime staging did not complete");
+    return { revision, image, container, endpoint: `http://127.0.0.1:${port}`, mcpRuntime };
+  } catch (error) {
+    if (mcpRuntime) mcpRuntimeStore.retire(mcpRuntime);
+    throw error;
+  }
 }
 
 async function containerExists(container: string): Promise<boolean> {
@@ -188,6 +238,7 @@ async function retireRelease(candidate: ViewerReleaseIdentity): Promise<void> {
   if (await containerExists(candidate.container)) await command(["docker", "container", "rm", "-f", candidate.container]);
   try { await command(["docker", "image", "rm", candidate.image]); } catch { /* another retained release may use this image */ }
   fs.rmSync(composeConfigFile(candidate.container), { force: true });
+  if (candidate.mcpRuntime) mcpRuntimeStore.retire(candidate.mcpRuntime);
 }
 
 async function retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
@@ -211,6 +262,7 @@ async function retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
       await command(["docker", "container", "stop", "--time", "10", rollback.container]);
     }
   }
+  mcpRuntimeStore.retainOnly(releases.flatMap((item) => item.mcpRuntime ? [item.mcpRuntime] : []));
 }
 
 function serviceToken(candidate: ViewerReleaseIdentity): string | null {
@@ -219,7 +271,7 @@ function serviceToken(candidate: ViewerReleaseIdentity): string | null {
 
 async function fetchStatus(url: string, headers: Record<string, string> = {}): Promise<{ status: number; text: string }> {
   try {
-    const response = await fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
+    const response = await fetch(url, { headers: { connection: "close", ...headers }, redirect: "manual", signal: AbortSignal.timeout(5_000) });
     return { status: response.status, text: await response.text() };
   } catch {
     return { status: 0, text: "" };
@@ -287,12 +339,46 @@ async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, e
   };
 }
 
-async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
+async function verifyViewer(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
   return waitForViewerReadiness({
     endpoint,
     inspect: () => containerState(candidate.container),
     probe: () => probeRoutes(candidate, endpoint, expectedAssetsEndpoint),
   });
+}
+
+async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
+  const viewer = await verifyViewer(candidate, endpoint, expectedAssetsEndpoint);
+  if (!viewer.ok) return viewer;
+  if (!candidate.mcpRuntime || candidate.mcpRuntime.source !== "managed") {
+    return { ...viewer, ok: false, detail: "candidate MCP runtime identity is missing" };
+  }
+  const promoted = expectedAssetsEndpoint !== undefined;
+  const probeTarget = promoted
+    ? targetFile
+    : path.join(stateDir, `mcp-candidate-probe-${candidate.mcpRuntime.releaseId}.json`);
+  if (!promoted) writeReleaseTarget(probeTarget, candidate);
+  const probeEnvironment = Object.fromEntries(Object.entries(withoutWakatimeCredential(process.env))
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  probeEnvironment.LLV_VIEWER_DEPLOY_TARGET = probeTarget;
+  const mcpRuntime = await probeMcpRuntime({
+    command: process.execPath,
+    args: [path.join(mcpRuntimeRoot, "bin", "mcp-server.mjs")],
+    cwd: mcpRuntimeRoot,
+    env: probeEnvironment,
+    runtime: candidate.mcpRuntime,
+  });
+  if (!promoted) {
+    fs.rmSync(probeTarget, { force: true });
+    const state = fs.openSync(stateDir, "r");
+    try { fs.fsyncSync(state); } finally { fs.closeSync(state); }
+  }
+  return {
+    ...viewer,
+    mcpRuntime,
+    ok: mcpRuntime.ok,
+    ...(mcpRuntime.ok ? {} : { detail: mcpRuntime.detail ?? "MCP runtime health gate failed" }),
+  };
 }
 
 function readTarget(): ViewerReleaseIdentity {
@@ -321,19 +407,34 @@ function readCurrentRelease(): ViewerReleaseIdentity | null {
   }
 }
 
-function switchTarget(target: ViewerReleaseIdentity): void {
-  fs.mkdirSync(path.dirname(targetFile), { recursive: true, mode: 0o700 });
-  const temporary = `${targetFile}.${process.pid}.${randomUUID()}.tmp`;
-  const fd = fs.openSync(temporary, "wx", 0o600);
-  try {
-    fs.writeFileSync(fd, JSON.stringify(target));
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
+function writeReleaseTarget(filename: string, target: ViewerReleaseIdentity): void {
+  mcpRuntimeStore.publishReleaseTarget(filename, target);
+}
+
+function switchTarget(
+  target: ViewerReleaseIdentity,
+  action: ViewerMcpRuntimePublicationEvidence["action"],
+  fallbackRuntime?: ViewerMcpRuntimeIdentity,
+): ViewerMcpRuntimePublicationEvidence {
+  const runtime = target.mcpRuntime ?? fallbackRuntime;
+  if (!runtime) throw new Error("release MCP runtime identity is missing");
+  if (runtime.source === "managed" && runtime.revision !== target.revision) {
+    throw new Error("release MCP runtime revision does not match the Viewer revision");
   }
-  fs.renameSync(temporary, targetFile);
-  const dir = fs.openSync(path.dirname(targetFile), "r");
-  try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+  writeReleaseTarget(targetFile, target);
+  return {
+    action,
+    ...runtime,
+    publishedAt: new Date().toISOString(),
+    durable: true,
+  };
+}
+
+async function currentMcpRuntime(): Promise<ViewerMcpRuntimeIdentity> {
+  const current = readCurrentRelease();
+  if (current?.mcpRuntime) return current.mcpRuntime;
+  const revision = await command(["git", "-C", mcpRuntimeRoot, "rev-parse", "HEAD"]);
+  return mcpRuntimeStore.legacyRuntimeIdentity(revision);
 }
 
 /** #518 runtime-host generation handoff (see hostSuccessor.ts for the
@@ -375,7 +476,7 @@ async function main(): Promise<unknown> {
       buildCandidate,
       startCandidate,
       verifyCandidate: (candidate) => verify(candidate, candidate.endpoint),
-      publishTarget: async (candidate) => { switchTarget(candidate); },
+      publishTarget: async (candidate) => { switchTarget(candidate, "activate"); },
       targetMatches: (candidate) => releasesEqual(readTarget(), candidate),
       retireCandidate: retireRelease,
     });
@@ -390,16 +491,21 @@ async function main(): Promise<unknown> {
     if (state !== "running") throw new Error(`current release container is ${state}`);
     return current;
   }
+  if (action === "current-mcp-runtime") return currentMcpRuntime();
   if (action === "verify-candidate") { const candidate = release(input.candidate); return verify(candidate, candidate.endpoint); }
-  if (action === "promote") { switchTarget(release(input.candidate)); return {}; }
+  if (action === "promote") {
+    const candidate = release(input.candidate);
+    if (candidate.mcpRuntime?.source !== "managed") throw new Error("candidate MCP runtime identity is missing");
+    return switchTarget(candidate, "activate");
+  }
   if (action === "verify-promoted") { const candidate = release(input.candidate); return verify(candidate, stableEndpoint, candidate.endpoint); }
   if (action === "rollback") {
     const previous = release(input.previous);
     await startCandidate(previous);
-    const evidence = await verify(previous, previous.endpoint);
+    const evidence = await verifyViewer(previous, previous.endpoint);
     if (!evidence.ok) throw new Error(evidence.detail ?? "rollback release health gate failed");
-    switchTarget(previous);
-    return { health: evidence };
+    const previousMcpRuntime = mcpRuntime(input.previousMcpRuntime);
+    return switchTarget(previous, "restore", previousMcpRuntime);
   }
   if (action === "stage-host-successor") {
     const candidate = release(input.candidate);
@@ -424,9 +530,16 @@ async function main(): Promise<unknown> {
   throw new Error("deployment adapter action is unsupported");
 }
 
+let output: string;
+let exitCode = 0;
 try {
-  process.stdout.write(`${JSON.stringify(await main())}\n`);
+  output = `${JSON.stringify(await main())}\n`;
 } catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : "deployment adapter failed"}\n`);
-  process.exitCode = 1;
+  output = `${error instanceof Error ? error.message : "deployment adapter failed"}\n`;
+  exitCode = 1;
 }
+const stream = exitCode === 0 ? process.stdout : process.stderr;
+await new Promise<void>((resolve, reject) => {
+  stream.write(output, (error) => error ? reject(error) : resolve());
+});
+process.exit(exitCode);

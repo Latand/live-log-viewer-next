@@ -9,6 +9,7 @@ const writer = process.env.LLV_WRITER_INTERFACE;
 const operation = process.env.LLV_WRITER_OPERATION ?? "create";
 const readyPath = process.env.LLV_WRITER_READY;
 const releasePath = process.env.LLV_WRITER_RELEASE;
+const creatorPath = process.env.LLV_WRITER_SRC;
 
 if (!stateDir || !writer || !readyPath || !releasePath) throw new Error("writer concurrency fixture is incomplete");
 
@@ -61,7 +62,7 @@ if (kind === "task" && operation === "create" && writer === "http") {
     clientRequestId: "mcp-task-update-request",
   });
 } else if (kind === "pipeline" && operation === "create" && writer === "http") {
-  const input = { task: `${writer} pipeline`, repoDir: process.cwd(), autoStart: false, stages: [] };
+  const input = { task: `${writer} pipeline`, src: creatorPath, repoDir: process.cwd(), autoStart: false, stages: [] };
   const { POST } = await import("@/app/api/pipelines/route");
   const response = await POST(new NextRequest("http://127.0.0.1/api/pipelines", {
     method: "POST",
@@ -73,6 +74,7 @@ if (kind === "task" && operation === "create" && writer === "http") {
   const { viewerMcpBindings } = await import("./bindings");
   await viewerMcpBindings().create_pipeline({
     task: `${writer} pipeline`,
+    src: creatorPath,
     repoDir: process.cwd(),
     autoStart: false,
     stages: [],

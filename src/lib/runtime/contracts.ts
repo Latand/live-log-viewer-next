@@ -390,11 +390,46 @@ export type ViewerDeploymentPhase =
   | "rolled-back"
   | "failed";
 
+export interface ViewerMcpRuntimeIdentity {
+  source: "legacy" | "managed";
+  revision: string;
+  releaseId: string | null;
+  artifactDigest: string;
+  stagedAt: string | null;
+}
+
+export interface ViewerMcpRuntimePublicationEvidence extends ViewerMcpRuntimeIdentity {
+  action: "activate" | "restore";
+  publishedAt: string;
+  durable: true;
+}
+
+export interface ViewerDeploymentMcpRuntimeStatus {
+  candidate: ViewerMcpRuntimeIdentity | null;
+  previous: ViewerMcpRuntimeIdentity | null;
+  publications: ViewerMcpRuntimePublicationEvidence[];
+}
+
 export interface ViewerReleaseIdentity {
   image: string;
   container: string;
   endpoint: string;
   revision: string;
+  mcpRuntime?: ViewerMcpRuntimeIdentity;
+}
+
+export interface ViewerMcpRuntimeHealthEvidence {
+  checkedAt: string;
+  revision: string;
+  artifactDigest: string;
+  processReady: boolean;
+  tools: string[];
+  calls: {
+    deploymentStatus: boolean;
+    boardSnapshot: boolean;
+  };
+  ok: boolean;
+  detail?: string;
 }
 
 export interface ViewerHealthEvidence {
@@ -405,6 +440,7 @@ export interface ViewerHealthEvidence {
   authenticatedStatus: number | null;
   unauthorizedStatus: number | null;
   assets: Array<{ path: string; status: number }>;
+  mcpRuntime?: ViewerMcpRuntimeHealthEvidence;
   ok: boolean;
   detail?: string;
 }
@@ -423,6 +459,7 @@ export interface ViewerDeploymentStatus {
   terminal: boolean;
   candidate: ViewerReleaseIdentity | null;
   previous: ViewerReleaseIdentity | null;
+  mcpRuntime: ViewerDeploymentMcpRuntimeStatus;
   health: ViewerHealthEvidence[];
   error: string | null;
   owner: ViewerDeploymentOwner;
