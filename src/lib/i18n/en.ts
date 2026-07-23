@@ -754,6 +754,8 @@ export const en = {
   "feed.thinking": "thinking…",
   "feed.working": "working…",
   "feed.liveTail": "live tail",
+  "feed.liveOmittedItems": "… ({count} earlier assistant items, {chars} characters)",
+  "feed.liveOmittedChars": "… (+{chars} characters)",
   "feed.backToLive": "Back to the live tail",
   "feed.newCount": "{count} new",
   "feed.down": "down",

@@ -183,6 +183,7 @@ test("snapshot exposes the canonical projected runtime model", () => {
         }),
       },
       activeTurnId: "turn-one",
+      liveTurn: null,
       pendingReconfigure: null,
       drift: null,
     }],

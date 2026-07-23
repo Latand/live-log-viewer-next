@@ -1,0 +1,247 @@
+{
+  "identity": {
+    "conversationId": "conversation_issue_626",
+    "launchId": "launch_issue_626",
+    "startingPath": "spawn:launch_issue_626",
+    "adoptedPath": "/workspace/.codex/sessions/2026/07/23/rollout-issue-626.jsonl"
+  },
+  "fileCheckpoints": [
+    {
+      "name": "streaming",
+      "filesRevision": 40,
+      "path": "spawn:launch_issue_626"
+    },
+    {
+      "name": "tool-transition-lag",
+      "filesRevision": 40,
+      "path": "spawn:launch_issue_626"
+    },
+    {
+      "name": "adopted",
+      "filesRevision": 41,
+      "path": "/workspace/.codex/sessions/2026/07/23/rollout-issue-626.jsonl"
+    }
+  ],
+  "runtimeEnvelopes": [
+    {
+      "schemaVersion": 1,
+      "seq": 2,
+      "eventId": "event-626-2",
+      "scope": { "type": "session", "id": "conversation_issue_626" },
+      "revision": 2,
+      "kind": "turn-started",
+      "occurredAt": "2026-07-23T09:00:00.500Z",
+      "payload": {
+        "conversationId": "conversation_issue_626",
+        "turnId": "turn_issue_626"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "seq": 3,
+      "eventId": "event-626-3",
+      "scope": { "type": "session", "id": "conversation_issue_626" },
+      "revision": 3,
+      "kind": "delta",
+      "occurredAt": "2026-07-23T09:00:01.000Z",
+      "payload": {
+        "conversationId": "conversation_issue_626",
+        "turnId": "turn_issue_626",
+        "text": "First commentary survives the tool transition."
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "seq": 4,
+      "eventId": "event-626-4",
+      "scope": { "type": "session", "id": "conversation_issue_626" },
+      "revision": 4,
+      "kind": "item",
+      "occurredAt": "2026-07-23T09:00:01.500Z",
+      "payload": {
+        "conversationId": "conversation_issue_626",
+        "turnId": "turn_issue_626",
+        "phase": "completed",
+        "item": {
+          "type": "agentMessage",
+          "id": "item_commentary_626_first",
+          "text": "First commentary survives the tool transition."
+        }
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "seq": 5,
+      "eventId": "event-626-5",
+      "scope": { "type": "session", "id": "conversation_issue_626" },
+      "revision": 5,
+      "kind": "item",
+      "occurredAt": "2026-07-23T09:00:02.000Z",
+      "payload": {
+        "conversationId": "conversation_issue_626",
+        "turnId": "turn_issue_626",
+        "phase": "started",
+        "item": {
+          "type": "customToolCall",
+          "id": "item_tool_626",
+          "name": "exec"
+        }
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "seq": 6,
+      "eventId": "event-626-6",
+      "scope": { "type": "session", "id": "conversation_issue_626" },
+      "revision": 6,
+      "kind": "item",
+      "occurredAt": "2026-07-23T09:00:03.500Z",
+      "payload": {
+        "conversationId": "conversation_issue_626",
+        "turnId": "turn_issue_626",
+        "phase": "completed",
+        "item": {
+          "type": "customToolCall",
+          "id": "item_tool_626",
+          "name": "exec"
+        }
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "seq": 7,
+      "eventId": "event-626-7",
+      "scope": { "type": "session", "id": "conversation_issue_626" },
+      "revision": 7,
+      "kind": "delta",
+      "occurredAt": "2026-07-23T09:00:04.000Z",
+      "payload": {
+        "conversationId": "conversation_issue_626",
+        "turnId": "turn_issue_626",
+        "text": "Second commentary follows the tool output."
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "seq": 8,
+      "eventId": "event-626-8",
+      "scope": { "type": "session", "id": "conversation_issue_626" },
+      "revision": 8,
+      "kind": "item",
+      "occurredAt": "2026-07-23T09:00:04.500Z",
+      "payload": {
+        "conversationId": "conversation_issue_626",
+        "turnId": "turn_issue_626",
+        "phase": "completed",
+        "item": {
+          "type": "agentMessage",
+          "id": "item_commentary_626_second",
+          "text": "Second commentary follows the tool output."
+        }
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "seq": 9,
+      "eventId": "event-626-9",
+      "scope": { "type": "session", "id": "conversation_issue_626" },
+      "revision": 9,
+      "kind": "turn-ended",
+      "occurredAt": "2026-07-23T09:00:05.000Z",
+      "payload": {
+        "conversationId": "conversation_issue_626",
+        "turnId": "turn_issue_626",
+        "outcome": "completed"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "seq": 10,
+      "eventId": "event-626-10",
+      "scope": { "type": "system", "id": "files" },
+      "kind": "files.revision",
+      "occurredAt": "2026-07-23T09:00:06.000Z",
+      "payload": {
+        "filesRevision": 41
+      }
+    }
+  ],
+  "transcriptRecords": [
+    {
+      "timestamp": "2026-07-23T09:00:00.750Z",
+      "type": "response_item",
+      "payload": {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Investigate issue 626."
+          }
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-07-23T09:00:01.500Z",
+      "type": "response_item",
+      "payload": {
+        "type": "message",
+        "id": "item_commentary_626_first",
+        "role": "assistant",
+        "phase": "commentary",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "First commentary survives the tool transition."
+          }
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-07-23T09:00:02.000Z",
+      "type": "response_item",
+      "payload": {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "call_custom_626",
+        "id": "item_tool_626",
+        "status": "completed",
+        "input": "await tools.exec_command({cmd:\"printf issue-626\"});"
+      }
+    },
+    {
+      "timestamp": "2026-07-23T09:00:03.500Z",
+      "type": "response_item",
+      "payload": {
+        "type": "custom_tool_call_output",
+        "call_id": "call_custom_626",
+        "output": [
+          {
+            "type": "input_text",
+            "text": "Script completed"
+          },
+          {
+            "type": "input_text",
+            "text": "TOOL_OUTPUT_626"
+          }
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-07-23T09:00:04.500Z",
+      "type": "response_item",
+      "payload": {
+        "type": "message",
+        "id": "item_commentary_626_second",
+        "role": "assistant",
+        "phase": "commentary",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "Second commentary follows the tool output."
+          }
+        ]
+      }
+    }
+  ]
+}

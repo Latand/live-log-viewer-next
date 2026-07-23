@@ -11,6 +11,8 @@ export interface ReviewFinding {
 export interface ReviewCardItem {
   kind: "review";
   ts: unknown;
+  /** Canonical assistant response that projected this structured card. */
+  sourceId?: string;
   verdict?: "REQUEST_CHANGES" | "APPROVE" | "COMMENT";
   findings: ReviewFinding[];
   summary: string[];

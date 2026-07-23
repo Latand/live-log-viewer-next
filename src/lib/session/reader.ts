@@ -29,6 +29,10 @@ function rec(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
 function arr(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value)
     ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
@@ -194,12 +198,27 @@ function readCodex(pathname: string): SessionReadResult {
       continue;
     }
     if (obj.type === "response_item") {
-      const item = rec(payload.item) || payload;
+      const nestedItem = recordOrNull(payload.item);
+      const item = nestedItem && str(nestedItem.type) ? nestedItem : payload;
       const itemType = str(item.type);
       if (itemType === "function_call" || itemType === "custom_tool_call") {
-        push(out, { kind: "tool_call", role: "assistant", ts, name: str(item.name), text: str(item.arguments) || JSON.stringify(item) });
+        const name = str(item.name);
+        push(out, {
+          kind: "tool_call",
+          role: "assistant",
+          ts,
+          ...(name ? { name } : {}),
+          text: str(item.arguments) || str(item.input) || JSON.stringify(item),
+        });
       } else if (itemType === "function_call_output" || itemType === "custom_tool_call_output") {
-        push(out, { kind: "tool_result", role: "tool", ts, name: str(item.name), text: str(item.output) || JSON.stringify(item) });
+        const name = str(item.name);
+        push(out, {
+          kind: "tool_result",
+          role: "tool",
+          ts,
+          ...(name ? { name } : {}),
+          text: textFromContent(item.output) || JSON.stringify(item),
+        });
       } else if (itemType) {
         push(out, { kind: "trace", role: "system", ts, name: itemType, text: JSON.stringify(item) });
       }

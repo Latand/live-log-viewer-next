@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 2,
+  "policy": "synthetic-and-redacted-media-only",
+  "assets": [
+    {
+      "path": "streaming-before-tool-desktop-1280.svg",
+      "classification": "synthetic",
+      "source": "deterministic-generator",
+      "generator": "generate-stills.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
+      "sourceDigests": [
+        "e25486a7757a1da228e2af26a26cf98bae0e8d452f5d42f0da3af4e251c82364"
+      ],
+      "description": "Deterministic vector evidence from the production conversation path for Streaming Before Tool.",
+      "sha256": "26b3438de6a9dd3f838f1aa627d249286b836971a8ed80e7386166e922a254d7"
+    },
+    {
+      "path": "refresh-at-tool-transition-desktop-1280.svg",
+      "classification": "synthetic",
+      "source": "deterministic-generator",
+      "generator": "generate-stills.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
+      "sourceDigests": [
+        "38107e8d9ea1f08b9012be64435562dc5e013138691926b03b39a0d98452b50f"
+      ],
+      "description": "Deterministic vector evidence from the production conversation path for Refresh At Tool Transition.",
+      "sha256": "977434420bfe302022c273906608868d0269767deb8dcbb771b8b7ed64abd280"
+    },
+    {
+      "path": "partial-adoption-desktop-1280.svg",
+      "classification": "synthetic",
+      "source": "deterministic-generator",
+      "generator": "generate-stills.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
+      "sourceDigests": [
+        "c18da1dd3646fc480cc2b03f56e4562f2d5b3ad7e78a20204b39c10086ba0c5a"
+      ],
+      "description": "Deterministic vector evidence from the production conversation path for Partial Adoption.",
+      "sha256": "560f5b099b88abd19ca7862cfc18d3a56580600f07c7c9ce414f58b87a4155f3"
+    },
+    {
+      "path": "refresh-after-adoption-desktop-1280.svg",
+      "classification": "synthetic",
+      "source": "deterministic-generator",
+      "generator": "generate-stills.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
+      "sourceDigests": [
+        "832e81ffeda1035f839d412c789ad17cb67a775e4d74f8aa81d0a73a0a7c23cd"
+      ],
+      "description": "Deterministic vector evidence from the production conversation path for Refresh After Adoption.",
+      "sha256": "23036d43306e66cd4700349197f0820e9baed03551becb4ad70f31a2c58fc63c"
+    },
+    {
+      "path": "streaming-before-tool-mobile-390.svg",
+      "classification": "synthetic",
+      "source": "deterministic-generator",
+      "generator": "generate-stills.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
+      "sourceDigests": [
+        "2c74e287804f55ef0732030a4473d0eb6de14022debbe027cf6caa2de7707219"
+      ],
+      "description": "Deterministic vector evidence from the production conversation path for Streaming Before Tool.",
+      "sha256": "6069597cbe7cdc996d8496768ff0058e99e11ef6039e6048d74dc2d22a00f00b"
+    },
+    {
+      "path": "refresh-at-tool-transition-mobile-390.svg",
+      "classification": "synthetic",
+      "source": "deterministic-generator",
+      "generator": "generate-stills.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
+      "sourceDigests": [
+        "77a0605172d1e70a904f171c9acfdd56e23e2cd7d4c7e962b4c03d41088ee777"
+      ],
+      "description": "Deterministic vector evidence from the production conversation path for Refresh At Tool Transition.",
+      "sha256": "4a406f10d4c0efe337a64ba7cfbf925698a65fe6b9fd5560c243e4f28ddf7f02"
+    },
+    {
+      "path": "partial-adoption-mobile-390.svg",
+      "classification": "synthetic",
+      "source": "deterministic-generator",
+      "generator": "generate-stills.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
+      "sourceDigests": [
+        "bf6edc23f58a4fde7d2b1b5c23130919cb04c25bd30d17e3a65c6977cc8d76a5"
+      ],
+      "description": "Deterministic vector evidence from the production conversation path for Partial Adoption.",
+      "sha256": "96b353529cbe7578227bec59d22598d548e12f9e34e5b7d84740277cbed73117"
+    },
+    {
+      "path": "refresh-after-adoption-mobile-390.svg",
+      "classification": "synthetic",
+      "source": "deterministic-generator",
+      "generator": "generate-stills.ts",
+      "generatorRuntime": "bun-1.3.3",
+      "generatorVersion": "issue-626-vector-stills-v2",
+      "generatorSha256": "4c7e9ff05f6316fd39fae02ae46fc64edde53cff6a6ddfe984e4db2614af7acd",
+      "sourceDigests": [
+        "aca9d96783cb5ee5cfd6879ca22503b1b5d75962d912321c2acbf0cbda2c8939"
+      ],
+      "description": "Deterministic vector evidence from the production conversation path for Refresh After Adoption.",
+      "sha256": "d8f45286c6d3d626969cc5ca84ee99ad4eb5fade1c91f0dc448a7173a3a0349f"
+    }
+  ]
+}

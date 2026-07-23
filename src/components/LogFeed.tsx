@@ -13,7 +13,14 @@ import type { FileEntry } from "@/lib/types";
 import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 
 import { LaunchChips } from "./conversation/LaunchChips";
+import { LiveTurnRows } from "./conversation/LiveTurnRows";
 import { OutboxBubbles } from "./conversation/OutboxBubbles";
+import {
+  adoptCanonicalAssistantClaims,
+  publishCanonicalAssistantClaims,
+  useCanonicalAssistantClaims,
+  visibleRuntimeLiveTurnItems,
+} from "./conversation/liveTurnHandoff";
 import { orderedConversationTail } from "./conversation/tailOrder";
 import { publishTranscriptEchoes, seedLaunchOutbox, useOutbox, visibleOutbox } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
@@ -118,6 +125,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      optimistic user bubbles at the tail of THIS feed, before any transcript
      flush, and retire the moment their real bubble lands. */
   const outbox = useOutbox(memoryKey ?? "");
+  const assistantClaims = useCanonicalAssistantClaims(memoryKey ?? "");
   /* Launch/delivery facts of the launch that created this conversation, or of
      the launch that is still becoming it (issue #569) — the same chips either
      way, because it is the same window. */
@@ -128,7 +136,10 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      launch the file path is still `spawn:<launchId>` with no artifact, so an
      artifact-only lookup would miss the live host and drop the first deltas; the
      transcript path stays a fallback for subagents that carry no bus id. */
-  const liveTurn = useRuntimeSessionForConversation(file?.conversationId ?? null, file?.path ?? null)?.session.liveTurn ?? null;
+  const runtimeLiveTurn = useRuntimeSessionForConversation(
+    file?.conversationId ?? null,
+    file?.path ?? null,
+  )?.session.liveTurn ?? null;
   /* The scroll magnet lives per feed instance, so each column remembers its
      own state across polls: glued to the live tail, or released by the user.
      A remount inherits the transcript's remembered state. */
@@ -390,27 +401,33 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     setMagnet(true, true);
   };
 
+  const transcriptGeneration = file?.path ?? null;
   /* Optimistic bubbles retire on their OWN transcript echo (round-1 P1#4,
      round-2 finding 2): a bubble disappears the moment ITS echo lands, resolved
      causally by occurrence count. A user text that appears twice is two echoes
      that retire two bubbles; a message that predates a queued bubble leaves it
      visible. The counts carry that occurrence information. */
+  const transcriptEchoes = useMemo(() => {
+    if (!transcriptGeneration) return [];
+    return feed.items.flatMap(({ anchorKey, key, item }) =>
+      item.kind === "user" && item.text.trim()
+        ? [{ generation: transcriptGeneration, id: anchorKey ?? `key:${key}`, text: item.text }]
+        : []);
+  }, [feed.items, transcriptGeneration]);
   const transcriptEchoCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const { item } of feed.items) {
-      if (item.kind === "user" && item.text.trim()) {
-        const key = item.text.trim();
-        counts.set(key, (counts.get(key) ?? 0) + 1);
-      }
+    for (const echo of transcriptEchoes) {
+      const key = echo.text.trim();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     return counts;
-  }, [feed.items]);
-  /* Publish the counts so the composer can watermark a new submission against
-     the echoes that already exist (its `echoBaseline`), keyed on the same
-     conversation identity the queue uses. */
+  }, [transcriptEchoes]);
+  /* Publish stable absolute row anchors so canonical retirement is persisted
+     before a capped tail or filter can remove the matching row. The outbox also
+     derives the composer's repeated-text occurrence watermark from this ledger. */
   useEffect(() => {
-    if (memoryKey) publishTranscriptEchoes(memoryKey, transcriptEchoCounts);
-  }, [memoryKey, transcriptEchoCounts]);
+    if (memoryKey) publishTranscriptEchoes(memoryKey, transcriptEchoes);
+  }, [memoryKey, transcriptEchoes]);
   /* The launch prompt as the conversation's first user bubble on EVERY surface
      (issue #614): the server projects the queued initial prompt onto the launch
      state, so a board that did not run the composer (an MCP spawn, a second tab,
@@ -435,9 +452,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     });
   }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt, launch?.promptEcho]);
   const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs()) : [];
+  useEffect(() => {
+    if (!memoryKey || !file) return;
+    adoptCanonicalAssistantClaims(file.path, memoryKey);
+    publishCanonicalAssistantClaims(memoryKey, feed.items);
+  }, [file, memoryKey, feed.items]);
+  const visibleLiveTurnItems = useMemo(
+    () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items, assistantClaims),
+    [runtimeLiveTurn, feed.items, assistantClaims],
+  );
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */
-  const windowTail = Boolean(liveTurn?.text) || pendingOutbox.length > 0 || Boolean(launch);
+  const windowTail = visibleLiveTurnItems.length > 0 || pendingOutbox.length > 0 || Boolean(launch);
 
   /* The floating pill is centered on every surface — the same axis as the
      pinned TurnStatusBar below, per the issue #268 operator note: the two
@@ -480,6 +506,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
            capture measures this scroller's rendered height against the usable
            visual viewport to prove the transcript owns its ≥60% share. */
         data-log-feed-scroller
+        data-tail-lines-start={tail.linesStart}
+        data-tail-line-count={tail.lines.length}
         className={compact ? "min-h-0 flex-1 overflow-y-auto py-3" : "min-h-0 flex-1 overflow-y-auto py-6"}
         onScroll={(event) => {
           const el = event.currentTarget;
@@ -550,7 +578,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                   /* Session-stable keys: a row keeps its DOM node while the
                      window slides. Compact panes live on the zoomable canvas:
                      off-screen rows skip layout/paint via content-visibility. */
-                  <div key={key} data-feed-key={anchorKey ?? undefined} className={compact ? "feed-cv" : undefined}>
+                  <div
+                    key={key}
+                    data-feed-key={anchorKey ?? undefined}
+                    data-feed-kind={item.kind}
+                    data-feed-source-id={"sourceId" in item ? item.sourceId : undefined}
+                    className={compact ? "feed-cv" : undefined}
+                  >
                     <FeedItem item={item} speakText={speakText} />
                   </div>
                 );
@@ -587,16 +621,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             {orderedConversationTail({
               launch: Boolean(launch),
               outbox: Boolean(memoryKey && pendingOutbox.length),
-              delta: Boolean(liveTurn?.text),
+              delta: visibleLiveTurnItems.length > 0,
             }).map((section) => {
               if (section === "launch") return <LaunchChips key="launch" launch={launch!} onRetry={onLaunchRetry} />;
               if (section === "outbox") return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} />;
-              return (
-                <div key="delta" data-live-turn className="my-2 ml-9 whitespace-pre-wrap [overflow-wrap:anywhere] text-ui text-primary">
-                  {liveTurn!.text}
-                  <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-[2px] bg-accent align-text-bottom" aria-hidden />
-                </div>
-              );
+              return <LiveTurnRows key="delta" items={visibleLiveTurnItems} />;
             })}
             <ConversationAttention file={file} />
             {feed.items.length && !file.pendingQuestion && !file.waitingInput && endedQuestion ? (

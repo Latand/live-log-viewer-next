@@ -729,6 +729,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "feed.thinking": "думає…",
   "feed.working": "працює…",
   "feed.liveTail": "живий хвіст",
+  "feed.liveOmittedItems": "… ({count} попередніх відповідей асистента, {chars} символів)",
+  "feed.liveOmittedChars": "… (+{chars} символів)",
   "feed.backToLive": "Повернутись до живого хвоста",
   "feed.newCount": "{count} нових",
   "feed.down": "вниз",

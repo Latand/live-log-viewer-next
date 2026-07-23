@@ -3,8 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
+import type { FileEntry } from "@/lib/types";
 
 import { viewerMcpBindings } from "./bindings";
 
@@ -12,6 +14,7 @@ const sandboxes: string[] = [];
 const originalStateDir = process.env.LLV_STATE_DIR;
 
 afterEach(() => {
+  setAgentRegistryForTests(null);
   if (originalStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = originalStateDir;
   for (const sandbox of sandboxes.splice(0)) fs.rmSync(sandbox, { recursive: true, force: true });
@@ -99,6 +102,71 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
   expect(requests[1]?.body.clientMessageId).toBe("send-http-control");
   expect(requests[1]?.body.text).toBe(exactMessage);
   expect(requests[2]?.body.idempotencyKey).toBe("deploy-http-control");
+});
+
+test("get_conversation presents current direct Codex tools and redacts recovered output content", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-binding-conversation-"));
+  sandboxes.push(sandbox);
+  setAgentRegistryForTests(new AgentRegistry(
+    path.join(sandbox, "agent-registry.json"),
+    undefined,
+    undefined,
+    { sqliteMode: "off" },
+  ));
+  const transcriptPath = path.join(
+    import.meta.dir,
+    "..",
+    "session",
+    "fixtures",
+    "codex-response-items-issue-626.jsonl",
+  );
+  const file = {
+    path: transcriptPath,
+    root: "codex-sessions",
+    name: path.basename(transcriptPath),
+    project: "live-log-viewer-next",
+    title: "Issue 626 production-shaped replay",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    parent: null,
+    mtime: 1,
+    size: fs.statSync(transcriptPath).size,
+    activity: "live",
+    proc: "running",
+    pid: null,
+    model: "gpt-5.6-sol",
+    pendingQuestion: null,
+    waitingInput: null,
+    conversationId: "conversation_issue_626",
+  } satisfies FileEntry;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    listFiles: async () => [file],
+  } as never);
+
+  const result = await bindings.get_conversation({
+    clientRequestId: "get-conversation-issue-626",
+    transcriptPath,
+    maxRecords: 100,
+  });
+
+  expect(result).toMatchObject({
+    conversationId: "conversation_issue_626",
+    transcriptPath,
+    messages: [
+      { role: "assistant", phase: "commentary", text: "First commentary survives the tool transition." },
+      { role: "assistant", phase: "commentary", text: "Second commentary follows the tool output." },
+    ],
+    tools: [
+      { kind: "tool_call", name: "exec" },
+      { kind: "tool_result", text: "Script completed\nTOOL_OUTPUT_626\nauthorization: [redacted]" },
+      { kind: "tool_call", name: "update_plan" },
+      { kind: "tool_result", text: "Plan updated" },
+      { kind: "tool_call", name: "nested_probe" },
+      { kind: "tool_result", text: "Nested output preserved" },
+    ],
+  });
+  expect(JSON.stringify(result)).not.toContain("issue626_fixture_token");
 });
 
 test("link_task_to_pipeline binds the latest operational attempt after historical adoption", async () => {
