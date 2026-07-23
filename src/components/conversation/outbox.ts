@@ -112,6 +112,7 @@ export const OUTBOX_DELIVERED_TTL_MS = 10 * 60_000;
 const storageKey = (cardId: string) => "llvOutbox:" + cardId;
 const echoStorageKey = (cardId: string) => "llvOutboxEchoes:" + cardId;
 const occurrenceStorageKey = (cardId: string) => "llvOutboxOccurrences:" + cardId;
+const currentLaunchStorageKey = (cardId: string) => "llvOutboxCurrentLaunch:" + cardId;
 
 const queues = new Map<string, readonly OutboxEntry[]>();
 const listeners = new Set<() => void>();
@@ -139,16 +140,68 @@ interface PersistedOccurrenceTombstone {
   id: string;
   key: string;
   at: number;
-  launchOwned?: true;
   echoBaseline?: number;
   echoBaselineIds?: string[];
   retiredEchoId?: string;
   retiredAt?: number;
+  launchOwned?: true;
 }
 
-const OCCURRENCE_TOMBSTONE_LIMIT = ECHO_LEDGER_LIMIT;
+/** Unresolved owners consume future echoes oldest-first. Preserve the oldest
+    supported set so completed churn cannot displace active chronology. */
+const OCCURRENCE_ACTIVE_LIMIT = ECHO_LEDGER_LIMIT;
+/** Consumed owners are replay protection history. Keep the newest bounded set. */
+const OCCURRENCE_COMPLETED_LIMIT = ECHO_LEDGER_LIMIT;
 const occurrenceTombstones = new Map<string, readonly PersistedOccurrenceTombstone[]>();
 const EMPTY_OCCURRENCE_TOMBSTONES: readonly PersistedOccurrenceTombstone[] = [];
+
+interface PersistedCurrentLaunch {
+  id: string;
+  at: number;
+  retiredEchoId?: string;
+  retiredAt?: number;
+}
+
+/** One stable conversation has one current launch identity. */
+const currentLaunches = new Map<string, PersistedCurrentLaunch | null>();
+
+function compareOccurrenceOrder(
+  left: PersistedOccurrenceTombstone,
+  right: PersistedOccurrenceTombstone,
+): number {
+  if (left.at !== right.at) return left.at - right.at;
+  if (left.id < right.id) return -1;
+  if (left.id > right.id) return 1;
+  return 0;
+}
+
+function compareCompletedAge(
+  left: PersistedOccurrenceTombstone,
+  right: PersistedOccurrenceTombstone,
+): number {
+  const age = (left.retiredAt ?? left.at) - (right.retiredAt ?? right.at);
+  return age || compareOccurrenceOrder(left, right);
+}
+
+/**
+ * Retention has two independent priority tiers. Active occurrence owners keep
+ * the oldest 512 submissions because reconciliation consumes echoes in that
+ * order. Completed reservations keep the newest 512 by retirement age. At a
+ * tier cap, those ordering rules choose the retained set deterministically.
+ */
+function boundOccurrenceTombstones(
+  tombstones: readonly PersistedOccurrenceTombstone[],
+): readonly PersistedOccurrenceTombstone[] {
+  const active = tombstones
+    .filter((tombstone) => !tombstone.retiredEchoId)
+    .sort(compareOccurrenceOrder)
+    .slice(0, OCCURRENCE_ACTIVE_LIMIT);
+  const completed = tombstones
+    .filter((tombstone) => Boolean(tombstone.retiredEchoId))
+    .sort(compareCompletedAge)
+    .slice(-OCCURRENCE_COMPLETED_LIMIT);
+  return [...active, ...completed].sort(compareOccurrenceOrder);
+}
 
 function isEntry(value: unknown): value is OutboxEntry {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -197,6 +250,75 @@ function isPersistedEcho(value: unknown): value is PersistedEchoObservation {
   return typeof raw.id === "string" && typeof raw.key === "string";
 }
 
+function isPersistedCurrentLaunch(value: unknown): value is PersistedCurrentLaunch {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  return typeof raw.id === "string"
+    && typeof raw.at === "number"
+    && (raw.retiredEchoId === undefined || typeof raw.retiredEchoId === "string")
+    && (raw.retiredAt === undefined || typeof raw.retiredAt === "number");
+}
+
+function readCurrentLaunch(cardId: string): PersistedCurrentLaunch | null {
+  if (currentLaunches.has(cardId)) return currentLaunches.get(cardId) ?? null;
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(currentLaunchStorageKey(cardId)) ?? "null") as unknown;
+    const restored = isPersistedCurrentLaunch(raw) ? raw : null;
+    currentLaunches.set(cardId, restored);
+    return restored;
+  } catch {
+    currentLaunches.set(cardId, null);
+    return null;
+  }
+}
+
+function persistCurrentLaunch(cardId: string, launch: PersistedCurrentLaunch | null): void {
+  currentLaunches.set(cardId, launch);
+  try {
+    if (launch) sessionStorage.setItem(currentLaunchStorageKey(cardId), JSON.stringify(launch));
+    else sessionStorage.removeItem(currentLaunchStorageKey(cardId));
+  } catch {
+    /* quota / opaque origin: the in-memory slot still protects this mount */
+  }
+}
+
+function selectCurrentLaunch(
+  current: PersistedCurrentLaunch | null,
+  candidate: PersistedCurrentLaunch,
+): PersistedCurrentLaunch {
+  if (!current) return candidate;
+  if (current.id === candidate.id) {
+    const latest = candidate.at > current.at ? candidate : current;
+    const retired = [current, candidate]
+      .filter((launch) => launch.retiredEchoId)
+      .sort((left, right) => (left.retiredAt ?? left.at) - (right.retiredAt ?? right.at))
+      .at(-1);
+    return retired?.retiredEchoId
+      ? {
+          ...latest,
+          retiredEchoId: retired.retiredEchoId,
+          retiredAt: retired.retiredAt,
+        }
+      : latest;
+  }
+  if (candidate.at !== current.at) return candidate.at > current.at ? candidate : current;
+  return candidate.id > current.id ? candidate : current;
+}
+
+function recordCurrentLaunch(cardId: string, candidate: PersistedCurrentLaunch): void {
+  persistCurrentLaunch(cardId, selectCurrentLaunch(readCurrentLaunch(cardId), candidate));
+}
+
+function recordCurrentLaunchRetirement(
+  cardId: string,
+  candidate: PersistedCurrentLaunch & { retiredEchoId: string },
+): void {
+  const current = readCurrentLaunch(cardId);
+  if (current && current.id !== candidate.id) return;
+  recordCurrentLaunch(cardId, candidate);
+}
+
 function readEchoLedger(cardId: string): readonly PersistedEchoObservation[] {
   const cached = echoLedgers.get(cardId);
   if (cached) return cached;
@@ -230,12 +352,12 @@ function isOccurrenceTombstone(value: unknown): value is PersistedOccurrenceTomb
   return typeof raw.id === "string"
     && typeof raw.key === "string"
     && typeof raw.at === "number"
-    && (raw.launchOwned === undefined || raw.launchOwned === true)
     && (raw.echoBaseline === undefined || typeof raw.echoBaseline === "number")
     && (raw.echoBaselineIds === undefined
       || (Array.isArray(raw.echoBaselineIds) && raw.echoBaselineIds.every((id) => typeof id === "string")))
     && (raw.retiredEchoId === undefined || typeof raw.retiredEchoId === "string")
-    && (raw.retiredAt === undefined || typeof raw.retiredAt === "number");
+    && (raw.retiredAt === undefined || typeof raw.retiredAt === "number")
+    && (raw.launchOwned === undefined || raw.launchOwned === true);
 }
 
 function readOccurrenceTombstones(cardId: string): readonly PersistedOccurrenceTombstone[] {
@@ -245,7 +367,7 @@ function readOccurrenceTombstones(cardId: string): readonly PersistedOccurrenceT
   try {
     const raw = JSON.parse(sessionStorage.getItem(occurrenceStorageKey(cardId)) ?? "[]") as unknown;
     const restored = Array.isArray(raw)
-      ? raw.filter(isOccurrenceTombstone).slice(-OCCURRENCE_TOMBSTONE_LIMIT)
+      ? boundOccurrenceTombstones(raw.filter(isOccurrenceTombstone))
       : EMPTY_OCCURRENCE_TOMBSTONES;
     occurrenceTombstones.set(cardId, restored);
     return restored;
@@ -259,10 +381,11 @@ function persistOccurrenceTombstones(
   cardId: string,
   tombstones: readonly PersistedOccurrenceTombstone[],
 ): void {
-  occurrenceTombstones.set(cardId, tombstones);
+  const retained = boundOccurrenceTombstones(tombstones);
+  occurrenceTombstones.set(cardId, retained);
   try {
-    if (tombstones.length) {
-      sessionStorage.setItem(occurrenceStorageKey(cardId), JSON.stringify(tombstones));
+    if (retained.length) {
+      sessionStorage.setItem(occurrenceStorageKey(cardId), JSON.stringify(retained));
     } else {
       sessionStorage.removeItem(occurrenceStorageKey(cardId));
     }
@@ -291,21 +414,7 @@ function mergeOccurrenceTombstones(
     if (existing?.retiredEchoId && !addition.retiredEchoId) continue;
     merged.set(addition.id, addition);
   }
-  const ordered = [...merged.values()].sort((left, right) => left.at - right.at);
-  const unresolved = ordered.filter((tombstone) => !tombstone.retiredEchoId);
-  const terminalLaunches = ordered
-    .filter((tombstone) => tombstone.launchOwned && tombstone.retiredEchoId)
-    .reverse();
-  const protectedIds = new Set(
-    [...unresolved, ...terminalLaunches]
-      .slice(0, OCCURRENCE_TOMBSTONE_LIMIT)
-      .map((tombstone) => tombstone.id),
-  );
-  const historySlots = OCCURRENCE_TOMBSTONE_LIMIT - protectedIds.size;
-  const recentHistory = historySlots > 0
-    ? ordered.filter((tombstone) => !protectedIds.has(tombstone.id)).slice(-historySlots)
-    : [];
-  return ordered.filter((tombstone) => protectedIds.has(tombstone.id) || recentHistory.includes(tombstone));
+  return boundOccurrenceTombstones([...merged.values()]);
 }
 
 function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone | null {
@@ -316,11 +425,11 @@ function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone |
     id: entry.id,
     key,
     at: entry.at,
-    ...(entry.launchOwned ? { launchOwned: true as const } : {}),
     ...(entry.echoBaseline !== undefined ? { echoBaseline: entry.echoBaseline } : {}),
     ...(entry.echoBaselineIds?.length ? { echoBaselineIds: entry.echoBaselineIds } : {}),
     ...(entry.retiredEchoId ? { retiredEchoId: entry.retiredEchoId } : {}),
     ...(entry.retiredAt !== undefined ? { retiredAt: entry.retiredAt } : {}),
+    ...(entry.launchOwned ? { launchOwned: true as const } : {}),
   };
 }
 
@@ -379,9 +488,17 @@ export function seedLaunchOutbox(
   entry: { id: string; text: string; images: number; at: number; echoText?: string },
 ): void {
   if (!entry.text.trim() && !entry.images) return;
+  const currentLaunch = readCurrentLaunch(cardId);
+  if (currentLaunch?.id === entry.id && currentLaunch.retiredEchoId) return;
   const queue = readOutbox(cardId);
   const existing = queue.find((item) => item.id === entry.id);
   if (existing) {
+    recordCurrentLaunch(cardId, {
+      id: entry.id,
+      at: entry.at,
+      ...(existing.retiredEchoId ? { retiredEchoId: existing.retiredEchoId } : {}),
+      ...(existing.retiredAt !== undefined ? { retiredAt: existing.retiredAt } : {}),
+    });
     /* Reconcile the canonical echo identity onto an already-seeded bubble (issue
        #615): the composer seeds the RAW draft first, without an echo identity (it
        never composes the role scaffold); the later server projection supplies it.
@@ -396,9 +513,19 @@ export function seedLaunchOutbox(
   /* Recurring LogFeed projections can outlive the recent queue entry. Durable
      retirement under this submission id keeps the compacted launch terminal
      across refresh and identity adoption. */
-  if (readOccurrenceTombstones(cardId).some(
+  const terminalTombstone = readOccurrenceTombstones(cardId).find(
     (tombstone) => tombstone.id === entry.id && tombstone.retiredEchoId,
-  )) return;
+  );
+  if (terminalTombstone?.retiredEchoId) {
+    recordCurrentLaunch(cardId, {
+      id: entry.id,
+      at: terminalTombstone.at,
+      retiredEchoId: terminalTombstone.retiredEchoId,
+      retiredAt: terminalTombstone.retiredAt,
+    });
+    return;
+  }
+  recordCurrentLaunch(cardId, { id: entry.id, at: entry.at });
   const seeded: OutboxEntry = { ...entry, state: "delivering", launchOwned: true };
   writeBounded(cardId, [...queue, seeded]);
   /* A refreshed surface can see the canonical transcript row before the launch
@@ -453,6 +580,11 @@ export function retryOutbox(cardId: string, id: string): void {
     the new identity win, so an adoption is idempotent. */
 export function adoptOutbox(from: string, to: string): void {
   if (from === to) return;
+  const sourceLaunch = readCurrentLaunch(from);
+  if (sourceLaunch) {
+    persistCurrentLaunch(to, selectCurrentLaunch(readCurrentLaunch(to), sourceLaunch));
+    persistCurrentLaunch(from, null);
+  }
   const sourceTombstones = readOccurrenceTombstones(from);
   if (sourceTombstones.length) {
     persistOccurrenceTombstones(
@@ -562,6 +694,7 @@ function reconcileEchoRetirements(
       echoBaseline: entry.echoBaseline,
       echoBaselineIds: entry.echoBaselineIds,
       retiredEchoId: entry.retiredEchoId,
+      launchOwned: entry.launchOwned,
     })),
     ...queue.map((entry) => ({
       type: "queue" as const,
@@ -571,6 +704,7 @@ function reconcileEchoRetirements(
       echoBaseline: entry.echoBaseline,
       echoBaselineIds: entry.echoBaselineIds,
       retiredEchoId: entry.retiredEchoId,
+      launchOwned: entry.launchOwned,
     })),
   ].sort((left, right) => left.at - right.at);
   const retirements = new Map<string, { echoId: string; retiredAt: number }>();
@@ -608,6 +742,9 @@ function reconcileEchoRetirements(
   if (tombstonesChanged) persistOccurrenceTombstones(cardId, nextTombstones);
 
   const reservedByKey = new Map<string, { at: number; echoId: string }[]>();
+  /* A newly consumed active owner can age out of an already-full completed tier
+     in this same turn. Its claimed echo still advances every live successor
+     before that completed history is discarded. */
   for (const tombstone of nextTombstones) {
     if (!tombstone.retiredEchoId) continue;
     const reservations = reservedByKey.get(tombstone.key) ?? [];
@@ -640,6 +777,24 @@ function reconcileEchoRetirements(
       echoBaselineIds: [...baselineIds],
     };
   });
+  for (const entry of nextTombstones) {
+    if (!entry.launchOwned || !entry.retiredEchoId) continue;
+    recordCurrentLaunchRetirement(cardId, {
+      id: entry.id,
+      at: entry.at,
+      retiredEchoId: entry.retiredEchoId,
+      retiredAt: entry.retiredAt,
+    });
+  }
+  for (const entry of nextQueue) {
+    if (!entry.launchOwned || !entry.retiredEchoId) continue;
+    recordCurrentLaunchRetirement(cardId, {
+      id: entry.id,
+      at: entry.at,
+      retiredEchoId: entry.retiredEchoId,
+      retiredAt: entry.retiredAt,
+    });
+  }
   if (queueChanged) write(cardId, nextQueue);
 }
 
@@ -809,4 +964,5 @@ export function resetOutboxForTests(): void {
   echoListeners.clear();
   echoLedgers.clear();
   occurrenceTombstones.clear();
+  currentLaunches.clear();
 }

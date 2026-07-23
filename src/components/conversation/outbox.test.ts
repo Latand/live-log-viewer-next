@@ -467,25 +467,28 @@ test("issue 626: compacted receipt delivery owns its delayed repeated-text echo 
     .toBeDefined();
 });
 
-test("issue 626: unresolved delivered ownership survives 512 newer tombstones", () => {
-  const provisional = "spawn:launch_626_tombstone_boundary";
-  const conversation = "conversation_626_tombstone_boundary";
-  const generation = "/transcripts/626-tombstone-boundary.jsonl";
-  const repeated = "same delivered text across the tombstone boundary";
+test("issue 626: unresolved delivery ownership survives completed history beyond 512 entries", () => {
+  const provisional = "spawn:launch_626_priority_retention";
+  const conversation = "conversation_626_priority_retention";
+  const firstGeneration = "/transcripts/626-priority-retention-1.jsonl";
+  const secondGeneration = "/transcripts/626-priority-retention-2.jsonl";
+  const repeated = "same delayed text beyond the completed-history bound";
 
   enqueueOutbox(provisional, {
-    id: "older-delivered-owner",
+    id: "older-unresolved-delivery",
     text: repeated,
     images: 0,
     at: 1_000,
   });
-  updateOutbox(provisional, "older-delivered-owner", {
+  updateOutbox(provisional, "older-unresolved-delivery", {
     state: outboxStateForReceiptStatus("delivered"),
     settledAt: 1_100,
   });
-  for (let index = 0; index < 512 + OUTBOX_LIMIT; index += 1) {
-    const id = `boundary-filler-${index}`;
-    const text = `boundary filler ${index}`;
+
+  const completedChurn = 512 + OUTBOX_LIMIT + 1;
+  for (let index = 0; index < completedChurn; index += 1) {
+    const id = `completed-churn-${index}`;
+    const text = `completed churn ${index}`;
     enqueueOutbox(provisional, {
       id,
       text,
@@ -494,30 +497,242 @@ test("issue 626: unresolved delivered ownership survives 512 newer tombstones", 
     });
     updateOutbox(provisional, id, {
       state: outboxStateForReceiptStatus("delivered"),
-      settledAt: 3_000 + index,
+      settledAt: 2_000 + index,
     });
     publishTranscriptEchoes(provisional, [{
-      generation,
-      id: `row:${index + 100}:0`,
+      generation: index < 256 ? firstGeneration : secondGeneration,
+      id: `row:${index}:0`,
       text,
     }]);
   }
-  enqueueOutbox(provisional, {
-    id: "newer-still-pending",
+
+  adoptOutbox(provisional, conversation);
+  publishTranscriptEchoes(conversation, []);
+  resetOutboxForTests();
+
+  enqueueOutbox(conversation, {
+    id: "newer-identical-pending",
     text: repeated,
     images: 0,
     at: 10_000,
   });
-
-  adoptOutbox(provisional, conversation);
+  enqueueOutbox(conversation, {
+    id: "unrelated-pending",
+    text: "keep this unrelated pending entry",
+    images: 0,
+    at: 10_001,
+  });
   resetOutboxForTests();
+
+  const delayedEcho = {
+    generation: secondGeneration,
+    id: "row:9000:0",
+    text: repeated,
+  };
+  publishTranscriptEchoes(conversation, [delayedEcho]);
+
+  let queue = readOutbox(conversation);
+  expect(queue.find((entry) => entry.id === "newer-identical-pending")?.retiredEchoId)
+    .toBeUndefined();
+  expect(queue.find((entry) => entry.id === "unrelated-pending")?.state).toBe("queued");
+  expect(queue.find((entry) => entry.id === "unrelated-pending")?.retiredEchoId)
+    .toBeUndefined();
+  expect(visibleOutbox(queue, echoes([repeated, 1]), 11_000).map((entry) => entry.id))
+    .toEqual(["newer-identical-pending", "unrelated-pending"]);
+
   publishTranscriptEchoes(conversation, []);
-  publishTranscriptEchoes(conversation, [{ generation, id: "row:10:0", text: repeated }]);
+  resetOutboxForTests();
+  publishTranscriptEchoes(conversation, [delayedEcho]);
+  queue = readOutbox(conversation);
+  expect(queue.find((entry) => entry.id === "newer-identical-pending")?.retiredEchoId)
+    .toBeUndefined();
+  expect(queue.find((entry) => entry.id === "unrelated-pending")?.retiredEchoId)
+    .toBeUndefined();
+});
+
+test("issue 626: the unresolved-owner cap deterministically preserves the oldest 512 occurrences", () => {
+  const conversation = "conversation_626_active_tier_cap";
+  const generation = "/transcripts/626-active-tier-cap.jsonl";
+  const activeOwnerCount = 513;
+
+  for (let index = 0; index < activeOwnerCount; index += 1) {
+    const id = `active-owner-${index}`;
+    enqueueOutbox(conversation, {
+      id,
+      text: `active owner text ${index}`,
+      images: 0,
+      at: 1_000 + index,
+    });
+    updateOutbox(conversation, id, {
+      state: outboxStateForReceiptStatus("delivered"),
+      settledAt: 2_000 + index,
+    });
+  }
+  for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+    enqueueOutbox(conversation, {
+      id: `active-cap-filler-${index}`,
+      text: `active cap filler ${index}`,
+      images: 0,
+      at: 10_000 + index,
+    });
+  }
+
+  enqueueOutbox(conversation, {
+    id: "pending-oldest-active-text",
+    text: "active owner text 0",
+    images: 0,
+    at: 20_000,
+  });
+  enqueueOutbox(conversation, {
+    id: "pending-newest-active-text",
+    text: "active owner text 512",
+    images: 0,
+    at: 20_001,
+  });
+  resetOutboxForTests();
+
+  publishTranscriptEchoes(conversation, [
+    { generation, id: "row:oldest:0", text: "active owner text 0" },
+    { generation, id: "row:newest:0", text: "active owner text 512" },
+  ]);
 
   const queue = readOutbox(conversation);
-  expect(queue.find((entry) => entry.id === "newer-still-pending")?.retiredEchoId).toBeUndefined();
-  expect(queue.some((entry) => entry.id === "newer-still-pending")).toBe(true);
-  expect(queue.filter((entry) => entry.id.startsWith("boundary-filler-"))).toHaveLength(OUTBOX_LIMIT - 1);
+  expect(queue.find((entry) => entry.id === "pending-oldest-active-text")?.retiredEchoId)
+    .toBeUndefined();
+  expect(queue.find((entry) => entry.id === "pending-newest-active-text")?.retiredEchoId)
+    .toBeDefined();
+});
+
+test("issue 626: the completed-owner cap deterministically preserves the newest 512 occurrences", () => {
+  const conversation = "conversation_626_completed_tier_cap";
+  const generation = "/transcripts/626-completed-tier-cap.jsonl";
+  const completedOwnerCount = 513;
+
+  for (let index = 0; index < completedOwnerCount; index += 1) {
+    const id = `completed-owner-${index}`;
+    const text = `completed owner text ${index}`;
+    enqueueOutbox(conversation, {
+      id,
+      text,
+      images: 0,
+      at: 1_000 + index,
+    });
+    updateOutbox(conversation, id, {
+      state: outboxStateForReceiptStatus("delivered"),
+      settledAt: 2_000 + index,
+    });
+    publishTranscriptEchoes(conversation, [{
+      generation,
+      id: `row:completed:${index}`,
+      text,
+    }]);
+  }
+  for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+    enqueueOutbox(conversation, {
+      id: `completed-cap-filler-${index}`,
+      text: `completed cap filler ${index}`,
+      images: 0,
+      at: 10_000 + index,
+    });
+  }
+
+  publishTranscriptEchoes(conversation, Array.from({ length: 513 }, (_, index) => ({
+    generation: "/transcripts/626-completed-ledger-churn.jsonl",
+    id: `row:ledger-churn:${index}`,
+    text: `ledger churn text ${index}`,
+  })));
+  enqueueOutbox(conversation, {
+    id: "pending-oldest-completed-text",
+    text: "completed owner text 0",
+    images: 0,
+    at: 20_000,
+  });
+  enqueueOutbox(conversation, {
+    id: "pending-newest-completed-text",
+    text: "completed owner text 512",
+    images: 0,
+    at: 20_001,
+  });
+  resetOutboxForTests();
+
+  publishTranscriptEchoes(conversation, [
+    { generation, id: "row:completed:0", text: "completed owner text 0" },
+    { generation, id: "row:completed:512", text: "completed owner text 512" },
+  ]);
+
+  const queue = readOutbox(conversation);
+  expect(queue.find((entry) => entry.id === "pending-oldest-completed-text")?.retiredEchoId)
+    .toBeDefined();
+  expect(queue.find((entry) => entry.id === "pending-newest-completed-text")?.retiredEchoId)
+    .toBeUndefined();
+});
+
+test("issue 626: an active claim advances pending ownership when the completed tier is full", () => {
+  const originalDateNow = Date.now;
+  Date.now = () => 50_000;
+  try {
+    const conversation = "conversation_626_full_completed_transition";
+    const generation = "/transcripts/626-full-completed-transition.jsonl";
+    const repeated = "same text while the completed tier is full";
+
+    enqueueOutbox(conversation, {
+      id: "active-owner-before-full-completed-tier",
+      text: repeated,
+      images: 0,
+      at: 1_000,
+    });
+    updateOutbox(conversation, "active-owner-before-full-completed-tier", {
+      state: outboxStateForReceiptStatus("delivered"),
+      settledAt: 1_001,
+    });
+    for (let index = 0; index < 512 + OUTBOX_LIMIT; index += 1) {
+      const id = `full-completed-owner-${index}`;
+      const text = `full completed owner text ${index}`;
+      enqueueOutbox(conversation, {
+        id,
+        text,
+        images: 0,
+        at: 2_000 + index,
+      });
+      updateOutbox(conversation, id, {
+        state: outboxStateForReceiptStatus("delivered"),
+        settledAt: 2_000 + index,
+      });
+      publishTranscriptEchoes(conversation, [{
+        generation,
+        id: `row:full-completed:${index}`,
+        text,
+      }]);
+    }
+    enqueueOutbox(conversation, {
+      id: "pending-after-full-completed-tier",
+      text: repeated,
+      images: 0,
+      at: 10_000,
+    });
+
+    const delayedEcho = {
+      generation,
+      id: "row:delayed-active-owner:0",
+      text: repeated,
+    };
+    publishTranscriptEchoes(conversation, [delayedEcho]);
+    expect(readOutbox(conversation).find(
+      (entry) => entry.id === "pending-after-full-completed-tier",
+    )?.retiredEchoId).toBeUndefined();
+
+    resetOutboxForTests();
+    publishTranscriptEchoes(conversation, [delayedEcho]);
+    const refreshed = readOutbox(conversation).find(
+      (entry) => entry.id === "pending-after-full-completed-tier",
+    );
+    expect(refreshed?.retiredEchoId).toBeUndefined();
+    expect(refreshed?.echoBaselineIds).toContain(
+      JSON.stringify([generation, delayedEcho.id]),
+    );
+  } finally {
+    Date.now = originalDateNow;
+  }
 });
 
 test("issue 626: identity adoption preserves submission order for identical occurrences", () => {
@@ -636,56 +851,178 @@ describe("seedLaunchOutbox (P1#2)", () => {
     expect(refreshed[0]?.id).toBe("terminal-launch-filler-0");
   });
 
-  test("issue 626: a terminal launch stays retired beyond both 512-entry ledgers", () => {
-    const provisional = "spawn:launch_626_terminal_boundary";
-    const conversation = "conversation_626_terminal_boundary";
-    const text = "terminal launch beyond bounded history";
+  test("issue 626: terminal launch retirement survives both ledgers churning beyond 512 entries", () => {
+    const provisional = "spawn:launch_626_terminal_priority";
+    const conversation = "conversation_626_terminal_priority";
+    const launchId = "launch_626_terminal_priority";
+    const text = "terminal launch prompt beyond both retention bounds";
+    const firstGeneration = "/transcripts/626-terminal-priority-1.jsonl";
+    const secondGeneration = "/transcripts/626-terminal-priority-2.jsonl";
 
     seedLaunchOutbox(provisional, {
-      id: "launch_626_terminal_boundary",
+      id: launchId,
       text,
       images: 0,
       at: 1_000,
     });
     publishTranscriptEchoes(provisional, [{
-      generation: "/transcripts/626-terminal-boundary.jsonl",
-      id: "row:0:0",
+      generation: firstGeneration,
+      id: "row:launch:0",
       text,
     }]);
-    for (let index = 0; index < 512 + OUTBOX_LIMIT; index += 1) {
-      const id = `terminal-boundary-filler-${index}`;
-      const fillerText = `terminal boundary filler ${index}`;
+    expect(readOutbox(provisional)[0]?.retiredEchoId).toBeDefined();
+
+    for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+      const id = `terminal-priority-warm-${index}`;
+      const churnText = `terminal priority warm ${index}`;
       enqueueOutbox(provisional, {
         id,
-        text: fillerText,
+        text: churnText,
         images: 0,
         at: 2_000 + index,
       });
       updateOutbox(provisional, id, {
         state: outboxStateForReceiptStatus("delivered"),
-        settledAt: 3_000 + index,
+        settledAt: 2_000 + index,
       });
       publishTranscriptEchoes(provisional, [{
-        generation: "/transcripts/626-terminal-boundary-successor.jsonl",
-        id: `row:${index + 1}:0`,
-        text: fillerText,
+        generation: firstGeneration,
+        id: `row:warm:${index}`,
+        text: churnText,
       }]);
     }
+    expect(readOutbox(provisional).some((entry) => entry.id === launchId)).toBe(false);
 
     adoptOutbox(provisional, conversation);
-    resetOutboxForTests();
     publishTranscriptEchoes(conversation, []);
+    resetOutboxForTests();
+
+    for (let index = 0; index < 512 + OUTBOX_LIMIT + 1; index += 1) {
+      const id = `terminal-priority-churn-${index}`;
+      const churnText = `terminal priority churn ${index}`;
+      enqueueOutbox(conversation, {
+        id,
+        text: churnText,
+        images: 0,
+        at: 3_000 + index,
+      });
+      updateOutbox(conversation, id, {
+        state: outboxStateForReceiptStatus("delivered"),
+        settledAt: 3_000 + index,
+      });
+      publishTranscriptEchoes(conversation, [{
+        generation: index < 256 ? firstGeneration : secondGeneration,
+        id: `row:churn:${index}`,
+        text: churnText,
+      }]);
+    }
+    enqueueOutbox(conversation, {
+      id: "terminal-priority-unrelated-pending",
+      text: "keep unrelated pending after launch retirement",
+      images: 0,
+      at: 10_000,
+    });
+    publishTranscriptEchoes(conversation, []);
+    resetOutboxForTests();
+
     seedLaunchOutbox(conversation, {
-      id: "launch_626_terminal_boundary",
+      id: launchId,
       text,
       images: 0,
       at: 1_000,
     });
+    let refreshed = readOutbox(conversation);
+    expect(refreshed.some((entry) => entry.id === launchId)).toBe(false);
+    expect(refreshed.find((entry) => entry.id === "terminal-priority-unrelated-pending")?.state)
+      .toBe("queued");
 
-    const refreshed = readOutbox(conversation);
-    expect(refreshed.some((entry) => entry.id === "launch_626_terminal_boundary")).toBe(false);
-    expect(refreshed.filter((entry) => entry.id.startsWith("terminal-boundary-filler-")))
-      .toHaveLength(OUTBOX_LIMIT);
+    resetOutboxForTests();
+    seedLaunchOutbox(conversation, {
+      id: launchId,
+      text,
+      images: 0,
+      at: 1_000,
+    });
+    refreshed = readOutbox(conversation);
+    expect(refreshed.some((entry) => entry.id === launchId)).toBe(false);
+    expect(visibleOutbox(refreshed, echoes(), 11_000).some((entry) => entry.id === launchId))
+      .toBe(false);
+  });
+
+  test("issue 626: the current-launch slot deterministically preserves the newest terminal launch", () => {
+    const conversation = "conversation_626_current_launch_cap";
+    const generation = "/transcripts/626-current-launch-cap.jsonl";
+
+    seedLaunchOutbox(conversation, {
+      id: "older-terminal-launch",
+      text: "older terminal launch text",
+      images: 0,
+      at: 1_000,
+    });
+    publishTranscriptEchoes(conversation, [{
+      generation,
+      id: "row:older-launch:0",
+      text: "older terminal launch text",
+    }]);
+    for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+      enqueueOutbox(conversation, {
+        id: `current-launch-filler-${index}`,
+        text: `current launch filler ${index}`,
+        images: 0,
+        at: 2_000 + index,
+      });
+    }
+
+    seedLaunchOutbox(conversation, {
+      id: "newer-terminal-launch",
+      text: "newer terminal launch text",
+      images: 0,
+      at: 3_000,
+    });
+    publishTranscriptEchoes(conversation, [{
+      generation,
+      id: "row:newer-launch:0",
+      text: "newer terminal launch text",
+    }]);
+
+    for (let index = 0; index < 512 + OUTBOX_LIMIT + 1; index += 1) {
+      const id = `current-launch-churn-${index}`;
+      const text = `current launch churn ${index}`;
+      enqueueOutbox(conversation, {
+        id,
+        text,
+        images: 0,
+        at: 4_000 + index,
+      });
+      updateOutbox(conversation, id, {
+        state: outboxStateForReceiptStatus("delivered"),
+        settledAt: 4_000 + index,
+      });
+      publishTranscriptEchoes(conversation, [{
+        generation,
+        id: `row:current-launch-churn:${index}`,
+        text,
+      }]);
+    }
+    publishTranscriptEchoes(conversation, []);
+    resetOutboxForTests();
+
+    seedLaunchOutbox(conversation, {
+      id: "older-terminal-launch",
+      text: "older terminal launch text",
+      images: 0,
+      at: 1_000,
+    });
+    seedLaunchOutbox(conversation, {
+      id: "newer-terminal-launch",
+      text: "newer terminal launch text",
+      images: 0,
+      at: 3_000,
+    });
+
+    const queue = readOutbox(conversation);
+    expect(queue.some((entry) => entry.id === "older-terminal-launch")).toBe(true);
+    expect(queue.some((entry) => entry.id === "newer-terminal-launch")).toBe(false);
   });
 
   test("the seeded launch bubble is adopted into the materialized conversation identity", () => {

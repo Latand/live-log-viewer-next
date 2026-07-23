@@ -63,6 +63,7 @@ const launchPrompt = "Investigate issue 626.";
 const unrelatedPrompt = "Unrelated queued entry remains visible.";
 const FINAL_FILLER_COUNT = 2_700;
 const FINAL_ASSISTANT_COUNT = 40;
+const RETENTION_CHURN_COUNT = 512 + OUTBOX_LIMIT + 1;
 const CAPTURE_NOW = Date.parse("2026-07-23T09:02:00.000Z");
 
 function productionCss(): string {
@@ -752,6 +753,7 @@ test("issue 626 production DOM keeps compacted receipt-delivered ownership acros
 
   try {
     for (const viewport of VIEWPORTS) {
+      Date.now = () => CAPTURE_NOW;
       mobile = viewport.mobile;
       dom.sessionStorage.clear();
       resetOutboxForTests();
@@ -771,29 +773,82 @@ test("issue 626 production DOM keeps compacted receipt-delivered ownership acros
         state: outboxStateForReceiptStatus("delivered"),
         settledAt: Date.parse("2026-07-23T09:02:01.000Z"),
       });
-      enqueueOutbox(provisional, {
-        id: "newer-pending",
-        text: repeated,
-        images: 0,
-        at: Date.parse("2026-07-23T09:02:02.000Z"),
-        launchOwned: true,
-      });
-      updateOutbox(provisional, "newer-pending", { state: "delivering" });
-      for (let index = 0; index < OUTBOX_LIMIT - 1; index += 1) {
-        const id = `browser-filler-${index}`;
+      for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+        const id = `browser-warm-${index}`;
+        const text = `Browser warm ${index}`;
         enqueueOutbox(provisional, {
           id,
-          text: `Browser filler ${index}`,
+          text,
           images: 0,
           at: Date.parse("2026-07-23T09:02:03.000Z") + index,
-          launchOwned: true,
         });
-        updateOutbox(provisional, id, { state: "delivering" });
+        updateOutbox(provisional, id, {
+          state: outboxStateForReceiptStatus("delivered"),
+          settledAt: Date.parse("2026-07-23T09:02:03.000Z") + index,
+        });
+        publishTranscriptEchoes(provisional, [{
+          generation: firstPath,
+          id: `row:browser-warm:${index}`,
+          text,
+        }]);
       }
       adoptOutbox(provisional, CONVERSATION_ID);
       resetOutboxForTests();
 
+      for (let index = 0; index < RETENTION_CHURN_COUNT; index += 1) {
+        const id = `browser-completed-churn-${index}`;
+        const text = `Browser completed churn ${index}`;
+        enqueueOutbox(CONVERSATION_ID, {
+          id,
+          text,
+          images: 0,
+          at: Date.parse("2026-07-23T09:04:00.000Z") + index,
+        });
+        updateOutbox(CONVERSATION_ID, id, {
+          state: outboxStateForReceiptStatus("delivered"),
+          settledAt: Date.parse("2026-07-23T09:04:00.000Z") + index,
+        });
+        publishTranscriptEchoes(CONVERSATION_ID, [{
+          generation: index < 256 ? firstPath : secondPath,
+          id: `row:browser-completed-churn:${index}`,
+          text,
+        }]);
+      }
+      enqueueOutbox(CONVERSATION_ID, {
+        id: "newer-pending",
+        text: repeated,
+        images: 0,
+        at: Date.parse("2026-07-23T09:05:00.000Z"),
+        launchOwned: true,
+      });
+      updateOutbox(CONVERSATION_ID, "newer-pending", { state: "delivering" });
+      enqueueOutbox(CONVERSATION_ID, {
+        id: "browser-unrelated-pending",
+        text: "Browser unrelated pending entry",
+        images: 0,
+        at: Date.parse("2026-07-23T09:05:01.000Z"),
+        launchOwned: true,
+      });
+      updateOutbox(CONVERSATION_ID, "browser-unrelated-pending", { state: "delivering" });
+      publishTranscriptEchoes(CONVERSATION_ID, []);
+      resetOutboxForTests();
+      publishTranscriptEchoes(CONVERSATION_ID, [{
+        generation: firstPath,
+        id: "row:0:0",
+        text: repeated,
+      }]);
+      resetOutboxForTests();
+
       const delayed = await renderState(generationState("delayed-older-echo", firstPath));
+      const delayedQueue = readOutbox(CONVERSATION_ID);
+      expect(delayedQueue.find((entry) => entry.id === "newer-pending")?.retiredEchoId)
+        .toBeUndefined();
+      expect(delayedQueue.find((entry) => entry.id === "newer-pending")?.echoBaseline)
+        .toBe(1);
+      expect(delayedQueue.find((entry) => entry.id === "newer-pending")?.echoBaselineIds)
+        .toHaveLength(1);
+      expect(delayedQueue.find((entry) => entry.id === "browser-unrelated-pending")?.retiredEchoId)
+        .toBeUndefined();
       const delayedPage = await evidenceBrowser.newPage({
         viewport: { width: viewport.width, height: viewport.height },
         deviceScaleFactor: 1,
@@ -804,11 +859,16 @@ test("issue 626 production DOM keeps compacted receipt-delivered ownership acros
         return {
           occurrences: body.split(text).length - 1,
           outboxEntries: document.querySelectorAll("[data-outbox-entry]").length,
+          outboxIds: Array.from(document.querySelectorAll<HTMLElement>("[data-outbox-entry]"))
+            .map((entry) => entry.dataset.outboxEntry ?? ""),
+          userRows: document.querySelectorAll('[data-feed-kind="user"]').length,
           scrollWidth: document.documentElement.scrollWidth,
         };
       }, repeated);
+      expect(delayedEvidence.outboxIds).toEqual(["newer-pending", "browser-unrelated-pending"]);
+      expect(delayedEvidence.outboxEntries).toBe(2);
+      expect(delayedEvidence.userRows).toBe(1);
       expect(delayedEvidence.occurrences).toBe(2);
-      expect(delayedEvidence.outboxEntries).toBe(OUTBOX_LIMIT);
       expect(delayedEvidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
       await delayedPage.screenshot({
         path: path.join(EVIDENCE_DIR, `delayed-occurrence-${viewport.id}.png`),
@@ -837,7 +897,7 @@ test("issue 626 production DOM keeps compacted receipt-delivered ownership acros
         };
       }, repeated);
       expect(filteredEvidence.occurrences).toBe(1);
-      expect(filteredEvidence.outboxEntries).toBe(OUTBOX_LIMIT);
+      expect(filteredEvidence.outboxEntries).toBe(2);
       expect(filteredEvidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
       await filteredPage.screenshot({
         path: path.join(EVIDENCE_DIR, `filtered-capped-tail-${viewport.id}.png`),
@@ -863,7 +923,7 @@ test("issue 626 production DOM keeps compacted receipt-delivered ownership acros
         };
       }, repeated);
       expect(successorEvidence.occurrences).toBe(1);
-      expect(successorEvidence.outboxEntries).toBe(OUTBOX_LIMIT - 1);
+      expect(successorEvidence.outboxEntries).toBe(1);
       expect(successorEvidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
       await successorPage.screenshot({
         path: path.join(EVIDENCE_DIR, `successor-generation-${viewport.id}.png`),
@@ -943,24 +1003,65 @@ test("issue 626 production LogFeed does not reseed a compacted terminal launch a
         }]);
       }
       for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
-        const id = `terminal-browser-filler-${index}`;
+        const id = `terminal-browser-warm-${index}`;
+        const text = `Terminal browser warm ${index}`;
         enqueueOutbox(provisional, {
           id,
-          text: `Terminal browser filler ${index}`,
+          text,
           images: 0,
-          at: promptAt + 1_000 + index,
-          launchOwned: true,
+          at: promptAt + index + 1,
         });
-        updateOutbox(provisional, id, { state: "delivering" });
+        updateOutbox(provisional, id, {
+          state: outboxStateForReceiptStatus("delivered"),
+          settledAt: promptAt + index + 1,
+        });
+        publishTranscriptEchoes(provisional, [{
+          generation: "/synthetic/issue-626-terminal-generation-1.jsonl",
+          id: `row:terminal-browser-warm:${index}`,
+          text,
+        }]);
       }
       adoptOutbox(provisional, CONVERSATION_ID);
+      resetOutboxForTests();
+
+      for (let index = 0; index < RETENTION_CHURN_COUNT; index += 1) {
+        const id = `terminal-browser-churn-${index}`;
+        const text = `Terminal browser churn ${index}`;
+        enqueueOutbox(CONVERSATION_ID, {
+          id,
+          text,
+          images: 0,
+          at: promptAt + OUTBOX_LIMIT + index + 1,
+        });
+        updateOutbox(CONVERSATION_ID, id, {
+          state: outboxStateForReceiptStatus("delivered"),
+          settledAt: promptAt + OUTBOX_LIMIT + index + 1,
+        });
+        publishTranscriptEchoes(CONVERSATION_ID, [{
+          generation: index < 256
+            ? "/synthetic/issue-626-terminal-generation-1.jsonl"
+            : fixture.identity.adoptedPath,
+          id: `row:terminal-browser-churn:${index}`,
+          text,
+        }]);
+      }
+      enqueueOutbox(CONVERSATION_ID, {
+        id: "terminal-browser-unrelated-pending",
+        text: "Terminal browser unrelated pending entry",
+        images: 0,
+        at: promptAt + 20_000,
+        launchOwned: true,
+      });
+      updateOutbox(CONVERSATION_ID, "terminal-browser-unrelated-pending", { state: "delivering" });
+      publishTranscriptEchoes(CONVERSATION_ID, []);
       resetOutboxForTests();
 
       const rendered = await renderState(state);
       const queue = readOutbox(CONVERSATION_ID);
       expect(queue).toHaveLength(OUTBOX_LIMIT);
       expect(queue.some((entry) => entry.id === terminalLaunch.launchId)).toBe(false);
-      expect(queue[0]?.id).toBe("terminal-browser-filler-0");
+      expect(queue.find((entry) => entry.id === "terminal-browser-unrelated-pending")?.state)
+        .toBe("delivering");
 
       const page = await evidenceBrowser.newPage({
         viewport: { width: viewport.width, height: viewport.height },
@@ -975,9 +1076,8 @@ test("issue 626 production LogFeed does not reseed a compacted terminal launch a
           && Boolean(document.querySelector("[data-log-feed-scroller]"))
           && Boolean(document.querySelector("textarea")),
       }));
-      expect(evidence.ids).toHaveLength(OUTBOX_LIMIT);
+      expect(evidence.ids).toEqual(["terminal-browser-unrelated-pending"]);
       expect(evidence.ids).not.toContain(terminalLaunch.launchId);
-      expect(evidence.ids[0]).toBe("terminal-browser-filler-0");
       expect(evidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
       expect(evidence.productionWindow).toBe(true);
       await page.screenshot({
