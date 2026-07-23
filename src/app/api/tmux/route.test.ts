@@ -132,6 +132,32 @@ mock.module("@/lib/delivery", () => ({
   reconfigureConversation: async () => ({ ok: true, outcome: "reconfigured", target: "agents:4.0" }),
   resumeConversation: async () => ({ ok: true, target: "" }),
 }));
+mock.module("@/lib/conversation/actions", () => ({
+  CONVERSATION_ACTIONS: ["interrupt", "kill", "resume", "compact", "dialog-key"],
+  applyConversationAction: async (request: Record<string, unknown>) => {
+    if (process.env.LLV_STRUCTURED_HOSTS === "1") {
+      structuredControlCalls += 1;
+      structuredControlRequest = request;
+      if (structuredControlResult) return structuredControlResult;
+    }
+    if (request.action === "interrupt") {
+      interruptCalls += 1;
+      return { status: 200, body: { ok: true, target: "" } };
+    }
+    if (request.action === "kill") {
+      killCalls += 1;
+      if (killOutcome.ok && !killOutcome.target) {
+        return { status: 409, body: { ok: false, outcome: "failed", error: "kill resolved no registered pane" } };
+      }
+      if (!killOutcome.ok) {
+        const { status, ...body } = killOutcome;
+        return { status, body };
+      }
+      return { status: 200, body: killOutcome };
+    }
+    return { status: 200, body: { ok: true, target: "" } };
+  },
+}));
 mock.module("@/lib/resources", () => ({
   ...realResources,
   allowedKillTarget: (target: string) => target === "agents:9.0"

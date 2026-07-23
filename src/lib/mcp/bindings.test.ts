@@ -252,3 +252,283 @@ test("link_task_to_pipeline follows the cursor retry after a fail-edge loop-back
   })]);
   expect(tasks[0]!.assignments[0]!.path).not.toBe(stalePath);
 });
+
+test("board_snapshot returns an inert bounded board projection with durable lineage and redaction", async () => {
+  let writes = 0;
+  const credentialLabel = ["api", "key"].join("_");
+  const titleFixture = ["super", "secret"].join("-");
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    listFiles: async () => [{
+      path: "/sessions/worker.jsonl",
+      project: "viewer",
+      title: `Audit ${credentialLabel}=${titleFixture}`,
+      engine: "codex",
+      activity: "live",
+      proc: "codex",
+      conversationId: "conversation_worker",
+    }],
+    registrySnapshot: () => ({
+      conversations: {
+        conversation_worker: {
+          id: "conversation_worker",
+          delegationDepth: 1,
+          generations: [{ path: "/sessions/worker.jsonl" }],
+        },
+      },
+      conversationAliases: {},
+      lineageEdges: {
+        conversation_worker: {
+          parentConversationId: "conversation_parent",
+          kind: "spawn",
+          source: "viewer-spawn",
+          role: "builder",
+        },
+      },
+      memberships: {
+        conversation_worker: [{ kind: "pipeline", containerId: "pipeline_608", role: "builder" }],
+      },
+    }),
+    boardFor: () => ({ schemaVersion: 1, revision: 7, updatedAt: "2026-07-23T00:00:00.000Z", prefs: { manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false } }),
+    noteWrite: () => { writes += 1; },
+  } as never);
+
+  const result = await bindings.board_snapshot({
+    clientRequestId: "board-snapshot-redacted",
+    project: "viewer",
+    liveOnly: true,
+    limit: 1,
+  });
+
+  expect(result).toMatchObject({
+    count: 1,
+    board: { revision: 7 },
+    conversations: [{
+      conversationId: "conversation_worker",
+      title: "Audit api_key=[redacted]",
+      lineage: {
+        parentConversationId: "conversation_parent",
+        role: "builder",
+        depth: 1,
+        memberships: [{ kind: "pipeline", containerId: "pipeline_608", role: "builder" }],
+      },
+    }],
+  });
+  expect(JSON.stringify(result)).not.toContain("super-secret");
+  expect(writes).toBe(0);
+});
+
+test("flow tools read durable flows and return a stable action receipt", async () => {
+  const flows = [
+    { id: "flow_open", project: "viewer", state: "waiting_ready", closedAt: null },
+    { id: "flow_closed", project: "viewer", state: "closed", closedAt: "2026-07-23T01:00:00.000Z" },
+    { id: "flow_other", project: "other", state: "waiting_ready", closedAt: null },
+  ];
+  const actions: Array<{ id: string; action: string }> = [];
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    getFlowsWithPresets: () => ({ flows, presets: [] }),
+    patchFlow: (id: string, request: { action: string }) => {
+      actions.push({ id, action: request.action });
+      return { flow: { ...flows[0], id, state: "paused" } };
+    },
+    cancelRound: async () => ({ flow: flows[0] }),
+    closeFlow: async () => ({ flow: flows[0] }),
+  } as never);
+
+  expect(await bindings.list_flows({ clientRequestId: "list-flows", project: "viewer" })).toMatchObject({
+    count: 1,
+    flows: [{ id: "flow_open" }],
+  });
+  expect(await bindings.get_flow({ clientRequestId: "get-flow", flowId: "flow_open" })).toEqual({
+    flowId: "flow_open",
+    flow: flows[0],
+  });
+  const actionResult = await bindings.flow_action({ clientRequestId: "pause-flow", flowId: "flow_open", action: "pause" });
+  const actionOperationId = actionResult.operationId as string;
+  expect(actionResult).toMatchObject({
+    flowId: "flow_open",
+    receipt: { status: "delivered" },
+    flow: { state: "paused" },
+  });
+  expect(actionOperationId).toMatch(/^mcp_flow_action_[0-9a-f]{24}$/);
+  expect((actionResult.receipt as { operationId: string }).operationId).toBe(actionOperationId);
+  expect(actions).toEqual([{ id: "flow_open", action: "pause" }]);
+});
+
+test("list_pipelines applies project, state, and closed filters to the durable registry", async () => {
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    getPipelines: () => ({ pipelines: [
+      { id: "pipeline_live", project: "viewer", state: "running" },
+      { id: "pipeline_paused", project: "viewer", state: "paused" },
+      { id: "pipeline_closed", project: "viewer", state: "closed" },
+      { id: "pipeline_other", project: "other", state: "running" },
+    ] }),
+  } as never);
+
+  expect(await bindings.list_pipelines({
+    clientRequestId: "list-pipelines",
+    project: "viewer",
+    state: "running",
+  })).toEqual({
+    count: 1,
+    pipelines: [{ id: "pipeline_live", project: "viewer", state: "running" }],
+  });
+});
+
+test("task read tools expose the pipeline-linked durable read model", async () => {
+  const tasks = [
+    { id: "task_viewer", project: "viewer", status: "assigned", placement: "pinned", text: "Ship #608" },
+    { id: "task_other", project: "other", status: "inbox", placement: "unplaced", text: "Other" },
+  ];
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    loadTasks: () => tasks,
+    getPipelines: () => ({ pipelines: [{ id: "pipeline_608", taskIds: ["task_viewer"] }] }),
+  } as never);
+
+  expect(await bindings.list_tasks({ clientRequestId: "list-tasks", project: "viewer" })).toEqual({
+    count: 1,
+    tasks: [{ ...tasks[0], pipelineIds: ["pipeline_608"] }],
+  });
+  expect(await bindings.get_task({ clientRequestId: "get-task", taskId: "task_viewer" })).toEqual({
+    taskId: "task_viewer",
+    task: { ...tasks[0], pipelineIds: ["pipeline_608"] },
+  });
+});
+
+test("operator_snapshot validates the v1 request and re-redacts the authoritative snapshot", async () => {
+  const requests: unknown[] = [];
+  const header = "Author" + "ization";
+  const scheme = "Bear" + "er";
+  const bearerFixture = ["super", "secret", "token"].join("-");
+  const fieldFixture = ["bare", "secret"].join("-");
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    collectSnapshot: async (request: unknown) => {
+      requests.push(request);
+      return { ok: true, schemaVersion: 1, [["access", "Token"].join("")]: fieldFixture, conversations: [{ text: { messages: [{ text: `${header}: ${scheme} ${bearerFixture}` }] } }] };
+    },
+  } as never);
+
+  const result = await bindings.operator_snapshot({
+    clientRequestId: "operator-snapshot",
+    scope: { kind: "focused" },
+    text: { include: true },
+  });
+
+  expect(requests).toEqual([{ schemaVersion: 1, scope: { kind: "focused", paths: undefined }, text: { include: true, lastMessages: undefined, maxCharsPerConversation: undefined }, view: undefined, caller: undefined }]);
+  expect(JSON.stringify(result)).not.toContain("super-secret-token");
+  expect(JSON.stringify(result)).not.toContain("bare-secret");
+  expect(JSON.stringify(result)).toContain("[redacted]");
+});
+
+test("deployment_status and resources use the runtime and resource read modules directly", async () => {
+  const calls: string[] = [];
+  const runtimeClient = {
+    readViewerDeployment: async (id: string) => {
+      calls.push(`deployment:${id}`);
+      return { deploymentId: id, state: "completed", revision: "a".repeat(40) };
+    },
+    operationStatus: async (id: string) => {
+      calls.push(`operation:${id}`);
+      return { operationId: id, receipt: { status: "delivered" } };
+    },
+    snapshot: async () => ({ deployments: [{ deploymentId: "deployment_recent", state: "running" }] }),
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    runtimeEventsEnabled: () => true,
+    runtimeHostClient: () => runtimeClient,
+    readResources: async (fresh: boolean) => {
+      calls.push(`resources:${fresh}`);
+      return { system: { ramTotal: 10, ramAvailable: 5, swapTotal: 2, swapUsed: 1, capturedAt: "2026-07-23T00:00:00.000Z" }, sessions: [] };
+    },
+  } as never);
+
+  expect(await bindings.deployment_status({ clientRequestId: "deployment-status", deploymentId: "deployment_608" })).toMatchObject({
+    deploymentId: "deployment_608",
+    deployment: { state: "completed" },
+  });
+  expect(await bindings.deployment_status({ clientRequestId: "operation-status", operationId: "operation_608" })).toMatchObject({
+    operationId: "operation_608",
+    operation: { receipt: { status: "delivered" } },
+  });
+  expect(await bindings.deployment_status({ clientRequestId: "deployment-list" })).toEqual({
+    count: 1,
+    deployments: [{ deploymentId: "deployment_recent", state: "running" }],
+  });
+  expect(await bindings.resources({ clientRequestId: "resources-read", fresh: true })).toMatchObject({ system: { ramAvailable: 5 }, sessions: [] });
+  expect(calls).toEqual(["deployment:deployment_608", "operation:operation_608", "resources:true"]);
+});
+
+test("conversation_action delegates to the ownership-fenced conversation command with a stable receipt", async () => {
+  const requests: unknown[] = [];
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    applyConversationAction: async (request: { operationId: string }) => {
+      requests.push(request);
+      return {
+        status: 202,
+        body: {
+          ok: true,
+          structured: true,
+          target: "conversation_608",
+          operationId: request.operationId,
+          receipt: { operationId: request.operationId, status: "queued" },
+        },
+      };
+    },
+  } as never);
+
+  const result = await bindings.conversation_action({
+    clientRequestId: "interrupt-608",
+    conversationId: "conversation_608",
+    action: "interrupt",
+  });
+
+  expect(requests).toEqual([{
+    operationId: expect.stringMatching(/^mcp_conversation_action_[0-9a-f]{24}$/),
+    conversationId: "conversation_608",
+    transcriptPath: "",
+    action: "interrupt",
+    key: "",
+    label: undefined,
+    question: undefined,
+  }]);
+  const operationId = (requests[0] as { operationId: string }).operationId;
+  expect(result).toMatchObject({
+    conversationId: "conversation_608",
+    operationId,
+    receipt: { operationId, status: "queued" },
+  });
+});
+
+test("conversation_migration delegates to the revision-fenced migration command with a stable receipt", async () => {
+  const requests: unknown[] = [];
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    applyConversationMigration: async (request: { conversationId: string; expectedRevision?: number }) => {
+      requests.push(request);
+      return {
+        status: 200,
+        body: { conversation: { id: request.conversationId, migration: { phase: "rolled-back", revision: request.expectedRevision } } },
+      };
+    },
+  } as never);
+
+  const result = await bindings.conversation_migration({
+    clientRequestId: "rollback-608",
+    conversationId: "conversation_608",
+    action: "rollback",
+    expectedRevision: 4,
+  });
+  const migrationOperationId = result.operationId as string;
+
+  expect(requests).toEqual([{
+    conversationId: "conversation_608",
+    action: "rollback",
+    expectedRevision: 4,
+    path: "",
+  }]);
+  expect(result).toMatchObject({
+    conversationId: "conversation_608",
+    receipt: { status: "delivered" },
+    conversation: { migration: { phase: "rolled-back", revision: 4 } },
+  });
+  expect(migrationOperationId).toMatch(/^mcp_conversation_migration_[0-9a-f]{24}$/);
+  expect((result.receipt as { operationId: string }).operationId).toBe(migrationOperationId);
+});

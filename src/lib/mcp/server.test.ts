@@ -20,6 +20,48 @@ afterEach(() => {
   for (const directory of scratch.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
 });
 
+function rewriteReceiptFileAsV1(receiptPath: string): void {
+  const current = JSON.parse(fs.readFileSync(receiptPath, "utf8")) as {
+    readReceipts: Record<string, unknown>;
+    mutationReceipts: Record<string, unknown>;
+  };
+  fs.writeFileSync(receiptPath, JSON.stringify({
+    version: 1,
+    receipts: { ...current.readReceipts, ...current.mutationReceipts },
+  }));
+}
+
+async function waitForFile(filename: string, timeoutMs = 3_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filename)) return true;
+    await Bun.sleep(10);
+  }
+  return fs.existsSync(filename);
+}
+
+function recoveryArtifacts(directory: string): string[] {
+  return fs.readdirSync(directory)
+    .filter((entry) => entry.includes(".recovering") || entry.includes(".recovery-owner"));
+}
+
+async function waitForRecoveryCleanup(directory: string, timeoutMs = 3_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (recoveryArtifacts(directory).length === 0) return true;
+    await Bun.sleep(10);
+  }
+  return recoveryArtifacts(directory).length === 0;
+}
+
+async function childResult(child: { exited: Promise<number>; stderr: ReadableStream<Uint8Array> }): Promise<{
+  exit: number;
+  error: string;
+}> {
+  const exit = await child.exited;
+  return { exit, error: await new Response(child.stderr).text() };
+}
+
 describe("MCP tool service", () => {
   test("each v1 tool returns structured ids and replays a duplicate clientRequestId", async () => {
     const calls = new Map<string, number>();
@@ -79,6 +121,917 @@ describe("MCP tool service", () => {
     await first;
   });
 
+  test("a future receipt file fails closed before a mutation binding runs", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const original = "{\n  \"version\": 3,\n  \"receipts\": {}\n}\n";
+    fs.writeFileSync(receiptPath, original);
+    let bindingCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.flow_action = async () => {
+      bindingCalls += 1;
+      return { operationId: "operation_future_state" };
+    };
+    const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+
+    await expect(service.callTool("flow_action", {
+      clientRequestId: "request-future-state",
+      flowId: "flow_future",
+      action: "pause",
+    })).rejects.toThrow("unsupported MCP receipt file version");
+    expect(bindingCalls).toBe(0);
+    expect(fs.readFileSync(receiptPath, "utf8")).toBe(original);
+  });
+
+  test("malformed supported receipt files fail closed and preserve their bytes", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    let bindingCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.flow_action = async () => {
+      bindingCalls += 1;
+      return { operationId: "operation_malformed_state" };
+    };
+    const digest = "0".repeat(64);
+    const cases = [
+      "{",
+      JSON.stringify({ version: 1, receipts: { "flow_action:request-malformed": { digest: "broken" } } }),
+      JSON.stringify({ version: 2, readReceipts: { "flow_action:request-malformed": { digest } }, mutationReceipts: {} }),
+      JSON.stringify({
+        version: 2,
+        readReceipts: {},
+        mutationReceipts: {
+          "flow_action:request-malformed": {
+            digest,
+            result: {
+              ok: true,
+              toolName: "flow_action",
+              clientRequestId: "request-other",
+              replayed: false,
+            },
+          },
+        },
+      }),
+      JSON.stringify({ version: 2, readReceipts: {}, mutationReceipts: {}, extra: true }),
+    ];
+
+    for (const original of cases) {
+      fs.writeFileSync(receiptPath, original);
+      const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+      await expect(service.callTool("flow_action", {
+        clientRequestId: "request-malformed",
+        flowId: "flow_malformed",
+        action: "pause",
+      })).rejects.toThrow("invalid MCP receipt file");
+      expect(fs.readFileSync(receiptPath, "utf8")).toBe(original);
+    }
+    expect(bindingCalls).toBe(0);
+  });
+
+  test("receipt read failures other than absence fail closed", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    fs.mkdirSync(receiptPath);
+    let bindingCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.flow_action = async () => {
+      bindingCalls += 1;
+      return { operationId: "operation_unreadable_state" };
+    };
+    const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+
+    await expect(service.callTool("flow_action", {
+      clientRequestId: "request-unreadable-state",
+      flowId: "flow_unreadable",
+      action: "pause",
+    })).rejects.toThrow();
+    expect(bindingCalls).toBe(0);
+    expect(fs.statSync(receiptPath).isDirectory()).toBeTrue();
+  });
+
+  test("a live receipt lock remains owned after its stale-age threshold", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const readyPath = path.join(directory, "holder-ready");
+    const releasePath = path.join(directory, "holder-release");
+    const countPath = path.join(directory, "binding-count");
+    const resultPath = path.join(directory, "claim-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    const env = { ...process.env };
+    const holder = Bun.spawn({
+      cmd: [process.execPath, child, "hold", lockPath, readyPath, releasePath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(readyPath)).toBeTrue();
+    const claimant = Bun.spawn({
+      cmd: [process.execPath, child, "claim", receiptPath, countPath, resultPath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+
+    await Bun.sleep(150);
+    const completedWhileHeld = fs.existsSync(resultPath);
+    fs.writeFileSync(releasePath, "release");
+    const results = await Promise.all([childResult(holder), childResult(claimant)]);
+
+    expect(completedWhileHeld).toBeFalse();
+    expect(results).toEqual([{ exit: 0, error: "" }, { exit: 0, error: "" }]);
+    expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toMatchObject({ ok: true, replayed: false });
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("persistent recovery-directory loss is bounded and keeps the event loop responsive", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-missing-directory-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const countPath = path.join(directory, "binding-count");
+    const resultPath = path.join(directory, "bounded-result.json");
+    const heartbeatPath = path.join(directory, "heartbeat");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "missing-directory-owner",
+    }));
+
+    const claimant = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "missing-directory-claim",
+        receiptPath,
+        countPath,
+        resultPath,
+        heartbeatPath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const settled = await waitForFile(resultPath, 6_500);
+    if (!settled) claimant.kill(9);
+    const processResult = await childResult(claimant);
+
+    expect(settled).toBeTrue();
+    expect(processResult).toEqual({ exit: 0, error: "" });
+    expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toMatchObject({
+      outcome: "failed",
+      error: "MCP receipt store is busy",
+    });
+    const probe = JSON.parse(fs.readFileSync(resultPath, "utf8")) as {
+      scans: number;
+      ticks: number;
+      elapsedMs: number;
+    };
+    expect(probe.scans).toBeLessThan(1_000);
+    expect(probe.ticks).toBeGreaterThan(10);
+    expect(probe.elapsedMs).toBeGreaterThanOrEqual(4_900);
+    expect(probe.elapsedMs).toBeLessThan(6_000);
+    expect(fs.existsSync(countPath)).toBeFalse();
+  }, 8_000);
+
+  test("one vanished published owner entry retries within the same fenced recovery", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-transient-owner-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const countPath = path.join(directory, "binding-count");
+    const resultPath = path.join(directory, "result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    fs.writeFileSync(`${receiptPath}.lock`, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "transient-owner-read",
+    }));
+
+    const claimant = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "transient-owner-read-claim",
+        receiptPath,
+        countPath,
+        resultPath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const processResult = await childResult(claimant);
+
+    expect(processResult).toEqual({ exit: 0, error: "" });
+    expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toMatchObject({ ok: true, replayed: false });
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(recoveryArtifacts(directory)).toEqual([]);
+  });
+
+  test("every recovery publication boundary settles after creator death", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-boundaries-"));
+    scratch.push(root);
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    const boundaries = [
+      "pending-open",
+      "pending-partial-write",
+      "pending-fsync",
+      "owner-publish",
+      "recovery-link-publish",
+      "original-unlink",
+      "recovery-link-cleanup",
+      "owner-cleanup",
+    ] as const;
+
+    for (const boundary of boundaries) {
+      const directory = path.join(root, boundary);
+      fs.mkdirSync(directory);
+      const receiptPath = path.join(directory, "receipts.json");
+      const lockPath = `${receiptPath}.lock`;
+      const countPath = path.join(directory, "binding-count");
+      const crashedResultPath = path.join(directory, "crashed-result.json");
+      const firstResultPath = path.join(directory, "first-result.json");
+      const secondResultPath = path.join(directory, "second-result.json");
+      const readyPath = path.join(directory, "crash-ready");
+      fs.writeFileSync(lockPath, JSON.stringify({
+        pid: 999_999_999,
+        startIdentity: "dead",
+        token: `boundary-${boundary}`,
+      }));
+      const creator = Bun.spawn({
+        cmd: [
+          process.execPath,
+          child,
+          "crash-claim",
+          receiptPath,
+          countPath,
+          crashedResultPath,
+          boundary,
+          readyPath,
+        ],
+        env: { ...process.env },
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      expect(await waitForFile(readyPath)).toBeTrue();
+      for (const artifact of recoveryArtifacts(directory)) {
+        expect(Buffer.byteLength(artifact)).toBeLessThanOrEqual(255);
+      }
+      creator.kill(9);
+      const creatorResult = await childResult(creator);
+
+      const first = Bun.spawn({
+        cmd: [process.execPath, child, "claim", receiptPath, countPath, firstResultPath],
+        env: { ...process.env },
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      const second = Bun.spawn({
+        cmd: [process.execPath, child, "claim", receiptPath, countPath, secondResultPath],
+        env: { ...process.env },
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      const claimants = await Promise.all([childResult(first), childResult(second)]);
+
+      expect(creatorResult.exit).not.toBe(0);
+      expect(claimants).toEqual([{ exit: 0, error: "" }, { exit: 0, error: "" }]);
+      const results = [firstResultPath, secondResultPath]
+        .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+      expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+      expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+      const artifacts = recoveryArtifacts(directory);
+      if (artifacts.length > 0) throw new Error(`${boundary} left recovery artifacts: ${artifacts.join(", ")}`);
+    }
+  }, 30_000);
+
+  test("same-inode replacement survives a paused stale reaper", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-inode-reuse-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const pausePath = path.join(directory, "reaper-paused");
+    const pauseReleasePath = path.join(directory, "reaper-release");
+    const holderReadyPath = path.join(directory, "replacement-ready");
+    const holderReleasePath = path.join(directory, "replacement-release");
+    const countPath = path.join(directory, "binding-count");
+    const firstResultPath = path.join(directory, "first-result.json");
+    const secondResultPath = path.join(directory, "second-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "inode-reuse-stale-owner",
+    }));
+
+    const first = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "claim",
+        receiptPath,
+        countPath,
+        firstResultPath,
+        pausePath,
+        pauseReleasePath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(pausePath)).toBeTrue();
+    const recoveryName = recoveryArtifacts(directory).find((entry) => entry.endsWith(".recovering"));
+    expect(recoveryName).toBeDefined();
+    const recoveryPath = path.join(directory, recoveryName!);
+    const staleIdentity = fs.statSync(recoveryPath).ino;
+    fs.unlinkSync(lockPath);
+    const replacement = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "hold-reused",
+        recoveryPath,
+        lockPath,
+        holderReadyPath,
+        holderReleasePath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(holderReadyPath)).toBeTrue();
+    expect(fs.statSync(lockPath).ino).toBe(staleIdentity);
+    const second = Bun.spawn({
+      cmd: [process.execPath, child, "claim", receiptPath, countPath, secondResultPath],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+
+    fs.writeFileSync(pauseReleasePath, "release");
+    await Bun.sleep(150);
+    expect(fs.existsSync(lockPath)).toBeTrue();
+    expect(fs.existsSync(countPath)).toBeFalse();
+    fs.writeFileSync(holderReleasePath, "release");
+    const processes = await Promise.all([
+      childResult(first),
+      childResult(second),
+      childResult(replacement),
+    ]);
+
+    expect(processes).toEqual([
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+    ]);
+    const results = [firstResultPath, secondResultPath]
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+    expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(recoveryArtifacts(directory)).toEqual([]);
+  }, 12_000);
+
+  test("successors wait for namespace release before forced inode reuse", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-namespace-handoff-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const pinPath = path.join(directory, "retired-inode-pin");
+    const handoffReadyPath = path.join(directory, "handoff-ready");
+    const handoffReleasePath = path.join(directory, "handoff-release");
+    const reuseReadyPath = path.join(directory, "reuse-ready");
+    const reuseReleasePath = path.join(directory, "reuse-release");
+    const countPath = path.join(directory, "binding-count");
+    const reaperResultPath = path.join(directory, "reaper-result.json");
+    const firstResultPath = path.join(directory, "first-result.json");
+    const secondResultPath = path.join(directory, "second-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "namespace-handoff-owner",
+    }));
+    const staleInode = fs.statSync(lockPath).ino;
+
+    const reaper = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "namespace-handoff-claim",
+        receiptPath,
+        countPath,
+        reaperResultPath,
+        pinPath,
+        handoffReadyPath,
+        handoffReleasePath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(handoffReadyPath)).toBeTrue();
+    expect(fs.existsSync(lockPath)).toBeFalse();
+    expect(fs.statSync(pinPath).ino).toBe(staleInode);
+
+    const first = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "reuse-claim",
+        receiptPath,
+        countPath,
+        firstResultPath,
+        pinPath,
+        reuseReadyPath,
+        reuseReleasePath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const second = Bun.spawn({
+      cmd: [process.execPath, child, "claim", receiptPath, countPath, secondResultPath],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const enteredBeforeRelease = await waitForFile(reuseReadyPath, 250);
+    fs.writeFileSync(handoffReleasePath, "release");
+    expect(await waitForFile(reuseReadyPath)).toBeTrue();
+    expect(Number(fs.readFileSync(reuseReadyPath, "utf8"))).toBe(staleInode);
+    fs.writeFileSync(reuseReleasePath, "release");
+    const processes = await Promise.all([
+      childResult(reaper),
+      childResult(first),
+      childResult(second),
+    ]);
+
+    expect(enteredBeforeRelease).toBeFalse();
+    expect(processes).toEqual([
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+    ]);
+    const results = [reaperResultPath, firstResultPath, secondResultPath]
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+    expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(recoveryArtifacts(directory)).toEqual([]);
+  }, 12_000);
+
+  test("successors remain responsive and bounded while namespace release is paused", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-namespace-busy-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const pinPath = path.join(directory, "retired-inode-pin");
+    const handoffReadyPath = path.join(directory, "handoff-ready");
+    const handoffReleasePath = path.join(directory, "handoff-release");
+    const countPath = path.join(directory, "binding-count");
+    const reaperResultPath = path.join(directory, "reaper-result.json");
+    const firstResultPath = path.join(directory, "first-result.json");
+    const secondResultPath = path.join(directory, "second-result.json");
+    const firstHeartbeatPath = path.join(directory, "first-heartbeat");
+    const secondHeartbeatPath = path.join(directory, "second-heartbeat");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "namespace-busy-owner",
+    }));
+
+    const reaper = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "namespace-handoff-claim",
+        receiptPath,
+        countPath,
+        reaperResultPath,
+        pinPath,
+        handoffReadyPath,
+        handoffReleasePath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(handoffReadyPath)).toBeTrue();
+    const first = Bun.spawn({
+      cmd: [process.execPath, child, "timed-claim", receiptPath, countPath, firstResultPath, firstHeartbeatPath],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const second = Bun.spawn({
+      cmd: [process.execPath, child, "timed-claim", receiptPath, countPath, secondResultPath, secondHeartbeatPath],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(firstResultPath, 6_500)).toBeTrue();
+    expect(await waitForFile(secondResultPath, 6_500)).toBeTrue();
+    const claimants = await Promise.all([childResult(first), childResult(second)]);
+    const results = [firstResultPath, secondResultPath]
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as {
+        outcome: string;
+        error: string;
+        ticks: number;
+        elapsedMs: number;
+      });
+
+    expect(claimants).toEqual([{ exit: 0, error: "" }, { exit: 0, error: "" }]);
+    for (const result of results) {
+      expect(result).toMatchObject({ outcome: "failed", error: "MCP receipt store is busy" });
+      expect(result.ticks).toBeGreaterThan(10);
+      expect(result.elapsedMs).toBeGreaterThanOrEqual(4_900);
+      expect(result.elapsedMs).toBeLessThan(6_000);
+    }
+    expect(fs.existsSync(countPath)).toBeFalse();
+    reaper.kill(9);
+    expect((await childResult(reaper)).exit).not.toBe(0);
+  }, 10_000);
+
+  test("multiprocess stale recovery preserves a live replacement and admits one same-key mutation", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-race-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const pausePath = path.join(directory, "recovery-paused");
+    const pauseReleasePath = path.join(directory, "recovery-release");
+    const holderReadyPath = path.join(directory, "replacement-ready");
+    const holderReleasePath = path.join(directory, "replacement-release");
+    const countPath = path.join(directory, "binding-count");
+    const firstResultPath = path.join(directory, "first-result.json");
+    const secondResultPath = path.join(directory, "second-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    const env = { ...process.env };
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "stale-owner",
+    }));
+
+    const firstClaimant = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "claim",
+        receiptPath,
+        countPath,
+        firstResultPath,
+        pausePath,
+        pauseReleasePath,
+      ],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(pausePath)).toBeTrue();
+    fs.unlinkSync(lockPath);
+    const replacement = Bun.spawn({
+      cmd: [process.execPath, child, "hold", lockPath, holderReadyPath, holderReleasePath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(holderReadyPath)).toBeTrue();
+    const secondClaimant = Bun.spawn({
+      cmd: [process.execPath, child, "claim", receiptPath, countPath, secondResultPath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+
+    fs.writeFileSync(pauseReleasePath, "release");
+    await Bun.sleep(150);
+    const completedWhileReplacementHeld = fs.existsSync(firstResultPath) || fs.existsSync(secondResultPath);
+    fs.writeFileSync(holderReleasePath, "release");
+    const processes = await Promise.all([
+      childResult(firstClaimant),
+      childResult(secondClaimant),
+      childResult(replacement),
+    ]);
+
+    expect(completedWhileReplacementHeld).toBeFalse();
+    expect(processes).toEqual([
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+    ]);
+    const results = [firstResultPath, secondResultPath]
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+    expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("a live recovery owner stays exclusive across two reapers", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-authority-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const raceDirectory = path.join(directory, "race");
+    const holderReadyPath = path.join(directory, "replacement-ready");
+    const holderReleasePath = path.join(directory, "replacement-release");
+    const countPath = path.join(directory, "binding-count");
+    const winnerResultPath = path.join(directory, "winner-result.json");
+    const contenderResultPath = path.join(directory, "contender-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    const env = { ...process.env };
+    const phase = (role: "winner" | "contender", name: string, state: "ready" | "release") =>
+      path.join(raceDirectory, `${role}-${name}-${state}`);
+    fs.mkdirSync(raceDirectory);
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "shared-stale-owner",
+    }));
+
+    const winner = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "race-claim",
+        receiptPath,
+        countPath,
+        winnerResultPath,
+        "winner",
+        raceDirectory,
+      ],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(phase("winner", "after-link", "ready"))).toBeTrue();
+    const contender = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "race-claim",
+        receiptPath,
+        countPath,
+        contenderResultPath,
+        "contender",
+        raceDirectory,
+      ],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(path.join(raceDirectory, "contender-owner-seen"))).toBeTrue();
+    const contenderBeforeUnlink = phase("contender", "before-unlink", "ready");
+    const contenderBeforeAcquire = phase("contender", "acquire", "ready");
+    expect(await waitForFile(contenderBeforeAcquire)).toBeTrue();
+    const contenderGainedUnlinkAuthority = fs.existsSync(contenderBeforeUnlink);
+
+    fs.writeFileSync(phase("winner", "after-link", "release"), "release");
+    expect(await waitForFile(phase("winner", "after-unlink", "ready"))).toBeTrue();
+    const replacement = Bun.spawn({
+      cmd: [process.execPath, child, "hold", lockPath, holderReadyPath, holderReleasePath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(holderReadyPath)).toBeTrue();
+    fs.writeFileSync(phase("contender", "before-unlink", "release"), "release");
+    fs.writeFileSync(phase("winner", "after-unlink", "release"), "release");
+    await Bun.sleep(100);
+    const replacementSurvived = fs.existsSync(lockPath);
+    const mutationRanWhileHeld = fs.existsSync(countPath);
+
+    fs.writeFileSync(holderReleasePath, "release");
+    fs.writeFileSync(phase("contender", "acquire", "release"), "release");
+    const processes = await Promise.all([
+      childResult(winner),
+      childResult(contender),
+      childResult(replacement),
+    ]);
+
+    expect(contenderGainedUnlinkAuthority).toBeFalse();
+    expect(replacementSurvived).toBeTrue();
+    expect(mutationRanWhileHeld).toBeFalse();
+    expect(processes).toEqual([
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+    ]);
+    const results = [winnerResultPath, contenderResultPath]
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+    expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("successors recover when the recovery-link creator exits", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-crash-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const creatorPausedPath = path.join(directory, "creator-paused");
+    const creatorReleasePath = path.join(directory, "creator-release");
+    const takeoverPausedPath = path.join(directory, "takeover-paused");
+    const takeoverReleasePath = path.join(directory, "takeover-release");
+    const holderReadyPath = path.join(directory, "replacement-ready");
+    const holderReleasePath = path.join(directory, "replacement-release");
+    const countPath = path.join(directory, "binding-count");
+    const firstResultPath = path.join(directory, "first-result.json");
+    const secondResultPath = path.join(directory, "second-result.json");
+    const discardedResultPath = path.join(directory, "creator-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    const env = { ...process.env };
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "creator-death-owner",
+    }));
+
+    const creator = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "claim",
+        receiptPath,
+        countPath,
+        discardedResultPath,
+        creatorPausedPath,
+        creatorReleasePath,
+      ],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(creatorPausedPath)).toBeTrue();
+    creator.kill(9);
+    const creatorOutcome = await childResult(creator);
+    const startedAt = Date.now();
+    const first = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "takeover-claim",
+        receiptPath,
+        countPath,
+        firstResultPath,
+        takeoverPausedPath,
+        takeoverReleasePath,
+      ],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(takeoverPausedPath)).toBeTrue();
+    const second = Bun.spawn({
+      cmd: [process.execPath, child, "claim", receiptPath, countPath, secondResultPath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    fs.unlinkSync(lockPath);
+    const replacement = Bun.spawn({
+      cmd: [process.execPath, child, "hold", lockPath, holderReadyPath, holderReleasePath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(holderReadyPath)).toBeTrue();
+    fs.writeFileSync(takeoverReleasePath, "release");
+    const recovered = await waitForRecoveryCleanup(directory);
+    const recoveryElapsedMs = Date.now() - startedAt;
+    const replacementSurvived = fs.existsSync(lockPath);
+    const mutationRanWhileHeld = fs.existsSync(countPath);
+
+    fs.writeFileSync(holderReleasePath, "release");
+    const processes = await Promise.all([
+      childResult(first),
+      childResult(second),
+      childResult(replacement),
+    ]);
+
+    expect(creatorOutcome.exit).not.toBe(0);
+    expect(recovered).toBeTrue();
+    expect(recoveryElapsedMs).toBeLessThan(5_000);
+    expect(recoveryArtifacts(directory)).toEqual([]);
+    expect(replacementSurvived).toBeTrue();
+    expect(mutationRanWhileHeld).toBeFalse();
+    expect(processes).toEqual([
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+    ]);
+    expect(fs.existsSync(firstResultPath)).toBeTrue();
+    expect(fs.existsSync(secondResultPath)).toBeTrue();
+    const results = [firstResultPath, secondResultPath]
+      .filter((filename) => fs.existsSync(filename))
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+    expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+  }, 12_000);
+
+  test("mutations retain replay and conflict protection after read receipt churn and restart", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const actionCalls = new Map<string, number>();
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    const cases = [
+      {
+        toolName: "flow_action" as const,
+        args: { clientRequestId: "request-flow-acceptance", flowId: "flow_acceptance", action: "pause" },
+        changedArgs: { clientRequestId: "request-flow-acceptance", flowId: "flow_acceptance", action: "resume" },
+      },
+      {
+        toolName: "conversation_action" as const,
+        args: { clientRequestId: "request-conversation-acceptance", conversationId: "conversation_acceptance", action: "interrupt" },
+        changedArgs: { clientRequestId: "request-conversation-acceptance", conversationId: "conversation_acceptance", action: "kill" },
+      },
+      {
+        toolName: "conversation_migration" as const,
+        args: { clientRequestId: "request-migration-acceptance", conversationId: "conversation_acceptance", action: "rollback", expectedRevision: 1 },
+        changedArgs: { clientRequestId: "request-migration-acceptance", conversationId: "conversation_acceptance", action: "retry", expectedRevision: 1 },
+      },
+    ];
+    for (const mutation of cases) {
+      bindings[mutation.toolName] = async () => {
+        actionCalls.set(mutation.toolName, (actionCalls.get(mutation.toolName) ?? 0) + 1);
+        return { operationId: `operation_${mutation.toolName}_acceptance` };
+      };
+    }
+    const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+    const firstResults = new Map<string, Awaited<ReturnType<typeof service.callTool>>>();
+    for (const mutation of cases) {
+      firstResults.set(mutation.toolName, await service.callTool(mutation.toolName, mutation.args));
+    }
+    rewriteReceiptFileAsV1(receiptPath);
+    for (let index = 0; index < 501; index += 1) {
+      await service.callTool("list_flows", { clientRequestId: `request-read-${index}`, limit: 1 });
+    }
+
+    const restarted = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+    for (const mutation of cases) {
+      const firstResult = firstResults.get(mutation.toolName);
+      if (!firstResult) throw new Error(`missing first result for ${mutation.toolName}`);
+      expect(await restarted.callTool(mutation.toolName, mutation.args)).toEqual({
+        ...firstResult,
+        replayed: true,
+      });
+      expect(await restarted.callTool(mutation.toolName, mutation.changedArgs)).toMatchObject({
+        ok: false,
+        code: "idempotency_conflict",
+        replayed: true,
+      });
+      expect(actionCalls.get(mutation.toolName)).toBe(1);
+    }
+  });
+
+  test("a pending mutation remains claimed while read receipts churn", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    let release!: () => void;
+    let markStarted!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let actionCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.conversation_action = async () => {
+      actionCalls += 1;
+      markStarted();
+      await held;
+      return { operationId: "operation_pending_acceptance" };
+    };
+    const args = { clientRequestId: "request-pending-acceptance", conversationId: "conversation_acceptance", action: "interrupt" };
+    const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+    const first = service.callTool("conversation_action", args);
+    await started;
+    rewriteReceiptFileAsV1(receiptPath);
+    for (let index = 0; index < 501; index += 1) {
+      await service.callTool("list_tasks", { clientRequestId: `request-pending-read-${index}`, limit: 1 });
+    }
+
+    const restarted = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+    expect(await restarted.callTool("conversation_action", args)).toMatchObject({
+      ok: false,
+      code: "call_interrupted",
+      replayed: true,
+    });
+    expect(await restarted.callTool("conversation_action", { ...args, action: "kill" })).toMatchObject({
+      ok: false,
+      code: "idempotency_conflict",
+      replayed: true,
+    });
+    expect(actionCalls).toBe(1);
+
+    release();
+    const completed = await first;
+    const completedRestart = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+    expect(await completedRestart.callTool("conversation_action", args)).toEqual({ ...completed, replayed: true });
+    expect(actionCalls).toBe(1);
+  });
+
   test("a concurrent duplicate waits for the active call and returns it as a replay", async () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
@@ -110,7 +1063,34 @@ describe("MCP tool service", () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const listed = await client.listTools();
-      expect(listed.tools.map((tool) => tool.name)).toEqual([...MCP_TOOL_NAMES]);
+      expect(listed.tools.map((tool) => tool.name)).toEqual([
+        "spawn_agent",
+        "send_message",
+        "create_task",
+        "update_task",
+        "create_pipeline",
+        "pipeline_action",
+        "link_task_to_pipeline",
+        "list_conversations",
+        "get_conversation",
+        "deploy_exact_sha",
+        "get_pipeline",
+        "board_snapshot",
+        "list_flows",
+        "get_flow",
+        "flow_action",
+        "list_pipelines",
+        "conversation_action",
+        "operator_snapshot",
+        "list_tasks",
+        "get_task",
+        "deployment_status",
+        "resources",
+        "conversation_migration",
+      ]);
+      for (const tool of listed.tools) {
+        expect(tool.inputSchema.required).toContain("clientRequestId");
+      }
       const spawnSchema = listed.tools.find((tool) => tool.name === "spawn_agent")?.inputSchema;
       expect(spawnSchema?.properties).toHaveProperty("cwd");
       expect(spawnSchema?.properties).toHaveProperty("prompt");

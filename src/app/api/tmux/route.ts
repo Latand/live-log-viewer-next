@@ -1,15 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import {
-  answerDialogKey,
-  compactConversation,
   deliverConversationMessage,
-  interruptConversation,
-  killConversation,
-  resumeConversation,
   reconfigureConversation,
   type DeliveryOutcome,
 } from "@/lib/delivery";
+import { applyConversationAction, CONVERSATION_ACTIONS } from "@/lib/conversation/actions";
 import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/transcriptHost";
 import { reconfigurationFromBody } from "@/lib/agent/reconfigure";
 import { listFiles } from "@/lib/scanner";
@@ -212,7 +208,19 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   }
 
   const explicitAction = typeof body.action === "string" ? body.action : "";
-  const structuredControl = process.env.LLV_STRUCTURED_HOSTS === "1"
+  if ((CONVERSATION_ACTIONS as readonly string[]).includes(explicitAction)) {
+    const result = await applyConversationAction({
+      conversationId,
+      transcriptPath: filePath,
+      action: explicitAction,
+      key: typeof body.key === "string" ? body.key : "",
+      label: body.label,
+      question: body.question,
+    });
+    return NextResponse.json(result.body, { status: result.status });
+  }
+
+  const structuredControl = explicitAction === "reconfigure" && process.env.LLV_STRUCTURED_HOSTS === "1"
     ? await dispatchStructuredControl({
         path: filePath,
         conversationId,
@@ -228,21 +236,6 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       })
     : null;
   if (structuredControl) return NextResponse.json(structuredControl.body, { status: structuredControl.status });
-
-  if (body.action === "interrupt") return respond(await interruptConversation(filePath));
-  if (body.action === "compact") return respond(await compactConversation(filePath));
-  if (body.action === "dialog-key") {
-    const key = typeof body.key === "string" ? body.key : "";
-    return respond(await answerDialogKey(filePath, key, body.label, body.question));
-  }
-  if (body.action === "resume") return respond(await resumeConversation(filePath));
-  if (body.action === "kill") {
-    const outcome = await killConversation(filePath);
-    if (outcome.ok && !outcome.target) {
-      return NextResponse.json({ ok: false, outcome: "failed", error: "kill resolved no registered pane" }, { status: 409 });
-    }
-    return respond(outcome);
-  }
   if (body.action === "reconfigure") {
     const file = (await listFiles()).find((item) => item.path === filePath);
     if (!file || (file.engine !== "claude" && file.engine !== "codex")) {
