@@ -1,11 +1,13 @@
 /**
- * Issue #499 (repair round) — the dead STRUCTURED host composer must present
+ * Issue #499 + round-2 finding 4 — the dead STRUCTURED host composer must present
  * exactly the production capability set, truthfully, in both locales:
  *
  *   - Send stays enabled: text is admitted durably and delivered after the
  *     host recovers (the capability matrix's `dead` row keeps send ENABLED);
- *   - the image picker stays usable: images queue in the local draft and the
- *     old inline restriction line is gone (compact-feed pass);
+ *   - the image picker is DISABLED with the localized recovery reason (finding
+ *     4): the dead host has no image pipeline, so the picker holds an image
+ *     submission until recovery, while staged tiles stay removable and text
+ *     still sends;
  *   - the model/reasoning pill is NOT offered (the matrix hides `runtime` on
  *     the dead surface), so no committed evidence may depict one.
  *
@@ -175,10 +177,13 @@ async function renderInto(node: React.ReactElement): Promise<{ host: HTMLElement
 }
 
 test.each(["en", "uk"] as const)(
-  "[%s] a dead structured host keeps Send admitting text durably and explains the image restriction inline, with no pill",
+  "[%s] finding 4: a dead structured host keeps Send admitting text but disables the image picker with the recovery reason, no pill",
   async (locale) => {
     setLocale(locale);
-    mobile = true;
+    /* Desktop: the attachment picker rides the always-inline secondary row, so
+       its disabled state and reason are directly observable (the mobile row folds
+       it behind a disclosure). */
+    mobile = false;
     quietWire();
     const { host, root } = await renderInto(<TmuxComposer file={deadViewerFile()} deadHost />);
 
@@ -193,9 +198,15 @@ test.each(["en", "uk"] as const)(
     expect(send.getAttribute("aria-disabled")).toBe("false");
     expect(send.disabled).toBe(false);
 
-    /* Images stay draftable while the host is down (compact-feed pass): no
-       blocking explainer renders and the picker is not disabled. */
-    expect(host.textContent).not.toContain(translate(locale, "composer.imagesBlockedDuringRecovery"));
+    /* Finding 4: the dead host has no image pipeline, so the picker is DISABLED
+       and names the localized recovery reason, keeping a submission on hold until
+       the host recovers. */
+    const recoveryReason = translate(locale, "composer.imagesBlockedDuringRecovery");
+    const imageButton = host.querySelector(`button[aria-label="${translate(locale, "composer.addImages")}"]`) as HTMLButtonElement;
+    expect(imageButton).toBeTruthy();
+    expect(imageButton.disabled).toBe(true);
+    expect(imageButton.title).toBe(recoveryReason);
+    expect(host.textContent).toContain(recoveryReason);
 
     /* Production capability visibility: the matrix hides the runtime control
        on the dead surface, so no model/reasoning pill may render. */

@@ -3,12 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MoreHorizontal } from "lucide-react";
-import { ArrowUpToLine, Check, FoldVertical, Loader2, Play, Square, SquareTerminal } from "@/components/icons";
+import { ArrowUpToLine, Check, FoldVertical, Loader2, Play, RotateCw, Square, SquareTerminal } from "@/components/icons";
 
 import { Hint } from "@/components/Hint";
 import { AttachTerminalDialog } from "@/components/AttachTerminalDialog";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { interruptRuntime } from "@/hooks/useRuntime";
+import { interruptRuntime, refreshRuntime } from "@/hooks/useRuntime";
 import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -112,9 +112,13 @@ export interface AgentControlStripViewProps {
   compactArmed: boolean;
   stopBusy: boolean;
   compactBusy: boolean;
+  /** The compact Re-check control's in-flight state; the container owns it.
+      Optional so presentational harnesses can render the strip without it. */
+  recheckBusy?: boolean;
   overflowOpen: boolean;
   onStop: () => void;
   onCompact: () => void;
+  onRecheck?: () => void;
   onTerminal: () => void;
   onToggleOverflow: () => void;
   status: { kind: "ok" | "info" | "err"; text: string } | null;
@@ -136,9 +140,11 @@ export function AgentControlStripView({
   compactArmed,
   stopBusy,
   compactBusy,
+  recheckBusy = false,
   overflowOpen,
   onStop,
   onCompact,
+  onRecheck = () => undefined,
   onTerminal,
   onToggleOverflow,
   status,
@@ -166,6 +172,26 @@ export function AgentControlStripView({
       <Square className="h-4 w-4" fill="currentColor" aria-hidden />
     </StripButton>
   ) : null;
+
+  /* Re-check (issue #561 item 4): a compact icon standing beside the interrupt
+     state, never a wide banner button. It forces a fresh runtime snapshot, so
+     it is the one recovery route that stays reachable in every surface state —
+     including the blocked ones where Stop itself is disabled. It therefore
+     stays on the face at every width instead of folding into the overflow. */
+  const recheckBtn = (
+    <StripButton
+      t={t}
+      isMobile={isMobile}
+      cap={{ state: "enabled" }}
+      ariaLabel="deadHost.recheck"
+      hint="strip.recheckHint"
+      busy={recheckBusy}
+      onClick={onRecheck}
+      className="hover:text-accent"
+    >
+      <RotateCw className="h-4 w-4" aria-hidden />
+    </StripButton>
+  );
 
   const compactBtn = visible(controls.compact) ? (
     <StripButton
@@ -213,6 +239,7 @@ export function AgentControlStripView({
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         <ModeChip t={t} surface={surface} />
         {stopBtn}
+        {recheckBtn}
         {/* Secondary controls: inline on the full desktop face, folded otherwise. */}
         {foldsSecondary ? null : compactBtn}
         {foldsSecondary ? null : terminalBtn}
@@ -266,6 +293,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
   const [overflowOpen, setOverflowOpen] = useState(false);
   const [stopBusy, setStopBusy] = useState(false);
   const [compactBusy, setCompactBusy] = useState(false);
+  const [recheckBusy, setRecheckBusy] = useState(false);
   const [compactArmed, setCompactArmed] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const [status, setStatus] = useState<{ kind: "ok" | "info" | "err"; text: string } | null>(null);
@@ -318,6 +346,18 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
     }
   };
 
+  const recheck = async () => {
+    if (recheckBusy) return;
+    setRecheckBusy(true);
+    setStatus(null);
+    try {
+      const ok = await refreshRuntime();
+      if (!ok) setStatus({ kind: "err", text: t("deadHost.recheckFailed") });
+    } finally {
+      setRecheckBusy(false);
+    }
+  };
+
   const compact = async () => {
     if (!compactArmed) {
       setCompactArmed(true);
@@ -352,9 +392,11 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
         compactArmed={compactArmed}
         stopBusy={stopBusy}
         compactBusy={compactBusy}
+        recheckBusy={recheckBusy}
         overflowOpen={overflowOpen}
         onStop={() => void stop()}
         onCompact={() => void compact()}
+        onRecheck={() => void recheck()}
         onTerminal={() => setAttachOpen(true)}
         onToggleOverflow={() => setOverflowOpen((open) => !open)}
         status={status}

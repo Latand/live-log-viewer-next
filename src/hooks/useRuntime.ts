@@ -122,6 +122,41 @@ export function useRuntimeSessionByArtifact(artifactPath: string | null): Runtim
 }
 
 /**
+ * The runtime session hosting a conversation (round-1 P1#3). The bus indexes
+ * sessions by conversation identity, so during launch — when the file's path is
+ * still `spawn:<launchId>` and no transcript artifact exists yet — a
+ * conversation-id lookup finds the live host and its streaming `liveTurn`,
+ * where an artifact-path lookup would return null until materialization. The
+ * artifact path stays a fallback so a Claude subagent (whose root process writes
+ * the child transcript, and whose child carries no own conversation id on the
+ * bus) still resolves via its transcript path (issue #241 finding 2).
+ */
+export function useRuntimeSessionForConversation(
+  conversationId: string | null | undefined,
+  artifactPath: string | null,
+): RuntimeSessionView | null {
+  const { store, structuredHostsEnabled } = useRuntime();
+  return useMemo(() => {
+    const session = sessionForConversation(store.sessions, conversationId, artifactPath);
+    return session ? sessionViewFor(store, session, structuredHostsEnabled) : null;
+  }, [store, structuredHostsEnabled, conversationId, artifactPath]);
+}
+
+/** Pure resolution (round-1 P1#3): the hosted session for a conversation, by
+    conversation identity first, then transcript-artifact fallback. Extracted so
+    the launch-time `spawn:<launchId>` → conversation-id resolution and the
+    subagent artifact fallback are directly testable. */
+export function sessionForConversation(
+  sessions: Record<string, RuntimeSession>,
+  conversationId: string | null | undefined,
+  artifactPath: string | null,
+): RuntimeSession | null {
+  if (conversationId && sessions[conversationId]) return sessions[conversationId];
+  if (artifactPath) return Object.values(sessions).find((s) => s.artifactPath === artifactPath) ?? null;
+  return null;
+}
+
+/**
  * Durable receipts for the hosted session backing a transcript path, newest
  * first. Empty while the bus is off or no hosted session carries that artifact
  * — so a legacy/unhosted composer shows nothing new.

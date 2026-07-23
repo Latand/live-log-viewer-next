@@ -60,8 +60,9 @@ afterAll(() => {
 });
 
 const { appendComposerDraft, TmuxComposer } = await import("./TmuxComposer");
+const { readOutbox, retryOutbox, resetOutboxForTests } = await import("./conversation/outbox");
 
-test("a lost image send keeps its earliest snapshot through a conflicting retry until the late delivery settles it", async () => {
+test("queue-first: a lost image send keeps its own immutable snapshot through a retry until the late delivery settles it", async () => {
   const sentKeys: string[] = [];
   const sentImageCounts: number[] = [];
   globalThis.fetch = (async (input, init) => {
@@ -154,41 +155,46 @@ test("a lost image send keeps its earliest snapshot through a conflicting retry 
     pasteImage("sent-with-first-attempt");
     await untilPreviews(1);
     const sentPreview = previews()[0];
+    /* Queue-first (round-1 P1#1/#4): submitting snapshots this generation's one
+       image into the durable outbox entry and clears the composer + tray
+       immediately. The lost first attempt (503) marks the bubble failed while
+       preserving its immutable image snapshot. */
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sentImageCounts).toEqual([1]);
-    expect(textarea.value).toBe("annotate the screenshot");
+    expect(textarea.value).toBe("");
+    await untilPreviews(0);
+    const failed = readOutbox("conv-pending-images").find((entry) => entry.text === "annotate the screenshot")!;
+    expect(failed.state).toBe("failed");
+    expect(failed.images).toBe(1);
 
-    /* An image attached while the first attempt's fate is unknown. */
+    /* An image attached AFTER the submit belongs to the NEXT message — it never
+       joins the failed entry's immutable snapshot. */
     pasteImage("attached-after-loss");
-    await untilPreviews(2);
-    const laterPreview = previews()[1];
+    await untilPreviews(1);
+    const laterPreview = previews()[0];
     expect(laterPreview).not.toBe(sentPreview);
 
-    /* The retry (same key, now two images) is a changed payload: the server
-       rejects it 409 with no receipt, the composer keeps everything attached,
-       and the FIRST attempt's snapshot stays the immutable record. */
-    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    /* Retrying the failed bubble replays the SAME key with the SAME one-image
+       snapshot — never the two images now on screen. */
+    flushSync(() => retryOutbox("conv-pending-images", failed.id));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sentKeys).toHaveLength(2);
     expect(sentKeys[1]).toBe(sentKeys[0]);
-    expect(previews()).toHaveLength(2);
-    expect(textarea.value).toBe("annotate the screenshot");
+    expect(sentImageCounts[1]).toBe(1);
+    /* The later image B still sits in the tray for the next message. */
+    expect(previews()).toEqual([laterPreview]);
 
     /* The late delivered receipt for the FIRST attempt arrives on the durable
-       receipt stream: it clears exactly the sent text and image A, keeps the
-       later image B, and rotates the consumed key. */
+       receipt stream: it settles exactly that bubble to delivered and rotates
+       the consumed key, without touching image B or the composer. */
     flushSync(() => publishReceipts([lateReceipt(2)]));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(textarea.value).toBe("");
+    expect(readOutbox("conv-pending-images").find((entry) => entry.id === failed.id)!.state).toBe("delivered");
     expect(previews()).toEqual([laterPreview]);
 
-    /* Re-publishing the same delivered receipt is idempotent: nothing further
-       clears and the key rotation below stays exactly once. */
-    flushSync(() => publishReceipts([lateReceipt(3)]));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(previews()).toEqual([laterPreview]);
-
+    /* The next message sends image B under a fresh key — proof the snapshots
+       never crossed generations. */
     flushSync(() => appendComposerDraft("conv-pending-images", "next ask"));
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -199,5 +205,6 @@ test("a lost image send keeps its earliest snapshot through a conflicting retry 
     flushSync(() => root.unmount());
     publishReceipts([]);
     sessionStorage.clear();
+    resetOutboxForTests();
   }
 });

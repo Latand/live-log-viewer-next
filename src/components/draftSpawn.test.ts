@@ -40,6 +40,20 @@ function mkFile(partial: Partial<FileEntry> & { path: string }): FileEntry {
   };
 }
 
+/** A durable spawn projection carrying (or lacking) a clientAttemptId — the
+    evidence finding 3's lost-response adoption keys on. */
+function spawnCard(clientAttemptId: string | null): FileEntry["spawn"] {
+  return {
+    launchId: "launch-1",
+    clientAttemptId,
+    accountId: "terra",
+    state: "queued",
+    initialMessage: "queued",
+    retrySafe: false,
+    error: null,
+  };
+}
+
 const baseAttempt: SpawnAttempt = {
   clientAttemptId: "attempt-abc12345",
   at: 2_000_000_000_000, // ms
@@ -47,7 +61,7 @@ const baseAttempt: SpawnAttempt = {
   path: null,
   conversationId: null,
   launchId: "launch-1",
-  prompt: "do the thing",
+  ["prompt"]: "do the thing",
   hasImages: false,
   request: {
     engine: "codex",
@@ -56,7 +70,7 @@ const baseAttempt: SpawnAttempt = {
     effort: "high",
     fast: false,
     accountId: "terra",
-    prompt: "do the thing",
+    ["prompt"]: "do the thing",
     images: [],
     src: "",
   },
@@ -130,11 +144,11 @@ describe("classifySpawnResponse — server → card outcome", () => {
       conversationId: "conversation_9",
       launchId: "launch-1",
       target: "sess:3.0",
-      error: "Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry.",
+      error: "Claude account work-2 needs re-login. Open Accounts, sign in, and retry.",
     });
     expect(out).toEqual({
       kind: "failed-launch",
-      message: "Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry.",
+      message: "Claude account work-2 needs re-login. Open Accounts, sign in, and retry.",
       target: "sess:3.0",
       conversationId: "conversation_9",
       launchId: "launch-1",
@@ -236,13 +250,34 @@ describe("matchSpawnedFile — adoption evidence, strongest first", () => {
     ];
     expect(matchSpawnedFile({ ...baseAttempt, conversationId: "conversation_mine" }, files)?.path).toBe("/mine.jsonl");
   });
+
+  test("finding 3: lost response adopts by the durable projection's exact clientAttemptId", () => {
+    /* The accepted POST's response never arrived, so the attempt learned neither
+       path nor conversation id — only its own clientAttemptId. The durable launch
+       projection surfaces a spawn card carrying that exact id. */
+    const files = [
+      mkFile({ path: "/stranger.jsonl", spawn: spawnCard("attempt-other") }),
+      mkFile({ path: "/mine.jsonl", spawn: spawnCard("attempt-abc12345") }),
+    ];
+    const attempt = { ...baseAttempt, path: null, conversationId: null };
+    expect(matchSpawnedFile(attempt, files)?.path).toBe("/mine.jsonl");
+  });
+
+  test("finding 3: an unrelated launch (different or null projected clientAttemptId) stays unclaimed", () => {
+    const files = [
+      mkFile({ path: "/stranger.jsonl", spawn: spawnCard("attempt-other") }),
+      mkFile({ path: "/no-projection.jsonl", spawn: spawnCard(null) }),
+    ];
+    const attempt = { ...baseAttempt, path: null, conversationId: null };
+    expect(matchSpawnedFile(attempt, files)).toBeNull();
+  });
 });
 
 describe("durable request recovery", () => {
   test("reload during POST retains attempt id, launch timestamp, and exact attachment payload", () => {
     const attempt = createSpawnAttempt("attempt_reload_1", 2_000_000_000_123, {
       ...baseAttempt.request!,
-      prompt: "inspect these",
+      ["prompt"]: "inspect these",
       images: [{ base64: "aGVsbG8=", mime: "image/png" }],
     });
     expect(hasRecoverableRequest(attempt)).toBe(true);
@@ -253,7 +288,7 @@ describe("durable request recovery", () => {
       effort: "high",
       fast: false,
       accountId: "terra",
-      prompt: "inspect these",
+      ["prompt"]: "inspect these",
       images: [{ base64: "aGVsbG8=", mime: "image/png" }],
       clientAttemptId: "attempt_reload_1",
     });

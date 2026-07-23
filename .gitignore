@@ -60,3 +60,13 @@ prod.log
 docs/screenshots/issue-499/*.png
 docs/screenshots/issue-499/captures.list
 docs/screenshots/issue-499/geometry.list
+
+# The conversation-window visual evidence: the objective geometry manifest
+# (geometry.json — overflow/proportions/control-placement measurements) is
+# COMMITTED so the review can inspect it directly (round-1 P2#7); the
+# browser-rendered PNGs and intermediate HTML are regenerated on demand by
+# conversationWindowEvidence.browser.test.tsx and are NOT committed (a raw
+# browser render is not byte-deterministic, so it cannot carry the deterministic
+# privacy-manifest hash the publication gate requires).
+evidence/**/*.html
+evidence/**/*.png

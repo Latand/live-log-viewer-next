@@ -118,6 +118,13 @@ export interface ResumeSpecOptions {
   permissionMode?: string | null;
   allowSubagents?: boolean;
   mcpServers?: readonly string[];
+  /** The conversation's authoritative working directory. When set it is the ONE
+      effective cwd used for MCP policy enumeration, materialization, and the
+      rendered command. The resume spec otherwise re-derives cwd by sniffing the
+      transcript head and silently falls back to `$HOME`, which enumerates
+      project-scoped MCP servers in the wrong directory (finding 1). Absent/empty
+      ⇒ safe fallback to the sniffed cwd. */
+  cwd?: string | null;
 }
 
 function normalizedMcpServers(value: readonly string[] | undefined): string[] {
@@ -324,19 +331,53 @@ export function claudeSuccessorSpecFor(input: {
  * session of their own, so only root session files qualify.
  */
 export function resumeSpecFor(root: string, pathname: string, options: ResumeSpecOptions = {}): ResumeSpec | null {
-  const mcpServers = normalizedMcpServers(options.mcpServers);
   const base = path.basename(pathname);
+  /* One effective cwd, chosen before the spec (and its MCP policy enumeration)
+     is generated: the caller's recorded cwd is authoritative; only when it is
+     absent do we sniff the transcript head (finding 1). */
+  const recordedCwd = options.cwd && options.cwd.trim() ? options.cwd : null;
   if (root === "claude-projects" && base.endsWith(".jsonl") && !pathname.includes(path.sep + "subagents" + path.sep)) {
     const sid = base.slice(0, -".jsonl".length);
     if (!/^[0-9a-f-]{36}$/.test(sid)) return null;
     const home = claudeHomeOwningTranscript(pathname);
     if (!home) return null;
+    return resumeSpecForSession("claude", sid, recordedCwd ?? resumeCwd(pathname), home, options);
+  }
+  if (root === "codex-sessions" && base.endsWith(".jsonl")) {
+    const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
+    if (!id) return null;
+    const home = codexHomeOwningSessionPath(pathname);
+    if (!home) return null;
+    return resumeSpecForSession("codex", id, recordedCwd ?? resumeCwd(pathname), home, options);
+  }
+  return null;
+}
+
+/**
+ * Compose the resume/attach command from an explicit engine + session id + cwd +
+ * account home, without needing the transcript file to exist yet (round-1 P1#6).
+ * The transcript-path form {@link resumeSpecFor} delegates here after sniffing
+ * the session id and home off the path; the launch-receipt form (a queued
+ * `spawn:<launchId>` window whose transcript has not materialized) passes the
+ * durable receipt's recorded session id, cwd, and account home directly, so
+ * "Open in terminal" composes a real working command instead of 400-ing on a
+ * synthetic path.
+ */
+export function resumeSpecForSession(
+  engine: AgentEngine,
+  sessionId: string,
+  cwd: string,
+  home: string,
+  options: ResumeSpecOptions = {},
+): ResumeSpec | null {
+  if (!/^[0-9a-f-]{36}$/.test(sessionId)) return null;
+  const mcpServers = normalizedMcpServers(options.mcpServers);
+  if (engine === "claude") {
     const managed = isManagedClaudeHome(home);
-    const cwd = resumeCwd(pathname);
     const policy = applyClaudeSpawnPolicy(home, {
       allowSubagents: options.allowSubagents,
       baseSettingsPath: managed ? claudeSettingsPath() : null,
-      profileId: `resume-${sid}`,
+      profileId: `resume-${sessionId}`,
       cwd,
       mcpServers,
       mcpStatePath: managed ? path.join(home, ".claude.json") : path.join(path.dirname(home), ".claude.json"),
@@ -354,7 +395,7 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     const launchModel = normalizeClaudeLaunchModel(options.model);
     if (launchModel) args.push("--model", launchModel);
     if (options.effort) args.push("--effort", options.effort);
-    args.push("--resume", sid);
+    args.push("--resume", sessionId);
     const command = args.map(shellQuote).join(" ");
     return {
       command: managed ? `${claudeEnvPrefix(home)} ${command}` : command,
@@ -364,33 +405,25 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
       launchProfile: { ...emptyLaunchProfileForResume(cwd, launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode, allowSubagents: options.allowSubagents ?? false, mcpServers },
     };
   }
-  if (root === "codex-sessions" && base.endsWith(".jsonl")) {
-    const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
-    if (!id) return null;
-    const home = codexHomeOwningSessionPath(pathname);
-    if (!home) return null;
-    let command = `${resolveBinary("codex")}`;
-    if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
-    const cwd = resumeCwd(pathname);
-    for (const override of codexMcpRuntimeOverrides(home, cwd, mcpServers)) command += ` -c ${shellQuote(override)}`;
-    if (options.model) command += ` -m ${shellQuote(options.model)}`;
-    if (options.effort) command += ` -c ${shellQuote(`model_reasoning_effort=${options.effort}`)}`;
-    if (options.fast != null) command += ` -c ${shellQuote(`service_tier=${options.fast ? "priority" : "standard"}`)}`;
-    if (options.readOnly) command += " --sandbox read-only";
-    if (options.permissionMode && ["untrusted", "on-request", "never"].includes(options.permissionMode)) {
-      command += ` --ask-for-approval ${shellQuote(options.permissionMode)}`;
-    }
-    if (!options.allowSubagents) command += " --disable multi_agent";
-    command += ` resume ${id}`;
-    return {
-      command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
-      cwd,
-      windowName: "codex-resume",
-      engine: "codex",
-      launchProfile: { ...emptyLaunchProfileForResume(cwd, options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false, mcpServers },
-    };
+  let command = `${resolveBinary("codex")}`;
+  if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
+  for (const override of codexMcpRuntimeOverrides(home, cwd, mcpServers)) command += ` -c ${shellQuote(override)}`;
+  if (options.model) command += ` -m ${shellQuote(options.model)}`;
+  if (options.effort) command += ` -c ${shellQuote(`model_reasoning_effort=${options.effort}`)}`;
+  if (options.fast != null) command += ` -c ${shellQuote(`service_tier=${options.fast ? "priority" : "standard"}`)}`;
+  if (options.readOnly) command += " --sandbox read-only";
+  if (options.permissionMode && ["untrusted", "on-request", "never"].includes(options.permissionMode)) {
+    command += ` --ask-for-approval ${shellQuote(options.permissionMode)}`;
   }
-  return null;
+  if (!options.allowSubagents) command += " --disable multi_agent";
+  command += ` resume ${sessionId}`;
+  return {
+    command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
+    cwd,
+    windowName: "codex-resume",
+    engine: "codex",
+    launchProfile: { ...emptyLaunchProfileForResume(cwd, options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false, mcpServers },
+  };
 }
 
 function emptyLaunchProfileForResume(cwd: string, model: string | null, effort: string | null): LaunchProfile {

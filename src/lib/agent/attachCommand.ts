@@ -37,19 +37,25 @@ export interface AttachCommand {
   note?: "subagent-root";
 }
 
-/** Build the {@link AttachCommand} from an already-resolved resume spec. Pure. */
+/** Build the {@link AttachCommand} from an already-resolved resume spec. Pure.
+    `cwd` overrides the spec's own working directory: the resume spec re-derives
+    it by sniffing the transcript head and silently falls back to `$HOME` when
+    that read comes up empty, which is exactly the wrong-path command #561
+    reported. The conversation's recorded cwd is authoritative, so when the
+    caller knows it, it wins. */
 export function attachCommandFromSpec(
   spec: ResumeSpec,
-  meta: { accountId: string; accountLabel: string; note?: "subagent-root" },
+  meta: { accountId: string; accountLabel: string; note?: "subagent-root"; cwd?: string | null },
 ): AttachCommand {
+  const cwd = meta.cwd || spec.cwd;
   return {
     engine: spec.engine,
     accountId: meta.accountId,
     accountLabel: meta.accountLabel,
-    cwd: spec.cwd,
+    cwd,
     command: spec.command,
-    cdCommand: `cd ${shellQuote(spec.cwd)}`,
-    fullCommand: `cd ${shellQuote(spec.cwd)} && ${spec.command}`,
+    cdCommand: `cd ${shellQuote(cwd)}`,
+    fullCommand: `cd ${shellQuote(cwd)} && ${spec.command}`,
     ...(meta.note ? { note: meta.note } : {}),
   };
 }
@@ -60,7 +66,7 @@ export type AttachResolution =
 
 export interface AttachResolverDeps {
   files: FileEntry[];
-  resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[] }) => ResumeSpec | null;
+  resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[]; cwd?: string | null }) => ResumeSpec | null;
   accountIdForPath: (path: string) => string;
   accountLabelFor: (engine: AgentEngine, accountId: string) => string;
   allowSubagentsForPath?: (path: string) => boolean | undefined;
@@ -80,11 +86,20 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
   const target = resolvableTarget(entry, deps.files);
   if (!target) return { ok: false, error: "this conversation cannot be attached", status: 409 };
 
+  /* One effective cwd, chosen BEFORE the resume spec is generated (finding 1):
+     the conversation's recorded cwd (the resolvable target's, so a subagent keeps
+     its ROOT's project dir) drives the MCP policy enumeration, materialization,
+     and rendered command alike. The resume spec's transcript-sniffed `$HOME`
+     fallback would otherwise enumerate project-scoped MCP servers in the wrong
+     directory before the recorded cwd is applied to the display command. When no
+     cwd is recorded, `resumeSpecFor` falls back to the sniff, exactly as before. */
+  const effectiveCwd = target.entry.cwd ?? entry.cwd ?? null;
   const spec = deps.resumeSpecFor(target.entry.root, target.entry.path, {
     model: target.entry.launchModel ?? target.entry.model,
     effort: target.entry.effort,
     allowSubagents: deps.allowSubagentsForPath?.(target.entry.path),
     mcpServers: deps.mcpServersForPath?.(target.entry.path),
+    cwd: effectiveCwd,
   });
   if (!spec) return { ok: false, error: "this conversation cannot be attached", status: 409 };
 
@@ -94,7 +109,80 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
     value: attachCommandFromSpec(spec, {
       accountId,
       accountLabel: deps.accountLabelFor(spec.engine, accountId),
+      cwd: effectiveCwd,
       ...(target.viaRoot ? { note: "subagent-root" as const } : {}),
+    }),
+  };
+}
+
+/** The launch-receipt fields the terminal command is composed from (round-1
+    P1#6). Everything here is durable registry state, so a queued launch window —
+    whose transcript path is the synthetic `spawn:<launchId>` — still yields a
+    real working command from the recorded account home, cwd, and session id. */
+export interface LaunchAttachReceipt {
+  engine: AgentEngine;
+  cwd: string;
+  accountId: string | null;
+  key: { engine: AgentEngine; sessionId: string } | null;
+  launchProfile: { model: string | null; effort: string | null; fast: boolean | null; allowSubagents?: boolean; mcpServers?: readonly string[] };
+}
+
+export interface LaunchAttachDeps {
+  receipt: LaunchAttachReceipt | null;
+  /** The conversation's materialized transcript path, when it is already in the
+      scan — preferred, so a launch that has since materialized resolves through
+      the full path flow (subagent walk, cwd override). */
+  materializedPath: string | null;
+  resolveByPath: (path: string) => AttachResolution;
+  resumeSpecForSession: (
+    engine: AgentEngine,
+    sessionId: string,
+    cwd: string,
+    home: string,
+    options?: { model?: string | null; effort?: string | null; fast?: boolean | null; allowSubagents?: boolean; mcpServers?: readonly string[] },
+  ) => ResumeSpec | null;
+  homeForAccount: (engine: AgentEngine, accountId: string) => string | null;
+  accountLabelFor: (engine: AgentEngine, accountId: string) => string;
+}
+
+/**
+ * Resolve the terminal command for a `spawn:<launchId>` launch window (round-1
+ * P1#6). Prefers the materialized transcript once it exists; before then it
+ * composes the resume command directly from the durable receipt's recorded
+ * account home, cwd, and session id — never handing the synthetic launch path to
+ * a filesystem-path endpoint (the HTTP 400 the review flagged). Pure: all I/O is
+ * injected.
+ */
+export function resolveLaunchAttachCommand(deps: LaunchAttachDeps): AttachResolution {
+  const receipt = deps.receipt;
+  if (!receipt) return { ok: false, error: "the launch is unknown to the viewer", status: 404 };
+  if (deps.materializedPath) {
+    const byPath = deps.resolveByPath(deps.materializedPath);
+    if (byPath.ok) return byPath;
+    /* A transient path-resolution miss (scan lag) falls through to the durable
+       receipt composition below rather than surfacing the path error. */
+  }
+  if (!receipt.key) {
+    return { ok: false, error: "the launch is still starting — the terminal command is available once its session binds", status: 409 };
+  }
+  const home = receipt.accountId ? deps.homeForAccount(receipt.engine, receipt.accountId) : null;
+  if (!home) return { ok: false, error: "the launch account is unavailable for a terminal command", status: 409 };
+  const spec = deps.resumeSpecForSession(receipt.engine, receipt.key.sessionId, receipt.cwd, home, {
+    model: receipt.launchProfile.model,
+    effort: receipt.launchProfile.effort,
+    fast: receipt.launchProfile.fast,
+    allowSubagents: receipt.launchProfile.allowSubagents,
+    /* Re-apply the launch's recorded MCP allowlist (PR #610) so the resumed
+       command enforces the same server scope the launch ran under. */
+    mcpServers: receipt.launchProfile.mcpServers,
+  });
+  if (!spec) return { ok: false, error: "this launch cannot be attached", status: 409 };
+  return {
+    ok: true,
+    value: attachCommandFromSpec(spec, {
+      accountId: receipt.accountId ?? "",
+      accountLabel: deps.accountLabelFor(receipt.engine, receipt.accountId ?? ""),
+      cwd: receipt.cwd,
     }),
   };
 }

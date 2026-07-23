@@ -1136,9 +1136,14 @@ export async function createDraftPipeline(
 
 /**
  * Does a stage already have a live board surface? A run stage is present once
- * its latest attempt's transcript is a placed node; a review-loop is present
- * once its flow has a placed round deck (the reviewer transcript itself is
- * folded into the deck, so `agentPath` is never the right probe there).
+ * its latest attempt's transcript is a placed node. A review-loop is present
+ * once EITHER its flow has a placed round deck OR — the pipeline lane (issue
+ * #560) — the current round's reviewer transcript is itself a placed node. The
+ * pipeline embeds the review stage as the same canonical conversation window as
+ * every other stage: the live/latest round's reviewer conversation renders in
+ * the stage slot (prior rounds fold to evidence), so `agentPath` is the right
+ * probe there too. Without this a running review round showed only its prompt
+ * placeholder while the reviewer was already working (Fix #604 symptom).
  */
 export function stageHasBoardPresence(
   pipeline: Pipeline,
@@ -1148,8 +1153,9 @@ export function stageHasBoardPresence(
 ): boolean {
   const attempt = latestAttempt(pipeline, stage.id);
   if (!attempt) return false;
+  if (Boolean(attempt.agentPath) && placedPaths.has(attempt.agentPath!)) return true;
   if (stage.kind === "review-loop") return Boolean(attempt.flowId && placedFlowIds.has(attempt.flowId));
-  return Boolean(attempt.agentPath && placedPaths.has(attempt.agentPath));
+  return false;
 }
 
 export type PipelineStagePresentation = "materialized" | "evidence" | "queued" | "waiting";
