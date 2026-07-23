@@ -132,7 +132,20 @@ type ReceiptLockObservation = {
   owner: ReceiptLockOwner | null;
   token: string | null;
 };
+type ReceiptRecoveryOwner = ReceiptLockOwner & {
+  version: 1;
+  epoch: number;
+  targetDev: number;
+  targetIno: number;
+  targetToken: string | null;
+};
+type ReceiptRecoveryClaim = {
+  owner: ReceiptRecoveryOwner;
+  ownerPath: string;
+};
 
+// Append-only epochs provide one retirement owner without replacing a live
+// claim. A successor publishes the next epoch only after the current owner dies.
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -228,28 +241,194 @@ function observeLock(lockPath: string): ReceiptLockObservation | null {
   }
 }
 
+function processOwnerAlive(owner: ReceiptLockOwner): boolean {
+  if (!procBackend.pidAlive(owner.pid)) return false;
+  if (owner.startIdentity === null) return true;
+  const currentIdentity = procBackend.processIdentity(owner.pid);
+  return currentIdentity === null || currentIdentity === owner.startIdentity;
+}
+
 function staleLock(observation: ReceiptLockObservation): boolean {
-  if (observation.owner) {
-    if (!procBackend.pidAlive(observation.owner.pid)) return true;
-    if (observation.owner.startIdentity === null) return false;
-    const currentIdentity = procBackend.processIdentity(observation.owner.pid);
-    return currentIdentity !== null && currentIdentity !== observation.owner.startIdentity;
-  }
+  if (observation.owner) return !processOwnerAlive(observation.owner);
   return Date.now() - observation.mtimeMs > LOCK_STALE_MS;
+}
+
+function recoveryOwnerPrefix(recoveryPath: string): string {
+  return `${recoveryPath}.recovery-owner-`;
+}
+
+function readRecoveryOwner(ownerPath: string): ReceiptRecoveryOwner {
+  const value = JSON.parse(fs.readFileSync(ownerPath, "utf8")) as unknown;
+  if (!isRecord(value)
+    || value.version !== 1
+    || !Number.isSafeInteger(value.epoch)
+    || (value.epoch as number) < 0
+    || !Number.isSafeInteger(value.pid)
+    || (value.pid as number) <= 0
+    || !(value.startIdentity === null || typeof value.startIdentity === "string")
+    || typeof value.token !== "string"
+    || !value.token
+    || !Number.isSafeInteger(value.targetDev)
+    || !Number.isSafeInteger(value.targetIno)
+    || !(value.targetToken === null || typeof value.targetToken === "string")) {
+    throw new Error("invalid MCP receipt recovery owner");
+  }
+  return value as ReceiptRecoveryOwner;
+}
+
+function recoveryOwners(
+  recoveryPath: string,
+  observation: ReceiptLockObservation,
+): Array<{ owner: ReceiptRecoveryOwner; ownerPath: string }> {
+  const directory = path.dirname(recoveryPath);
+  const prefix = path.basename(recoveryOwnerPrefix(recoveryPath));
+  for (;;) {
+    try {
+      return fs.readdirSync(directory)
+        .map((entry) => {
+          if (!entry.startsWith(prefix)) return null;
+          const epochText = entry.slice(prefix.length);
+          if (!/^(?:0|[1-9][0-9]*)$/.test(epochText)) return null;
+          const ownerPath = path.join(directory, entry);
+          const owner = readRecoveryOwner(ownerPath);
+          if (owner.epoch !== Number(epochText)
+            || owner.targetDev !== observation.identity.dev
+            || owner.targetIno !== observation.identity.ino
+            || owner.targetToken !== observation.token) {
+            throw new Error("invalid MCP receipt recovery owner target");
+          }
+          return { owner, ownerPath };
+        })
+        .filter((entry): entry is { owner: ReceiptRecoveryOwner; ownerPath: string } => entry !== null)
+        .sort((left, right) => left.owner.epoch - right.owner.epoch);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
+function publishRecoveryOwner(
+  recoveryPath: string,
+  owner: ReceiptRecoveryOwner,
+): string | null {
+  const ownerPath = `${recoveryOwnerPrefix(recoveryPath)}${owner.epoch}`;
+  const temporary = `${ownerPath}.pending-${owner.pid}-${owner.token}`;
+  let descriptor: number | null = null;
+  try {
+    descriptor = fs.openSync(temporary, "wx", 0o600);
+    fs.writeFileSync(descriptor, JSON.stringify(owner));
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = null;
+    try {
+      fs.linkSync(temporary, ownerPath);
+      return ownerPath;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return null;
+      throw error;
+    }
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+    try {
+      fs.unlinkSync(temporary);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
+function claimRecoveryOwnership(
+  recoveryPath: string,
+  observation: ReceiptLockObservation,
+): ReceiptRecoveryClaim | null {
+  const token = crypto.randomUUID();
+  for (;;) {
+    const owners = recoveryOwners(recoveryPath, observation);
+    const current = owners.at(-1)?.owner;
+    if (current && processOwnerAlive(current)) return null;
+    const owner: ReceiptRecoveryOwner = {
+      version: 1,
+      epoch: (current?.epoch ?? -1) + 1,
+      pid: process.pid,
+      startIdentity: procBackend.processIdentity(process.pid),
+      token,
+      targetDev: observation.identity.dev,
+      targetIno: observation.identity.ino,
+      targetToken: observation.token,
+    };
+    const ownerPath = publishRecoveryOwner(recoveryPath, owner);
+    if (ownerPath) return { owner, ownerPath };
+  }
+}
+
+function recoveryClaimCurrent(
+  recoveryPath: string,
+  observation: ReceiptLockObservation,
+  claim: ReceiptRecoveryClaim,
+): boolean {
+  const current = recoveryOwners(recoveryPath, observation).at(-1);
+  return current?.owner.token === claim.owner.token && current.ownerPath === claim.ownerPath;
+}
+
+function removeDeadRecoveryOwnerAliases(
+  recoveryPath: string,
+  observation: ReceiptLockObservation,
+): void {
+  const directory = path.dirname(recoveryPath);
+  const prefix = path.basename(recoveryOwnerPrefix(recoveryPath));
+  for (const entry of fs.readdirSync(directory)) {
+    if (!entry.startsWith(prefix) || !entry.includes(".pending-")) continue;
+    const ownerPath = path.join(directory, entry);
+    try {
+      const owner = readRecoveryOwner(ownerPath);
+      if (owner.targetDev !== observation.identity.dev
+        || owner.targetIno !== observation.identity.ino
+        || owner.targetToken !== observation.token
+        || processOwnerAlive(owner)) continue;
+      fs.unlinkSync(ownerPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
+function releaseRecoveryOwnership(
+  recoveryPath: string,
+  observation: ReceiptLockObservation,
+  claim: ReceiptRecoveryClaim,
+): void {
+  if (!recoveryClaimCurrent(recoveryPath, observation, claim)) return;
+  for (const { ownerPath } of recoveryOwners(recoveryPath, observation).reverse()) {
+    try {
+      fs.unlinkSync(ownerPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  removeDeadRecoveryOwnerAliases(recoveryPath, observation);
 }
 
 function removeObservedLock(lockPath: string, observation: ReceiptLockObservation): boolean {
   const recoveryPath = `${lockPath}.${observation.identity.dev}-${observation.identity.ino}.recovering`;
+  const claim = claimRecoveryOwnership(recoveryPath, observation);
+  if (!claim) return false;
   try {
     fs.linkSync(lockPath, recoveryPath);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "EEXIST") return false;
-    throw error;
+    if (code === "ENOENT") {
+      releaseRecoveryOwnership(recoveryPath, observation, claim);
+      return false;
+    }
+    if (code !== "EEXIST") {
+      releaseRecoveryOwnership(recoveryPath, observation, claim);
+      throw error;
+    }
   }
   try {
     const recoveryMetadata = readLockMetadata(recoveryPath);
-    if (!sameLock(recoveryPath, observation.identity)
+    if (!recoveryClaimCurrent(recoveryPath, observation, claim)
+      || !sameLock(recoveryPath, observation.identity)
       || recoveryMetadata.token !== observation.token
       || !sameLock(lockPath, observation.identity)
       || readLockMetadata(lockPath).token !== observation.token) return false;
@@ -269,6 +448,7 @@ function removeObservedLock(lockPath: string, observation: ReceiptLockObservatio
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
+    releaseRecoveryOwnership(recoveryPath, observation, claim);
   }
 }
 

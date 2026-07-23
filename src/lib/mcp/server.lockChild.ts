@@ -49,9 +49,23 @@ async function claimReceipt(
   pauseReleasePath?: string,
   raceRole?: RaceRole,
   raceDirectory?: string,
+  takeoverPausePath?: string,
+  takeoverReleasePath?: string,
 ): Promise<void> {
   const lockPath = `${receiptPath}.lock`;
-  if (raceRole && raceDirectory) {
+  if (takeoverPausePath && takeoverReleasePath) {
+    const originalLink = fs.linkSync.bind(fs);
+    let paused = false;
+    fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+      const result = originalLink(existingPath, newPath);
+      if (!paused && String(newPath).includes(".recovery-owner-1")) {
+        paused = true;
+        fs.writeFileSync(takeoverPausePath, "paused");
+        waitFor(takeoverReleasePath);
+      }
+      return result;
+    }) as typeof fs.linkSync;
+  } else if (raceRole && raceDirectory) {
     const originalOpen = fs.openSync.bind(fs);
     const originalUnlink = fs.unlinkSync.bind(fs);
     const originalLink = fs.linkSync.bind(fs);
@@ -63,7 +77,17 @@ async function claimReceipt(
         pauseAt(raceDirectory, raceRole, "acquire");
         blockAcquire = false;
       }
-      return originalOpen(filename, flags, mode);
+      try {
+        return originalOpen(filename, flags, mode);
+      } catch (error) {
+        if (raceRole === "contender"
+          && (error as NodeJS.ErrnoException).code === "EEXIST"
+          && String(filename) === lockPath) {
+          blockAcquire = true;
+          fs.writeFileSync(path.join(raceDirectory, `${raceRole}-owner-seen`), "seen");
+        }
+        throw error;
+      }
     }) as typeof fs.openSync;
     fs.unlinkSync = ((filename: fs.PathLike) => {
       if (raceRole === "contender" && !unlinked && String(filename) === lockPath) {
@@ -78,22 +102,12 @@ async function claimReceipt(
       return result;
     }) as typeof fs.unlinkSync;
     fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
-      try {
-        const result = originalLink(existingPath, newPath);
-        if (raceRole === "winner" && !linked && String(existingPath) === lockPath) {
-          linked = true;
-          pauseAt(raceDirectory, raceRole, "after-link");
-        }
-        return result;
-      } catch (error) {
-        if (raceRole === "contender"
-          && (error as NodeJS.ErrnoException).code === "EEXIST"
-          && String(existingPath) === lockPath) {
-          blockAcquire = true;
-          fs.writeFileSync(path.join(raceDirectory, `${raceRole}-eexist-seen`), "seen");
-        }
-        throw error;
+      const result = originalLink(existingPath, newPath);
+      if (raceRole === "winner" && !linked && String(existingPath) === lockPath) {
+        linked = true;
+        pauseAt(raceDirectory, raceRole, "after-link");
       }
+      return result;
     }) as typeof fs.linkSync;
   } else if (pausePath && pauseReleasePath) {
     const originalUnlink = fs.unlinkSync.bind(fs);
@@ -150,6 +164,18 @@ if (mode === "hold") {
     undefined,
     undefined,
     process.argv[6] as RaceRole,
+    process.argv[7]!,
+  );
+} else if (mode === "takeover-claim") {
+  await claimReceipt(
+    process.argv[3]!,
+    process.argv[4]!,
+    process.argv[5]!,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    process.argv[6]!,
     process.argv[7]!,
   );
 } else {

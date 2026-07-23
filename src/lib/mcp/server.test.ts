@@ -40,14 +40,18 @@ async function waitForFile(filename: string, timeoutMs = 3_000): Promise<boolean
   return fs.existsSync(filename);
 }
 
-async function waitForAnyFile(filenames: string[], timeoutMs = 3_000): Promise<string | null> {
+function recoveryArtifacts(directory: string): string[] {
+  return fs.readdirSync(directory)
+    .filter((entry) => entry.includes(".recovering") || entry.includes(".recovery-owner"));
+}
+
+async function waitForRecoveryCleanup(directory: string, timeoutMs = 3_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const existing = filenames.find((filename) => fs.existsSync(filename));
-    if (existing) return existing;
+    if (recoveryArtifacts(directory).length === 0) return true;
     await Bun.sleep(10);
   }
-  return filenames.find((filename) => fs.existsSync(filename)) ?? null;
+  return recoveryArtifacts(directory).length === 0;
 }
 
 async function childResult(child: { exited: Promise<number>; stderr: ReadableStream<Uint8Array> }): Promise<{
@@ -317,7 +321,7 @@ describe("MCP tool service", () => {
     expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
   });
 
-  test("only the recovery-link creator can retire a stale lock", async () => {
+  test("a live recovery owner stays exclusive across two reapers", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-authority-"));
     scratch.push(directory);
     const receiptPath = path.join(directory, "receipts.json");
@@ -370,11 +374,11 @@ describe("MCP tool service", () => {
       stdout: "ignore",
       stderr: "pipe",
     });
-    expect(await waitForFile(path.join(raceDirectory, "contender-eexist-seen"))).toBeTrue();
+    expect(await waitForFile(path.join(raceDirectory, "contender-owner-seen"))).toBeTrue();
     const contenderBeforeUnlink = phase("contender", "before-unlink", "ready");
     const contenderBeforeAcquire = phase("contender", "acquire", "ready");
-    const contenderPhase = await waitForAnyFile([contenderBeforeUnlink, contenderBeforeAcquire]);
-    const contenderGainedUnlinkAuthority = contenderPhase === contenderBeforeUnlink;
+    expect(await waitForFile(contenderBeforeAcquire)).toBeTrue();
+    const contenderGainedUnlinkAuthority = fs.existsSync(contenderBeforeUnlink);
 
     fs.writeFileSync(phase("winner", "after-link", "release"), "release");
     expect(await waitForFile(phase("winner", "after-unlink", "ready"))).toBeTrue();
@@ -386,7 +390,6 @@ describe("MCP tool service", () => {
     });
     expect(await waitForFile(holderReadyPath)).toBeTrue();
     fs.writeFileSync(phase("contender", "before-unlink", "release"), "release");
-    expect(await waitForFile(contenderBeforeAcquire)).toBeTrue();
     fs.writeFileSync(phase("winner", "after-unlink", "release"), "release");
     await Bun.sleep(100);
     const replacementSurvived = fs.existsSync(lockPath);
@@ -400,7 +403,6 @@ describe("MCP tool service", () => {
       childResult(replacement),
     ]);
 
-    expect(contenderPhase).not.toBeNull();
     expect(contenderGainedUnlinkAuthority).toBeFalse();
     expect(replacementSurvived).toBeTrue();
     expect(mutationRanWhileHeld).toBeFalse();
@@ -414,6 +416,111 @@ describe("MCP tool service", () => {
     expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
     expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
   });
+
+  test("successors recover when the recovery-link creator exits", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-crash-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const creatorPausedPath = path.join(directory, "creator-paused");
+    const creatorReleasePath = path.join(directory, "creator-release");
+    const takeoverPausedPath = path.join(directory, "takeover-paused");
+    const takeoverReleasePath = path.join(directory, "takeover-release");
+    const holderReadyPath = path.join(directory, "replacement-ready");
+    const holderReleasePath = path.join(directory, "replacement-release");
+    const countPath = path.join(directory, "binding-count");
+    const firstResultPath = path.join(directory, "first-result.json");
+    const secondResultPath = path.join(directory, "second-result.json");
+    const discardedResultPath = path.join(directory, "creator-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    const env = { ...process.env };
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "creator-death-owner",
+    }));
+
+    const creator = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "claim",
+        receiptPath,
+        countPath,
+        discardedResultPath,
+        creatorPausedPath,
+        creatorReleasePath,
+      ],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(creatorPausedPath)).toBeTrue();
+    creator.kill(9);
+    const creatorOutcome = await childResult(creator);
+    const startedAt = Date.now();
+    const first = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "takeover-claim",
+        receiptPath,
+        countPath,
+        firstResultPath,
+        takeoverPausedPath,
+        takeoverReleasePath,
+      ],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(takeoverPausedPath)).toBeTrue();
+    const second = Bun.spawn({
+      cmd: [process.execPath, child, "claim", receiptPath, countPath, secondResultPath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    fs.unlinkSync(lockPath);
+    const replacement = Bun.spawn({
+      cmd: [process.execPath, child, "hold", lockPath, holderReadyPath, holderReleasePath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(holderReadyPath)).toBeTrue();
+    fs.writeFileSync(takeoverReleasePath, "release");
+    const recovered = await waitForRecoveryCleanup(directory);
+    const recoveryElapsedMs = Date.now() - startedAt;
+    const replacementSurvived = fs.existsSync(lockPath);
+    const mutationRanWhileHeld = fs.existsSync(countPath);
+
+    fs.writeFileSync(holderReleasePath, "release");
+    const processes = await Promise.all([
+      childResult(first),
+      childResult(second),
+      childResult(replacement),
+    ]);
+
+    expect(creatorOutcome.exit).not.toBe(0);
+    expect(recovered).toBeTrue();
+    expect(recoveryElapsedMs).toBeLessThan(5_000);
+    expect(recoveryArtifacts(directory)).toEqual([]);
+    expect(replacementSurvived).toBeTrue();
+    expect(mutationRanWhileHeld).toBeFalse();
+    expect(processes).toEqual([
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+    ]);
+    expect(fs.existsSync(firstResultPath)).toBeTrue();
+    expect(fs.existsSync(secondResultPath)).toBeTrue();
+    const results = [firstResultPath, secondResultPath]
+      .filter((filename) => fs.existsSync(filename))
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+    expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+  }, 12_000);
 
   test("mutations retain replay and conflict protection after read receipt churn and restart", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
