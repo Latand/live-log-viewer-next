@@ -15,6 +15,7 @@ import {
   visibleStandaloneReceipts,
   withDismissedReceipts,
   writeDismissedReceipts,
+  messageReceiptForAssistantTurn,
 } from "./deliveryState";
 import type { ReceiptStatus, RuntimeReceipt } from "./runtimeModel";
 
@@ -157,6 +158,67 @@ test("an exact feed echo retires a delivered row while queued and delivering rec
     new Map([[text, 1]]),
   )).toEqual([]);
   expect(deliveryAttemptGroups(active).map((group) => group.current.status)).toEqual(["queued", "delivering"]);
+});
+
+test("full feed bubbles retire every delivered row whose receipt text is a bounded prefix", () => {
+  const now = Date.parse("2026-07-23T07:13:25.000Z");
+  const fullTexts = [
+    "а".repeat(286),
+    "б".repeat(325),
+  ];
+  const receipts = fullTexts.map((text, index) => receipt({
+    operationId: `op-bounded-${index}`,
+    status: "delivered",
+    text: text.slice(0, 240),
+    at: `2026-07-23T07:13:2${index}.000Z`,
+  }));
+
+  expect(deliveryEchoes(
+    receipts,
+    Date.parse("2026-07-23T07:13:00.000Z"),
+    new Set(),
+    now,
+    new Map(fullTexts.map((text) => [text, 1])),
+  )).toEqual([]);
+});
+
+test("assistant turn evidence identifies its delivering message and leaves another pending message unmatched", () => {
+  const delivering = receipt({
+    operationId: "turn-replied",
+    idempotencyKey: "key-replied",
+    status: "delivering",
+    turnId: null,
+    text: "the assistant is answering this",
+  });
+  const pending = receipt({
+    operationId: "op-pending",
+    idempotencyKey: "key-pending",
+    status: "queued",
+    turnId: null,
+    text: "still waiting",
+  });
+
+  expect(messageReceiptForAssistantTurn([pending, delivering], "turn-replied")?.idempotencyKey).toBe("key-replied");
+  expect(messageReceiptForAssistantTurn([pending, delivering], "some-other-turn")).toBeNull();
+});
+
+test("assistant response evidence retires a delivered echo before its feed bubble lands", () => {
+  const delivered = receipt({
+    operationId: "op-replied",
+    idempotencyKey: "key-replied",
+    status: "delivered",
+    text: "reply already streaming",
+    at: "2026-07-23T07:13:20.000Z",
+  });
+
+  expect(deliveryEchoes(
+    [delivered],
+    Date.parse("2026-07-23T07:13:00.000Z"),
+    new Set(),
+    Date.parse("2026-07-23T07:13:25.000Z"),
+    new Map(),
+    new Set([delivered.idempotencyKey]),
+  )).toEqual([]);
 });
 
 test("active, problem, and interrupted receipts never echo", () => {

@@ -5,6 +5,7 @@ import {
   adoptOutbox,
   cancelOutbox,
   enqueueOutbox,
+  markOutboxResponded,
   nextDispatch,
   outboxHistory,
   OUTBOX_DELIVERED_TTL_MS,
@@ -117,6 +118,36 @@ test("queued / delivering / launch-owned bubbles stay until their echo lands, ne
   expect(visibleOutbox([queued, delivering, launch], echoes(), far)).toHaveLength(3);
   /* Each retires only on its own echo. */
   expect(visibleOutbox([queued, delivering, launch], echoes("the launch prompt"), far).map((e) => e.id)).toEqual(["k1", "k2"]);
+});
+
+test("assistant reply evidence settles and retires its delivering outbox bubble", () => {
+  const submittedAt = 1_000_000;
+  enqueueOutbox("conv", { id: "key-replied", text: "please inspect this", images: 0, at: submittedAt });
+  updateOutbox("conv", "key-replied", { state: "delivering" });
+
+  markOutboxResponded("conv", "key-replied", submittedAt + 2_000);
+
+  const [responded] = readOutbox("conv");
+  expect(responded).toMatchObject({
+    id: "key-replied",
+    state: "delivered",
+    settledAt: submittedAt + 2_000,
+    responseStartedAt: submittedAt + 2_000,
+  });
+  expect(visibleOutbox([responded!], echoes(), submittedAt + 2_001)).toEqual([]);
+});
+
+test("assistant reply evidence leaves an unrelated pending outbox bubble visible", () => {
+  const submittedAt = 1_000_000;
+  enqueueOutbox("conv", { id: "key-replied", text: "first turn", images: 0, at: submittedAt });
+  updateOutbox("conv", "key-replied", { state: "delivering" });
+  enqueueOutbox("conv", { id: "key-pending", text: "still waiting", images: 0, at: submittedAt + 1 });
+
+  markOutboxResponded("conv", "key-replied", submittedAt + 2_000);
+
+  expect(visibleOutbox(readOutbox("conv"), echoes(), submittedAt + 2_001).map((entry) => entry.id))
+    .toEqual(["key-pending"]);
+  expect(readOutbox("conv").find((entry) => entry.id === "key-pending")).toMatchObject({ state: "queued" });
 });
 
 test("finding 2: a pre-existing identical user message leaves a freshly queued bubble visible", () => {
