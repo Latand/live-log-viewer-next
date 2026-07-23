@@ -926,13 +926,29 @@ test("issue 626 production LogFeed does not reseed a compacted terminal launch a
       }]);
       expect(typeof readOutbox(provisional)[0]?.retiredEchoId).toBe("string");
 
+      for (let index = 0; index < 512 + OUTBOX_LIMIT; index += 1) {
+        const id = `terminal-browser-history-${index}`;
+        const text = `Terminal browser history ${index}`;
+        enqueueOutbox(provisional, {
+          id,
+          text,
+          images: 0,
+          at: promptAt + index + 1,
+        });
+        updateOutbox(provisional, id, { state: "delivered" });
+        publishTranscriptEchoes(provisional, [{
+          generation: fixture.identity.adoptedPath,
+          id: `row:${index + 1}:0`,
+          text,
+        }]);
+      }
       for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
         const id = `terminal-browser-filler-${index}`;
         enqueueOutbox(provisional, {
           id,
           text: `Terminal browser filler ${index}`,
           images: 0,
-          at: promptAt + index + 1,
+          at: promptAt + 1_000 + index,
           launchOwned: true,
         });
         updateOutbox(provisional, id, { state: "delivering" });

@@ -467,6 +467,59 @@ test("issue 626: compacted receipt delivery owns its delayed repeated-text echo 
     .toBeDefined();
 });
 
+test("issue 626: unresolved delivered ownership survives 512 newer tombstones", () => {
+  const provisional = "spawn:launch_626_tombstone_boundary";
+  const conversation = "conversation_626_tombstone_boundary";
+  const generation = "/transcripts/626-tombstone-boundary.jsonl";
+  const repeated = "same delivered text across the tombstone boundary";
+
+  enqueueOutbox(provisional, {
+    id: "older-delivered-owner",
+    text: repeated,
+    images: 0,
+    at: 1_000,
+  });
+  updateOutbox(provisional, "older-delivered-owner", {
+    state: outboxStateForReceiptStatus("delivered"),
+    settledAt: 1_100,
+  });
+  for (let index = 0; index < 512 + OUTBOX_LIMIT; index += 1) {
+    const id = `boundary-filler-${index}`;
+    const text = `boundary filler ${index}`;
+    enqueueOutbox(provisional, {
+      id,
+      text,
+      images: 0,
+      at: 2_000 + index,
+    });
+    updateOutbox(provisional, id, {
+      state: outboxStateForReceiptStatus("delivered"),
+      settledAt: 3_000 + index,
+    });
+    publishTranscriptEchoes(provisional, [{
+      generation,
+      id: `row:${index + 100}:0`,
+      text,
+    }]);
+  }
+  enqueueOutbox(provisional, {
+    id: "newer-still-pending",
+    text: repeated,
+    images: 0,
+    at: 10_000,
+  });
+
+  adoptOutbox(provisional, conversation);
+  resetOutboxForTests();
+  publishTranscriptEchoes(conversation, []);
+  publishTranscriptEchoes(conversation, [{ generation, id: "row:10:0", text: repeated }]);
+
+  const queue = readOutbox(conversation);
+  expect(queue.find((entry) => entry.id === "newer-still-pending")?.retiredEchoId).toBeUndefined();
+  expect(queue.some((entry) => entry.id === "newer-still-pending")).toBe(true);
+  expect(queue.filter((entry) => entry.id.startsWith("boundary-filler-"))).toHaveLength(OUTBOX_LIMIT - 1);
+});
+
 test("issue 626: identity adoption preserves submission order for identical occurrences", () => {
   const provisional = "spawn:launch_626_order";
   const conversation = "conversation_626_order";
@@ -581,6 +634,58 @@ describe("seedLaunchOutbox (P1#2)", () => {
     expect(refreshed).toHaveLength(OUTBOX_LIMIT);
     expect(refreshed.some((entry) => entry.id === "launch_626_terminal")).toBe(false);
     expect(refreshed[0]?.id).toBe("terminal-launch-filler-0");
+  });
+
+  test("issue 626: a terminal launch stays retired beyond both 512-entry ledgers", () => {
+    const provisional = "spawn:launch_626_terminal_boundary";
+    const conversation = "conversation_626_terminal_boundary";
+    const text = "terminal launch beyond bounded history";
+
+    seedLaunchOutbox(provisional, {
+      id: "launch_626_terminal_boundary",
+      text,
+      images: 0,
+      at: 1_000,
+    });
+    publishTranscriptEchoes(provisional, [{
+      generation: "/transcripts/626-terminal-boundary.jsonl",
+      id: "row:0:0",
+      text,
+    }]);
+    for (let index = 0; index < 512 + OUTBOX_LIMIT; index += 1) {
+      const id = `terminal-boundary-filler-${index}`;
+      const fillerText = `terminal boundary filler ${index}`;
+      enqueueOutbox(provisional, {
+        id,
+        text: fillerText,
+        images: 0,
+        at: 2_000 + index,
+      });
+      updateOutbox(provisional, id, {
+        state: outboxStateForReceiptStatus("delivered"),
+        settledAt: 3_000 + index,
+      });
+      publishTranscriptEchoes(provisional, [{
+        generation: "/transcripts/626-terminal-boundary-successor.jsonl",
+        id: `row:${index + 1}:0`,
+        text: fillerText,
+      }]);
+    }
+
+    adoptOutbox(provisional, conversation);
+    resetOutboxForTests();
+    publishTranscriptEchoes(conversation, []);
+    seedLaunchOutbox(conversation, {
+      id: "launch_626_terminal_boundary",
+      text,
+      images: 0,
+      at: 1_000,
+    });
+
+    const refreshed = readOutbox(conversation);
+    expect(refreshed.some((entry) => entry.id === "launch_626_terminal_boundary")).toBe(false);
+    expect(refreshed.filter((entry) => entry.id.startsWith("terminal-boundary-filler-")))
+      .toHaveLength(OUTBOX_LIMIT);
   });
 
   test("the seeded launch bubble is adopted into the materialized conversation identity", () => {

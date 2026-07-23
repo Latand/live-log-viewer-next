@@ -139,6 +139,7 @@ interface PersistedOccurrenceTombstone {
   id: string;
   key: string;
   at: number;
+  launchOwned?: true;
   echoBaseline?: number;
   echoBaselineIds?: string[];
   retiredEchoId?: string;
@@ -229,6 +230,7 @@ function isOccurrenceTombstone(value: unknown): value is PersistedOccurrenceTomb
   return typeof raw.id === "string"
     && typeof raw.key === "string"
     && typeof raw.at === "number"
+    && (raw.launchOwned === undefined || raw.launchOwned === true)
     && (raw.echoBaseline === undefined || typeof raw.echoBaseline === "number")
     && (raw.echoBaselineIds === undefined
       || (Array.isArray(raw.echoBaselineIds) && raw.echoBaselineIds.every((id) => typeof id === "string")))
@@ -289,9 +291,21 @@ function mergeOccurrenceTombstones(
     if (existing?.retiredEchoId && !addition.retiredEchoId) continue;
     merged.set(addition.id, addition);
   }
-  return [...merged.values()]
-    .sort((left, right) => left.at - right.at)
-    .slice(-OCCURRENCE_TOMBSTONE_LIMIT);
+  const ordered = [...merged.values()].sort((left, right) => left.at - right.at);
+  const unresolved = ordered.filter((tombstone) => !tombstone.retiredEchoId);
+  const terminalLaunches = ordered
+    .filter((tombstone) => tombstone.launchOwned && tombstone.retiredEchoId)
+    .reverse();
+  const protectedIds = new Set(
+    [...unresolved, ...terminalLaunches]
+      .slice(0, OCCURRENCE_TOMBSTONE_LIMIT)
+      .map((tombstone) => tombstone.id),
+  );
+  const historySlots = OCCURRENCE_TOMBSTONE_LIMIT - protectedIds.size;
+  const recentHistory = historySlots > 0
+    ? ordered.filter((tombstone) => !protectedIds.has(tombstone.id)).slice(-historySlots)
+    : [];
+  return ordered.filter((tombstone) => protectedIds.has(tombstone.id) || recentHistory.includes(tombstone));
 }
 
 function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone | null {
@@ -302,6 +316,7 @@ function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone |
     id: entry.id,
     key,
     at: entry.at,
+    ...(entry.launchOwned ? { launchOwned: true as const } : {}),
     ...(entry.echoBaseline !== undefined ? { echoBaseline: entry.echoBaseline } : {}),
     ...(entry.echoBaselineIds?.length ? { echoBaselineIds: entry.echoBaselineIds } : {}),
     ...(entry.retiredEchoId ? { retiredEchoId: entry.retiredEchoId } : {}),
