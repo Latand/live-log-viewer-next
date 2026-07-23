@@ -7,6 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { statePath } from "@/lib/configDir";
+import { procBackend } from "@/lib/proc";
 
 export const MCP_SERVER_NAME = "viewer";
 
@@ -123,28 +124,159 @@ const FILE_RECEIPT_CAP = 500;
 const LOCK_WAIT_MS = 5_000;
 const LOCK_STALE_MS = 30_000;
 const sleepCell = new Int32Array(new SharedArrayBuffer(4));
+type ReceiptLockOwner = { pid: number; startIdentity: string | null; token: string };
+type ReceiptLockIdentity = { dev: number; ino: number };
+type ReceiptLockObservation = {
+  identity: ReceiptLockIdentity;
+  mtimeMs: number;
+  owner: ReceiptLockOwner | null;
+  token: string | null;
+};
 
-function isReceiptRecord(value: unknown): value is Record<string, Receipt> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function processAlive(pid: number): boolean {
+function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const keys = Object.keys(value).sort();
+  return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+}
+
+function receiptKeyParts(key: string): { toolName: McpToolName; requestId: string } | null {
+  const separator = key.indexOf(":");
+  if (separator <= 0) return null;
+  const toolName = key.slice(0, separator);
+  const requestId = key.slice(separator + 1);
+  if (!(MCP_TOOL_NAMES as readonly string[]).includes(toolName) || !requestId.trim()) return null;
+  return { toolName: toolName as McpToolName, requestId };
+}
+
+function validReceiptResult(value: unknown, toolName: McpToolName, requestId: string): value is McpToolResult {
+  if (!isRecord(value)
+    || value.toolName !== toolName
+    || value.clientRequestId !== requestId
+    || typeof value.replayed !== "boolean") return false;
+  if (value.ok === true) return true;
+  return value.ok === false
+    && typeof value.error === "string"
+    && typeof value.code === "string"
+    && typeof value.retryable === "boolean";
+}
+
+function validateReceiptRecord(
+  value: unknown,
+  retention?: ReceiptRetention,
+): Record<string, Receipt> {
+  if (!isRecord(value)) throw new Error("invalid MCP receipt file: receipt collection must be an object");
+  const receipts: Record<string, Receipt> = {};
+  for (const [key, candidate] of Object.entries(value)) {
+    const parts = receiptKeyParts(key);
+    if (!parts) throw new Error(`invalid MCP receipt file: invalid receipt key ${JSON.stringify(key)}`);
+    if (!isRecord(candidate)
+      || !hasExactKeys(candidate, "result" in candidate ? ["digest", "result"] : ["digest"])
+      || typeof candidate.digest !== "string"
+      || !/^[0-9a-f]{64}$/i.test(candidate.digest)
+      || ("result" in candidate && !validReceiptResult(candidate.result, parts.toolName, parts.requestId))) {
+      throw new Error(`invalid MCP receipt file: invalid receipt ${JSON.stringify(key)}`);
+    }
+    const actualRetention: ReceiptRetention = MUTATING_MCP_TOOL_NAMES.has(parts.toolName) ? "durable" : "bounded";
+    if (retention && actualRetention !== retention) {
+      throw new Error(`invalid MCP receipt file: receipt ${JSON.stringify(key)} is in the wrong collection`);
+    }
+    receipts[key] = candidate as Receipt;
+  }
+  return receipts;
+}
+
+function readLockMetadata(lockPath: string): { owner: ReceiptLockOwner | null; token: string | null } {
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    const value = JSON.parse(fs.readFileSync(lockPath, "utf8")) as Partial<ReceiptLockOwner>;
+    const token = typeof value.token === "string" && value.token ? value.token : null;
+    if (!Number.isInteger(value.pid) || (value.pid ?? 0) <= 0
+      || !(value.startIdentity === null || typeof value.startIdentity === "string")
+      || token === null) return { owner: null, token };
+    return { owner: value as ReceiptLockOwner, token };
+  } catch {
+    return { owner: null, token: null };
   }
 }
 
-function staleLock(lockPath: string): boolean {
+function sameLock(lockPath: string, identity: ReceiptLockIdentity): boolean {
   try {
-    const stat = fs.statSync(lockPath);
-    if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) return true;
-    const owner = JSON.parse(fs.readFileSync(lockPath, "utf8")) as { pid?: unknown };
-    return typeof owner.pid === "number" && !processAlive(owner.pid);
-  } catch {
-    return false;
+    const current = fs.statSync(lockPath);
+    return current.dev === identity.dev && current.ino === identity.ino;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function observeLock(lockPath: string): ReceiptLockObservation | null {
+  try {
+    const before = fs.statSync(lockPath);
+    const metadata = readLockMetadata(lockPath);
+    const after = fs.statSync(lockPath);
+    if (before.dev !== after.dev || before.ino !== after.ino) return null;
+    return {
+      identity: { dev: after.dev, ino: after.ino },
+      mtimeMs: after.mtimeMs,
+      ...metadata,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function staleLock(observation: ReceiptLockObservation): boolean {
+  if (observation.owner) {
+    if (!procBackend.pidAlive(observation.owner.pid)) return true;
+    if (observation.owner.startIdentity === null) return false;
+    const currentIdentity = procBackend.processIdentity(observation.owner.pid);
+    return currentIdentity !== null && currentIdentity !== observation.owner.startIdentity;
+  }
+  return Date.now() - observation.mtimeMs > LOCK_STALE_MS;
+}
+
+function removeObservedLock(lockPath: string, observation: ReceiptLockObservation): boolean {
+  const recoveryPath = `${lockPath}.${observation.identity.dev}-${observation.identity.ino}.recovering`;
+  try {
+    fs.linkSync(lockPath, recoveryPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return false;
+    if (code === "EEXIST"
+      && sameLock(recoveryPath, observation.identity)
+      && readLockMetadata(recoveryPath).token === observation.token) {
+      // An existing link to this inode can complete the same fenced retirement.
+    } else if (code === "EEXIST") {
+      return false;
+    } else {
+      throw error;
+    }
+  }
+  try {
+    const recoveryMetadata = readLockMetadata(recoveryPath);
+    if (!sameLock(recoveryPath, observation.identity)
+      || recoveryMetadata.token !== observation.token
+      || !sameLock(lockPath, observation.identity)
+      || readLockMetadata(lockPath).token !== observation.token) return false;
+    try {
+      fs.unlinkSync(lockPath);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  } finally {
+    if (sameLock(recoveryPath, observation.identity)
+      && readLockMetadata(recoveryPath).token === observation.token) {
+      try {
+        fs.unlinkSync(recoveryPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
   }
 }
 
@@ -152,20 +284,35 @@ function withFileLock<T>(filePath: string, operation: () => T): T {
   const lockPath = `${filePath}.lock`;
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const deadline = Date.now() + LOCK_WAIT_MS;
+  const owner: ReceiptLockOwner = {
+    pid: process.pid,
+    startIdentity: procBackend.processIdentity(process.pid),
+    token: crypto.randomUUID(),
+  };
   while (true) {
     try {
       const fd = fs.openSync(lockPath, "wx", 0o600);
+      let observation: ReceiptLockObservation | null = null;
       try {
-        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
+        fs.writeFileSync(fd, JSON.stringify(owner));
+        fs.fsyncSync(fd);
+        const stat = fs.fstatSync(fd);
+        observation = {
+          identity: { dev: stat.dev, ino: stat.ino },
+          mtimeMs: stat.mtimeMs,
+          owner,
+          token: owner.token,
+        };
         return operation();
       } finally {
         fs.closeSync(fd);
-        try { fs.unlinkSync(lockPath); } catch { /* a recovered owner may already have cleared it */ }
+        if (observation) removeObservedLock(lockPath, observation);
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (staleLock(lockPath)) {
-        try { fs.unlinkSync(lockPath); } catch { /* another waiter recovered it first */ }
+      const observation = observeLock(lockPath);
+      if (observation && staleLock(observation)) {
+        removeObservedLock(lockPath, observation);
         continue;
       }
       if (Date.now() >= deadline) throw new Error("MCP receipt store is busy");
@@ -175,33 +322,50 @@ function withFileLock<T>(filePath: string, operation: () => T): T {
 }
 
 function readReceiptFile(filePath: string): ReceiptFile {
+  let serialized: string;
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
-    if (
-      parsed.version === 2
-      && isReceiptRecord(parsed.readReceipts)
-      && isReceiptRecord(parsed.mutationReceipts)
-    ) {
-      return {
-        version: 2,
-        readReceipts: parsed.readReceipts,
-        mutationReceipts: parsed.mutationReceipts,
-      };
-    }
-    if (parsed.version === 1 && isReceiptRecord(parsed.receipts)) {
-      const readReceipts: Record<string, Receipt> = {};
-      const mutationReceipts: Record<string, Receipt> = {};
-      for (const [key, receipt] of Object.entries(parsed.receipts)) {
-        const toolName = key.slice(0, key.indexOf(":"));
-        const target = MUTATING_MCP_TOOL_NAMES.has(toolName as McpToolName) ? mutationReceipts : readReceipts;
-        target[key] = receipt;
-      }
-      return { version: 2, readReceipts, mutationReceipts };
-    }
+    serialized = fs.readFileSync(filePath, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { version: 2, readReceipts: {}, mutationReceipts: {} };
+    }
+    throw error;
   }
-  return { version: 2, readReceipts: {}, mutationReceipts: {} };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error("invalid MCP receipt file: invalid JSON", { cause: error });
+  }
+  if (!isRecord(parsed) || !Number.isInteger(parsed.version)) {
+    throw new Error("invalid MCP receipt file: root must contain an integer version");
+  }
+  if (parsed.version === 2) {
+    if (!hasExactKeys(parsed, ["mutationReceipts", "readReceipts", "version"])) {
+      throw new Error("invalid MCP receipt file: invalid v2 members");
+    }
+    const readReceipts = validateReceiptRecord(parsed.readReceipts, "bounded");
+    const mutationReceipts = validateReceiptRecord(parsed.mutationReceipts, "durable");
+    if (Object.keys(readReceipts).some((key) => key in mutationReceipts)) {
+      throw new Error("invalid MCP receipt file: duplicate receipt key");
+    }
+    return { version: 2, readReceipts, mutationReceipts };
+  }
+  if (parsed.version === 1) {
+    if (!hasExactKeys(parsed, ["receipts", "version"])) {
+      throw new Error("invalid MCP receipt file: invalid v1 members");
+    }
+    const receipts = validateReceiptRecord(parsed.receipts);
+    const readReceipts: Record<string, Receipt> = {};
+    const mutationReceipts: Record<string, Receipt> = {};
+    for (const [key, receipt] of Object.entries(receipts)) {
+      const parts = receiptKeyParts(key)!;
+      const target = MUTATING_MCP_TOOL_NAMES.has(parts.toolName) ? mutationReceipts : readReceipts;
+      target[key] = receipt;
+    }
+    return { version: 2, readReceipts, mutationReceipts };
+  }
+  throw new Error(`unsupported MCP receipt file version: ${String(parsed.version)}`);
 }
 
 function writeReceiptFile(filePath: string, state: ReceiptFile): void {

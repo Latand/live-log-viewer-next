@@ -78,12 +78,13 @@ export async function applyConversationAction(
     ? registry.conversation(request.conversationId as `conversation_${string}`)
     : null;
   const byPath = request.transcriptPath ? registry.conversationForPath(request.transcriptPath) : null;
+  if (request.conversationId && !byId) return failure("viewer conversation is unknown", 404);
   if (byId && request.transcriptPath) {
     const knownPaths = new Set([
       ...byId.generations.map((generation) => generation.path),
       ...byId.continuityPaths,
     ]);
-    if (!knownPaths.has(request.transcriptPath) || (byPath && byPath.id !== byId.id)) {
+    if (!knownPaths.has(request.transcriptPath) || byPath?.id !== byId.id) {
       return failure("conversation identity does not own transcript path", 409);
     }
   }
@@ -99,7 +100,6 @@ export async function applyConversationAction(
     });
     if (structured) return structured;
   }
-  if (request.conversationId && !byId) return failure("viewer conversation is unknown", 404);
   if (!transcriptPath) return failure("conversationId or transcriptPath is required", 400);
 
   if (request.action === "interrupt") return deliveryResult(await dependencies.interruptConversation(transcriptPath));

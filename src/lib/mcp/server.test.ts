@@ -31,6 +31,23 @@ function rewriteReceiptFileAsV1(receiptPath: string): void {
   }));
 }
 
+async function waitForFile(filename: string, timeoutMs = 3_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filename)) return true;
+    await Bun.sleep(10);
+  }
+  return fs.existsSync(filename);
+}
+
+async function childResult(child: { exited: Promise<number>; stderr: ReadableStream<Uint8Array> }): Promise<{
+  exit: number;
+  error: string;
+}> {
+  const exit = await child.exited;
+  return { exit, error: await new Response(child.stderr).text() };
+}
+
 describe("MCP tool service", () => {
   test("each v1 tool returns structured ids and replays a duplicate clientRequestId", async () => {
     const calls = new Map<string, number>();
@@ -88,6 +105,206 @@ describe("MCP tool service", () => {
 
     release();
     await first;
+  });
+
+  test("a future receipt file fails closed before a mutation binding runs", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const original = "{\n  \"version\": 3,\n  \"receipts\": {}\n}\n";
+    fs.writeFileSync(receiptPath, original);
+    let bindingCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.flow_action = async () => {
+      bindingCalls += 1;
+      return { operationId: "operation_future_state" };
+    };
+    const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+
+    await expect(service.callTool("flow_action", {
+      clientRequestId: "request-future-state",
+      flowId: "flow_future",
+      action: "pause",
+    })).rejects.toThrow("unsupported MCP receipt file version");
+    expect(bindingCalls).toBe(0);
+    expect(fs.readFileSync(receiptPath, "utf8")).toBe(original);
+  });
+
+  test("malformed supported receipt files fail closed and preserve their bytes", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    let bindingCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.flow_action = async () => {
+      bindingCalls += 1;
+      return { operationId: "operation_malformed_state" };
+    };
+    const digest = "0".repeat(64);
+    const cases = [
+      "{",
+      JSON.stringify({ version: 1, receipts: { "flow_action:request-malformed": { digest: "broken" } } }),
+      JSON.stringify({ version: 2, readReceipts: { "flow_action:request-malformed": { digest } }, mutationReceipts: {} }),
+      JSON.stringify({
+        version: 2,
+        readReceipts: {},
+        mutationReceipts: {
+          "flow_action:request-malformed": {
+            digest,
+            result: {
+              ok: true,
+              toolName: "flow_action",
+              clientRequestId: "request-other",
+              replayed: false,
+            },
+          },
+        },
+      }),
+      JSON.stringify({ version: 2, readReceipts: {}, mutationReceipts: {}, extra: true }),
+    ];
+
+    for (const original of cases) {
+      fs.writeFileSync(receiptPath, original);
+      const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+      await expect(service.callTool("flow_action", {
+        clientRequestId: "request-malformed",
+        flowId: "flow_malformed",
+        action: "pause",
+      })).rejects.toThrow("invalid MCP receipt file");
+      expect(fs.readFileSync(receiptPath, "utf8")).toBe(original);
+    }
+    expect(bindingCalls).toBe(0);
+  });
+
+  test("receipt read failures other than absence fail closed", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    fs.mkdirSync(receiptPath);
+    let bindingCalls = 0;
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    bindings.flow_action = async () => {
+      bindingCalls += 1;
+      return { operationId: "operation_unreadable_state" };
+    };
+    const service = createMcpToolService(bindings, new FileMcpReceiptStore(receiptPath));
+
+    await expect(service.callTool("flow_action", {
+      clientRequestId: "request-unreadable-state",
+      flowId: "flow_unreadable",
+      action: "pause",
+    })).rejects.toThrow();
+    expect(bindingCalls).toBe(0);
+    expect(fs.statSync(receiptPath).isDirectory()).toBeTrue();
+  });
+
+  test("a live receipt lock remains owned after its stale-age threshold", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const readyPath = path.join(directory, "holder-ready");
+    const releasePath = path.join(directory, "holder-release");
+    const countPath = path.join(directory, "binding-count");
+    const resultPath = path.join(directory, "claim-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    const env = { ...process.env };
+    const holder = Bun.spawn({
+      cmd: [process.execPath, child, "hold", lockPath, readyPath, releasePath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(readyPath)).toBeTrue();
+    const claimant = Bun.spawn({
+      cmd: [process.execPath, child, "claim", receiptPath, countPath, resultPath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+
+    await Bun.sleep(150);
+    const completedWhileHeld = fs.existsSync(resultPath);
+    fs.writeFileSync(releasePath, "release");
+    const results = await Promise.all([childResult(holder), childResult(claimant)]);
+
+    expect(completedWhileHeld).toBeFalse();
+    expect(results).toEqual([{ exit: 0, error: "" }, { exit: 0, error: "" }]);
+    expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toMatchObject({ ok: true, replayed: false });
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("multiprocess stale recovery preserves a live replacement and admits one same-key mutation", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-race-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const pausePath = path.join(directory, "recovery-paused");
+    const pauseReleasePath = path.join(directory, "recovery-release");
+    const holderReadyPath = path.join(directory, "replacement-ready");
+    const holderReleasePath = path.join(directory, "replacement-release");
+    const countPath = path.join(directory, "binding-count");
+    const firstResultPath = path.join(directory, "first-result.json");
+    const secondResultPath = path.join(directory, "second-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    const env = { ...process.env };
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "stale-owner",
+    }));
+
+    const firstClaimant = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "claim",
+        receiptPath,
+        countPath,
+        firstResultPath,
+        pausePath,
+        pauseReleasePath,
+      ],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(pausePath)).toBeTrue();
+    fs.unlinkSync(lockPath);
+    const replacement = Bun.spawn({
+      cmd: [process.execPath, child, "hold", lockPath, holderReadyPath, holderReleasePath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(holderReadyPath)).toBeTrue();
+    const secondClaimant = Bun.spawn({
+      cmd: [process.execPath, child, "claim", receiptPath, countPath, secondResultPath],
+      env,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+
+    fs.writeFileSync(pauseReleasePath, "release");
+    await Bun.sleep(150);
+    const completedWhileReplacementHeld = fs.existsSync(firstResultPath) || fs.existsSync(secondResultPath);
+    fs.writeFileSync(holderReleasePath, "release");
+    const processes = await Promise.all([
+      childResult(firstClaimant),
+      childResult(secondClaimant),
+      childResult(replacement),
+    ]);
+
+    expect(completedWhileReplacementHeld).toBeFalse();
+    expect(processes).toEqual([
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+    ]);
+    const results = [firstResultPath, secondResultPath]
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+    expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
   });
 
   test("mutations retain replay and conflict protection after read receipt churn and restart", async () => {
