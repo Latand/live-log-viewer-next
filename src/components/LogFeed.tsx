@@ -401,17 +401,19 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     setMagnet(true, true);
   };
 
+  const transcriptGeneration = file?.path ?? null;
   /* Optimistic bubbles retire on their OWN transcript echo (round-1 P1#4,
      round-2 finding 2): a bubble disappears the moment ITS echo lands, resolved
      causally by occurrence count. A user text that appears twice is two echoes
      that retire two bubbles; a message that predates a queued bubble leaves it
      visible. The counts carry that occurrence information. */
   const transcriptEchoes = useMemo(() => {
+    if (!transcriptGeneration) return [];
     return feed.items.flatMap(({ anchorKey, key, item }) =>
       item.kind === "user" && item.text.trim()
-        ? [{ id: anchorKey ?? `key:${key}`, text: item.text }]
+        ? [{ generation: transcriptGeneration, id: anchorKey ?? `key:${key}`, text: item.text }]
         : []);
-  }, [feed.items]);
+  }, [feed.items, transcriptGeneration]);
   const transcriptEchoCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const echo of transcriptEchoes) {

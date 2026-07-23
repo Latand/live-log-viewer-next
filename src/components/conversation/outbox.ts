@@ -111,12 +111,15 @@ export const OUTBOX_DELIVERED_TTL_MS = 10 * 60_000;
 
 const storageKey = (cardId: string) => "llvOutbox:" + cardId;
 const echoStorageKey = (cardId: string) => "llvOutboxEchoes:" + cardId;
+const occurrenceStorageKey = (cardId: string) => "llvOutboxOccurrences:" + cardId;
 
 const queues = new Map<string, readonly OutboxEntry[]>();
 const listeners = new Set<() => void>();
 const EMPTY: readonly OutboxEntry[] = [];
 
 export interface TranscriptEchoObservation {
+  /** Active transcript path. Production feeds always provide it; legacy fixtures may omit it. */
+  generation?: string;
   /** Stable absolute feed anchor, e.g. `row:<source line>:<ordinal>`. */
   id: string;
   text: string;
@@ -130,6 +133,21 @@ interface PersistedEchoObservation {
 const ECHO_LEDGER_LIMIT = 512;
 const echoLedgers = new Map<string, readonly PersistedEchoObservation[]>();
 const EMPTY_ECHO_LEDGER: readonly PersistedEchoObservation[] = [];
+
+interface PersistedOccurrenceTombstone {
+  /** Submission identity retained after the recent-history entry is compacted. */
+  id: string;
+  key: string;
+  at: number;
+  echoBaseline?: number;
+  echoBaselineIds?: string[];
+  retiredEchoId?: string;
+  retiredAt?: number;
+}
+
+const OCCURRENCE_TOMBSTONE_LIMIT = ECHO_LEDGER_LIMIT;
+const occurrenceTombstones = new Map<string, readonly PersistedOccurrenceTombstone[]>();
+const EMPTY_OCCURRENCE_TOMBSTONES: readonly PersistedOccurrenceTombstone[] = [];
 
 function isEntry(value: unknown): value is OutboxEntry {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -205,6 +223,52 @@ function persistEchoLedger(cardId: string, ledger: readonly PersistedEchoObserva
   }
 }
 
+function isOccurrenceTombstone(value: unknown): value is PersistedOccurrenceTombstone {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  return typeof raw.id === "string"
+    && typeof raw.key === "string"
+    && typeof raw.at === "number"
+    && (raw.echoBaseline === undefined || typeof raw.echoBaseline === "number")
+    && (raw.echoBaselineIds === undefined
+      || (Array.isArray(raw.echoBaselineIds) && raw.echoBaselineIds.every((id) => typeof id === "string")))
+    && (raw.retiredEchoId === undefined || typeof raw.retiredEchoId === "string")
+    && (raw.retiredAt === undefined || typeof raw.retiredAt === "number");
+}
+
+function readOccurrenceTombstones(cardId: string): readonly PersistedOccurrenceTombstone[] {
+  const cached = occurrenceTombstones.get(cardId);
+  if (cached) return cached;
+  if (typeof window === "undefined") return EMPTY_OCCURRENCE_TOMBSTONES;
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(occurrenceStorageKey(cardId)) ?? "[]") as unknown;
+    const restored = Array.isArray(raw)
+      ? raw.filter(isOccurrenceTombstone).slice(-OCCURRENCE_TOMBSTONE_LIMIT)
+      : EMPTY_OCCURRENCE_TOMBSTONES;
+    occurrenceTombstones.set(cardId, restored);
+    return restored;
+  } catch {
+    occurrenceTombstones.set(cardId, EMPTY_OCCURRENCE_TOMBSTONES);
+    return EMPTY_OCCURRENCE_TOMBSTONES;
+  }
+}
+
+function persistOccurrenceTombstones(
+  cardId: string,
+  tombstones: readonly PersistedOccurrenceTombstone[],
+): void {
+  occurrenceTombstones.set(cardId, tombstones);
+  try {
+    if (tombstones.length) {
+      sessionStorage.setItem(occurrenceStorageKey(cardId), JSON.stringify(tombstones));
+    } else {
+      sessionStorage.removeItem(occurrenceStorageKey(cardId));
+    }
+  } catch {
+    /* quota / opaque origin: the in-memory reservations still protect this mount */
+  }
+}
+
 function emit(): void {
   for (const listener of listeners) listener();
 }
@@ -213,6 +277,54 @@ function write(cardId: string, queue: readonly OutboxEntry[]): void {
   queues.set(cardId, queue);
   persist(cardId, queue);
   emit();
+}
+
+function mergeOccurrenceTombstones(
+  current: readonly PersistedOccurrenceTombstone[],
+  additions: readonly PersistedOccurrenceTombstone[],
+): readonly PersistedOccurrenceTombstone[] {
+  const merged = new Map(current.map((tombstone) => [tombstone.id, tombstone]));
+  for (const addition of additions) {
+    const existing = merged.get(addition.id);
+    if (existing?.retiredEchoId && !addition.retiredEchoId) continue;
+    merged.set(addition.id, addition);
+  }
+  return [...merged.values()]
+    .sort((left, right) => left.at - right.at)
+    .slice(-OCCURRENCE_TOMBSTONE_LIMIT);
+}
+
+function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone | null {
+  if (entry.responseStartedAt === undefined && !entry.retiredEchoId) return null;
+  const key = echoKey(entry.echoText ?? entry.text);
+  if (!key) return null;
+  return {
+    id: entry.id,
+    key,
+    at: entry.at,
+    ...(entry.echoBaseline !== undefined ? { echoBaseline: entry.echoBaseline } : {}),
+    ...(entry.echoBaselineIds?.length ? { echoBaselineIds: entry.echoBaselineIds } : {}),
+    ...(entry.retiredEchoId ? { retiredEchoId: entry.retiredEchoId } : {}),
+    ...(entry.retiredAt !== undefined ? { retiredAt: entry.retiredAt } : {}),
+  };
+}
+
+/** Compact recent queue/history while preserving older terminal occurrence owners. */
+function writeBounded(cardId: string, queue: readonly OutboxEntry[]): void {
+  const overflow = Math.max(0, queue.length - OUTBOX_LIMIT);
+  if (overflow > 0) {
+    const additions = queue
+      .slice(0, overflow)
+      .map(occurrenceTombstone)
+      .filter((entry): entry is PersistedOccurrenceTombstone => entry !== null);
+    if (additions.length) {
+      persistOccurrenceTombstones(
+        cardId,
+        mergeOccurrenceTombstones(readOccurrenceTombstones(cardId), additions),
+      );
+    }
+  }
+  write(cardId, queue.slice(-OUTBOX_LIMIT));
 }
 
 /** The queue for a conversation, hydrating from sessionStorage on first read. */
@@ -236,7 +348,7 @@ export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">)
     ...(baselineIds.length ? { echoBaselineIds: baselineIds } : {}),
     state: "queued",
   };
-  write(cardId, [...readOutbox(cardId).filter((item) => item.id !== entry.id), queued].slice(-OUTBOX_LIMIT));
+  writeBounded(cardId, [...readOutbox(cardId).filter((item) => item.id !== entry.id), queued]);
   return queued;
 }
 
@@ -267,7 +379,7 @@ export function seedLaunchOutbox(
     return;
   }
   const seeded: OutboxEntry = { ...entry, state: "delivering", launchOwned: true };
-  write(cardId, [...queue, seeded].slice(-OUTBOX_LIMIT));
+  writeBounded(cardId, [...queue, seeded]);
   /* A refreshed surface can see the canonical transcript row before the launch
      projection effect seeds its optimistic bubble. Reconcile the persisted row
      immediately so retirement becomes durable during that same mount. */
@@ -320,6 +432,14 @@ export function retryOutbox(cardId: string, id: string): void {
     the new identity win, so an adoption is idempotent. */
 export function adoptOutbox(from: string, to: string): void {
   if (from === to) return;
+  const sourceTombstones = readOccurrenceTombstones(from);
+  if (sourceTombstones.length) {
+    persistOccurrenceTombstones(
+      to,
+      mergeOccurrenceTombstones(readOccurrenceTombstones(to), sourceTombstones),
+    );
+    persistOccurrenceTombstones(from, EMPTY_OCCURRENCE_TOMBSTONES);
+  }
   const sourceEchoes = readEchoLedger(from);
   if (sourceEchoes.length) {
     const targetEchoes = readEchoLedger(to);
@@ -349,11 +469,10 @@ export function adoptOutbox(from: string, to: string): void {
         });
       }
     }
-    write(
+    writeBounded(
       to,
       [...merged.values()]
-        .sort((left, right) => left.at - right.at)
-        .slice(-OUTBOX_LIMIT),
+        .sort((left, right) => left.at - right.at),
     );
     write(from, EMPTY);
   }
@@ -363,6 +482,15 @@ export function adoptOutbox(from: string, to: string): void {
 /** The trimmed text of a bubble, used to match its transcript echo. */
 function echoKey(text: string): string {
   return text.trim();
+}
+
+/** Collision-free durable identity for one row inside one transcript generation. */
+function echoObservationId(observation: TranscriptEchoObservation): string {
+  const anchor = observation.id.trim();
+  if (!anchor) return "";
+  return observation.generation
+    ? JSON.stringify([observation.generation, anchor])
+    : anchor;
 }
 
 /** Occurrence counts of the trimmed user-message texts in a rendered transcript,
@@ -398,23 +526,100 @@ function reconcileEchoRetirements(
   ledger: readonly PersistedEchoObservation[],
 ): void {
   const queue = readOutbox(cardId);
-  if (!queue.length) return;
-  const claimed = new Set(queue.flatMap((entry) => entry.retiredEchoId ? [entry.retiredEchoId] : []));
-  let changed = false;
-  const next = queue.map((entry) => {
-    if (entry.retiredEchoId) return entry;
+  const tombstones = readOccurrenceTombstones(cardId);
+  if (!queue.length && !tombstones.length) return;
+  const claimed = new Set([
+    ...tombstones.flatMap((entry) => entry.retiredEchoId ? [entry.retiredEchoId] : []),
+    ...queue.flatMap((entry) => entry.retiredEchoId ? [entry.retiredEchoId] : []),
+  ]);
+  const owners = [
+    ...tombstones.map((entry) => ({
+      type: "tombstone" as const,
+      id: entry.id,
+      at: entry.at,
+      key: entry.key,
+      echoBaseline: entry.echoBaseline,
+      echoBaselineIds: entry.echoBaselineIds,
+      retiredEchoId: entry.retiredEchoId,
+    })),
+    ...queue.map((entry) => ({
+      type: "queue" as const,
+      id: entry.id,
+      at: entry.at,
+      key: echoKey(entry.echoText ?? entry.text),
+      echoBaseline: entry.echoBaseline,
+      echoBaselineIds: entry.echoBaselineIds,
+      retiredEchoId: entry.retiredEchoId,
+    })),
+  ].sort((left, right) => left.at - right.at);
+  const retirements = new Map<string, { echoId: string; retiredAt: number }>();
+  for (const entry of owners) {
+    if (entry.retiredEchoId) continue;
     const baseline = new Set(entry.echoBaselineIds ?? []);
-    const key = echoKey(entry.echoText ?? entry.text);
-    const owner = ledger.find((echo) =>
-      echo.key === key
-      && !baseline.has(echo.id)
-      && !claimed.has(echo.id));
-    if (!owner) return entry;
+    let remainingBaseline = baseline.size ? 0 : (entry.echoBaseline ?? 0);
+    const owner = ledger.find((echo) => {
+      if (echo.key !== entry.key || baseline.has(echo.id)) return false;
+      if (remainingBaseline > 0) {
+        remainingBaseline -= 1;
+        return false;
+      }
+      return !claimed.has(echo.id);
+    });
+    if (!owner) continue;
     claimed.add(owner.id);
-    changed = true;
-    return { ...entry, retiredEchoId: owner.id, retiredAt: Date.now() };
+    retirements.set(`${entry.type}:${entry.id}`, {
+      echoId: owner.id,
+      retiredAt: Date.now(),
+    });
+  }
+
+  let tombstonesChanged = false;
+  const nextTombstones = tombstones.map((entry) => {
+    const retirement = retirements.get(`tombstone:${entry.id}`);
+    if (!retirement) return entry;
+    tombstonesChanged = true;
+    return {
+      ...entry,
+      retiredEchoId: retirement.echoId,
+      retiredAt: retirement.retiredAt,
+    };
   });
-  if (changed) write(cardId, next);
+  if (tombstonesChanged) persistOccurrenceTombstones(cardId, nextTombstones);
+
+  const reservedByKey = new Map<string, { at: number; echoId: string }[]>();
+  for (const tombstone of nextTombstones) {
+    if (!tombstone.retiredEchoId) continue;
+    const reservations = reservedByKey.get(tombstone.key) ?? [];
+    reservations.push({ at: tombstone.at, echoId: tombstone.retiredEchoId });
+    reservedByKey.set(tombstone.key, reservations);
+  }
+
+  let queueChanged = false;
+  const nextQueue = queue.map((entry) => {
+    const retirement = retirements.get(`queue:${entry.id}`);
+    if (retirement) {
+      queueChanged = true;
+      return {
+        ...entry,
+        retiredEchoId: retirement.echoId,
+        retiredAt: retirement.retiredAt,
+      };
+    }
+    if (entry.retiredEchoId) return entry;
+    const key = echoKey(entry.echoText ?? entry.text);
+    const baselineIds = new Set(entry.echoBaselineIds ?? []);
+    for (const reservation of reservedByKey.get(key) ?? []) {
+      if (reservation.at <= entry.at) baselineIds.add(reservation.echoId);
+    }
+    if (baselineIds.size === (entry.echoBaselineIds?.length ?? 0)) return entry;
+    queueChanged = true;
+    return {
+      ...entry,
+      echoBaseline: Math.max(entry.echoBaseline ?? 0, baselineIds.size),
+      echoBaselineIds: [...baselineIds],
+    };
+  });
+  if (queueChanged) write(cardId, nextQueue);
 }
 
 /**
@@ -437,7 +642,7 @@ export function publishTranscriptEchoes(
 
   const merged = new Map(readEchoLedger(cardId).map((echo) => [echo.id, echo]));
   for (const observation of observations) {
-    const id = observation.id.trim();
+    const id = echoObservationId(observation);
     const key = echoKey(observation.text);
     if (!id || !key) continue;
     merged.set(id, { id, key });
@@ -582,4 +787,5 @@ export function resetOutboxForTests(): void {
   echoSnapshots.clear();
   echoListeners.clear();
   echoLedgers.clear();
+  occurrenceTombstones.clear();
 }

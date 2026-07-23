@@ -9,6 +9,7 @@ import {
   nextDispatch,
   outboxHistory,
   OUTBOX_DELIVERED_TTL_MS,
+  OUTBOX_LIMIT,
   outboxStateForReceiptStatus,
   publishTranscriptEchoes,
   readOutbox,
@@ -18,6 +19,7 @@ import {
   updateOutbox,
   visibleOutbox,
   type OutboxEntry,
+  type TranscriptEchoObservation,
 } from "./outbox";
 
 const dom = new Window();
@@ -240,6 +242,42 @@ test("issue 626: canonical echo retirement survives eviction, filters, identity 
   expect(transcriptEchoCount(conversation, repeated)).toBe(2);
 });
 
+test("issue 626: successor transcript paths disambiguate identical row anchors across adoption and refresh", () => {
+  type GenerationEcho = TranscriptEchoObservation & { generation: string };
+  const echo = (generation: string, text: string): GenerationEcho => ({
+    generation,
+    id: "row:0:0",
+    text,
+  });
+  const provisional = "spawn:launch_626_generation";
+  const conversation = "conversation_626_generation";
+  const firstPath = "/transcripts/626-generation-1.jsonl";
+  const secondPath = "/transcripts/626-generation-2.jsonl";
+  const repeated = "same row anchor in two transcript generations";
+
+  publishTranscriptEchoes(provisional, [echo(firstPath, repeated)]);
+  enqueueOutbox(provisional, {
+    id: "second-generation-submission",
+    text: repeated,
+    images: 0,
+    at: 1_000,
+  });
+
+  adoptOutbox(provisional, conversation);
+  publishTranscriptEchoes(conversation, []);
+  resetOutboxForTests();
+  publishTranscriptEchoes(conversation, [echo(secondPath, repeated)]);
+
+  const repaired = readOutbox(conversation).find((entry) => entry.id === "second-generation-submission");
+  expect(repaired?.retiredEchoId).toBeDefined();
+  expect(repaired?.retiredEchoId).not.toBe("row:0:0");
+  expect(transcriptEchoCount(conversation, repeated)).toBe(2);
+
+  publishTranscriptEchoes(conversation, []);
+  resetOutboxForTests();
+  expect(visibleOutbox(readOutbox(conversation), echoes(), 2_000)).toEqual([]);
+});
+
 test("issue 626: a refresh that observes the launch echo before seeding persists retirement", () => {
   const conversation = "conversation_626_refresh";
   const text = "canonical launch prompt";
@@ -310,6 +348,59 @@ test("issue 626: response evidence still reserves the first later identical user
   ]);
   expect(readOutbox(conversation).find((entry) => entry.id === "response-second"))
     .toMatchObject({ retiredEchoId: "row:30:0" });
+});
+
+test("issue 626: compacted response ownership reserves its delayed echo above the outbox limit across refresh", () => {
+  const provisional = "spawn:launch_626_occurrence_tombstone";
+  const conversation = "conversation_626_occurrence_tombstone";
+  const generation = "/transcripts/626-occurrence-tombstone.jsonl";
+  const repeated = "same text before delayed transcript publication";
+
+  enqueueOutbox(provisional, {
+    id: "older-response-settled",
+    text: repeated,
+    images: 0,
+    at: 1_000,
+  });
+  markOutboxResponded(provisional, "older-response-settled", 1_100);
+  enqueueOutbox(provisional, {
+    id: "newer-still-pending",
+    text: repeated,
+    images: 0,
+    at: 1_200,
+  });
+  for (let index = 0; index < OUTBOX_LIMIT - 1; index += 1) {
+    enqueueOutbox(provisional, {
+      id: `filler-${index}`,
+      text: `filler ${index}`,
+      images: 0,
+      at: 2_000 + index,
+    });
+  }
+
+  expect(readOutbox(provisional)).toHaveLength(OUTBOX_LIMIT);
+  expect(readOutbox(provisional).some((entry) => entry.id === "older-response-settled")).toBe(false);
+  adoptOutbox(provisional, conversation);
+  resetOutboxForTests();
+
+  const olderEcho = { generation, id: "row:10:0", text: repeated };
+  publishTranscriptEchoes(conversation, [olderEcho]);
+  let queue = readOutbox(conversation);
+  expect(queue.find((entry) => entry.id === "newer-still-pending")?.retiredEchoId).toBeUndefined();
+  expect(visibleOutbox(queue, echoes([repeated, 1]), 3_000).some((entry) => entry.id === "newer-still-pending"))
+    .toBe(true);
+
+  resetOutboxForTests();
+  publishTranscriptEchoes(conversation, [olderEcho]);
+  queue = readOutbox(conversation);
+  expect(queue.find((entry) => entry.id === "newer-still-pending")?.retiredEchoId).toBeUndefined();
+
+  publishTranscriptEchoes(conversation, [
+    olderEcho,
+    { generation, id: "row:20:0", text: repeated },
+  ]);
+  expect(readOutbox(conversation).find((entry) => entry.id === "newer-still-pending")?.retiredEchoId)
+    .toBeDefined();
 });
 
 test("issue 626: identity adoption preserves submission order for identical occurrences", () => {
