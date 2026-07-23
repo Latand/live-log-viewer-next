@@ -278,6 +278,40 @@ test("issue 626: adopting an echo ledger immediately retires a queue already on 
   expect(visibleOutbox(readOutbox(conversation), echoes(), 2_000)).toEqual([]);
 });
 
+test("issue 626: response evidence still reserves the first later identical user echo", () => {
+  const conversation = "conversation_626_response_occurrence";
+  const text = "repeat while the first response starts";
+
+  enqueueOutbox(conversation, {
+    id: "response-first",
+    text,
+    images: 0,
+    at: 1_000,
+  });
+  enqueueOutbox(conversation, {
+    id: "response-second",
+    text,
+    images: 0,
+    at: 1_001,
+  });
+  markOutboxResponded(conversation, "response-first", 1_100);
+
+  publishTranscriptEchoes(conversation, [{ id: "row:20:0", text }]);
+  expect(readOutbox(conversation).find((entry) => entry.id === "response-first"))
+    .toMatchObject({ retiredEchoId: "row:20:0" });
+  expect(readOutbox(conversation).find((entry) => entry.id === "response-second")?.retiredEchoId)
+    .toBeUndefined();
+  expect(visibleOutbox(readOutbox(conversation), echoes([text, 1]), 1_200).map((entry) => entry.id))
+    .toEqual(["response-second"]);
+
+  publishTranscriptEchoes(conversation, [
+    { id: "row:20:0", text },
+    { id: "row:30:0", text },
+  ]);
+  expect(readOutbox(conversation).find((entry) => entry.id === "response-second"))
+    .toMatchObject({ retiredEchoId: "row:30:0" });
+});
+
 describe("outboxStateForReceiptStatus (P1#4)", () => {
   test("admitted-but-not-delivered stays delivering; only a delivered receipt reads delivered", () => {
     expect(outboxStateForReceiptStatus("queued")).toBe("delivering");

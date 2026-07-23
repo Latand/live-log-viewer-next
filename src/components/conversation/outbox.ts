@@ -397,7 +397,7 @@ function reconcileEchoRetirements(
   const claimed = new Set(queue.flatMap((entry) => entry.retiredEchoId ? [entry.retiredEchoId] : []));
   let changed = false;
   const next = queue.map((entry) => {
-    if (entry.retiredEchoId || entry.responseStartedAt !== undefined) return entry;
+    if (entry.retiredEchoId) return entry;
     const baseline = new Set(entry.echoBaselineIds ?? []);
     const key = echoKey(entry.echoText ?? entry.text);
     const owner = ledger.find((echo) =>
@@ -502,11 +502,15 @@ export function visibleOutbox(
   const consumed = new Map<string, number>();
   const visible: OutboxEntry[] = [];
   for (const entry of queue) {
-    if (entry.retiredEchoId) continue;
     /* A bubble retires on ITS canonical transcript echo — the delivered text,
        which for a role launch is the scaffold-plus-draft carried on `echoText`,
        not the raw draft it displays (issue #615). */
     const key = echoKey(entry.echoText ?? entry.text);
+    if (entry.retiredEchoId) {
+      const floor = Math.max(entry.echoBaseline ?? 0, consumed.get(key) ?? 0);
+      consumed.set(key, floor + 1);
+      continue;
+    }
     const total = transcriptEchoCounts.get(key) ?? 0;
     /* Echoes below this floor belong to messages submitted before this entry
        (its own baseline) or to earlier queued siblings that already consumed
