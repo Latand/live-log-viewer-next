@@ -188,13 +188,30 @@ The server name must stay `viewer` (or another `isViewerMcpServer()` match:
 `viewer-*`, `agent-log-viewer*`) — transcript calls attributed to other names
 do not render as Viewer cards.
 
-The v1 tools are `spawn_agent`, `send_message`, `create_task`, `update_task`,
-`create_pipeline`, `pipeline_action`, `link_task_to_pipeline`,
-`list_conversations`, `get_conversation`, `deploy_exact_sha`, and
-`get_pipeline`. Every call requires a stable `clientRequestId`. Reusing that id
-with the same arguments returns the durable result as a replay. Reusing it with
-different arguments returns an idempotency conflict. `deploy_exact_sha`
-accepts a full 40-character commit SHA and requires `confirm: "deploy"`.
+The MCP surface includes:
+
+- conversations and the board: `board_snapshot`, `list_conversations`,
+  `get_conversation`, `send_message`, and `conversation_action` for
+  `interrupt`, `kill`, `resume`, `compact`, and `dialog-key`;
+- review flows: `list_flows`, `get_flow`, and `flow_action`;
+- pipelines: `create_pipeline`, `list_pipelines`, `get_pipeline`,
+  `pipeline_action`, and `link_task_to_pipeline`;
+- tasks: `create_task`, `list_tasks`, `get_task`, and `update_task`;
+- operator/runtime reads: `operator_snapshot`, `deployment_status`, and
+  `resources`;
+- agent/runtime mutations: `spawn_agent`, `conversation_migration`, and
+  `deploy_exact_sha`.
+
+Every call requires a stable `clientRequestId`. Reusing that id with the same
+arguments returns the durable result as a replay. Reusing it with different
+arguments returns an idempotency conflict. Read tools are inert, bounded, and
+secret-redacted. Mutating tools return stable operation receipts, and their
+durable MCP receipt prevents a replay from applying the action twice.
+`deploy_exact_sha` accepts a full 40-character commit SHA and requires
+`confirm: "deploy"`.
+
+The package exposes the MCP launcher as `agent-log-viewer/mcp-server` in
+addition to the `agent-log-viewer-mcp` executable.
 
 Tool results contain the durable entity identifiers available for that action,
 including conversation ids, transcript paths, pipeline ids, task ids, and

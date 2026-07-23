@@ -5,6 +5,10 @@
     "agent-log-viewer": "bin/cli.mjs",
     "agent-log-viewer-mcp": "bin/mcp-server.mjs"
   },
+  "exports": {
+    "./mcp-server": "./bin/mcp-server.mjs",
+    "./package.json": "./package.json"
+  },
   "files": [
     "bin",
     "dist"

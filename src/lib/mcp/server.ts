@@ -22,6 +22,18 @@ export const MCP_TOOL_NAMES = [
   "get_conversation",
   "deploy_exact_sha",
   "get_pipeline",
+  "board_snapshot",
+  "list_flows",
+  "get_flow",
+  "flow_action",
+  "list_pipelines",
+  "conversation_action",
+  "operator_snapshot",
+  "list_tasks",
+  "get_task",
+  "deployment_status",
+  "resources",
+  "conversation_migration",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -292,6 +304,18 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   get_conversation: "Read a conversation summary and its recent messages and tools.",
   deploy_exact_sha: "Deploy one full commit SHA after the caller supplies confirm=deploy.",
   get_pipeline: "Read one pipeline by durable id.",
+  board_snapshot: "Read a bounded, redacted snapshot of the Viewer board and durable placement.",
+  list_flows: "List durable implement-review flows.",
+  get_flow: "Read one implement-review flow by durable id.",
+  flow_action: "Apply a supported action to an implement-review flow.",
+  list_pipelines: "List durable pipelines.",
+  conversation_action: "Interrupt, kill, resume, compact, or answer a dialog for a Viewer conversation.",
+  operator_snapshot: "Read the bounded, secret-redacted Viewer state currently visible to the operator.",
+  list_tasks: "List durable board tasks.",
+  get_task: "Read one durable board task.",
+  deployment_status: "Read Viewer deployment or runtime operation status, or list recent deployments.",
+  resources: "Read system and Viewer-owned agent resource usage.",
+  conversation_migration: "Reseat, retry, or roll back a conversation account migration.",
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");
@@ -381,6 +405,85 @@ const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   get_pipeline: z.object({
     clientRequestId: clientRequestIdSchema,
     pipelineId: entityIdSchema,
+  }).passthrough(),
+  board_snapshot: z.object({
+    clientRequestId: clientRequestIdSchema,
+    project: z.string().optional(),
+    activity: z.enum(["live", "stalled", "recent", "idle"]).optional(),
+    liveOnly: z.boolean().optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+  }).passthrough(),
+  list_flows: z.object({
+    clientRequestId: clientRequestIdSchema,
+    project: z.string().optional(),
+    state: z.string().optional(),
+    includeClosed: z.boolean().optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+  }).passthrough(),
+  get_flow: z.object({
+    clientRequestId: clientRequestIdSchema,
+    flowId: entityIdSchema,
+  }).passthrough(),
+  flow_action: z.object({
+    clientRequestId: clientRequestIdSchema,
+    flowId: entityIdSchema,
+    action: z.enum(["pause", "resume", "set-mode", "advance", "retry-round", "cancel-round", "set-round-limit", "extend", "another-round", "set-roles", "close"]),
+    mode: z.enum(["auto", "manual"]).optional(),
+    rounds: z.number().int().min(0).max(50).optional(),
+    note: z.string().optional(),
+    roles: z.record(z.string(), z.unknown()).optional(),
+  }).passthrough(),
+  list_pipelines: z.object({
+    clientRequestId: clientRequestIdSchema,
+    project: z.string().optional(),
+    state: z.string().optional(),
+    includeClosed: z.boolean().optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+  }).passthrough(),
+  conversation_action: z.object({
+    clientRequestId: clientRequestIdSchema,
+    conversationId: z.string().optional(),
+    transcriptPath: z.string().optional(),
+    action: z.enum(["interrupt", "kill", "resume", "compact", "dialog-key"]),
+    key: z.enum(["1", "2", "3", "4", "5", "6", "7", "8", "9", "Tab", "Enter", "Escape"]).optional(),
+    label: z.string().optional(),
+    question: z.string().optional(),
+  }).passthrough(),
+  operator_snapshot: z.object({
+    clientRequestId: clientRequestIdSchema,
+    schemaVersion: z.literal(1).optional(),
+    view: z.record(z.string(), z.unknown()).optional(),
+    scope: z.record(z.string(), z.unknown()).optional(),
+    text: z.record(z.string(), z.unknown()).optional(),
+    caller: z.record(z.string(), z.unknown()).optional(),
+  }).passthrough(),
+  list_tasks: z.object({
+    clientRequestId: clientRequestIdSchema,
+    project: z.string().optional(),
+    status: z.enum(["inbox", "assigned", "blocked", "done"]).optional(),
+    placement: z.enum(["pinned", "unplaced"]).optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+  }).passthrough(),
+  get_task: z.object({
+    clientRequestId: clientRequestIdSchema,
+    taskId: entityIdSchema,
+  }).passthrough(),
+  deployment_status: z.object({
+    clientRequestId: clientRequestIdSchema,
+    deploymentId: z.string().min(1).optional(),
+    operationId: z.string().min(1).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }).passthrough(),
+  resources: z.object({
+    clientRequestId: clientRequestIdSchema,
+    fresh: z.boolean().optional(),
+  }).passthrough(),
+  conversation_migration: z.object({
+    clientRequestId: clientRequestIdSchema,
+    conversationId: z.string().min(1),
+    action: z.enum(["reseat", "retry", "rollback"]),
+    expectedRevision: z.number().int().min(0).optional(),
+    transcriptPath: z.string().optional(),
   }).passthrough(),
 };
 

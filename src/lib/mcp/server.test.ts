@@ -110,7 +110,34 @@ describe("MCP tool service", () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const listed = await client.listTools();
-      expect(listed.tools.map((tool) => tool.name)).toEqual([...MCP_TOOL_NAMES]);
+      expect(listed.tools.map((tool) => tool.name)).toEqual([
+        "spawn_agent",
+        "send_message",
+        "create_task",
+        "update_task",
+        "create_pipeline",
+        "pipeline_action",
+        "link_task_to_pipeline",
+        "list_conversations",
+        "get_conversation",
+        "deploy_exact_sha",
+        "get_pipeline",
+        "board_snapshot",
+        "list_flows",
+        "get_flow",
+        "flow_action",
+        "list_pipelines",
+        "conversation_action",
+        "operator_snapshot",
+        "list_tasks",
+        "get_task",
+        "deployment_status",
+        "resources",
+        "conversation_migration",
+      ]);
+      for (const tool of listed.tools) {
+        expect(tool.inputSchema.required).toContain("clientRequestId");
+      }
       const spawnSchema = listed.tools.find((tool) => tool.name === "spawn_agent")?.inputSchema;
       expect(spawnSchema?.properties).toHaveProperty("cwd");
       expect(spawnSchema?.properties).toHaveProperty("prompt");
