@@ -403,6 +403,70 @@ test("issue 626: compacted response ownership reserves its delayed echo above th
     .toBeDefined();
 });
 
+test("issue 626: compacted receipt delivery owns its delayed repeated-text echo across lifecycle churn", () => {
+  const provisional = "spawn:launch_626_delivered_tombstone";
+  const conversation = "conversation_626_delivered_tombstone";
+  const generation = "/transcripts/626-delivered-tombstone.jsonl";
+  const repeated = "same delivered text before delayed transcript publication";
+
+  enqueueOutbox(provisional, {
+    id: "older-receipt-delivered",
+    text: repeated,
+    images: 0,
+    at: 1_000,
+  });
+  updateOutbox(provisional, "older-receipt-delivered", {
+    state: outboxStateForReceiptStatus("delivered"),
+    settledAt: 1_100,
+  });
+  const older = readOutbox(provisional).find((entry) => entry.id === "older-receipt-delivered");
+  expect(older?.state).toBe("delivered");
+  expect(older?.responseStartedAt).toBeUndefined();
+  expect(older?.retiredEchoId).toBeUndefined();
+  enqueueOutbox(provisional, {
+    id: "newer-still-pending",
+    text: repeated,
+    images: 0,
+    at: 1_200,
+  });
+  for (let index = 0; index < OUTBOX_LIMIT - 1; index += 1) {
+    enqueueOutbox(provisional, {
+      id: `delivered-filler-${index}`,
+      text: `delivered filler ${index}`,
+      images: 0,
+      at: 2_000 + index,
+    });
+  }
+
+  expect(readOutbox(provisional)).toHaveLength(OUTBOX_LIMIT);
+  expect(readOutbox(provisional).some((entry) => entry.id === "older-receipt-delivered")).toBe(false);
+  adoptOutbox(provisional, conversation);
+  resetOutboxForTests();
+
+  /* Empty publications model filters and capped-tail eviction. They cannot
+     release the compacted occurrence reservation before its echo arrives. */
+  publishTranscriptEchoes(conversation, []);
+  const olderEcho = { generation, id: "row:10:0", text: repeated };
+  publishTranscriptEchoes(conversation, [olderEcho]);
+  let queue = readOutbox(conversation);
+  expect(queue.find((entry) => entry.id === "newer-still-pending")?.retiredEchoId).toBeUndefined();
+  expect(visibleOutbox(queue, echoes([repeated, 1]), 3_000).some((entry) => entry.id === "newer-still-pending"))
+    .toBe(true);
+
+  publishTranscriptEchoes(conversation, []);
+  resetOutboxForTests();
+  publishTranscriptEchoes(conversation, [olderEcho]);
+  queue = readOutbox(conversation);
+  expect(queue.find((entry) => entry.id === "newer-still-pending")?.retiredEchoId).toBeUndefined();
+
+  publishTranscriptEchoes(conversation, [
+    olderEcho,
+    { generation, id: "row:20:0", text: repeated },
+  ]);
+  expect(readOutbox(conversation).find((entry) => entry.id === "newer-still-pending")?.retiredEchoId)
+    .toBeDefined();
+});
+
 test("issue 626: identity adoption preserves submission order for identical occurrences", () => {
   const provisional = "spawn:launch_626_order";
   const conversation = "conversation_626_order";
@@ -471,6 +535,52 @@ describe("seedLaunchOutbox (P1#2)", () => {
     const restored = readOutbox("conv");
     expect(restored[0]).toMatchObject({ state: "delivering", launchOwned: true });
     expect(nextDispatch(restored)).toBeNull();
+  });
+
+  test("issue 626: a compacted terminal launch cannot be reseeded after adoption and refresh", () => {
+    const provisional = "spawn:launch_626_terminal";
+    const conversation = "conversation_626_terminal";
+    const text = "terminal launch prompt";
+    const echo = {
+      generation: "/transcripts/626-terminal-launch.jsonl",
+      id: "row:0:0",
+      text,
+    };
+
+    seedLaunchOutbox(provisional, {
+      id: "launch_626_terminal",
+      text,
+      images: 0,
+      at: 1_000,
+    });
+    publishTranscriptEchoes(provisional, [echo]);
+    expect(readOutbox(provisional)[0]?.id).toBe("launch_626_terminal");
+    expect(typeof readOutbox(provisional)[0]?.retiredEchoId).toBe("string");
+
+    for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+      enqueueOutbox(provisional, {
+        id: `terminal-launch-filler-${index}`,
+        text: `terminal launch filler ${index}`,
+        images: 0,
+        at: 2_000 + index,
+      });
+    }
+    expect(readOutbox(provisional).some((entry) => entry.id === "launch_626_terminal")).toBe(false);
+
+    adoptOutbox(provisional, conversation);
+    resetOutboxForTests();
+    publishTranscriptEchoes(conversation, []);
+    seedLaunchOutbox(conversation, {
+      id: "launch_626_terminal",
+      text,
+      images: 0,
+      at: 1_000,
+    });
+
+    const refreshed = readOutbox(conversation);
+    expect(refreshed).toHaveLength(OUTBOX_LIMIT);
+    expect(refreshed.some((entry) => entry.id === "launch_626_terminal")).toBe(false);
+    expect(refreshed[0]?.id).toBe("terminal-launch-filler-0");
   });
 
   test("the seeded launch bubble is adopted into the materialized conversation identity", () => {

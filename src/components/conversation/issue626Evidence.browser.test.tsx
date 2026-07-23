@@ -31,9 +31,12 @@ import { resetCanonicalAssistantClaimsForTests } from "./liveTurnHandoff";
 import {
   adoptOutbox,
   enqueueOutbox,
-  markOutboxResponded,
   OUTBOX_LIMIT,
+  outboxStateForReceiptStatus,
+  publishTranscriptEchoes,
+  readOutbox,
   resetOutboxForTests,
+  seedLaunchOutbox,
   updateOutbox,
 } from "./outbox";
 
@@ -383,6 +386,17 @@ let logRequestCount = 0;
 const originalFetch = globalThis.fetch;
 const originalDateNow = Date.now;
 
+async function openEvidenceBrowser(): Promise<{
+  instance: Browser;
+  closeOwned: () => Promise<void>;
+}> {
+  if (browser?.isConnected()) {
+    return { instance: browser, closeOwned: () => Promise.resolve() };
+  }
+  const instance = await chromium.launch({ executablePath: chromium.executablePath() });
+  return { instance, closeOwned: () => instance.close() };
+}
+
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = typeof input === "string"
     ? input
@@ -717,7 +731,7 @@ test("issue 626 production evidence preserves lifecycle ownership and bounded ha
   );
 }, 120_000);
 
-test("issue 626 production DOM keeps delayed duplicate ownership across transcript generations at 1280px and 390px", async () => {
+test("issue 626 production DOM keeps compacted receipt-delivered ownership across lifecycle churn at 1280px and 390px", async () => {
   const css = productionCss();
   expect(css.length).toBeGreaterThan(10_000);
   const repeated = "Issue 626 repeated row-anchor ownership.";
@@ -734,7 +748,7 @@ test("issue 626 production DOM keeps delayed duplicate ownership across transcri
     logOverride: serialize([userMessage(repeated, "2026-07-23T09:03:00.000Z")]),
     expectedOrder: ["user", "outbox"],
   });
-  const evidenceBrowser = await chromium.launch({ executablePath: chromium.executablePath() });
+  const { instance: evidenceBrowser, closeOwned } = await openEvidenceBrowser();
 
   try {
     for (const viewport of VIEWPORTS) {
@@ -747,18 +761,16 @@ test("issue 626 production DOM keeps delayed duplicate ownership across transcri
       getRuntimeBus().stop();
 
       enqueueOutbox(provisional, {
-        id: "older-response-settled",
+        id: "older-receipt-delivered",
         text: repeated,
         images: 0,
         at: Date.parse("2026-07-23T09:02:00.000Z"),
         launchOwned: true,
       });
-      updateOutbox(provisional, "older-response-settled", { state: "delivering" });
-      markOutboxResponded(
-        provisional,
-        "older-response-settled",
-        Date.parse("2026-07-23T09:02:01.000Z"),
-      );
+      updateOutbox(provisional, "older-receipt-delivered", {
+        state: outboxStateForReceiptStatus("delivered"),
+        settledAt: Date.parse("2026-07-23T09:02:01.000Z"),
+      });
       enqueueOutbox(provisional, {
         id: "newer-pending",
         text: repeated,
@@ -804,6 +816,35 @@ test("issue 626 production DOM keeps delayed duplicate ownership across transcri
       });
       await delayedPage.close();
 
+      resetLogTailCacheForTests();
+      logs.clear();
+      const filtered = await renderState({
+        ...generationState("filtered-capped-tail", firstPath),
+        logOverride: "",
+        expectedOrder: ["outbox"],
+      });
+      const filteredPage = await evidenceBrowser.newPage({
+        viewport: { width: viewport.width, height: viewport.height },
+        deviceScaleFactor: 1,
+      });
+      await filteredPage.setContent(pageHtml(filtered.html, css), { waitUntil: "load" });
+      const filteredEvidence = await filteredPage.evaluate((text) => {
+        const body = document.body.textContent ?? "";
+        return {
+          occurrences: body.split(text).length - 1,
+          outboxEntries: document.querySelectorAll("[data-outbox-entry]").length,
+          scrollWidth: document.documentElement.scrollWidth,
+        };
+      }, repeated);
+      expect(filteredEvidence.occurrences).toBe(1);
+      expect(filteredEvidence.outboxEntries).toBe(OUTBOX_LIMIT);
+      expect(filteredEvidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
+      await filteredPage.screenshot({
+        path: path.join(EVIDENCE_DIR, `filtered-capped-tail-${viewport.id}.png`),
+        fullPage: false,
+      });
+      await filteredPage.close();
+
       resetOutboxForTests();
       resetLogTailCacheForTests();
       logs.clear();
@@ -831,6 +872,105 @@ test("issue 626 production DOM keeps delayed duplicate ownership across transcri
       await successorPage.close();
     }
   } finally {
-    await evidenceBrowser.close();
+    await closeOwned();
+  }
+}, 120_000);
+
+test("issue 626 production LogFeed does not reseed a compacted terminal launch at 1280px and 390px", async () => {
+  const css = productionCss();
+  expect(css.length).toBeGreaterThan(10_000);
+  const provisional = "spawn:launch_issue_626_terminal";
+  const prompt = "Issue 626 terminal launch prompt.";
+  const promptAt = launchBase.promptAt ?? CAPTURE_NOW;
+  const terminalLaunch: StructuredSpawnCardState = {
+    ...launchBase,
+    launchId: "launch_issue_626_terminal",
+    state: "live-late-success",
+    initialMessage: "delivered",
+    ["prompt"]: prompt,
+    promptEcho: prompt,
+    promptAt,
+  };
+  const state: EvidenceState = {
+    id: "terminal-launch-reseed",
+    envelopeCount: 0,
+    filesRevision: 43,
+    path: fixture.identity.adoptedPath,
+    launch: terminalLaunch,
+    logMode: "empty",
+    logOverride: "",
+    expectedOrder: ["outbox"],
+  };
+  const { instance: evidenceBrowser, closeOwned } = await openEvidenceBrowser();
+
+  try {
+    for (const viewport of VIEWPORTS) {
+      mobile = viewport.mobile;
+      dom.sessionStorage.clear();
+      resetOutboxForTests();
+      resetCanonicalAssistantClaimsForTests();
+      resetLogTailCacheForTests();
+      logs.clear();
+      getRuntimeBus().stop();
+
+      seedLaunchOutbox(provisional, {
+        id: terminalLaunch.launchId,
+        text: prompt,
+        images: 0,
+        at: promptAt,
+      });
+      publishTranscriptEchoes(provisional, [{
+        generation: fixture.identity.adoptedPath,
+        id: "row:0:0",
+        text: prompt,
+      }]);
+      expect(typeof readOutbox(provisional)[0]?.retiredEchoId).toBe("string");
+
+      for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+        const id = `terminal-browser-filler-${index}`;
+        enqueueOutbox(provisional, {
+          id,
+          text: `Terminal browser filler ${index}`,
+          images: 0,
+          at: promptAt + index + 1,
+          launchOwned: true,
+        });
+        updateOutbox(provisional, id, { state: "delivering" });
+      }
+      adoptOutbox(provisional, CONVERSATION_ID);
+      resetOutboxForTests();
+
+      const rendered = await renderState(state);
+      const queue = readOutbox(CONVERSATION_ID);
+      expect(queue).toHaveLength(OUTBOX_LIMIT);
+      expect(queue.some((entry) => entry.id === terminalLaunch.launchId)).toBe(false);
+      expect(queue[0]?.id).toBe("terminal-browser-filler-0");
+
+      const page = await evidenceBrowser.newPage({
+        viewport: { width: viewport.width, height: viewport.height },
+        deviceScaleFactor: 1,
+      });
+      await page.setContent(pageHtml(rendered.html, css), { waitUntil: "load" });
+      const evidence = await page.evaluate(() => ({
+        ids: Array.from(document.querySelectorAll<HTMLElement>("[data-outbox-entry]"))
+          .map((entry) => entry.dataset.outboxEntry ?? ""),
+        scrollWidth: document.documentElement.scrollWidth,
+        productionWindow: Boolean(document.querySelector("[data-pan-ignore]"))
+          && Boolean(document.querySelector("[data-log-feed-scroller]"))
+          && Boolean(document.querySelector("textarea")),
+      }));
+      expect(evidence.ids).toHaveLength(OUTBOX_LIMIT);
+      expect(evidence.ids).not.toContain(terminalLaunch.launchId);
+      expect(evidence.ids[0]).toBe("terminal-browser-filler-0");
+      expect(evidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
+      expect(evidence.productionWindow).toBe(true);
+      await page.screenshot({
+        path: path.join(EVIDENCE_DIR, `terminal-launch-reseed-${viewport.id}.png`),
+        fullPage: false,
+      });
+      await page.close();
+    }
+  } finally {
+    await closeOwned();
   }
 }, 120_000);

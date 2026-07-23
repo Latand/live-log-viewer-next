@@ -295,7 +295,7 @@ function mergeOccurrenceTombstones(
 }
 
 function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone | null {
-  if (entry.responseStartedAt === undefined && !entry.retiredEchoId) return null;
+  if (entry.state !== "delivered" && entry.responseStartedAt === undefined && !entry.retiredEchoId) return null;
   const key = echoKey(entry.echoText ?? entry.text);
   if (!key) return null;
   return {
@@ -378,6 +378,12 @@ export function seedLaunchOutbox(
     }
     return;
   }
+  /* Recurring LogFeed projections can outlive the recent queue entry. Durable
+     retirement under this submission id keeps the compacted launch terminal
+     across refresh and identity adoption. */
+  if (readOccurrenceTombstones(cardId).some(
+    (tombstone) => tombstone.id === entry.id && tombstone.retiredEchoId,
+  )) return;
   const seeded: OutboxEntry = { ...entry, state: "delivering", launchOwned: true };
   writeBounded(cardId, [...queue, seeded]);
   /* A refreshed surface can see the canonical transcript row before the launch
