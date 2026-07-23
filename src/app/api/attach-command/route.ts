@@ -68,6 +68,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<AttachCommand 
       accountIdForPath: accountIdFromPath,
       accountLabelFor,
       allowSubagentsForPath: (p) => agentRegistry().launchProfileForPath(p)?.allowSubagents,
+      mcpServersForPath: (p) => agentRegistry().launchProfileForPath(p)?.mcpServers,
     });
     if (!resolution.ok) {
       return NextResponse.json({ error: resolution.error }, { status: resolution.status, headers: { "Cache-Control": "no-store" } });

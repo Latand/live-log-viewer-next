@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { accountManager } from "@/lib/accounts/manager";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
 import { turnStateFromRecords } from "@/lib/accounts/migration/turnState";
@@ -398,6 +400,8 @@ export async function adoptStructuredHostsAtStartup(
         fileAuthCredentials: owner?.kind === "managed",
         model: entry.launchProfile?.model ?? undefined,
         effort: entry.launchProfile?.effort ?? undefined,
+        allowSubagents: entry.launchProfile?.allowSubagents ?? false,
+        mcpServers: entry.launchProfile?.mcpServers ?? ["viewer"],
         env: {
           ...startupEnvironment,
           ...(capability ? { [VIEWER_SPAWN_CAPABILITY_ENV]: capability } : {}),
@@ -422,6 +426,10 @@ export async function adoptStructuredHostsAtStartup(
         claudeProjectsDir: owner?.transcriptRoot,
         spawnPolicyBaseSettingsPath: owner?.kind === "managed" ? claudeSettingsPath() : null,
         allowSubagents: entry.launchProfile?.allowSubagents ?? false,
+        mcpServers: entry.launchProfile?.mcpServers ?? ["viewer"],
+        mcpStatePath: owner?.kind === "managed"
+          ? path.join(owner.home, ".claude.json")
+          : owner ? path.join(path.dirname(owner.home), ".claude.json") : undefined,
         readOnly: entry.launchProfile?.readOnly === true,
         env,
         model: entry.launchProfile?.model ?? undefined,

@@ -168,6 +168,39 @@ const IMAGE_REF: StructuredImageRef = {
 };
 
 describe("ClaudeStreamBrokerHost", () => {
+  test("structured Claude hosts launch with an exclusive native MCP allowlist", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-structured-mcp-"));
+    fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+      mcpServers: {
+        viewer: { type: "stdio", command: "viewer-mcp" },
+        "agent-browser": { type: "stdio", command: "browser-mcp" },
+        unrelated: { type: "stdio", command: "unrelated-mcp" },
+      },
+    }));
+    const child = new FakeClaude(new RecordingDeliveryLedger());
+    const captured: { args?: string[] } = {};
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      claudeConfigDir: home,
+      mcpServers: ["viewer", "agent-browser"],
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, captured),
+    });
+
+    expect(captured.args).toContain("--strict-mcp-config");
+    expect(captured.args).not.toContain("--safe-mode");
+    const mcpConfigPath = captured.args![captured.args!.indexOf("--mcp-config") + 1]!;
+    const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf8")) as { mcpServers: Record<string, unknown> };
+    expect(mcpConfig.mcpServers).toEqual({
+      viewer: { type: "stdio", command: "viewer-mcp" },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+    });
+    await host.release();
+    expect(child.signals).toContain("SIGTERM");
+  });
+
   test("defaults writable pane-less Claude processes to bypassPermissions", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);
@@ -278,7 +311,8 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(captured.options?.env).toEqual({ NODE_ENV: "test", PATH: process.env.PATH });
     expect(captured.args).toContain("--input-format");
     expect(captured.args).toContain("--output-format");
-    expect(captured.args).toContain("--safe-mode");
+    expect(captured.args).not.toContain("--safe-mode");
+    expect(captured.args).toContain("--strict-mcp-config");
     expect(captured.args).toContain("--disallowedTools");
     expect(captured.args).toContain("Task,Agent,Workflow,TeamCreate,TeamDelete,SendMessage");
     expect(captured.args).toContain("--replay-user-messages");
@@ -596,6 +630,13 @@ describe("ClaudeStreamBrokerHost", () => {
       env: { SHARED_SETTING: "kept" },
       hooks: { PreToolUse: [{ matcher: "Read", hooks: [{ type: "command", command: "shared-read-hook" }] }] },
     }));
+    fs.writeFileSync(path.join(managedHome, ".claude.json"), JSON.stringify({
+      mcpServers: {
+        viewer: { type: "stdio", command: "viewer-mcp" },
+        "agent-browser": { type: "stdio", command: "browser-mcp" },
+        unrelated: { type: "stdio", command: "unrelated-mcp" },
+      },
+    }));
 
     const freshChild = new FakeClaude(new RecordingDeliveryLedger());
     const freshCapture: { args?: string[] } = {};
@@ -604,6 +645,7 @@ describe("ClaudeStreamBrokerHost", () => {
       cwd: managedHome,
       claudeConfigDir: managedHome,
       spawnPolicyBaseSettingsPath: sharedSettingsPath,
+      mcpServers: ["agent-browser"],
       readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
       readTranscript: () => [],
       spawnProcess: fakeSpawn(freshChild, freshCapture),
@@ -614,6 +656,8 @@ describe("ClaudeStreamBrokerHost", () => {
       env: Record<string, string>;
       hooks: { PreToolUse: Array<{ matcher: string }> };
     };
+    const freshMcpPath = freshCapture.args![freshCapture.args!.indexOf("--mcp-config") + 1]!;
+    const freshMcp = JSON.parse(fs.readFileSync(freshMcpPath, "utf8"));
     await fresh.release();
 
     const adoptedChild = new FakeClaude(new RecordingDeliveryLedger());
@@ -622,16 +666,26 @@ describe("ClaudeStreamBrokerHost", () => {
       cwd: managedHome,
       claudeConfigDir: managedHome,
       spawnPolicyBaseSettingsPath: sharedSettingsPath,
+      mcpServers: ["agent-browser"],
       readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
       readTranscript: () => [],
       spawnProcess: fakeSpawn(adoptedChild, adoptedCapture),
     });
     const adoptedSettingsPath = adoptedCapture.args![adoptedCapture.args!.indexOf("--settings") + 1]!;
     const adoptedSettings = JSON.parse(fs.readFileSync(adoptedSettingsPath, "utf8"));
+    const adoptedMcpPath = adoptedCapture.args![adoptedCapture.args!.indexOf("--mcp-config") + 1]!;
+    const adoptedMcp = JSON.parse(fs.readFileSync(adoptedMcpPath, "utf8"));
     expect(freshSettings.theme).toBe("shared-dark");
     expect(freshSettings.env).toEqual({ SHARED_SETTING: "kept" });
     expect(freshSettings.hooks.PreToolUse.map((group) => group.matcher)).toEqual(["Read", "Task|Agent|Workflow|TeamCreate|TeamDelete|SendMessage"]);
     expect(adoptedSettings).toEqual(freshSettings);
+    expect(freshCapture.args).toContain("--strict-mcp-config");
+    expect(adoptedCapture.args).toContain("--strict-mcp-config");
+    expect(adoptedMcp).toEqual(freshMcp);
+    expect(freshMcp).toEqual({ mcpServers: {
+      viewer: { type: "stdio", command: "viewer-mcp" },
+      "agent-browser": { type: "stdio", command: "browser-mcp" },
+    } });
     await adopted.release();
 
     const legacyHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-legacy-policy-"));

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from 
 import { claudeHomeOwningTranscript, claudeSettingsPath, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
+import { normalizeSpawnMcpServers } from "./mcpAllowlist";
 import { normalizeClaudeLaunchModel } from "./models";
 import { applyClaudeSpawnPolicy, claudeSpawnPolicyPaths, VIEWER_SPAWN_CAPABILITY_ENV } from "./spawnPolicy";
 import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
@@ -98,6 +100,7 @@ export interface FreshSpecOptions {
   claudeProjectsDir?: string | null;
   /** Allow native Claude sub-agents and the Codex multi-agent feature. */
   allowSubagents?: boolean;
+  mcpServers?: readonly string[];
   /** Route admission owns policy materialization after its durable reservation. */
   deferClaudeSpawnPolicy?: boolean;
 }
@@ -114,6 +117,52 @@ export interface ResumeSpecOptions {
   readOnly?: boolean | null;
   permissionMode?: string | null;
   allowSubagents?: boolean;
+  mcpServers?: readonly string[];
+}
+
+function normalizedMcpServers(value: readonly string[] | undefined): string[] {
+  const normalized = normalizeSpawnMcpServers(value);
+  if (!normalized.ok) throw new Error(normalized.error);
+  return normalized.value;
+}
+
+function configuredCodexMcpServers(home: string, cwd: string): string[] {
+  const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: home };
+  delete env.LLV_TOKEN;
+  const listed = spawnSync(process.env.LLV_CODEX_BINARY ?? resolveBinary("codex"), ["mcp", "list", "--json"], {
+    cwd,
+    env,
+    encoding: "utf8",
+    timeout: 10_000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  if (listed.status === 0) {
+    try {
+      const parsed = JSON.parse(listed.stdout) as unknown;
+      if (Array.isArray(parsed) && parsed.every((server) => server && typeof server === "object" && typeof (server as { name?: unknown }).name === "string")) {
+        return parsed.map((server) => (server as { name: string }).name);
+      }
+    } catch { /* fail closed below */ }
+  }
+  throw new Error("Codex MCP configuration could not be enumerated safely");
+}
+
+function codexMcpRuntimeOverrides(home: string, cwd: string, allowlist: readonly string[]): string[] {
+  const enabled = new Set(allowlist);
+  return configuredCodexMcpServers(home, cwd).map((name) => {
+    const key = /^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name);
+    return `mcp_servers.${key}.enabled=${enabled.has(name)}`;
+  });
+}
+
+function pushClaudePolicyArgs(
+  args: string[],
+  policy: ReturnType<typeof applyClaudeSpawnPolicy> | ReturnType<typeof claudeSpawnPolicyPaths>,
+): void {
+  args.push(
+    "--settings", policy.settingsPath,
+    "--strict-mcp-config", "--mcp-config", policy.mcpConfigPath,
+  );
 }
 
 export function effectiveClaudePermissionMode(
@@ -125,6 +174,7 @@ export function effectiveClaudePermissionMode(
 
 /** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
 export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpecOptions = {}): ResumeSpec {
+  const mcpServers = normalizedMcpServers(options.mcpServers);
   if (engine === "claude") {
     /* A pre-chosen session id makes the transcript path knowable right at
        spawn time (handoff lineage links it before the file exists) and lets
@@ -147,12 +197,14 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
         ? claudeSpawnPolicyPaths(options.claudeConfigDir, sid)
         : applyClaudeSpawnPolicy(options.claudeConfigDir, {
           allowSubagents: options.allowSubagents,
+          cwd,
+          mcpServers,
           baseSettingsPath: managed ? claudeSettingsPath() : null,
           profileId: sid,
         })
       : null;
-    const settings = installedPolicy?.settingsPath ?? null;
-    if (settings) args.push("--settings", settings);
+    if (installedPolicy) pushClaudePolicyArgs(args, installedPolicy);
+    else args.push("--strict-mcp-config");
     const command = args.map(shellQuote).join(" ");
     return {
       command: managed ? `${claudeEnvPrefix(options.claudeConfigDir!)} ${command}` : command,
@@ -168,6 +220,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
         permissionMode,
         readOnly: options.readOnly ?? false,
         allowSubagents: options.allowSubagents ?? false,
+        mcpServers,
         title: null,
         project: null,
         parentConversationId: null,
@@ -180,6 +233,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
   const args = [resolveBinary("codex")];
   const home = options.codexHome ?? accountForSpawn().home;
   if (isManagedCodexHome(home)) args.push("-c", "cli_auth_credentials_store=file");
+  for (const override of codexMcpRuntimeOverrides(home, cwd, mcpServers)) args.push("-c", override);
   if (options.model) args.push("-m", options.model);
   if (options.effort) args.push("-c", `model_reasoning_effort=${options.effort}`);
   if (options.fast != null) args.push("-c", `service_tier=${options.fast ? "priority" : "standard"}`);
@@ -199,6 +253,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       permissionMode: options.readOnly ? "never" : null,
       readOnly: options.readOnly ?? false,
       allowSubagents: options.allowSubagents ?? false,
+      mcpServers,
       title: null,
       project: null,
       parentConversationId: null,
@@ -240,15 +295,21 @@ export function claudeSuccessorSpecFor(input: {
   if (model) args.push("--model", model);
   if (input.profile.effort && /^[a-z]+$/.test(input.profile.effort)) args.push("--effort", input.profile.effort);
   args.push("--resume", input.sourcePath, "--fork-session", "--session-id", input.candidateId);
-  const settings = applyClaudeSpawnPolicy(input.targetHome, {
+  const cwd = input.profile.cwd || resumeCwd(input.sourcePath);
+  const policy = applyClaudeSpawnPolicy(input.targetHome, {
     allowSubagents: input.profile.allowSubagents,
     baseSettingsPath: isManagedClaudeHome(input.targetHome) ? claudeSettingsPath() : null,
     profileId: input.candidateId,
-  }).settingsPath;
-  args.push("--settings", settings);
+    cwd,
+    mcpServers: input.profile.mcpServers,
+    mcpStatePath: isManagedClaudeHome(input.targetHome)
+      ? path.join(input.targetHome, ".claude.json")
+      : path.join(path.dirname(input.targetHome), ".claude.json"),
+  });
+  pushClaudePolicyArgs(args, policy);
   return {
     command: `${claudeEnvPrefix(input.targetHome)} ${args.map(shellQuote).join(" ")}`,
-    cwd: input.profile.cwd || resumeCwd(input.sourcePath),
+    cwd,
     windowName: "claude-migration-successor",
     engine: "claude",
     ["transcript"]: claudeTranscriptPath(input.profile.cwd || resumeCwd(input.sourcePath), input.candidateId, input.targetProjectsDir),
@@ -263,6 +324,7 @@ export function claudeSuccessorSpecFor(input: {
  * session of their own, so only root session files qualify.
  */
 export function resumeSpecFor(root: string, pathname: string, options: ResumeSpecOptions = {}): ResumeSpec | null {
+  const mcpServers = normalizedMcpServers(options.mcpServers);
   const base = path.basename(pathname);
   if (root === "claude-projects" && base.endsWith(".jsonl") && !pathname.includes(path.sep + "subagents" + path.sep)) {
     const sid = base.slice(0, -".jsonl".length);
@@ -270,31 +332,36 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     const home = claudeHomeOwningTranscript(pathname);
     if (!home) return null;
     const managed = isManagedClaudeHome(home);
-    const settings = applyClaudeSpawnPolicy(home, {
+    const cwd = resumeCwd(pathname);
+    const policy = applyClaudeSpawnPolicy(home, {
       allowSubagents: options.allowSubagents,
       baseSettingsPath: managed ? claudeSettingsPath() : null,
       profileId: `resume-${sid}`,
-    }).settingsPath;
-    let command = shellQuote(resolveBinary("claude"));
+      cwd,
+      mcpServers,
+      mcpStatePath: managed ? path.join(home, ".claude.json") : path.join(path.dirname(home), ".claude.json"),
+    });
+    const args = [resolveBinary("claude")];
     const permissionMode = effectiveClaudePermissionMode(options);
     if (options.readOnly || permissionMode === "plan") {
-      command += " --permission-mode plan --disallowedTools Edit,Write,NotebookEdit";
+      args.push("--permission-mode", "plan", "--disallowedTools", "Edit,Write,NotebookEdit");
     } else if (permissionMode !== "bypassPermissions" && /^[a-zA-Z-]+$/.test(permissionMode)) {
-      command += ` --permission-mode ${shellQuote(permissionMode)}`;
+      args.push("--permission-mode", permissionMode);
     } else {
-      command += " --dangerously-skip-permissions";
+      args.push("--dangerously-skip-permissions");
     }
-    command += ` --settings ${shellQuote(settings)}`;
+    pushClaudePolicyArgs(args, policy);
     const launchModel = normalizeClaudeLaunchModel(options.model);
-    if (launchModel) command += ` --model ${shellQuote(launchModel)}`;
-    if (options.effort) command += ` --effort ${shellQuote(options.effort)}`;
-    command += ` --resume ${shellQuote(sid)}`;
+    if (launchModel) args.push("--model", launchModel);
+    if (options.effort) args.push("--effort", options.effort);
+    args.push("--resume", sid);
+    const command = args.map(shellQuote).join(" ");
     return {
       command: managed ? `${claudeEnvPrefix(home)} ${command}` : command,
-      cwd: resumeCwd(pathname),
+      cwd,
       windowName: "claude-resume",
       engine: "claude",
-      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode, allowSubagents: options.allowSubagents ?? false },
+      launchProfile: { ...emptyLaunchProfileForResume(cwd, launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode, allowSubagents: options.allowSubagents ?? false, mcpServers },
     };
   }
   if (root === "codex-sessions" && base.endsWith(".jsonl")) {
@@ -304,6 +371,8 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     if (!home) return null;
     let command = `${resolveBinary("codex")}`;
     if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
+    const cwd = resumeCwd(pathname);
+    for (const override of codexMcpRuntimeOverrides(home, cwd, mcpServers)) command += ` -c ${shellQuote(override)}`;
     if (options.model) command += ` -m ${shellQuote(options.model)}`;
     if (options.effort) command += ` -c ${shellQuote(`model_reasoning_effort=${options.effort}`)}`;
     if (options.fast != null) command += ` -c ${shellQuote(`service_tier=${options.fast ? "priority" : "standard"}`)}`;
@@ -315,10 +384,10 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     command += ` resume ${id}`;
     return {
       command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
-      cwd: resumeCwd(pathname),
+      cwd,
       windowName: "codex-resume",
       engine: "codex",
-      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false },
+      launchProfile: { ...emptyLaunchProfileForResume(cwd, options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false, mcpServers },
     };
   }
   return null;
@@ -333,6 +402,7 @@ function emptyLaunchProfileForResume(cwd: string, model: string | null, effort: 
     permissionMode: null,
     readOnly: null,
     allowSubagents: false,
+    mcpServers: ["viewer"],
     title: null,
     project: null,
     parentConversationId: null,
