@@ -7,6 +7,15 @@ import { procBackend } from "@/lib/proc";
 import type { McpToolBindings } from "./server";
 
 type RaceRole = "winner" | "contender";
+type CrashBoundary =
+  | "pending-open"
+  | "pending-partial-write"
+  | "pending-fsync"
+  | "owner-publish"
+  | "recovery-link-publish"
+  | "original-unlink"
+  | "recovery-link-cleanup"
+  | "owner-cleanup";
 
 function waitFor(filename: string): void {
   while (!fs.existsSync(filename)) {
@@ -38,6 +47,104 @@ function publishLock(lockPath: string, readyPath: string, releasePath: string): 
     if (current.token === owner.token) fs.unlinkSync(lockPath);
   } catch {
     // The contender may already have retired a deliberately stale fixture.
+  }
+}
+
+function pauseForCrash(readyPath: string): never {
+  fs.writeFileSync(readyPath, "ready");
+  for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_000);
+}
+
+function installCrashBoundary(receiptPath: string, boundary: CrashBoundary, readyPath: string): void {
+  const lockPath = `${receiptPath}.lock`;
+  const originalOpen = fs.openSync.bind(fs);
+  const originalWriteFile = fs.writeFileSync.bind(fs);
+  const originalFsync = fs.fsyncSync.bind(fs);
+  const originalLink = fs.linkSync.bind(fs);
+  const originalUnlink = fs.unlinkSync.bind(fs);
+  let pendingDescriptor: number | null = null;
+  let fired = false;
+  const fire = () => {
+    if (fired) return;
+    fired = true;
+    pauseForCrash(readyPath);
+  };
+  fs.openSync = ((filename: fs.PathLike, flags: string | number, mode?: fs.Mode) => {
+    const descriptor = originalOpen(filename, flags, mode);
+    if (String(filename).includes(".recovery-owner-") && String(filename).includes(".pending-v1-")) {
+      pendingDescriptor = descriptor;
+      if (boundary === "pending-open") fire();
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.writeFileSync = ((target: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, options?: unknown) => {
+    if (boundary === "pending-partial-write" && target === pendingDescriptor) {
+      const serialized = typeof data === "string" ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString();
+      fs.writeSync(target, serialized.slice(0, Math.max(1, Math.floor(serialized.length / 3))));
+      fire();
+    }
+    return originalWriteFile(target, data, options as never);
+  }) as typeof fs.writeFileSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    const result = originalFsync(descriptor);
+    if (boundary === "pending-fsync" && descriptor === pendingDescriptor) fire();
+    return result;
+  }) as typeof fs.fsyncSync;
+  fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+    const result = originalLink(existingPath, newPath);
+    const target = String(newPath);
+    if (boundary === "owner-publish" && /\.recovery-owner-[0-9]+$/.test(target)) fire();
+    if (boundary === "recovery-link-publish" && target.endsWith(".recovering")) fire();
+    return result;
+  }) as typeof fs.linkSync;
+  fs.unlinkSync = ((filename: fs.PathLike) => {
+    const target = String(filename);
+    const result = originalUnlink(filename);
+    if (boundary === "original-unlink" && target === lockPath) fire();
+    if (boundary === "recovery-link-cleanup" && target.endsWith(".recovering")) fire();
+    if (boundary === "owner-cleanup" && /\.recovery-owner-[0-9]+$/.test(target)) fire();
+    return result;
+  }) as typeof fs.unlinkSync;
+}
+
+function installTransientOwnerReadFailure(): void {
+  const originalRead = fs.readFileSync.bind(fs);
+  let fired = false;
+  fs.readFileSync = ((filename: fs.PathOrFileDescriptor, options?: unknown) => {
+    if (!fired && typeof filename !== "number" && /\.recovery-owner-[0-9]+$/.test(String(filename))) {
+      fired = true;
+      throw Object.assign(new Error("injected vanished recovery owner"), { code: "ENOENT" });
+    }
+    return originalRead(filename, options as never);
+  }) as typeof fs.readFileSync;
+}
+
+function publishReusedLock(
+  recoveryPath: string,
+  lockPath: string,
+  readyPath: string,
+  releasePath: string,
+): void {
+  const owner = {
+    pid: process.pid,
+    startIdentity: procBackend.processIdentity(process.pid),
+    token: crypto.randomUUID(),
+  };
+  const descriptor = fs.openSync(recoveryPath, "r+");
+  fs.ftruncateSync(descriptor, 0);
+  fs.writeFileSync(descriptor, JSON.stringify(owner));
+  fs.fsyncSync(descriptor);
+  fs.closeSync(descriptor);
+  fs.linkSync(recoveryPath, lockPath);
+  fs.writeFileSync(readyPath, "ready");
+  waitFor(releasePath);
+  for (const target of [lockPath, recoveryPath]) {
+    try {
+      const current = JSON.parse(fs.readFileSync(target, "utf8")) as { token?: unknown };
+      if (current.token === owner.token) fs.unlinkSync(target);
+    } catch {
+      // A settled claimant may already have removed an unreferenced alias.
+    }
   }
 }
 
@@ -145,6 +252,45 @@ async function claimReceipt(
   fs.writeFileSync(resultPath, JSON.stringify(result));
 }
 
+async function claimWithMissingRecoveryDirectory(
+  receiptPath: string,
+  countPath: string,
+  resultPath: string,
+  heartbeatPath: string,
+): Promise<void> {
+  const directory = path.dirname(receiptPath);
+  const originalReaddir = fs.readdirSync.bind(fs);
+  let scans = 0;
+  fs.readdirSync = ((target: fs.PathLike, options?: unknown) => {
+    if (String(target) === directory) {
+      scans += 1;
+      throw Object.assign(new Error("injected missing receipt directory"), { code: "ENOENT" });
+    }
+    return originalReaddir(target, options as never);
+  }) as typeof fs.readdirSync;
+  let ticks = 0;
+  const heartbeat = setInterval(() => {
+    ticks += 1;
+    fs.writeFileSync(heartbeatPath, String(ticks));
+  }, 20);
+  await Bun.sleep(40);
+  const startedAt = Date.now();
+  try {
+    await claimReceipt(receiptPath, countPath, path.join(directory, "discarded-result.json"));
+    fs.writeFileSync(resultPath, JSON.stringify({ outcome: "completed", scans, ticks, elapsedMs: Date.now() - startedAt }));
+  } catch (error) {
+    fs.writeFileSync(resultPath, JSON.stringify({
+      outcome: "failed",
+      error: error instanceof Error ? error.message : String(error),
+      scans,
+      ticks,
+      elapsedMs: Date.now() - startedAt,
+    }));
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
 const mode = process.argv[2];
 if (mode === "hold") {
   publishLock(process.argv[3]!, process.argv[4]!, process.argv[5]!);
@@ -178,6 +324,21 @@ if (mode === "hold") {
     process.argv[6]!,
     process.argv[7]!,
   );
+} else if (mode === "missing-directory-claim") {
+  await claimWithMissingRecoveryDirectory(
+    process.argv[3]!,
+    process.argv[4]!,
+    process.argv[5]!,
+    process.argv[6]!,
+  );
+} else if (mode === "transient-owner-read-claim") {
+  installTransientOwnerReadFailure();
+  await claimReceipt(process.argv[3]!, process.argv[4]!, process.argv[5]!);
+} else if (mode === "crash-claim") {
+  installCrashBoundary(process.argv[3]!, process.argv[6] as CrashBoundary, process.argv[7]!);
+  await claimReceipt(process.argv[3]!, process.argv[4]!, process.argv[5]!);
+} else if (mode === "hold-reused") {
+  publishReusedLock(process.argv[3]!, process.argv[4]!, process.argv[5]!, process.argv[6]!);
 } else {
   throw new Error(`unsupported lock child mode: ${String(mode)}`);
 }

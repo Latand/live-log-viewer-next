@@ -248,6 +248,254 @@ describe("MCP tool service", () => {
     expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
   });
 
+  test("persistent recovery-directory loss is bounded and keeps the event loop responsive", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-missing-directory-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const countPath = path.join(directory, "binding-count");
+    const resultPath = path.join(directory, "bounded-result.json");
+    const heartbeatPath = path.join(directory, "heartbeat");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "missing-directory-owner",
+    }));
+
+    const claimant = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "missing-directory-claim",
+        receiptPath,
+        countPath,
+        resultPath,
+        heartbeatPath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const settled = await waitForFile(resultPath, 6_500);
+    if (!settled) claimant.kill(9);
+    const processResult = await childResult(claimant);
+
+    expect(settled).toBeTrue();
+    expect(processResult).toEqual({ exit: 0, error: "" });
+    expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toMatchObject({
+      outcome: "failed",
+      error: "MCP receipt store is busy",
+    });
+    const probe = JSON.parse(fs.readFileSync(resultPath, "utf8")) as {
+      scans: number;
+      ticks: number;
+      elapsedMs: number;
+    };
+    expect(probe.scans).toBeLessThan(1_000);
+    expect(probe.ticks).toBeGreaterThan(10);
+    expect(probe.elapsedMs).toBeGreaterThanOrEqual(4_900);
+    expect(probe.elapsedMs).toBeLessThan(6_000);
+    expect(fs.existsSync(countPath)).toBeFalse();
+  }, 8_000);
+
+  test("one vanished published owner entry retries within the same fenced recovery", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-transient-owner-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const countPath = path.join(directory, "binding-count");
+    const resultPath = path.join(directory, "result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    fs.writeFileSync(`${receiptPath}.lock`, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "transient-owner-read",
+    }));
+
+    const claimant = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "transient-owner-read-claim",
+        receiptPath,
+        countPath,
+        resultPath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const processResult = await childResult(claimant);
+
+    expect(processResult).toEqual({ exit: 0, error: "" });
+    expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toMatchObject({ ok: true, replayed: false });
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(recoveryArtifacts(directory)).toEqual([]);
+  });
+
+  test("every recovery publication boundary settles after creator death", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-boundaries-"));
+    scratch.push(root);
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    const boundaries = [
+      "pending-open",
+      "pending-partial-write",
+      "pending-fsync",
+      "owner-publish",
+      "recovery-link-publish",
+      "original-unlink",
+      "recovery-link-cleanup",
+      "owner-cleanup",
+    ] as const;
+
+    for (const boundary of boundaries) {
+      const directory = path.join(root, boundary);
+      fs.mkdirSync(directory);
+      const receiptPath = path.join(directory, "receipts.json");
+      const lockPath = `${receiptPath}.lock`;
+      const countPath = path.join(directory, "binding-count");
+      const crashedResultPath = path.join(directory, "crashed-result.json");
+      const firstResultPath = path.join(directory, "first-result.json");
+      const secondResultPath = path.join(directory, "second-result.json");
+      const readyPath = path.join(directory, "crash-ready");
+      fs.writeFileSync(lockPath, JSON.stringify({
+        pid: 999_999_999,
+        startIdentity: "dead",
+        token: `boundary-${boundary}`,
+      }));
+      const creator = Bun.spawn({
+        cmd: [
+          process.execPath,
+          child,
+          "crash-claim",
+          receiptPath,
+          countPath,
+          crashedResultPath,
+          boundary,
+          readyPath,
+        ],
+        env: { ...process.env },
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      expect(await waitForFile(readyPath)).toBeTrue();
+      for (const artifact of recoveryArtifacts(directory)) {
+        expect(Buffer.byteLength(artifact)).toBeLessThanOrEqual(255);
+      }
+      creator.kill(9);
+      const creatorResult = await childResult(creator);
+
+      const first = Bun.spawn({
+        cmd: [process.execPath, child, "claim", receiptPath, countPath, firstResultPath],
+        env: { ...process.env },
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      const second = Bun.spawn({
+        cmd: [process.execPath, child, "claim", receiptPath, countPath, secondResultPath],
+        env: { ...process.env },
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      const claimants = await Promise.all([childResult(first), childResult(second)]);
+
+      expect(creatorResult.exit).not.toBe(0);
+      expect(claimants).toEqual([{ exit: 0, error: "" }, { exit: 0, error: "" }]);
+      const results = [firstResultPath, secondResultPath]
+        .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+      expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+      expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+      const artifacts = recoveryArtifacts(directory);
+      if (artifacts.length > 0) throw new Error(`${boundary} left recovery artifacts: ${artifacts.join(", ")}`);
+    }
+  }, 30_000);
+
+  test("same-inode replacement survives a paused stale reaper", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-inode-reuse-"));
+    scratch.push(directory);
+    const receiptPath = path.join(directory, "receipts.json");
+    const lockPath = `${receiptPath}.lock`;
+    const pausePath = path.join(directory, "reaper-paused");
+    const pauseReleasePath = path.join(directory, "reaper-release");
+    const holderReadyPath = path.join(directory, "replacement-ready");
+    const holderReleasePath = path.join(directory, "replacement-release");
+    const countPath = path.join(directory, "binding-count");
+    const firstResultPath = path.join(directory, "first-result.json");
+    const secondResultPath = path.join(directory, "second-result.json");
+    const child = path.join(import.meta.dir, "server.lockChild.ts");
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999_999,
+      startIdentity: "dead",
+      token: "inode-reuse-stale-owner",
+    }));
+
+    const first = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "claim",
+        receiptPath,
+        countPath,
+        firstResultPath,
+        pausePath,
+        pauseReleasePath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(pausePath)).toBeTrue();
+    const recoveryName = recoveryArtifacts(directory).find((entry) => entry.endsWith(".recovering"));
+    expect(recoveryName).toBeDefined();
+    const recoveryPath = path.join(directory, recoveryName!);
+    const staleIdentity = fs.statSync(recoveryPath).ino;
+    fs.unlinkSync(lockPath);
+    const replacement = Bun.spawn({
+      cmd: [
+        process.execPath,
+        child,
+        "hold-reused",
+        recoveryPath,
+        lockPath,
+        holderReadyPath,
+        holderReleasePath,
+      ],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await waitForFile(holderReadyPath)).toBeTrue();
+    expect(fs.statSync(lockPath).ino).toBe(staleIdentity);
+    const second = Bun.spawn({
+      cmd: [process.execPath, child, "claim", receiptPath, countPath, secondResultPath],
+      env: { ...process.env },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+
+    fs.writeFileSync(pauseReleasePath, "release");
+    await Bun.sleep(150);
+    expect(fs.existsSync(lockPath)).toBeTrue();
+    expect(fs.existsSync(countPath)).toBeFalse();
+    fs.writeFileSync(holderReleasePath, "release");
+    const processes = await Promise.all([
+      childResult(first),
+      childResult(second),
+      childResult(replacement),
+    ]);
+
+    expect(processes).toEqual([
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+      { exit: 0, error: "" },
+    ]);
+    const results = [firstResultPath, secondResultPath]
+      .map((filename) => JSON.parse(fs.readFileSync(filename, "utf8")) as { ok: boolean; replayed: boolean });
+    expect(results.filter((result) => result.ok && !result.replayed)).toHaveLength(1);
+    expect(fs.readFileSync(countPath, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(recoveryArtifacts(directory)).toEqual([]);
+  }, 12_000);
+
   test("multiprocess stale recovery preserves a live replacement and admits one same-key mutation", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-lock-race-"));
     scratch.push(directory);

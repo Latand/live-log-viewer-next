@@ -90,8 +90,8 @@ export type ReceiptClaim =
   | { kind: "conflict" };
 
 export interface McpReceiptStore {
-  claim(key: string, digest: string, retention: ReceiptRetention): ReceiptClaim;
-  complete(key: string, digest: string, result: McpToolResult, retention: ReceiptRetention): void;
+  claim(key: string, digest: string, retention: ReceiptRetention): ReceiptClaim | Promise<ReceiptClaim>;
+  complete(key: string, digest: string, result: McpToolResult, retention: ReceiptRetention): void | Promise<void>;
 }
 
 export class MemoryMcpReceiptStore implements McpReceiptStore {
@@ -123,7 +123,6 @@ type ReceiptFile = {
 const FILE_RECEIPT_CAP = 500;
 const LOCK_WAIT_MS = 5_000;
 const LOCK_STALE_MS = 30_000;
-const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 type ReceiptLockOwner = { pid: number; startIdentity: string | null; token: string };
 type ReceiptLockIdentity = { dev: number; ino: number };
 type ReceiptLockObservation = {
@@ -142,6 +141,18 @@ type ReceiptRecoveryOwner = ReceiptLockOwner & {
 type ReceiptRecoveryClaim = {
   owner: ReceiptRecoveryOwner;
   ownerPath: string;
+};
+type ReceiptRecoveryOwnerEntry = {
+  owner: ReceiptRecoveryOwner;
+  ownerPath: string;
+};
+type ReceiptRecoveryOwnerScan =
+  | { kind: "owners"; entries: ReceiptRecoveryOwnerEntry[] }
+  | { kind: "retry" };
+type ReceiptRecoveryAttempt = "removed" | "blocked" | "retry";
+type PendingRecoveryOwner = {
+  pid: number;
+  startIdentityTag: string | null;
 };
 
 // Append-only epochs provide one retirement owner without replacing a live
@@ -257,6 +268,22 @@ function recoveryOwnerPrefix(recoveryPath: string): string {
   return `${recoveryPath}.recovery-owner-`;
 }
 
+function waitForRetry(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function recoveryIdentityTag(identity: string | null): string {
+  return identity === null
+    ? "unknown"
+    : crypto.createHash("sha256").update(identity).digest("hex").slice(0, 32);
+}
+
+function recoveryTargetTag(token: string | null): string {
+  return token === null
+    ? "unknown"
+    : crypto.createHash("sha256").update(token).digest("hex").slice(0, 32);
+}
+
 function readRecoveryOwner(ownerPath: string): ReceiptRecoveryOwner {
   const value = JSON.parse(fs.readFileSync(ownerPath, "utf8")) as unknown;
   if (!isRecord(value)
@@ -279,32 +306,59 @@ function readRecoveryOwner(ownerPath: string): ReceiptRecoveryOwner {
 function recoveryOwners(
   recoveryPath: string,
   observation: ReceiptLockObservation,
-): Array<{ owner: ReceiptRecoveryOwner; ownerPath: string }> {
+  deadline: number,
+): ReceiptRecoveryOwnerScan {
+  if (Date.now() >= deadline) return { kind: "retry" };
   const directory = path.dirname(recoveryPath);
   const prefix = path.basename(recoveryOwnerPrefix(recoveryPath));
-  for (;;) {
+  let names: string[];
+  try {
+    names = fs.readdirSync(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     try {
-      return fs.readdirSync(directory)
-        .map((entry) => {
-          if (!entry.startsWith(prefix)) return null;
-          const epochText = entry.slice(prefix.length);
-          if (!/^(?:0|[1-9][0-9]*)$/.test(epochText)) return null;
-          const ownerPath = path.join(directory, entry);
-          const owner = readRecoveryOwner(ownerPath);
-          if (owner.epoch !== Number(epochText)
-            || owner.targetDev !== observation.identity.dev
-            || owner.targetIno !== observation.identity.ino
-            || owner.targetToken !== observation.token) {
-            throw new Error("invalid MCP receipt recovery owner target");
-          }
-          return { owner, ownerPath };
-        })
-        .filter((entry): entry is { owner: ReceiptRecoveryOwner; ownerPath: string } => entry !== null)
-        .sort((left, right) => left.owner.epoch - right.owner.epoch);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      fs.mkdirSync(directory, { recursive: true });
+    } catch (mkdirError) {
+      if ((mkdirError as NodeJS.ErrnoException).code !== "ENOENT") throw mkdirError;
     }
+    return { kind: "retry" };
   }
+  const entries: ReceiptRecoveryOwnerEntry[] = [];
+  for (const entry of names) {
+    if (!entry.startsWith(prefix)) continue;
+    const epochText = entry.slice(prefix.length);
+    if (!/^(?:0|[1-9][0-9]*)$/.test(epochText)) continue;
+    const ownerPath = path.join(directory, entry);
+    let owner: ReceiptRecoveryOwner;
+    try {
+      owner = readRecoveryOwner(ownerPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "retry" };
+      throw error;
+    }
+    if (owner.epoch !== Number(epochText)
+      || owner.targetDev !== observation.identity.dev
+      || owner.targetIno !== observation.identity.ino
+      || owner.targetToken !== observation.token) {
+      throw new Error("invalid MCP receipt recovery owner target");
+    }
+    entries.push({ owner, ownerPath });
+  }
+  entries.sort((left, right) => left.owner.epoch - right.owner.epoch);
+  return { kind: "owners", entries };
+}
+
+async function recoveryOwnersUntil(
+  recoveryPath: string,
+  observation: ReceiptLockObservation,
+  deadline: number,
+): Promise<ReceiptRecoveryOwnerEntry[] | null> {
+  while (Date.now() < deadline) {
+    const scan = recoveryOwners(recoveryPath, observation, deadline);
+    if (scan.kind === "owners") return scan.entries;
+    await waitForRetry(Math.min(10, Math.max(1, deadline - Date.now())));
+  }
+  return null;
 }
 
 function publishRecoveryOwner(
@@ -312,7 +366,7 @@ function publishRecoveryOwner(
   owner: ReceiptRecoveryOwner,
 ): string | null {
   const ownerPath = `${recoveryOwnerPrefix(recoveryPath)}${owner.epoch}`;
-  const temporary = `${ownerPath}.pending-${owner.pid}-${owner.token}`;
+  const temporary = `${ownerPath}.pending-v1-${owner.pid}-${recoveryIdentityTag(owner.startIdentity)}-${recoveryTargetTag(owner.targetToken)}-${owner.token}`;
   let descriptor: number | null = null;
   try {
     descriptor = fs.openSync(temporary, "wx", 0o600);
@@ -337,54 +391,84 @@ function publishRecoveryOwner(
   }
 }
 
-function claimRecoveryOwnership(
+async function claimRecoveryOwnership(
   recoveryPath: string,
   observation: ReceiptLockObservation,
-): ReceiptRecoveryClaim | null {
+  deadline: number,
+): Promise<ReceiptRecoveryClaim | "blocked" | "retry"> {
   const token = crypto.randomUUID();
-  for (;;) {
-    const owners = recoveryOwners(recoveryPath, observation);
-    const current = owners.at(-1)?.owner;
-    if (current && processOwnerAlive(current)) return null;
-    const owner: ReceiptRecoveryOwner = {
-      version: 1,
-      epoch: (current?.epoch ?? -1) + 1,
-      pid: process.pid,
-      startIdentity: procBackend.processIdentity(process.pid),
-      token,
-      targetDev: observation.identity.dev,
-      targetIno: observation.identity.ino,
-      targetToken: observation.token,
-    };
-    const ownerPath = publishRecoveryOwner(recoveryPath, owner);
-    if (ownerPath) return { owner, ownerPath };
-  }
+  const owners = await recoveryOwnersUntil(recoveryPath, observation, deadline);
+  if (!owners) return "retry";
+  const current = owners.at(-1)?.owner;
+  if (current && processOwnerAlive(current)) return "blocked";
+  const owner: ReceiptRecoveryOwner = {
+    version: 1,
+    epoch: (current?.epoch ?? -1) + 1,
+    pid: process.pid,
+    startIdentity: procBackend.processIdentity(process.pid),
+    token,
+    targetDev: observation.identity.dev,
+    targetIno: observation.identity.ino,
+    targetToken: observation.token,
+  };
+  const ownerPath = publishRecoveryOwner(recoveryPath, owner);
+  return ownerPath ? { owner, ownerPath } : "retry";
 }
 
-function recoveryClaimCurrent(
+async function recoveryClaimCurrent(
   recoveryPath: string,
   observation: ReceiptLockObservation,
   claim: ReceiptRecoveryClaim,
-): boolean {
-  const current = recoveryOwners(recoveryPath, observation).at(-1);
+  deadline: number,
+): Promise<boolean> {
+  const owners = await recoveryOwnersUntil(recoveryPath, observation, deadline);
+  if (!owners) return false;
+  const current = owners.at(-1);
   return current?.owner.token === claim.owner.token && current.ownerPath === claim.ownerPath;
+}
+
+function pendingRecoveryOwner(entry: string, prefix: string): PendingRecoveryOwner | null {
+  if (!entry.startsWith(prefix)) return null;
+  const suffix = entry.slice(prefix.length);
+  const current = /^(?:0|[1-9][0-9]*)\.pending-v1-([1-9][0-9]*)-(unknown|[0-9a-f]{32})-(?:unknown|[0-9a-f]{32})-[0-9a-f-]{36}$/i.exec(suffix);
+  if (current) {
+    const pid = Number(current[1]);
+    if (!Number.isSafeInteger(pid)) return null;
+    return {
+      pid,
+      startIdentityTag: current[2] === "unknown" ? null : current[2]!.toLowerCase(),
+    };
+  }
+  const legacy = /^(?:0|[1-9][0-9]*)\.pending-([1-9][0-9]*)-[0-9a-f-]{36}$/i.exec(suffix);
+  if (!legacy) return null;
+  const pid = Number(legacy[1]);
+  return Number.isSafeInteger(pid) ? { pid, startIdentityTag: null } : null;
+}
+
+function pendingRecoveryOwnerAlive(owner: PendingRecoveryOwner): boolean {
+  if (!procBackend.pidAlive(owner.pid)) return false;
+  if (owner.startIdentityTag === null) return true;
+  const currentIdentity = procBackend.processIdentity(owner.pid);
+  return currentIdentity === null || recoveryIdentityTag(currentIdentity) === owner.startIdentityTag;
 }
 
 function removeDeadRecoveryOwnerAliases(
   recoveryPath: string,
-  observation: ReceiptLockObservation,
 ): void {
   const directory = path.dirname(recoveryPath);
   const prefix = path.basename(recoveryOwnerPrefix(recoveryPath));
-  for (const entry of fs.readdirSync(directory)) {
-    if (!entry.startsWith(prefix) || !entry.includes(".pending-")) continue;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  for (const entry of entries) {
+    const owner = pendingRecoveryOwner(entry, prefix);
+    if (!owner || pendingRecoveryOwnerAlive(owner)) continue;
     const ownerPath = path.join(directory, entry);
     try {
-      const owner = readRecoveryOwner(ownerPath);
-      if (owner.targetDev !== observation.identity.dev
-        || owner.targetIno !== observation.identity.ino
-        || owner.targetToken !== observation.token
-        || processOwnerAlive(owner)) continue;
       fs.unlinkSync(ownerPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -392,51 +476,151 @@ function removeDeadRecoveryOwnerAliases(
   }
 }
 
-function releaseRecoveryOwnership(
+function recoveryPathsForLock(lockPath: string): string[] {
+  const directory = path.dirname(lockPath);
+  const prefix = `${path.basename(lockPath)}.`;
+  const marker = ".recovering";
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const paths = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) continue;
+    const markerIndex = entry.indexOf(marker, prefix.length);
+    if (markerIndex < 0) continue;
+    const suffix = entry.slice(markerIndex + marker.length);
+    if (suffix && !suffix.startsWith(".recovery-owner-")) continue;
+    paths.add(path.join(directory, entry.slice(0, markerIndex + marker.length)));
+  }
+  return [...paths];
+}
+
+function abandonedRecoveryObservation(recoveryPath: string): ReceiptLockObservation | null {
+  const linked = observeLock(recoveryPath);
+  if (linked) return linked;
+  const directory = path.dirname(recoveryPath);
+  const prefix = path.basename(recoveryOwnerPrefix(recoveryPath));
+  let current: ReceiptRecoveryOwner | null = null;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) continue;
+    const epochText = entry.slice(prefix.length);
+    if (!/^(?:0|[1-9][0-9]*)$/.test(epochText)) continue;
+    let owner: ReceiptRecoveryOwner;
+    try {
+      owner = readRecoveryOwner(path.join(directory, entry));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+    if (owner.epoch !== Number(epochText)) throw new Error("invalid MCP receipt recovery owner epoch");
+    if (current && (current.targetDev !== owner.targetDev
+      || current.targetIno !== owner.targetIno
+      || current.targetToken !== owner.targetToken)) {
+      throw new Error("invalid MCP receipt recovery owner lineage");
+    }
+    if (!current || owner.epoch > current.epoch) current = owner;
+  }
+  if (!current) return null;
+  return {
+    identity: { dev: current.targetDev, ino: current.targetIno },
+    mtimeMs: 0,
+    owner: null,
+    token: current.targetToken,
+  };
+}
+
+function lockReferencesObservation(lockPath: string, observation: ReceiptLockObservation): boolean {
+  return sameLock(lockPath, observation.identity)
+    && readLockMetadata(lockPath).token === observation.token;
+}
+
+async function cleanupAbandonedRecoveryArtifacts(lockPath: string, deadline: number): Promise<void> {
+  for (const recoveryPath of recoveryPathsForLock(lockPath)) {
+    removeDeadRecoveryOwnerAliases(recoveryPath);
+    const observation = abandonedRecoveryObservation(recoveryPath);
+    if (!observation || lockReferencesObservation(lockPath, observation)) continue;
+    const claim = await claimRecoveryOwnership(recoveryPath, observation, deadline);
+    if (claim === "blocked" || claim === "retry") continue;
+    try {
+      if (!await recoveryClaimCurrent(recoveryPath, observation, claim, deadline)
+        || lockReferencesObservation(lockPath, observation)) continue;
+      if (sameLock(recoveryPath, observation.identity)
+        && readLockMetadata(recoveryPath).token === observation.token) {
+        try {
+          fs.unlinkSync(recoveryPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+    } finally {
+      await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline);
+    }
+  }
+}
+
+async function releaseRecoveryOwnership(
   recoveryPath: string,
   observation: ReceiptLockObservation,
   claim: ReceiptRecoveryClaim,
-): void {
-  if (!recoveryClaimCurrent(recoveryPath, observation, claim)) return;
-  for (const { ownerPath } of recoveryOwners(recoveryPath, observation).reverse()) {
+  deadline: number,
+): Promise<void> {
+  if (!await recoveryClaimCurrent(recoveryPath, observation, claim, deadline)) return;
+  const owners = await recoveryOwnersUntil(recoveryPath, observation, deadline);
+  if (!owners) return;
+  for (const { ownerPath } of owners.reverse()) {
     try {
       fs.unlinkSync(ownerPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
-  removeDeadRecoveryOwnerAliases(recoveryPath, observation);
+  removeDeadRecoveryOwnerAliases(recoveryPath);
 }
 
-function removeObservedLock(lockPath: string, observation: ReceiptLockObservation): boolean {
+async function removeObservedLock(
+  lockPath: string,
+  observation: ReceiptLockObservation,
+  deadline: number,
+): Promise<ReceiptRecoveryAttempt> {
   const recoveryPath = `${lockPath}.${observation.identity.dev}-${observation.identity.ino}.recovering`;
-  const claim = claimRecoveryOwnership(recoveryPath, observation);
-  if (!claim) return false;
+  const claim = await claimRecoveryOwnership(recoveryPath, observation, deadline);
+  if (claim === "blocked" || claim === "retry") return claim;
   try {
     fs.linkSync(lockPath, recoveryPath);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
-      releaseRecoveryOwnership(recoveryPath, observation, claim);
-      return false;
+      await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline);
+      return "blocked";
     }
     if (code !== "EEXIST") {
-      releaseRecoveryOwnership(recoveryPath, observation, claim);
+      await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline);
       throw error;
     }
   }
   try {
     const recoveryMetadata = readLockMetadata(recoveryPath);
-    if (!recoveryClaimCurrent(recoveryPath, observation, claim)
+    if (!await recoveryClaimCurrent(recoveryPath, observation, claim, deadline)
       || !sameLock(recoveryPath, observation.identity)
       || recoveryMetadata.token !== observation.token
       || !sameLock(lockPath, observation.identity)
-      || readLockMetadata(lockPath).token !== observation.token) return false;
+      || readLockMetadata(lockPath).token !== observation.token) return "blocked";
     try {
       fs.unlinkSync(lockPath);
-      return true;
+      return "removed";
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "blocked";
       throw error;
     }
   } finally {
@@ -448,11 +632,11 @@ function removeObservedLock(lockPath: string, observation: ReceiptLockObservatio
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    releaseRecoveryOwnership(recoveryPath, observation, claim);
+    await releaseRecoveryOwnership(recoveryPath, observation, claim, deadline);
   }
 }
 
-function withFileLock<T>(filePath: string, operation: () => T): T {
+async function withFileLock<T>(filePath: string, operation: () => T): Promise<T> {
   const lockPath = `${filePath}.lock`;
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const deadline = Date.now() + LOCK_WAIT_MS;
@@ -462,6 +646,7 @@ function withFileLock<T>(filePath: string, operation: () => T): T {
     token: crypto.randomUUID(),
   };
   while (true) {
+    await cleanupAbandonedRecoveryArtifacts(lockPath, deadline);
     try {
       const fd = fs.openSync(lockPath, "wx", 0o600);
       let observation: ReceiptLockObservation | null = null;
@@ -478,14 +663,28 @@ function withFileLock<T>(filePath: string, operation: () => T): T {
         return operation();
       } finally {
         fs.closeSync(fd);
-        if (observation) removeObservedLock(lockPath, observation);
+        if (observation) {
+          const retirementDeadline = Date.now() + LOCK_WAIT_MS;
+          const retired = await removeObservedLock(lockPath, observation, retirementDeadline);
+          if (retired !== "removed"
+            && sameLock(lockPath, observation.identity)
+            && readLockMetadata(lockPath).token === observation.token) {
+            throw new Error("MCP receipt lock retirement timed out");
+          }
+        }
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      } else if (code !== "EEXIST") {
+        throw error;
+      }
       const observation = observeLock(lockPath);
-      if (observation && staleLock(observation) && removeObservedLock(lockPath, observation)) continue;
+      if (observation && staleLock(observation)
+        && await removeObservedLock(lockPath, observation, deadline) === "removed") continue;
       if (Date.now() >= deadline) throw new Error("MCP receipt store is busy");
-      Atomics.wait(sleepCell, 0, 0, 10);
+      await waitForRetry(Math.min(10, Math.max(1, deadline - Date.now())));
     }
   }
 }
@@ -547,7 +746,7 @@ function writeReceiptFile(filePath: string, state: ReceiptFile): void {
 export class FileMcpReceiptStore implements McpReceiptStore {
   constructor(private readonly filePath: string) {}
 
-  claim(key: string, digest: string, retention: ReceiptRetention): ReceiptClaim {
+  async claim(key: string, digest: string, retention: ReceiptRetention): Promise<ReceiptClaim> {
     return withFileLock(this.filePath, () => {
       const state = readReceiptFile(this.filePath);
       const receipt = state.mutationReceipts[key] ?? state.readReceipts[key];
@@ -564,8 +763,8 @@ export class FileMcpReceiptStore implements McpReceiptStore {
     });
   }
 
-  complete(key: string, digest: string, result: McpToolResult, retention: ReceiptRetention): void {
-    withFileLock(this.filePath, () => {
+  async complete(key: string, digest: string, result: McpToolResult, retention: ReceiptRetention): Promise<void> {
+    await withFileLock(this.filePath, () => {
       const state = readReceiptFile(this.filePath);
       const receipt = state.mutationReceipts[key] ?? state.readReceipts[key];
       if (!receipt || receipt.digest !== digest) throw new Error("MCP receipt ownership changed");
@@ -637,16 +836,15 @@ export function createMcpToolService(
         }
         return { ...await active.result, replayed: true };
       }
-      const claim = receipts.claim(key, digest, retention);
-      if (claim.kind === "conflict") {
-        return failure(toolName, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
-      }
-      if (claim.kind === "pending") {
-        return failure(toolName, requestId, "call_interrupted", "The previous MCP process ended before this call completed", true, true);
-      }
-      if (claim.kind === "replay") return { ...claim.result, replayed: true };
-
       const result = (async (): Promise<McpToolResult> => {
+        const claim = await receipts.claim(key, digest, retention);
+        if (claim.kind === "conflict") {
+          return failure(toolName, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
+        }
+        if (claim.kind === "pending") {
+          return failure(toolName, requestId, "call_interrupted", "The previous MCP process ended before this call completed", true, true);
+        }
+        if (claim.kind === "replay") return { ...claim.result, replayed: true };
         let settled: McpToolResult;
         try {
           const payload = await bindings[typedTool](args);
@@ -660,7 +858,7 @@ export function createMcpToolService(
             true,
           );
         }
-        receipts.complete(key, digest, settled, retention);
+        await receipts.complete(key, digest, settled, retention);
         return settled;
       })();
       inFlight.set(key, { digest, result });
