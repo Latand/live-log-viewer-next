@@ -40,6 +40,15 @@ export interface StructuredSpawnCardState {
       draft. The optimistic bubble displays `prompt` (the raw draft) but retires on
       THIS text, so a scaffolded role launch never lingers and never duplicates. */
   promptEcho?: string;
+  /** When the launch's initial message actually reached the agent (ms, issue
+      #648). A structured / MCP spawn journals its first user record with SDK /
+      agent provenance, so the transcript renders it as a system row and the
+      echo-text retirement never fires. This receipt timestamp is the independent
+      settlement proof: the client settles the launch bubble to `delivered` with
+      THIS value as its `settledAt`, so it retires on the delivered TTL even when
+      no echo ever matches. Present once the delivery receipt reports delivered;
+      it survives prompt scrubbing so a materialized window can still settle. */
+  deliveredAt?: number;
 }
 
 /** Current quota wall affecting a hosted conversation. Account provenance

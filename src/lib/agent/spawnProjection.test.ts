@@ -350,6 +350,11 @@ test("issue 615 HIGH1: the launch prompt projects from the durable display paylo
     const scanLag = projectLaunchConversations([], snapshot, createdMs + 20_000);
     expect(scanLag.cards).toHaveLength(1);
     expect(scanLag.cards[0]!.spawn).toMatchObject({ prompt: "LLV615_RAW_PROMPT", promptImages: 2, promptEcho: "scaffold\n\nLLV615_RAW_PROMPT" });
+    /* The delivered receipt time is projected so the client can settle the launch
+       bubble even when the transcript echo never matches (issue #648). */
+    const deliveredAt = scanLag.cards[0]!.spawn!.deliveredAt;
+    expect(typeof deliveredAt).toBe("number");
+    expect(Number.isFinite(deliveredAt)).toBe(true);
 
     /* The response that ADOPTS the live transcript stops projecting the prompt —
        the transcript now renders the message, so the facts carry no bubble. */
@@ -360,6 +365,9 @@ test("issue 615 HIGH1: the launch prompt projects from the durable display paylo
     expect(facts.prompt).toBeUndefined();
     expect(facts.promptEcho).toBeUndefined();
     expect(facts.promptImages).toBeUndefined();
+    /* The delivered receipt time survives prompt scrubbing: a materialized window
+       whose echo never matches can still settle the launch bubble (issue #648). */
+    expect(facts.deliveredAt).toBe(deliveredAt);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

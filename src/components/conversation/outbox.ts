@@ -634,6 +634,58 @@ export function markOutboxResponded(cardId: string, id: string, at: number): voi
   write(cardId, next);
 }
 
+/**
+ * Settle a launch-owned bubble from the server-projected delivery receipt
+ * (issue #648). A structured / MCP spawn delivers its first message through the
+ * runtime, and the agent journals that user record with SDK / agent provenance —
+ * so the transcript renders it as a system row, never a `user` echo, and the
+ * echo-text retirement path can never fire. The delivered receipt is the
+ * independent proof the prompt reached the agent: it settles the bubble to
+ * `delivered` with the receipt time as `settledAt`, so it renders delivered and
+ * retires on the delivered TTL exactly like a composer-delivered bubble, whether
+ * or not any echo ever matches.
+ *
+ * Idempotent and monotonic. The settlement is also recorded into the durable
+ * current-launch slot, so a compaction reseed inside the TTL restores the
+ * `delivered` state (issue #644) and the slot still retires at the delivered TTL
+ * even after the recent entry is evicted. A launch already responded, retired,
+ * or settled keeps its earlier settlement; a newer launch owning the slot is
+ * left untouched.
+ */
+export function settleLaunchOutboxDelivered(
+  cardId: string,
+  launch: { id: string; at: number; settledAt: number },
+): void {
+  const current = readCurrentLaunch(cardId);
+  if (current && current.id !== launch.id) return;
+  /* Fold the receipt settlement into the durable slot first: this is the only
+     carrier once the recent entry is compacted out, and it is what a within-TTL
+     reseed reads to restore `delivered` rather than a fresh `delivering` entry. */
+  recordCurrentLaunch(cardId, {
+    id: launch.id,
+    at: current?.at ?? launch.at,
+    settledAt: launch.settledAt,
+  });
+  const queue = readOutbox(cardId);
+  const existing = queue.find((item) => item.id === launch.id);
+  if (!existing || !existing.launchOwned) return;
+  if (
+    existing.retiredEchoId
+    || existing.responseStartedAt !== undefined
+    || existing.state === "delivered"
+    || existing.state === "failed"
+  ) {
+    recordCurrentLaunchEntry(cardId, existing);
+    return;
+  }
+  const next = queue.map((item) => (item.id === launch.id
+    ? { ...item, state: "delivered" as const, settledAt: item.settledAt ?? launch.settledAt }
+    : item));
+  const updated = next.find((item) => item.id === launch.id);
+  if (updated) recordCurrentLaunchEntry(cardId, updated);
+  write(cardId, next);
+}
+
 /** Remove an entry outright — the operator cancelled a message that never left. */
 export function cancelOutbox(cardId: string, id: string): void {
   const queue = readOutbox(cardId);
