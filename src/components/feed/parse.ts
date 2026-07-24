@@ -1970,7 +1970,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           } else {
             const command = familyOf(name) === "shell" ? textPart(input.command) : undefined;
             const lang = familyOf(name) === "read" ? extLang(textPart(input.file_path)) : undefined;
-            const mcpIdentity = viewerMcpToolUse(name) ?? attributedMcp;
+            /* Claude may stamp an entire assistant record with the MCP tool that
+             * supplied context. That provenance is useful only for an actual
+             * MCP call. Applying it to a sibling Bash/Read call turns a real
+             * command into an unrelated MCP card (for example, `gh pr view`
+             * rendered as "Reading deployment status"). */
+            const mcpIdentity = viewerMcpToolUse(name) ?? (name.startsWith("mcp__") ? attributedMcp : null);
             const mcp = mcpIdentity
               ? { ...mcpIdentity, args: input, result: null }
               : undefined;

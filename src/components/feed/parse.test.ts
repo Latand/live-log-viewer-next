@@ -103,6 +103,30 @@ function itemsOfKind(feed: ReturnType<typeof buildFeed>, kind: Item["kind"]) {
 }
 
 describe("feed session parity with one-shot parse", () => {
+  test("keeps a Claude Bash command when the enclosing record carries Viewer MCP attribution", () => {
+    const call = JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-07-24T19:57:42Z",
+      attributionMcpServer: "viewer",
+      attributionMcpTool: "deployment_status",
+      message: { content: [{
+        type: "tool_use",
+        id: "bash-gh-pr",
+        name: "Bash",
+        input: { command: "gh pr view 665 --json number,title", description: "Inspect latest merged PRs" },
+      }] },
+    });
+
+    const item = buildFeed(claudeFile, [call], false, "").items[0];
+    expect(item).toMatchObject({
+      kind: "tool",
+      tool: "Bash",
+      summary: "gh pr view 665 --json number,title",
+    });
+    if (item.kind !== "tool") throw new Error("expected tool");
+    expect(item.mcp).toBeUndefined();
+  });
+
   test("claude transcript: tools, results, grouping, tmsg delivery, compaction", () => {
     const lines = [
       claudeUser("take the first step"),
