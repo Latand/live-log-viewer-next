@@ -138,3 +138,37 @@ test("a sync contender fails quickly while another process owns the file lock", 
     holderError: "",
   });
 });
+
+test("a duplicated module copy joins the transaction instead of failing busy", async () => {
+  const state = path.join(sandbox, "duplicate-copy-state");
+  const result = path.join(sandbox, "duplicate-copy-result.json");
+  const modulePath = path.join(import.meta.dir, "accountMutation.ts");
+  const child = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      process.env.LLV_STATE_DIR = ${JSON.stringify(state)};
+      const fs = await import("node:fs");
+      const first = await import(${JSON.stringify(modulePath)});
+      const second = await import(${JSON.stringify(modulePath)} + "?bundler-duplicate");
+      const outcome = await first.withAccountMutationLockAsync(async () => {
+        let nestedRan = false;
+        let nestedError = null;
+        try { second.withAccountMutationLock(() => { nestedRan = true; }); }
+        catch (error) { nestedError = String(error); }
+        return { nestedRan, nestedError };
+      });
+      fs.writeFileSync(${JSON.stringify(result)}, JSON.stringify(outcome));
+    `],
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+
+  const completed = await Promise.race([
+    child.exited.then(() => true),
+    Bun.sleep(5_000).then(() => false),
+  ]);
+  if (!completed) child.kill();
+  const error = await new Response(child.stderr).text();
+
+  expect({ completed, error }).toEqual({ completed: true, error: "" });
+  expect(JSON.parse(fs.readFileSync(result, "utf8"))).toEqual({ nestedRan: true, nestedError: null });
+});
