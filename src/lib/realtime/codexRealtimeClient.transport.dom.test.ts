@@ -198,7 +198,7 @@ test("a live call renders both transcripts and streams delegation handoffs with 
     content: { text: string }[];
   });
   expect(events.every((event) => event.type === "delegation.context.append" && event.delegation_item_id === "delegation-9")).toBe(true);
-  expect(events.filter((event) => event.channel === "thinking").length).toBeGreaterThanOrEqual(1);
+  expect(events.filter((event) => event.channel === "commentary").length).toBeGreaterThanOrEqual(1);
   expect(events.at(-1)?.channel).toBe("speakable");
   expect(events.at(-1)?.content[0]?.text).toStartWith("Agent Final Message:");
 

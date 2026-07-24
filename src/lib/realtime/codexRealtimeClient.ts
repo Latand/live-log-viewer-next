@@ -121,7 +121,7 @@ export function chunkUtf8(text: string, maxBytes = HANDOFF_CHUNK_BYTES): string[
 export function delegationContextEvents(
   delegationItemId: string,
   text: string,
-  channel: "thinking" | "speakable",
+  channel: "commentary" | "speakable",
 ): Record<string, unknown>[] {
   if (!delegationItemId || !text) return [];
   return chunkUtf8(text).map((chunk) => ({
@@ -298,10 +298,10 @@ class CodexRealtimeClient {
     const text = this.pendingWorkerText;
     if (!text) return;
     const delta = text.startsWith(this.lastWorkerText) ? text.slice(this.lastWorkerText.length) : text;
-    if (!delta || this.sendDelegationContext(delta, "thinking")) this.lastWorkerText = text;
+    if (!delta || this.sendDelegationContext(delta, "commentary")) this.lastWorkerText = text;
   }
 
-  private sendDelegationContext(text: string, channel: "thinking" | "speakable"): boolean {
+  private sendDelegationContext(text: string, channel: "commentary" | "speakable"): boolean {
     if (!this.delegationItemId || this.events?.readyState !== "open") return false;
     for (const event of delegationContextEvents(this.delegationItemId, text, channel)) {
       this.events.send(JSON.stringify(event));

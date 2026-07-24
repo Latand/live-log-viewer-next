@@ -33,10 +33,10 @@ test("chunks handoff context on UTF-8 boundaries", () => {
 });
 
 test("builds targeted delegation.context.append events", () => {
-  expect(delegationContextEvents("delegation-1", "worker progress", "thinking")).toEqual([{
+  expect(delegationContextEvents("delegation-1", "worker progress", "commentary")).toEqual([{
     type: "delegation.context.append",
     delegation_item_id: "delegation-1",
-    channel: "thinking",
+    channel: "commentary",
     content: [{ type: "input_text", text: "worker progress" }],
   }]);
 });
