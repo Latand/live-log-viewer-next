@@ -15,6 +15,7 @@ import {
   readOutbox,
   resetOutboxForTests,
   seedLaunchOutbox,
+  settleLaunchOutboxDelivered,
   transcriptEchoCount,
   updateOutbox,
   visibleOutbox,
@@ -1138,6 +1139,112 @@ describe("seedLaunchOutbox (P1#2)", () => {
     } finally {
       Date.now = originalDateNow;
     }
+  });
+
+  test("issue 648: a delivered receipt settles a launch bubble whose transcript echo never matches, and it retires on the TTL", () => {
+    const originalDateNow = Date.now;
+    Date.now = () => 5_000;
+    try {
+      const provisional = "spawn:launch_648_structured";
+      const conversation = "conversation_648_structured";
+      const launchId = "launch_648_structured";
+      const displayed = "Прочитай синтетичну розмову у файлі-фікстурі та підсумуй її";
+      const echo = displayed;
+      const deliveredAt = 4_240;
+
+      /* The launch prompt seeds as a delivering, launch-owned bubble. */
+      seedLaunchOutbox(provisional, {
+        id: launchId,
+        text: displayed,
+        images: 0,
+        at: 4_000,
+        echoText: echo,
+      });
+      expect(readOutbox(provisional)[0]).toMatchObject({ state: "delivering", launchOwned: true });
+
+      /* The structured spawn's replayed user record is journaled with SDK / agent
+         provenance, so the transcript renders it as a SYSTEM row — it never lands
+         as a user echo that text-matches the bubble's identity. Simulate exactly
+         that: a transcript whose only user-classified rows carry unrelated text. */
+      publishTranscriptEchoes(provisional, [{
+        generation: "/transcripts/648-structured.jsonl",
+        id: "row:0:0",
+        text: "some unrelated user row that does not match the launch echo",
+      }]);
+
+      /* Without consuming the delivered receipt the bubble is stranded: a
+         launch-owned `delivering` entry has no TTL, so even far past the delivered
+         TTL it is STILL visible — the eternal "Доставляється" ghost of #648. */
+      const wayPastTtl = deliveredAt + OUTBOX_DELIVERED_TTL_MS + 60_000;
+      expect(visibleOutbox(readOutbox(provisional), echoes(), wayPastTtl)
+        .some((entry) => entry.id === launchId)).toBe(true);
+      expect(readOutbox(provisional).find((entry) => entry.id === launchId)?.state).toBe("delivering");
+
+      /* The server-projected delivered receipt settles it to `delivered` with the
+         receipt time as `settledAt`, INDEPENDENT of any echo match. */
+      settleLaunchOutboxDelivered(provisional, { id: launchId, at: 4_000, settledAt: deliveredAt });
+      const settled = readOutbox(provisional).find((entry) => entry.id === launchId);
+      expect(settled?.state).toBe("delivered");
+      expect(settled?.settledAt).toBe(deliveredAt);
+
+      /* Inside the delivered TTL it renders (as delivered); past it, it retires. */
+      expect(visibleOutbox(readOutbox(provisional), echoes(), deliveredAt + 60_000)
+        .some((entry) => entry.id === launchId)).toBe(true);
+      expect(visibleOutbox(readOutbox(provisional), echoes(), wayPastTtl)
+        .some((entry) => entry.id === launchId)).toBe(false);
+
+      /* The settlement is idempotent and monotonic — a re-projected receipt keeps
+         the original settledAt and never revives a fresh delivering entry. */
+      settleLaunchOutboxDelivered(provisional, { id: launchId, at: 4_000, settledAt: deliveredAt + 999 });
+      expect(readOutbox(provisional).find((entry) => entry.id === launchId)?.settledAt).toBe(deliveredAt);
+
+      /* The settlement survives adoption, refresh, and a recurring reseed inside
+         the TTL: the bubble comes back visibly DELIVERED, not delivering. */
+      adoptOutbox(provisional, conversation);
+      resetOutboxForTests();
+      Date.now = () => deliveredAt + 30_000;
+      seedLaunchOutbox(conversation, { id: launchId, text: displayed, images: 0, at: 4_000, echoText: echo });
+      const reseeded = readOutbox(conversation).find((entry) => entry.id === launchId);
+      expect(reseeded?.state).toBe("delivered");
+      expect(reseeded?.settledAt).toBe(deliveredAt);
+
+      /* Past the TTL the launch retires for good and a reseed cannot revive it. */
+      resetOutboxForTests();
+      Date.now = () => deliveredAt + OUTBOX_DELIVERED_TTL_MS;
+      seedLaunchOutbox(conversation, { id: launchId, text: displayed, images: 0, at: 4_000, echoText: echo });
+      expect(visibleOutbox(readOutbox(conversation), echoes(), deliveredAt + OUTBOX_DELIVERED_TTL_MS)
+        .some((entry) => entry.id === launchId)).toBe(false);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("issue 648: a delivered receipt for one launch never settles an unrelated launch's slot", () => {
+    const conversation = "conversation_648_isolation";
+    seedLaunchOutbox(conversation, { id: "launch_a", text: "launch A prompt", images: 0, at: 1_000 });
+    /* A receipt addressed to a DIFFERENT launch id must not touch the live slot
+       or the visible bubble — the current launch stays delivering. */
+    settleLaunchOutboxDelivered(conversation, { id: "launch_b", at: 900, settledAt: 950 });
+    expect(readOutbox(conversation).find((entry) => entry.id === "launch_a")?.state).toBe("delivering");
+  });
+
+  test("issue 648: an echo match still wins when it lands before the delivered receipt is consumed", () => {
+    const provisional = "spawn:launch_648_echo_first";
+    const text = "launch prompt that DOES echo as a user row";
+    seedLaunchOutbox(provisional, { id: "launch_echo_first", text, images: 0, at: 1_000 });
+    publishTranscriptEchoes(provisional, [{
+      generation: "/transcripts/648-echo-first.jsonl",
+      id: "row:echo:0",
+      text,
+    }]);
+    const retired = readOutbox(provisional).find((entry) => entry.id === "launch_echo_first");
+    expect(typeof retired?.retiredEchoId).toBe("string");
+    /* A delayed delivered receipt is a no-op on an already echo-retired bubble. */
+    settleLaunchOutboxDelivered(provisional, { id: "launch_echo_first", at: 1_000, settledAt: 2_000 });
+    const after = readOutbox(provisional).find((entry) => entry.id === "launch_echo_first");
+    expect(after?.retiredEchoId).toBe(retired?.retiredEchoId);
+    expect(visibleOutbox(readOutbox(provisional), echoes([text, 1]), 3_000)
+      .some((entry) => entry.id === "launch_echo_first")).toBe(false);
   });
 
   test("issue 626: terminal launch retirement survives both ledgers churning beyond 512 entries", () => {
