@@ -1662,6 +1662,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "runtime.staleSince": "застаріло {duration}",
   "runtime.lastKnown": "останнє оновлення {duration} тому",
   "runtime.legacyProvenance": "легасі · похідний стан",
+  "staging.badge": "Стейджинг",
+  "staging.badgeTitle": "Стейджинг-інстанс — ізольований стан; нічого звідси не торкається проду",
   "runtime.drift": "розбіжність: {evidence}",
   "runtime.driftDismiss": "Сховати",
   "runtime.receipt.pending": "надсилання…",

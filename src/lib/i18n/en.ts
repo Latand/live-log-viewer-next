@@ -1710,6 +1710,8 @@ export const en = {
   "runtime.staleSince": "stale {duration}",
   "runtime.lastKnown": "last update {duration} ago",
   "runtime.legacyProvenance": "legacy · derived state",
+  "staging.badge": "Staging",
+  "staging.badgeTitle": "Staging instance — isolated state; nothing here touches prod",
   "runtime.drift": "drift: {evidence}",
   "runtime.driftDismiss": "Dismiss",
   "runtime.receipt.pending": "sending…",

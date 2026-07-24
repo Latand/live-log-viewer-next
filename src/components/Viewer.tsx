@@ -26,6 +26,7 @@ import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
 import { DeploymentStatusPill } from "./runtime/DeploymentStatusPill";
+import { StagingBadge } from "./StagingBadge";
 import { activityDot, cleanTitle, fmtAge } from "./utils";
 
 const PROJECT_KEY = "llvProject";
@@ -678,6 +679,9 @@ export function Viewer() {
           of the bottom-right CornerStatus and the top-right attention anchor. */}
       {isMobile ? null : <ConnectionPill />}
       <DeploymentStatusPill />
+      {/* Staging instances (#659) announce themselves on every device; prod
+          renders nothing. Top-center, clear of both corner anchors. */}
+      <StagingBadge />
     </div>
   );
 }
