@@ -62,6 +62,7 @@ class FakeAppServer extends EventEmitter {
   modelList: unknown[] = [{ id: "gpt-5.3-codex-spark", isDefault: true, inputModalities: ["text"] }];
   modelListFailuresRemaining = 0;
   realtimeStartError: string | null = null;
+  injectItemsError: string | null = null;
   private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
 
@@ -173,6 +174,11 @@ class FakeAppServer extends EventEmitter {
       return;
     }
     if (method === "turn/interrupt") return this.respond(message.id, {});
+    if (method === "thread/inject_items") {
+      return this.injectItemsError
+        ? this.respondError(message.id, this.injectItemsError)
+        : this.respond(message.id, {});
+    }
     if (method === "thread/realtime/start") {
       this.respond(message.id, {});
       if (this.realtimeStartError) {
@@ -293,6 +299,15 @@ describe("CodexAppServerHost", () => {
          instructions assume a text agent, which does not survive being read
          aloud. */
     });
+
+    /* The persona rides into the THREAD before the call, never into the live
+       session: an initial item on the session opened the sideband channel that
+       every 9-second kill arrived on. */
+    const injected = server.requests.find((request) => request.method === "thread/inject_items");
+    expect((injected?.params as { threadId?: string })?.threadId).toBe("voice-thread");
+    expect(JSON.stringify(injected?.params)).toContain("Алік");
+    expect(server.requests.findIndex((request) => request.method === "thread/inject_items"))
+      .toBeLessThan(server.requests.findIndex((request) => request.method === "thread/realtime/start"));
 
     await host.appendRealtimeSpeech("Worker inspected package.json");
     expect(server.requests.find((request) => request.method === "thread/realtime/appendSpeech")?.params).toEqual({
@@ -2820,4 +2835,22 @@ describe("CodexAppServerHost", () => {
       structuredHost,
     });
   });
+});
+
+test("a refused persona injection still yields a working call", async () => {
+  /* The persona is a nicety; the call is not. An app-server that refuses the
+     item shape — or the method outright — must cost the operator nothing. */
+  const server = new FakeAppServer("voice-thread");
+  server.injectItemsError = "Invalid request: unknown field `role`";
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+
+  await expect(host.startRealtimeWebRtc("v=0\r\noffer")).resolves.toEqual({
+    sdp: "v=0\r\nanswer",
+    realtimeSessionId: "realtime-1",
+  });
+  await host.release();
 });

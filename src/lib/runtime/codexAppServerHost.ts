@@ -25,6 +25,7 @@ import {
   type RuntimeEventCursorRecoveryReporter,
   type RuntimeEventStore,
 } from "./eventStore";
+import { voicePersona } from "./voicePersona";
 
 type JsonObject = Record<string, unknown>;
 type PendingRpc = {
@@ -151,6 +152,10 @@ const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_THREAD_READ_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const REALTIME_START_TIMEOUT_MS = 90_000;
+/* The persona is optional; never let it hold the microphone waiting. An
+   app-server that rejects the method answers immediately, so this bound only
+   covers one that accepts it and then stalls. */
+const REALTIME_PERSONA_TIMEOUT_MS = 3_000;
 /**
  * The live model to ask for by name (#664). Sending none let the backend pick
  * `gpt-live-1-boulder-alpha`, and every such call was cut at 9.0–9.4 seconds
@@ -688,6 +693,22 @@ export class CodexAppServerHost implements EngineHost {
     });
     void answer.catch(() => undefined);
 
+    /* The persona reaches the call through the THREAD, never through the live
+       session: `includeStartupContext` pulls the thread in at start, while an
+       initial item on the session made codex open the sideband channel that
+       every 9-second kill arrived on. Best effort by construction — a rejected
+       injection must never cost the operator their call, so the failure is
+       swallowed and the start proceeds with whatever the thread already holds. */
+    try {
+      await this.rpc("thread/inject_items", {
+        threadId: this.identity.threadId,
+        items: [{ role: "developer", text: voicePersona() }],
+      }, REALTIME_PERSONA_TIMEOUT_MS);
+    } catch {
+      /* Swallowed on purpose: the app-server records the rejected RPC in its
+         own log, which is where a wrong item shape gets diagnosed, and the
+         operator gets their call either way. */
+    }
     try {
       await this.rpc("thread/realtime/start", {
         threadId: this.identity.threadId,
