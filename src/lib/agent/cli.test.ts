@@ -439,3 +439,37 @@ test("deferred Claude policy planning leaves disk unchanged before route admissi
   expect(fresh.command).toContain(path.join(account.home, ".llv", "spawn-settings", `${sid}.json`));
   expect(fs.existsSync(path.join(account.home, ".llv"))).toBe(false);
 });
+
+test("resolveHostBinary never emits the container nsenter shim", async () => {
+  const { resolveHostBinary } = await import("./cli");
+  const previous = process.env.LLV_DOCKER_NSENTER_SHIMS;
+  process.env.LLV_DOCKER_NSENTER_SHIMS = "1";
+  try {
+    const resolved = resolveHostBinary("claude");
+    expect(resolved.startsWith("/usr/local/bin/")).toBe(false);
+    expect(resolved.startsWith("/usr/bin/")).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.LLV_DOCKER_NSENTER_SHIMS;
+    else process.env.LLV_DOCKER_NSENTER_SHIMS = previous;
+  }
+});
+
+test("a host-terminal resume spec resolves the CLI as the host, not the container shim", async () => {
+  const { resumeSpecForSession } = await import("./cli");
+  const account = createManagedClaudeAccount("host-terminal-probe");
+  const previous = process.env.LLV_DOCKER_NSENTER_SHIMS;
+  process.env.LLV_DOCKER_NSENTER_SHIMS = "1";
+  try {
+    const sessionId = "12345678-1234-1234-1234-123456789abc";
+    const inContainer = resumeSpecForSession("claude", sessionId, SANDBOX, account.home, {});
+    const forHost = resumeSpecForSession("claude", sessionId, SANDBOX, account.home, { hostTerminal: true });
+    expect(forHost).not.toBeNull();
+    expect(inContainer).not.toBeNull();
+    expect(forHost!.command.includes("/usr/local/bin/claude")).toBe(false);
+    /* Same session, same flags — only the binary resolution differs. */
+    expect(forHost!.command.includes(`--resume' '${sessionId}`)).toBe(true);
+  } finally {
+    if (previous === undefined) delete process.env.LLV_DOCKER_NSENTER_SHIMS;
+    else process.env.LLV_DOCKER_NSENTER_SHIMS = previous;
+  }
+});

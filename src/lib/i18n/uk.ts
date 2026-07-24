@@ -395,6 +395,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "attach.copyCwd": "Скопіювати робочу директорію",
   "attach.copyCommand": "Скопіювати команду",
   "attach.copyFull": "Скопіювати повну команду",
+  "attach.copiedFull": "Повну команду скопійовано в буфер",
   "attach.takeoverWarning": "Відновлення тут перебирає розмову у переглядача.",
   "attach.subagentNote": "Субагенти відновлюються через свою кореневу сесію.",
   "attach.secondaryViewer": "Відкрити панель перегляду лише для читання в tmux",

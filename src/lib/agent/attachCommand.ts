@@ -66,7 +66,7 @@ export type AttachResolution =
 
 export interface AttachResolverDeps {
   files: FileEntry[];
-  resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[]; cwd?: string | null }) => ResumeSpec | null;
+  resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[]; cwd?: string | null; hostTerminal?: boolean }) => ResumeSpec | null;
   accountIdForPath: (path: string) => string;
   accountLabelFor: (engine: AgentEngine, accountId: string) => string;
   allowSubagentsForPath?: (path: string) => boolean | undefined;
@@ -100,6 +100,9 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
     allowSubagents: deps.allowSubagentsForPath?.(target.entry.path),
     mcpServers: deps.mcpServersForPath?.(target.entry.path),
     cwd: effectiveCwd,
+    /* The composed string is pasted into the operator's own shell: the CLI
+       binary must resolve as the host sees it, never the container shim. */
+    hostTerminal: true,
   });
   if (!spec) return { ok: false, error: "this conversation cannot be attached", status: 409 };
 
@@ -139,7 +142,7 @@ export interface LaunchAttachDeps {
     sessionId: string,
     cwd: string,
     home: string,
-    options?: { model?: string | null; effort?: string | null; fast?: boolean | null; allowSubagents?: boolean; mcpServers?: readonly string[] },
+    options?: { model?: string | null; effort?: string | null; fast?: boolean | null; allowSubagents?: boolean; mcpServers?: readonly string[]; hostTerminal?: boolean },
   ) => ResumeSpec | null;
   homeForAccount: (engine: AgentEngine, accountId: string) => string | null;
   accountLabelFor: (engine: AgentEngine, accountId: string) => string;
@@ -175,6 +178,8 @@ export function resolveLaunchAttachCommand(deps: LaunchAttachDeps): AttachResolu
     /* Re-apply the launch's recorded MCP allowlist (PR #610) so the resumed
        command enforces the same server scope the launch ran under. */
     mcpServers: receipt.launchProfile.mcpServers,
+    /* Destined for the operator's own shell, same as the path flow above. */
+    hostTerminal: true,
   });
   if (!spec) return { ok: false, error: "this launch cannot be attached", status: 409 };
   return {

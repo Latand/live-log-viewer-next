@@ -372,6 +372,7 @@ export const en = {
   "attach.copyCwd": "Copy working directory",
   "attach.copyCommand": "Copy command",
   "attach.copyFull": "Copy full command",
+  "attach.copiedFull": "Full command copied to clipboard",
   "attach.takeoverWarning": "Resuming here takes over the conversation from the viewer.",
   "attach.subagentNote": "Subagents resume through their root session.",
   "attach.secondaryViewer": "Open a read-only viewer pane in tmux",
