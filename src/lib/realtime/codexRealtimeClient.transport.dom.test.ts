@@ -274,7 +274,7 @@ test("closing the page hangs up so the account's realtime slot is not stranded",
   StubPeerConnection.latest?.channel.onopen?.();
   expect(client.getSnapshot().phase).toBe("live");
 
-  window.dispatchEvent(new dom.Event("pagehide"));
+  window.dispatchEvent(new dom.Event("pagehide") as unknown as Event);
   const hangup = posts.find((post) => post.action === "stop");
   expect(hangup).toBeTruthy();
   expect(hangup?.keepalive).toBe(true);
