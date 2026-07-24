@@ -16,7 +16,7 @@ Agent Log Viewer (`~/.agents/tools/live-log-viewer-next`) is the user's dashboar
 - Prompts to agents: English. Codex effort is set at boot (`-c model_reasoning_effort=...`), never mid-conversation.
 - **Pipeline boundary.** A session running as a pipeline stage never starts another pipeline or helper. It returns `needs_decision` with the required follow-up. The owning orchestrator materializes that work through the Pipeline API.
 - **Prompt = role + scope, nothing else.** Never name the model or reasoning level in the prompt text ("Act as Sol xhigh reviewer" is wrong twice: effort is a launch parameter that words cannot enable, and the model already knows what it is). Write the role — "You are a fresh-context Reviewer. …" — and pass model/effort only as spawn parameters.
-- Review fan-out is budget-bound: Fable runs at most 1–2 independent review passes; swarms of 5+ reviewers are Sol-only and must run as visible pipeline stages.
+- Review fan-out is budget-bound: Opus 5 runs at most 1–2 independent review passes; swarms of 5+ reviewers are Sol-only and must run as visible pipeline stages.
 - **Reviewer isolation (#393).** Reviewer and verifier roles perform every assigned check inside their own single session and have zero child-launch capability: they never launch helpers, workflows, teams, swarms, native subagents, Viewer children, or MCP children. Multiple review perspectives are always explicit visible pipeline stages, never fan-out from inside a review session.
 - **Bounded delegation (#393).** Roles that may delegate (builder, architect, orchestrator) spawn only through the Viewer with lineage recorded (`src`, plus `role`/`reviews` where applicable) and keep the delegation chain within the configured maximum depth — initially two.
 - After a worker finishes, keep its session/window: the user inspects and kills it from the UI.
@@ -28,15 +28,15 @@ Templates map 1:1 to `agent:*` labels on GitHub issues (`Latand/live-log-viewer-
 
 | Template (engine) | Use for | Avoid |
 |---|---|---|
-| **GPT-5.6-Sol** (Codex) | Visible review swarms of five or more reviewers (Viewer pipeline stages) and tasks the operator explicitly assigns to it | Default ownership of LLV UX/UI or Viewer bug work — that is Fable's |
+| **GPT-5.6-Sol** (Codex) | Visible review swarms of five or more reviewers (Viewer pipeline stages) and tasks the operator explicitly assigns to it | Default ownership of LLV UX/UI or Viewer bug work — that is Opus 5's |
 | **GPT-5.6-Terra** (Codex) | Well-scoped implementation when the operator explicitly assigns it; parked otherwise | Unassigned pickup, open-ended design |
 | **Opus 4.8** (Claude) | Frontend styling, icons, visual polish outside LLV | Bug-finding, deep logic |
-| **Fable 5** (Claude) | All LLV UX/UI and Viewer bug investigation, implementation, and review; planning/architecture; orchestrator/advisor | — |
+| **Opus 5** (Claude) | All LLV UX/UI and Viewer bug investigation, implementation, and review; planning/architecture; orchestrator/advisor | — |
 | **Sonnet 5** (Claude) | Web/docs research, lightweight tasks (Haiku 4.5 for cheap throughput) | Deep design/review |
 
-Assignment defaults: all LLV UX/UI and Viewer bug investigation, implementation, and review go to Fable by default. Sol is reserved for visible review swarms of five or more reviewers and for explicit operator exceptions. Research goes to Sonnet, and Terra stays parked until the operator explicitly assigns a task to it. Fable runs at most one or two independent review passes on any change.
+Assignment defaults: all LLV UX/UI and Viewer bug investigation, implementation, and review go to Opus 5 by default. Sol is reserved for visible review swarms of five or more reviewers and for explicit operator exceptions. Research goes to Sonnet, and Terra stays parked until the operator explicitly assigns a task to it. Opus 5 runs at most one or two independent review passes on any change.
 
-**Review-pass policy (#381).** Fable performs at most **one or two independent review passes** on any change. A review swarm of **five or more reviewers is Sol-only** and runs as declared Pipeline API stages the operator sees on the board. Structured Fable hosts deny the native Claude multi-agent tools (`Task`, `Agent`, `Workflow`, `TeamCreate`, `TeamDelete`, `SendMessage`); the owning orchestrator materializes each pipeline helper through the Pipeline API with durable lineage.
+**Review-pass policy (#381).** Opus 5 performs at most **one or two independent review passes** on any change. A review swarm of **five or more reviewers is Sol-only** and runs as declared Pipeline API stages the operator sees on the board. Structured Opus hosts deny the native Claude multi-agent tools (`Task`, `Agent`, `Workflow`, `TeamCreate`, `TeamDelete`, `SendMessage`); the owning orchestrator materializes each pipeline helper through the Pipeline API with durable lineage.
 
 **Reviewer isolation and bounded delegation (#393).** An agent spawned as a **reviewer or verifier** does all of its assigned checks itself, inside that one visible session — it must never launch helpers, workflows, teams, swarms, native subagents, Viewer children, or MCP children. If a review needs more coverage or another perspective, the reviewer reports that in its verdict and the orchestrator adds an explicit pipeline stage the operator can see. Roles that are allowed to delegate (builder, architect, orchestrator) record lineage on every spawn and obey the configured maximum delegation depth, **initially two** (e.g. orchestrator → builder → helper; nothing deeper). Product enforcement of these limits is tracked in #393.
 

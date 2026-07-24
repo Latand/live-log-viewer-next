@@ -8,7 +8,7 @@ export type WorkflowStageKind = "implement" | "review-loop";
 
 export type ImplementStage = {
   kind: "implement";
-  agent: RoleConfig; // engine/model/effort, e.g. claude "fable"
+  agent: RoleConfig; // engine/model/effort, e.g. claude "opus"
   scope: string; // role brief: "UI/frontend", "backend/API"
 };
 

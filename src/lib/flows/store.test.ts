@@ -100,9 +100,9 @@ test("an untouched pre-registry flow preset migrates to the current role config"
     implementer: { engine: "codex" as const, model: CODEX_TERRA_MODEL, effort: "high" },
     reviewer: { engine: "claude" as const, model: "fable", effort: null },
   };
-  expect(mergeSeededPresets([previous]).find((preset) => preset.name === "Sol medium → Fable")?.reviewer).toEqual({
+  expect(mergeSeededPresets([previous]).find((preset) => preset.name === "Sol medium → Opus 5")?.reviewer).toEqual({
     engine: "claude",
-    model: "fable",
+    model: "opus",
     effort: "high",
   });
 });

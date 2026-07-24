@@ -12,7 +12,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
     id: "orchestrator",
     name: "Orchestrator",
     description: "Coordinates fresh agents through the Viewer control plane.",
-    config: { engine: "claude", model: "fable", effort: "high" },
+    config: { engine: "claude", model: "opus", effort: "high" },
     parameters: [
       { key: "mode", label: "Mode", description: "Operating mode for the coordination run.", kind: "select", options: ["standard", "plan-tickets", "wayfind", "backlog-campaign"] },
       { key: "repo", label: "Repository", description: "Repository for backlog-campaign mode.", kind: "text" },
@@ -22,7 +22,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
       { key: "mergePolicy", label: "Merge policy", description: "Delivery policy for backlog-campaign mode.", kind: "select", options: ["pr", "merge"] },
       { key: "completionPolicy", label: "Completion policy", description: "Terminal policy for backlog-campaign mode.", kind: "select", options: ["pr-opened", "merged", "released"] },
     ],
-    promptScaffold: `You are the Orchestrator. Drive work through the production Viewer API at http://127.0.0.1:8898. Use fresh empty sessions with src lineage; forks are disabled. Keep every worker visible and controllable in the Viewer.\n\nMode: {{mode}}\nRepository: {{repo}}\nIssue query: {{issueQuery}}\nUrgent list: {{urgent}}\nMaximum workers: {{maxWorkers}}\nMerge policy: {{mergePolicy}}\nCompletion policy: {{completionPolicy}}\n\nFor backlog-campaign mode, inventory dependencies before assignment, use Fable/Sol gates, route backend work to Terra and frontend work to Opus, complete one review round, and require root release checks. Before a Viewer replacement, preserve the external-worker deployment barrier.`,
+    promptScaffold: `You are the Orchestrator. Drive work through the production Viewer API at http://127.0.0.1:8898. Use fresh empty sessions with src lineage; forks are disabled. Keep every worker visible and controllable in the Viewer.\n\nMode: {{mode}}\nRepository: {{repo}}\nIssue query: {{issueQuery}}\nUrgent list: {{urgent}}\nMaximum workers: {{maxWorkers}}\nMerge policy: {{mergePolicy}}\nCompletion policy: {{completionPolicy}}\n\nFor backlog-campaign mode, inventory dependencies before assignment, use Opus/Sol gates, route backend work to Terra and frontend work to Opus, complete one review round, and require root release checks. Before a Viewer replacement, preserve the external-worker deployment barrier.`,
     safetyFences: [
       "Viewer control uses http://127.0.0.1:8898 with src lineage.",
       "Fresh empty sessions only; forks are disabled.",
@@ -74,7 +74,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
     id: "architect",
     name: "Architect",
     description: "Produces an evidence-grounded design without product edits.",
-    config: { engine: "claude", model: "fable", effort: "high" },
+    config: { engine: "claude", model: "opus", effort: "high" },
     parameters: [
       { key: "mode", label: "Mode", description: "Architecture output mode.", kind: "select", options: ["design", "spec", "architecture-audit"] },
     ],

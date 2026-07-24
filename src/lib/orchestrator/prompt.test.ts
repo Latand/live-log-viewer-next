@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 
 import { ORCHESTRATOR_SPAWN_CONFIG, ORCHESTRATOR_SYSTEM_PROMPT } from "./prompt";
 
-test("orchestrator spawns as claude fable on low effort through the #35 role preset", () => {
-  expect(ORCHESTRATOR_SPAWN_CONFIG).toMatchObject({ engine: "claude", model: "fable", effort: "low", role: "orchestrator" });
+test("orchestrator spawns as Claude Opus on low effort through the role preset", () => {
+  expect(ORCHESTRATOR_SPAWN_CONFIG).toMatchObject({ engine: "claude", model: "opus", effort: "low", role: "orchestrator" });
 });
 
 test("system prompt carries the draft-only pipeline contract", () => {

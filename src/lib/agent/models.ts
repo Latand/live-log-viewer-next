@@ -28,8 +28,8 @@ export function codexModelSupportsImages(model: string | null | undefined): bool
 
 export const ENGINE_MODELS: Record<"claude" | "codex", readonly AgentModelOption[]> = {
   claude: [
-    { id: "fable", label: "Fable", shortLabel: "Fable", use: "review" },
-    { id: "opus", label: "Opus", shortLabel: "Opus", use: "general" },
+    { id: "opus", label: "Opus 5", shortLabel: "Opus 5", use: "review" },
+    { id: "fable", label: "Fable", shortLabel: "Fable", use: "general" },
     { id: "sonnet", label: "Sonnet", shortLabel: "Sonnet", use: "implement" },
     { id: "haiku", label: "Haiku", shortLabel: "Haiku", use: "general" },
   ],
@@ -41,7 +41,7 @@ export const ENGINE_MODELS: Record<"claude" | "codex", readonly AgentModelOption
 
 /** A fresh Codex conversation starts on the architecture/review profile. */
 export function defaultModelFor(engine: "claude" | "codex"): string {
-  return engine === "codex" ? CODEX_SOL_MODEL : "";
+  return engine === "codex" ? CODEX_SOL_MODEL : "opus";
 }
 
 const CLAUDE_MODEL_FAMILIES = ["fable", "opus", "sonnet", "haiku"] as const;

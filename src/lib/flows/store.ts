@@ -79,8 +79,8 @@ export function seededPresetsFromRoles(): FlowPreset[] {
   const presets: FlowPreset[] = [
     { name: "Sol medium → Sol xhigh", implementer: builder, reviewer },
     { name: "Terra low → Sol xhigh", implementer: fixer, reviewer },
-    { name: "Sol medium → Fable", implementer: builder, reviewer: architect },
-    { name: "Fable → Sol xhigh", implementer: architect, reviewer },
+    { name: "Sol medium → Opus 5", implementer: builder, reviewer: architect },
+    { name: "Opus 5 → Sol xhigh", implementer: architect, reviewer },
     { name: "Sonnet → Sol xhigh", implementer: { engine: "claude", model: "sonnet", effort: "high" }, reviewer },
   ];
   return presets.map((preset) => ({ ...preset, managed: "role-registry" }));

@@ -209,3 +209,52 @@ test("a live call renders both transcripts and streams delegation handoffs with 
   await client.stop();
   expect(client.getSnapshot().phase).toBe("idle");
 });
+
+test("issue 664: a call cut down mid-flight reports the backend's reason, not the transport symptom", async () => {
+  /* The 9-second backend cutoff reached the operator as "Realtime connection
+     was interrupted", which reads as a viewer bug. The reason lives on the
+     app-server's sideband channel, so the client asks for it and shows it. */
+  const actions: unknown[] = [];
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { action?: string };
+    actions.push(body.action);
+    return body.action === "status"
+      ? jsonResponse(200, { ok: true, failure: { message: "You have reached your usage limit.", at: "t", realtimeSessionId: "rtc_1" } })
+      : jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" });
+  }) as unknown as typeof fetch;
+
+  const client = codexRealtimeClient("conversation_cutoff");
+  await client.start();
+  StubPeerConnection.latest?.channel.onopen?.();
+  expect(client.getSnapshot().phase).toBe("live");
+
+  const peer = StubPeerConnection.latest!;
+  peer.connectionState = "failed";
+  peer.onconnectionstatechange?.();
+  // The transport reason shows immediately, so the pane never sits silent.
+  expect(client.getSnapshot().error).toBe("Realtime connection was interrupted");
+
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(client.getSnapshot().error).toBe("You have reached your usage limit.");
+  expect(client.getSnapshot().phase).toBe("error");
+  expect(actions).toContain("status");
+});
+
+test("issue 664: the transport reason stands when the host has no failure to report", async () => {
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { action?: string };
+    return body.action === "status"
+      ? jsonResponse(200, { ok: true, failure: null })
+      : jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" });
+  }) as unknown as typeof fetch;
+
+  const client = codexRealtimeClient("conversation_no_reason");
+  await client.start();
+  StubPeerConnection.latest?.channel.onopen?.();
+  const peer = StubPeerConnection.latest!;
+  peer.connectionState = "failed";
+  peer.onconnectionstatechange?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(client.getSnapshot().error).toBe("Realtime connection was interrupted");
+});

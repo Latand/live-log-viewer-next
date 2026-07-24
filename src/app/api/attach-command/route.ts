@@ -64,9 +64,20 @@ function resolveLaunchPath(launchId: string, files: FileEntry[]): NextResponse<A
   const materializedPath = generationPath && pathAllowed(generationPath) && files.some((file) => file.path === generationPath)
     ? generationPath
     : null;
+  /* The receipt records the launch as requested; the conversation's current
+     generation records what it runs on now (an applied reconfigure lands
+     there, never on the receipt). Prefer the live profile so this flow and the
+     transcript-path flow compose the same command (#663). */
+  const liveProfile = conversation?.generations.at(-1)?.launchProfile ?? null;
   return jsonFor(resolveLaunchAttachCommand({
     receipt: receipt
-      ? { engine: receipt.engine, cwd: receipt.cwd, accountId: receipt.accountId, key: receipt.key, launchProfile: receipt.launchProfile }
+      ? {
+        engine: receipt.engine,
+        cwd: liveProfile?.cwd || receipt.cwd,
+        accountId: receipt.accountId,
+        key: receipt.key,
+        launchProfile: liveProfile ?? receipt.launchProfile,
+      }
       : null,
     materializedPath,
     resolveByPath: (target) => resolveAttachCommand(target, {
@@ -74,8 +85,7 @@ function resolveLaunchPath(launchId: string, files: FileEntry[]): NextResponse<A
       resumeSpecFor,
       accountIdForPath: accountIdFromPath,
       accountLabelFor,
-      allowSubagentsForPath: (p) => registry.launchProfileForPath(p)?.allowSubagents,
-      mcpServersForPath: (p) => registry.launchProfileForPath(p)?.mcpServers,
+      launchProfileForPath: (p) => registry.launchProfileForPath(p),
     }),
     resumeSpecForSession,
     homeForAccount,
@@ -141,8 +151,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<AttachCommand 
       resumeSpecFor,
       accountIdForPath: accountIdFromPath,
       accountLabelFor,
-      allowSubagentsForPath: (p) => agentRegistry().launchProfileForPath(p)?.allowSubagents,
-      mcpServersForPath: (p) => agentRegistry().launchProfileForPath(p)?.mcpServers,
+      launchProfileForPath: (p) => agentRegistry().launchProfileForPath(p),
     });
     if (!resolution.ok) {
       return NextResponse.json({ error: resolution.error }, { status: resolution.status, headers: { "Cache-Control": "no-store" } });

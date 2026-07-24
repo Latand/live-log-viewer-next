@@ -64,11 +64,28 @@ export type AttachResolution =
   | { ok: true; value: AttachCommand }
   | { ok: false; error: string; status: number };
 
+/** The registry facts a composed command must agree with. */
+export interface AttachLaunchProfile {
+  cwd?: string | null;
+  model?: string | null;
+  effort?: string | null;
+  allowSubagents?: boolean;
+  mcpServers?: readonly string[];
+}
+
 export interface AttachResolverDeps {
   files: FileEntry[];
   resumeSpecFor: (root: string, path: string, options?: { model?: string | null; effort?: string | null; allowSubagents?: boolean; mcpServers?: readonly string[]; cwd?: string | null; hostTerminal?: boolean }) => ResumeSpec | null;
   accountIdForPath: (path: string) => string;
   accountLabelFor: (engine: AgentEngine, accountId: string) => string;
+  /** The conversation's live launch profile (#663). Authoritative for cwd,
+      model, and effort: this resolver walks the RAW scan entries, and the
+      registry overlay that fills those fields in lives in the files route, so
+      without it a Claude session arrives with no `cwd` at all and a `model`
+      still reading the transcript's historical provenance. Composing from the
+      raw entry produced `cd '$HOME'` — where `--resume <id>` cannot find the
+      session — plus a `--model` the operator had already moved away from. */
+  launchProfileForPath?: (path: string) => AttachLaunchProfile | null | undefined;
   allowSubagentsForPath?: (path: string) => boolean | undefined;
   mcpServersForPath?: (path: string) => readonly string[] | undefined;
 }
@@ -91,14 +108,20 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
      its ROOT's project dir) drives the MCP policy enumeration, materialization,
      and rendered command alike. The resume spec's transcript-sniffed `$HOME`
      fallback would otherwise enumerate project-scoped MCP servers in the wrong
-     directory before the recorded cwd is applied to the display command. When no
-     cwd is recorded, `resumeSpecFor` falls back to the sniff, exactly as before. */
-  const effectiveCwd = target.entry.cwd ?? entry.cwd ?? null;
+     directory before the recorded cwd is applied to the display command. The
+     registry profile leads, because the raw scan entry carries no cwd for a
+     Claude session at all (#663); when neither is recorded, `resumeSpecFor`
+     falls back to the sniff, exactly as before. */
+  const profile = deps.launchProfileForPath?.(target.entry.path) ?? null;
+  const effectiveCwd = profile?.cwd || target.entry.cwd || entry.cwd || null;
   const spec = deps.resumeSpecFor(target.entry.root, target.entry.path, {
-    model: target.entry.launchModel ?? target.entry.model,
-    effort: target.entry.effort,
-    allowSubagents: deps.allowSubagentsForPath?.(target.entry.path),
-    mcpServers: deps.mcpServersForPath?.(target.entry.path),
+    /* Same precedence for the runtime axes: an applied reconfigure is what the
+       conversation runs on now, while `entry.model` is transcript provenance —
+       resuming on the latter silently reverts the operator's model choice. */
+    model: profile?.model ?? target.entry.launchModel ?? target.entry.model,
+    effort: profile?.effort ?? target.entry.effort,
+    allowSubagents: profile?.allowSubagents ?? deps.allowSubagentsForPath?.(target.entry.path),
+    mcpServers: profile?.mcpServers ?? deps.mcpServersForPath?.(target.entry.path),
     cwd: effectiveCwd,
     /* The composed string is pasted into the operator's own shell: the CLI
        binary must resolve as the host sees it, never the container shim. */

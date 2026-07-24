@@ -16,11 +16,11 @@ test("role registry exposes the frozen eight role ids and campaign-ready orchest
     "deployer",
   ]);
   expect(Object.fromEntries(roles.map((role) => [role.id, role.config]))).toEqual({
-    orchestrator: { engine: "claude", model: "fable", effort: "high" },
+    orchestrator: { engine: "claude", model: "opus", effort: "high" },
     reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" },
     verifier: { engine: "codex", model: "gpt-5.6-sol", effort: "high" },
     builder: { engine: "codex", model: "gpt-5.6-sol", effort: "medium" },
-    architect: { engine: "claude", model: "fable", effort: "high" },
+    architect: { engine: "claude", model: "opus", effort: "high" },
     cleaner: { engine: "codex", model: "gpt-5.6-terra", effort: "low" },
     "prod-auditor": { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" },
     deployer: { engine: "codex", model: "gpt-5.6-terra", effort: "medium" },
@@ -35,7 +35,7 @@ test("role registry exposes the frozen eight role ids and campaign-ready orchest
     mergePolicy: "pr",
     completionPolicy: "released",
   });
-  expect(orchestrator.ok && orchestrator.value.config).toEqual({ engine: "claude", model: "fable", effort: "high" });
+  expect(orchestrator.ok && orchestrator.value.config).toEqual({ engine: "claude", model: "opus", effort: "high" });
   expect(orchestrator.ok && orchestrator.value.prompt).toContain("127.0.0.1:8898");
 
   expect(resolveRole("builder", { mode: "plain", domain: "general" })).toMatchObject({
