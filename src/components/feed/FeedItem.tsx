@@ -2,7 +2,7 @@
 
 import { memo } from "react";
 
-import { Brain, ChevronUp, Command, Check, Mail, Sparkle, X } from "../icons";
+import { Brain, ChevronUp, Command, Check, Mail, Mic, Sparkle, X } from "../icons";
 import { hhmm } from "../utils";
 import { CopyButton } from "./CopyButton";
 import { InboxImageCard } from "./InboxImage";
@@ -53,6 +53,38 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
             />
           </div>
           {mdBlocks(item.text)}
+        </div>
+      </div>
+    );
+  }
+  /* A voice turn is the operator speaking, so it keeps the user side of the
+     feed — but labelled and with the call's interleaved transcript folded away,
+     because that tail repeats itself turn over turn and is only ever read when
+     something sounded wrong. */
+  if (item.kind === "voice") {
+    return (
+      <div className="group/msg my-3 flex items-start justify-end gap-1.5">
+        <CopyButton
+          text={item.input || item.delta}
+          label={tr("feed.copyMd")}
+          className="mt-2 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/msg:opacity-100 [@media(hover:none)]:opacity-60"
+        />
+        <div className="max-w-[75%] rounded-surface bg-user px-4 py-2.5">
+          <span className="mb-1 flex items-center gap-1 text-caption uppercase tracking-wide text-muted">
+            <Mic className="h-3 w-3" aria-hidden />
+            {tr("feed.voiceTurn")}
+          </span>
+          {item.input ? (
+            <p className="whitespace-pre-wrap break-words">{item.input}</p>
+          ) : null}
+          {item.delta ? (
+            <details className="mt-1.5">
+              <summary className="cursor-pointer list-none text-caption text-muted [&::-webkit-details-marker]:hidden">
+                {tr("feed.voiceContext")}
+              </summary>
+              <pre className="mt-1 whitespace-pre-wrap break-words text-label text-secondary">{item.delta}</pre>
+            </details>
+          ) : null}
         </div>
       </div>
     );
