@@ -298,6 +298,34 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
   const [attachOpen, setAttachOpen] = useState(false);
   const [status, setStatus] = useState<{ kind: "ok" | "info" | "err"; text: string } | null>(null);
 
+  /* One click, one command (operator request): the terminal button copies the
+     COMPLETE resume command (cd + env + CLI) straight to the clipboard and
+     confirms via the strip's own status toast — no dialog hop. The dialog
+     remains the fallback for the live-tmux mode (two commands to choose from)
+     and for any fetch/clipboard failure, so nothing is ever less capable than
+     before. */
+  const copyAttachCommand = async () => {
+    if (attachMode === "live") {
+      setAttachOpen(true);
+      return;
+    }
+    setStatus(null);
+    try {
+      const response = await fetch(`/api/attach-command?path=${encodeURIComponent(file.path)}`);
+      const body = (await response.json()) as { fullCommand?: string; error?: string };
+      if (response.ok && body.fullCommand) {
+        const { copyText } = await import("@/components/feed/CopyButton");
+        if (await copyText(body.fullCommand)) {
+          setStatus({ kind: "ok", text: t("attach.copiedFull") });
+          return;
+        }
+      }
+    } catch {
+      /* fall through to the dialog */
+    }
+    setAttachOpen(true);
+  };
+
   /* Width is the collapse trigger (§3) — scheme nodes vary continuously with
      zoom, so a ResizeObserver on the strip beats any media query. A callback
      ref (not a mount-once effect) attaches it, because the strip root can mount
@@ -397,7 +425,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
         onStop={() => void stop()}
         onCompact={() => void compact()}
         onRecheck={() => void recheck()}
-        onTerminal={() => setAttachOpen(true)}
+        onTerminal={() => void copyAttachCommand()}
         onToggleOverflow={() => setOverflowOpen((open) => !open)}
         status={status}
       />
