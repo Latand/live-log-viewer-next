@@ -69,7 +69,7 @@ confirmed against the transcript — the agent just keeps going.
   it is mid-turn and *done* once the final assistant message lands.
 - **Deep links**: every selection is reflected in the URL (`#f=<path>`), so a
   link opens that exact log.
-- **English or Ukrainian UI**, model chips (`fable`, `gpt-5.5`, `sonnet`…),
+- **English or Ukrainian UI**, model chips (`opus`, `gpt-5.6-sol`, `sonnet`…),
   collapsible tree with persisted state, follow-mode autoscroll, service-event
   toggle, and a line filter.
 

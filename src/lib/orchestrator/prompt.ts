@@ -5,11 +5,11 @@
  * follows as the built-in system directive. Shared by the client button and
  * the API layer, so it must stay a pure-constant module. */
 
-/** Fixed spawn identity: the resident brain runs cheap (fable/low) and
+/** Fixed spawn identity: the resident brain runs on the latest Opus alias and
     escalates by spawning higher-effort workers, never by thinking harder. */
 export const ORCHESTRATOR_SPAWN_CONFIG = {
   engine: "claude",
-  model: "fable",
+  model: "opus",
   effort: "low",
   role: "orchestrator",
   roleParams: { mode: "standard" },

@@ -9,13 +9,14 @@ import {
   normalizeClaudeLaunchModel,
 } from "./models";
 
-test("the Codex catalog exposes Sol for review and Terra for implementation", () => {
+test("the model catalog exposes Opus 5 as the Claude default", () => {
+  expect(ENGINE_MODELS.claude[0]).toEqual({ id: "opus", label: "Opus 5", shortLabel: "Opus 5", use: "review" });
   expect(ENGINE_MODELS.codex).toEqual([
     { id: CODEX_SOL_MODEL, label: "GPT-5.6-Sol", shortLabel: "5.6-Sol", use: "review" },
     { id: CODEX_TERRA_MODEL, label: "GPT-5.6-Terra", shortLabel: "5.6-Terra", use: "implement" },
   ]);
   expect(defaultModelFor("codex")).toBe(CODEX_SOL_MODEL);
-  expect(defaultModelFor("claude")).toBe("");
+  expect(defaultModelFor("claude")).toBe("opus");
 });
 
 test("spawn model validation accepts CLI ids and rejects control characters", () => {
