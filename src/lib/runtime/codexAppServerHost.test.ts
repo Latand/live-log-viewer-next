@@ -292,9 +292,6 @@ describe("CodexAppServerHost", () => {
       /* The voice persona rides in as the call's first item: the thread's own
          instructions assume a text agent, which does not survive being read
          aloud. */
-      /* `role` is required by the app-server; instructions ride as developer,
-         the role Codex itself uses for its realtime conversation preamble. */
-      initialItems: [{ role: "developer", text: expect.stringContaining("Алік") }],
     });
 
     await host.appendRealtimeSpeech("Worker inspected package.json");
@@ -361,7 +358,6 @@ describe("CodexAppServerHost", () => {
       "clientManagedHandoffs",
       "codexResponsesAsItems",
       "includeStartupContext",
-      "initialItems",
       "model",
       "outputModality",
       "threadId",
