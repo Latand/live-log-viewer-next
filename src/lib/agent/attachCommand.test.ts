@@ -207,3 +207,48 @@ test("P1#6: an unknown launch id is a 404", () => {
   expect(res.ok).toBe(false);
   if (!res.ok) expect(res.status).toBe(404);
 });
+
+test("issue 663: the registry launch profile wins over the raw scan entry for cwd, model, and effort", () => {
+  /* The attach route walks PRE-OVERLAY scan entries: a Claude session arrives
+     with no cwd and a `model` that is transcript provenance. Composing from
+     those produced `cd '$HOME'` — where `--resume <id>` finds nothing — and a
+     `--model` the operator had already reconfigured away from. */
+  const entry = file({ path: "/root.jsonl", cwd: undefined, model: "fable-5", effort: "high" });
+  const seen: Record<string, unknown>[] = [];
+  const res = resolveAttachCommand("/root.jsonl", deps([entry], {
+    resumeSpecFor: (_root, path, options) => {
+      seen.push({ ...options });
+      return spec({ cwd: options?.cwd ?? "/home/user" });
+    },
+    launchProfileForPath: () => ({
+      cwd: "/home/user/.agents/tools/live-log-viewer-next",
+      model: "opus",
+      effort: "low",
+      allowSubagents: true,
+      mcpServers: ["viewer"],
+    }),
+  }));
+  expect(res.ok).toBe(true);
+  expect(seen[0]).toMatchObject({
+    cwd: "/home/user/.agents/tools/live-log-viewer-next",
+    model: "opus",
+    effort: "low",
+    allowSubagents: true,
+    mcpServers: ["viewer"],
+  });
+  if (res.ok) expect(res.value.cdCommand).toBe("cd '/home/user/.agents/tools/live-log-viewer-next'");
+});
+
+test("issue 663: a conversation with no registry profile still composes from the scan entry", () => {
+  const entry = file({ path: "/root.jsonl", cwd: "/scanned/dir", model: "sonnet", effort: "high" });
+  const seen: Record<string, unknown>[] = [];
+  const res = resolveAttachCommand("/root.jsonl", deps([entry], {
+    resumeSpecFor: (_root, path, options) => {
+      seen.push({ ...options });
+      return spec({ cwd: options?.cwd ?? "/home/user" });
+    },
+    launchProfileForPath: () => null,
+  }));
+  expect(res.ok).toBe(true);
+  expect(seen[0]).toMatchObject({ cwd: "/scanned/dir", model: "sonnet", effort: "high" });
+});
