@@ -2030,6 +2030,9 @@ export function TmuxComposer({
             phase={voice.phase}
             lines={voice.lines}
             error={voice.error}
+            startedAt={voice.startedAt}
+            stream={voice.micStream}
+            onRetry={() => void voice.start()}
             t={t}
           />
         ) : undefined}

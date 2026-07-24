@@ -14,6 +14,10 @@ export interface CodexRealtimeSnapshot {
   phase: CodexRealtimePhase;
   lines: readonly CodexRealtimeLine[];
   error: string | null;
+  /** Epoch ms the call went live, for the panel's call timer; null until then.
+      Kept in the snapshot rather than derived in the view so a remounted
+      composer resumes the same clock instead of restarting it. */
+  startedAt: number | null;
 }
 
 export type ParsedRealtimeEvent =
@@ -155,7 +159,7 @@ async function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
 }
 
 class CodexRealtimeClient {
-  private snapshot: CodexRealtimeSnapshot = { phase: "idle", lines: [], error: null };
+  private snapshot: CodexRealtimeSnapshot = { phase: "idle", lines: [], error: null, startedAt: null };
   private readonly listeners = new Set<() => void>();
   private peer: RTCPeerConnection | null = null;
   private events: RTCDataChannel | null = null;
@@ -178,6 +182,11 @@ class CodexRealtimeClient {
 
   getSnapshot = (): CodexRealtimeSnapshot => this.snapshot;
 
+  /** The live microphone stream, for the panel's level meter. Deliberately
+      outside the snapshot: the meter animates per frame and must not push
+      React re-renders through the composer. */
+  micStream = (): MediaStream | null => this.media;
+
   async start(): Promise<void> {
     if (this.snapshot.phase === "connecting" || this.snapshot.phase === "live") return;
     if (!navigator.mediaDevices?.getUserMedia || typeof RTCPeerConnection === "undefined") {
@@ -185,7 +194,7 @@ class CodexRealtimeClient {
       return;
     }
     this.cleanupTransport();
-    this.update({ phase: "connecting", error: null });
+    this.update({ phase: "connecting", error: null, startedAt: null });
     const epoch = ++this.epoch;
     try {
       const media = await navigator.mediaDevices.getUserMedia({
@@ -212,7 +221,7 @@ class CodexRealtimeClient {
         if (epoch === this.epoch) this.acceptWireMessage(message.data);
       };
       events.onopen = () => {
-        if (epoch === this.epoch) this.update({ phase: "live", error: null });
+        if (epoch === this.epoch) this.update({ phase: "live", error: null, startedAt: Date.now() });
       };
       events.onclose = () => {
         /* A channel lost before it ever opened is a failed admission too: the

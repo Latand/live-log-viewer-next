@@ -1723,4 +1723,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "voice.you": "Ви",
   "voice.agent": "Агент",
   "voice.progress": "Перебіг",
+  "voice.retry": "Спробувати ще раз",
+  "voice.ended": "Голосову розмову завершено",
+  "voice.elapsed": "Тривалість дзвінка",
+  "voice.micLevel": "Рівень мікрофона",
 };

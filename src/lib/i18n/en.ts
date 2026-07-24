@@ -1766,4 +1766,8 @@ export const en = {
   "voice.you": "You",
   "voice.agent": "Agent",
   "voice.progress": "Progress",
+  "voice.retry": "Try again",
+  "voice.ended": "Voice conversation ended",
+  "voice.elapsed": "Call duration",
+  "voice.micLevel": "Microphone level",
 } satisfies Dictionary;
