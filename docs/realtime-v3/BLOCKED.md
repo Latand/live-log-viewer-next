@@ -14,22 +14,22 @@ The message names an account quota. The timing rules one out. Measured
 
 | client / home | account | plan | connected | killed after |
 |---|---|---|---|---|
-| Codex Desktop `~/.codex` | — | — | 14:04:28 | 9.0 s |
-| Codex Desktop `~/.codex` | — | — | 14:25:49 | 9.3 s |
-| Codex Desktop `~/.codex` | — | — | 14:35:44 | 9.3 s |
-| Codex Desktop `~/.codex` | — | — | 14:36:24 | 9.4 s |
-| Viewer | botfatherdev | pro | 20:42:04 | 9.0 s |
-| Viewer | latandcosta | prolite | 20:44:58 | 9.1 s |
-| Viewer | latandcosta | prolite | 21:05:30 | 9.4 s |
-| Viewer | latandcosta | prolite | 21:05:50 | 9.4 s |
-| Viewer | latandcosta | prolite | 21:16:16 | 9.2 s |
+| Codex Desktop (personal home) | — | — | 14:04:28 | 9.0 s |
+| Codex Desktop (personal home) | — | — | 14:25:49 | 9.3 s |
+| Codex Desktop (personal home) | — | — | 14:35:44 | 9.3 s |
+| Codex Desktop (personal home) | — | — | 14:36:24 | 9.4 s |
+| Viewer | account A | higher tier | 20:42:04 | 9.0 s |
+| Viewer | account B | entry tier | 20:44:58 | 9.1 s |
+| Viewer | account B | entry tier | 21:05:30 | 9.4 s |
+| Viewer | account B | entry tier | 21:05:50 | 9.4 s |
+| Viewer | account B | entry tier | 21:16:16 | 9.2 s |
 
 The only call that ended otherwise was hung up by the client at 3.3 s, before
 the cutoff.
 
 What this rules out:
 
-- **Account quota.** `latandcosta` is a fresh account reading 5% session usage
+- **Account quota.** Account B is a freshly created account reading 5% session usage
   (`/api/limits`, live provenance); its first call ever died at 9.1 s. A quota
   also does not lift for the next call 26 seconds later (20:45:07 killed →
   20:45:33 admitted → killed at its own 9 s mark).
