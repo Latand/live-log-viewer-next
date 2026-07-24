@@ -43,6 +43,12 @@ type PendingAnswer = {
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
 };
+/** Why the last realtime call ended, in the backend's own words (#664). */
+export type CodexRealtimeFailure = {
+  message: string;
+  at: string;
+  realtimeSessionId: string | null;
+};
 type PendingRealtimeStart = {
   resolve(result: CodexRealtimeWebRtcAnswer): void;
   reject(error: Error): void;
@@ -319,6 +325,14 @@ export class CodexAppServerHost implements EngineHost {
   private readonly resolveImagePath: (ref: StructuredImageRef) => string;
   private readonly pending = new Map<number, PendingRpc>();
   private pendingRealtimeStart: PendingRealtimeStart | null = null;
+  /* Why a live call's failure has to be retained (#664): the browser holds the
+     WebRTC leg, while `thread/realtime/error` arrives on the app-server's own
+     sideband channel. Once the start has resolved there is no promise left to
+     reject, so the reason used to be dropped and the operator saw only the
+     transport dying — "Realtime connection was interrupted" standing in for
+     what the backend actually said ("You have reached your usage limit."). */
+  private realtimeFailure: CodexRealtimeFailure | null = null;
+  private realtimeSessionId: string | null = null;
   private readonly lateThreadReadResponses = new Map<number, number>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
@@ -645,6 +659,10 @@ export class CodexAppServerHost implements EngineHost {
       throw new Error("A valid WebRTC SDP offer is required");
     }
     if (this.pendingRealtimeStart) throw new Error("A realtime session is already starting");
+    /* A new call owns the failure slot: the previous call's reason must never
+       be reported against this one. */
+    this.realtimeFailure = null;
+    this.realtimeSessionId = null;
 
     const answer = new Promise<CodexRealtimeWebRtcAnswer>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -691,6 +709,9 @@ export class CodexAppServerHost implements EngineHost {
   async stopRealtime(): Promise<void> {
     await this.rpc("thread/realtime/stop", { threadId: this.identity.threadId });
     this.rejectRealtimeStart(new Error("Realtime session stopped during startup"));
+    /* An operator hanging up is not a failure to report back to them. */
+    this.realtimeFailure = null;
+    this.realtimeSessionId = null;
   }
 
   async answer(attentionRef: string, value: unknown): Promise<void> {
@@ -1408,6 +1429,7 @@ export class CodexAppServerHost implements EngineHost {
       if (!pending || stringField(params, "threadId") !== this.identity.threadId) return;
       pending.started = true;
       pending.realtimeSessionId = stringField(params, "realtimeSessionId");
+      this.realtimeSessionId = pending.realtimeSessionId;
       this.resolveRealtimeStart();
       return;
     }
@@ -1424,12 +1446,18 @@ export class CodexAppServerHost implements EngineHost {
     }
     if (method === "thread/realtime/error") {
       if (stringField(params, "threadId") !== this.identity.threadId) return;
-      this.rejectRealtimeStart(new Error(stringField(params, "message") ?? "Codex realtime session failed"));
+      const message = stringField(params, "message") ?? "Codex realtime session failed";
+      this.recordRealtimeFailure(message);
+      this.rejectRealtimeStart(new Error(message));
       return;
     }
     if (method === "thread/realtime/closed") {
       if (stringField(params, "threadId") !== this.identity.threadId) return;
-      this.rejectRealtimeStart(new Error(stringField(params, "reason") ?? "Codex realtime session closed"));
+      const reason = stringField(params, "reason") ?? "Codex realtime session closed";
+      /* `closed` always trails `error`; the error carries the backend's actual
+         words, so it wins and the close reason only fills an empty slot. */
+      this.recordRealtimeFailure(reason, { keepExisting: true });
+      this.rejectRealtimeStart(new Error(reason));
       return;
     }
     const turnId = turnIdFromParams(params);
@@ -1591,6 +1619,22 @@ export class CodexAppServerHost implements EngineHost {
       sdp: pending.sdp,
       realtimeSessionId: pending.realtimeSessionId,
     });
+  }
+
+  /** The reason the last realtime call ended, or null when none has failed
+      since the current call started. Read by the realtime control endpoint so
+      the browser can replace its generic transport message with this one. */
+  lastRealtimeFailure(): CodexRealtimeFailure | null {
+    return this.realtimeFailure;
+  }
+
+  private recordRealtimeFailure(message: string, options: { keepExisting?: boolean } = {}): void {
+    if (options.keepExisting && this.realtimeFailure) return;
+    this.realtimeFailure = {
+      message: message.slice(0, 500),
+      at: new Date().toISOString(),
+      realtimeSessionId: this.realtimeSessionId,
+    };
   }
 
   private rejectRealtimeStart(error: Error): void {

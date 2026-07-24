@@ -8,6 +8,9 @@ interface RealtimeHost {
   startRealtimeWebRtc(sdp: string): Promise<{ sdp: string; realtimeSessionId: string | null }>;
   appendRealtimeSpeech(text: string): Promise<void>;
   stopRealtime(): Promise<void>;
+  /** Optional so an older or stubbed host still satisfies the contract; the
+      `status` action simply reports no failure when it is absent (#664). */
+  lastRealtimeFailure?(): { message: string; at: string; realtimeSessionId: string | null } | null;
 }
 
 export type RealtimeControlResult = {
@@ -70,7 +73,23 @@ export async function executeRealtimeControl(
       await host.stopRealtime();
       return { status: 200, body: { ok: true } };
     }
-    return { status: 400, body: { error: "action must be start, appendSpeech, or stop" } };
+    /* Why the browser asks (#664): it owns the WebRTC leg and sees only that
+       the transport died. The reason arrived on the app-server's sideband
+       channel, so the operator gets the backend's own words instead of a
+       generic interruption notice. */
+    if (request.action === "status") {
+      const failure = host.lastRealtimeFailure?.() ?? null;
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          failure: failure
+            ? { ...failure, message: redactCodexHostDiagnostic(new Error(failure.message)) }
+            : null,
+        },
+      };
+    }
+    return { status: 400, body: { error: "action must be start, appendSpeech, stop, or status" } };
   } catch (error) {
     return { status: 409, body: { error: redactCodexHostDiagnostic(error) } };
   }

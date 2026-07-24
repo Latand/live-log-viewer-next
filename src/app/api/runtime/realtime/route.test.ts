@@ -80,3 +80,60 @@ test("POST rejects a cross-origin browser before realtime admission", async () =
   ));
   expect(response.status).toBe(403);
 });
+
+test("issue 664: status reports the backend's own reason for a call that died after start", async () => {
+  /* The browser owns the WebRTC leg and sees only a dead peer connection. The
+     reason arrived on the app-server's sideband channel, so it has to be
+     readable back or the operator reads a backend cutoff as a viewer bug. */
+  const host = {
+    async startRealtimeWebRtc() {
+      return { sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" };
+    },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() {},
+    lastRealtimeFailure() {
+      return {
+        message: "You have reached your usage limit.",
+        at: "2026-07-24T18:16:25.750Z",
+        realtimeSessionId: "rtc_u2_live",
+      };
+    },
+  };
+  const status = await executeRealtimeControl(
+    { action: "status", conversationId: "conversation_voice" },
+    () => host,
+  );
+  expect(status.status).toBe(200);
+  expect(status.body).toEqual({
+    ok: true,
+    failure: {
+      message: "You have reached your usage limit.",
+      at: "2026-07-24T18:16:25.750Z",
+      realtimeSessionId: "rtc_u2_live",
+    },
+  });
+});
+
+test("issue 664: a host with no recorded failure, or none at all, reports none", async () => {
+  const bare = {
+    async startRealtimeWebRtc() {
+      return { sdp: "v=0\r\nanswer", realtimeSessionId: null };
+    },
+    async appendRealtimeSpeech() {},
+    async stopRealtime() {},
+  };
+  expect(await executeRealtimeControl({ action: "status", conversationId: "conversation_voice" }, () => bare))
+    .toEqual({ status: 200, body: { ok: true, failure: null } });
+  expect(await executeRealtimeControl(
+    { action: "status", conversationId: "conversation_voice" },
+    () => ({ ...bare, lastRealtimeFailure: () => null }),
+  )).toEqual({ status: 200, body: { ok: true, failure: null } });
+});
+
+test("issue 664: status on a conversation with no hosted realtime thread stays a 409", async () => {
+  expect(await executeRealtimeControl({ action: "status", conversationId: "conversation_cold" }, () => null))
+    .toEqual({
+      status: 409,
+      body: { error: "the active conversation has no hosted Codex realtime thread" },
+    });
+});

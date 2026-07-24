@@ -220,13 +220,13 @@ class CodexRealtimeClient {
            of sitting in "connecting" forever. */
         if (epoch === this.epoch
           && (this.snapshot.phase === "live" || this.snapshot.phase === "connecting")) {
-          this.setError("Realtime connection closed");
+          this.failWithServerReason("Realtime connection closed", epoch);
         }
       };
       peer.onconnectionstatechange = () => {
         if (epoch === this.epoch
           && (peer.connectionState === "failed" || peer.connectionState === "disconnected")) {
-          this.setError("Realtime connection was interrupted");
+          this.failWithServerReason("Realtime connection was interrupted", epoch);
         }
       };
 
@@ -345,6 +345,32 @@ class CodexRealtimeClient {
 
   private setError(message: string): void {
     this.update({ phase: "error", error: message.slice(0, 500) });
+  }
+
+  /**
+   * The transport dying describes the symptom; the cause sits on the server
+   * (#664). Codex delivers `thread/realtime/error` on its own sideband channel
+   * — a backend cutoff reads here as nothing but a dead peer connection — so
+   * show the transport reason at once and upgrade it in place once the host
+   * hands over what the backend actually said ("You have reached your usage
+   * limit."). Best effort by construction: the transport reason stands if the
+   * lookup fails, and a newer call (epoch bump) never inherits this message.
+   */
+  private failWithServerReason(fallback: string, epoch: number): void {
+    this.setError(fallback);
+    void (async () => {
+      try {
+        const body = await responseJson(await fetch("/api/runtime/realtime", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "status", conversationId: this.conversationId }),
+        }));
+        const message = stringAt(body.failure, "message")?.trim() ?? "";
+        if (message && epoch === this.epoch && this.snapshot.phase === "error") this.setError(message);
+      } catch {
+        /* the transport reason already on screen stands */
+      }
+    })();
   }
 
   private update(patch: Partial<CodexRealtimeSnapshot>): void {
