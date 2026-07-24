@@ -3,10 +3,11 @@ import { expect, test } from "bun:test";
 import { isStagingMode, stagingReleaseRecord, STAGING_RELEASE_FILE } from "./staging";
 
 test("isStagingMode requires the exact LLV_STAGING=1 opt-in", () => {
-  expect(isStagingMode({ LLV_STAGING: "1" } as NodeJS.ProcessEnv)).toBe(true);
-  expect(isStagingMode({} as NodeJS.ProcessEnv)).toBe(false);
-  expect(isStagingMode({ LLV_STAGING: "0" } as NodeJS.ProcessEnv)).toBe(false);
-  expect(isStagingMode({ LLV_STAGING: "true" } as NodeJS.ProcessEnv)).toBe(false);
+  const env = (values: Record<string, string>) => values as unknown as NodeJS.ProcessEnv;
+  expect(isStagingMode(env({ LLV_STAGING: "1" }))).toBe(true);
+  expect(isStagingMode(env({}))).toBe(false);
+  expect(isStagingMode(env({ LLV_STAGING: "0" }))).toBe(false);
+  expect(isStagingMode(env({ LLV_STAGING: "true" }))).toBe(false);
 });
 
 test("staging release records carry the deployed revision and container pair", () => {

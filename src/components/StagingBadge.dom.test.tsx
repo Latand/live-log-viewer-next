@@ -21,9 +21,11 @@ Object.assign(globalThis, {
 const { StagingBadge } = await import("./StagingBadge");
 
 let payload: Record<string, unknown> = { staging: false, revision: null, deployedAt: null, endpoint: null };
-globalThis.fetch = (async () =>
-  new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } })
-) as typeof fetch;
+const requested: string[] = [];
+globalThis.fetch = (async (input: RequestInfo | URL) => {
+  requested.push(String(input));
+  return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+}) as typeof fetch;
 
 let root: Root | null = null;
 afterEach(async () => {
@@ -49,6 +51,7 @@ test("a staging instance shows the staging badge with its deployed revision", as
   expect(badge).not.toBeNull();
   expect(badge?.textContent ?? "").toContain("Staging");
   expect(badge?.textContent ?? "").toContain("e".repeat(7));
+  expect(requested).toContain("/api/staging");
 });
 
 test("a production instance renders no staging badge", async () => {

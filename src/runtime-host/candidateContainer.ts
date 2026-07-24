@@ -157,7 +157,7 @@ export function viewerCandidateTmuxEnvironment(
     : configured;
 }
 
-function viewerCandidateVolumes(
+export function viewerCandidateVolumes(
   service: ViewerComposeService,
   overrides: Pick<ViewerCandidateContainerOverrides, "legacyTmuxExternal" | "tmuxTmpdir">,
 ): ViewerComposeVolume[] {

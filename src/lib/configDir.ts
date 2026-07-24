@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { isStagingMode, STAGING_STATE_DIRNAME } from "@/lib/staging";
+
 /** App dir that matches the npm package name; new installs land here. */
 const APP_DIR = "agent-log-viewer";
 /** Former app dir, still honored as a fallback so existing setups keep working. */
@@ -115,9 +117,29 @@ export function migrateLegacyDir(target: string, legacy: string): void {
  */
 export function stateDir(): string {
   const override = process.env.LLV_STATE_DIR;
+  if (isStagingMode()) return stagingStateDir(override);
   if (override) return override;
   const dir = path.join(configRoot(), APP_DIR, "state");
   migrateLegacyDir(dir, path.join(os.homedir(), ".claude", "viewer-state"));
+  return dir;
+}
+
+/* The staging isolation seam (#659). A staging process must never resolve
+   its mutable state (registry, events, board, pipelines, flows, release
+   records) into the prod state dir — not by default, not by misconfigured
+   override, and never through the legacy migration copy, which would clone
+   prod state into staging or stamp sentinels into shared legacy dirs. */
+function stagingStateDir(override: string | undefined): string {
+  const dir = override || path.join(configRoot(), APP_DIR, STAGING_STATE_DIRNAME);
+  const resolved = path.resolve(dir);
+  const prodDirs = [
+    path.join(configRoot(), APP_DIR, "state"),
+    path.join(configRoot(), LEGACY_APP_DIR, "state"),
+    path.join(os.homedir(), ".claude", "viewer-state"),
+  ];
+  if (prodDirs.some((prod) => path.resolve(prod) === resolved)) {
+    throw new Error(`staging mode refuses the production state dir ${resolved}; set LLV_STATE_DIR to a staging-only dir`);
+  }
   return dir;
 }
 
@@ -126,8 +148,11 @@ export function statePath(...segments: string[]): string {
   return path.join(stateDir(), ...segments);
 }
 
-/** Composer-pasted images the agents receive as file paths. */
+/** Composer-pasted images the agents receive as file paths. Staging keeps
+    its inbox inside the staging state dir, so composer uploads on the
+    staging instance never land in (or migrate) the prod inbox. */
 export function inboxDir(): string {
+  if (isStagingMode()) return statePath("inbox");
   const dir = path.join(configRoot(), APP_DIR, "inbox");
   migrateLegacyDir(dir, path.join(os.homedir(), ".claude", "viewer-inbox"));
   return dir;
