@@ -41,10 +41,18 @@ interface StoredAccount {
   loginPane?: LoginPane | null;
 }
 
+/** A removed account whose session tree was retained (issue #643). */
+interface RetiredAccount {
+  id: string;
+  label: string;
+  retiredAt: number;
+}
+
 interface Registry {
   version: number;
   active: string;
   accounts: StoredAccount[];
+  retired: RetiredAccount[];
 }
 
 interface CachedRegistry {
@@ -102,7 +110,7 @@ function registryPath(): string {
 }
 
 function defaultRegistry(): Registry {
-  return { version: REGISTRY_VERSION, active: DEFAULT_ID, accounts: [] };
+  return { version: REGISTRY_VERSION, active: DEFAULT_ID, accounts: [], retired: [] };
 }
 
 function storeKey(file: string): string {
@@ -137,6 +145,12 @@ function isStoredAccount(value: unknown): value is StoredAccount {
   );
 }
 
+function isRetiredAccount(value: unknown): value is RetiredAccount {
+  if (!value || typeof value !== "object") return false;
+  const account = value as Partial<RetiredAccount>;
+  return typeof account.id === "string" && typeof account.label === "string" && typeof account.retiredAt === "number";
+}
+
 function managedHome(id: string): string {
   return path.join(codexAccountsRoot(), id);
 }
@@ -167,6 +181,11 @@ function normalizeRegistry(value: unknown, sourceKey: string): LoadedRegistry {
     reportStoreErrorOnce(sourceKey, "registry has an unsupported shape; serving the default account");
     return { registry: defaultRegistry(), corrupt: true };
   }
+  /* `retired` post-dates version 1; a registry written before it is complete, not corrupt. */
+  if (raw.retired !== undefined && !Array.isArray(raw.retired)) {
+    reportStoreErrorOnce(sourceKey, "registry has an unsupported shape; serving the default account");
+    return { registry: defaultRegistry(), corrupt: true };
+  }
   const seen = new Set<string>();
   const accounts: StoredAccount[] = [];
   let rejected = false;
@@ -185,7 +204,17 @@ function normalizeRegistry(value: unknown, sourceKey: string): LoadedRegistry {
       loginPane: account.loginPane ? { ...account.loginPane, startedAt: account.loginPane.startedAt ?? 0 } : null,
     });
   }
-  return { registry: { version: REGISTRY_VERSION, active: raw.active, accounts }, corrupt: rejected };
+  const retired: RetiredAccount[] = [];
+  for (const account of raw.retired ?? []) {
+    if (!isRetiredAccount(account) || seen.has(account.id) || !managedHomeIsSafe(account.id)) {
+      reportStoreErrorOnce(`${sourceKey}:invalid-retired`, "ignored an invalid retired account record");
+      rejected = true;
+      continue;
+    }
+    seen.add(account.id);
+    retired.push({ id: account.id, label: account.label, retiredAt: account.retiredAt });
+  }
+  return { registry: { version: REGISTRY_VERSION, active: raw.active, accounts, retired }, corrupt: rejected };
 }
 
 function readRegistry(): LoadedRegistry {
@@ -337,8 +366,14 @@ export function setActiveCodexAccount(id: string): void {
   });
 }
 
+/** Session trees kept by removed accounts (issue #643). Their homes hold nothing else. */
+export function retiredCodexSessionRoots(): string[] {
+  return readRegistry().registry.retired.map((account) => path.join(managedHome(account.id), "sessions"));
+}
+
+/** Every Codex session root the scanner reads: live accounts first, then retained archives. */
 export function codexSessionRoots(): string[] {
-  return [...new Set(listCodexAccounts().map((account) => account.sessionsDir))];
+  return [...new Set([...listCodexAccounts().map((account) => account.sessionsDir), ...retiredCodexSessionRoots()])];
 }
 
 export function codexHomeOwningSessionPath(pathname: string): string | null {
@@ -373,7 +408,7 @@ export function createManagedCodexAccount(label: string): CodexAccount {
   return withRegistryLock(() => {
     cached = null;
     const registry = mutableRegistry();
-    const id = accountIdForLabel(cleanLabel, new Set(listCodexAccounts().map((account) => account.id)));
+    const id = accountIdForLabel(cleanLabel, new Set([...listCodexAccounts().map((account) => account.id), ...registry.retired.map((account) => account.id)]));
     const home = managedHome(id);
     let createdHome = false;
     try {
@@ -394,6 +429,34 @@ export function createManagedCodexAccount(label: string): CodexAccount {
   });
 }
 
+/** True when the home still holds sessions worth retaining past removal. */
+function hasRetainableSessions(home: string): boolean {
+  try { return fs.readdirSync(path.join(home, "sessions")).length > 0; } catch { return false; }
+}
+
+/** Strips a managed home down to its `sessions` tree, leaving no credential,
+ *  runtime state, or overlay link behind. Symlinked overlays are unlinked,
+ *  never followed. Reports what survived so a partial failure can be retried. */
+function stripHomeToSessions(home: string): { stripped: string[]; complete: boolean } {
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(home, { withFileTypes: true }); } catch { return { stripped: [], complete: false }; }
+  const stripped: string[] = [];
+  let complete = true;
+  for (const entry of entries) {
+    if (entry.name === "sessions") continue;
+    try { fs.rmSync(path.join(home, entry.name), { recursive: true, force: true }); stripped.push(entry.name); }
+    catch { complete = false; }
+  }
+  return { stripped, complete };
+}
+
+/**
+ * Removes a managed account while preserving its history (issue #643), by the
+ * same retain-in-place mechanism as `removeManagedClaudeAccount`: the home
+ * keeps only its `sessions` tree and becomes a retired archive, so every
+ * transcript stays readable at its original absolute path and no conversation
+ * identity or board placement has to be rewritten.
+ */
 export function removeManagedCodexAccount(id: string): { cleanupPending: boolean } {
   return withRegistryLock(() => {
     cached = null;
@@ -403,22 +466,30 @@ export function removeManagedCodexAccount(id: string): { cleanupPending: boolean
     const home = managedHome(id);
     const exists = fs.existsSync(home);
     if (exists && !managedHomeIsSafe(id, true)) throw new UnsafeCodexHomeError();
+    const retain = exists && hasRetainableSessions(home);
+    const retired = registry.retired.filter((account) => account.id !== id);
     writeRegistry({
       ...registry,
       active: registry.active === id ? DEFAULT_ID : registry.active,
       accounts: registry.accounts.filter((account) => account.id !== id),
+      retired: retain ? [...retired, { id, label: existing.label, retiredAt: Date.now() }] : retired,
     });
-    if (exists) try { fs.rmSync(home, { recursive: true, force: true }); } catch { return { cleanupPending: true }; }
+    if (!exists) return { cleanupPending: false };
+    if (retain) return { cleanupPending: !stripHomeToSessions(home).complete };
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch { return { cleanupPending: true }; }
     return { cleanupPending: false };
   });
 }
 
-/** Removes failed-login homes that have no registry owner. Only safe direct children qualify. */
+/** Removes failed-login homes that have no registry owner. Only safe direct
+ *  children qualify. Retired archives are never deleted — their sessions are
+ *  the point — but a strip left incomplete by an earlier removal is retried. */
 export function cleanupOrphanedCodexHomes(): { removed: string[]; unresolved: string[] } {
   return withRegistryLock(() => {
     cached = null;
     const registry = mutableRegistry();
     const registered = new Set(registry.accounts.map((account) => account.id));
+    const retired = new Set(registry.retired.map((account) => account.id));
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(codexAccountsRoot(), { withFileTypes: true }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { removed: [], unresolved: [] }; throw error; }
@@ -427,6 +498,12 @@ export function cleanupOrphanedCodexHomes(): { removed: string[]; unresolved: st
     for (const entry of entries) {
       if (registered.has(entry.name)) continue;
       if (!entry.isDirectory() || !managedHomeIsSafe(entry.name, true)) { unresolved.push(entry.name); continue; }
+      if (retired.has(entry.name)) {
+        const strip = stripHomeToSessions(managedHome(entry.name));
+        if (!strip.complete) unresolved.push(entry.name);
+        else if (strip.stripped.length > 0) removed.push(entry.name);
+        continue;
+      }
       try { fs.rmSync(managedHome(entry.name), { recursive: true, force: true }); removed.push(entry.name); }
       catch { unresolved.push(entry.name); }
     }

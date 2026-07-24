@@ -86,6 +86,51 @@ test("managed account removal deletes its registry record and home, while orphan
   expect(fs.existsSync(orphan)).toBe(false);
 });
 
+test("removing an account with history retains its transcripts in place and scrubs everything else (issue #643)", () => {
+  const account = mod.createManagedClaudeAccount("Retire me");
+  const transcript = path.join(account.projectsDir, "-repo", "12345678-1234-1234-1234-123456789abc.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(transcript, "{\"cwd\":\"/repo\"}\n", { mode: 0o600 });
+  fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
+  fs.writeFileSync(path.join(account.home, ".claude.json"), "{}", { mode: 0o600 });
+
+  const removal = mod.removeManagedClaudeAccount(account.id);
+
+  expect(removal).toEqual({ cleanupPending: false });
+  expect(mod.listClaudeAccounts().map((item) => item.id)).not.toContain(account.id);
+  // The transcript stays at the exact path the registry and the board already know.
+  expect(fs.readFileSync(transcript, "utf8")).toBe("{\"cwd\":\"/repo\"}\n");
+  expect(mod.claudeProjectRoots()).toContain(account.projectsDir);
+  expect(fs.readdirSync(account.home)).toEqual(["projects"]);
+  expect(mod.claudeHomeOwningTranscript(transcript)).toBeNull();
+  // A retired archive is not an orphan, and its id is never reissued.
+  expect(mod.cleanupOrphanedClaudeHomes()).toEqual({ removed: [], unresolved: [] });
+  expect(fs.existsSync(transcript)).toBe(true);
+  expect(mod.createManagedClaudeAccount("Retire me").id).not.toBe(account.id);
+});
+
+test("orphan cleanup finishes a retired home whose strip was interrupted (issue #643)", () => {
+  const account = mod.createManagedClaudeAccount("Interrupted strip");
+  const transcript = path.join(account.projectsDir, "-repo", "abcdef12-1234-1234-1234-123456789abc.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(transcript, "{}", { mode: 0o600 });
+  const credentials = path.join(account.home, ".credentials.json");
+  fs.writeFileSync(credentials, "{}", { mode: 0o600 });
+  const originalRm = fs.rmSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (path.resolve(String(target)) === path.resolve(credentials)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  let removal: { cleanupPending: boolean } | undefined;
+  try { removal = mod.removeManagedClaudeAccount(account.id); } finally { fs.rmSync = originalRm; }
+
+  expect(removal).toEqual({ cleanupPending: true });
+  expect(fs.existsSync(credentials)).toBe(true);
+  expect(mod.cleanupOrphanedClaudeHomes()).toEqual({ removed: [account.id], unresolved: [] });
+  expect(fs.existsSync(credentials)).toBe(false);
+  expect(fs.existsSync(transcript)).toBe(true);
+});
+
 test("a home deletion failure leaves a removable Claude orphan after logical removal", () => {
   const account = mod.createManagedClaudeAccount("Retry removal");
   const originalRm = fs.rmSync;

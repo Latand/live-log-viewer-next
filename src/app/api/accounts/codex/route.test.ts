@@ -157,10 +157,11 @@ test("managed Codex removal reports pending cleanup when local data survives", a
   }
 });
 
-test("managed Codex removal stays blocked while a current conversation depends on the account", async () => {
+test("managed Codex removal stays blocked while a live conversation depends on the account", async () => {
   const account = createManagedCodexAccount("Current history");
   const registry = agentRegistry();
-  registry.ensureConversation("codex", "/current-codex.jsonl", account.id);
+  const conversation = registry.ensureConversation("codex", "/current-codex.jsonl", account.id);
+  registry.holdDelivery(conversation.id, "still owed to this conversation");
 
   const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
     method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
@@ -168,6 +169,24 @@ test("managed Codex removal stays blocked while a current conversation depends o
 
   expect(response.status).toBe(409);
   await expect(response.json()).resolves.toEqual(expect.objectContaining({ blockers: ["current_conversations"] }));
+});
+
+test("managed Codex removal proceeds over dead history and keeps its sessions readable (issue #643)", async () => {
+  const account = createManagedCodexAccount("Dead history");
+  const registry = agentRegistry();
+  const session = path.join(account.sessionsDir, "2026", "07", "24", "rollout-2026-07-24T00-00-00-99999999-1234-1234-1234-123456789abc.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(session, "{}\n", { mode: 0o600 });
+  registry.ensureConversation("codex", session, account.id);
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+  }));
+
+  expect(response.status).toBe(200);
+  await expect(response.json()).resolves.toEqual({ removed: { id: account.id }, cleanupPending: false });
+  expect(fs.readFileSync(session, "utf8")).toBe("{}\n");
+  expect(registry.conversationForPath(session)).not.toBeNull();
 });
 
 test("managed Codex removal restores routing when the underlying deletion fails after routing was retired", async () => {

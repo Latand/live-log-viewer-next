@@ -28,7 +28,9 @@ export type ClaudeAccount = {
 };
 
 type StoredAccount = { id: string; label: string; kind: "managed"; createdAt: number };
-type Registry = { version: number; active: string; accounts: StoredAccount[] };
+/** A removed account whose transcript tree was retained (issue #643). */
+type RetiredAccount = { id: string; label: string; retiredAt: number };
+type Registry = { version: number; active: string; accounts: StoredAccount[]; retired: RetiredAccount[] };
 type Loaded = { registry: Registry; corrupt: boolean };
 let cached: { key: string; loaded: Loaded } | null = null;
 
@@ -42,7 +44,7 @@ export function claudeAccountsRoot(): string { return path.join(path.dirname(sta
 export function claudeRegistryPath(): string { return statePath("claude-accounts.json"); }
 export function claudeCapabilitiesRoot(): string { return path.join(path.dirname(stateDir()), "shared", "claude"); }
 function managedHome(id: string): string { return path.join(claudeAccountsRoot(), id); }
-function defaults(): Registry { return { version: VERSION, active: DEFAULT_ID, accounts: [] }; }
+function defaults(): Registry { return { version: VERSION, active: DEFAULT_ID, accounts: [], retired: [] }; }
 function key(file: string): string { try { const s = fs.statSync(file); return `${s.mtimeMs}:${s.size}`; } catch { return "missing"; } }
 function safeMode(mode: number, required: number): boolean { return (mode & 0o077) === 0 && (mode & 0o777) === required; }
 
@@ -66,10 +68,18 @@ function validStored(value: unknown): value is StoredAccount {
   return typeof item.id === "string" && typeof item.label === "string" && item.kind === "managed" && typeof item.createdAt === "number" && managedClaudeHomeIsSafe(item.id);
 }
 
+function validRetired(value: unknown): value is RetiredAccount {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Partial<RetiredAccount>;
+  return typeof item.id === "string" && typeof item.label === "string" && typeof item.retiredAt === "number" && managedClaudeHomeIsSafe(item.id);
+}
+
 function normalize(value: unknown): Loaded {
   if (!value || typeof value !== "object") return { registry: defaults(), corrupt: true };
   const raw = value as Partial<Registry>;
   if (raw.version !== VERSION || typeof raw.active !== "string" || !Array.isArray(raw.accounts)) return { registry: defaults(), corrupt: true };
+  /* `retired` post-dates version 1; a registry written before it is complete, not corrupt. */
+  if (raw.retired !== undefined && !Array.isArray(raw.retired)) return { registry: defaults(), corrupt: true };
   const seen = new Set<string>();
   let corrupt = false;
   const accounts: StoredAccount[] = [];
@@ -77,7 +87,12 @@ function normalize(value: unknown): Loaded {
     if (!validStored(item) || seen.has(item.id)) { corrupt = true; continue; }
     seen.add(item.id); accounts.push(item);
   }
-  return { registry: { version: VERSION, active: raw.active, accounts }, corrupt };
+  const retired: RetiredAccount[] = [];
+  for (const item of raw.retired ?? []) {
+    if (!validRetired(item) || seen.has(item.id)) { corrupt = true; continue; }
+    seen.add(item.id); retired.push(item);
+  }
+  return { registry: { version: VERSION, active: raw.active, accounts, retired }, corrupt };
 }
 
 function readRegistry(): Loaded {
@@ -133,7 +148,10 @@ export function activeClaudeAccountId(): string { const active = readRegistry().
 export function claudeAccountsMutationLocked(): boolean { return readRegistry().corrupt; }
 export function claudeAccountForSpawn(requested?: string | null): Pick<ClaudeAccount, "id" | "kind" | "home" | "projectsDir"> { const found = listClaudeAccounts().find((item) => item.id === (requested ?? activeClaudeAccountId())); if (!found) throw new UnknownClaudeAccountError(requested ?? ""); if (found.kind === "managed" && (!managedClaudeHomeIsSafe(found.id, true) || !managedClaudeCredentialIsSafe(found.home))) throw new UnsafeClaudeHomeError(); return { id: found.id, kind: found.kind, home: found.home, projectsDir: found.projectsDir }; }
 export function setActiveClaudeAccount(id: string): void { withRegistryLock(() => { cached = null; const registry = mutable(); if (!listClaudeAccounts().some((item) => item.id === id)) throw new UnknownClaudeAccountError(id); write({ ...registry, active: id }); }); }
-export function claudeProjectRoots(): string[] { return [...new Set(listClaudeAccounts().map((item) => item.projectsDir))]; }
+/** Transcript trees kept by removed accounts (issue #643). Their homes hold nothing else. */
+export function retiredClaudeProjectRoots(): string[] { return readRegistry().registry.retired.map((item) => path.join(managedHome(item.id), "projects")); }
+/** Every Claude transcript root the scanner reads: live accounts first, then retained archives. */
+export function claudeProjectRoots(): string[] { return [...new Set([...listClaudeAccounts().map((item) => item.projectsDir), ...retiredClaudeProjectRoots()])]; }
 
 export function claudeHomeOwningTranscript(pathname: string): string | null {
   let real: string; try { real = fs.realpathSync(pathname); } catch { return null; }
@@ -171,7 +189,7 @@ export function claudeSettingsPath(): string | null { const file = path.join(cla
 export function createManagedClaudeAccount(label: string): ClaudeAccount {
   const clean = label.trim(); if (!clean || clean.length > 80 || /[\u0000-\u001f\u007f]/.test(clean)) throw new InvalidClaudeAccountLabelError();
   return withRegistryLock(() => {
-    cached = null; const registry = mutable(); const id = nextId(clean, new Set(listClaudeAccounts().map((item) => item.id))); const home = managedHome(id); let made = false;
+    cached = null; const registry = mutable(); const id = nextId(clean, new Set([...listClaudeAccounts().map((item) => item.id), ...registry.retired.map((item) => item.id)])); const home = managedHome(id); let made = false;
     try {
       fs.mkdirSync(path.dirname(home), { recursive: true, mode: 0o700 }); fs.chmodSync(path.dirname(home), 0o700); fs.mkdirSync(home, { mode: 0o700 }); fs.chmodSync(home, 0o700); made = true;
       const shared = syncClaudeCapabilitySnapshot();
@@ -182,24 +200,72 @@ export function createManagedClaudeAccount(label: string): ClaudeAccount {
   });
 }
 
+/** True when the home still holds transcripts worth retaining past removal. */
+function hasRetainableTranscripts(home: string): boolean {
+  try { return fs.readdirSync(path.join(home, "projects")).length > 0; } catch { return false; }
+}
+
+/** Strips a managed home down to its `projects` tree, leaving no credential,
+ *  runtime state, or capability link behind. Symlinked capability directories
+ *  are unlinked, never followed. Reports what survived so a partial failure
+ *  can be retried by orphan cleanup. */
+function stripHomeToTranscripts(home: string): { stripped: string[]; complete: boolean } {
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(home, { withFileTypes: true }); } catch { return { stripped: [], complete: false }; }
+  const stripped: string[] = [];
+  let complete = true;
+  for (const entry of entries) {
+    if (entry.name === "projects") continue;
+    try { fs.rmSync(path.join(home, entry.name), { recursive: true, force: true }); stripped.push(entry.name); }
+    catch { complete = false; }
+  }
+  return { stripped, complete };
+}
+
+/**
+ * Removes a managed account while preserving its history (issue #643).
+ *
+ * Transcript preservation mechanism: **retain in place**. The home keeps only
+ * its `projects` tree and is recorded as a retired archive in the accounts
+ * registry; every credential, runtime file, and capability link is deleted, so
+ * the account can no longer authenticate, spawn, or be selected. Because the
+ * transcripts never move, every absolute path stays valid — Viewer conversation
+ * ids, continuity paths, registry entries, board grouping (which is derived
+ * from the transcript's cwd) and `/api/log` path admission all keep working
+ * untouched, with no registry rewrite and no window where a conversation points
+ * at a path that no longer exists. `claudeProjectRoots()` keeps returning the
+ * retired tree, so the scanner reads it exactly as before.
+ */
 export function removeManagedClaudeAccount(id: string): { cleanupPending: boolean } {
   return withRegistryLock(() => {
     cached = null; const registry = mutable(); const existing = registry.accounts.find((item) => item.id === id); if (!existing) throw new UnknownClaudeAccountError(id);
     const home = managedHome(id);
     const exists = fs.existsSync(home);
     if (exists && !managedClaudeHomeIsSafe(id, true)) throw new UnsafeClaudeHomeError();
-    write({ ...registry, active: registry.active === id ? DEFAULT_ID : registry.active, accounts: registry.accounts.filter((item) => item.id !== id) });
-    if (exists) try { fs.rmSync(home, { recursive: true, force: true }); } catch { return { cleanupPending: true }; }
+    const retain = exists && hasRetainableTranscripts(home);
+    const retired = registry.retired.filter((item) => item.id !== id);
+    write({
+      ...registry,
+      active: registry.active === id ? DEFAULT_ID : registry.active,
+      accounts: registry.accounts.filter((item) => item.id !== id),
+      retired: retain ? [...retired, { id, label: existing.label, retiredAt: Date.now() }] : retired,
+    });
+    if (!exists) return { cleanupPending: false };
+    if (retain) return { cleanupPending: !stripHomeToTranscripts(home).complete };
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch { return { cleanupPending: true }; }
     return { cleanupPending: false };
   });
 }
 
-/** Removes failed-login homes that have no registry owner. Only safe direct children qualify. */
+/** Removes failed-login homes that have no registry owner. Only safe direct
+ *  children qualify. Retired archives are never deleted — their transcripts are
+ *  the point — but a strip left incomplete by an earlier removal is retried. */
 export function cleanupOrphanedClaudeHomes(): { removed: string[]; unresolved: string[] } {
   return withRegistryLock(() => {
     cached = null;
     const registry = mutable();
     const registered = new Set(registry.accounts.map((account) => account.id));
+    const retired = new Set(registry.retired.map((account) => account.id));
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(claudeAccountsRoot(), { withFileTypes: true }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { removed: [], unresolved: [] }; throw error; }
@@ -208,6 +274,12 @@ export function cleanupOrphanedClaudeHomes(): { removed: string[]; unresolved: s
     for (const entry of entries) {
       if (registered.has(entry.name)) continue;
       if (!entry.isDirectory() || !managedClaudeHomeIsSafe(entry.name, true)) { unresolved.push(entry.name); continue; }
+      if (retired.has(entry.name)) {
+        const strip = stripHomeToTranscripts(managedHome(entry.name));
+        if (!strip.complete) unresolved.push(entry.name);
+        else if (strip.stripped.length > 0) removed.push(entry.name);
+        continue;
+      }
       try { fs.rmSync(managedHome(entry.name), { recursive: true, force: true }); removed.push(entry.name); }
       catch { unresolved.push(entry.name); }
     }

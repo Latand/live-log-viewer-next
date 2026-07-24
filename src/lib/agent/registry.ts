@@ -28,6 +28,7 @@ import {
 } from "@/lib/accounts/migration/contracts";
 
 import type { AgentEngine } from "./cli";
+import { liveAccountConversationIds, type AccountLivenessOptions } from "./accountLiveness";
 import { loadSpawnNestingPolicy } from "./nestingPolicy";
 import {
   SpawnAdmissionError,
@@ -4707,11 +4708,20 @@ export class AgentRegistry {
     return migrationScopeCounts(this.readOnlySnapshot(), engine, targetId);
   }
 
-  retireAccount(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string, fallbackAccountId: string): void {
+  /** Retires an account's routing and migration intents. Refuses only while a
+      conversation is *genuinely live* on the account — the same liveness
+      definition `accountRemovalBlockers` enforces at the DELETE route (issue
+      #643), so the two can never disagree about whether a home may go. Dead,
+      unhosted history keeps its account provenance: the transcripts survive as
+      a retained archive, so the generation stays truthful about where it ran. */
+  retireAccount(
+    engine: Extract<AgentEngine, "claude" | "codex">,
+    accountId: string,
+    fallbackAccountId: string,
+    liveness: AccountLivenessOptions = {},
+  ): void {
     withAccountMutationLock(() => this.mutate((file) => {
-      const currentConversation = Object.values(file.conversations).find((conversation) =>
-        conversation.engine === engine && conversation.generations.at(-1)?.accountId === accountId);
-      if (currentConversation) throw new Error("account has current conversations");
+      if (liveAccountConversationIds(file, engine, accountId, liveness).length > 0) throw new Error("account has current conversations");
       const changedAt = now();
       const route = file.engineRouting[engine];
       if (route.activeAccountId === accountId) {

@@ -596,6 +596,21 @@ describe("agent registry", () => {
     expect(fs.existsSync(liveWriter)).toBeTrue();
   });
 
+  test("account retirement refuses live conversations and releases dead history (issue #643)", () => {
+    const store = registry();
+    // Terminal, unhosted history: the account owns it, nothing is running on it.
+    store.ensureConversation("codex", "/sessions/dead.jsonl", "work");
+    store.upsert({ ...spawnEntry("/sessions/dead.jsonl", "work"), status: "starting", host: null });
+
+    expect(() => store.retireAccount("codex", "work", "default", { now: () => Date.now() + 86_400_000 })).not.toThrow();
+
+    const live = store.ensureConversation("codex", "/sessions/live.jsonl", "work");
+    store.holdDelivery(live.id, "still owed to this conversation");
+
+    expect(() => store.retireAccount("codex", "work", "default", { now: () => Date.now() + 86_400_000 }))
+      .toThrow("account has current conversations");
+  });
+
   test("account-retirement compensation preserves unrelated concurrent mutations", () => {
     const store = registry();
     store.setEngineRouting("codex", "work");
