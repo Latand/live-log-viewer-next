@@ -43,6 +43,14 @@ type PendingAnswer = {
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
 };
+type PendingRealtimeStart = {
+  resolve(result: CodexRealtimeWebRtcAnswer): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
+  started: boolean;
+  realtimeSessionId: string | null;
+  sdp: string | null;
+};
 type PendingDelivery = {
   text: string;
   contentDigest: string;
@@ -99,6 +107,11 @@ export interface CodexThreadIdentity {
   path: string | null;
 }
 
+export interface CodexRealtimeWebRtcAnswer {
+  sdp: string;
+  realtimeSessionId: string | null;
+}
+
 const CHILD_ENV_ALLOWLIST = [
   "PATH",
   "HOME",
@@ -131,11 +144,22 @@ const LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER = 3;
 const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_THREAD_READ_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
+const REALTIME_START_TIMEOUT_MS = 90_000;
+const MAX_REALTIME_SDP_BYTES = 512 * 1024;
+const MAX_REALTIME_SPEECH_BYTES = 8 * 1024;
 const MAX_LINE_BYTES = 16 * 1024 * 1024;
 const MAX_STDERR_TAIL_BYTES = 16 * 1024;
 const MAX_PRE_RESTORE_FRAMES = 256;
 const MAX_PRE_RESTORE_BYTES = 4 * 1024 * 1024;
-const MUTATING_RPC_METHODS = new Set(["thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt"]);
+const MUTATING_RPC_METHODS = new Set([
+  "thread/start",
+  "thread/resume",
+  "turn/start",
+  "turn/steer",
+  "turn/interrupt",
+  "thread/realtime/start",
+  "thread/realtime/stop",
+]);
 
 function record(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
@@ -294,6 +318,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly resolveImagePath: (ref: StructuredImageRef) => string;
   private readonly pending = new Map<number, PendingRpc>();
+  private pendingRealtimeStart: PendingRealtimeStart | null = null;
   private readonly lateThreadReadResponses = new Map<number, number>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
@@ -399,6 +424,8 @@ export class CodexAppServerHost implements EngineHost {
     const args = [
       ...(options.fileAuthCredentials ? ["-c", "cli_auth_credentials_store=file"] : []),
       "app-server",
+      "--enable",
+      "realtime_conversation",
     ];
     const child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", args, {
       cwd: options.cwd,
@@ -606,6 +633,63 @@ export class CodexAppServerHost implements EngineHost {
     await this.rpc("turn/interrupt", { threadId: this.identity.threadId, turnId: turnRef });
   }
 
+  async startRealtimeWebRtc(sdp: string): Promise<CodexRealtimeWebRtcAnswer> {
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+      throw new Error("Codex app-server host is unavailable");
+    }
+    const offer = sdp.trim();
+    if (!offer.startsWith("v=0") || Buffer.byteLength(offer, "utf8") > MAX_REALTIME_SDP_BYTES) {
+      throw new Error("A valid WebRTC SDP offer is required");
+    }
+    if (this.pendingRealtimeStart) throw new Error("A realtime session is already starting");
+
+    const answer = new Promise<CodexRealtimeWebRtcAnswer>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.rejectRealtimeStart(new Error("thread/realtime/start timed out"));
+      }, REALTIME_START_TIMEOUT_MS);
+      this.pendingRealtimeStart = {
+        resolve,
+        reject,
+        timer,
+        started: false,
+        realtimeSessionId: null,
+        sdp: null,
+      };
+    });
+    void answer.catch(() => undefined);
+
+    try {
+      await this.rpc("thread/realtime/start", {
+        threadId: this.identity.threadId,
+        version: "v3",
+        outputModality: "audio",
+        transport: { type: "webrtc", sdp: offer },
+        clientManagedHandoffs: true,
+        codexResponsesAsItems: true,
+        includeStartupContext: true,
+      }, REALTIME_START_TIMEOUT_MS);
+    } catch (error) {
+      this.rejectRealtimeStart(error instanceof Error ? error : new Error(safeError(error)));
+    }
+    return answer;
+  }
+
+  async appendRealtimeSpeech(text: string): Promise<void> {
+    const speech = text.trim();
+    if (!speech || Buffer.byteLength(speech, "utf8") > MAX_REALTIME_SPEECH_BYTES) {
+      throw new Error("Realtime speech text is empty or too large");
+    }
+    await this.rpc("thread/realtime/appendSpeech", {
+      threadId: this.identity.threadId,
+      text: speech,
+    });
+  }
+
+  async stopRealtime(): Promise<void> {
+    await this.rpc("thread/realtime/stop", { threadId: this.identity.threadId });
+    this.rejectRealtimeStart(new Error("Realtime session stopped during startup"));
+  }
+
   async answer(attentionRef: string, value: unknown): Promise<void> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       throw new Error("Codex app-server host is unavailable");
@@ -683,6 +767,7 @@ export class CodexAppServerHost implements EngineHost {
 
   private async releaseAndReap(): Promise<void> {
     this.releasing = true;
+    this.rejectRealtimeStart(new Error("Codex app-server host released"));
     this.rejectPendingAnswers(new Error("Codex app-server host released"));
     this.rejectPendingDeliveries(new Error("Codex app-server host released"));
     for (const request of this.pending.values()) {
@@ -1315,6 +1400,35 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private acceptNotification(method: string, params: JsonObject, reconcileBufferedLifecycle = false): void {
+    if (method === "thread/realtime/started") {
+      const pending = this.pendingRealtimeStart;
+      if (!pending || stringField(params, "threadId") !== this.identity.threadId) return;
+      pending.started = true;
+      pending.realtimeSessionId = stringField(params, "realtimeSessionId");
+      this.resolveRealtimeStart();
+      return;
+    }
+    if (method === "thread/realtime/sdp") {
+      const pending = this.pendingRealtimeStart;
+      if (!pending || stringField(params, "threadId") !== this.identity.threadId) return;
+      pending.sdp = stringField(params, "sdp");
+      if (!pending.sdp) {
+        this.rejectRealtimeStart(new Error("Codex app-server returned an empty WebRTC SDP answer"));
+        return;
+      }
+      this.resolveRealtimeStart();
+      return;
+    }
+    if (method === "thread/realtime/error") {
+      if (stringField(params, "threadId") !== this.identity.threadId) return;
+      this.rejectRealtimeStart(new Error(stringField(params, "message") ?? "Codex realtime session failed"));
+      return;
+    }
+    if (method === "thread/realtime/closed") {
+      if (stringField(params, "threadId") !== this.identity.threadId) return;
+      this.rejectRealtimeStart(new Error(stringField(params, "reason") ?? "Codex realtime session closed"));
+      return;
+    }
     const turnId = turnIdFromParams(params);
     if (method === "serverRequest/resolved") {
       const requestId = params.requestId;
@@ -1401,6 +1515,7 @@ export class CodexAppServerHost implements EngineHost {
     this.dead = true;
     this.failure = error;
     this.activeTurnId = null;
+    this.rejectRealtimeStart(error);
     this.rejectPendingAnswers(error);
     this.rejectPendingDeliveries(error);
     this.attentions.clear();
@@ -1421,6 +1536,7 @@ export class CodexAppServerHost implements EngineHost {
     this.engineStatus = "dead";
     this.activeFlags = [];
     this.activeTurnId = null;
+    this.rejectRealtimeStart(error);
     this.rejectPendingAnswers(error);
     this.rejectPendingDeliveries(error);
     this.attentions.clear();
@@ -1461,5 +1577,24 @@ export class CodexAppServerHost implements EngineHost {
       delivery.reject(rejection);
     }
     this.pendingDeliveries.clear();
+  }
+
+  private resolveRealtimeStart(): void {
+    const pending = this.pendingRealtimeStart;
+    if (!pending?.started || pending.sdp === null) return;
+    this.pendingRealtimeStart = null;
+    clearTimeout(pending.timer);
+    pending.resolve({
+      sdp: pending.sdp,
+      realtimeSessionId: pending.realtimeSessionId,
+    });
+  }
+
+  private rejectRealtimeStart(error: Error): void {
+    const pending = this.pendingRealtimeStart;
+    if (!pending) return;
+    this.pendingRealtimeStart = null;
+    clearTimeout(pending.timer);
+    pending.reject(new Error(safeError(error)));
   }
 }

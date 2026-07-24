@@ -10,6 +10,7 @@ import type { TFunction } from "@/lib/i18n";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useCodexRealtime } from "@/hooks/useCodexRealtime";
 import { refreshRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -59,6 +60,7 @@ import {
 } from "./runtime/deliveryState";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
+import { VoiceConversationButton, VoiceConversationPanel } from "./VoiceConversation";
 
 /** The persisted "on resume" runtime profile as a POST body fragment (issue
     #241 §4). `fast` is a codex-only service-tier override. */
@@ -964,6 +966,14 @@ export function TmuxComposer({
   // scanner-shaped subagent, a shell task) means this surface exposes no message
   // path at all, so the whole composer stands down below (finding 2).
   const { caps, structuredSession } = useAgentCapabilities(file);
+  const voiceEnabled = cardId.startsWith("conversation_")
+    && structuredSession?.session.hostKind === "codex-app-server"
+    && structuredSession.session.host === "hosted";
+  const voice = useCodexRealtime(
+    cardId,
+    voiceEnabled,
+    structuredSession?.session.liveTurn?.text ?? "",
+  );
   const structuredImageCapability = structuredSession?.session.capabilities?.imageInput;
   const structuredImageControl = caps.controls.images;
   const structuredImagesDisabled = Boolean(structuredSession && structuredImageControl.state !== "enabled");
@@ -2007,6 +2017,22 @@ export function TmuxComposer({
         /* ArrowUp/ArrowDown in an empty composer walk what is queued and what
            was already sent, newest first (issue #561). */
         history={composerHistory}
+        voiceControl={voiceEnabled ? (
+          <VoiceConversationButton
+            phase={voice.phase}
+            start={voice.start}
+            stop={voice.stop}
+            t={t}
+          />
+        ) : undefined}
+        voicePanel={voiceEnabled ? (
+          <VoiceConversationPanel
+            phase={voice.phase}
+            lines={voice.lines}
+            error={voice.error}
+            t={t}
+          />
+        ) : undefined}
         sendMenuActions={
           canQuickAck
             ? [

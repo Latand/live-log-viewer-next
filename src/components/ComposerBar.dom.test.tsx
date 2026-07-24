@@ -52,6 +52,23 @@ function Harness() {
   />;
 }
 
+function AdditiveVoiceHarness() {
+  const composer = useComposer({ initialText: () => "", persistText: () => {}, submit: () => {} });
+  return (
+    <ComposerBar
+      composer={composer}
+      placeholder="Prompt"
+      textareaAriaLabel="Prompt"
+      imageAriaLabel="Add images"
+      leftSlot={null}
+      sendLabelIdle="Send"
+      sendLabelRecording="Stop"
+      sendIdleClassName="bg-accent"
+      voiceControl={<button type="button" data-testid="voice-call-button">Voice call</button>}
+    />
+  );
+}
+
 function MobileAttachmentHarness() {
   const composer = useComposer({ initialText: () => "", persistText: () => {}, submit: () => {} });
   const restored = useRef(false);
@@ -140,6 +157,19 @@ test("unsupported image capability disables picker, paste, and drop before admis
   expect(dragTransfer.dropEffect).toBe("none");
   expect(dropPrevented).toBe(true);
   expect(host.textContent).toContain("Capability unavailable");
+  flushSync(() => root.unmount());
+});
+
+test("continuous voice is additive and preserves the original dictation input", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<AdditiveVoiceHarness />));
+
+  expect(host.querySelector('[data-testid="voice-call-button"]')).toBeTruthy();
+  const dictation = host.querySelector('button[aria-label="Dictate"]') as HTMLButtonElement | null;
+  expect(dictation).toBeTruthy();
+  expect(dictation?.disabled).toBe(false);
   flushSync(() => root.unmount());
 });
 

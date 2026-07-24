@@ -672,6 +672,11 @@ export function hasStructuredDeliveryHost(key: SessionKey): boolean {
   return state.activeHosts?.has(sessionKeyId(key)) ?? false;
 }
 
+export function structuredDeliveryHostForConversation(conversationId: string): EngineHost | null {
+  if (!conversationId.startsWith("conversation_") || !state.activeRegistry || !state.activeHosts) return null;
+  return hostResolver(state.activeRegistry, state.activeHosts)(conversationId);
+}
+
 export async function publishStructuredDeliveryHost(
   item: StructuredDeliveryHost,
   ownsOperation?: () => Promise<boolean>,
