@@ -1015,6 +1015,131 @@ describe("seedLaunchOutbox (P1#2)", () => {
     }
   });
 
+  test("issue 626: a delivered launch compacted inside the TTL reseeds as delivered and still retires at the TTL", () => {
+    const originalDateNow = Date.now;
+    const settledAt = 1_100;
+    /* Inside the TTL window: the launch settled recently and its echo has not
+       arrived yet. */
+    let now = settledAt + 60_000;
+    Date.now = () => now;
+    try {
+      const provisional = "spawn:launch_626_ttl_reseed";
+      const conversation = "conversation_626_ttl_reseed";
+      const launchId = "launch_626_ttl_reseed";
+      const text = "delivered launch compacted before its TTL elapses";
+
+      seedLaunchOutbox(provisional, {
+        id: launchId,
+        text,
+        images: 0,
+        at: 1_000,
+      });
+      updateOutbox(provisional, launchId, {
+        state: outboxStateForReceiptStatus("delivered"),
+        settledAt,
+      });
+      expect(visibleOutbox(readOutbox(provisional), echoes(), now).map((entry) => entry.id))
+        .toEqual([launchId]);
+
+      /* Compaction evicts the delivered entry from the recent queue BEFORE the
+         TTL elapses; its settlement survives only in the current-launch slot. */
+      for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+        enqueueOutbox(provisional, {
+          id: `ttl-reseed-warm-${index}`,
+          text: `ttl reseed warm ${index}`,
+          images: 0,
+          at: 2_000 + index,
+        });
+      }
+      expect(readOutbox(provisional).some((entry) => entry.id === launchId)).toBe(false);
+
+      /* The recurring LogFeed seed fires once inside the TTL window. The bubble
+         must come back visibly DELIVERED with its original settlement — never as
+         a fresh delivering entry that no echo or TTL could ever retire. */
+      seedLaunchOutbox(provisional, {
+        id: launchId,
+        text,
+        images: 0,
+        at: 1_000,
+      });
+      const reseeded = readOutbox(provisional).find((entry) => entry.id === launchId);
+      expect(reseeded?.state).toBe("delivered");
+      expect(reseeded?.settledAt).toBe(settledAt);
+      expect(visibleOutbox(readOutbox(provisional), echoes(), now).some((entry) => entry.id === launchId))
+        .toBe(true);
+
+      /* Past the TTL the launch retires and a recurring seed cannot revive it. */
+      now = settledAt + OUTBOX_DELIVERED_TTL_MS;
+      expect(visibleOutbox(readOutbox(provisional), echoes(), now).some((entry) => entry.id === launchId))
+        .toBe(false);
+      seedLaunchOutbox(provisional, {
+        id: launchId,
+        text,
+        images: 0,
+        at: 1_000,
+      });
+      expect(visibleOutbox(readOutbox(provisional), echoes(), now).some((entry) => entry.id === launchId))
+        .toBe(false);
+
+      /* Adoption, generation rollover past both retention bounds, and tail
+         eviction leave the launch retired. */
+      adoptOutbox(provisional, conversation);
+      for (let index = 0; index < 512 + OUTBOX_LIMIT + 1; index += 1) {
+        const id = `ttl-reseed-churn-${index}`;
+        const churnText = `ttl reseed churn ${index}`;
+        enqueueOutbox(conversation, {
+          id,
+          text: churnText,
+          images: 0,
+          at: 3_000 + index,
+        });
+        updateOutbox(conversation, id, {
+          state: outboxStateForReceiptStatus("delivered"),
+          settledAt: 3_000 + index,
+        });
+        publishTranscriptEchoes(conversation, [{
+          generation: index < 256
+            ? "/transcripts/626-ttl-reseed-1.jsonl"
+            : "/transcripts/626-ttl-reseed-2.jsonl",
+          id: `row:ttl-reseed:${index}`,
+          text: churnText,
+        }]);
+      }
+      enqueueOutbox(conversation, {
+        id: "ttl-reseed-unrelated-pending",
+        text: "unrelated pending survives the TTL reseed retirement",
+        images: 0,
+        at: 10_000,
+      });
+
+      /* Refresh/reconnect plus further recurring seeds never resurrect it. */
+      resetOutboxForTests();
+      publishTranscriptEchoes(conversation, []);
+      seedLaunchOutbox(conversation, {
+        id: launchId,
+        text,
+        images: 0,
+        at: 1_000,
+      });
+      resetOutboxForTests();
+      seedLaunchOutbox(conversation, {
+        id: launchId,
+        text,
+        images: 0,
+        at: 1_000,
+      });
+
+      const refreshed = readOutbox(conversation);
+      expect(refreshed.some((entry) => entry.id === launchId)).toBe(false);
+      expect(refreshed.find((entry) => entry.id === "ttl-reseed-unrelated-pending")?.state)
+        .toBe("queued");
+      expect(visibleOutbox(refreshed, echoes(), now).some((entry) => entry.id === launchId))
+        .toBe(false);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
   test("issue 626: terminal launch retirement survives both ledgers churning beyond 512 entries", () => {
     const provisional = "spawn:launch_626_terminal_priority";
     const conversation = "conversation_626_terminal_priority";
