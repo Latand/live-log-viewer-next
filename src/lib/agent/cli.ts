@@ -57,6 +57,35 @@ export function resolveBinary(name: string): string {
   return name;
 }
 
+/** Binary path as the OPERATOR'S OWN terminal resolves it. Inside the runtime
+    container the nsenter shim lives at /usr/local/bin and points at container
+    plumbing that does not exist on the host, so a command composed for a host
+    terminal must never embed it (issue: "Підключитися у своєму терміналі"
+    emitted /usr/local/bin/claude → "No such file or directory"). Only the
+    mounted $HOME install locations are probed there; system directories are
+    container-owned and untrustworthy. Outside a container the system paths are
+    probed too. When nothing matches, the bare name defers to the user's PATH. */
+export function resolveHostBinary(name: string): string {
+  const home = os.homedir();
+  const homeCandidates = [
+    path.join(home, ".bun", "bin", name),
+    path.join(home, ".npm-global", "bin", name),
+    path.join(home, ".local", "bin", name),
+    path.join(home, "go", "bin", name),
+  ];
+  const containerized = process.env.LLV_DOCKER_NSENTER_SHIMS === "1";
+  const candidates = containerized ? homeCandidates : [...homeCandidates, "/usr/local/bin/" + name, "/usr/bin/" + name];
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      /* keep looking */
+    }
+  }
+  return name;
+}
+
 export function shellQuote(value: string): string {
   return "'" + value.replace(/'/g, "'\\''") + "'";
 }
@@ -125,6 +154,9 @@ export interface ResumeSpecOptions {
       project-scoped MCP servers in the wrong directory (finding 1). Absent/empty
       ⇒ safe fallback to the sniffed cwd. */
   cwd?: string | null;
+  /** The command is destined for the operator's own terminal: resolve the CLI
+      binary as the HOST sees it, never the in-container nsenter shim. */
+  hostTerminal?: boolean;
 }
 
 function normalizedMcpServers(value: readonly string[] | undefined): string[] {
@@ -382,7 +414,7 @@ export function resumeSpecForSession(
       mcpServers,
       mcpStatePath: managed ? path.join(home, ".claude.json") : path.join(path.dirname(home), ".claude.json"),
     });
-    const args = [resolveBinary("claude")];
+    const args = [(options.hostTerminal ? resolveHostBinary : resolveBinary)("claude")];
     const permissionMode = effectiveClaudePermissionMode(options);
     if (options.readOnly || permissionMode === "plan") {
       args.push("--permission-mode", "plan", "--disallowedTools", "Edit,Write,NotebookEdit");
@@ -405,7 +437,7 @@ export function resumeSpecForSession(
       launchProfile: { ...emptyLaunchProfileForResume(cwd, launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode, allowSubagents: options.allowSubagents ?? false, mcpServers },
     };
   }
-  let command = `${resolveBinary("codex")}`;
+  let command = `${(options.hostTerminal ? resolveHostBinary : resolveBinary)("codex")}`;
   if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
   for (const override of codexMcpRuntimeOverrides(home, cwd, mcpServers)) command += ` -c ${shellQuote(override)}`;
   if (options.model) command += ` -m ${shellQuote(options.model)}`;
