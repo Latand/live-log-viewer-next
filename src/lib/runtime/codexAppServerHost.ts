@@ -703,7 +703,7 @@ export class CodexAppServerHost implements EngineHost {
            long structured answers, scannable identifiers — and all three fail
            when spoken. The persona rides in as the call's first item, which is
            the same channel Codex Desktop uses for its startup context. */
-        initialItems: [{ text: voicePersona() }],
+        initialItems: [{ role: "developer", text: voicePersona() }],
       }, REALTIME_START_TIMEOUT_MS);
     } catch (error) {
       this.rejectRealtimeStart(error instanceof Error ? error : new Error(safeError(error)));
