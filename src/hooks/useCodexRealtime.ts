@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
 import { codexRealtimeClient } from "@/lib/realtime/codexRealtimeClient";
 
-const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null };
+const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
 
 export function useCodexRealtime(
   conversationId: string,
@@ -43,6 +43,8 @@ export function useCodexRealtime(
     /* Read at render time rather than stored: the stream appears with the
        `live` phase, which already re-renders this subtree. */
     micStream: client?.micStream() ?? null,
+    toggleMic: () => client?.toggleMic(),
+    toggleOutput: () => client?.toggleOutput(),
     start: () => client?.start() ?? Promise.resolve(),
     stop: () => client?.stop() ?? Promise.resolve(),
   };

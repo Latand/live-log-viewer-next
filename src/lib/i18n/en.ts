@@ -726,6 +726,8 @@ export const en = {
   "feed.agentEnded": "agent finished",
   "feed.copyCode": "Copy code",
   "feed.copyMd": "Copy message (Markdown)",
+  "feed.voiceTurn": "Voice",
+  "feed.voiceContext": "Call transcript",
   "feed.speak": "Read answer aloud (AI-generated voice)",
   "feed.stopSpeaking": "Stop reading aloud",
   "tts.read": "Read answer aloud",
@@ -1770,4 +1772,8 @@ export const en = {
   "voice.ended": "Voice conversation ended",
   "voice.elapsed": "Call duration",
   "voice.micLevel": "Microphone level",
+  "voice.micMute": "Mute microphone",
+  "voice.micUnmute": "Unmute microphone",
+  "voice.outputMute": "Silence the agent",
+  "voice.outputUnmute": "Unsilence the agent",
 } satisfies Dictionary;

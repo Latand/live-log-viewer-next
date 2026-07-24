@@ -2032,6 +2032,10 @@ export function TmuxComposer({
             error={voice.error}
             startedAt={voice.startedAt}
             stream={voice.micStream}
+            micMuted={voice.micMuted}
+            outputMuted={voice.outputMuted}
+            onToggleMic={voice.toggleMic}
+            onToggleOutput={voice.toggleOutput}
             onRetry={() => void voice.start()}
             t={t}
           />

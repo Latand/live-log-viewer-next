@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { AudioLines } from "lucide-react";
+import { AudioLines, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 
 import { Loader2, RotateCw, Square } from "@/components/icons";
 import { Hint } from "@/components/Hint";
@@ -160,6 +160,39 @@ function MicLevelMeter({ stream, t }: { stream: MediaStream | null; t: TFunction
   );
 }
 
+function MuteToggle({
+  on,
+  onClick,
+  label,
+  testId,
+  OnIcon,
+  OffIcon,
+}: {
+  on: boolean;
+  onClick: () => void;
+  label: string;
+  testId: string;
+  OnIcon: typeof Mic;
+  OffIcon: typeof Mic;
+}) {
+  const Icon = on ? OnIcon : OffIcon;
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      aria-label={label}
+      aria-pressed={on}
+      title={label}
+      onClick={onClick}
+      className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        on ? "text-danger hover:bg-danger/10" : "text-muted hover:bg-sunken hover:text-secondary"
+      }`}
+    >
+      <Icon className="h-3.5 w-3.5" aria-hidden />
+    </button>
+  );
+}
+
 /** The transcript follows the newest line unless the operator has scrolled up
     to read something — hijacking their scroll position mid-call is worse than
     a missed line they can reach in one gesture. */
@@ -184,6 +217,10 @@ export function VoiceConversationPanel({
   error,
   startedAt = null,
   stream = null,
+  micMuted = false,
+  outputMuted = false,
+  onToggleMic,
+  onToggleOutput,
   onRetry,
   t,
 }: {
@@ -194,6 +231,10 @@ export function VoiceConversationPanel({
   startedAt?: number | null;
   /** The live microphone stream, for the level meter. */
   stream?: MediaStream | null;
+  micMuted?: boolean;
+  outputMuted?: boolean;
+  onToggleMic?: () => void;
+  onToggleOutput?: () => void;
   onRetry?: () => void;
   t: TFunction;
 }) {
@@ -232,7 +273,29 @@ export function VoiceConversationPanel({
         />
         <span className="min-w-0 flex-1 truncate text-caption text-muted" role="status">{status}</span>
         {live && startedAt !== null ? <CallTimer startedAt={startedAt} t={t} /> : null}
-        {live ? <MicLevelMeter stream={stream} t={t} /> : null}
+        {live && !micMuted ? <MicLevelMeter stream={stream} t={t} /> : null}
+        {/* Muting is the move when someone walks in mid-call; hanging up and
+            re-admitting a session is not. */}
+        {live && onToggleMic ? (
+          <MuteToggle
+            on={micMuted}
+            onClick={onToggleMic}
+            testId="voice-mic-toggle"
+            label={micMuted ? t("voice.micUnmute") : t("voice.micMute")}
+            OnIcon={MicOff}
+            OffIcon={Mic}
+          />
+        ) : null}
+        {live && onToggleOutput ? (
+          <MuteToggle
+            on={outputMuted}
+            onClick={onToggleOutput}
+            testId="voice-output-toggle"
+            label={outputMuted ? t("voice.outputUnmute") : t("voice.outputMute")}
+            OnIcon={VolumeX}
+            OffIcon={Volume2}
+          />
+        ) : null}
       </header>
 
       <div

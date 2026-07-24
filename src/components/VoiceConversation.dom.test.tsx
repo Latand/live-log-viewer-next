@@ -180,3 +180,61 @@ test("consecutive turns from one speaker carry a single label", () => {
   expect(host.textContent).toContain("Three agents are active.");
   flushSync(() => root.unmount());
 });
+
+test("a live call offers mute for the microphone and for the agent's voice", () => {
+  /* Muting is the move when someone walks into the room mid-call; hanging up
+     and paying for a fresh admission is not. */
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const toggles: string[] = [];
+  const render = (micMuted: boolean, outputMuted: boolean) => root.render(
+    <VoiceConversationPanel
+      phase="live"
+      error={null}
+      startedAt={Date.now()}
+      micMuted={micMuted}
+      outputMuted={outputMuted}
+      onToggleMic={() => toggles.push("mic")}
+      onToggleOutput={() => toggles.push("output")}
+      lines={[]}
+      t={t}
+    />,
+  );
+  flushSync(() => render(false, false));
+  const mic = host.querySelector('[data-testid="voice-mic-toggle"]') as HTMLElement;
+  const output = host.querySelector('[data-testid="voice-output-toggle"]') as HTMLElement;
+  expect(mic.getAttribute("aria-label")).toBe("Mute microphone");
+  expect(mic.getAttribute("aria-pressed")).toBe("false");
+  expect(output.getAttribute("aria-label")).toBe("Silence the agent");
+  flushSync(() => mic.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  flushSync(() => output.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  expect(toggles).toEqual(["mic", "output"]);
+
+  // A muted microphone drops the level meter: an idle meter would read as a
+  // dead call rather than a deliberate mute.
+  flushSync(() => render(true, true));
+  expect(host.querySelector('[data-testid="voice-mic-level"]')).toBeNull();
+  expect(host.querySelector('[data-testid="voice-mic-toggle"]')?.getAttribute("aria-label")).toBe("Unmute microphone");
+  expect(host.querySelector('[data-testid="voice-output-toggle"]')?.getAttribute("aria-label")).toBe("Unsilence the agent");
+  flushSync(() => root.unmount());
+});
+
+test("mute controls stay out of the way outside a live call", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(
+    <VoiceConversationPanel
+      phase="error"
+      error="You have reached your usage limit."
+      lines={[]}
+      onToggleMic={() => {}}
+      onToggleOutput={() => {}}
+      t={t}
+    />,
+  ));
+  expect(host.querySelector('[data-testid="voice-mic-toggle"]')).toBeNull();
+  expect(host.querySelector('[data-testid="voice-output-toggle"]')).toBeNull();
+  flushSync(() => root.unmount());
+});

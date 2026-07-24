@@ -4,7 +4,7 @@ import path, { join } from "node:path";
 
 import type { FileEntry } from "@/lib/types";
 
-import { buildFeed, createFeedSession, type Item } from "./parse";
+import { buildFeed, createFeedSession, parseRealtimeDelegation, type Item } from "./parse";
 import { groupNestedCalls } from "./toolBlocks";
 
 const claudeFile = { path: "/tmp/x.jsonl", engine: "claude", fmt: "claude", activity: "recent" } as FileEntry;
@@ -1626,4 +1626,29 @@ describe("ScheduleWakeup card", () => {
     expect(by.get("first")?.superseded).toBe(false);
     assertParity(claudeFile, lines);
   });
+});
+
+test("a realtime delegation row renders as a voice turn, not raw XML", () => {
+  /* Codex records every delegated voice turn as a user row wrapping a
+     `<realtime_delegation>` envelope; feeding that through untouched put the
+     markup itself in the operator's transcript (#664). */
+  const parsed = parseRealtimeDelegation(
+    "<realtime_delegation>\n  <input>Перевір дошку</input>\n  <transcript_delta>user: Алло\nassistant: Слухаю</transcript_delta>\n</realtime_delegation>",
+  );
+  expect(parsed).toEqual({ input: "Перевір дошку", delta: "user: Алло\nassistant: Слухаю" });
+});
+
+test("a delegation envelope truncated mid-transcript still yields its turn", () => {
+  /* The rolling transcript tail is what gets cut when the envelope is long, so
+     the closing tag cannot be required. */
+  const parsed = parseRealtimeDelegation(
+    "<realtime_delegation>\n  <input>Що далі</input>\n  <transcript_delta>assistant: Зроз",
+  );
+  expect(parsed?.input).toBe("Що далі");
+  expect(parsed?.delta).toBe("assistant: Зроз");
+});
+
+test("ordinary user text is never mistaken for a voice turn", () => {
+  expect(parseRealtimeDelegation("Talk about <realtime_delegation> in the docs")).toBeNull();
+  expect(parseRealtimeDelegation("<realtime_conversation>\nRealtime conversation started.\n")).toBeNull();
 });

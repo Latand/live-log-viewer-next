@@ -701,6 +701,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "feed.agentEnded": "агент завершився",
   "feed.copyCode": "Скопіювати код",
   "feed.copyMd": "Скопіювати повідомлення (Markdown)",
+  "feed.voiceTurn": "Голос",
+  "feed.voiceContext": "Стенограма дзвінка",
   "feed.speak": "Прочитати відповідь уголос (голос згенеровано ШІ)",
   "feed.stopSpeaking": "Зупинити озвучення",
   "tts.read": "Прочитати відповідь уголос",
@@ -1727,4 +1729,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "voice.ended": "Голосову розмову завершено",
   "voice.elapsed": "Тривалість дзвінка",
   "voice.micLevel": "Рівень мікрофона",
+  "voice.micMute": "Вимкнути мікрофон",
+  "voice.micUnmute": "Увімкнути мікрофон",
+  "voice.outputMute": "Приглушити агента",
+  "voice.outputUnmute": "Увімкнути звук агента",
 };
