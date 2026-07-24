@@ -789,6 +789,7 @@ export class RuntimeJournal {
         terminal: false,
         candidate: null,
         previous: null,
+        mcpRuntime: { candidate: null, previous: null, publications: [], health: [] },
         health: [],
         error: null,
         owner,
@@ -821,6 +822,17 @@ export class RuntimeJournal {
   viewerDeploymentByIdempotencyKey(idempotencyKey: string): ViewerDeploymentStatus | null {
     const row = this.db.query<{ status_json: string }, [string]>("SELECT status_json FROM viewer_deployments WHERE idempotency_key = ?").get(idempotencyKey);
     return row ? JSON.parse(row.status_json) as ViewerDeploymentStatus : null;
+  }
+
+  latestViewerDeploymentForRevision(revision: string): ViewerDeploymentStatus | null {
+    const rows = this.db.query<{ status_json: string }, []>(
+      "SELECT status_json FROM viewer_deployments ORDER BY updated_at DESC",
+    ).all();
+    for (const row of rows) {
+      const status = JSON.parse(row.status_json) as ViewerDeploymentStatus;
+      if (status.revision === revision) return status;
+    }
+    return null;
   }
 
   activeViewerDeployment(): ViewerDeploymentStatus | null {

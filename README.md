@@ -179,10 +179,17 @@ registration) — run the idempotent installer and re-run it after adding
 accounts:
 
 ```bash
-scripts/install-mcp.sh                     # registers the repo's bin/mcp-server.mjs
+scripts/install-mcp.sh                     # uses the managed stable launcher when present
 LLV_MCP_BIN=/path/to/mcp-server.mjs \
-  scripts/install-mcp.sh                   # point at a stable runtime copy instead
+  scripts/install-mcp.sh                   # select an explicit launcher
 ```
+
+Exact deployments keep the managed executable at
+`~/.agents/tools/llv-mcp-runtime/bin/mcp-server.mjs`. Existing Claude and
+Codex registrations retain that path. Each fresh MCP process reads the atomic
+Viewer release target and starts the runtime bundle staged from the same
+revision. Deployment receipts expose the staged runtime digest plus durable
+activation or restore evidence.
 
 The server name must stay `viewer` (or another `isViewerMcpServer()` match:
 `viewer-*`, `agent-log-viewer*`) — transcript calls attributed to other names
