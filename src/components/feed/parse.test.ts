@@ -787,6 +787,43 @@ describe("Codex user-turn coalescing", () => {
 });
 
 describe("Codex assistant prose coalescing", () => {
+  test("issue 626: response identity propagates through mixed prose, review, citation, and blob projections", () => {
+    const responseId = "response-mixed-626";
+    const mixed = [
+      "Introductory prose.",
+      "<oai-mem-citation>",
+      "<citation_entries>",
+      "MEMORY.md:1-2|note=[context]",
+      "</citation_entries>",
+      "<rollout_ids>",
+      "</rollout_ids>",
+      "</oai-mem-citation>",
+      "VERDICT: APPROVE",
+      "",
+      "NO FINDINGS",
+    ].join("\n");
+    const response = (id: string, text: string) => JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-07-23T09:00:01.000Z",
+      payload: {
+        type: "message",
+        id,
+        role: "assistant",
+        content: [{ type: "output_text", text }],
+      },
+    });
+
+    const mixedItems = buildFeed(codexFile, [response(responseId, mixed)], false, "").items;
+    expect(mixedItems.map((item) => item.kind)).toEqual(["prose", "mem-citation", "review"]);
+    expect(mixedItems.map((item) => "sourceId" in item ? item.sourceId : null))
+      .toEqual([responseId, responseId, responseId]);
+
+    const blobItems = buildFeed(codexFile, [response("response-blob-626", "A".repeat(30_000))], false, "").items;
+    expect(blobItems).toEqual([
+      expect.objectContaining({ kind: "blob", sourceId: "response-blob-626" }),
+    ]);
+  });
+
   test("coalesces production-shaped echoes in either record order and gives the event timestamp ownership", () => {
     const sevenMsText = "Причина `sudo` тоже найдена точно: сокет Docker имеет права `root:docker`, пользователь `latand` уже записан в группу `docker`, однако текущая login-сессия запущена без этой дополнительной группы. Host network, PID namespace и маунты к этому отношения не имеют. После нового входа в сессию группа подхватится; для текущей оболочки можно запускать через `sg docker -c ...`. Проверяю доступ этим способом без изменения системы.";
     const zeroMsText = "Account-switch UI готов и закоммичен: bare `select()` удалён, обе поверхности используют preview → confirm/migrate, активный аккаунт можно нажать для ремонта застрявших поколений, retry получает свежую revision. Переношу UI-коммит в общую ветку и запускаю интеграционную проверку backend+frontend. После неё будет один свежий независимый review-round.";
@@ -800,10 +837,22 @@ describe("Codex assistant prose coalescing", () => {
     ];
 
     expect(itemsOfKind(buildFeed(codexFile, productionOrder, false, ""), "prose")).toEqual([
-      { kind: "prose", ts: "2026-07-10T07:05:12.128Z", text: sevenMsText, engine: "codex" },
+      {
+        kind: "prose",
+        ts: "2026-07-10T07:05:12.128Z",
+        text: sevenMsText,
+        engine: "codex",
+        sourceId: "msg_0393b5967eeb6b3d016a5099a6c6f881918750dcfe9b95b684",
+      },
     ]);
     expect(itemsOfKind(buildFeed(codexFile, reversedOrder, false, ""), "prose")).toEqual([
-      { kind: "prose", ts: "2026-07-10T07:05:24.424Z", text: zeroMsText, engine: "codex" },
+      {
+        kind: "prose",
+        ts: "2026-07-10T07:05:24.424Z",
+        text: zeroMsText,
+        engine: "codex",
+        sourceId: "msg_0393b5967eeb6b3d016a5099b33df88191bfb8b5a7b245ebb7",
+      },
     ]);
   });
 

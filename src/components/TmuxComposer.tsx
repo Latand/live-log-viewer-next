@@ -24,11 +24,13 @@ import {
   adoptOutbox,
   cancelOutbox,
   enqueueOutbox,
+  markOutboxResponded,
   outboxHistory,
   outboxStateForReceiptStatus,
   transcriptEchoCount,
   updateOutbox,
   useOutbox,
+  useTranscriptEchoes,
   type OutboxEntry,
   type OutboxState,
 } from "./conversation/outbox";
@@ -49,6 +51,7 @@ import {
   deliveryEchoes,
   deliveryProblem,
   dismissedReceiptsKey,
+  messageReceiptForAssistantTurn,
   readDismissedReceipts,
   visibleStandaloneReceipts,
   withDismissedReceipts,
@@ -1008,6 +1011,10 @@ export function TmuxComposer({
      moment they are submitted, so the feed can render them as optimistic user
      bubbles while the composer clears and stays typable. */
   const outbox = useOutbox(cardId);
+  /* Exact transcript user echoes are the authoritative retirement signal for
+     temporary delivered rows. The feed publishes them reactively because the
+     transcript write commonly precedes the final delivered receipt. */
+  const transcriptEchoCounts = useTranscriptEchoes(cardId);
   /* Attachment bytes for queued submissions. Memory-only: a refresh restores
      the queue's text but not its images, and the restore path marks any
      image-bearing entry as needing re-attachment rather than silently sending
@@ -1052,6 +1059,19 @@ export function TmuxComposer({
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
   const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
+  const assistantTurnReceipt = messageReceiptForAssistantTurn(
+    displayedRuntimeReceipts,
+    structuredSession?.session.liveTurn?.turnId,
+  );
+  const assistantTurnMessageKey = assistantTurnReceipt?.idempotencyKey;
+  /* A live assistant delta proves the matching message reached its turn even
+     while the receipt stream still projects `delivering`. Persist that causal
+     settlement so the optimistic bubble stays retired after the delta folds
+     into the transcript. */
+  useEffect(() => {
+    if (!assistantTurnMessageKey) return;
+    markOutboxResponded(cardId, assistantTurnMessageKey, nowMs());
+  }, [cardId, assistantTurnMessageKey]);
   const displayedRuntimeReceiptsRef = useRef(displayedRuntimeReceipts);
   useLayoutEffect(() => {
     displayedRuntimeReceiptsRef.current = displayedRuntimeReceipts;
@@ -1072,11 +1092,24 @@ export function TmuxComposer({
     setDismissedReceiptIds(next);
     writeDismissedReceipts(cardId, next);
   };
+  const respondedMessageKeys = new Set(
+    outbox
+      .filter((entry) => entry.responseStartedAt !== undefined)
+      .map((entry) => entry.id),
+  );
+  if (assistantTurnMessageKey) respondedMessageKeys.add(assistantTurnMessageKey);
   /* Successful sends whose bubble has not landed in the visible feed yet:
      quiet one-line echoes derived from the receipt stream (issue #264 rule 2).
      They self-clear the moment the transcript grows — the bubble in the feed
      is the real confirmation — so success never accumulates chrome. */
-  const echoedReceipts = deliveryEchoes(displayedRuntimeReceipts, file.mtime * 1000, dismissedReceipts, nowMs());
+  const echoedReceipts = deliveryEchoes(
+    displayedRuntimeReceipts,
+    file.mtime * 1000,
+    dismissedReceipts,
+    nowMs(),
+    transcriptEchoCounts,
+    respondedMessageKeys,
+  );
 
   const persistPendingDeliveries = (next: PendingDelivery[]) => {
     pendingDeliveries.current = next;

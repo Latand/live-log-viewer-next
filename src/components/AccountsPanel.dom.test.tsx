@@ -46,6 +46,7 @@ function state(currentLogin: ClaudeLoginView, over: Partial<EngineAccountsState>
     retryLogin: async () => true,
     remove: async () => true,
     cleanupOrphans: async () => true,
+    copyTerminalCommand: async () => true,
     ...over,
   };
 }
@@ -247,4 +248,63 @@ test("keyboard Cancel restores focus to the Claude sign-in row after it enters c
 
   await view.rerender(state(login({ phase: "canceling", loginUrl: null, acceptsCode: false }), { cancelLogin: initial.cancelLogin }));
   expect(document.activeElement).toBe(view.host.querySelector('[role="group"]'));
+});
+
+test("each authenticated account row exposes a one-click tmux agent launch", async () => {
+  let opened: string | null = null;
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts: [{ id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null }],
+    copyTerminalCommand: async (id) => { opened = id; return true; },
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const launch = view.host.querySelector<HTMLButtonElement>('button[aria-label="Copy the agent command for Acc"]')!;
+  expect(launch).not.toBeNull();
+  expect(launch.disabled).toBe(false);
+
+  flushSync(() => { launch.click(); });
+  await Promise.resolve();
+  expect(opened as unknown as string).toBe("acc");
+});
+
+test("the tmux launch stands down for signed-out and pending accounts", async () => {
+  const initial = state(login(), {
+    accounts: [
+      { id: "out", label: "Out", kind: "managed", authPresent: false, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null, login: null },
+      { id: "pending", label: "Pending", kind: "managed", authPresent: true, loginPending: true, loginState: "pending", deviceAuth: null, login: null },
+    ],
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const out = view.host.querySelector<HTMLButtonElement>('button[aria-label="Copy the agent command for Out"]')!;
+  const pending = view.host.querySelector<HTMLButtonElement>('button[aria-label="Copy the agent command for Pending"]')!;
+  expect(out.disabled).toBe(true);
+  expect(pending.disabled).toBe(true);
+});
+
+test("a switch-failure notice shows the server's real error text beside Retry", async () => {
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts: [{ id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null }],
+    notice: { kind: "error", operation: "switch", messageKey: "accounts.switchFailed", detail: "RegistryParityError: snapshots differ", action: { type: "retry", kind: "switch", accountId: "acc" } },
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  expect(view.host.textContent).toContain("Could not switch account — RegistryParityError: snapshots differ");
+  expect([...view.host.querySelectorAll("button")].some((button) => button.textContent === "Retry")).toBe(true);
+});
+
+test("quota windows render as labeled meters with remaining capacity", async () => {
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts: [{
+      id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null,
+      limits: { freshness: "fresh", session: { usedPercent: 33, resetsAt: null }, weekly: { usedPercent: 80, resetsAt: null } },
+    }],
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const detail = view.host.querySelector('[aria-label="Quota windows for Acc"]')!;
+  expect(detail.textContent).toContain("5h");
+  expect(detail.textContent).toContain("Week");
+  expect(detail.textContent).toContain("67%");
+  expect(detail.textContent).toContain("20%");
 });

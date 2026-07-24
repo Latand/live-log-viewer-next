@@ -30,6 +30,11 @@ import {
   type ViewerDeploymentReceipt,
   type ViewerDeploymentStatus,
 } from "@/lib/runtime/contracts";
+import {
+  appendRuntimeLiveTurnDelta,
+  completeRuntimeLiveTurnItem,
+  normalizeRuntimeLiveTurn,
+} from "@/lib/runtime/liveTurn";
 import { parseStructuredImageRefs, structuredContent } from "@/lib/runtime/structuredContent";
 import { runtimeImageCapability } from "@/lib/runtime/runtimeImageStore";
 
@@ -196,6 +201,7 @@ function visibleReceipts(value: RuntimeOperationReceipt[]): RuntimeOperationRece
 function baseSession(id: string, payload: Record<string, unknown>, revision: number): RuntimeSession {
   const key = record(payload.sessionKey);
   const capabilities = record(payload.capabilities);
+  const liveTurn = normalizeRuntimeLiveTurn(payload.liveTurn);
   return {
     conversationId: typeof payload.conversationId === "string" ? payload.conversationId : id,
     sessionKey: {
@@ -227,6 +233,7 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
       ? payload.pendingReconfigure as RuntimeSession["pendingReconfigure"]
       : null,
     drift: payload.drift && typeof payload.drift === "object" ? payload.drift as RuntimeSession["drift"] : null,
+    ...(liveTurn ? { liveTurn } : {}),
   };
 }
 
@@ -1555,8 +1562,37 @@ export class RuntimeJournal {
         revision: event.revision,
         turn: event.kind === "turn-started" ? "running" : "idle",
         activeTurnId: event.kind === "turn-started" && typeof payload.turnId === "string" ? payload.turnId : null,
+        liveTurn: previous.liveTurn,
       };
       this.upsertEntity("session", scope.id, event.revision, next, event.seq);
+      return;
+    }
+    if (event.kind === "delta") {
+      const previous = this.entity<RuntimeSession>("session", scope.id) ?? baseSession(scope.id, {}, 0);
+      const turnId = typeof payload.turnId === "string"
+        ? payload.turnId
+        : previous.activeTurnId ?? "unknown";
+      const fragment = typeof payload.text === "string" ? payload.text : "";
+      this.upsertEntity("session", scope.id, event.revision, {
+        ...previous,
+        revision: event.revision,
+        liveTurn: appendRuntimeLiveTurnDelta(previous.liveTurn, turnId, fragment, event.recorded_at),
+      }, event.seq);
+      return;
+    }
+    if (event.kind === "item") {
+      const previous = this.entity<RuntimeSession>("session", scope.id) ?? baseSession(scope.id, {}, 0);
+      const turnId = typeof payload.turnId === "string"
+        ? payload.turnId
+        : previous.activeTurnId ?? "unknown";
+      const liveTurn = payload.phase === "completed"
+        ? completeRuntimeLiveTurnItem(previous.liveTurn, turnId, payload.item, event.recorded_at)
+        : previous.liveTurn;
+      this.upsertEntity("session", scope.id, event.revision, {
+        ...previous,
+        revision: event.revision,
+        liveTurn,
+      }, event.seq);
       return;
     }
     if (event.kind === "attention") {

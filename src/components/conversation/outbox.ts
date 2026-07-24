@@ -36,6 +36,9 @@ export interface OutboxEntry {
   state: OutboxState;
   /** Moment the entry left `queued`/`delivering` (ms), for the hard-cap TTL. */
   settledAt?: number;
+  /** Assistant output began for the turn created by this submission. This is
+      causal delivery proof and permanently retires the optimistic bubble. */
+  responseStartedAt?: number;
   error?: string;
   /** The attachment bytes of this submission did not survive a page refresh
       (previews are memory-only). The entry is held back rather than delivered
@@ -47,6 +50,13 @@ export interface OutboxEntry {
       drain of the operator's follow-up messages. It retires on its transcript
       echo like any other bubble. */
   launchOwned?: true;
+  /** The canonical text this bubble's transcript echo will carry (issue #615),
+      when it differs from the displayed {@link text}. A role launch DISPLAYS the
+      operator's raw draft but the transcript echoes the delivered scaffold-plus-
+      draft, so retirement matches THIS text while the bubble still shows the raw
+      draft. Absent ⇒ the display text is its own echo identity (plain launches
+      and ordinary composer sends). */
+  echoText?: string;
   /** Submission watermark (round-2 finding 2): how many transcript echoes of THIS
       exact text already existed when the entry was submitted. Retirement consumes
       only echoes BEYOND this baseline, so a freshly queued bubble survives a
@@ -54,6 +64,13 @@ export interface OutboxEntry {
       lands. Absent (legacy/reloaded entries) ⇒ baseline 0, preserving the prior
       "retire once the text is present" reload behaviour. */
   echoBaseline?: number;
+  /** Stable transcript-row anchors present when this entry was submitted. They
+      are the durable occurrence watermark across capped tails and filters. */
+  echoBaselineIds?: string[];
+  /** Stable anchor of the canonical user row that retired this entry. Once set,
+      retirement is monotonic across tail eviction, adoption, and refresh. */
+  retiredEchoId?: string;
+  retiredAt?: number;
 }
 
 /**
@@ -93,10 +110,102 @@ export const OUTBOX_MTIME_GRACE_MS = 2_000;
 export const OUTBOX_DELIVERED_TTL_MS = 10 * 60_000;
 
 const storageKey = (cardId: string) => "llvOutbox:" + cardId;
+const echoStorageKey = (cardId: string) => "llvOutboxEchoes:" + cardId;
+const occurrenceStorageKey = (cardId: string) => "llvOutboxOccurrences:" + cardId;
+const currentLaunchStorageKey = (cardId: string) => "llvOutboxCurrentLaunch:" + cardId;
 
 const queues = new Map<string, readonly OutboxEntry[]>();
 const listeners = new Set<() => void>();
 const EMPTY: readonly OutboxEntry[] = [];
+
+export interface TranscriptEchoObservation {
+  /** Active transcript path. Production feeds always provide it; legacy fixtures may omit it. */
+  generation?: string;
+  /** Stable absolute feed anchor, e.g. `row:<source line>:<ordinal>`. */
+  id: string;
+  text: string;
+}
+
+interface PersistedEchoObservation {
+  id: string;
+  key: string;
+}
+
+const ECHO_LEDGER_LIMIT = 512;
+const echoLedgers = new Map<string, readonly PersistedEchoObservation[]>();
+const EMPTY_ECHO_LEDGER: readonly PersistedEchoObservation[] = [];
+
+interface PersistedOccurrenceTombstone {
+  /** Submission identity retained after the recent-history entry is compacted. */
+  id: string;
+  key: string;
+  at: number;
+  echoBaseline?: number;
+  echoBaselineIds?: string[];
+  retiredEchoId?: string;
+  retiredAt?: number;
+  launchOwned?: true;
+}
+
+/** Unresolved owners consume future echoes oldest-first. Preserve the oldest
+    supported set so completed churn cannot displace active chronology. */
+const OCCURRENCE_ACTIVE_LIMIT = ECHO_LEDGER_LIMIT;
+/** Consumed owners are replay protection history. Keep the newest bounded set. */
+const OCCURRENCE_COMPLETED_LIMIT = ECHO_LEDGER_LIMIT;
+const occurrenceTombstones = new Map<string, readonly PersistedOccurrenceTombstone[]>();
+const EMPTY_OCCURRENCE_TOMBSTONES: readonly PersistedOccurrenceTombstone[] = [];
+
+type CurrentLaunchTerminalReason = "response-started" | "delivered-ttl";
+
+interface PersistedCurrentLaunch {
+  id: string;
+  at: number;
+  settledAt?: number;
+  retiredEchoId?: string;
+  retiredAt?: number;
+  terminalReason?: CurrentLaunchTerminalReason;
+}
+
+/** One stable conversation has one current launch identity. */
+const currentLaunches = new Map<string, PersistedCurrentLaunch | null>();
+
+function compareOccurrenceOrder(
+  left: PersistedOccurrenceTombstone,
+  right: PersistedOccurrenceTombstone,
+): number {
+  if (left.at !== right.at) return left.at - right.at;
+  if (left.id < right.id) return -1;
+  if (left.id > right.id) return 1;
+  return 0;
+}
+
+function compareCompletedAge(
+  left: PersistedOccurrenceTombstone,
+  right: PersistedOccurrenceTombstone,
+): number {
+  const age = (left.retiredAt ?? left.at) - (right.retiredAt ?? right.at);
+  return age || compareOccurrenceOrder(left, right);
+}
+
+/**
+ * Retention has two independent priority tiers. Active occurrence owners keep
+ * the oldest 512 submissions because reconciliation consumes echoes in that
+ * order. Completed reservations keep the newest 512 by retirement age. At a
+ * tier cap, those ordering rules choose the retained set deterministically.
+ */
+function boundOccurrenceTombstones(
+  tombstones: readonly PersistedOccurrenceTombstone[],
+): readonly PersistedOccurrenceTombstone[] {
+  const active = tombstones
+    .filter((tombstone) => !tombstone.retiredEchoId)
+    .sort(compareOccurrenceOrder)
+    .slice(0, OCCURRENCE_ACTIVE_LIMIT);
+  const completed = tombstones
+    .filter((tombstone) => Boolean(tombstone.retiredEchoId))
+    .sort(compareCompletedAge)
+    .slice(-OCCURRENCE_COMPLETED_LIMIT);
+  return [...active, ...completed].sort(compareOccurrenceOrder);
+}
 
 function isEntry(value: unknown): value is OutboxEntry {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -139,6 +248,204 @@ function persist(cardId: string, queue: readonly OutboxEntry[]): void {
   }
 }
 
+function isPersistedEcho(value: unknown): value is PersistedEchoObservation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  return typeof raw.id === "string" && typeof raw.key === "string";
+}
+
+function isPersistedCurrentLaunch(value: unknown): value is PersistedCurrentLaunch {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  return typeof raw.id === "string"
+    && typeof raw.at === "number"
+    && (raw.settledAt === undefined || typeof raw.settledAt === "number")
+    && (raw.retiredEchoId === undefined || typeof raw.retiredEchoId === "string")
+    && (raw.retiredAt === undefined || typeof raw.retiredAt === "number")
+    && (raw.terminalReason === undefined
+      || raw.terminalReason === "response-started"
+      || raw.terminalReason === "delivered-ttl");
+}
+
+function readCurrentLaunch(cardId: string): PersistedCurrentLaunch | null {
+  if (currentLaunches.has(cardId)) return currentLaunches.get(cardId) ?? null;
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(currentLaunchStorageKey(cardId)) ?? "null") as unknown;
+    const restored = isPersistedCurrentLaunch(raw) ? raw : null;
+    currentLaunches.set(cardId, restored);
+    return restored;
+  } catch {
+    currentLaunches.set(cardId, null);
+    return null;
+  }
+}
+
+function persistCurrentLaunch(cardId: string, launch: PersistedCurrentLaunch | null): void {
+  currentLaunches.set(cardId, launch);
+  try {
+    if (launch) sessionStorage.setItem(currentLaunchStorageKey(cardId), JSON.stringify(launch));
+    else sessionStorage.removeItem(currentLaunchStorageKey(cardId));
+  } catch {
+    /* quota / opaque origin: the in-memory slot still protects this mount */
+  }
+}
+
+function selectCurrentLaunch(
+  current: PersistedCurrentLaunch | null,
+  candidate: PersistedCurrentLaunch,
+): PersistedCurrentLaunch {
+  if (!current) return candidate;
+  if (current.id === candidate.id) {
+    const latest = candidate.at > current.at ? candidate : current;
+    const settledAt = Math.max(current.settledAt ?? -Infinity, candidate.settledAt ?? -Infinity);
+    const terminal = [current, candidate]
+      .filter((launch) => launch.retiredEchoId || launch.terminalReason)
+      .sort((left, right) => (left.retiredAt ?? left.at) - (right.retiredAt ?? right.at))
+      .at(-1);
+    return {
+      ...latest,
+      ...(Number.isFinite(settledAt) ? { settledAt } : {}),
+      ...(terminal
+        ? {
+          ...(terminal.retiredEchoId ? { retiredEchoId: terminal.retiredEchoId } : {}),
+          ...(terminal.retiredAt !== undefined ? { retiredAt: terminal.retiredAt } : {}),
+          ...(terminal.terminalReason ? { terminalReason: terminal.terminalReason } : {}),
+        }
+        : {}),
+    };
+  }
+  if (candidate.at !== current.at) return candidate.at > current.at ? candidate : current;
+  return candidate.id > current.id ? candidate : current;
+}
+
+function recordCurrentLaunch(cardId: string, candidate: PersistedCurrentLaunch): void {
+  persistCurrentLaunch(cardId, selectCurrentLaunch(readCurrentLaunch(cardId), candidate));
+}
+
+function recordCurrentLaunchRetirement(
+  cardId: string,
+  candidate: PersistedCurrentLaunch & (
+    { retiredEchoId: string }
+    | { terminalReason: CurrentLaunchTerminalReason }
+  ),
+): void {
+  const current = readCurrentLaunch(cardId);
+  if (current && current.id !== candidate.id) return;
+  recordCurrentLaunch(cardId, candidate);
+}
+
+function terminalReasonForLaunch(
+  launch: Pick<PersistedCurrentLaunch, "settledAt" | "terminalReason">,
+  nowMs: number,
+): CurrentLaunchTerminalReason | undefined {
+  if (launch.terminalReason) return launch.terminalReason;
+  if (
+    launch.settledAt !== undefined
+    && nowMs - launch.settledAt >= OUTBOX_DELIVERED_TTL_MS
+  ) return "delivered-ttl";
+  return undefined;
+}
+
+function recordCurrentLaunchEntry(cardId: string, entry: OutboxEntry, nowMs = Date.now()): void {
+  if (!entry.launchOwned) return;
+  const settledAt = entry.settledAt ?? (entry.state === "delivered" ? entry.at : undefined);
+  const terminalReason = entry.responseStartedAt !== undefined
+    ? "response-started"
+    : terminalReasonForLaunch({ settledAt }, nowMs);
+  const candidate = {
+    id: entry.id,
+    at: entry.at,
+    ...(settledAt !== undefined ? { settledAt } : {}),
+  };
+  if (terminalReason) {
+    recordCurrentLaunchRetirement(cardId, {
+      ...candidate,
+      terminalReason,
+      retiredAt: terminalReason === "response-started"
+        ? entry.responseStartedAt
+        : (settledAt ?? entry.at) + OUTBOX_DELIVERED_TTL_MS,
+    });
+    return;
+  }
+  recordCurrentLaunch(cardId, candidate);
+}
+
+function readEchoLedger(cardId: string): readonly PersistedEchoObservation[] {
+  const cached = echoLedgers.get(cardId);
+  if (cached) return cached;
+  if (typeof window === "undefined") return EMPTY_ECHO_LEDGER;
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(echoStorageKey(cardId)) ?? "[]") as unknown;
+    const restored = Array.isArray(raw)
+      ? raw.filter(isPersistedEcho).slice(-ECHO_LEDGER_LIMIT)
+      : EMPTY_ECHO_LEDGER;
+    echoLedgers.set(cardId, restored);
+    return restored;
+  } catch {
+    echoLedgers.set(cardId, EMPTY_ECHO_LEDGER);
+    return EMPTY_ECHO_LEDGER;
+  }
+}
+
+function persistEchoLedger(cardId: string, ledger: readonly PersistedEchoObservation[]): void {
+  echoLedgers.set(cardId, ledger);
+  try {
+    if (ledger.length) sessionStorage.setItem(echoStorageKey(cardId), JSON.stringify(ledger));
+    else sessionStorage.removeItem(echoStorageKey(cardId));
+  } catch {
+    /* quota / opaque origin: the in-memory ledger still protects this mount */
+  }
+}
+
+function isOccurrenceTombstone(value: unknown): value is PersistedOccurrenceTombstone {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  return typeof raw.id === "string"
+    && typeof raw.key === "string"
+    && typeof raw.at === "number"
+    && (raw.echoBaseline === undefined || typeof raw.echoBaseline === "number")
+    && (raw.echoBaselineIds === undefined
+      || (Array.isArray(raw.echoBaselineIds) && raw.echoBaselineIds.every((id) => typeof id === "string")))
+    && (raw.retiredEchoId === undefined || typeof raw.retiredEchoId === "string")
+    && (raw.retiredAt === undefined || typeof raw.retiredAt === "number")
+    && (raw.launchOwned === undefined || raw.launchOwned === true);
+}
+
+function readOccurrenceTombstones(cardId: string): readonly PersistedOccurrenceTombstone[] {
+  const cached = occurrenceTombstones.get(cardId);
+  if (cached) return cached;
+  if (typeof window === "undefined") return EMPTY_OCCURRENCE_TOMBSTONES;
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(occurrenceStorageKey(cardId)) ?? "[]") as unknown;
+    const restored = Array.isArray(raw)
+      ? boundOccurrenceTombstones(raw.filter(isOccurrenceTombstone))
+      : EMPTY_OCCURRENCE_TOMBSTONES;
+    occurrenceTombstones.set(cardId, restored);
+    return restored;
+  } catch {
+    occurrenceTombstones.set(cardId, EMPTY_OCCURRENCE_TOMBSTONES);
+    return EMPTY_OCCURRENCE_TOMBSTONES;
+  }
+}
+
+function persistOccurrenceTombstones(
+  cardId: string,
+  tombstones: readonly PersistedOccurrenceTombstone[],
+): void {
+  const retained = boundOccurrenceTombstones(tombstones);
+  occurrenceTombstones.set(cardId, retained);
+  try {
+    if (retained.length) {
+      sessionStorage.setItem(occurrenceStorageKey(cardId), JSON.stringify(retained));
+    } else {
+      sessionStorage.removeItem(occurrenceStorageKey(cardId));
+    }
+  } catch {
+    /* quota / opaque origin: the in-memory reservations still protect this mount */
+  }
+}
+
 function emit(): void {
   for (const listener of listeners) listener();
 }
@@ -147,6 +454,54 @@ function write(cardId: string, queue: readonly OutboxEntry[]): void {
   queues.set(cardId, queue);
   persist(cardId, queue);
   emit();
+}
+
+function mergeOccurrenceTombstones(
+  current: readonly PersistedOccurrenceTombstone[],
+  additions: readonly PersistedOccurrenceTombstone[],
+): readonly PersistedOccurrenceTombstone[] {
+  const merged = new Map(current.map((tombstone) => [tombstone.id, tombstone]));
+  for (const addition of additions) {
+    const existing = merged.get(addition.id);
+    if (existing?.retiredEchoId && !addition.retiredEchoId) continue;
+    merged.set(addition.id, addition);
+  }
+  return boundOccurrenceTombstones([...merged.values()]);
+}
+
+function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone | null {
+  if (entry.state !== "delivered" && entry.responseStartedAt === undefined && !entry.retiredEchoId) return null;
+  const key = echoKey(entry.echoText ?? entry.text);
+  if (!key) return null;
+  return {
+    id: entry.id,
+    key,
+    at: entry.at,
+    ...(entry.echoBaseline !== undefined ? { echoBaseline: entry.echoBaseline } : {}),
+    ...(entry.echoBaselineIds?.length ? { echoBaselineIds: entry.echoBaselineIds } : {}),
+    ...(entry.retiredEchoId ? { retiredEchoId: entry.retiredEchoId } : {}),
+    ...(entry.retiredAt !== undefined ? { retiredAt: entry.retiredAt } : {}),
+    ...(entry.launchOwned ? { launchOwned: true as const } : {}),
+  };
+}
+
+/** Compact recent queue/history while preserving older terminal occurrence owners. */
+function writeBounded(cardId: string, queue: readonly OutboxEntry[]): void {
+  const overflow = Math.max(0, queue.length - OUTBOX_LIMIT);
+  if (overflow > 0) {
+    for (const entry of queue.slice(0, overflow)) recordCurrentLaunchEntry(cardId, entry);
+    const additions = queue
+      .slice(0, overflow)
+      .map(occurrenceTombstone)
+      .filter((entry): entry is PersistedOccurrenceTombstone => entry !== null);
+    if (additions.length) {
+      persistOccurrenceTombstones(
+        cardId,
+        mergeOccurrenceTombstones(readOccurrenceTombstones(cardId), additions),
+      );
+    }
+  }
+  write(cardId, queue.slice(-OUTBOX_LIMIT));
 }
 
 /** The queue for a conversation, hydrating from sessionStorage on first read. */
@@ -161,8 +516,16 @@ export function readOutbox(cardId: string): readonly OutboxEntry[] {
 
 /** Submit a draft into the queue. Returns the entry the dispatcher will send. */
 export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">): OutboxEntry {
-  const queued: OutboxEntry = { ...entry, state: "queued" };
-  write(cardId, [...readOutbox(cardId).filter((item) => item.id !== entry.id), queued].slice(-OUTBOX_LIMIT));
+  const key = echoKey(entry.echoText ?? entry.text);
+  const baselineIds = entry.echoBaselineIds
+    ?? readEchoLedger(cardId).filter((echo) => echo.key === key).map((echo) => echo.id);
+  const queued: OutboxEntry = {
+    ...entry,
+    echoBaseline: entry.echoBaseline ?? baselineIds.length,
+    ...(baselineIds.length ? { echoBaselineIds: baselineIds } : {}),
+    state: "queued",
+  };
+  writeBounded(cardId, [...readOutbox(cardId).filter((item) => item.id !== entry.id), queued]);
   return queued;
 }
 
@@ -173,18 +536,102 @@ export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">)
  * reached. The entry is `launchOwned` — delivered by the spawn, so it is never
  * dispatched and never blocks the operator's follow-up messages.
  */
-export function seedLaunchOutbox(cardId: string, entry: { id: string; text: string; images: number; at: number }): void {
+export function seedLaunchOutbox(
+  cardId: string,
+  entry: { id: string; text: string; images: number; at: number; echoText?: string },
+): void {
   if (!entry.text.trim() && !entry.images) return;
+  const currentLaunch = readCurrentLaunch(cardId);
+  if (currentLaunch?.id === entry.id) {
+    const terminalReason = terminalReasonForLaunch(currentLaunch, Date.now());
+    if (terminalReason && !currentLaunch.terminalReason) {
+      recordCurrentLaunchRetirement(cardId, {
+        ...currentLaunch,
+        terminalReason,
+        retiredAt: (currentLaunch.settledAt ?? currentLaunch.at) + OUTBOX_DELIVERED_TTL_MS,
+      });
+    }
+    if (currentLaunch.retiredEchoId || terminalReason) return;
+  }
   const queue = readOutbox(cardId);
-  if (queue.some((item) => item.id === entry.id)) return;
-  const seeded: OutboxEntry = { ...entry, state: "delivering", launchOwned: true };
-  write(cardId, [...queue, seeded].slice(-OUTBOX_LIMIT));
+  const existing = queue.find((item) => item.id === entry.id);
+  if (existing) {
+    recordCurrentLaunchEntry(cardId, existing);
+    if (existing.retiredEchoId) {
+      recordCurrentLaunchRetirement(cardId, {
+        id: entry.id,
+        at: entry.at,
+        retiredEchoId: existing.retiredEchoId,
+        ...(existing.retiredAt !== undefined ? { retiredAt: existing.retiredAt } : {}),
+      });
+    }
+    /* Reconcile the canonical echo identity onto an already-seeded bubble (issue
+       #615): the composer seeds the RAW draft first, without an echo identity (it
+       never composes the role scaffold); the later server projection supplies it.
+       Attach it while preserving the user-facing raw text and the bubble's current
+       state — one bubble, never a second. Idempotent once attached. */
+    if (entry.echoText && entry.echoText !== existing.echoText) {
+      write(cardId, queue.map((item) => (item.id === entry.id ? { ...item, echoText: entry.echoText } : item)));
+      reconcileEchoRetirements(cardId, readEchoLedger(cardId));
+    }
+    return;
+  }
+  /* Recurring LogFeed projections can outlive the recent queue entry. Durable
+     retirement under this submission id keeps the compacted launch terminal
+     across refresh and identity adoption. */
+  const terminalTombstone = readOccurrenceTombstones(cardId).find(
+    (tombstone) => tombstone.id === entry.id && tombstone.retiredEchoId,
+  );
+  if (terminalTombstone?.retiredEchoId) {
+    recordCurrentLaunch(cardId, {
+      id: entry.id,
+      at: terminalTombstone.at,
+      retiredEchoId: terminalTombstone.retiredEchoId,
+      retiredAt: terminalTombstone.retiredAt,
+    });
+    return;
+  }
+  recordCurrentLaunch(cardId, { id: entry.id, at: entry.at });
+  /* A delivered launch compacted out of the recent queue keeps its settlement
+     only in the current-launch slot. A reseed inside the TTL window restores
+     that delivered state so the bubble stays visibly delivered and still
+     retires at the TTL — never a fresh `delivering` entry that no echo or TTL
+     could ever retire. */
+  const settledAt = currentLaunch?.id === entry.id ? currentLaunch.settledAt : undefined;
+  const seeded: OutboxEntry = settledAt === undefined
+    ? { ...entry, state: "delivering", launchOwned: true }
+    : { ...entry, state: "delivered", settledAt, launchOwned: true };
+  writeBounded(cardId, [...queue, seeded]);
+  /* A refreshed surface can see the canonical transcript row before the launch
+     projection effect seeds its optimistic bubble. Reconcile the persisted row
+     immediately so retirement becomes durable during that same mount. */
+  reconcileEchoRetirements(cardId, readEchoLedger(cardId));
 }
 
 export function updateOutbox(cardId: string, id: string, patch: Partial<Omit<OutboxEntry, "id">>): void {
   const queue = readOutbox(cardId);
   if (!queue.some((entry) => entry.id === id)) return;
-  write(cardId, queue.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)));
+  const next = queue.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
+  const updated = next.find((entry) => entry.id === id);
+  if (updated) recordCurrentLaunchEntry(cardId, updated);
+  write(cardId, next);
+}
+
+/** Settle one submission when the assistant starts its matching runtime turn.
+    The entry remains in recent history while its optimistic bubble retires. */
+export function markOutboxResponded(cardId: string, id: string, at: number): void {
+  const queue = readOutbox(cardId);
+  const entry = queue.find((item) => item.id === id);
+  if (!entry || entry.responseStartedAt !== undefined) return;
+  const next = queue.map((item) => (item.id === id ? {
+    ...item,
+    state: "delivered" as const,
+    settledAt: item.settledAt ?? at,
+    responseStartedAt: at,
+  } : item));
+  const updated = next.find((item) => item.id === id);
+  if (updated) recordCurrentLaunchEntry(cardId, updated, at);
+  write(cardId, next);
 }
 
 /** Remove an entry outright — the operator cancelled a message that never left. */
@@ -213,17 +660,70 @@ export function retryOutbox(cardId: string, id: string): void {
     the new identity win, so an adoption is idempotent. */
 export function adoptOutbox(from: string, to: string): void {
   if (from === to) return;
+  const sourceLaunch = readCurrentLaunch(from);
+  if (sourceLaunch) {
+    persistCurrentLaunch(to, selectCurrentLaunch(readCurrentLaunch(to), sourceLaunch));
+    persistCurrentLaunch(from, null);
+  }
+  const sourceTombstones = readOccurrenceTombstones(from);
+  if (sourceTombstones.length) {
+    persistOccurrenceTombstones(
+      to,
+      mergeOccurrenceTombstones(readOccurrenceTombstones(to), sourceTombstones),
+    );
+    persistOccurrenceTombstones(from, EMPTY_OCCURRENCE_TOMBSTONES);
+  }
+  const sourceEchoes = readEchoLedger(from);
+  if (sourceEchoes.length) {
+    const targetEchoes = readEchoLedger(to);
+    const merged = new Map(sourceEchoes.map((echo) => [echo.id, echo]));
+    for (const echo of targetEchoes) {
+      merged.delete(echo.id);
+      merged.set(echo.id, echo);
+    }
+    persistEchoLedger(to, [...merged.values()].slice(-ECHO_LEDGER_LIMIT));
+    persistEchoLedger(from, EMPTY_ECHO_LEDGER);
+  }
   const source = readOutbox(from);
-  if (!source.length) return;
-  const target = readOutbox(to);
-  const seen = new Set(target.map((entry) => entry.id));
-  write(to, [...target, ...source.filter((entry) => !seen.has(entry.id))].slice(-OUTBOX_LIMIT));
-  write(from, EMPTY);
+  if (source.length) {
+    const target = readOutbox(to);
+    const merged = new Map(target.map((entry) => [entry.id, entry]));
+    for (const entry of source) {
+      const existing = merged.get(entry.id);
+      if (!existing) {
+        merged.set(entry.id, entry);
+        continue;
+      }
+      if (entry.retiredEchoId && !existing.retiredEchoId) {
+        merged.set(entry.id, {
+          ...existing,
+          retiredEchoId: entry.retiredEchoId,
+          retiredAt: entry.retiredAt,
+        });
+      }
+    }
+    writeBounded(
+      to,
+      [...merged.values()]
+        .sort((left, right) => left.at - right.at),
+    );
+    write(from, EMPTY);
+  }
+  reconcileEchoRetirements(to, readEchoLedger(to));
 }
 
 /** The trimmed text of a bubble, used to match its transcript echo. */
 function echoKey(text: string): string {
   return text.trim();
+}
+
+/** Collision-free durable identity for one row inside one transcript generation. */
+function echoObservationId(observation: TranscriptEchoObservation): string {
+  const anchor = observation.id.trim();
+  if (!anchor) return "";
+  return observation.generation
+    ? JSON.stringify([observation.generation, anchor])
+    : anchor;
 }
 
 /** Occurrence counts of the trimmed user-message texts in a rendered transcript,
@@ -239,16 +739,205 @@ export type TranscriptEchoCounts = ReadonlyMap<string, number>;
  * the same stable conversation identity as the queue itself.
  */
 const echoSnapshots = new Map<string, TranscriptEchoCounts>();
+const echoListeners = new Set<() => void>();
+const EMPTY_ECHO_COUNTS: TranscriptEchoCounts = new Map();
 
-/** Publish the transcript's current user-echo counts for a conversation. */
-export function publishTranscriptEchoes(cardId: string, counts: TranscriptEchoCounts): void {
-  echoSnapshots.set(cardId, counts);
+function countsFromLedger(ledger: readonly PersistedEchoObservation[]): TranscriptEchoCounts {
+  const counts = new Map<string, number>();
+  for (const echo of ledger) counts.set(echo.key, (counts.get(echo.key) ?? 0) + 1);
+  return counts;
+}
+
+function sameCounts(left: TranscriptEchoCounts | undefined, right: TranscriptEchoCounts): boolean {
+  if (!left || left.size !== right.size) return false;
+  for (const [key, count] of right) if (left.get(key) !== count) return false;
+  return true;
+}
+
+function reconcileEchoRetirements(
+  cardId: string,
+  ledger: readonly PersistedEchoObservation[],
+): void {
+  const queue = readOutbox(cardId);
+  const tombstones = readOccurrenceTombstones(cardId);
+  if (!queue.length && !tombstones.length) return;
+  const claimed = new Set([
+    ...tombstones.flatMap((entry) => entry.retiredEchoId ? [entry.retiredEchoId] : []),
+    ...queue.flatMap((entry) => entry.retiredEchoId ? [entry.retiredEchoId] : []),
+  ]);
+  const owners = [
+    ...tombstones.map((entry) => ({
+      type: "tombstone" as const,
+      id: entry.id,
+      at: entry.at,
+      key: entry.key,
+      echoBaseline: entry.echoBaseline,
+      echoBaselineIds: entry.echoBaselineIds,
+      retiredEchoId: entry.retiredEchoId,
+      launchOwned: entry.launchOwned,
+    })),
+    ...queue.map((entry) => ({
+      type: "queue" as const,
+      id: entry.id,
+      at: entry.at,
+      key: echoKey(entry.echoText ?? entry.text),
+      echoBaseline: entry.echoBaseline,
+      echoBaselineIds: entry.echoBaselineIds,
+      retiredEchoId: entry.retiredEchoId,
+      launchOwned: entry.launchOwned,
+    })),
+  ].sort((left, right) => left.at - right.at);
+  const retirements = new Map<string, { echoId: string; retiredAt: number }>();
+  for (const entry of owners) {
+    if (entry.retiredEchoId) continue;
+    const baseline = new Set(entry.echoBaselineIds ?? []);
+    let remainingBaseline = baseline.size ? 0 : (entry.echoBaseline ?? 0);
+    const owner = ledger.find((echo) => {
+      if (echo.key !== entry.key || baseline.has(echo.id)) return false;
+      if (remainingBaseline > 0) {
+        remainingBaseline -= 1;
+        return false;
+      }
+      return !claimed.has(echo.id);
+    });
+    if (!owner) continue;
+    claimed.add(owner.id);
+    retirements.set(`${entry.type}:${entry.id}`, {
+      echoId: owner.id,
+      retiredAt: Date.now(),
+    });
+  }
+
+  let tombstonesChanged = false;
+  const nextTombstones = tombstones.map((entry) => {
+    const retirement = retirements.get(`tombstone:${entry.id}`);
+    if (!retirement) return entry;
+    tombstonesChanged = true;
+    return {
+      ...entry,
+      retiredEchoId: retirement.echoId,
+      retiredAt: retirement.retiredAt,
+    };
+  });
+  if (tombstonesChanged) persistOccurrenceTombstones(cardId, nextTombstones);
+
+  const reservedByKey = new Map<string, { at: number; echoId: string }[]>();
+  /* A newly consumed active owner can age out of an already-full completed tier
+     in this same turn. Its claimed echo still advances every live successor
+     before that completed history is discarded. */
+  for (const tombstone of nextTombstones) {
+    if (!tombstone.retiredEchoId) continue;
+    const reservations = reservedByKey.get(tombstone.key) ?? [];
+    reservations.push({ at: tombstone.at, echoId: tombstone.retiredEchoId });
+    reservedByKey.set(tombstone.key, reservations);
+  }
+
+  let queueChanged = false;
+  const nextQueue = queue.map((entry) => {
+    const retirement = retirements.get(`queue:${entry.id}`);
+    if (retirement) {
+      queueChanged = true;
+      return {
+        ...entry,
+        retiredEchoId: retirement.echoId,
+        retiredAt: retirement.retiredAt,
+      };
+    }
+    if (entry.retiredEchoId) return entry;
+    const key = echoKey(entry.echoText ?? entry.text);
+    const baselineIds = new Set(entry.echoBaselineIds ?? []);
+    for (const reservation of reservedByKey.get(key) ?? []) {
+      if (reservation.at <= entry.at) baselineIds.add(reservation.echoId);
+    }
+    if (baselineIds.size === (entry.echoBaselineIds?.length ?? 0)) return entry;
+    queueChanged = true;
+    return {
+      ...entry,
+      echoBaseline: Math.max(entry.echoBaseline ?? 0, baselineIds.size),
+      echoBaselineIds: [...baselineIds],
+    };
+  });
+  for (const entry of nextTombstones) {
+    if (!entry.launchOwned || !entry.retiredEchoId) continue;
+    recordCurrentLaunchRetirement(cardId, {
+      id: entry.id,
+      at: entry.at,
+      retiredEchoId: entry.retiredEchoId,
+      retiredAt: entry.retiredAt,
+    });
+  }
+  for (const entry of nextQueue) {
+    if (!entry.launchOwned || !entry.retiredEchoId) continue;
+    recordCurrentLaunchRetirement(cardId, {
+      id: entry.id,
+      at: entry.at,
+      retiredEchoId: entry.retiredEchoId,
+      retiredAt: entry.retiredAt,
+    });
+  }
+  if (queueChanged) write(cardId, nextQueue);
+}
+
+/**
+ * Publish stable transcript user-row observations. The absolute row anchors
+ * form a bounded durable occurrence ledger; matching entries persist the exact
+ * anchor that retired them. The count-map overload keeps older callers and
+ * fixtures compatible while production feeds publish anchor observations.
+ */
+export function publishTranscriptEchoes(
+  cardId: string,
+  observations: TranscriptEchoCounts | readonly TranscriptEchoObservation[],
+): void {
+  if (!Array.isArray(observations)) {
+    const counts = observations as TranscriptEchoCounts;
+    if (sameCounts(echoSnapshots.get(cardId), counts)) return;
+    echoSnapshots.set(cardId, counts);
+    for (const listener of echoListeners) listener();
+    return;
+  }
+
+  const merged = new Map(readEchoLedger(cardId).map((echo) => [echo.id, echo]));
+  for (const observation of observations) {
+    const id = echoObservationId(observation);
+    const key = echoKey(observation.text);
+    if (!id || !key) continue;
+    merged.set(id, { id, key });
+  }
+  const ledger = [...merged.values()].slice(-ECHO_LEDGER_LIMIT);
+  const previous = readEchoLedger(cardId);
+  const ledgerChanged = previous.length !== ledger.length
+    || previous.some((echo, index) => echo.id !== ledger[index]?.id || echo.key !== ledger[index]?.key);
+  if (ledgerChanged) persistEchoLedger(cardId, ledger);
+  const counts = countsFromLedger(ledger);
+  const countsChanged = !sameCounts(echoSnapshots.get(cardId), counts);
+  if (countsChanged) echoSnapshots.set(cardId, counts);
+  reconcileEchoRetirements(cardId, ledger);
+  if (countsChanged) for (const listener of echoListeners) listener();
 }
 
 /** How many transcript echoes of `text` the feed has published for a
     conversation — the submission watermark a new entry stamps onto itself. */
 export function transcriptEchoCount(cardId: string, text: string): number {
-  return echoSnapshots.get(cardId)?.get(echoKey(text)) ?? 0;
+  let counts = echoSnapshots.get(cardId);
+  if (!counts) {
+    counts = countsFromLedger(readEchoLedger(cardId));
+    echoSnapshots.set(cardId, counts);
+  }
+  return counts.get(echoKey(text)) ?? 0;
+}
+
+/** Reactive transcript-echo snapshot for the composer. Delivery success can
+    arrive after its user bubble was already written, so exact feed evidence
+    retires the temporary receipt row immediately. */
+export function useTranscriptEchoes(cardId: string): TranscriptEchoCounts {
+  return useSyncExternalStore(
+    (listener) => {
+      echoListeners.add(listener);
+      return () => echoListeners.delete(listener);
+    },
+    () => echoSnapshots.get(cardId) ?? EMPTY_ECHO_COUNTS,
+    () => EMPTY_ECHO_COUNTS,
+  );
 }
 
 /**
@@ -279,7 +968,15 @@ export function visibleOutbox(
   const consumed = new Map<string, number>();
   const visible: OutboxEntry[] = [];
   for (const entry of queue) {
-    const key = echoKey(entry.text);
+    /* A bubble retires on ITS canonical transcript echo — the delivered text,
+       which for a role launch is the scaffold-plus-draft carried on `echoText`,
+       not the raw draft it displays (issue #615). */
+    const key = echoKey(entry.echoText ?? entry.text);
+    if (entry.retiredEchoId) {
+      const floor = Math.max(entry.echoBaseline ?? 0, consumed.get(key) ?? 0);
+      consumed.set(key, floor + 1);
+      continue;
+    }
     const total = transcriptEchoCounts.get(key) ?? 0;
     /* Echoes below this floor belong to messages submitted before this entry
        (its own baseline) or to earlier queued siblings that already consumed
@@ -289,6 +986,7 @@ export function visibleOutbox(
       consumed.set(key, floor + 1);
       continue;
     }
+    if (entry.responseStartedAt !== undefined) continue;
     if (entry.state === "delivered") {
       const settledAt = entry.settledAt ?? entry.at;
       if (nowMs - settledAt >= OUTBOX_DELIVERED_TTL_MS) continue;
@@ -343,4 +1041,8 @@ export function resetOutboxForTests(): void {
   queues.clear();
   listeners.clear();
   echoSnapshots.clear();
+  echoListeners.clear();
+  echoLedgers.clear();
+  occurrenceTombstones.clear();
+  currentLaunches.clear();
 }

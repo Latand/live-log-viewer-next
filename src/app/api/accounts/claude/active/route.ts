@@ -21,6 +21,11 @@ export async function POST(req: NextRequest) {
     if (error instanceof AccountLoginPendingError) return NextResponse.json({ error: error.message, code: "login_pending" }, { status: 409 });
     if (error instanceof AccountAuthenticationRequiredError) return NextResponse.json({ error: error.message, code: "authentication_required" }, { status: 409 });
     const known = error instanceof UnknownClaudeAccountError || error instanceof CorruptClaudeAccountsError;
-    return NextResponse.json({ error: known ? error.message : "Claude account selection failed" }, { status: known ? 400 : 500 });
+    if (known) return NextResponse.json({ error: error.message }, { status: 400 });
+    /* Mirror of the codex route: the real failure message travels as `detail`
+       so the panel can show it, and the stack lands in the server log. */
+    console.error("[accounts] claude selection failed:", error);
+    const detail = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ error: "Claude account selection failed", detail, code: "selection_failed" }, { status: 500 });
   }
 }

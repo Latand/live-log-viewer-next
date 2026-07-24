@@ -25,7 +25,6 @@ import { OverviewBoard } from "./OverviewBoard";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
-import { SupervisorHealthAlert } from "./SupervisorHealthAlert";
 import { DeploymentStatusPill } from "./runtime/DeploymentStatusPill";
 import { activityDot, cleanTitle, fmtAge } from "./utils";
 
@@ -105,7 +104,7 @@ export function Viewer() {
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [catalogPin, dispatchCatalogPin] = useReducer(reduceCatalogPin, null);
-  const { files: allFiles, requestScope, projectCatalog, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, launchRoutes, loaded } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
+  const { files: allFiles, requestScope, projectCatalog, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, conversationAliases, launchRoutes, loaded } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -561,7 +560,6 @@ export function Viewer() {
 
   return (
     <div className="flex h-full">
-      <SupervisorHealthAlert health={systemHealth.tmux} />
       {isMobile ? null : (
         <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
       )}

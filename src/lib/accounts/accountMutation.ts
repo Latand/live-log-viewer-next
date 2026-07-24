@@ -15,9 +15,23 @@ type LockOwner = { pid: number; startIdentity: string | null; token: string };
 type TransactionContext = { active: boolean; revision: number };
 type PendingLock = { lock: string; queue: string; owner: LockOwner; ticket: string };
 type AcquiredLock = { context: TransactionContext; release(): void };
-const transactionContext = new AsyncLocalStorage<TransactionContext>();
-const localWaiters: Array<() => void> = [];
-let localHeld = false;
+
+/* The bundler may duplicate this module across route chunks. Every copy must
+   share one transaction context and one local-held flag, or a nested acquire
+   in a second copy observes its own process as a foreign lock holder and
+   fails instantly with a busy error. */
+type MutationRuntime = {
+  transactionContext: AsyncLocalStorage<TransactionContext>;
+  localWaiters: Array<() => void>;
+  localHeld: boolean;
+};
+const runtime: MutationRuntime = ((globalThis as unknown as { __llvAccountMutationRuntime?: MutationRuntime }).__llvAccountMutationRuntime ??= {
+  transactionContext: new AsyncLocalStorage<TransactionContext>(),
+  localWaiters: [],
+  localHeld: false,
+});
+const transactionContext = runtime.transactionContext;
+const localWaiters = runtime.localWaiters;
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -33,18 +47,18 @@ export class AccountMutationBusyError extends Error {
 function releaseLocal(): void {
   const next = localWaiters.shift();
   if (next) next();
-  else localHeld = false;
+  else runtime.localHeld = false;
 }
 
 function acquireLocalSync(): () => void {
-  if (localHeld) throw new AccountMutationBusyError("account mutation is busy in this process; retry shortly");
-  localHeld = true;
+  if (runtime.localHeld) throw new AccountMutationBusyError("account mutation is busy in this process; retry shortly");
+  runtime.localHeld = true;
   return releaseLocal;
 }
 
 async function acquireLocalAsync(): Promise<() => void> {
-  if (localHeld) await new Promise<void>((resolve) => localWaiters.push(resolve));
-  else localHeld = true;
+  if (runtime.localHeld) await new Promise<void>((resolve) => localWaiters.push(resolve));
+  else runtime.localHeld = true;
   return releaseLocal;
 }
 

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="754.25" viewBox="0 0 1280 754.25">
+<metadata>{&quot;classification&quot;:&quot;synthetic&quot;,&quot;generator&quot;:&quot;generate-stills.ts&quot;,&quot;generatorVersion&quot;:&quot;issue-626-vector-stills-v2&quot;,&quot;sourceDigest&quot;:&quot;c18da1dd3646fc480cc2b03f56e4562f2d5b3ad7e78a20204b39c10086ba0c5a&quot;,&quot;state&quot;:&quot;partial-adoption-desktop-1280&quot;,&quot;geometry&quot;:{&quot;width&quot;:1280,&quot;scrollWidth&quot;:1280,&quot;feedHeight&quot;:553.25,&quot;composerHeight&quot;:120,&quot;order&quot;:[&quot;user&quot;,&quot;commentary&quot;,&quot;tool&quot;,&quot;live&quot;],&quot;tailLinesStart&quot;:0,&quot;tailLineCount&quot;:4,&quot;feedRows&quot;:3,&quot;toolRows&quot;:1,&quot;reviewRows&quot;:0,&quot;citationRows&quot;:0,&quot;outboxEntries&quot;:0,&quot;toolOutputVisible&quot;:true,&quot;unrelatedOutboxVisible&quot;:false,&quot;productionWindow&quot;:true,&quot;launchId&quot;:&quot;launch_issue_626&quot;,&quot;conversationId&quot;:&quot;conversation_issue_626&quot;,&quot;path&quot;:&quot;/workspace/.codex/sessions/2026/07/23/rollout-issue-626.jsonl&quot;,&quot;filesRevision&quot;:&quot;files revision 41&quot;,&quot;liveItems&quot;:1,&quot;runtimeItems&quot;:2,&quot;runtimeOverflow&quot;:0,&quot;runtimeOmittedChars&quot;:0}}</metadata>
+<style>
+text{font-family:Inter,ui-sans-serif,system-ui,sans-serif;fill:#22242b}.title{font-size:16px;font-weight:700}.meta{font-size:11px;fill:#6b7280}.row{font-size:15px}.mono{font-family:ui-monospace,SFMono-Regular,monospace;font-size:11px}.muted{fill:#667085}
+</style>
+<rect width="1280" height="754.25" fill="#f5f6f8"/>
+<rect width="1280" height="81" fill="#ffffff"/>
+<line x1="0" y1="80.5" x2="1280" y2="80.5" stroke="#dfe2e8"/>
+<text x="16" y="27" class="title">Issue 626 · Partial Adoption</text>
+<text x="16" y="49" class="meta">conversation_issue_626 · launch_issue_626 · files revision 41</text>
+<text x="16" y="67" class="mono muted">/workspace/.codex/sessions/2026/07/23/rollout-issue-626.jsonl</text>
+<g data-evidence-row="user"><rect x="518" y="132" width="557" height="60" rx="14" fill="#e8e9ef" stroke="#e2e5eb" stroke-width="1"/><text x="536" y="165" class="row">canonical user prompt</text></g><g data-evidence-row="commentary"><rect x="205" y="210" width="557" height="60" rx="14" fill="#ffffff" stroke="#e2e5eb" stroke-width="1"/><text x="223" y="243" class="row">canonical commentary</text></g><g data-evidence-row="tool"><rect x="263" y="288" width="812" height="116" rx="14" fill="#ffffff" stroke="#d6dae3" stroke-width="1"/><text x="281" y="321" class="row">tool call + output</text><text x="281" y="358" class="mono muted">TOOL_OUTPUT_626 · visible</text></g><g data-evidence-row="live"><rect x="205" y="422" width="557" height="60" rx="14" fill="#ffffff" stroke="#7c3aed" stroke-width="3"/><text x="223" y="455" class="row">live commentary handoff</text></g>
+<rect x="0" y="634.25" width="1280" height="120" fill="#ffffff"/>
+<line x1="0" y1="634.75" x2="1280" y2="634.75" stroke="#dfe2e8"/>
+<rect x="16" y="648.25" width="1248" height="92" rx="12" fill="#ffffff" stroke="#d8dce4"/>
+<text x="30" y="681.25" class="meta">Message this conversation</text>
+</svg>

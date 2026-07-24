@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { Workflow } from "@/lib/workflows/types";
+import type { RuntimeLiveTurn } from "@/lib/runtime/liveTurn";
 import type { RuntimeImageCapability, StructuredImageRef } from "./structuredContent";
 
 export const RUNTIME_SCHEMA_VERSION = 1;
@@ -352,7 +353,7 @@ export interface RuntimeSession {
   drift?: RuntimeDrift | null;
   /** In-flight assistant text accumulated from live `delta` events, rendered
       as a streaming bubble until the transcript materializes the item. */
-  liveTurn?: { turnId: string; text: string } | null;
+  liveTurn?: RuntimeLiveTurn | null;
 }
 
 export interface ScopedEntity<T> {
