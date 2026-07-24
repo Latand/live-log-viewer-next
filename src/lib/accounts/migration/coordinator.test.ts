@@ -10,6 +10,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { advanceConversationMigration, createMigrationIntent, drainHeldDeliveries, previewMigration, reconcileMigrationInventory, reconcileMigrations } from "./coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
+import { oauthFailureWithRecoveryTail } from "./fixtures/claudeRecoveryTail";
 import { CodexForkOutcomeUnknownError, SuccessorPendingError } from "./provider";
 
 const roots: string[] = [];
@@ -135,6 +136,19 @@ async function withInterruptedTailRead<T>(
     fs.readSync = originalReadSync;
     fs.closeSync = originalCloseSync;
   }
+}
+
+function tmuxHost(windowName: string): NonNullable<Parameters<AgentRegistry["upsert"]>[0]["host"]> {
+  return {
+    kind: "tmux",
+    endpoint: "/tmp/tmux-1000/default",
+    server: { pid: 4100, startIdentity: "4100:recovery" },
+    paneId: "%41",
+    panePid: { pid: 4101, startIdentity: "4101:recovery" },
+    windowName,
+    agent: { pid: 4102, startIdentity: "4102:recovery" },
+    argv: ["claude", "--resume"],
+  };
 }
 
 function inventoryEntry(pathname: string, overrides: Partial<FileEntry> = {}): FileEntry {
@@ -3430,6 +3444,172 @@ describe("durable account migration coordinator", () => {
     expect(restarted.conversation(conversation.id)?.migration?.operationId).toBe(operationId);
     expect(restarted.conversation(conversation.id)?.generations).toHaveLength(2);
     expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
+  });
+
+  test("recovery records on an unhosted predecessor release the reseat and deliver held input once", async () => {
+    /* Issue #516 production acceptance blocker: after the terminal OAuth
+       failure released the turn, a recovery attempt appended a replayed
+       continuation prompt, the synthetic `No response requested.` no-op, the
+       inherited reporting prompt, and the interrupt sentinel its host wrote on
+       the way out. The predecessor is unhosted and none of those records are
+       provider work, so the reseat must still complete: one successor, the
+       held delivery sent once with its stable clientMessageId, zero sends to
+       the predecessor, and repeated ticks through a reopened registry stay
+       converged. */
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "recovery-tail-source.jsonl");
+    const successorPath = "/recovery-tail-successor.jsonl";
+    fs.writeFileSync(pathname, oauthFailureWithRecoveryTail().map((record) => JSON.stringify(record)).join("\n") + "\n");
+    store.reconcileConversations([{ ...observation(pathname, "expired", "busy"), engine: "claude" }]);
+    const conversation = store.conversationForPath(pathname)!;
+    expect(conversation.generations.at(-1)?.host ?? null).toBeNull();
+    expect(store.requestConversationReseat(conversation.id, "healthy").migration?.phase).toBe("waiting-turn");
+    store.holdDelivery(conversation.id, "continue after reseat", "recovery-held-client");
+    const entry = inventoryEntry(pathname, {
+      root: "claude-projects",
+      engine: "claude",
+      fmt: "claude",
+      model: "claude-fable-5",
+      activity: "stalled",
+      activityReason: undefined,
+    });
+    const counts = { create: 0, verify: 0 };
+    const baseProvider = provider([successorPath], counts);
+    const createdOperations: string[] = [];
+    const migrationProvider: SuccessorProviderPort = {
+      ...baseProvider,
+      async create(input) {
+        createdOperations.push(input.operationId);
+        return baseProvider.create(input);
+      },
+    };
+    const sends: { path: string; clientMessageId: string }[] = [];
+    const deliveryPort = {
+      async deliver(input: { path: string; clientMessageId: string }) {
+        sends.push({ path: input.path, clientMessageId: input.clientMessageId });
+        return "delivered" as const;
+      },
+    };
+
+    await reconcileMigrationInventory(store, [entry]);
+
+    expect(store.conversation(conversation.id)?.turn).toMatchObject({ state: "terminal", source: "lifecycle" });
+    const operationId = store.conversation(conversation.id)!.migration!.operationId;
+    const restarted = new AgentRegistry(store.filename);
+    await reconcileMigrations(migrationProvider, deliveryPort, restarted);
+
+    const committed = restarted.conversation(conversation.id)!;
+    expect(committed.migration?.phase).toBe("committed");
+    expect(createdOperations).toEqual([operationId]);
+    expect(committed.generations.map((generation) => generation.path)).toEqual([pathname, successorPath]);
+    expect(sends).toEqual([{ path: successorPath, clientMessageId: "recovery-held-client" }]);
+    expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
+
+    await reconcileMigrationInventory(restarted, [entry]);
+    await reconcileMigrations(migrationProvider, deliveryPort, restarted);
+    await drainHeldDeliveries(conversation.id, deliveryPort, restarted);
+    expect(counts.create).toBe(1);
+    expect(sends).toEqual([{ path: successorPath, clientMessageId: "recovery-held-client" }]);
+    expect(restarted.conversation(conversation.id)?.generations).toHaveLength(2);
+    expect(restarted.snapshot().migrationIntents[committed.migration!.intentId]).toMatchObject({ scope: "conversation", state: "complete" });
+  });
+
+  test("a registered host keeps a recovery tail busy until it exits", async () => {
+    /* The same records under a live registered host are not release evidence:
+       the host can still append real provider work, so the turn stays busy and
+       the successor waits. Once the host is gone the release applies. */
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "hosted-recovery-tail.jsonl");
+    fs.writeFileSync(pathname, oauthFailureWithRecoveryTail().map((record) => JSON.stringify(record)).join("\n") + "\n");
+    store.reconcileConversations([{ ...observation(pathname, "expired", "busy"), engine: "claude" }]);
+    const conversation = store.conversationForPath(pathname)!;
+    const key = { engine: "claude" as const, sessionId: conversation.generations[0]!.id };
+    const hostEntry = {
+      key,
+      artifactPath: pathname,
+      cwd: "/repo",
+      accountId: "expired",
+      claimEpoch: 1,
+      claimOwner: "test-owner",
+      pendingAction: null,
+    };
+    store.upsert({
+      ...hostEntry,
+      status: "live",
+      host: tmuxHost("llv-recovery"),
+    });
+    expect(store.requestConversationReseat(conversation.id, "healthy").migration?.phase).toBe("waiting-turn");
+    const entry = inventoryEntry(pathname, {
+      root: "claude-projects",
+      engine: "claude",
+      fmt: "claude",
+      model: "claude-fable-5",
+      activity: "stalled",
+      activityReason: undefined,
+    });
+    const counts = { create: 0, verify: 0 };
+    const successorProvider = provider(["/hosted-recovery-successor.jsonl"], counts);
+
+    await reconcileMigrationInventory(store, [entry]);
+    await advanceConversationMigration(conversation.id, store, successorProvider);
+
+    expect(store.conversation(conversation.id)?.turn.state).toBe("busy");
+    expect(counts.create).toBe(0);
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
+
+    store.upsert({ ...hostEntry, status: "unhosted", host: null });
+
+    await reconcileMigrationInventory(store, [entry]);
+    await advanceConversationMigration(conversation.id, store, successorProvider);
+
+    expect(store.conversation(conversation.id)?.turn.state).toBe("terminal");
+    expect(counts.create).toBe(1);
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("committed");
+  });
+
+  test("a host registered after the released inventory fences successor creation", async () => {
+    /* The release is transcript evidence, so a host that appears between the
+       inventory tick and provider creation must still fence the successor. */
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "raced-recovery-tail.jsonl");
+    fs.writeFileSync(pathname, oauthFailureWithRecoveryTail().map((record) => JSON.stringify(record)).join("\n") + "\n");
+    store.reconcileConversations([{ ...observation(pathname, "expired", "busy"), engine: "claude" }]);
+    const conversation = store.conversationForPath(pathname)!;
+    expect(store.requestConversationReseat(conversation.id, "healthy").migration?.phase).toBe("waiting-turn");
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, {
+      root: "claude-projects",
+      engine: "claude",
+      fmt: "claude",
+      model: "claude-fable-5",
+      activity: "stalled",
+      activityReason: undefined,
+    })]);
+    expect(store.conversation(conversation.id)?.turn.state).toBe("terminal");
+    const hostEntry = {
+      key: { engine: "claude" as const, sessionId: conversation.generations[0]!.id },
+      artifactPath: pathname,
+      cwd: "/repo",
+      accountId: "expired",
+      claimEpoch: 1,
+      claimOwner: "test-owner",
+      pendingAction: null,
+    };
+    store.upsert({
+      ...hostEntry,
+      status: "live",
+      host: tmuxHost("llv-raced-recovery"),
+    });
+    const counts = { create: 0, verify: 0 };
+    const successorProvider = provider(["/raced-recovery-successor.jsonl"], counts);
+
+    await advanceConversationMigration(conversation.id, store, successorProvider);
+    expect(counts.create).toBe(0);
+
+    store.upsert({ ...hostEntry, status: "unhosted", host: null });
+    await advanceConversationMigration(conversation.id, store, successorProvider);
+
+    expect(counts.create).toBe(1);
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("committed");
   });
 
   test("a conversation reseat completes without booking the engine auto-balance outcome or cooldown", async () => {
