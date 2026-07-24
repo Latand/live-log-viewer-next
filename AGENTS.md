@@ -54,3 +54,35 @@ when the path genuinely cannot name the repo. Add a "deleted worktree still
 groups under its parent repo" case to `describe.test.ts`. Don't rely on the
 checkout being present, and don't invent a second naming scheme.
 <!-- END:worktree-grouping -->
+
+<!-- BEGIN:live-state-and-publication -->
+# Two ways to do real damage here (both happened, 2026-07-24)
+
+## Never run this repo's suites against the operator's live state
+
+`bun test src/lib/agent/ src/app/api/runtime/` and anything else that sweeps
+whole runtime/registry directories exercises host lifecycle code against the
+**shared** registry under `$XDG_CONFIG_HOME/agent-log-viewer/state`. Running it
+on the operator's machine killed the structured host that owned the session the
+operator was talking to. Their composer started answering `structured host
+ownership is unavailable` and they had to recover the conversation by pasting an
+attach command into a terminal.
+
+Run the specific test files you touched, by path. If a change genuinely needs a
+broad sweep, point the run at an isolated state directory first and say so; do
+not sweep the live one. The same applies to any command that enumerates and acts
+on runtime processes — `pgrep -f <pattern>` matches your own command line too.
+
+## This repository is public — publication surfaces carry no identities
+
+Docs, issues, PR bodies, commit messages, fixtures, and test data are public the
+moment they are pushed. Never put an account handle, email, account id, token,
+or absolute home path into any of them, including evidence tables pasted from a
+live investigation. Distinguish accounts as "account A / account B" with their
+plan tier, and keep paths repo-relative or `$HOME`-relative.
+
+`privacy-publication` on CI enforces this with a fingerprint list the repo does
+not carry, so it fails **after** you have pushed. Scrub before the push:
+`bun scripts/privacy-publication-gate.ts --base <merge-base>` locally catches the
+generic classes, and re-read every table and quote you lifted out of logs.
+<!-- END:live-state-and-publication -->
