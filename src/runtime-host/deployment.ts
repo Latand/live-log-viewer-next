@@ -5,6 +5,9 @@ import type {
   ViewerDeploymentRequest,
   ViewerDeploymentStatus,
   ViewerHealthEvidence,
+  ViewerMcpRuntimeIdentity,
+  ViewerMcpRuntimePublicationEvidence,
+  ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
 } from "@/lib/runtime/contracts";
 import { RuntimeIdempotencyConflictError } from "@/lib/runtime/contracts";
@@ -40,10 +43,16 @@ export interface ViewerDeploymentAdapter {
   buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity>;
   startCandidate(candidate: ViewerReleaseIdentity): Promise<void>;
   currentRelease(): Promise<ViewerReleaseIdentity | null>;
+  currentMcpRuntime(): Promise<ViewerMcpRuntimeIdentity>;
+  reconcileMcpRuntime(revision: string): Promise<ViewerMcpRuntimeReconciliation | null>;
   verifyCandidate(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence>;
-  promote(candidate: ViewerReleaseIdentity): Promise<void>;
+  promote(candidate: ViewerReleaseIdentity): Promise<ViewerMcpRuntimePublicationEvidence>;
   verifyPromoted(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence>;
-  rollback(previous: ViewerReleaseIdentity, candidate: ViewerReleaseIdentity): Promise<void>;
+  rollback(
+    previous: ViewerReleaseIdentity,
+    candidate: ViewerReleaseIdentity,
+    previousMcpRuntime: ViewerMcpRuntimeIdentity,
+  ): Promise<ViewerMcpRuntimePublicationEvidence>;
   retire(release: ViewerReleaseIdentity): Promise<void>;
   retainOnly(releases: ViewerReleaseIdentity[]): Promise<void>;
 }
@@ -70,6 +79,32 @@ function validRequestedRevision(revision: string): boolean {
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : "viewer deployment failed";
   return message.replace(/[\r\n]+/g, " ").slice(0, 500);
+}
+
+/** Journal rows written before a field existed replay through here, so every
+    list is recovered rather than assumed present. */
+function mcpRuntimeStatus(status: ViewerDeploymentStatus): ViewerDeploymentStatus["mcpRuntime"] {
+  const recordedHealth = status.health.flatMap((evidence) => evidence.mcpRuntime ? [evidence.mcpRuntime] : []);
+  const runtime = status.mcpRuntime;
+  if (runtime) {
+    return {
+      ...runtime,
+      publications: runtime.publications ?? [],
+      health: runtime.health ?? recordedHealth,
+    };
+  }
+  return {
+    candidate: status.candidate?.mcpRuntime ?? null,
+    previous: status.previous?.mcpRuntime ?? null,
+    publications: [],
+    health: recordedHealth,
+  };
+}
+
+/** Health gates carry MCP evidence only once a candidate has a managed runtime. */
+function mcpRuntimeStatusWithHealth(status: ViewerDeploymentStatus, evidence: ViewerHealthEvidence): ViewerDeploymentStatus["mcpRuntime"] {
+  const runtime = mcpRuntimeStatus(status);
+  return evidence.mcpRuntime ? { ...runtime, health: [...runtime.health, evidence.mcpRuntime] } : runtime;
 }
 
 export class ViewerDeploymentCoordinator {
@@ -138,6 +173,40 @@ export class ViewerDeploymentCoordinator {
     return this.journal.viewerDeployment(deploymentId);
   }
 
+  recordMcpRuntimeReconciliation(reconciliation: ViewerMcpRuntimeReconciliation): ViewerDeploymentStatus | null {
+    const { publication, health } = reconciliation;
+    const status = this.journal.latestViewerDeploymentForRevision(publication.revision);
+    if (!status?.candidate || status.phase !== "succeeded" || !status.terminal) return status;
+    const runtime: ViewerMcpRuntimeIdentity = {
+      source: publication.source,
+      revision: publication.revision,
+      releaseId: publication.releaseId,
+      artifactDigest: publication.artifactDigest,
+      stagedAt: publication.stagedAt,
+    };
+    const current = mcpRuntimeStatus(status);
+    const publicationRecorded = current.publications.some((item) =>
+      item.action === publication.action
+      && item.revision === publication.revision
+      && item.artifactDigest === publication.artifactDigest);
+    const healthRecorded = current.health.some((item) =>
+      item.ok
+      && item.revision === health.revision
+      && item.artifactDigest === health.artifactDigest);
+    if (publicationRecorded && healthRecorded && status.candidate.mcpRuntime?.artifactDigest === runtime.artifactDigest) {
+      return status;
+    }
+    return this.journal.updateViewerDeployment(status.deploymentId, {
+      candidate: { ...status.candidate, mcpRuntime: runtime },
+      mcpRuntime: {
+        ...current,
+        candidate: runtime,
+        publications: publicationRecorded ? current.publications : [...current.publications, publication],
+        health: healthRecorded ? current.health : [...current.health, health],
+      },
+    });
+  }
+
   async recover(): Promise<ViewerDeploymentStatus | null> {
     await this.adapter.reconcile();
     const active = this.journal.activeViewerDeployment();
@@ -195,7 +264,16 @@ export class ViewerDeploymentCoordinator {
         }
         if (status.phase === "building") {
           const candidate = await this.adapter.buildCandidate(status.deploymentId, status.revision);
-          status = this.journal.updateViewerDeployment(status.deploymentId, { phase: "candidate-starting", candidate });
+          if (!candidate.mcpRuntime
+            || candidate.mcpRuntime.source !== "managed"
+            || candidate.mcpRuntime.revision !== status.revision) {
+            throw new Error("candidate MCP runtime does not match the deployment revision");
+          }
+          status = this.journal.updateViewerDeployment(status.deploymentId, {
+            phase: "candidate-starting",
+            candidate,
+            mcpRuntime: { ...mcpRuntimeStatus(status), candidate: candidate.mcpRuntime },
+          });
           continue;
         }
         if (status.phase === "candidate-starting") {
@@ -220,13 +298,23 @@ export class ViewerDeploymentCoordinator {
           }
           const previous = await this.adapter.currentRelease();
           if (!previous) throw new Error("previous healthy release identity is unavailable");
-          status = this.journal.updateViewerDeployment(status.deploymentId, { health, previous, phase: "promoting" });
+          const previousMcpRuntime = await this.adapter.currentMcpRuntime();
+          status = this.journal.updateViewerDeployment(status.deploymentId, {
+            health,
+            previous,
+            phase: "promoting",
+            mcpRuntime: { ...mcpRuntimeStatusWithHealth(status, evidence), previous: previousMcpRuntime },
+          });
           continue;
         }
         if (status.phase === "promoting") {
           if (!status.candidate) throw new Error("candidate identity is missing");
-          await this.adapter.promote(status.candidate);
-          status = this.journal.updateViewerDeployment(status.deploymentId, { phase: "post-promotion-health" });
+          const publication = await this.adapter.promote(status.candidate);
+          const runtime = mcpRuntimeStatus(status);
+          status = this.journal.updateViewerDeployment(status.deploymentId, {
+            phase: "post-promotion-health",
+            mcpRuntime: { ...runtime, publications: [...runtime.publications, publication] },
+          });
           continue;
         }
         if (status.phase === "post-promotion-health") {
@@ -241,6 +329,7 @@ export class ViewerDeploymentCoordinator {
               health,
               phase: "host-handoff",
               terminal: false,
+              mcpRuntime: mcpRuntimeStatusWithHealth(status, evidence),
             });
             continue;
           }
@@ -264,9 +353,15 @@ export class ViewerDeploymentCoordinator {
         }
         if (status.phase === "rolling-back") {
           if (!status.previous || !status.candidate) throw new Error("rollback release identity is missing");
-          await this.adapter.rollback(status.previous, status.candidate);
+          const runtime = mcpRuntimeStatus(status);
+          if (!runtime.previous) throw new Error("rollback MCP runtime identity is missing");
+          const publication = await this.adapter.rollback(status.previous, status.candidate, runtime.previous);
           await this.adapter.retire(status.candidate);
-          status = this.journal.updateViewerDeployment(status.deploymentId, { phase: "rolled-back", terminal: true });
+          status = this.journal.updateViewerDeployment(status.deploymentId, {
+            phase: "rolled-back",
+            terminal: true,
+            mcpRuntime: { ...runtime, publications: [...runtime.publications, publication] },
+          });
           continue;
         }
         throw new Error(`unsupported deployment phase: ${status.phase}`);
@@ -288,9 +383,16 @@ export class ViewerDeploymentCoordinator {
           const rolling = latest.phase === "rolling-back"
             ? latest
             : this.journal.updateViewerDeployment(latest.deploymentId, { phase: "rolling-back", error: message });
-          await this.adapter.rollback(rolling.previous!, rolling.candidate!);
+          const runtime = mcpRuntimeStatus(rolling);
+          if (!runtime.previous) throw new Error("rollback MCP runtime identity is missing");
+          const publication = await this.adapter.rollback(rolling.previous!, rolling.candidate!, runtime.previous);
           await this.adapter.retire(rolling.candidate!);
-          this.journal.updateViewerDeployment(rolling.deploymentId, { phase: "rolled-back", terminal: true, error: message });
+          this.journal.updateViewerDeployment(rolling.deploymentId, {
+            phase: "rolled-back",
+            terminal: true,
+            error: message,
+            mcpRuntime: { ...runtime, publications: [...runtime.publications, publication] },
+          });
           return;
         } catch (rollbackError) {
           this.journal.updateViewerDeployment(latest.deploymentId, {

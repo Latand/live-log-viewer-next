@@ -100,6 +100,23 @@ function stop(): void {
 process.once("SIGINT", stop);
 process.once("SIGTERM", stop);
 
+/* #618: a deployment driven by a predecessor adapter promotes this generation
+   without publishing its matching MCP runtime, so this boot is the first
+   process that can repair it. The probe runs against the socket server above,
+   so it starts only once that is serving; staging copies a package tree, so it
+   runs off the boot path rather than delaying the scheduler and the signal
+   handlers. A failed reconcile restores the previous target adapter-side and
+   leaves the host running on the runtime that is already published. */
+if (deploymentAdapter && deployments && bootGeneration.revision) {
+  const revision = bootGeneration.revision;
+  void (async () => {
+    const reconciliation = await deploymentAdapter.reconcileMcpRuntime(revision);
+    if (reconciliation && journal.isWritable()) deployments.recordMcpRuntimeReconciliation(reconciliation);
+  })().catch((error: unknown) => {
+    console.error(`[runtime host] MCP runtime reconcile for ${revision} failed; the published runtime is unchanged: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
 const HANDOFF_EXIT_GRACE_MS = 30_000;
 let handoffStarted = false;
 /* #518 generation handoff. Invoked only after the successor container from

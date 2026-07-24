@@ -3,7 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "@/lib/runtime/contracts";
+import type {
+  ViewerDeploymentStatus,
+  ViewerHealthEvidence,
+  ViewerMcpRuntimeIdentity,
+  ViewerMcpRuntimePublicationEvidence,
+  ViewerMcpRuntimeReconciliation,
+  ViewerReleaseIdentity,
+} from "@/lib/runtime/contracts";
 import { runtimeHostClient, UnixRuntimeHostClient } from "@/lib/runtime/client";
 
 import { ViewerDeploymentCoordinator, type ViewerDeploymentAdapter } from "./deployment";
@@ -48,6 +55,13 @@ function healthy(endpoint: string): ViewerHealthEvidence {
 
 class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   current = release("old", "old");
+  currentMcp: ViewerMcpRuntimeIdentity = {
+    source: "legacy" as const,
+    revision: "8".repeat(40),
+    releaseId: null,
+    artifactDigest: "8".repeat(64),
+    stagedAt: null,
+  };
   resolveGate: Promise<void> | null = null;
   resolveFailures = 0;
   buildGate: Promise<void> | null = null;
@@ -70,14 +84,74 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   async buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity> {
     this.calls.push(`build:${revision}`);
     await this.buildGate;
-    return release(revision, deploymentId);
+    return {
+      ...release(revision, deploymentId),
+      mcpRuntime: {
+        source: "managed",
+        revision,
+        releaseId: `deploy-${deploymentId}`,
+        artifactDigest: "7".repeat(64),
+        stagedAt: "2026-07-23T08:00:00.000Z",
+      },
+    };
   }
   async startCandidate(candidate: ViewerReleaseIdentity): Promise<void> { this.calls.push(`start:${candidate.container}`); }
   async currentRelease(): Promise<ViewerReleaseIdentity | null> { this.calls.push("current"); return this.current; }
   async verifyCandidate(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence> { this.calls.push(`verify-candidate:${candidate.container}`); return this.candidateHealth; }
-  async promote(candidate: ViewerReleaseIdentity): Promise<void> { this.calls.push(`promote:${candidate.container}`); this.current = candidate; }
+  async currentMcpRuntime() { this.calls.push("current-mcp"); return this.currentMcp; }
+  async reconcileMcpRuntime(revision: string): Promise<ViewerMcpRuntimeReconciliation> {
+    this.calls.push(`reconcile-mcp-runtime:${revision}`);
+    return {
+      publication: {
+        action: "activate",
+        source: "managed",
+        revision,
+        releaseId: "deploy-reconciled",
+        artifactDigest: "9".repeat(64),
+        stagedAt: "2026-07-23T08:00:03.000Z",
+        publishedAt: "2026-07-23T08:00:04.000Z",
+        durable: true,
+      },
+      health: {
+        checkedAt: "2026-07-23T08:00:05.000Z",
+        revision,
+        artifactDigest: "9".repeat(64),
+        processReady: true,
+        tools: ["deployment_status", "board_snapshot"],
+        calls: { deploymentStatus: true, boardSnapshot: true },
+        ok: true,
+      },
+    };
+  }
+  async promote(candidate: ViewerReleaseIdentity): Promise<ViewerMcpRuntimePublicationEvidence> {
+    this.calls.push(`promote:${candidate.container}`);
+    this.current = candidate;
+    this.currentMcp = candidate.mcpRuntime!;
+    return {
+      action: "activate",
+      ...candidate.mcpRuntime!,
+      publishedAt: "2026-07-23T08:00:01.000Z",
+      durable: true,
+    };
+  }
   async verifyPromoted(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence> { this.calls.push(`verify-promoted:${candidate.container}`); return this.promotedHealth; }
-  async rollback(previous: ViewerReleaseIdentity, candidate: ViewerReleaseIdentity): Promise<void> { this.calls.push(`rollback:${candidate.container}`); this.current = previous; }
+  async rollback(previous: ViewerReleaseIdentity, candidate: ViewerReleaseIdentity): Promise<ViewerMcpRuntimePublicationEvidence> {
+    this.calls.push(`rollback:${candidate.container}`);
+    this.current = previous;
+    this.currentMcp = previous.mcpRuntime ?? {
+      source: "legacy",
+      revision: "8".repeat(40),
+      releaseId: null,
+      artifactDigest: "8".repeat(64),
+      stagedAt: null,
+    };
+    return {
+      action: "restore",
+      ...this.currentMcp,
+      publishedAt: "2026-07-23T08:00:02.000Z",
+      durable: true,
+    };
+  }
   async retire(candidate: ViewerReleaseIdentity): Promise<void> { this.calls.push(`retire:${candidate.container}`); }
   async retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> { this.calls.push(`retain-only:${releases.map((item) => item.container).join(",")}`); }
 }
@@ -145,6 +219,7 @@ test("an unhealthy candidate leaves the serving release unchanged", async () => 
   const store = journal("candidate-gate");
   const adapter = new FakeDeploymentAdapter();
   const previous = adapter.current;
+  const previousMcpRuntime = adapter.currentMcp;
   adapter.candidateHealth = { ...healthy("http://127.0.0.1/candidate"), ok: false, assets: [{ path: "/_next/static/app.js", status: 404 }], detail: "asset gate failed" };
   const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
 
@@ -155,8 +230,110 @@ test("an unhealthy candidate leaves the serving release unchanged", async () => 
   expect(status).toMatchObject({ phase: "failed", terminal: true, error: "asset gate failed" });
   expect(status?.health[0]?.assets).toEqual([{ path: "/_next/static/app.js", status: 404 }]);
   expect(adapter.current).toEqual(previous);
+  expect(adapter.currentMcp).toEqual(previousMcpRuntime);
   expect(adapter.calls.some((call) => call.startsWith("promote:"))).toBe(false);
   expect(adapter.calls).toContain(`retire:${status?.candidate?.container}`);
+  expect(status?.mcpRuntime).toMatchObject({
+    candidate: { source: "managed", revision: "a".repeat(40) },
+    previous: null,
+    publications: [],
+  });
+  store.close();
+});
+
+test("deployment status exposes exact MCP runtime staging and atomic publication evidence", async () => {
+  const store = journal("mcp-publication-status");
+  const adapter = new FakeDeploymentAdapter();
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+  const revision = "7".repeat(40);
+
+  const receipt = await coordinator.requestViewerDeployment({
+    idempotencyKey: "mcp-publication-status",
+    revision,
+  });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  const status = await coordinator.waitForDeployment(receipt.deploymentId);
+
+  expect(status).toMatchObject({
+    phase: "succeeded",
+    terminal: true,
+    mcpRuntime: {
+      candidate: {
+        source: "managed",
+        revision,
+        artifactDigest: "7".repeat(64),
+      },
+      previous: {
+        source: "legacy",
+        revision: "8".repeat(40),
+        artifactDigest: "8".repeat(64),
+      },
+      publications: [{
+        action: "activate",
+        source: "managed",
+        revision,
+        artifactDigest: "7".repeat(64),
+        durable: true,
+      }],
+    },
+  });
+  expect(adapter.calls.findIndex((call) => call === "current-mcp"))
+    .toBeLessThan(adapter.calls.findIndex((call) => call.startsWith("promote:")));
+  store.close();
+});
+
+test("a successor records first-boot MCP publication on the old terminal deployment receipt", async () => {
+  const store = journal("mcp-successor-reconciliation");
+  const adapter = new FakeDeploymentAdapter();
+  const revision = "7".repeat(40);
+  const receipt = store.admitViewerDeployment(
+    { idempotencyKey: "old-adapter-deployment", requestedRevision: revision, revision },
+    { pid: 9, startIdentity: "9:old" },
+  );
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  store.updateViewerDeployment(receipt.deploymentId, {
+    phase: "succeeded",
+    terminal: true,
+    candidate: release(revision, "old-adapter-candidate"),
+    previous: release("8".repeat(40), "previous"),
+    /* The shape the predecessor generation journaled, before MCP health
+       evidence had a home on the receipt. */
+    mcpRuntime: { candidate: null, previous: null, publications: [] } as unknown as ViewerDeploymentStatus["mcpRuntime"],
+  });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:new" });
+  const reconciliation = await adapter.reconcileMcpRuntime(revision);
+
+  const updated = coordinator.recordMcpRuntimeReconciliation(reconciliation);
+
+  expect(updated).toMatchObject({
+    phase: "succeeded",
+    terminal: true,
+    candidate: {
+      mcpRuntime: {
+        source: "managed",
+        revision,
+        artifactDigest: "9".repeat(64),
+      },
+    },
+    mcpRuntime: {
+      candidate: {
+        source: "managed",
+        revision,
+        artifactDigest: "9".repeat(64),
+      },
+      publications: [{
+        action: "activate",
+        revision,
+        artifactDigest: "9".repeat(64),
+        durable: true,
+      }],
+      health: [{
+        revision,
+        artifactDigest: "9".repeat(64),
+        ok: true,
+      }],
+    },
+  });
   store.close();
 });
 
@@ -164,6 +341,7 @@ test("a post-promotion failure restores the previous healthy release", async () 
   const store = journal("rollback");
   const adapter = new FakeDeploymentAdapter();
   const previous = adapter.current;
+  const previousMcpRuntime = adapter.currentMcp;
   adapter.promotedHealth = { ...healthy("http://127.0.0.1:8898"), ok: false, rootStatus: 503, detail: "stable listener failed" };
   const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
 
@@ -173,6 +351,11 @@ test("a post-promotion failure restores the previous healthy release", async () 
 
   expect(status).toMatchObject({ phase: "rolled-back", terminal: true, previous });
   expect(adapter.current).toEqual(previous);
+  expect(adapter.currentMcp).toEqual(previousMcpRuntime);
+  expect(status?.mcpRuntime.publications).toMatchObject([
+    { action: "activate", source: "managed", revision: "a".repeat(40), durable: true },
+    { action: "restore", ...previousMcpRuntime, durable: true },
+  ]);
   expect(adapter.calls.findIndex((call) => call.startsWith("promote:"))).toBeLessThan(adapter.calls.findIndex((call) => call.startsWith("rollback:")));
   expect(adapter.calls).toContain(`retire:${status?.candidate?.container}`);
   expect(status?.health).toHaveLength(2);
@@ -257,6 +440,13 @@ test("issue 521 review: consecutive same-revision deployments stage each distinc
     return {
       ...release(candidateRevision, deploymentId),
       image: `viewer:${candidateRevision}:${deploymentId}`,
+      mcpRuntime: {
+        source: "managed",
+        revision: candidateRevision,
+        releaseId: `deploy-${deploymentId.replaceAll("_", "-")}`,
+        artifactDigest: "7".repeat(64),
+        stagedAt: "2026-07-23T08:00:00.000Z",
+      },
     };
   };
   let running = { image: "agent-log-viewer:node22", revision: null as string | null };
@@ -443,8 +633,30 @@ test("restart recovery finishes rollback from a journaled promotion phase", asyn
   );
   if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
   const previous = release("old", "old");
-  const candidate = release("c".repeat(40), receipt.deploymentId);
-  beforeRestart.updateViewerDeployment(receipt.deploymentId, { phase: "promoting", previous, candidate, health: [healthy(candidate.endpoint)] });
+  const candidate = {
+    ...release("c".repeat(40), receipt.deploymentId),
+    mcpRuntime: {
+      source: "managed" as const,
+      revision: "c".repeat(40),
+      releaseId: `deploy-${receipt.deploymentId.replaceAll("_", "-")}`,
+      artifactDigest: "c".repeat(64),
+      stagedAt: "2026-07-23T08:00:00.000Z",
+    },
+  };
+  const previousMcpRuntime = {
+    source: "legacy" as const,
+    revision: "8".repeat(40),
+    releaseId: null,
+    artifactDigest: "8".repeat(64),
+    stagedAt: null,
+  };
+  beforeRestart.updateViewerDeployment(receipt.deploymentId, {
+    phase: "promoting",
+    previous,
+    candidate,
+    health: [healthy(candidate.endpoint)],
+    mcpRuntime: { candidate: candidate.mcpRuntime, previous: previousMcpRuntime, publications: [], health: [] },
+  });
   beforeRestart.close();
 
   const afterRestart = new RuntimeJournal(filename, { now: () => 2_000 });
@@ -462,6 +674,11 @@ test("restart recovery finishes rollback from a journaled promotion phase", asyn
 
   expect(status).toMatchObject({ phase: "rolled-back", terminal: true });
   expect(adapter.current).toEqual(previous);
+  expect(adapter.currentMcp).toEqual(previousMcpRuntime);
+  expect(status?.mcpRuntime.publications).toMatchObject([
+    { action: "activate", source: "managed", revision: candidate.revision, durable: true },
+    { action: "restore", ...previousMcpRuntime, durable: true },
+  ]);
   expect(adapter.calls).toContain(`promote:${candidate.container}`);
   expect(adapter.calls).toContain(`rollback:${candidate.container}`);
   afterRestart.close();

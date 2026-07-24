@@ -10,7 +10,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MCP_BIN="${LLV_MCP_BIN:-$REPO_ROOT/bin/mcp-server.mjs}"
+STABLE_MCP_BIN="${LLV_MCP_RUNTIME_ROOT:-$HOME/.agents/tools/llv-mcp-runtime}/bin/mcp-server.mjs"
+if [ -n "${LLV_MCP_BIN:-}" ]; then
+  MCP_BIN="$LLV_MCP_BIN"
+elif [ -f "$STABLE_MCP_BIN" ]; then
+  MCP_BIN="$STABLE_MCP_BIN"
+else
+  MCP_BIN="$REPO_ROOT/bin/mcp-server.mjs"
+fi
 ACCOUNTS_ROOT="${LLV_CONFIG_ROOT:-$HOME/.config/agent-log-viewer}/accounts"
 
 if [ ! -f "$MCP_BIN" ]; then

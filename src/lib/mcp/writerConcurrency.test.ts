@@ -23,11 +23,26 @@ async function runConcurrentWriters(
   kind: "task" | "pipeline",
   initialState: string,
   operation: WriterOperation = "create",
-): Promise<{ enteredBeforeRelease: boolean; persisted: Record<string, unknown> }> {
+): Promise<{ creatorPath: string | null; enteredBeforeRelease: boolean; persisted: Record<string, unknown> }> {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), `llv-${kind}-writers-`));
   sandboxes.push(sandbox);
   const stateFile = path.join(sandbox, `${kind}s.json`);
   fs.writeFileSync(stateFile, initialState, "utf8");
+  let creatorPath: string | null = null;
+  let codexHome: string | null = null;
+  if (kind === "pipeline" && operation === "create") {
+    codexHome = path.join(sandbox, "codex");
+    creatorPath = path.join(codexHome, "sessions", "creator.jsonl");
+    fs.mkdirSync(path.dirname(creatorPath), { recursive: true });
+    fs.writeFileSync(creatorPath, "{}\n", "utf8");
+    const { AgentRegistry } = await import("@/lib/agent/registry");
+    new AgentRegistry(
+      path.join(sandbox, "agent-registry.json"),
+      undefined,
+      undefined,
+      { sqliteMode: "off" },
+    ).ensureConversation("codex", creatorPath, null);
+  }
   const fixture = path.join(import.meta.dir, "writerConcurrencyChild.ts");
   const writers = ["http", "mcp"].map((writer) => {
     const ready = path.join(sandbox, `${writer}.ready`);
@@ -43,6 +58,9 @@ async function runConcurrentWriters(
         LLV_WRITER_OPERATION: operation,
         LLV_WRITER_READY: ready,
         LLV_WRITER_RELEASE: release,
+        ...(codexHome ? { LLV_CODEX_HOME: codexHome } : {}),
+        ...(creatorPath ? { LLV_WRITER_SRC: creatorPath } : {}),
+        LLV_AGENT_REGISTRY_SQLITE: "off",
       },
       stdout: "ignore",
       stderr: "pipe",
@@ -71,6 +89,7 @@ async function runConcurrentWriters(
     throw new Error(errors.filter(Boolean).join("\n"));
   }
   return {
+    creatorPath,
     enteredBeforeRelease,
     persisted: JSON.parse(fs.readFileSync(stateFile, "utf8")) as Record<string, unknown>,
   };
@@ -86,9 +105,12 @@ test("Viewer HTTP and standalone MCP task creates preserve both writes across pr
 
 test("Viewer HTTP and standalone MCP pipeline creates preserve both writes across processes", async () => {
   const result = await runConcurrentWriters("pipeline", "{\"schemaVersion\":3,\"pipelines\":[]}\n");
-  const persisted = result.persisted as { pipelines: unknown[] };
+  const persisted = result.persisted as { pipelines: Array<{ srcPath: string | null; srcConversationId: string | null }> };
   expect(result.enteredBeforeRelease).toBe(false);
   expect(persisted.pipelines).toHaveLength(2);
+  expect(persisted.pipelines.every((pipeline) =>
+    pipeline.srcPath === result.creatorPath
+    && pipeline.srcConversationId?.startsWith("conversation_") === true)).toBe(true);
 }, 15_000);
 
 test("Viewer HTTP PATCH and standalone MCP update_task serialize across processes", async () => {
