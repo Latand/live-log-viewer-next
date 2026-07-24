@@ -32,7 +32,10 @@ export function headlessCodexThreadConfig(
         ...(approval ? { default_tools_approval_mode: approval } : {}),
       }];
     })),
-    features: { ...CODEX_VIEWER_SPAWN_FEATURES, multi_agent: allowSubagents },
+    /* The per-thread features table replaces the app-server's global one, so
+       the realtime flag the host passes via `--enable realtime_conversation`
+       must be restated here or thread/realtime/start fails locally (#621). */
+    features: { ...CODEX_VIEWER_SPAWN_FEATURES, multi_agent: allowSubagents, realtime_conversation: true },
     include_apps_instructions: false,
   };
 }

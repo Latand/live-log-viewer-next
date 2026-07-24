@@ -73,6 +73,8 @@ export interface ComposerBarProps {
       ones (issue #561). ArrowUp/ArrowDown recall them while the composer is
       empty; absent (the default) leaves the arrows as plain caret movement. */
   history?: readonly string[];
+  voiceControl?: ReactNode;
+  voicePanel?: ReactNode;
 }
 
 const NO_HISTORY: readonly string[] = [];
@@ -159,6 +161,8 @@ export function ComposerBar({
   sendPayloadAvailable = false,
   receipts,
   history = NO_HISTORY,
+  voiceControl,
+  voicePanel,
 }: ComposerBarProps) {
   const {
     displayText,
@@ -250,6 +254,7 @@ export function ComposerBar({
       {/* Dictation is inert while the host is dead (§5): a spoken message could
           never be delivered, so the mic disables alongside Send — no half-open
           affordance that records into a void. */}
+      {voiceControl}
       <MicButtonView {...dictation} busy={voiceSending || sendBlocked} onText={insertSpoken} anchored />
       <span
         className="relative inline-flex shrink-0"
@@ -296,6 +301,7 @@ export function ComposerBar({
 
   return (
     <>
+      {voicePanel}
       {/* On phones, staged images are the composer's first bounded row. The
           desktop tray keeps its established position below the controls. */}
       {isMobile && !onImageFiles ? (
