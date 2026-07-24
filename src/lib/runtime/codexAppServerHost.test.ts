@@ -277,9 +277,13 @@ describe("CodexAppServerHost", () => {
     });
     // SDP requires a terminal CRLF; a missing one is healed, never trimmed —
     // OpenAI rejects an unterminated offer with "unmarshal SDP: EOF".
+    /* The live model is named explicitly (#664): letting the backend choose
+       gave `gpt-live-1-boulder-alpha`, whose calls were cut at ~9s even on an
+       account at 5% of its window. */
     expect(server.requests.find((request) => request.method === "thread/realtime/start")?.params).toEqual({
       threadId: "voice-thread",
       version: "v3",
+      model: "gpt-live-1-codex",
       outputModality: "audio",
       transport: { type: "webrtc", sdp: "v=0\r\noffer\r\n" },
       clientManagedHandoffs: true,
@@ -351,6 +355,7 @@ describe("CodexAppServerHost", () => {
       "clientManagedHandoffs",
       "codexResponsesAsItems",
       "includeStartupContext",
+      "model",
       "outputModality",
       "threadId",
       "transport",

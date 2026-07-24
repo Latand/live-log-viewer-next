@@ -151,6 +151,15 @@ const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_THREAD_READ_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const REALTIME_START_TIMEOUT_MS = 90_000;
+/**
+ * The live model to ask for by name (#664). Sending none let the backend pick
+ * `gpt-live-1-boulder-alpha`, and every such call was cut at 9.0–9.4 seconds
+ * with `rate_limit_error / "You have reached your usage limit."` — including on
+ * an account sitting at 5% of its window. Codex Desktop names
+ * `gpt-live-1-codex` explicitly and holds a call on that same account for as
+ * long as the operator talks, so the alpha default is the difference.
+ */
+const REALTIME_LIVE_MODEL = "gpt-live-1-codex";
 const MAX_REALTIME_SDP_BYTES = 512 * 1024;
 const MAX_REALTIME_SPEECH_BYTES = 8 * 1024;
 const MAX_LINE_BYTES = 16 * 1024 * 1024;
@@ -683,6 +692,7 @@ export class CodexAppServerHost implements EngineHost {
       await this.rpc("thread/realtime/start", {
         threadId: this.identity.threadId,
         version: "v3",
+        model: REALTIME_LIVE_MODEL,
         outputModality: "audio",
         transport: { type: "webrtc", sdp: offer },
         clientManagedHandoffs: true,
