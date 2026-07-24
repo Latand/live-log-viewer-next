@@ -45,6 +45,14 @@ function syncTree(dirname: string): void {
   syncDirectory(dirname);
 }
 
+/* Staging temp directories are named `.<releaseId>.<pid>.<uuid>.tmp`. A crash
+   leaves one behind carrying a whole copied node_modules, and the next
+   deployment has a different releaseId — so the sweep matches the shape, never
+   one deployment's own id. */
+function isStagingTemporary(name: string): boolean {
+  return name.startsWith(".") && name.endsWith(".tmp");
+}
+
 function releaseId(deploymentId: string, revision: string): string {
   const digest = createHash("sha256").update(`${deploymentId}\0${revision}`).digest("hex").slice(0, 24);
   return `deploy-${digest}`;
@@ -109,7 +117,12 @@ export class McpRuntimeReleaseStore {
       .filter((runtime) => runtime.source === "managed")
       .map((runtime) => runtime.releaseId));
     for (const entry of fs.readdirSync(this.releasesDir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name.startsWith(".") || retained.has(entry.name)) continue;
+      if (!entry.isDirectory()) continue;
+      if (isStagingTemporary(entry.name)) {
+        fs.rmSync(path.join(this.releasesDir, entry.name), { recursive: true, force: true });
+        continue;
+      }
+      if (entry.name.startsWith(".") || retained.has(entry.name)) continue;
       if (!/^[a-z0-9-]+$/.test(entry.name)) throw new Error("managed MCP runtime release directory is invalid");
       fs.rmSync(path.join(this.releasesDir, entry.name), { recursive: true, force: true });
     }
@@ -209,7 +222,7 @@ export class McpRuntimeReleaseStore {
 
     fs.mkdirSync(this.releasesDir, { recursive: true, mode: 0o700 });
     for (const entry of fs.readdirSync(this.releasesDir)) {
-      if (entry.startsWith(`.${id}.`) && entry.endsWith(".tmp")) {
+      if (isStagingTemporary(entry)) {
         fs.rmSync(path.join(this.releasesDir, entry), { recursive: true, force: true });
       }
     }

@@ -195,6 +195,31 @@ test("process death around target publication exposes one complete Viewer and MC
   }
 });
 
+test("staging and retention reclaim crashed staging directories from earlier deployments", () => {
+  const fixture = preparedPackage();
+  const store = new McpRuntimeReleaseStore({
+    stateDir: fixture.state,
+    stableRuntimeRoot: fixture.stable,
+    now: () => "2026-07-23T08:04:00.000Z",
+  });
+  const releasesDir = path.join(fixture.state, "mcp-runtime", "releases");
+  const abandoned = (name: string) => {
+    fs.mkdirSync(path.join(releasesDir, name, "node_modules"), { recursive: true });
+    fs.writeFileSync(path.join(releasesDir, name, "node_modules", "index.js"), "export {};\n");
+  };
+  fs.mkdirSync(releasesDir, { recursive: true });
+  abandoned(".deploy-crashed-earlier.4242.staging-uuid-one.tmp");
+
+  const staged = store.stagePreparedPackage(fixture.source, "deploy-next", "5".repeat(40));
+
+  expect(fs.readdirSync(releasesDir)).toEqual([staged.releaseId!]);
+
+  abandoned(".deploy-crashed-later.4243.staging-uuid-two.tmp");
+  store.retainOnly([staged]);
+
+  expect(fs.readdirSync(releasesDir)).toEqual([staged.releaseId!]);
+});
+
 test("runtime retention keeps the active rollback pair and retires failed candidates", () => {
   const fixture = preparedPackage();
   const store = new McpRuntimeReleaseStore({

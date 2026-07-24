@@ -120,7 +120,7 @@ describe("installSnapshot", () => {
     const deployment: ViewerDeploymentStatus = {
       deploymentId: "deploy_1", idempotencyKey: "key_1", requestedRevision: "origin/main", revision: "a".repeat(40),
       phase: "building", terminal: false, candidate: null, previous: null, health: [], error: null,
-      mcpRuntime: { candidate: null, previous: null, publications: [] },
+      mcpRuntime: { candidate: null, previous: null, publications: [], health: [] },
       owner: { pid: 10, startIdentity: "10:1" }, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z", revisionNumber: 2,
     };
     const store = installSnapshot(snapshot({ deployments: [deployment] }));

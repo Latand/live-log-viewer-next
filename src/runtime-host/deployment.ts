@@ -7,6 +7,7 @@ import type {
   ViewerHealthEvidence,
   ViewerMcpRuntimeIdentity,
   ViewerMcpRuntimePublicationEvidence,
+  ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
 } from "@/lib/runtime/contracts";
 import { RuntimeIdempotencyConflictError } from "@/lib/runtime/contracts";
@@ -43,6 +44,7 @@ export interface ViewerDeploymentAdapter {
   startCandidate(candidate: ViewerReleaseIdentity): Promise<void>;
   currentRelease(): Promise<ViewerReleaseIdentity | null>;
   currentMcpRuntime(): Promise<ViewerMcpRuntimeIdentity>;
+  reconcileMcpRuntime(revision: string): Promise<ViewerMcpRuntimeReconciliation | null>;
   verifyCandidate(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence>;
   promote(candidate: ViewerReleaseIdentity): Promise<ViewerMcpRuntimePublicationEvidence>;
   verifyPromoted(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence>;
@@ -79,8 +81,30 @@ function safeError(error: unknown): string {
   return message.replace(/[\r\n]+/g, " ").slice(0, 500);
 }
 
+/** Journal rows written before a field existed replay through here, so every
+    list is recovered rather than assumed present. */
 function mcpRuntimeStatus(status: ViewerDeploymentStatus): ViewerDeploymentStatus["mcpRuntime"] {
-  return status.mcpRuntime ?? { candidate: status.candidate?.mcpRuntime ?? null, previous: status.previous?.mcpRuntime ?? null, publications: [] };
+  const recordedHealth = status.health.flatMap((evidence) => evidence.mcpRuntime ? [evidence.mcpRuntime] : []);
+  const runtime = status.mcpRuntime;
+  if (runtime) {
+    return {
+      ...runtime,
+      publications: runtime.publications ?? [],
+      health: runtime.health ?? recordedHealth,
+    };
+  }
+  return {
+    candidate: status.candidate?.mcpRuntime ?? null,
+    previous: status.previous?.mcpRuntime ?? null,
+    publications: [],
+    health: recordedHealth,
+  };
+}
+
+/** Health gates carry MCP evidence only once a candidate has a managed runtime. */
+function mcpRuntimeStatusWithHealth(status: ViewerDeploymentStatus, evidence: ViewerHealthEvidence): ViewerDeploymentStatus["mcpRuntime"] {
+  const runtime = mcpRuntimeStatus(status);
+  return evidence.mcpRuntime ? { ...runtime, health: [...runtime.health, evidence.mcpRuntime] } : runtime;
 }
 
 export class ViewerDeploymentCoordinator {
@@ -147,6 +171,40 @@ export class ViewerDeploymentCoordinator {
 
   readViewerDeployment(deploymentId: string): ViewerDeploymentStatus | null {
     return this.journal.viewerDeployment(deploymentId);
+  }
+
+  recordMcpRuntimeReconciliation(reconciliation: ViewerMcpRuntimeReconciliation): ViewerDeploymentStatus | null {
+    const { publication, health } = reconciliation;
+    const status = this.journal.latestViewerDeploymentForRevision(publication.revision);
+    if (!status?.candidate || status.phase !== "succeeded" || !status.terminal) return status;
+    const runtime: ViewerMcpRuntimeIdentity = {
+      source: publication.source,
+      revision: publication.revision,
+      releaseId: publication.releaseId,
+      artifactDigest: publication.artifactDigest,
+      stagedAt: publication.stagedAt,
+    };
+    const current = mcpRuntimeStatus(status);
+    const publicationRecorded = current.publications.some((item) =>
+      item.action === publication.action
+      && item.revision === publication.revision
+      && item.artifactDigest === publication.artifactDigest);
+    const healthRecorded = current.health.some((item) =>
+      item.ok
+      && item.revision === health.revision
+      && item.artifactDigest === health.artifactDigest);
+    if (publicationRecorded && healthRecorded && status.candidate.mcpRuntime?.artifactDigest === runtime.artifactDigest) {
+      return status;
+    }
+    return this.journal.updateViewerDeployment(status.deploymentId, {
+      candidate: { ...status.candidate, mcpRuntime: runtime },
+      mcpRuntime: {
+        ...current,
+        candidate: runtime,
+        publications: publicationRecorded ? current.publications : [...current.publications, publication],
+        health: healthRecorded ? current.health : [...current.health, health],
+      },
+    });
   }
 
   async recover(): Promise<ViewerDeploymentStatus | null> {
@@ -245,7 +303,7 @@ export class ViewerDeploymentCoordinator {
             health,
             previous,
             phase: "promoting",
-            mcpRuntime: { ...mcpRuntimeStatus(status), previous: previousMcpRuntime },
+            mcpRuntime: { ...mcpRuntimeStatusWithHealth(status, evidence), previous: previousMcpRuntime },
           });
           continue;
         }
@@ -271,6 +329,7 @@ export class ViewerDeploymentCoordinator {
               health,
               phase: "host-handoff",
               terminal: false,
+              mcpRuntime: mcpRuntimeStatusWithHealth(status, evidence),
             });
             continue;
           }

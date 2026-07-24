@@ -55,7 +55,17 @@ function deployedPackageRoot() {
   const releasesRoot = join(stateDir, "mcp-runtime", "releases");
   const releaseRoot = join(releasesRoot, runtime.releaseId);
   const bundle = join(releaseRoot, "dist", "mcp-server.mjs");
-  const artifactDigest = createHash("sha256").update(readFileSync(bundle)).digest("hex");
+  let bundled;
+  try {
+    bundled = readFileSync(bundle);
+  } catch (error) {
+    /* Same policy as an absent release target: a runtime the deployment never
+       published (or already retired) falls back to this image's own bundle
+       instead of leaving the operator with no MCP server at all. */
+    if (error?.code === "ENOENT") return packageRoot;
+    throw new Error(`Could not read the published MCP runtime bundle: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const artifactDigest = createHash("sha256").update(bundled).digest("hex");
   if (artifactDigest !== runtime.artifactDigest) {
     throw new Error("MCP runtime bundle digest does not match the active release.");
   }

@@ -199,6 +199,7 @@ chmod +x /usr/local/bin/tmux
 EOF
 
 COPY --from=build /app/.next ./.next
+COPY --from=build /app/dist ./dist
 COPY --from=build /app/public ./public
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/bin ./bin

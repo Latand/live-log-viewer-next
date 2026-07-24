@@ -408,6 +408,7 @@ export interface ViewerDeploymentMcpRuntimeStatus {
   candidate: ViewerMcpRuntimeIdentity | null;
   previous: ViewerMcpRuntimeIdentity | null;
   publications: ViewerMcpRuntimePublicationEvidence[];
+  health: ViewerMcpRuntimeHealthEvidence[];
 }
 
 export interface ViewerReleaseIdentity {
@@ -430,6 +431,11 @@ export interface ViewerMcpRuntimeHealthEvidence {
   };
   ok: boolean;
   detail?: string;
+}
+
+export interface ViewerMcpRuntimeReconciliation {
+  publication: ViewerMcpRuntimePublicationEvidence;
+  health: ViewerMcpRuntimeHealthEvidence;
 }
 
 export interface ViewerHealthEvidence {

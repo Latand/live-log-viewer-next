@@ -8,6 +8,7 @@ import type {
   ViewerHealthEvidence,
   ViewerMcpRuntimeIdentity,
   ViewerMcpRuntimePublicationEvidence,
+  ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
 } from "../src/lib/runtime/contracts";
 import {
@@ -56,7 +57,7 @@ const stableEndpoint = `http://127.0.0.1:${Number(process.env.LLV_VIEWER_PORT ||
 const runtimeHostImageTag = process.env.LLV_RUNTIME_HOST_IMAGE_TAG || "agent-log-viewer:node22";
 const mcpRuntimeRoot = process.env.LLV_MCP_RUNTIME_ROOT || path.join(process.env.HOME || "/home/user", ".agents", "tools", "llv-mcp-runtime");
 const mcpRuntimeStore = new McpRuntimeReleaseStore({ stateDir, stableRuntimeRoot: mcpRuntimeRoot });
-const deploymentPackageRoot = path.resolve(import.meta.dir, "..");
+const deploymentPackageRoot = process.env.LLV_DEPLOYMENT_PACKAGE_ROOT || path.resolve(import.meta.dir, "..");
 
 async function command(argv: string[], options: { cwd?: string } = {}): Promise<string> {
   const child = Bun.spawn(["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", ...argv], {
@@ -437,6 +438,48 @@ async function currentMcpRuntime(): Promise<ViewerMcpRuntimeIdentity> {
   return mcpRuntimeStore.legacyRuntimeIdentity(revision);
 }
 
+/* #618 successor-boot reconcile. A deployment driven by an older adapter
+   promotes the new Viewer without ever publishing a matching MCP runtime, so
+   the successor generation is the first process that can repair it: it stages
+   from its own package, installs the launcher, and gates on the full tool
+   surface. `stagePreparedPackage` derives its release id from the deployment
+   id, so a boot that crashed mid-reconcile reuses (never duplicates) the same
+   release, and a boot that already matches does nothing at all. */
+async function reconcileMcpRuntime(revision: string): Promise<ViewerMcpRuntimeReconciliation | null> {
+  if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error("runtime-host MCP revision is invalid");
+  const previous = readTarget();
+  if (previous.revision !== revision) throw new Error("runtime-host MCP revision differs from the active Viewer release");
+  const published = previous.mcpRuntime;
+  if (published?.source === "managed" && published.revision === revision) return null;
+  const runtime = mcpRuntimeStore.stagePreparedPackage(deploymentPackageRoot, `runtime-host-bootstrap-${revision}`, revision);
+  try {
+    mcpRuntimeStore.installStableLauncher(deploymentPackageRoot);
+    const publication = switchTarget({ ...previous, mcpRuntime: runtime }, "activate");
+    const probeEnvironment = Object.fromEntries(Object.entries(withoutWakatimeCredential(process.env))
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+    probeEnvironment.LLV_VIEWER_DEPLOY_TARGET = targetFile;
+    const health = await probeMcpRuntime({
+      command: process.execPath,
+      args: [path.join(mcpRuntimeRoot, "bin", "mcp-server.mjs")],
+      cwd: mcpRuntimeRoot,
+      env: probeEnvironment,
+      runtime,
+    });
+    if (!health.ok) throw new Error(health.detail ?? "runtime-host MCP reconciliation health gate failed");
+    return { publication, health };
+  } catch (error) {
+    let restoreError: unknown = null;
+    try { writeReleaseTarget(targetFile, previous); } catch (failure) { restoreError = failure; }
+    try { mcpRuntimeStore.retire(runtime); } catch (failure) { restoreError ??= failure; }
+    if (restoreError) {
+      const message = error instanceof Error ? error.message : "runtime-host MCP reconciliation failed";
+      const restoreMessage = restoreError instanceof Error ? restoreError.message : "MCP target restore failed";
+      throw new Error(`${message}; restore failed: ${restoreMessage}`);
+    }
+    throw error;
+  }
+}
+
 /** #518 runtime-host generation handoff (see hostSuccessor.ts for the
     ordering contract). Every mutation is a short-lived CLI call against the
     host Docker daemon, so the successor container exists daemon-side before
@@ -492,6 +535,7 @@ async function main(): Promise<unknown> {
     return current;
   }
   if (action === "current-mcp-runtime") return currentMcpRuntime();
+  if (action === "reconcile-mcp-runtime") return reconcileMcpRuntime(String(input.revision ?? ""));
   if (action === "verify-candidate") { const candidate = release(input.candidate); return verify(candidate, candidate.endpoint); }
   if (action === "promote") {
     const candidate = release(input.candidate);

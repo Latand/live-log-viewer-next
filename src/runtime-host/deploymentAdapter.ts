@@ -10,6 +10,7 @@ import type {
   ViewerMcpRuntimeHealthEvidence,
   ViewerMcpRuntimeIdentity,
   ViewerMcpRuntimePublicationEvidence,
+  ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
 } from "@/lib/runtime/contracts";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
@@ -17,7 +18,7 @@ import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 import type { ViewerDeploymentAdapter } from "./deployment";
 
 type CommandRunner = (action: string, input: Record<string, unknown>) => Promise<unknown>;
-type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "current-mcp-runtime" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "complete-host-handoff";
+type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "current-mcp-runtime" | "reconcile-mcp-runtime" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "complete-host-handoff";
 
 const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "resolve-revision": 110_000,
@@ -25,6 +26,7 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "start-candidate": 60_000,
   "current-release": 90_000,
   "current-mcp-runtime": 90_000,
+  "reconcile-mcp-runtime": 10 * 60_000,
   "verify-candidate": 90_000,
   promote: 30_000,
   "verify-promoted": 90_000,
@@ -234,6 +236,16 @@ function mcpHealthEvidence(value: unknown): ViewerMcpRuntimeHealthEvidence {
   };
 }
 
+/** `null` is the adapter's "the published runtime already matches" answer. */
+function reconciliation(value: unknown): ViewerMcpRuntimeReconciliation | null {
+  if (value === null) return null;
+  const item = object(value);
+  return {
+    publication: publication(item.publication),
+    health: mcpHealthEvidence(item.health),
+  };
+}
+
 /**
  * Host-owned adapter protocol. The executable path comes from runtime-host
  * configuration. Request data is sent as one JSON document on stdin; it never
@@ -327,6 +339,10 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
 
   async currentMcpRuntime(): Promise<ViewerMcpRuntimeIdentity> {
     return mcpRuntime(await this.run("current-mcp-runtime", {}));
+  }
+
+  async reconcileMcpRuntime(revision: string): Promise<ViewerMcpRuntimeReconciliation | null> {
+    return reconciliation(await this.run("reconcile-mcp-runtime", { revision }));
   }
 
   async verifyCandidate(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence> {

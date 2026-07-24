@@ -3,33 +3,12 @@ import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { MCP_TOOL_NAMES } from "@/lib/mcp/server";
 import type { ViewerMcpRuntimeHealthEvidence, ViewerMcpRuntimeIdentity } from "@/lib/runtime/contracts";
 
-const REQUIRED_TOOLS = [
-  "spawn_agent",
-  "send_message",
-  "create_task",
-  "update_task",
-  "create_pipeline",
-  "pipeline_action",
-  "link_task_to_pipeline",
-  "list_conversations",
-  "get_conversation",
-  "deploy_exact_sha",
-  "get_pipeline",
-  "board_snapshot",
-  "list_flows",
-  "get_flow",
-  "flow_action",
-  "list_pipelines",
-  "conversation_action",
-  "operator_snapshot",
-  "list_tasks",
-  "get_task",
-  "deployment_status",
-  "resources",
-  "conversation_migration",
-] as const;
+/* The probe gate is the tool surface this generation ships; a duplicated list
+   silently stops gating whenever a tool is added. */
+const REQUIRED_TOOLS: readonly string[] = MCP_TOOL_NAMES;
 
 export interface McpRuntimeProbeOptions {
   command: string;
