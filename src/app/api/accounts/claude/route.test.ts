@@ -13,7 +13,7 @@ process.env.LLV_STATE_DIR = path.join(sandbox, "state");
 process.env.LLV_CLAUDE_HOME = path.join(sandbox, "legacy");
 
 const { ClaudeLoginSupervisor, setClaudeLoginSupervisorForTests } = await import("@/lib/accounts/claudeLogin");
-const { claudeRegistryPath, createManagedClaudeAccount } = await import("@/lib/accounts/claude");
+const { claudeProjectRoots, claudeRegistryPath, createManagedClaudeAccount } = await import("@/lib/accounts/claude");
 const { agentRegistry } = await import("@/lib/agent/registry");
 const { DELETE: remove, POST } = await import("./route");
 const { DELETE } = await import("./login/[operationId]/route");
@@ -277,10 +277,11 @@ test("managed Claude removal restores routing when the underlying deletion fails
   }
 });
 
-test("managed Claude removal stays blocked while a current conversation depends on the account", async () => {
+test("managed Claude removal stays blocked while a live conversation depends on the account", async () => {
   const account = createManagedClaudeAccount("Current history");
   const registry = agentRegistry();
-  registry.ensureConversation("claude", "/current-claude.jsonl", account.id);
+  const conversation = registry.ensureConversation("claude", "/current-claude.jsonl", account.id);
+  registry.holdDelivery(conversation.id, "still owed to this conversation");
 
   const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
     method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
@@ -288,6 +289,28 @@ test("managed Claude removal stays blocked while a current conversation depends 
 
   expect(response.status).toBe(409);
   await expect(response.json()).resolves.toEqual(expect.objectContaining({ blockers: ["current_conversations"] }));
+});
+
+test("managed Claude removal proceeds over dead history and keeps its transcripts readable (issue #643)", async () => {
+  const account = createManagedClaudeAccount("Dead history");
+  const registry = agentRegistry();
+  const transcript = path.join(account.projectsDir, "-repo", "99999999-1234-1234-1234-123456789abc.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(transcript, "{\"cwd\":\"/repo\"}\n", { mode: 0o600 });
+  const conversation = registry.ensureConversation("claude", transcript, account.id);
+  fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+  }));
+
+  expect(response.status).toBe(200);
+  await expect(response.json()).resolves.toEqual({ removed: { id: account.id }, cleanupPending: false });
+  // History survives the home: same file, same path, same conversation identity.
+  expect(fs.readFileSync(transcript, "utf8")).toBe("{\"cwd\":\"/repo\"}\n");
+  expect(claudeProjectRoots()).toContain(account.projectsDir);
+  expect(registry.conversationForPath(transcript)?.id).toBe(conversation.id);
+  expect(fs.existsSync(path.join(account.home, ".credentials.json"))).toBe(false);
 });
 
 test("managed Claude removal reports a corrupt registry as locked", async () => {

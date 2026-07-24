@@ -10,7 +10,7 @@ const OLD_HOME = process.env.LLV_CODEX_HOME;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy-codex");
 
-const { CorruptCodexAccountsError, LOGIN_STARTUP_GRACE_MS, activeCodexAccountId, cleanupOrphanedCodexHomes, codexAccountsRoot, codexLoginPaneStatus, createManagedCodexAccount, listCodexAccounts, removeManagedCodexAccount, setActiveCodexAccount } = await import("./codex");
+const { CorruptCodexAccountsError, LOGIN_STARTUP_GRACE_MS, activeCodexAccountId, cleanupOrphanedCodexHomes, codexAccountsRoot, codexLoginPaneStatus, codexSessionRoots, createManagedCodexAccount, listCodexAccounts, removeManagedCodexAccount, setActiveCodexAccount } = await import("./codex");
 
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
@@ -103,6 +103,25 @@ test("managed Codex account removal deletes its registry record and home, then c
   expect(fs.existsSync(account.home)).toBe(false);
   expect(cleaned).toEqual({ removed: ["probe-login"], unresolved: [] });
   expect(fs.existsSync(orphan)).toBe(false);
+});
+
+test("removing an account with history retains its sessions in place and scrubs everything else (issue #643)", () => {
+  const account = createManagedCodexAccount("Retire me");
+  const session = path.join(account.sessionsDir, "2026", "07", "24", "rollout-2026-07-24T00-00-00-12345678-1234-1234-1234-123456789abc.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(session, "{}\n", { mode: 0o600 });
+  fs.writeFileSync(path.join(account.home, "auth.json"), "{}", { mode: 0o600 });
+
+  const removal = removeManagedCodexAccount(account.id);
+
+  expect(removal).toEqual({ cleanupPending: false });
+  expect(listCodexAccounts().map((item) => item.id)).not.toContain(account.id);
+  expect(fs.readFileSync(session, "utf8")).toBe("{}\n");
+  expect(codexSessionRoots()).toContain(account.sessionsDir);
+  expect(fs.readdirSync(account.home)).toEqual(["sessions"]);
+  expect(cleanupOrphanedCodexHomes()).toEqual({ removed: [], unresolved: [] });
+  expect(fs.existsSync(session)).toBe(true);
+  expect(createManagedCodexAccount("Retire me").id).not.toBe(account.id);
 });
 
 test("a home deletion failure leaves a removable Codex orphan after logical removal", () => {
