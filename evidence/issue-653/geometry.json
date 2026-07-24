@@ -1,0 +1,26 @@
+{
+  "foreign-leak-suppressed-desktop": {
+    "scrollWidth": 1280,
+    "viewportWidth": 1280,
+    "outboxEntries": 0,
+    "foreignPromptVisible": false
+  },
+  "own-launch-renders-desktop": {
+    "scrollWidth": 1280,
+    "viewportWidth": 1280,
+    "outboxEntries": 1,
+    "foreignPromptVisible": true
+  },
+  "foreign-leak-suppressed-mobile-390": {
+    "scrollWidth": 390,
+    "viewportWidth": 390,
+    "outboxEntries": 0,
+    "foreignPromptVisible": false
+  },
+  "own-launch-renders-mobile-390": {
+    "scrollWidth": 390,
+    "viewportWidth": 390,
+    "outboxEntries": 1,
+    "foreignPromptVisible": true
+  }
+}

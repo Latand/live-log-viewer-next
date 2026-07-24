@@ -71,6 +71,13 @@ export interface OutboxEntry {
       retirement is monotonic across tail eviction, adoption, and refresh. */
   retiredEchoId?: string;
   retiredAt?: number;
+  /** The durable conversation identity that OWNS this bubble (issue #653). A
+      launch-owned bubble records the launch's own conversation id here, so a pane
+      renders it ONLY inside that conversation — never leaked into an unrelated
+      pane whose structured entry went dead. Absent for ordinary composer sends,
+      which are enqueued into their own pane's queue and so are inherently owned
+      by it; absence therefore renders as before. */
+  owner?: string;
 }
 
 /**
@@ -538,7 +545,7 @@ export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">)
  */
 export function seedLaunchOutbox(
   cardId: string,
-  entry: { id: string; text: string; images: number; at: number; echoText?: string },
+  entry: { id: string; text: string; images: number; at: number; echoText?: string; owner?: string },
 ): void {
   if (!entry.text.trim() && !entry.images) return;
   const currentLaunch = readCurrentLaunch(cardId);
@@ -1016,10 +1023,18 @@ export function visibleOutbox(
   queue: readonly OutboxEntry[],
   transcriptEchoCounts: TranscriptEchoCounts,
   nowMs: number,
+  paneOwner?: string,
 ): OutboxEntry[] {
   const consumed = new Map<string, number>();
   const visible: OutboxEntry[] = [];
   for (const entry of queue) {
+    /* Pane ownership by durable conversation id (issue #653): a bubble that
+       records an owner renders ONLY in that conversation's pane. This keeps a
+       launch bubble keyed to another conversation from leaking into an unrelated
+       pane (e.g. when that pane's own structured entry went dead). An owner-less
+       entry — an ordinary composer send — is inherently owned by the pane whose
+       queue holds it, so it renders as before. */
+    if (paneOwner !== undefined && entry.owner !== undefined && entry.owner !== paneOwner) continue;
     /* A bubble retires on ITS canonical transcript echo — the delivered text,
        which for a role launch is the scaffold-plus-draft carried on `echoText`,
        not the raw draft it displays (issue #615). */

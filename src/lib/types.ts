@@ -18,6 +18,12 @@ export interface StructuredSpawnCardState {
   launchId: string;
   clientAttemptId: string | null;
   accountId: string | null;
+  /** The durable conversation this launch created/owns (issue #653). The client
+      keys the launch-owned optimistic bubble on THIS id, so a pane renders the
+      bubble only inside its own conversation — never leaked into an unrelated
+      pane. Absent on legacy payloads, where the client falls back to prior
+      (path-based) behaviour. */
+  conversationId?: string;
   state: "starting" | "binding" | "queued" | "reconciling" | "recoverable-timeout" | "live-late-success" | "failed" | "recovered";
   initialMessage: "pending" | "queued" | "delivered" | "failed";
   retrySafe: boolean;
