@@ -592,7 +592,15 @@ export function seedLaunchOutbox(
     return;
   }
   recordCurrentLaunch(cardId, { id: entry.id, at: entry.at });
-  const seeded: OutboxEntry = { ...entry, state: "delivering", launchOwned: true };
+  /* A delivered launch compacted out of the recent queue keeps its settlement
+     only in the current-launch slot. A reseed inside the TTL window restores
+     that delivered state so the bubble stays visibly delivered and still
+     retires at the TTL — never a fresh `delivering` entry that no echo or TTL
+     could ever retire. */
+  const settledAt = currentLaunch?.id === entry.id ? currentLaunch.settledAt : undefined;
+  const seeded: OutboxEntry = settledAt === undefined
+    ? { ...entry, state: "delivering", launchOwned: true }
+    : { ...entry, state: "delivered", settledAt, launchOwned: true };
   writeBounded(cardId, [...queue, seeded]);
   /* A refreshed surface can see the canonical transcript row before the launch
      projection effect seeds its optimistic bubble. Reconcile the persisted row

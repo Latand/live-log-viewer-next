@@ -1096,6 +1096,161 @@ test("issue 626 production LogFeed does not reseed a compacted terminal launch a
   }
 }, 120_000);
 
+test("issue 626 production LogFeed reseeds a compacted delivered launch inside the TTL and retires it after at 1280px and 390px", async () => {
+  const css = productionCss();
+  expect(css.length).toBeGreaterThan(10_000);
+  const provisional = "spawn:launch_issue_626_ttl_reseed";
+  const launchId = "launch_issue_626_ttl_reseed";
+  const prompt = "Issue 626 delivered launch compacted inside the TTL.";
+  const promptAt = launchBase.promptAt ?? CAPTURE_NOW;
+  const settledAt = promptAt + 1_000;
+  const reseedLaunch: StructuredSpawnCardState = {
+    ...launchBase,
+    launchId,
+    state: "live-late-success",
+    initialMessage: "delivered",
+    ["prompt"]: prompt,
+    promptEcho: prompt,
+    promptAt,
+  };
+  const state: EvidenceState = {
+    id: "ttl-reseed-launch",
+    envelopeCount: 0,
+    filesRevision: 45,
+    path: fixture.identity.adoptedPath,
+    launch: reseedLaunch,
+    logMode: "empty",
+    logOverride: "",
+    expectedOrder: ["outbox"],
+  };
+  const { instance: evidenceBrowser, closeOwned } = await openEvidenceBrowser();
+
+  try {
+    for (const viewport of VIEWPORTS) {
+      /* CAPTURE_NOW is two minutes past the launch — inside the 10-minute TTL. */
+      Date.now = () => CAPTURE_NOW;
+      mobile = viewport.mobile;
+      dom.sessionStorage.clear();
+      resetOutboxForTests();
+      resetCanonicalAssistantClaimsForTests();
+      resetLogTailCacheForTests();
+      logs.clear();
+      getRuntimeBus().stop();
+
+      seedLaunchOutbox(provisional, {
+        id: launchId,
+        text: prompt,
+        images: 0,
+        at: promptAt,
+      });
+      updateOutbox(provisional, launchId, {
+        state: outboxStateForReceiptStatus("delivered"),
+        settledAt,
+      });
+      /* Compaction evicts the delivered launch BEFORE its TTL elapses; the
+         warm follow-ups retire on their own echoes so only the launch bubble
+         and the unrelated pending entry render. */
+      for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+        const id = `ttl-reseed-browser-warm-${index}`;
+        const text = `TTL reseed browser warm ${index}`;
+        enqueueOutbox(provisional, {
+          id,
+          text,
+          images: 0,
+          at: promptAt + 2_000 + index,
+        });
+        updateOutbox(provisional, id, {
+          state: outboxStateForReceiptStatus("delivered"),
+          settledAt: promptAt + 2_000 + index,
+        });
+        publishTranscriptEchoes(provisional, [{
+          generation: "/synthetic/issue-626-ttl-reseed-generation-1.jsonl",
+          id: `row:ttl-reseed-browser-warm:${index}`,
+          text,
+        }]);
+      }
+      expect(readOutbox(provisional).some((entry) => entry.id === launchId)).toBe(false);
+
+      adoptOutbox(provisional, CONVERSATION_ID);
+      enqueueOutbox(CONVERSATION_ID, {
+        id: "ttl-reseed-browser-unrelated-pending",
+        text: "TTL reseed browser unrelated pending entry",
+        images: 0,
+        at: promptAt + 20_000,
+      });
+      resetOutboxForTests();
+
+      /* One recurring LogFeed seed inside the TTL window: the bubble comes back
+         visibly DELIVERED with its original settlement. */
+      const withinRender = await renderState(state);
+      const reseeded = readOutbox(CONVERSATION_ID).find((entry) => entry.id === launchId);
+      expect(reseeded?.state).toBe("delivered");
+      expect(reseeded?.settledAt).toBe(settledAt);
+
+      const withinPage = await evidenceBrowser.newPage({
+        viewport: { width: viewport.width, height: viewport.height },
+        deviceScaleFactor: 1,
+      });
+      await withinPage.setContent(pageHtml(withinRender.html, css), { waitUntil: "load" });
+      const withinEvidence = await withinPage.evaluate((text) => ({
+        ids: Array.from(document.querySelectorAll<HTMLElement>("[data-outbox-entry]"))
+          .map((entry) => entry.dataset.outboxEntry ?? ""),
+        occurrences: (document.body.textContent ?? "").split(text).length - 1,
+        scrollWidth: document.documentElement.scrollWidth,
+        productionWindow: Boolean(document.querySelector("[data-pan-ignore]"))
+          && Boolean(document.querySelector("[data-log-feed-scroller]"))
+          && Boolean(document.querySelector("textarea")),
+      }), prompt);
+      /* The reseed appends to the queue tail (the same position the pre-fix
+         delivering ghost took), so the pending entry precedes it. */
+      expect(withinEvidence.ids).toEqual(["ttl-reseed-browser-unrelated-pending", launchId]);
+      expect(withinEvidence.occurrences).toBe(1);
+      expect(withinEvidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
+      expect(withinEvidence.productionWindow).toBe(true);
+      await withinPage.screenshot({
+        path: path.join(EVIDENCE_DIR, `ttl-reseed-within-ttl-${viewport.id}.png`),
+        fullPage: false,
+      });
+      await withinPage.close();
+
+      /* Past the TTL: refresh plus another recurring seed retire the launch
+         while the unrelated pending entry keeps rendering. */
+      Date.now = () => settledAt + OUTBOX_DELIVERED_TTL_MS;
+      resetOutboxForTests();
+      resetLogTailCacheForTests();
+      logs.clear();
+      getRuntimeBus().stop();
+      const afterRender = await renderState(state);
+      const afterPage = await evidenceBrowser.newPage({
+        viewport: { width: viewport.width, height: viewport.height },
+        deviceScaleFactor: 1,
+      });
+      await afterPage.setContent(pageHtml(afterRender.html, css), { waitUntil: "load" });
+      const afterEvidence = await afterPage.evaluate((text) => ({
+        ids: Array.from(document.querySelectorAll<HTMLElement>("[data-outbox-entry]"))
+          .map((entry) => entry.dataset.outboxEntry ?? ""),
+        occurrences: (document.body.textContent ?? "").split(text).length - 1,
+        scrollWidth: document.documentElement.scrollWidth,
+        productionWindow: Boolean(document.querySelector("[data-pan-ignore]"))
+          && Boolean(document.querySelector("[data-log-feed-scroller]"))
+          && Boolean(document.querySelector("textarea")),
+      }), prompt);
+      expect(afterEvidence.ids).toEqual(["ttl-reseed-browser-unrelated-pending"]);
+      expect(afterEvidence.ids).not.toContain(launchId);
+      expect(afterEvidence.occurrences).toBe(0);
+      expect(afterEvidence.scrollWidth).toBeLessThanOrEqual(viewport.width + 1);
+      expect(afterEvidence.productionWindow).toBe(true);
+      await afterPage.screenshot({
+        path: path.join(EVIDENCE_DIR, `ttl-reseed-after-ttl-${viewport.id}.png`),
+        fullPage: false,
+      });
+      await afterPage.close();
+    }
+  } finally {
+    await closeOwned();
+  }
+}, 120_000);
+
 test("issue 626 production LogFeed preserves both no-echo terminal launch reasons at 1280px and 390px", async () => {
   const css = productionCss();
   expect(css.length).toBeGreaterThan(10_000);
