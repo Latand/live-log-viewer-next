@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { staleUndeliverableHeldDeliveryIds } from "@/lib/agent/accountLiveness";
 import { agentRegistry, type AgentRegistry, type RegistryFile, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { boardFor } from "@/lib/board/store";
@@ -799,6 +800,26 @@ export interface ReaperActuationOverrides {
   terminalizeStaleSpawns?: typeof terminalizeStaleStructuredSpawns;
 }
 
+/** Fails every held delivery the liveness contract has abandoned (#652). Each
+    settle is one guarded registry mutation, so a race that re-settled a delivery
+    since the snapshot is a no-op rather than a clobber. Returns the ids failed. */
+export function terminalizeStaleUndeliverableHeldDeliveries(
+  registry: AgentRegistry,
+  now: number = Date.now(),
+): string[] {
+  const ids = staleUndeliverableHeldDeliveryIds(registry.readOnlySnapshot(), { now: () => now });
+  const terminalized: string[] = [];
+  for (const id of ids) {
+    const settled = registry.recordDeliveryOutcome(
+      id,
+      "failed",
+      "delivery-uncertain abandoned: owning migration settled with no live host or receipt (#652)",
+    );
+    if (settled.state === "failed") terminalized.push(id);
+  }
+  return terminalized;
+}
+
 export async function runReaperCycle(options: {
   registry?: AgentRegistry;
   hosts: TranscriptHost[];
@@ -808,6 +829,19 @@ export async function runReaperCycle(options: {
 }): Promise<ReaperReport> {
   const registry = options.registry ?? agentRegistry();
   const now = options.now ?? Date.now();
+  /* Stale undeliverable held-delivery convergence (#652): a delivery-uncertain
+     attempt whose owning migration has settled and whose conversation has no
+     live host/receipt can never resolve, yet it keeps counting as an owed turn
+     and blocks account removal forever. The reaper cycle terminalizes exactly
+     what `conversationIsLive` has already stopped counting as live, so the
+     registry stops carrying it as owed. Registry hygiene, never a process kill,
+     so it runs regardless of `LLV_REAPER_ENABLED`; failure never blocks the
+     reaper. */
+  try {
+    terminalizeStaleUndeliverableHeldDeliveries(registry, now);
+  } catch (error) {
+    console.error("[reaper] stale undeliverable held-delivery convergence failed", error);
+  }
   /* Stale structured launch convergence (#334): the reaper cycle is the
      while-running seam that turns dead-evidence pending receipts terminal, so
      a permanent spinner no longer waits for a replay POST or a restart. The
