@@ -174,6 +174,7 @@ class CodexRealtimeClient {
   private pendingWorkerText = "";
   private pendingFinalText = "";
   private handoffTimer: number | null = null;
+  private unloadHangup: (() => void) | null = null;
   private lineSequence = 0;
   private epoch = 0;
 
@@ -244,6 +245,23 @@ class CodexRealtimeClient {
       events.onopen = () => {
         if (epoch === this.epoch) this.update({ phase: "live", error: null, startedAt: Date.now() });
       };
+      /* Closing the tab must hang up too. A call the backend still believes is
+         open holds the account's one concurrent slot, and the next call is
+         refused with "You have reached your usage limit." — indistinguishable
+         from an exhausted window. `keepalive` is what lets the request outlive
+         the page; `pagehide` fires where `beforeunload` does not, notably on
+         mobile Safari. */
+      this.unloadHangup = () => {
+        try {
+          void fetch("/api/runtime/realtime", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ action: "stop", conversationId: this.conversationId }),
+            keepalive: true,
+          });
+        } catch { /* the page is going away regardless */ }
+      };
+      window.addEventListener("pagehide", this.unloadHangup);
       events.onclose = () => {
         /* A channel lost before it ever opened is a failed admission too: the
            call lands in the error state so the UI can offer a restart instead
@@ -409,6 +427,8 @@ class CodexRealtimeClient {
   }
 
   private cleanupTransport(): void {
+    if (this.unloadHangup) window.removeEventListener("pagehide", this.unloadHangup);
+    this.unloadHangup = null;
     if (this.handoffTimer !== null) window.clearTimeout(this.handoffTimer);
     this.handoffTimer = null;
     this.events?.close();

@@ -156,6 +156,9 @@ const REALTIME_START_TIMEOUT_MS = 90_000;
    app-server that rejects the method answers immediately, so this bound only
    covers one that accepts it and then stalls. */
 const REALTIME_PERSONA_TIMEOUT_MS = 3_000;
+/* Releasing the host must not block on a wedged app-server, but the hangup is
+   worth a moment: skipping it strands the account's realtime slot. */
+const REALTIME_HANGUP_TIMEOUT_MS = 2_000;
 /**
  * The live model to ask for by name (#664). Sending none let the backend pick
  * `gpt-live-1-boulder-alpha`, and every such call was cut at 9.0–9.4 seconds
@@ -827,6 +830,18 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private async releaseAndReap(): Promise<void> {
+    /* Hang up before the process goes away. A realtime call the backend still
+       believes is open holds the account's concurrent slot, and every later
+       call is refused with "You have reached your usage limit." — the same
+       sentence an exhausted window produces, on an account at 10% of it. That
+       is what a deploy replacing the runtime host mid-call cost the operator:
+       one orphaned session, then nothing worked until it expired an hour on.
+       Best effort and bounded: a wedged app-server must not delay teardown. */
+    if (this.realtimeSessionId) {
+      const hangup = this.rpc("thread/realtime/stop", { threadId: this.identity.threadId }, REALTIME_HANGUP_TIMEOUT_MS);
+      await hangup.catch(() => undefined);
+      this.realtimeSessionId = null;
+    }
     this.releasing = true;
     this.rejectRealtimeStart(new Error("Codex app-server host released"));
     this.rejectPendingAnswers(new Error("Codex app-server host released"));

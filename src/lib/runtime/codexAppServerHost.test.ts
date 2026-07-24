@@ -2854,3 +2854,31 @@ test("a refused persona injection still yields a working call", async () => {
   });
   await host.release();
 });
+
+test("releasing the host hangs up a live call so the account's slot is freed", async () => {
+  /* A realtime session the backend still believes is open holds the account's
+     one concurrent slot, and every later call is refused with "You have
+     reached your usage limit." — the same sentence an exhausted window
+     produces. A deploy replacing the runtime host mid-call is exactly how that
+     orphan gets created. */
+  const server = new FakeAppServer("voice-thread");
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  await host.startRealtimeWebRtc("v=0\r\noffer");
+  await host.release();
+  expect(server.requests.some((request) => request.method === "thread/realtime/stop")).toBe(true);
+});
+
+test("a host with no live call releases without a stray hangup", async () => {
+  const server = new FakeAppServer("voice-thread");
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  await host.release();
+  expect(server.requests.some((request) => request.method === "thread/realtime/stop")).toBe(false);
+});

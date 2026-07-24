@@ -258,3 +258,26 @@ test("issue 664: the transport reason stands when the host has no failure to rep
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(client.getSnapshot().error).toBe("Realtime connection was interrupted");
 });
+
+test("closing the page hangs up so the account's realtime slot is not stranded", async () => {
+  /* An orphaned session is indistinguishable from an exhausted window on the
+     next call: both come back as "You have reached your usage limit." */
+  const posts: { action?: string; keepalive?: boolean }[] = [];
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit & { keepalive?: boolean }) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { action?: string };
+    posts.push({ action: body.action, keepalive: init?.keepalive });
+    return jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" });
+  }) as unknown as typeof fetch;
+
+  const client = codexRealtimeClient("conversation_unload");
+  await client.start();
+  StubPeerConnection.latest?.channel.onopen?.();
+  expect(client.getSnapshot().phase).toBe("live");
+
+  window.dispatchEvent(new dom.Event("pagehide"));
+  const hangup = posts.find((post) => post.action === "stop");
+  expect(hangup).toBeTruthy();
+  expect(hangup?.keepalive).toBe(true);
+
+  await client.stop();
+});
