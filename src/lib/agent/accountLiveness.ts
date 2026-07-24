@@ -13,7 +13,15 @@ const HOSTED_ENTRY_STATUSES = new Set<AgentRegistryEntry["status"]>(["starting",
 const OPEN_RECEIPT_STATES = new Set<SpawnReceipt["state"]>(["starting", "pane-bound", "host-verified", "prompt-delivered", "path-pending"]);
 /** Migration phases with nothing left in flight. */
 const SETTLED_MIGRATION_PHASES = new Set(["committed", "rolled-back"]);
-/** Held-delivery states where the Viewer still owes the conversation a message. */
+/**
+ * Held-delivery states where the Viewer still owes the conversation a message.
+ *
+ * `held`/`assigned` are unconditionally in flight: the queued turn has not been
+ * attempted yet. `delivery-uncertain` is conditional (issue #652): an attempt
+ * started but its outcome is unknown, and once its owning migration has settled
+ * and the conversation has no live host/receipt it can never resolve, so past a
+ * recovery grace it stops counting as live and the reaper terminalizes it.
+ */
 const UNDELIVERED_DELIVERY_STATES = new Set(["held", "assigned", "delivery-uncertain"]);
 
 /**
@@ -132,7 +140,15 @@ export function conversationIsLive(
   const owns = (id: ViewerConversationId) => canonicalId(file, id) === conversation.id;
   for (const delivery of Object.values(file.heldDeliveries)) {
     if (!UNDELIVERED_DELIVERY_STATES.has(delivery.state)) continue;
-    if (owns(delivery.conversationId) || owns(delivery.runtimeConversationId)) return true;
+    if (!owns(delivery.conversationId) && !owns(delivery.runtimeConversationId)) continue;
+    /* held/assigned: the queued turn has not been attempted — always current. */
+    if (delivery.state !== "delivery-uncertain") return true;
+    /* delivery-uncertain (issue #652): reaching here means this conversation
+       already has no live host and a settled migration (the checks above
+       returned otherwise). The attempt can still recover only while its grace
+       holds; a live receipt below is the one remaining in-flight signal, so a
+       grace-expired uncertain delivery contributes nothing on its own. */
+    if (withinGrace(delivery.createdAt, probe)) return true;
   }
   for (const receipt of Object.values(file.receipts)) {
     if (!owns(receipt.conversationId)) continue;
@@ -171,6 +187,41 @@ export function accountHasLiveSessions(
     if (receiptIsLive(file, receipt, probe)) return true;
   }
   return false;
+}
+
+/**
+ * Held deliveries that can never resolve and no longer keep any conversation
+ * current (issue #652): a `delivery-uncertain` attempt past its recovery grace
+ * whose canonical conversation is not live — its owning migration has settled
+ * and it owns no live host, entry, or receipt. This is the exact set that
+ * `conversationIsLive` has already stopped counting as live, surfaced so the
+ * reaper can terminalize it durably and blocker evaluation and the reaper agree
+ * on which deliveries are dead.
+ */
+export function staleUndeliverableHeldDeliveryIds(
+  file: RegistryFile,
+  options: AccountLivenessOptions = {},
+): string[] {
+  const probe = livenessProbe(options);
+  const pathsByEngine = new Map<ManagedAccountEngine, Set<string>>();
+  const livePathsFor = (engine: ManagedAccountEngine): Set<string> => {
+    let paths = pathsByEngine.get(engine);
+    if (!paths) {
+      paths = liveEntryPaths(file, engine, probe);
+      pathsByEngine.set(engine, paths);
+    }
+    return paths;
+  };
+  const ids: string[] = [];
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.state !== "delivery-uncertain") continue;
+    if (withinGrace(delivery.createdAt, probe)) continue;
+    const conversation = file.conversations[canonicalId(file, delivery.conversationId)];
+    if (!conversation) continue;
+    if (conversationIsLive(file, conversation, livePathsFor(conversation.engine), probe)) continue;
+    ids.push(delivery.id);
+  }
+  return ids;
 }
 
 /** Conversations whose latest generation is genuinely live on the account. */
