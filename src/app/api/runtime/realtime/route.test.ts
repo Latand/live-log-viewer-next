@@ -28,8 +28,10 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
     },
   };
 
+  // The trailing CRLF is part of the SDP payload and must survive untrimmed
+  // (issue #621: a trimmed offer dies upstream with "unmarshal SDP: EOF").
   const started = await executeRealtimeControl(
-    { action: "start", conversationId: "conversation_voice", sdp: "v=0\r\noffer" },
+    { action: "start", conversationId: "conversation_voice", sdp: "v=0\r\noffer\r\n" },
     () => host,
   );
   expect(started).toEqual({
@@ -45,7 +47,7 @@ test("starts V3 WebRTC through the active hosted conversation", async () => {
     () => host,
   );
   expect(calls).toEqual([
-    ["start", "v=0\r\noffer"],
+    ["start", "v=0\r\noffer\r\n"],
     ["speech", "progress"],
     ["stop"],
   ]);

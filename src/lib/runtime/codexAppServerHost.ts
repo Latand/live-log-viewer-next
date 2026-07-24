@@ -637,8 +637,11 @@ export class CodexAppServerHost implements EngineHost {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       throw new Error("Codex app-server host is unavailable");
     }
-    const offer = sdp.trim();
-    if (!offer.startsWith("v=0") || Buffer.byteLength(offer, "utf8") > MAX_REALTIME_SDP_BYTES) {
+    /* SDP grammar requires every line — including the last — to end in CRLF;
+       OpenAI's parser fails a trimmed offer with "unmarshal SDP: EOF". Keep
+       the payload intact and only heal a missing terminal newline. */
+    const offer = sdp.endsWith("\n") ? sdp : `${sdp}\r\n`;
+    if (!offer.trimStart().startsWith("v=0") || Buffer.byteLength(offer, "utf8") > MAX_REALTIME_SDP_BYTES) {
       throw new Error("A valid WebRTC SDP offer is required");
     }
     if (this.pendingRealtimeStart) throw new Error("A realtime session is already starting");

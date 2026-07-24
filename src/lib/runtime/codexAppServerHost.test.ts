@@ -275,11 +275,13 @@ describe("CodexAppServerHost", () => {
       sdp: "v=0\r\nanswer",
       realtimeSessionId: "realtime-1",
     });
+    // SDP requires a terminal CRLF; a missing one is healed, never trimmed —
+    // OpenAI rejects an unterminated offer with "unmarshal SDP: EOF".
     expect(server.requests.find((request) => request.method === "thread/realtime/start")?.params).toEqual({
       threadId: "voice-thread",
       version: "v3",
       outputModality: "audio",
-      transport: { type: "webrtc", sdp: "v=0\r\noffer" },
+      transport: { type: "webrtc", sdp: "v=0\r\noffer\r\n" },
       clientManagedHandoffs: true,
       codexResponsesAsItems: true,
       includeStartupContext: true,
@@ -294,6 +296,20 @@ describe("CodexAppServerHost", () => {
     expect(server.requests.find((request) => request.method === "thread/realtime/stop")?.params).toEqual({
       threadId: "voice-thread",
     });
+    await host.release();
+  });
+
+  test("a browser offer with its terminal CRLF is forwarded byte-for-byte", async () => {
+    const server = new FakeAppServer("voice-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    await host.startRealtimeWebRtc("v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n");
+    const start = server.requests.find((request) => request.method === "thread/realtime/start");
+    expect((start?.params as { transport?: { sdp?: string } })?.transport?.sdp)
+      .toBe("v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n");
     await host.release();
   });
 

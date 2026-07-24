@@ -48,8 +48,11 @@ export async function executeRealtimeControl(
 
   try {
     if (request.action === "start") {
-      const sdp = typeof request.sdp === "string" ? request.sdp.trim() : "";
-      if (!sdp.startsWith("v=0") || byteLength(sdp) > MAX_SDP_BYTES) {
+      /* Never trim the SDP: its grammar requires a terminal CRLF, and OpenAI's
+         parser rejects an offer whose last line is unterminated ("unmarshal
+         SDP: EOF"). Validate on a trimmed view only. */
+      const sdp = typeof request.sdp === "string" ? request.sdp : "";
+      if (!sdp.trimStart().startsWith("v=0") || byteLength(sdp) > MAX_SDP_BYTES) {
         return { status: 400, body: { error: "a valid WebRTC SDP offer is required" } };
       }
       const answer = await host.startRealtimeWebRtc(sdp);
