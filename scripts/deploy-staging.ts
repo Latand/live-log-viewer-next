@@ -20,7 +20,7 @@
  * instance itself never reads any of the prod paths referenced here.
  */
 
-import crypto from "node:crypto";
+import crypto, { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -136,7 +136,7 @@ function parseOptions(argv: string[]): DeployOptions {
 
 function writeReleaseRecord(filename: string, record: StagingReleaseRecord): void {
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
-  const temporary = `${filename}.${process.pid}.tmp`;
+  const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(stagingReleaseRecord(record), null, 2)}\n`, { mode: 0o600, flag: "wx" });
   fs.renameSync(temporary, filename);
 }
