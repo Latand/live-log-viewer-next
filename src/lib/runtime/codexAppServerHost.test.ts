@@ -289,6 +289,10 @@ describe("CodexAppServerHost", () => {
       clientManagedHandoffs: true,
       codexResponsesAsItems: true,
       includeStartupContext: true,
+      /* The voice persona rides in as the call's first item: the thread's own
+         instructions assume a text agent, which does not survive being read
+         aloud. */
+      initialItems: [{ text: expect.stringContaining("Алік") }],
     });
 
     await host.appendRealtimeSpeech("Worker inspected package.json");
@@ -355,6 +359,7 @@ describe("CodexAppServerHost", () => {
       "clientManagedHandoffs",
       "codexResponsesAsItems",
       "includeStartupContext",
+      "initialItems",
       "model",
       "outputModality",
       "threadId",

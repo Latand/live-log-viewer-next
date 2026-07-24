@@ -5,6 +5,7 @@ import { isKnownEffortTier } from "@/lib/agent/efforts";
 import { procBackend } from "@/lib/proc";
 import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "@/lib/processGroup";
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
+import { voicePersona } from "./voicePersona";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
 import { runtimeImageStore } from "./runtimeImageStore";
@@ -698,6 +699,11 @@ export class CodexAppServerHost implements EngineHost {
         clientManagedHandoffs: true,
         codexResponsesAsItems: true,
         includeStartupContext: true,
+        /* The thread's own instructions are written for a text agent — markdown,
+           long structured answers, scannable identifiers — and all three fail
+           when spoken. The persona rides in as the call's first item, which is
+           the same channel Codex Desktop uses for its startup context. */
+        initialItems: [{ text: voicePersona() }],
       }, REALTIME_START_TIMEOUT_MS);
     } catch (error) {
       this.rejectRealtimeStart(error instanceof Error ? error : new Error(safeError(error)));
