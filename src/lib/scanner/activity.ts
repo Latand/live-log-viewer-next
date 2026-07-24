@@ -5,7 +5,7 @@ import type { Activity, RootKey } from "../types";
 import { globalCache } from "./caches";
 import { readHead } from "./head";
 import { outputHolders } from "./process";
-import { turnStateFromRecords as structuredTurnStateFromRecords } from "@/lib/accounts/migration/turnState";
+import { claudeRecoveryTailRelease, turnStateFromRecords as structuredTurnStateFromRecords } from "@/lib/accounts/migration/turnState";
 
 type CachedTurnEvidence = {
   size: number;
@@ -14,10 +14,12 @@ type CachedTurnEvidence = {
   authoritative: boolean;
   turn: TurnState;
   composerReleased: boolean;
+  recoveryReleased: boolean;
 };
 
 globalCache<unknown>("turn").clear();
-const turnEvidenceCache = globalCache<CachedTurnEvidence>("turn-evidence-v1");
+globalCache<unknown>("turn-evidence-v1").clear();
+const turnEvidenceCache = globalCache<CachedTurnEvidence>("turn-evidence-v2");
 const TURN_EVIDENCE_CACHE_CAP = 4_096;
 
 /** Shared tail read+parse, keyed by path and file identity. Within one
@@ -132,6 +134,20 @@ export interface TranscriptTurnResult {
   turn: TurnState;
   complete: boolean;
   composerReleased: boolean;
+  /** True when the projection was released only because the tail is Claude
+      recovery bookkeeping (issue #516). Host-aware consumers re-impose busy
+      while a live host still owns the transcript. */
+  recoveryReleased: boolean;
+}
+
+function recoveryRelease(
+  turn: TurnState,
+  records: Record<string, unknown>[],
+  codex: boolean,
+  authoritative: boolean,
+): boolean {
+  if (codex || !authoritative || turn.state !== "terminal") return false;
+  return claudeRecoveryTailRelease(records) !== null;
 }
 
 /** Complete, identity-bound turn evidence shared by scanner and migration
@@ -148,12 +164,18 @@ export function transcriptTurnResult(
   const cached = turnEvidenceCache.get(key);
   if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.codex === codex) {
     storeTurnEvidence(pathname, cached);
-    return { turn: { ...cached.turn }, complete: true, composerReleased: cached.composerReleased };
+    return {
+      turn: { ...cached.turn },
+      complete: true,
+      composerReleased: cached.composerReleased,
+      recoveryReleased: cached.recoveryReleased,
+    };
   }
   const tail = tailRecordsResult(pathname, size, mtimeMs);
   const turn = structuredTurnStateFromRecords(tail.records, codex, authoritative);
+  const recoveryReleased = tail.complete && recoveryRelease(turn, tail.records, codex, authoritative);
   if (tail.complete) {
-    storeTurnEvidence(pathname, { size, mtimeMs, codex, authoritative, turn, composerReleased: false });
+    storeTurnEvidence(pathname, { size, mtimeMs, codex, authoritative, turn, composerReleased: false, recoveryReleased });
     const companionAuthoritative = !authoritative;
     const companionKey = `${companionAuthoritative ? "authoritative" : "activity"}:${pathname}`;
     const cachedCompanion = turnEvidenceCache.get(companionKey);
@@ -169,11 +191,19 @@ export function transcriptTurnResult(
       authoritative: companionAuthoritative,
       turn: companionTurn,
       composerReleased: companionComposerReleased,
+      recoveryReleased: recoveryRelease(companionTurn, tail.records, codex, companionAuthoritative),
     });
   }
-  return { turn, complete: tail.complete, composerReleased: false };
+  return { turn, complete: tail.complete, composerReleased: false, recoveryReleased };
 }
 
+/** A persisted scan snapshot carries the projected turn but not the records
+    behind it, so it cannot carry `recoveryReleased`. A terminal authoritative
+    Claude turn is exactly the shape whose release may hinge on that flag, and
+    a primed cache entry is served for as long as size/mtime stay stable — a
+    false prime would silently disable the live-host fence across a restart.
+    Those transcripts stay unprimed so the first read rebuilds the evidence
+    from the actual tail; every other shape primes as before. */
 export function primeTranscriptTurnEvidence(
   pathname: string,
   size: number,
@@ -184,7 +214,16 @@ export function primeTranscriptTurnEvidence(
 ): void {
   const authoritative = options.authoritative ?? true;
   const composerReleased = options.composerReleased ?? false;
-  storeTurnEvidence(pathname, { size, mtimeMs, codex, authoritative, turn: { ...turn }, composerReleased });
+  if (!codex && authoritative && turn.state === "terminal") return;
+  storeTurnEvidence(pathname, {
+    size,
+    mtimeMs,
+    codex,
+    authoritative,
+    turn: { ...turn },
+    composerReleased,
+    recoveryReleased: false,
+  });
 }
 
 export function recordTranscriptComposerRelease(

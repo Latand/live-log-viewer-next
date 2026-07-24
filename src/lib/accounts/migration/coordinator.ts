@@ -12,7 +12,7 @@ import {
 } from "@/lib/board/store";
 import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { listFiles } from "@/lib/scanner";
-import { recordTranscriptComposerRelease, transcriptTurnResult } from "@/lib/scanner/activity";
+import { recordTranscriptComposerRelease, transcriptTurnResult, type TranscriptTurnResult } from "@/lib/scanner/activity";
 import { writingHolders } from "@/lib/scanner/process";
 import type { FileEntry } from "@/lib/types";
 import { isStructuredDeliveryControllerUnavailable } from "@/lib/runtime/structuredDeliveryController";
@@ -28,6 +28,7 @@ import {
   type MigrationOrigin,
   type ProviderReceipt,
   type SuccessorProviderPort,
+  type TurnState,
   type ViewerConversationId,
 } from "./contracts";
 import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
@@ -73,6 +74,32 @@ function deadStalledTurn(entry: FileEntry, existing: RegistryConversation | null
     && !hasActiveRegisteredHost;
 }
 
+/** Transcript paths a registered host still owns. A host in any of these
+    statuses can append real provider work at any moment, so transcript-only
+    release evidence must not outrank it. */
+function activeRegisteredHostPaths(snapshot: ReturnType<AgentRegistry["readOnlySnapshot"]>): Set<string> {
+  return new Set(Object.values(snapshot.entries)
+    .filter((entry) => entry.artifactPath
+      && ["starting", "live", "idle", "handoff"].includes(entry.status)
+      && (entry.host !== null || entry.structuredHost !== null))
+    .map((entry) => entry.artifactPath!));
+}
+
+function hasActiveRegisteredHost(registry: AgentRegistry, pathname: string): boolean {
+  return activeRegisteredHostPaths(registry.readOnlySnapshot()).has(pathname);
+}
+
+/** Issue #516 — a Claude recovery tail (replayed continuation, synthetic
+    `No response requested.` no-op, interrupt sentinel) releases the turn on
+    transcript evidence alone. That evidence describes a session that already
+    exited; while a host is still registered for the path the turn stays busy,
+    because its next record can be genuine provider work. */
+function hostFencedTurn(observed: TranscriptTurnResult, hasActiveHost: boolean): TurnState {
+  return observed.recoveryReleased && hasActiveHost
+    ? { state: "busy", source: "lifecycle", terminalAt: null }
+    : observed.turn;
+}
+
 function projectedInventoryTurn(
   entry: FileEntry,
   parsed: ConversationObservation["turn"] | null,
@@ -105,11 +132,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
   const snapshot = registry.readOnlySnapshot();
   const conversationByPath = new Map<string, RegistryConversation>();
   const launchProfileByPath = new Map<string, RegistryConversation["generations"][number]["launchProfile"]>();
-  const activeRegisteredHostPaths = new Set(Object.values(snapshot.entries)
-    .filter((entry) => entry.artifactPath
-      && ["starting", "live", "idle", "handoff"].includes(entry.status)
-      && (entry.host !== null || entry.structuredHost !== null))
-    .map((entry) => entry.artifactPath));
+  const hostedPaths = activeRegisteredHostPaths(snapshot);
   await forEachCooperatively(Object.values(snapshot.conversations), (conversation) => {
     for (const generation of conversation.generations) {
       if (!conversationByPath.has(generation.path)) conversationByPath.set(generation.path, conversation);
@@ -135,8 +158,9 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const owner = accountManager.resolveTranscriptOwner(engine, entry.path);
     const mtimeMs = entry.mtime * 1000;
     const observedTurn = transcriptTurnResult(entry.path, entry.size, mtimeMs, engine === "codex");
-    const parsed = observedTurn.complete ? observedTurn.turn : null;
-    const releasedDeadTurn = deadStalledTurn(entry, existing, activeRegisteredHostPaths.has(entry.path));
+    const hostedPath = hostedPaths.has(entry.path);
+    const parsed = observedTurn.complete ? hostFencedTurn(observedTurn, hostedPath) : null;
+    const releasedDeadTurn = deadStalledTurn(entry, existing, hostedPath);
     if (observedTurn.complete && entry.derivationComplete !== false && (
       entry.activityReason === "pane_at_composer"
       || currentPaneWall(entry)
@@ -144,7 +168,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     )) {
       recordTranscriptComposerRelease(entry.path, entry.size, mtimeMs, engine === "codex");
     }
-    const turn = projectedInventoryTurn(entry, parsed, existing, activeRegisteredHostPaths.has(entry.path));
+    const turn = projectedInventoryTurn(entry, parsed, existing, hostedPath);
     const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
     const configuredRoot = process.env.LLV_ROOT_CONVERSATION_ID;
@@ -285,6 +309,7 @@ function completeProviderTurnObservation(
   conversation: RegistryConversation,
   source: RegistryConversation["generations"][number],
   virtualSource: boolean,
+  registry: AgentRegistry,
 ): boolean {
   let before: fs.Stats;
   try {
@@ -301,7 +326,14 @@ function completeProviderTurnObservation(
     return false;
   }
   if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return false;
-  if (observed.turn.state === "terminal" || observed.composerReleased) return true;
+  /* An explicit composer release is the operator's own signal and outranks
+     the recovery-tail host fence: a live-but-idle host at the composer must
+     not hold the reseat hostage. */
+  if (observed.composerReleased) return true;
+  /* A host registered between inventory and creation still owns a recovery
+     tail's turn (issue #516), so its release must not reach the provider. */
+  if (observed.recoveryReleased && hasActiveRegisteredHost(registry, source.path)) return false;
+  if (observed.turn.state === "terminal") return true;
 
   /* A crashed Codex rollout can retain its final task_started record forever.
      An inventory release plus a stable file with no writable holder proves
@@ -507,7 +539,7 @@ export async function advanceConversationMigration(
       let source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
-      if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true)) return conversation;
+      if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true, registry)) return conversation;
       if (migration.phase === "requested") {
         conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["requested"], { phase: "preparing" });
         migration = conversation.migration!;
@@ -522,7 +554,7 @@ export async function advanceConversationMigration(
       source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
-      if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true)) return restoreCreationFence(conversation);
+      if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true, registry)) return restoreCreationFence(conversation);
       const conversationId = conversation.id;
       const creationOwner = { operationId: migration.operationId, revision: migration.revision };
       receipt = await successorProvider.create({

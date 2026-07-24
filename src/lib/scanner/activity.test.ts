@@ -12,6 +12,7 @@ import {
   transcriptTurnResult,
   turnStateFromRecords,
 } from "./activity";
+import { OAUTH_FAILURE_AT, oauthFailureWithRecoveryTail } from "@/lib/accounts/migration/fixtures/claudeRecoveryTail";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-activity-test-"));
 
@@ -95,6 +96,19 @@ describe("turnStateFromRecords (claude)", () => {
 
   test("no assistant/user records yields no verdict", () => {
     expect(turnStateFromRecords([{ type: "summary" }], false)).toBeNull();
+  });
+
+  test("a restart prime cannot disable the recovery-release host fence", () => {
+    const pathname = path.join(sandbox, "claude-recovery-restart.jsonl");
+    fs.writeFileSync(
+      pathname,
+      oauthFailureWithRecoveryTail().map((record) => JSON.stringify(record)).join("\n") + "\n",
+    );
+    const stat = fs.statSync(pathname);
+    const terminal = { state: "terminal" as const, source: "lifecycle" as const, terminalAt: OAUTH_FAILURE_AT };
+    primeTranscriptTurnEvidence(pathname, stat.size, stat.mtimeMs, false, terminal);
+
+    expect(transcriptTurnResult(pathname, stat.size, stat.mtimeMs, false).recoveryReleased).toBe(true);
   });
 });
 
