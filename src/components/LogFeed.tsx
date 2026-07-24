@@ -22,7 +22,7 @@ import {
   visibleRuntimeLiveTurnItems,
 } from "./conversation/liveTurnHandoff";
 import { orderedConversationTail } from "./conversation/tailOrder";
-import { publishTranscriptEchoes, seedLaunchOutbox, useOutbox, visibleOutbox } from "./conversation/outbox";
+import { publishTranscriptEchoes, seedLaunchOutbox, settleLaunchOutboxDelivered, useOutbox, visibleOutbox } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
 import { FeedItem } from "./feed/FeedItem";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
@@ -130,6 +130,16 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      the launch that is still becoming it (issue #569) — the same chips either
      way, because it is the same window. */
   const launch = file?.launch ?? file?.spawn ?? null;
+  /* Pane ownership by durable conversation id (issue #653): a launch bubble is
+     seeded/settled/rendered ONLY when it belongs to THIS pane's conversation. A
+     launch whose own conversation id differs from this file's is a foreign bubble
+     (its pane's structured entry may have gone dead) and must never leak in. When
+     either id is absent (a path-only card, or a legacy payload with no launch
+     conversation id) the check cannot fire, preserving prior behaviour. */
+  const paneConversationId = file?.conversationId ?? null;
+  const launchOwnsThisPane = !launch?.conversationId
+    || !paneConversationId
+    || launch.conversationId === paneConversationId;
   /* Live streaming text: `delta` events from the structured host render the
      in-flight assistant reply immediately, ahead of the transcript flush. The
      host is resolved by conversation identity FIRST (round-1 P1#3): during
@@ -407,13 +417,36 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      causally by occurrence count. A user text that appears twice is two echoes
      that retire two bubbles; a message that predates a queued bubble leaves it
      visible. The counts carry that occurrence information. */
+  /* The launch's own first message identity (issue #648): a structured / MCP
+     spawn journals its first user record with SDK / agent provenance, so the
+     transcript parser renders it as a SYSTEM row, not a `user` bubble — the
+     echo-text retirement path would never see it. Its text is still the launch
+     prompt's transcript echo, so treat a system-row row that matches a
+     launch-owned bubble's own text (raw draft OR scaffolded echo) as that
+     bubble's echo. Derived from the outbox so it survives adoption (which strips
+     the launch prompt fields from the server projection). */
+  const launchEchoKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const entry of outbox) {
+      if (!entry.launchOwned) continue;
+      const echo = entry.echoText?.trim();
+      if (echo) keys.add(echo);
+      const text = entry.text.trim();
+      if (text) keys.add(text);
+    }
+    return keys;
+  }, [outbox]);
   const transcriptEchoes = useMemo(() => {
     if (!transcriptGeneration) return [];
-    return feed.items.flatMap(({ anchorKey, key, item }) =>
-      item.kind === "user" && item.text.trim()
-        ? [{ generation: transcriptGeneration, id: anchorKey ?? `key:${key}`, text: item.text }]
-        : []);
-  }, [feed.items, transcriptGeneration]);
+    return feed.items.flatMap(({ anchorKey, key, item }) => {
+      const text = "text" in item ? item.text : "";
+      if (!text.trim()) return [];
+      /* A genuine user bubble is always an echo; a non-user row only echoes the
+         launch when it exactly carries a launch-owned bubble's own identity. */
+      if (item.kind !== "user" && !launchEchoKeys.has(text.trim())) return [];
+      return [{ generation: transcriptGeneration, id: anchorKey ?? `key:${key}`, text }];
+    });
+  }, [feed.items, transcriptGeneration, launchEchoKeys]);
   const transcriptEchoCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const echo of transcriptEchoes) {
@@ -436,7 +469,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      idempotent with the composer's own seed (no duplicate), survives a refresh,
      folds through transcript adoption, and retires on its transcript echo. */
   useEffect(() => {
-    if (!memoryKey || !launch?.launchId) return;
+    if (!memoryKey || !launch?.launchId || !launchOwnsThisPane) return;
     const promptText = launch.prompt ?? "";
     const promptImages = launch.promptImages ?? 0;
     if (!promptText.trim() && !promptImages) return;
@@ -449,9 +482,32 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
          draft but retires on the delivered (possibly scaffolded) transcript
          echo. Reconciled onto a composer-seeded bubble under the same id. */
       ...(launch.promptEcho ? { echoText: launch.promptEcho } : {}),
+      /* Stamp the launch's durable conversation as the bubble's owner so a stale
+         copy under another pane's key is filtered at render (issue #653). */
+      ...(launch.conversationId ? { owner: launch.conversationId } : {}),
     });
-  }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt, launch?.promptEcho]);
-  const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs()) : [];
+  }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt, launch?.promptEcho, launch?.conversationId, launchOwnsThisPane]);
+  /* Settle the launch bubble from the delivery receipt the server projects
+     (issue #648), independent of any transcript echo. A structured / MCP spawn's
+     first message is journaled as a system row (SDK / agent provenance), so echo
+     retirement can never fire; the delivered receipt is the proof the prompt
+     reached the agent. It settles the bubble to `delivered` with the receipt time
+     as `settledAt`, so it retires on the delivered TTL instead of spinning on
+     "delivering" forever. Keyed on the launch id and the receipt time only, so it
+     still fires on a materialized window that has stripped the prompt fields. */
+  useEffect(() => {
+    if (!memoryKey || !launch?.launchId || !launchOwnsThisPane) return;
+    if (launch.initialMessage !== "delivered" || launch.deliveredAt === undefined) return;
+    settleLaunchOutboxDelivered(memoryKey, {
+      id: launch.launchId,
+      at: launch.promptAt ?? launch.deliveredAt,
+      settledAt: launch.deliveredAt,
+    });
+  }, [memoryKey, launch?.launchId, launch?.initialMessage, launch?.deliveredAt, launch?.promptAt, launchOwnsThisPane]);
+  /* Render only bubbles owned by this pane's conversation (issue #653). memoryKey
+     is the durable conversation id when the payload carries one; a foreign
+     launch bubble stamped with another conversation id is dropped here. */
+  const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs(), memoryKey ?? undefined) : [];
   useEffect(() => {
     if (!memoryKey || !file) return;
     adoptCanonicalAssistantClaims(file.path, memoryKey);

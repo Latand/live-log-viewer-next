@@ -18,6 +18,12 @@ export interface StructuredSpawnCardState {
   launchId: string;
   clientAttemptId: string | null;
   accountId: string | null;
+  /** The durable conversation this launch created/owns (issue #653). The client
+      keys the launch-owned optimistic bubble on THIS id, so a pane renders the
+      bubble only inside its own conversation — never leaked into an unrelated
+      pane. Absent on legacy payloads, where the client falls back to prior
+      (path-based) behaviour. */
+  conversationId?: string;
   state: "starting" | "binding" | "queued" | "reconciling" | "recoverable-timeout" | "live-late-success" | "failed" | "recovered";
   initialMessage: "pending" | "queued" | "delivered" | "failed";
   retrySafe: boolean;
@@ -40,6 +46,15 @@ export interface StructuredSpawnCardState {
       draft. The optimistic bubble displays `prompt` (the raw draft) but retires on
       THIS text, so a scaffolded role launch never lingers and never duplicates. */
   promptEcho?: string;
+  /** When the launch's initial message actually reached the agent (ms, issue
+      #648). A structured / MCP spawn journals its first user record with SDK /
+      agent provenance, so the transcript renders it as a system row and the
+      echo-text retirement never fires. This receipt timestamp is the independent
+      settlement proof: the client settles the launch bubble to `delivered` with
+      THIS value as its `settledAt`, so it retires on the delivered TTL even when
+      no echo ever matches. Present once the delivery receipt reports delivered;
+      it survives prompt scrubbing so a materialized window can still settle. */
+  deliveredAt?: number;
 }
 
 /** Current quota wall affecting a hosted conversation. Account provenance

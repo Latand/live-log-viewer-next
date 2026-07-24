@@ -1,0 +1,46 @@
+{
+  "delivering-control-desktop": {
+    "scrollWidth": 1280,
+    "viewportWidth": 1280,
+    "feedHeight": 667.75,
+    "composerHeight": 99,
+    "textarea": true,
+    "outboxEntries": 1,
+    "outboxState": "delivering",
+    "statusLabel": "Доставляється",
+    "promptVisible": true
+  },
+  "receipt-settled-no-echo-desktop": {
+    "scrollWidth": 1280,
+    "viewportWidth": 1280,
+    "feedHeight": 667.75,
+    "composerHeight": 99,
+    "textarea": true,
+    "outboxEntries": 1,
+    "outboxState": "delivered",
+    "statusLabel": "Доставлено",
+    "promptVisible": true
+  },
+  "delivering-control-mobile-390": {
+    "scrollWidth": 390,
+    "viewportWidth": 390,
+    "feedHeight": 653,
+    "composerHeight": 105,
+    "textarea": true,
+    "outboxEntries": 1,
+    "outboxState": "delivering",
+    "statusLabel": "Доставляється",
+    "promptVisible": true
+  },
+  "receipt-settled-no-echo-mobile-390": {
+    "scrollWidth": 390,
+    "viewportWidth": 390,
+    "feedHeight": 653,
+    "composerHeight": 105,
+    "textarea": true,
+    "outboxEntries": 1,
+    "outboxState": "delivered",
+    "statusLabel": "Доставлено",
+    "promptVisible": true
+  }
+}

@@ -71,6 +71,13 @@ export interface OutboxEntry {
       retirement is monotonic across tail eviction, adoption, and refresh. */
   retiredEchoId?: string;
   retiredAt?: number;
+  /** The durable conversation identity that OWNS this bubble (issue #653). A
+      launch-owned bubble records the launch's own conversation id here, so a pane
+      renders it ONLY inside that conversation — never leaked into an unrelated
+      pane whose structured entry went dead. Absent for ordinary composer sends,
+      which are enqueued into their own pane's queue and so are inherently owned
+      by it; absence therefore renders as before. */
+  owner?: string;
 }
 
 /**
@@ -538,7 +545,7 @@ export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">)
  */
 export function seedLaunchOutbox(
   cardId: string,
-  entry: { id: string; text: string; images: number; at: number; echoText?: string },
+  entry: { id: string; text: string; images: number; at: number; echoText?: string; owner?: string },
 ): void {
   if (!entry.text.trim() && !entry.images) return;
   const currentLaunch = readCurrentLaunch(cardId);
@@ -631,6 +638,58 @@ export function markOutboxResponded(cardId: string, id: string, at: number): voi
   } : item));
   const updated = next.find((item) => item.id === id);
   if (updated) recordCurrentLaunchEntry(cardId, updated, at);
+  write(cardId, next);
+}
+
+/**
+ * Settle a launch-owned bubble from the server-projected delivery receipt
+ * (issue #648). A structured / MCP spawn delivers its first message through the
+ * runtime, and the agent journals that user record with SDK / agent provenance —
+ * so the transcript renders it as a system row, never a `user` echo, and the
+ * echo-text retirement path can never fire. The delivered receipt is the
+ * independent proof the prompt reached the agent: it settles the bubble to
+ * `delivered` with the receipt time as `settledAt`, so it renders delivered and
+ * retires on the delivered TTL exactly like a composer-delivered bubble, whether
+ * or not any echo ever matches.
+ *
+ * Idempotent and monotonic. The settlement is also recorded into the durable
+ * current-launch slot, so a compaction reseed inside the TTL restores the
+ * `delivered` state (issue #644) and the slot still retires at the delivered TTL
+ * even after the recent entry is evicted. A launch already responded, retired,
+ * or settled keeps its earlier settlement; a newer launch owning the slot is
+ * left untouched.
+ */
+export function settleLaunchOutboxDelivered(
+  cardId: string,
+  launch: { id: string; at: number; settledAt: number },
+): void {
+  const current = readCurrentLaunch(cardId);
+  if (current && current.id !== launch.id) return;
+  /* Fold the receipt settlement into the durable slot first: this is the only
+     carrier once the recent entry is compacted out, and it is what a within-TTL
+     reseed reads to restore `delivered` rather than a fresh `delivering` entry. */
+  recordCurrentLaunch(cardId, {
+    id: launch.id,
+    at: current?.at ?? launch.at,
+    settledAt: launch.settledAt,
+  });
+  const queue = readOutbox(cardId);
+  const existing = queue.find((item) => item.id === launch.id);
+  if (!existing || !existing.launchOwned) return;
+  if (
+    existing.retiredEchoId
+    || existing.responseStartedAt !== undefined
+    || existing.state === "delivered"
+    || existing.state === "failed"
+  ) {
+    recordCurrentLaunchEntry(cardId, existing);
+    return;
+  }
+  const next = queue.map((item) => (item.id === launch.id
+    ? { ...item, state: "delivered" as const, settledAt: item.settledAt ?? launch.settledAt }
+    : item));
+  const updated = next.find((item) => item.id === launch.id);
+  if (updated) recordCurrentLaunchEntry(cardId, updated);
   write(cardId, next);
 }
 
@@ -964,10 +1023,18 @@ export function visibleOutbox(
   queue: readonly OutboxEntry[],
   transcriptEchoCounts: TranscriptEchoCounts,
   nowMs: number,
+  paneOwner?: string,
 ): OutboxEntry[] {
   const consumed = new Map<string, number>();
   const visible: OutboxEntry[] = [];
   for (const entry of queue) {
+    /* Pane ownership by durable conversation id (issue #653): a bubble that
+       records an owner renders ONLY in that conversation's pane. This keeps a
+       launch bubble keyed to another conversation from leaking into an unrelated
+       pane (e.g. when that pane's own structured entry went dead). An owner-less
+       entry — an ordinary composer send — is inherently owned by the pane whose
+       queue holds it, so it renders as before. */
+    if (paneOwner !== undefined && entry.owner !== undefined && entry.owner !== paneOwner) continue;
     /* A bubble retires on ITS canonical transcript echo — the delivered text,
        which for a role launch is the scaffold-plus-draft carried on `echoText`,
        not the raw draft it displays (issue #615). */

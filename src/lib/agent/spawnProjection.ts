@@ -82,14 +82,23 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
     state = "binding";
   }
   const launchPrompt = launchPromptOf(receipt, delivery);
+  /* The receipt time the initial message reached the agent (issue #648). Prefer
+     the held delivery's own `deliveredAt`; a launch that completed without a
+     retained delivery record (its text already scrubbed) falls back to the
+     receipt creation time, which still bounds the delivered TTL. */
+  const deliveredAt = delivered
+    ? (Date.parse(delivery?.deliveredAt ?? "") || Date.parse(receipt.createdAt) || undefined)
+    : undefined;
   return {
     launchId: receipt.launchId,
     clientAttemptId: receipt.clientAttemptId,
     accountId: receipt.accountId,
+    conversationId: receipt.conversationId,
     state,
     initialMessage,
     retrySafe: receipt.state === "failed",
     error: receipt.error,
+    ...(deliveredAt !== undefined ? { deliveredAt } : {}),
     ...(launchPrompt
       ? {
           promptImages: launchPrompt.promptImages,
