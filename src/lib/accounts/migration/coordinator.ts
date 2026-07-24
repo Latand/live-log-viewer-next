@@ -326,10 +326,14 @@ function completeProviderTurnObservation(
     return false;
   }
   if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return false;
+  /* An explicit composer release is the operator's own signal and outranks
+     the recovery-tail host fence: a live-but-idle host at the composer must
+     not hold the reseat hostage. */
+  if (observed.composerReleased) return true;
   /* A host registered between inventory and creation still owns a recovery
      tail's turn (issue #516), so its release must not reach the provider. */
   if (observed.recoveryReleased && hasActiveRegisteredHost(registry, source.path)) return false;
-  if (observed.turn.state === "terminal" || observed.composerReleased) return true;
+  if (observed.turn.state === "terminal") return true;
 
   /* A crashed Codex rollout can retain its final task_started record forever.
      An inventory release plus a stable file with no writable holder proves

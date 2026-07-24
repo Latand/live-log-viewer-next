@@ -5,6 +5,7 @@ import {
   SHUTDOWN_INTERRUPT_UUID,
   continuationPromptRecord,
   inheritedPromptRecord,
+  oauthFailureRecord,
   oauthFailureWithRecoveryTail,
   shutdownInterruptRecord,
   syntheticNoOpRecord,
@@ -210,6 +211,16 @@ describe("issue 516 — recovery records must not reopen a released turn", () =>
 
   test("a repeated recovery attempt stays released", () => {
     expect(authoritative(oauthFailureWithRecoveryTail(3))).toEqual(released);
+  });
+
+  test("a tail ending on the synthetic no-op right after the OAuth boundary is released", () => {
+    const records = [
+      { type: "user", timestamp: "2026-07-24T06:36:44.000Z", message: { role: "user", content: [{ type: "text", text: "Continue the reseat probe." }] } },
+      oauthFailureRecord(OAUTH_FAILURE_AT),
+      continuationPromptRecord("2026-07-24T07:04:23.736Z"),
+      syntheticNoOpRecord("2026-07-24T07:04:23.736Z"),
+    ];
+    expect(authoritative(records)).toEqual(released);
   });
 
   test("a recovery run that ends on a live prompt keeps the turn busy", () => {

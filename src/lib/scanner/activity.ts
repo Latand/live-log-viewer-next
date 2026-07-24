@@ -198,8 +198,12 @@ export function transcriptTurnResult(
 }
 
 /** A persisted scan snapshot carries the projected turn but not the records
-    behind it, so `recoveryReleased` primes false: the host guard rebuilds from
-    real evidence the first time the transcript is re-read. */
+    behind it, so it cannot carry `recoveryReleased`. A terminal authoritative
+    Claude turn is exactly the shape whose release may hinge on that flag, and
+    a primed cache entry is served for as long as size/mtime stay stable — a
+    false prime would silently disable the live-host fence across a restart.
+    Those transcripts stay unprimed so the first read rebuilds the evidence
+    from the actual tail; every other shape primes as before. */
 export function primeTranscriptTurnEvidence(
   pathname: string,
   size: number,
@@ -210,6 +214,7 @@ export function primeTranscriptTurnEvidence(
 ): void {
   const authoritative = options.authoritative ?? true;
   const composerReleased = options.composerReleased ?? false;
+  if (!codex && authoritative && turn.state === "terminal") return;
   storeTurnEvidence(pathname, {
     size,
     mtimeMs,
