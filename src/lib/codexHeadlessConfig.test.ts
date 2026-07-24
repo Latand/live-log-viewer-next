@@ -15,7 +15,7 @@ test("headless Codex threads allow only the registered Viewer MCP server", () =>
       viewer: { enabled: true, default_tools_approval_mode: "approve" },
       docs: { enabled: false },
     },
-    features: { plugins: false, apps: false, multi_agent: false },
+    features: { plugins: false, apps: false, multi_agent: false, realtime_conversation: true },
     include_apps_instructions: false,
   });
 });
@@ -23,8 +23,18 @@ test("headless Codex threads allow only the registered Viewer MCP server", () =>
 test("configurations without Viewer disable every registered MCP server", () => {
   expect(headlessCodexThreadConfig({ config: { mcp_servers: { docs: {} } } })).toEqual({
     mcp_servers: { docs: { enabled: false } },
-    features: { plugins: false, apps: false, multi_agent: false },
+    features: { plugins: false, apps: false, multi_agent: false, realtime_conversation: true },
     include_apps_instructions: false,
+  });
+});
+
+test("hosted threads keep the realtime conversation feature the app-server enabled", () => {
+  /* The host spawns `codex app-server --enable realtime_conversation`, but the
+     per-thread `features` override replaces the global table — without an
+     explicit true here, thread/realtime/start fails locally with "thread does
+     not support realtime conversation" (issue #621 MVP probe). */
+  expect(headlessCodexThreadConfig({ config: { mcp_servers: {} } })).toMatchObject({
+    features: { realtime_conversation: true },
   });
 });
 

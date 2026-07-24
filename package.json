@@ -25,6 +25,7 @@
     "build": "next build --webpack && bun run build:mcp",
     "build:mcp": "bun scripts/build-mcp.ts",
     "demo:capture": "bun scripts/demo-capture.ts",
+    "deploy:staging": "bun scripts/deploy-staging.ts",
     "demo:motion": "bun scripts/demo-motion.ts",
     "start": "next start",
     "lint": "eslint",
