@@ -1606,6 +1606,44 @@ describe("seedLaunchOutbox (P1#2)", () => {
   });
 });
 
+describe("issue 653: pane ownership by durable conversation id", () => {
+  const withOwner = (over: Partial<OutboxEntry>): OutboxEntry => ({
+    id: "ccb088d2", text: "Round 2 review PR #618", images: 0, at: 1_000,
+    state: "delivering", launchOwned: true, ...over,
+  });
+
+  test("a foreign-owned launch bubble is never rendered in an unrelated pane", () => {
+    const queue = [withOwner({ owner: "conversation_A" })];
+    /* Conversation B's pane (dead structured entry): the leaked bubble owned by A
+       must not render. */
+    expect(visibleOutbox(queue, echoes(), 5_000, "conversation_B")).toEqual([]);
+    /* A's own pane still shows it. */
+    expect(visibleOutbox(queue, echoes(), 5_000, "conversation_A").map((entry) => entry.id)).toEqual(["ccb088d2"]);
+  });
+
+  test("owner-less composer sends and same-owner launches still render", () => {
+    const composer = { id: "k1", text: "hi", images: 0, at: 1, state: "queued" as const };
+    const own = withOwner({ owner: "conversation_B" });
+    expect(visibleOutbox([composer, own], echoes(), 5_000, "conversation_B").map((entry) => entry.id))
+      .toEqual(["k1", "ccb088d2"]);
+    /* No pane owner supplied (legacy call sites) → no filtering at all. */
+    expect(visibleOutbox([withOwner({ owner: "conversation_A" })], echoes(), 5_000).map((entry) => entry.id))
+      .toEqual(["ccb088d2"]);
+  });
+
+  test("seedLaunchOutbox stamps the owner and the foreign pane filters it durably", () => {
+    /* A prior mis-seed (or a payload that carried a foreign launch) left A's
+       launch bubble in B's queue. */
+    seedLaunchOutbox("conversation_B", {
+      id: "ccb088d2", text: "Round 2 review PR #618", images: 0, at: 1_000, owner: "conversation_A",
+    });
+    const queue = readOutbox("conversation_B");
+    expect(queue[0]!.owner).toBe("conversation_A");
+    /* B's pane renders nothing; the entry is durably filtered by owner. */
+    expect(visibleOutbox(queue, echoes(), 5_000, "conversation_B")).toEqual([]);
+  });
+});
+
 test("adoption moves a queue onto the materialized conversation identity idempotently", () => {
   submit("spawn:launch", "k1", "queued into the launch window");
   /* The launch materializes into its conversation; the queue rides along. */

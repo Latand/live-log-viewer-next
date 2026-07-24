@@ -130,6 +130,16 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      the launch that is still becoming it (issue #569) — the same chips either
      way, because it is the same window. */
   const launch = file?.launch ?? file?.spawn ?? null;
+  /* Pane ownership by durable conversation id (issue #653): a launch bubble is
+     seeded/settled/rendered ONLY when it belongs to THIS pane's conversation. A
+     launch whose own conversation id differs from this file's is a foreign bubble
+     (its pane's structured entry may have gone dead) and must never leak in. When
+     either id is absent (a path-only card, or a legacy payload with no launch
+     conversation id) the check cannot fire, preserving prior behaviour. */
+  const paneConversationId = file?.conversationId ?? null;
+  const launchOwnsThisPane = !launch?.conversationId
+    || !paneConversationId
+    || launch.conversationId === paneConversationId;
   /* Live streaming text: `delta` events from the structured host render the
      in-flight assistant reply immediately, ahead of the transcript flush. The
      host is resolved by conversation identity FIRST (round-1 P1#3): during
@@ -459,7 +469,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      idempotent with the composer's own seed (no duplicate), survives a refresh,
      folds through transcript adoption, and retires on its transcript echo. */
   useEffect(() => {
-    if (!memoryKey || !launch?.launchId) return;
+    if (!memoryKey || !launch?.launchId || !launchOwnsThisPane) return;
     const promptText = launch.prompt ?? "";
     const promptImages = launch.promptImages ?? 0;
     if (!promptText.trim() && !promptImages) return;
@@ -472,8 +482,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
          draft but retires on the delivered (possibly scaffolded) transcript
          echo. Reconciled onto a composer-seeded bubble under the same id. */
       ...(launch.promptEcho ? { echoText: launch.promptEcho } : {}),
+      /* Stamp the launch's durable conversation as the bubble's owner so a stale
+         copy under another pane's key is filtered at render (issue #653). */
+      ...(launch.conversationId ? { owner: launch.conversationId } : {}),
     });
-  }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt, launch?.promptEcho]);
+  }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt, launch?.promptEcho, launch?.conversationId, launchOwnsThisPane]);
   /* Settle the launch bubble from the delivery receipt the server projects
      (issue #648), independent of any transcript echo. A structured / MCP spawn's
      first message is journaled as a system row (SDK / agent provenance), so echo
@@ -483,15 +496,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      "delivering" forever. Keyed on the launch id and the receipt time only, so it
      still fires on a materialized window that has stripped the prompt fields. */
   useEffect(() => {
-    if (!memoryKey || !launch?.launchId) return;
+    if (!memoryKey || !launch?.launchId || !launchOwnsThisPane) return;
     if (launch.initialMessage !== "delivered" || launch.deliveredAt === undefined) return;
     settleLaunchOutboxDelivered(memoryKey, {
       id: launch.launchId,
       at: launch.promptAt ?? launch.deliveredAt,
       settledAt: launch.deliveredAt,
     });
-  }, [memoryKey, launch?.launchId, launch?.initialMessage, launch?.deliveredAt, launch?.promptAt]);
-  const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs()) : [];
+  }, [memoryKey, launch?.launchId, launch?.initialMessage, launch?.deliveredAt, launch?.promptAt, launchOwnsThisPane]);
+  /* Render only bubbles owned by this pane's conversation (issue #653). memoryKey
+     is the durable conversation id when the payload carries one; a foreign
+     launch bubble stamped with another conversation id is dropped here. */
+  const pendingOutbox = file ? visibleOutbox(outbox, transcriptEchoCounts, nowMs(), memoryKey ?? undefined) : [];
   useEffect(() => {
     if (!memoryKey || !file) return;
     adoptCanonicalAssistantClaims(file.path, memoryKey);

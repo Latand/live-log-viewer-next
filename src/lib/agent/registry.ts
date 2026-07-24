@@ -1325,6 +1325,41 @@ function syncDeliveryOperationOwnerState(file: RegistryFile, delivery: HeldDeliv
   if (owner?.deliveryId === delivery.id) owner.terminalState = terminalDeliveryState(delivery);
 }
 
+/** The launch receipt a spawn's initial `spawn_<launchId>` held delivery belongs
+    to, if that receipt is a launch that reached the terminal `failed` state
+    (issue #653). Such a delivery can never actuate — the spawn is gone — so it
+    is registry rot that must be terminalized. */
+function failedSpawnLaunchIdOf(file: RegistryFile, delivery: HeldDelivery): string | null {
+  const clientMessageId = delivery.clientMessageId;
+  if (!clientMessageId || !clientMessageId.startsWith("spawn_")) return null;
+  const launchId = clientMessageId.slice("spawn_".length);
+  const receipt = file.receipts[launchId];
+  if (!receipt || receipt.purpose !== "launch" || receipt.state !== "failed") return null;
+  return launchId;
+}
+
+/** Durably terminalize the `spawn_<launchId>` initial delivery of a FAILED
+    structured spawn (issue #653). Only a still-`held` reservation is touched, so
+    a concurrent `beginDeliveryAttempt` — which claims only an `assigned`
+    reservation — is never clobbered, and an in-flight attempt settles on its own
+    outcome. Returns the ids it failed; idempotent, so a terminal reservation is
+    skipped. */
+function terminalizeFailedSpawnDeliveriesInFile(file: RegistryFile): string[] {
+  const failed: string[] = [];
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.state !== "held") continue;
+    if (!failedSpawnLaunchIdOf(file, delivery)) continue;
+    delivery.state = "failed";
+    delivery.generationId = null;
+    delivery.assignedAt = null;
+    delivery.deliveredAt = null;
+    delivery.error = "spawn failed before its initial message was delivered";
+    syncDeliveryOperationOwnerState(file, delivery);
+    failed.push(delivery.id);
+  }
+  return failed;
+}
+
 interface DeliveryReservationInspection {
   canonicalId: ViewerConversationId;
   existing: HeldDelivery | undefined;
@@ -3869,12 +3904,31 @@ export class AgentRegistry {
     });
   }
 
+  /** Durably terminalize every FAILED structured spawn's stuck initial held
+      delivery (issue #653). The reaper cycle calls this so a spawn that already
+      failed before this fix shipped still stops owing a delivery and stops
+      projecting the ghost "delivering" bubble. Peeks first so a quiet registry
+      stays byte-stable across polls. Returns the reservation ids it failed. */
+  terminalizeFailedSpawnDeliveries(): string[] {
+    const snapshot = this.readOnlySnapshot();
+    const hasCandidate = Object.values(snapshot.heldDeliveries).some(
+      (delivery) => delivery.state === "held" && failedSpawnLaunchIdOf(snapshot, delivery),
+    );
+    if (!hasCandidate) return [];
+    return this.mutate((file) => terminalizeFailedSpawnDeliveriesInFile(file));
+  }
+
   failStructuredSpawn(launchId: string, error: string): void {
     this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt || receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") return;
       receipt.state = "failed";
       receipt.error = error;
+      /* A structured spawn that fails can never deliver its initial message, so
+         its still-`held` `spawn_<launchId>` reservation is terminalized in the
+         same transaction (issue #653) rather than left as an eternal owed
+         delivery. */
+      terminalizeFailedSpawnDeliveriesInFile(file);
       if (!receipt.key || !receipt.artifactPath) return;
       const entry = file.entries[sessionKeyId(receipt.key)];
       if (!entry || entry.artifactPath !== receipt.artifactPath) return;

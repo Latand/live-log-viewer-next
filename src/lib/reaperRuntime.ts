@@ -842,6 +842,16 @@ export async function runReaperCycle(options: {
   } catch (error) {
     console.error("[reaper] stale undeliverable held-delivery convergence failed", error);
   }
+  /* Durable ghost-delivery convergence (issue #653): a structured spawn that
+     reached the terminal `failed` state can never deliver its initial message,
+     so its stuck `spawn_<launchId>` reservation is failed here — it stops owing a
+     delivery and stops projecting a "delivering" bubble. Pure registry mutation,
+     independent of the runtime client, byte-stable when there is nothing to do. */
+  try {
+    registry.terminalizeFailedSpawnDeliveries();
+  } catch (error) {
+    console.error("[reaper] failed-spawn held-delivery convergence failed", error);
+  }
   /* Stale structured launch convergence (#334): the reaper cycle is the
      while-running seam that turns dead-evidence pending receipts terminal, so
      a permanent spinner no longer waits for a replay POST or a restart. The
