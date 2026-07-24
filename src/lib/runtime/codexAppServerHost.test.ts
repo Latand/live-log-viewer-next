@@ -297,6 +297,53 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("the V3 realtime session inherits the hosted thread's MCP configuration", async () => {
+    const server = new FakeAppServer("voice-mcp-thread");
+    server.mcpServers = {
+      viewer: { command: "agent-log-viewer-mcp", enabled: true, default_tools_approval_mode: "prompt" },
+      "agent-browser": { command: "browser-mcp", enabled: true, default_tools_approval_mode: "writes" },
+      "telegram-readonly": { command: "telegram-mcp", enabled: true, default_tools_approval_mode: "prompt" },
+    };
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      mcpServers: ["viewer", "agent-browser"],
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    /* The hosted thread is the only place the MCP table lives: thread/start
+       enables the allowlisted servers and restates realtime_conversation. */
+    expect(server.requests.find((request) => request.method === "thread/start")?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          viewer: { enabled: true, default_tools_approval_mode: "approve" },
+          "agent-browser": { enabled: true, default_tools_approval_mode: "writes" },
+          "telegram-readonly": { enabled: false },
+        },
+        features: { realtime_conversation: true },
+      },
+    });
+
+    await host.startRealtimeWebRtc("v=0\r\noffer");
+    const realtimeStart = server.requests.find((request) => request.method === "thread/realtime/start");
+    const params = realtimeStart?.params as Record<string, unknown>;
+    /* App-server contract (codex 0.145.0): thread/realtime/start names the
+       thread and nothing else — no MCP table, config, or tool list rides the
+       call, so the session can only inherit the thread's servers above. */
+    expect(params.threadId).toBe("voice-mcp-thread");
+    expect(Object.keys(params).sort()).toEqual([
+      "clientManagedHandoffs",
+      "codexResponsesAsItems",
+      "includeStartupContext",
+      "outputModality",
+      "threadId",
+      "transport",
+      "version",
+    ]);
+    expect(server.requests.filter((request) => request.method === "thread/start")).toHaveLength(1);
+    await host.release();
+  });
+
   test("surfaces the app-server realtime admission error", async () => {
     const server = new FakeAppServer("voice-error-thread");
     server.realtimeStartError = "AVAS route unavailable";

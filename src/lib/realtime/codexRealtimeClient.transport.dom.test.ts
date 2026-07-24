@@ -107,6 +107,62 @@ test("a rejected admission surfaces the backend error and leaves restart availab
   await client.stop();
 });
 
+test("barge-in mid-answer interleaves transcripts, keeps the mic live, and never reconfigures server VAD", async () => {
+  globalThis.fetch = (async () => jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" })) as unknown as typeof fetch;
+  let stoppedTracks = 0;
+  const mediaDevices = (globalThis.navigator as unknown as { mediaDevices: { getUserMedia: unknown } }).mediaDevices;
+  const originalGetUserMedia = mediaDevices.getUserMedia;
+  const track = { stop: () => { stoppedTracks += 1; } };
+  mediaDevices.getUserMedia = async () => ({
+    getAudioTracks: () => [track],
+    getTracks: () => [track],
+  });
+  try {
+    const client = codexRealtimeClient("conversation_barge_in");
+    await client.start();
+    const peer = StubPeerConnection.latest!;
+    peer.channel.onopen?.();
+    expect(client.getSnapshot().phase).toBe("live");
+
+    // The agent is mid-answer when server VAD detects operator speech: the
+    // truncated agent line stays visible, the operator turn opens a new line,
+    // and the post-interruption answer never glues onto the abandoned one.
+    peer.channel.onmessage?.({ data: JSON.stringify({ type: "output_transcript.added", item: { text: "The build is" } }) });
+    peer.channel.onmessage?.({ data: JSON.stringify({ type: "input_transcript.added", item: { text: "Stop — check the tests instead" } }) });
+    peer.channel.onmessage?.({ data: JSON.stringify({ type: "output_transcript.added", item: { text: "Checking the tests" } }) });
+    peer.channel.onmessage?.({ data: JSON.stringify({ type: "turn.done", turn: { role: "assistant", transcript: "Checking the tests now" } }) });
+    expect(client.getSnapshot().lines.map((line) => [line.role, line.text, line.final])).toEqual([
+      ["assistant", "The build is", false],
+      ["user", "Stop — check the tests instead", false],
+      ["assistant", "Checking the tests now", true],
+    ]);
+
+    // Barge-in works only while the mic stays on the wire: no track stops
+    // before hangup, and the client sends nothing that could override the
+    // server-side VAD/turn-detection config.
+    expect(stoppedTracks).toBe(0);
+    expect(peer.channel.sent).toEqual([]);
+    expect(client.getSnapshot().phase).toBe("live");
+
+    await client.stop();
+    expect(client.getSnapshot().phase).toBe("idle");
+    expect(stoppedTracks).toBe(1);
+  } finally {
+    mediaDevices.getUserMedia = originalGetUserMedia;
+  }
+});
+
+test("a data channel lost before opening surfaces the error state instead of connecting forever", async () => {
+  globalThis.fetch = (async () => jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" })) as unknown as typeof fetch;
+  const client = codexRealtimeClient("conversation_channel_lost");
+  await client.start();
+  expect(client.getSnapshot().phase).toBe("connecting");
+
+  StubPeerConnection.latest?.channel.onclose?.();
+  expect(client.getSnapshot().phase).toBe("error");
+  expect(client.getSnapshot().error).toBe("Realtime connection closed");
+});
+
 test("a live call renders both transcripts and streams delegation handoffs with a final message", async () => {
   globalThis.fetch = (async () => jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" })) as unknown as typeof fetch;
 

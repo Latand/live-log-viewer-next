@@ -215,7 +215,13 @@ class CodexRealtimeClient {
         if (epoch === this.epoch) this.update({ phase: "live", error: null });
       };
       events.onclose = () => {
-        if (epoch === this.epoch && this.snapshot.phase === "live") this.setError("Realtime connection closed");
+        /* A channel lost before it ever opened is a failed admission too: the
+           call lands in the error state so the UI can offer a restart instead
+           of sitting in "connecting" forever. */
+        if (epoch === this.epoch
+          && (this.snapshot.phase === "live" || this.snapshot.phase === "connecting")) {
+          this.setError("Realtime connection closed");
+        }
       };
       peer.onconnectionstatechange = () => {
         if (epoch === this.epoch
