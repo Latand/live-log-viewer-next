@@ -1,6 +1,7 @@
 "use client";
 
 import type { FeedEntry } from "@/components/feed/parse";
+import { newestTranscriptInstant } from "@/components/feed/transcriptOrder";
 import { useSyncExternalStore } from "react";
 import {
   LIVE_TURN_ITEM_LIMIT,
@@ -145,16 +146,29 @@ function canonicalAssistantItems(feed: readonly FeedEntry[]): CanonicalAssistant
 /**
  * Canonical transcript rows claim completed live items by response identity.
  * Older engine records without ids use a timestamp-fenced text echo.
+ *
+ * These overlay rows render BELOW every transcript row, so a completed item the
+ * transcript has already moved past would sit under records written after it
+ * (issue #674): the session's opening answer pinned beneath tool cards from
+ * minutes later, permanently, because its own transcript row is far above the
+ * window the pane keeps and no claim can ever be made from it. A completed item
+ * older than the newest record in the window is therefore dropped — the
+ * transcript is demonstrably past it, so it belongs above, where the transcript
+ * already renders it. In-flight (`streaming`) items are always the newest thing
+ * in the conversation and stay.
  */
 export function visibleRuntimeLiveTurnItems(
   liveTurn: RuntimeLiveTurn | null | undefined,
   feed: readonly FeedEntry[],
   persistedClaims: ReadonlySet<string> = EMPTY_CLAIMS,
 ): RuntimeLiveTurnItem[] {
+  const overlay = runtimeLiveTurnItems(liveTurn);
+  if (!overlay.length) return overlay;
   const canonical = canonicalAssistantItems(feed);
   const currentClaims = new Set(canonical.flatMap((item) => item.sourceId ? [item.sourceId] : []));
+  const transcriptAt = newestTranscriptInstant(feed);
   const claimed = new Set<number>();
-  return runtimeLiveTurnItems(liveTurn).filter((live) => {
+  return overlay.filter((live) => {
     if (live.phase === "streaming") return true;
     if (live.itemId && (persistedClaims.has(live.itemId) || currentClaims.has(live.itemId))) return false;
     let owner = live.itemId
@@ -169,7 +183,10 @@ export function visibleRuntimeLiveTurnItems(
         && (startedAt === null || item.at === null || item.at >= startedAt),
       );
     }
-    if (owner < 0) return true;
+    if (owner < 0) {
+      const liveAt = timestamp(live.completedAt) ?? timestamp(live.startedAt);
+      return transcriptAt === null || liveAt === null || liveAt > transcriptAt;
+    }
     claimed.add(owner);
     return false;
   });
