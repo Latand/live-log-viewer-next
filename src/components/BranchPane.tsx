@@ -141,7 +141,17 @@ interface Props {
       opening prompt, and every stage prompt opens with the same shared preamble,
       so every stage pane on the board carried the identical meaningless title.
       The transcript's own title stays reachable as the header tooltip, and the
-      prompt itself is the transcript's first message. */
+      prompt itself is the transcript's first message.
+
+      RENAME, deliberately: an imposed title replaces the inline `SessionTitle`
+      editor, so a stage card carries no hover pencil — renaming a transcript
+      whose own title is the preamble is not what that affordance is for, and a
+      rename would not change what the card shows anyway. The rename path stays
+      open where it is meaningful: F2 on the selected node expands it, and the
+      board's overlay drops the override while that rename token is pending
+      (SchemeBoard `stageTitle`), mounting the real editor. Any surface that
+      passes an override on a renamable conversation owes the operator the same
+      escape hatch. */
   titleOverride?: string;
 }
 

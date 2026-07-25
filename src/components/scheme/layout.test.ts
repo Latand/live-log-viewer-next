@@ -13,7 +13,7 @@ import { applyBoardMutations } from "@/lib/board/mutations";
 import { autoTaskSlotPosition } from "@/lib/tasks/lattice";
 
 import { deckKey, flowLinkKey, stageSlotKey } from "./agentLinks";
-import { REST_BAND_MAX_W, SLOT_H, SLOT_ROW_H, buildSchemeLayout } from "./layout";
+import { HANDOFF_BADGE_Y, REST_BAND_MAX_W, SLOT_H, SLOT_ROW_H, buildSchemeLayout } from "./layout";
 import { TASK_W, taskWorldBounds } from "./taskGeometry";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
@@ -1021,6 +1021,26 @@ describe("a pipeline's stages read in execution order (#658)", () => {
     const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p658")!;
     expect(byPath.get("/plan")!.x).toBeGreaterThanOrEqual(halo.x);
     expect(future.x + future.w).toBeLessThanOrEqual(halo.x + halo.w);
+  });
+
+  test("the handoff badge into a full card sits on the seam it shares with a collapsed row", () => {
+    /* Adjacent slots are top-aligned, so a 96px row beside a 620px card share
+       only the row's own span: anchoring the arrow at the card's header level
+       (110px) floated it below the row it visually leaves. */
+    const p = threeStage();
+    const layout = buildSchemeLayout([], [], [], [], [], [p], [p]);
+    const slotByStage = new Map(layout.slots.map((slot) => [slot.stage.id, slot]));
+    const skipped = slotByStage.get("plan_v3_voice")!;
+    const live = slotByStage.get("integrate_v3_voice")!;
+    const future = slotByStage.get("verify_v3_voice")!;
+    /* Row → full card: the badge stays inside the row's vertical span. */
+    expect(skipped.h).toBe(SLOT_ROW_H);
+    expect(live.incoming).toBe("run");
+    expect(live.incomingAnchorY).toBe(SLOT_ROW_H / 2);
+    expect(live.incomingAnchorY!).toBeGreaterThan(skipped.y - live.y);
+    expect(live.incomingAnchorY!).toBeLessThan(skipped.y + skipped.h - live.y);
+    /* Two full cards keep the header-level anchor. */
+    expect(future.incomingAnchorY).toBe(HANDOFF_BADGE_Y);
   });
 
   test("a skipped stage with no placed transcript reserves one status row, not a full card", () => {

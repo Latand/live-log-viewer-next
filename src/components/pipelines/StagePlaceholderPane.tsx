@@ -251,7 +251,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
       data-pan-ignore
       data-pipeline-stage-card={`${pipeline.id}::${stage.id}`}
       data-pipeline-stage-state={state}
-      aria-label={t("pipelineSlot.paneAria", { role: label })}
+      aria-label={t("pipelineSlot.paneAria", { title })}
       className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-control border-2 border-dashed bg-card shadow-1"
       style={{ borderColor: active ? tone.color : "var(--border-strong)" }}
     >

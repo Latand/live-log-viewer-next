@@ -768,6 +768,42 @@ export function stagePaneTitle(t: TFunction, stage: PipelineStage, index: number
   return role === stage.id ? `${role} · ${position}` : `${role} · ${stage.id} · ${position}`;
 }
 
+/** A live conversation resolved to the pipeline stage it runs (#658): the stage's
+    declared identity plus its position in the chain. */
+export type PipelineStagePane = {
+  pipeline: Pipeline;
+  stage: PipelineStage;
+  index: number;
+  total: number;
+};
+
+/**
+ * Which pipeline stage each live transcript belongs to, keyed by `agentPath`
+ * (#658). One index shared by every surface that must name a stage conversation
+ * — the board node and the full-window overlay both read it, so the two can
+ * never disagree about what a pane is. Closed pipelines are excluded: their
+ * transcripts are history, not a stage in flight.
+ */
+export function pipelineStageByAgentPath(pipelines: readonly Pipeline[]): Map<string, PipelineStagePane> {
+  const map = new Map<string, PipelineStagePane>();
+  for (const pipeline of pipelines) {
+    if (pipeline.state === "closed") continue;
+    pipeline.stages.forEach((stage, index) => {
+      const attempt = latestAttempt(pipeline, stage.id);
+      if (!attempt?.agentPath) return;
+      map.set(attempt.agentPath, { pipeline, stage, index, total: pipeline.stages.length });
+    });
+  }
+  return map;
+}
+
+/** The imposed title for a resolved stage pane, or undefined when a conversation
+    is not a pipeline stage — the ONE composition point every pane-title call site
+    goes through, so no surface can grow its own variant. */
+export function stagePaneTitleOf(t: TFunction, pane: PipelineStagePane | null | undefined): string | undefined {
+  return pane ? stagePaneTitle(t, pane.stage, pane.index, pane.total) : undefined;
+}
+
 /**
  * Whether a stage's board surface collapses to a one-line status row (#658).
  * Skipped and completed work is BEHIND the operator: rendering it at the same

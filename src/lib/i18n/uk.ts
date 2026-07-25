@@ -1113,8 +1113,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineGroup.openHistory": "Відкрити історію пайплайна {task}",
 
   // плейсхолдери етапів пайплайна + вибір шаблону (#196)
-  "pipelineSlot.paneAria": "Запланований етап {role}",
-  "pipelineSlot.completedAria": "Завершений етап {role} — відкрийте для перегляду",
+  "pipelineSlot.paneAria": "Запланований етап {title}",
+  "pipelineSlot.completedAria": "Завершений етап {title} — відкрийте для перегляду",
   "pipelineSlot.openTranscript": "Відкрити розмову",
   "pipelineSlot.stageOf": "етап {k}/{n}",
   "pipelineSlot.promptLabel": "Промпт стадії",

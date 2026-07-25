@@ -13,7 +13,6 @@ import {
   STAGE_TONES,
   VERDICT_TONES,
   attemptStateLabel,
-  stageChipLabel,
   stageChipState,
   stagePaneTitle,
   verdictStatusLabel,
@@ -35,8 +34,9 @@ export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?:
   const { pipeline, stage, attempt } = slot;
   const state = stageChipState(pipeline, stage);
   const tone = STAGE_TONES[state];
-  const label = stageChipLabel(t, stage);
-  /* Role · stage · position, never the prompt's shared preamble (#658). */
+  /* Role · stage · position, never the prompt's shared preamble (#658) — the
+     visible title and the card's accessible name are the same string, so two
+     stages sharing a role are still told apart by assistive tech. */
   const title = stagePaneTitle(t, stage, slot.index, slot.total);
   const review = stage.kind === "review-loop";
   const tint = engineTintOf(stage.effectiveRole.engine);
@@ -53,7 +53,7 @@ export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?:
       data-pipeline-stage-card={`${pipeline.id}::${stage.id}`}
       data-pipeline-stage-state={state}
       data-pipeline-stage-completed="true"
-      aria-label={t("pipelineSlot.completedAria", { role: label })}
+      aria-label={t("pipelineSlot.completedAria", { title })}
       className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-control border-2 bg-card shadow-1"
       style={{ borderColor: tone.color }}
     >

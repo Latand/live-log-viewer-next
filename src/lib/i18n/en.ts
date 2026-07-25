@@ -1144,8 +1144,8 @@ export const en = {
   "pipelineGroup.openHistory": "Open pipeline history for {task}",
 
   // pipeline stage placeholders + template picker (#196)
-  "pipelineSlot.paneAria": "Planned stage {role}",
-  "pipelineSlot.completedAria": "Completed stage {role} — open to review",
+  "pipelineSlot.paneAria": "Planned stage {title}",
+  "pipelineSlot.completedAria": "Completed stage {title} — open to review",
   "pipelineSlot.openTranscript": "Open conversation",
   "pipelineSlot.stageOf": "stage {k}/{n}",
   "pipelineSlot.promptLabel": "Stage prompt",

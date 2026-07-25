@@ -33,13 +33,23 @@ test("a titleOverride names the pane and keeps the transcript's own title in the
   expect(html).toMatch(/title="Builder · integrate_v3_voice · stage 2\/3 — Work alone and launch no helpers/);
 });
 
-test("a renamable stage pane still shows the imposed title, not the prompt's first line", () => {
+test("a renamable stage pane shows the imposed title and drops the inline rename pencil, by design", () => {
   /* A renamable conversation would otherwise render the editable SessionTitle
-     seeded from the prompt-derived title — the very string #658 is about. */
-  const html = renderToStaticMarkup(
+     seeded from the prompt-derived title — the very string #658 is about. The
+     imposed identity replaces that editor, so the card carries no rename pencil;
+     renaming stays reachable through F2 → the full-window overlay, which drops
+     the override while a rename token is pending (SchemeBoard `stageTitle`,
+     `titleUnderRename`). Losing the pencil here is a decision, not a slip. */
+  const stagePane = renderToStaticMarkup(
     <BranchPane file={file({ renamable: true } as Partial<FileEntry>)} tasks={[]} isRoot titleOverride="Architect · plan_v3_voice · stage 1/3" />,
   );
-  expect(html).toContain("Architect · plan_v3_voice · stage 1/3");
+  expect(stagePane).toContain("Architect · plan_v3_voice · stage 1/3");
+  expect(stagePane).not.toContain("Rename ");
+
+  /* The same conversation without an override keeps its editor: the pencil is
+     lost only where an owner imposes an identity. */
+  const plainPane = renderToStaticMarkup(<BranchPane file={file({ renamable: true } as Partial<FileEntry>)} tasks={[]} isRoot />);
+  expect(plainPane).toContain("Rename ");
 });
 
 test("without an override the pane keeps the transcript-derived title (every other surface)", () => {

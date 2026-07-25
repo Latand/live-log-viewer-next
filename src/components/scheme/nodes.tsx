@@ -24,7 +24,7 @@ import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplateP
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
 import { StageCompletedCard } from "@/components/pipelines/StageCompletedCard";
 import { StageStatusRow } from "@/components/pipelines/StageStatusRow";
-import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, latestAttempt, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState, stagePaneTitle } from "@/components/pipelines/pipelineModel";
+import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState, pipelineStageByAgentPath, stagePaneTitleOf, type PipelineStagePane } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
 import { MAX_PIPELINE_STAGES } from "@/lib/pipelines/limits";
@@ -50,6 +50,7 @@ import { SubagentBadges } from "./SubagentBadges";
 import { SubagentTray, type SubagentTrayApi } from "./SubagentTrayView";
 import type { SubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
 import {
+  HANDOFF_BADGE_Y,
   LOOP_GAP,
   NODE_W,
   SLOT_GAP,
@@ -797,7 +798,7 @@ function NodeShell({
       review-loop (the FlowStrip owns that slot). */
   pipeline: Pipeline | null;
   /** The exact pipeline stage represented by this real conversation pane. */
-  pipelineStage: { pipeline: Pipeline; stage: Pipeline["stages"][number]; index: number; total: number } | null;
+  pipelineStage: PipelineStagePane | null;
   /** All flows, for the strip's review-loop round counters + open-review. */
   flows: Flow[];
   files: readonly FileEntry[];
@@ -947,7 +948,7 @@ function NodeShell({
              first line of its prompt — every stage prompt opens with the same
              shared preamble, so prompt-derived titles named every pane on the
              board identically (#658). */
-          titleOverride={pipelineStage ? stagePaneTitle(t, pipelineStage.stage, pipelineStage.index, pipelineStage.total) : undefined}
+          titleOverride={stagePaneTitleOf(t, pipelineStage)}
           onClose={() => onClose(node.file.path)}
           onToggleExpand={() => onExpand(node.file.path)}
           onSpawnRetry={onSpawnRetry}
@@ -1088,8 +1089,8 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
         {slot.incoming ? (
           <span
             aria-hidden
-            className="absolute top-1/2 z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
-            style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
+            className="absolute z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
+            style={{ left: -SLOT_GAP / 2, top: slot.incomingAnchorY ?? HANDOFF_BADGE_Y, borderColor: tone.color, color: tone.color }}
           >
             {slot.incoming === "review-loop" ? "⟳" : "→"}
           </span>
@@ -1122,8 +1123,8 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
         {slot.incoming ? (
           <span
             aria-hidden
-            className="absolute top-[110px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
-            style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
+            className="absolute z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
+            style={{ left: -SLOT_GAP / 2, top: slot.incomingAnchorY ?? HANDOFF_BADGE_Y, borderColor: tone.color, color: tone.color }}
           >
             {slot.incoming === "review-loop" ? "⟳" : "→"}
           </span>
@@ -1164,8 +1165,8 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
       {slot.incoming ? (
         <span
           aria-hidden
-          className="absolute top-[110px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
-          style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
+          className="absolute z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
+          style={{ left: -SLOT_GAP / 2, top: slot.incomingAnchorY ?? HANDOFF_BADGE_Y, borderColor: tone.color, color: tone.color }}
         >
           {slot.incoming === "review-loop" ? "⟳" : "→"}
         </span>
@@ -1337,19 +1338,9 @@ export const NodesLayer = memo(function NodesLayer({
   /* Paths still in the scan; a run stage action is disabled once its transcript
      leaves the file set (AC4). */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
-  const pipelineStageByPath = useMemo(() => {
-    const map = new Map<string, { pipeline: Pipeline; stage: Pipeline["stages"][number]; index: number; total: number }>();
-    for (const pipeline of pipelines) {
-      if (pipeline.state === "closed") continue;
-      for (let index = 0; index < pipeline.stages.length; index += 1) {
-        const stage = pipeline.stages[index]!;
-        const attempt = latestAttempt(pipeline, stage.id);
-        if (!attempt?.agentPath) continue;
-        map.set(attempt.agentPath, { pipeline, stage, index, total: pipeline.stages.length });
-      }
-    }
-    return map;
-  }, [pipelines]);
+  /* Which stage each live transcript runs — the shared index (#658), so the
+     board node and the full-window overlay name a stage pane identically. */
+  const pipelineStageByPath = useMemo(() => pipelineStageByAgentPath(pipelines), [pipelines]);
   /* Activity ranking reaches the screen through each host's x/y transform.
      Stable sibling order keeps React from moving stateful hosts in the DOM,
      preserving scroll, focus, selection, and draft/deck state. */

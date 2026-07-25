@@ -85,6 +85,13 @@ export const SLOT_GAP = 72;
    expandable — the shell floats the full card over the board on demand, which is
    why the reserved geometry stays this row. */
 export const SLOT_ROW_H = 96;
+/* Where the handoff badge rides in the gap between two chain-adjacent slots:
+   on the seam of the two surfaces it joins. Adjacent slots are top-aligned, so
+   their shared vertical span is the shorter of the two — a pair of full cards
+   keeps this header-level anchor, while a collapsed row pins the arrow inside
+   its own 96px span instead of floating below its bottom edge (#658). */
+export const HANDOFF_BADGE_Y = 110;
+const handoffBadgeY = (a: number, b: number) => Math.min(HANDOFF_BADGE_Y, Math.round(Math.min(a, b) / 2));
 /* Completed stage cards (#507 F2): a terminal stage of an ACTIVE pipeline whose
    idle transcript is not surfaced as a live node still stands in at its stage
    position with the live cards' width, so a five-stage graph reads as five
@@ -202,6 +209,10 @@ export interface StageSlot extends SchemeRect {
   /** Render an incoming handoff badge on this slot's left edge: set when the
       previous stage's slot sits directly beside it in the same row. */
   incoming?: "run" | "review-loop";
+  /** Distance from this slot's top to the incoming badge's center — the seam the
+      two joined surfaces share (`handoffBadgeY`). Set with `incoming`, so an
+      arrow out of a collapsed row never floats below the row it leaves (#658). */
+  incomingAnchorY?: number;
 }
 
 /** A board task card owned by a pipeline region (#531): the layout places it
@@ -543,6 +554,10 @@ export function buildSchemeLayout(
     /* Settled work reserves ONE row (#658); everything still ahead — pending,
        active, or a parked decision — keeps the full card footprint. */
     const collapsedRow = stageRowCollapsible(plan.pipeline, stage, presentation);
+    const height = collapsedRow ? SLOT_ROW_H : SLOT_H;
+    /* The badge sits on the seam the two adjacent surfaces share, so a mixed
+       row/card pair keeps the arrow on the chain rather than under it. */
+    const previousHeight = previous && stageRowCollapsible(plan.pipeline, previous.stage, previous.presentation) ? SLOT_ROW_H : SLOT_H;
     const slot: StageSlot = {
       key: stageSlotKey(plan.pipeline.id, stage.id),
       pipeline: plan.pipeline,
@@ -551,7 +566,7 @@ export function buildSchemeLayout(
       total: plan.pipeline.stages.length,
       presentation,
       ...(attempt ? { attempt } : {}),
-      ...(adjacent ? { incoming: stage.kind } : {}),
+      ...(adjacent ? { incoming: stage.kind, incomingAnchorY: handoffBadgeY(previousHeight, height) } : {}),
       ...(collapsedRow ? { collapsedRow: true as const } : {}),
       x,
       y,
@@ -559,7 +574,7 @@ export function buildSchemeLayout(
       /* A pending/active slot is a full-size card — placeholder and completed
          alike share the live conversation's footprint (#507 F2); a settled stage
          collapses to its status row (#658). */
-      h: collapsedRow ? SLOT_ROW_H : SLOT_H,
+      h: height,
     };
     slots.push(slot);
     regionKeys(plan.pipeline.id).push(slot.key);
