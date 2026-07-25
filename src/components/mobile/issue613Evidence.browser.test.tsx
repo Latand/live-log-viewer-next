@@ -19,11 +19,13 @@ import type { BoardTask } from "@/lib/tasks/types";
  * page scroll, with the «More actions» trigger hanging off the right edge.
  *
  * The header now fits BY CONSTRUCTION: every always-mounted control is a fixed
- * 44px target, the project name and the attention filler are the only elastic
- * cells (they truncate), and the scheme/list switch rides the «more» menu on the
- * phone instead of a 94px inline segmented pair. This renders the REAL
- * ProjectDashboard with a populated board and measures the production CSS in
- * Chromium, exactly as the issue's repro did.
+ * 44px target, the ONE elastic cell is the project name (the filler beside it is
+ * an empty spacer that collapses to nothing first, and the attention pill holds
+ * its own width), and the scheme/list switch is one tap inside the «more» menu
+ * instead of a 94px inline segmented pair. The budget itself is documented at
+ * the header in ProjectDashboard.tsx. This renders the REAL ProjectDashboard
+ * with a populated board and measures the production CSS in Chromium, exactly as
+ * the issue's repro did.
  */
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
@@ -293,7 +295,8 @@ test("issue 613: the populated phone header fits a 390px viewport with every con
     expect(labels.some((label) => label.startsWith(translate("en", key).slice(0, 12)))).toBe(true);
   }
   /* The attention-queue badge is an action, so a full row must not squeeze it
-     out of existence (it used to ride the elastic filler). */
+     out of existence — it is no longer elastic (before #613 it rode the
+     flex-1 filler and collapsed to zero px here). */
   expect(labels).toContain(ATTENTION_LABEL);
 
   /* The long project name truncates instead of pushing the row wide. */

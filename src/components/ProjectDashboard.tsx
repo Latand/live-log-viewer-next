@@ -1375,9 +1375,13 @@ export function ProjectDashboard({
           most five fixed 44px targets (projects, undo, shelf, create, more) plus
           the bounded attention pill — ~326px with the gaps and padding — and the
           project name as the ONE elastic cell, which truncates into whatever is
-          left. Nothing here can push the document into a horizontal scroll.
-          Any control added later either fits that budget as a 44px target or
-          folds into the «⋯» menu, the way the scheme/list switch did. */}
+          left. 390px is the narrowest viewport this layout supports — a fully
+          populated row leaves the name ~73px there, ~43px at 360px, a sliver at
+          320px, and at 280px the fixed targets alone overflow the row by ~29px.
+          That collapse below 390px is a documented limit, not a defect: a
+          narrower phone would need a further fold into the «⋯» menu. Any control
+          added later either fits the budget as a 44px target or folds into that
+          menu, the way the scheme/list switch did. */}
       <div
         data-testid={isMobile ? "mobile-project-header" : undefined}
         className={
@@ -1587,8 +1591,9 @@ export function ProjectDashboard({
 
       {isMobile ? (
         <>
-          {/* The scheme/list toggle moved into the header row (finding 7), so the
-              phone shell is two nav rows at most: header + the focus-view strip. */}
+          {/* The phone shell is two nav rows at most: header + the focus-view
+              strip (finding 7). The scheme/list switch is not one of them — it
+              is one tap inside the header's «⋯» menu (issue #613). */}
           {!boardReady ? (
             <SchemeSkeleton />
           ) : projectView === "scheme" && schemeAvailable ? (
