@@ -169,6 +169,7 @@ export type PipelineUnconfirmedHost = {
   attempt: number;
   conversationId: string | null;
   agentPath: string | null;
+  paneId: string | null;
   operationId: string | null;
   detail: string;
   at: string;

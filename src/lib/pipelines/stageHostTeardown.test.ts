@@ -239,3 +239,16 @@ test("a refused kill surfaces the still-running host instead of claiming a stop 
     .toEqual({ outcome: "failed", error: "stage host kill was refused with status 200" });
   setAgentRegistryForTests(null);
 });
+
+test("the residency probe reads host state without dispatching anything (#670)", async () => {
+  const live = hostedConversation();
+  const ports = defaultPipelinePorts();
+  expect(await ports.stageHostResident(target(live.conversationId))).toBeTrue();
+
+  /* What the tick trusts to retire an unconfirmed record: the host is gone. */
+  live.registry.terminateStructuredHost(live.key);
+  expect(await ports.stageHostResident(target(live.conversationId))).toBeFalse();
+  expect(await ports.stageHostResident(target("conversation_never_seen"))).toBeFalse();
+  expect(killed).toEqual([]);
+  setAgentRegistryForTests(null);
+});

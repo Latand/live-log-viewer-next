@@ -158,6 +158,7 @@ function isUnconfirmedHost(value: unknown): value is PipelineUnconfirmedHost {
     && Number.isInteger(host.attempt)
     && isNullableString(host.conversationId)
     && isNullableString(host.agentPath)
+    && (host.paneId === undefined || isNullableString(host.paneId))
     && isNullableString(host.operationId)
     && typeof host.detail === "string"
     && typeof host.at === "string";

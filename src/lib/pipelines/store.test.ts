@@ -288,6 +288,7 @@ test("an unconfirmed host record survives a round trip and rejects a malformed o
       attempt: 1,
       conversationId: "conversation_build",
       agentPath: null,
+      paneId: null,
       operationId: "kill-op-1",
       detail: "kill accepted as queued but termination was not confirmed",
       at: "2026-07-25T00:00:00.000Z",

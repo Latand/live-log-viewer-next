@@ -20,7 +20,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { isShellCommand } from "@/lib/status";
-import { paneInfo } from "@/lib/tmux";
+import { killPane, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
@@ -52,6 +52,7 @@ import type {
   PipelineStage,
   PipelineStageInput,
   PipelineStageAttempt,
+  PipelineUnconfirmedHost,
 } from "./types";
 import { parseStageVerdict, type ParsedStageVerdict } from "./verdict";
 
@@ -131,6 +132,15 @@ export interface PipelinePorts {
   /** Terminates the host that owns a stage attempt's agent. `not-running` means
       no host was resident, so a close can tell an idle lane from one it stopped. */
   stopStageAgent(target: PipelineStageHostRef): Promise<PipelineStageStopResult>;
+  /** Terminates a stage attempt's tmux pane. The teardown's last resort for a
+      pane-hosted agent the registry cannot address. */
+  killStagePane(paneId: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Residency read with no side effects: `false` means the host is
+      demonstrably gone. Used to retire an unconfirmed kill without re-killing. */
+  stageHostResident(target: PipelineStageHostRef): Promise<boolean>;
+  /** Monotonic milliseconds, kept apart from `now()` so a teardown budget can be
+      bounded independently of the ISO timestamps written to the record. */
+  monotonicNow(): number;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
   durableTurnEvidence(engine: EffectivePipelineRole["engine"], transcriptPath: string): Promise<StageTurnEvidence | null>;
   headCwd(transcriptPath: string): string | null;
@@ -321,10 +331,15 @@ export type StageStopProbes = {
  * yields `failed`; anything still in flight yields `unconfirmed` with its
  * operation id, and the close reports that instead of a clean stop.
  */
-export async function stopPipelineStageAgent(
-  target: PipelineStageHostRef,
-  probes: StageStopProbes = {},
-): Promise<PipelineStageStopResult> {
+/** Resolved identity of a stage host plus a live residency read. Null when the
+    registry has no trace of the conversation at all. */
+type StageHostProbe = {
+  conversationId: ViewerConversationId;
+  transcriptPath: string;
+  resident(): boolean;
+};
+
+async function stageHostProbe(target: PipelineStageHostRef): Promise<StageHostProbe | null> {
   const registry = agentRegistry();
   /* applyConversationAction resolves by id or by path; residency must too, or a
      prefixed id the registry cannot resolve short-circuits to not-running while
@@ -334,23 +349,33 @@ export async function stopPipelineStageAgent(
     : null;
   const conversation = byId ?? (target.agentPath ? registry.conversationForPath(target.agentPath) : null);
   const generation = conversation?.generations.at(-1) ?? null;
-  if (!conversation || !generation) return { outcome: "not-running" };
+  if (!conversation || !generation) return null;
   const sessionKey = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
-  try {
-    const { structuredHostProcessAlive } = await import("@/lib/runtime/structuredRecovery");
-    const resident = (): boolean => {
+  const { structuredHostProcessAlive } = await import("@/lib/runtime/structuredRecovery");
+  return {
+    conversationId: conversation.id,
+    transcriptPath: generation.path,
+    /* Re-read every call: the registry read cache invalidates on the file
+       signature, so a teardown written by the host process is visible here. */
+    resident: () => {
       const entry = registry.readOnlySnapshot().entries[sessionKey];
       if (!entry || entry.status === "dead" || entry.status === "unhosted") return false;
       return structuredHostProcessAlive(entry.structuredHost?.process ?? null) || Boolean(entry.host);
-    };
-    if (!resident()) return { outcome: "not-running" };
+    },
+  };
+}
+
+export async function stopPipelineStageAgent(
+  target: PipelineStageHostRef,
+  probes: StageStopProbes = {},
+): Promise<PipelineStageStopResult> {
+  try {
+    const probe = await stageHostProbe(target);
+    if (!probe || !probe.resident()) return { outcome: "not-running" };
+    const { conversationId, transcriptPath, resident } = probe;
 
     const { applyConversationAction } = await import("@/lib/conversation/actions");
-    const result = await applyConversationAction({
-      conversationId: conversation.id,
-      transcriptPath: generation.path,
-      action: "kill",
-    });
+    const result = await applyConversationAction({ conversationId, transcriptPath, action: "kill" });
     const body = result.body as { ok?: boolean; error?: string; operationId?: string; receipt?: { status?: string } };
     if (result.status >= 400 || body.ok !== true) {
       return { outcome: "failed", error: body.error ?? `stage host kill was refused with status ${result.status}` };
@@ -418,6 +443,24 @@ export function defaultPipelinePorts(): PipelinePorts {
       return info !== null && !isShellCommand(info.command);
     },
     stopStageAgent: (target) => stopPipelineStageAgent(target),
+    killStagePane: async (paneId) => {
+      try {
+        await killPane(paneId);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    stageHostResident: async (target) => {
+      try {
+        const probe = await stageHostProbe(target);
+        return probe ? probe.resident() : false;
+      } catch {
+        /* An unreadable probe is not evidence of death; keep the record. */
+        return true;
+      }
+    },
+    monotonicNow: () => Date.now(),
     conversationAgentActive: async (conversationId) => {
       const client = runtimeHostClient();
       if (!client) return null;
@@ -1620,6 +1663,39 @@ function isStructuredSpawnPark(pipeline: Pipeline, attempt: PipelineStageAttempt
     || failure.includes("runtime host request timed out");
 }
 
+/**
+ * Retires the unconfirmed-host records a close left behind, once each host is
+ * demonstrably gone (#670). Without this a lane that has actually finished would
+ * sit on the board forever claiming a survivor it no longer has. The probe has
+ * no side effects — nothing is re-killed here; a host that is still resident
+ * keeps its record and the lane stays visible.
+ */
+async function reconcileUnconfirmedHosts(pipeline: Pipeline, ports: PipelinePorts): Promise<boolean> {
+  const outstanding = pipeline.unconfirmedHosts;
+  if (!outstanding?.length) return false;
+  const remaining: PipelineUnconfirmedHost[] = [];
+  for (const host of outstanding) {
+    const target: PipelineStageHostRef = {
+      stageId: host.stageId,
+      attempt: host.attempt,
+      conversationId: host.conversationId,
+      agentPath: host.agentPath,
+      paneId: host.paneId ?? null,
+    };
+    const resident = await ports.stageHostResident(target);
+    const paneAlive = !resident && target.paneId ? await ports.paneAgentAlive(target.paneId) : false;
+    if (resident || paneAlive) remaining.push(host);
+  }
+  if (remaining.length === outstanding.length) return false;
+  pipeline.unconfirmedHosts = remaining.length > 0 ? remaining : undefined;
+  /* The last survivor retired: the lane has nothing left to surface, so the
+     closed record hides like any other. */
+  if (!pipeline.unconfirmedHosts && pipeline.state === "closed") {
+    pipeline.hiddenAt = pipeline.closedAt ?? ports.now();
+  }
+  return true;
+}
+
 export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts = defaultPipelinePorts()): Promise<{ pipelines: Pipeline[]; changed: boolean }> {
   if (tickStore.__llvPipelineTick) return { pipelines: [], changed: false };
   tickStore.__llvPipelineTick = true;
@@ -1634,6 +1710,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
+        pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
           pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
         }
@@ -2094,6 +2171,29 @@ function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
 /** A launched host plus whether its attempt's turn ended, which decides only
     whether the pane heuristic may speak for it. */
 type StageHostCandidate = { target: PipelineStageHostRef; turnSettled: boolean };
+
+/** Ceiling on a close's whole host teardown, holding the pipelines transaction. */
+const CLOSE_TEARDOWN_BUDGET_MS = 10_000;
+
+/**
+ * Last resort for a pane-hosted agent the registry cannot address: kill the
+ * pane, then confirm it stopped running one. Refusing instead would leave the
+ * operator with a card that never closes and a host they have to kill by hand —
+ * the very chore #670 exists to end.
+ */
+async function stopStagePaneAgent(
+  paneId: string,
+  ports: PipelinePorts,
+): Promise<{ outcome: "stopped" } | { outcome: "failed"; error: string }> {
+  const killed = await ports.killStagePane(paneId);
+  if (!killed.ok) {
+    return { outcome: "failed", error: `could not kill pane ${paneId}: ${killed.error}` };
+  }
+  if (await ports.paneAgentAlive(paneId)) {
+    return { outcome: "failed", error: `pane ${paneId} still runs an agent after its kill; stop it, then close again` };
+  }
+  return { outcome: "stopped" };
+}
 
 function stageHostLabel(target: PipelineStageHostRef): string {
   return `stage ${target.stageId} attempt ${target.attempt} (${target.conversationId ?? target.agentPath ?? "unknown host"})`;
@@ -2569,7 +2669,26 @@ export async function patchPipeline(
          what was stopped. Nothing on disk is touched — uncommitted stage work
          stays in the worktree and is named in the report instead. */
       const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], stillRunning: [], worktree: null };
-      for (const { target, turnSettled } of launchedStageHosts(pipeline)) {
+      /* Each host's confirmation is bounded, but N of them multiply, and this
+         whole loop holds the pipelines file transaction — every other pipeline
+         mutation and the controller tick queue behind it. So the aggregate is
+         bounded too, and the hosts the budget cut off are reported as
+         unconfirmed rather than silently skipped: the lane stays visible and a
+         later close picks the work up where this one stopped. */
+      const teardownDeadline = ports.monotonicNow() + CLOSE_TEARDOWN_BUDGET_MS;
+      const candidates = launchedStageHosts(pipeline);
+      for (let index = 0; index < candidates.length; index += 1) {
+        const { target, turnSettled } = candidates[index]!;
+        if (index > 0 && ports.monotonicNow() >= teardownDeadline) {
+          for (const remaining of candidates.slice(index)) {
+            close.unconfirmed.push({
+              ...remaining.target,
+              operationId: null,
+              detail: "close teardown budget expired before this host was probed",
+            });
+          }
+          break;
+        }
         const result = await ports.stopStageAgent(target);
         if (result.outcome === "stopped") close.stopped.push(target);
         else if (result.outcome === "failed") close.stillRunning.push({ ...target, error: result.error });
@@ -2577,13 +2696,12 @@ export async function patchPipeline(
           close.unconfirmed.push({ ...target, operationId: result.operationId, detail: result.detail });
         } else if (!turnSettled && target.paneId && await ports.paneAgentAlive(target.paneId)) {
           /* The registry knows no host, but the attempt never finished its turn
-             and an agent is still running in its pane — the same evidence
-             orphanAgentPane refuses a retry on. Surface it rather than closing
-             cleanly over a live agent. */
-          close.stillRunning.push({
-            ...target,
-            error: `an agent is still running in pane ${target.paneId}; kill the pane, then close again`,
-          });
+             and an agent is still running in its pane. Killing the pane is the
+             last resort the operator would otherwise reach for by hand, so the
+             teardown does it here and confirms the pane went with it. */
+          const pane = await stopStagePaneAgent(target.paneId, ports);
+          if (pane.outcome === "stopped") close.stopped.push(target);
+          else close.stillRunning.push({ ...target, error: pane.error });
         } else close.alreadyStopped.push(target);
       }
       close.worktree = closeWorktreeReport(pipeline, ports);
@@ -2630,6 +2748,7 @@ export async function patchPipeline(
             attempt: item.attempt,
             conversationId: item.conversationId,
             agentPath: item.agentPath,
+            paneId: item.paneId,
             operationId: item.operationId,
             detail: item.detail,
             at: pipeline.closedAt!,

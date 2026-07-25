@@ -146,6 +146,7 @@ test("a closed lane holding an unconfirmed host stays on the board (#670)", () =
     attempt: 1,
     conversationId,
     agentPath: "/old.jsonl",
+    paneId: null,
     operationId: "kill-op-1",
     detail: "kill accepted as queued but termination was not confirmed",
     at: "2026-01-01T01:00:00.000Z",
