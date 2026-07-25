@@ -1367,6 +1367,10 @@ export const en = {
   "limits.stale": "data is stale: {stale}",
   "limits.5h": "5h",
   "limits.week": "Week",
+  // Window labels for a horizon the provider declares itself (issue #606).
+  "limits.windowMinutes": "{n}m",
+  "limits.windowHours": "{n}h",
+  "limits.windowDays": "{n}d",
   "limits.accountsOpenAria": "Codex accounts — switch or add",
   "limits.noDataYet": "no data yet",
   "limits.rateLimited": "Provider is rate-limiting requests.",
@@ -1383,6 +1387,7 @@ export const en = {
   "burndown.loading": "Loading history…",
   "burndown.failed": "Couldn't load history.",
   "burndown.empty": "No history yet — the chart fills in as quota is sampled.",
+  "burndown.windowUnreported": "This plan reports no {window} window, so there is nothing to chart here.",
   "burndown.buildsFrom": "history builds from {date}",
   "burndown.fast": "{pct}% ahead of pace — burning fast",
   "burndown.slow": "{pct}% under pace — room to spare",

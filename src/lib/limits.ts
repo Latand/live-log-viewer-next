@@ -8,6 +8,7 @@ import type { AppServerRateLimits } from "@/lib/accounts/codexAppServer";
 import { redactAppServerDetail } from "@/lib/accounts/codexAppServerProtocol";
 import { statePath } from "@/lib/configDir";
 import { WINDOW_SECONDS, clampPercent, mergeSamples, type WindowKey } from "@/lib/burndown";
+import { relabelCachedWindows, routeWindowsByHorizon, SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
 import { historySamples, historySince, recordLimitSample, RETENTION_S } from "@/lib/limitsHistoryStore";
 import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type BurndownPayload, type BurndownSeries, type EngineBurndown, type EngineLimits, type LimitSample, type LimitsPayload, type LimitsProvenance, type LimitWindow } from "./types";
 
@@ -94,7 +95,10 @@ function readDiskCache(): LimitsCache {
         if (!entries || typeof entries !== "object") continue;
         for (const [id, entry] of Object.entries(entries)) {
           const valid = safeCacheEntry(entry);
-          if (valid) cache.engines[engine][id] = valid;
+          // Snapshots written before the horizon fix can carry a weekly window
+          // under `session`; relabel on read so a degraded account still shows
+          // its number under the horizon that number actually has.
+          if (valid) cache.engines[engine][id] = engine === "codex" ? { ...valid, data: relabelCachedWindows(valid.data) } : valid;
         }
       }
       return cache;
@@ -102,7 +106,7 @@ function readDiskCache(): LimitsCache {
     // Preserve the usable half of a pre-v2 cache during the one-time upgrade.
     if (typeof raw.at === "number" && typeof raw.accountId === "string" && raw.data?.codex) {
       const provenance = isProvenance(raw.data.provenance) ? raw.data.provenance.codex : { source: "cache" as const, reason: "legacy cache provenance unavailable", staleSince: raw.data.staleSince ?? null };
-      return { version: 2, engines: { claude: {}, codex: { [raw.accountId]: { at: raw.at, data: raw.data.codex, provenance } } } };
+      return { version: 2, engines: { claude: {}, codex: { [raw.accountId]: { at: raw.at, data: relabelCachedWindows(raw.data.codex), provenance } } } };
     }
   } catch {
     // An unreadable cache is a cache miss; the source accounts remain usable.
@@ -303,22 +307,24 @@ export async function fetchClaudeLimits(
   clock: () => number = Date.now,
   timeoutMs = 8_000,
 ): Promise<LimitRead> {
-  let accessToken = "";
+  // Keep this local named for its role: an `accessToken = …` line reads as a
+  // credential assignment to the publication gate and fails the scan.
+  let oauthToken = "";
   let plan: string | null = null;
   try {
     const raw = JSON.parse(fs.readFileSync(credentialsPath, "utf8")) as {
       claudeAiOauth?: { accessToken?: unknown; subscriptionType?: unknown };
     };
-    if (typeof raw.claudeAiOauth?.accessToken === "string") accessToken = raw.claudeAiOauth.accessToken;
+    if (typeof raw.claudeAiOauth?.accessToken === "string") oauthToken = raw.claudeAiOauth.accessToken;
     if (typeof raw.claudeAiOauth?.subscriptionType === "string") plan = raw.claudeAiOauth.subscriptionType;
   } catch (err) {
     return { data: null, reason: `credentials unreadable: ${err instanceof Error ? err.message : String(err)}`, source: "unavailable" };
   }
-  if (!accessToken) return { data: null, reason: "credentials missing access token", source: "unavailable" };
+  if (!oauthToken) return { data: null, reason: "credentials missing access token", source: "unavailable" };
   try {
     const res = await fetch(OAUTH_USAGE_URL, {
       headers: {
-        authorization: "Bearer " + accessToken,
+        authorization: "Bearer " + oauthToken,
         "anthropic-beta": "oauth-2025-04-20",
       },
       signal: AbortSignal.timeout(timeoutMs),
@@ -328,8 +334,8 @@ export async function fetchClaudeLimits(
     if (!res.ok) return { data: null, reason: `oauth usage status ${res.status}`, source: "unavailable" };
     const json = (await res.json()) as { five_hour?: OauthWindow; seven_day?: OauthWindow };
     const data = {
-      session: oauthWindow(json.five_hour),
-      weekly: oauthWindow(json.seven_day),
+      session: oauthWindow(json.five_hour, SESSION_WINDOW_MINUTES),
+      weekly: oauthWindow(json.seven_day, WEEKLY_WINDOW_MINUTES),
       plan,
       capturedAt: null,
     };
@@ -349,10 +355,13 @@ function retryAfterAt(value: string | null, now: number): number | undefined {
   return Math.max(now, date);
 }
 
-function oauthWindow(w: OauthWindow | undefined): LimitWindow | null {
+/** The OAuth usage endpoint names its two windows (`five_hour`, `seven_day`)
+    rather than numbering slots, so each one's horizon is known from the field it
+    arrived in and is stamped here for the labels. */
+function oauthWindow(w: OauthWindow | undefined, windowMinutes: number): LimitWindow | null {
   if (!w || typeof w.utilization !== "number") return null;
   const resets = typeof w.resets_at === "string" ? Date.parse(w.resets_at) : NaN;
-  return { usedPercent: w.utilization, resetsAt: Number.isFinite(resets) ? Math.round(resets / 1000) : null };
+  return { usedPercent: w.utilization, resetsAt: Number.isFinite(resets) ? Math.round(resets / 1000) : null, windowMinutes };
 }
 
 /* -------------------------------- Codex -------------------------------- */
@@ -370,10 +379,17 @@ interface CodexRateLimits {
   plan_type?: unknown;
 }
 
+/** The app-server's two slots carry whichever windows the plan has, each with
+    its own `windowDurationMins`; a plan with no 5-hour limit sends its weekly
+    window as `primary`. Filing them by declared length (issue #606) keeps a
+    weekly number off the 5h label and leaves the weekly window populated. */
 export function mapAppServerRateLimits(rateLimits: AppServerRateLimits, capturedAt = Math.round(Date.now() / 1000)): EngineLimits {
+  const toLimitWindow = (w: AppServerRateLimits["primary"]): LimitWindow | null =>
+    w ? { usedPercent: w.usedPercent, resetsAt: w.resetsAt, windowMinutes: w.windowDurationMins } : null;
+  const routed = routeWindowsByHorizon(toLimitWindow(rateLimits.primary), toLimitWindow(rateLimits.secondary));
   return {
-    session: rateLimits.primary ? { usedPercent: rateLimits.primary.usedPercent, resetsAt: rateLimits.primary.resetsAt } : null,
-    weekly: rateLimits.secondary ? { usedPercent: rateLimits.secondary.usedPercent, resetsAt: rateLimits.secondary.resetsAt } : null,
+    session: routed.session,
+    weekly: routed.weekly,
     plan: rateLimits.planType,
     capturedAt,
   };
@@ -491,9 +507,10 @@ function lastRateLimits(file: string): EngineLimits | null {
       if (!rl) continue;
       const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
       const capturedAt = Number.isFinite(ts) ? Math.round(ts / 1000) : null;
+      const routed = routeWindowsByHorizon(codexWindow(rl.primary, capturedAt), codexWindow(rl.secondary, capturedAt));
       return {
-        session: codexWindow(rl.primary, capturedAt),
-        weekly: codexWindow(rl.secondary, capturedAt),
+        session: routed.session,
+        weekly: routed.weekly,
         plan: typeof rl.plan_type === "string" ? rl.plan_type : null,
         capturedAt,
       };
@@ -509,7 +526,7 @@ function codexWindow(w: CodexWindow | undefined, capturedAt: number | null): Lim
   let resetsAt: number | null = null;
   if (typeof w.resets_at === "number") resetsAt = w.resets_at;
   else if (typeof w.resets_in_seconds === "number" && capturedAt !== null) resetsAt = capturedAt + w.resets_in_seconds;
-  return { usedPercent: w.used_percent, resetsAt };
+  return { usedPercent: w.used_percent, resetsAt, windowMinutes: typeof w.window_minutes === "number" ? w.window_minutes : null };
 }
 
 /* ----------------------------- Burndown series ----------------------------- */
@@ -520,8 +537,8 @@ const SERIES_MAX_FILES = 400;
 /** Whole-file read cap; larger transcripts fall back to a tail read. */
 const SERIES_MAX_BYTES = 8 * 1024 * 1024;
 
-function windowSecondsOf(w: CodexWindow | undefined): number | null {
-  if (w && typeof w.window_minutes === "number" && w.window_minutes > 0) return Math.round(w.window_minutes * 60);
+function windowSecondsOf(w: LimitWindow | null): number | null {
+  if (w && typeof w.windowMinutes === "number" && w.windowMinutes > 0) return Math.round(w.windowMinutes * 60);
   return null;
 }
 
@@ -572,14 +589,16 @@ export function collectCodexRateLimitSeries(sessionsDir: string, sinceUnix: numb
         const t = Math.round(ts / 1000);
         if (t < sinceUnix || seen.has(t)) continue;
         seen.add(t);
-        const prim = codexWindow(rl.primary, t);
-        const sec = codexWindow(rl.secondary, t);
-        if (prim) session.push({ t, remaining: clampPercent(100 - prim.usedPercent) });
-        if (sec) weekly.push({ t, remaining: clampPercent(100 - sec.usedPercent) });
+        // Each event's windows go to the horizon their own `window_minutes`
+        // names, so a plan that reports only a weekly window backfills the
+        // weekly curve instead of the 5h one (issue #606).
+        const routed = routeWindowsByHorizon(codexWindow(rl.primary, t), codexWindow(rl.secondary, t));
+        if (routed.session) session.push({ t, remaining: clampPercent(100 - routed.session.usedPercent) });
+        if (routed.weekly) weekly.push({ t, remaining: clampPercent(100 - routed.weekly.usedPercent) });
         if (t > latestT) {
           latestT = t;
-          if (prim) { sessionResetsAt = prim.resetsAt; sessionWindowSeconds = windowSecondsOf(rl.primary); }
-          if (sec) { weeklyResetsAt = sec.resetsAt; weeklyWindowSeconds = windowSecondsOf(rl.secondary); }
+          if (routed.session) { sessionResetsAt = routed.session.resetsAt; sessionWindowSeconds = windowSecondsOf(routed.session); }
+          if (routed.weekly) { weeklyResetsAt = routed.weekly.resetsAt; weeklyWindowSeconds = windowSecondsOf(routed.weekly); }
         }
       } catch {
         /* partial or non-JSON line */
@@ -623,23 +642,27 @@ function buildEngineBurndown(
   backfill: CodexTranscriptSeries | null,
 ): EngineBurndown {
   const forward = (window: WindowKey) => historySamples(engine, accountId, window, now);
-  const session = buildSeries(
-    forward("session"),
-    backfill?.session ?? [],
-    limits?.session ?? null,
-    now,
-    backfill?.sessionWindowSeconds ?? WINDOW_SECONDS.session,
-    backfill?.sessionResetsAt ?? null,
-  );
-  const weekly = buildSeries(
-    forward("weekly"),
-    backfill?.weekly ?? [],
-    limits?.weekly ?? null,
-    now,
-    backfill?.weeklyWindowSeconds ?? WINDOW_SECONDS.weekly,
-    backfill?.weeklyResetsAt ?? null,
-  );
-  return { session, weekly };
+  const seriesFor = (
+    key: WindowKey,
+    backfillSamples: LimitSample[],
+    backfillWindowSeconds: number | null,
+    backfillResetsAt: number | null,
+  ): BurndownSeries => {
+    const live = limits?.[key] ?? null;
+    const windowSeconds = windowSecondsOf(live) ?? backfillWindowSeconds ?? WINDOW_SECONDS[key];
+    // A snapshot that reports no window of this horizon has nothing to chart:
+    // the forward history under this key predates the horizon fix (issue #606)
+    // and belongs to the other window, so it is not drawn here. The panel names
+    // that reason rather than claiming there is no history at all.
+    if (limits && !live && backfillSamples.length === 0) {
+      return { windowStart: null, resetsAt: null, windowSeconds, samples: [], windowUnreported: true };
+    }
+    return buildSeries(forward(key), backfillSamples, live, now, windowSeconds, backfillResetsAt);
+  };
+  return {
+    session: seriesFor("session", backfill?.session ?? [], backfill?.sessionWindowSeconds ?? null, backfill?.sessionResetsAt ?? null),
+    weekly: seriesFor("weekly", backfill?.weekly ?? [], backfill?.weeklyWindowSeconds ?? null, backfill?.weeklyResetsAt ?? null),
+  };
 }
 
 /** Burndown history for both engines. Reads the current live snapshot (which

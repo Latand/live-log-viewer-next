@@ -16,7 +16,7 @@ import { handleOverlayEscape } from "@/lib/overlay";
 
 import { Loader2, SquareTerminal, Trash2, X } from "./icons";
 import { Badge } from "./ui/Badge";
-import { formatResetClock, formatResetEta } from "./rateLimit";
+import { formatResetClock, formatResetEta, windowLabel } from "./rateLimit";
 import { engineTintOf } from "./utils";
 
 /** Amber that clears contrast on the panel background — state legibility never
@@ -75,8 +75,8 @@ function AccountLimitsDetail({ account, engine }: { account: AccountOption; engi
   const limits = account.limits;
   if (!limits) return null;
   const windows = [
-    { key: "session", label: t("limits.5h"), window: limits.session },
-    { key: "weekly", label: t("limits.week"), window: limits.weekly },
+    { key: "session", label: windowLabel(t, "session", limits.session?.windowMinutes), window: limits.session },
+    { key: "weekly", label: windowLabel(t, "weekly", limits.weekly?.windowMinutes), window: limits.weekly },
   ].filter((row): row is { key: string; label: string; window: NonNullable<typeof row.window> } => row.window != null);
   if (windows.length === 0) return null;
   const stale = limits.freshness === "stale";

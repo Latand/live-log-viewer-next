@@ -97,7 +97,7 @@ test("breaks out each account's session and weekly windows with reset times", ()
       {
         id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
         effective: { percent: 45, window: "session", freshness: "fresh" },
-        limits: { freshness: "fresh", session: { usedPercent: 55, resetsAt: nowS + 7200 }, weekly: { usedPercent: 8, resetsAt: nowS + 259200 } },
+        limits: { freshness: "fresh", session: { usedPercent: 55, resetsAt: nowS + 7200, windowMinutes: 300 }, weekly: { usedPercent: 8, resetsAt: nowS + 259200, windowMinutes: 10_080 } },
       },
     ],
     active: "main",
@@ -110,12 +110,32 @@ test("breaks out each account's session and weekly windows with reset times", ()
   expect(html).toContain("reset"); // both windows carry a reset time
 });
 
+test("a weekly-only account labels its one window by the horizon it carries", () => {
+  // A Codex plan with no 5-hour limit reports a single weekly window; the row
+  // must read "Week", never the 5h label (issue #606).
+  const nowS = Math.floor(Date.now() / 1000);
+  const html = render(base({
+    accounts: [
+      {
+        id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+        effective: { percent: 85, window: "weekly", freshness: "fresh" },
+        limits: { freshness: "fresh", session: null, weekly: { usedPercent: 15, resetsAt: nowS + 437_631, windowMinutes: 10_080 } },
+      },
+    ],
+    active: "main",
+  }));
+  const detail = html.match(/<dl[^>]*Quota windows[^>]*>[\s\S]*?<\/dl>/)?.[0] ?? "";
+  expect(detail).toContain(translate("en", "limits.week"));
+  expect(detail).not.toContain(translate("en", "limits.5h"));
+  expect(detail).toContain("85%"); // weekly remaining (100 - 15)
+});
+
 test("dims and labels a stale account limits read and omits a missing reset time", () => {
   const html = render(base({
     accounts: [
       {
         id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
-        limits: { freshness: "stale", session: { usedPercent: 20, resetsAt: null }, weekly: null },
+        limits: { freshness: "stale", session: { usedPercent: 20, resetsAt: null, windowMinutes: 300 }, weekly: null },
       },
     ],
     active: "main",
