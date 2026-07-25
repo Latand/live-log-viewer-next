@@ -3,6 +3,20 @@ import { expect, mock, test } from "bun:test";
 import { NextRequest } from "next/server";
 
 const pipeline = { id: "pipeline-1" };
+const closeReport = {
+  stopped: [{ stageId: "build", attempt: 1, conversationId: "conversation_stage_1", agentPath: null, paneId: null }],
+  alreadyStopped: [],
+  unconfirmed: [],
+  acknowledged: [],
+  reviewers: [],
+  stillRunning: [],
+  worktree: { dir: "/repo-pipeline-1", uncommitted: ["notes.md"], truncated: false },
+};
+const refusedClose = {
+  ...closeReport,
+  stopped: [],
+  stillRunning: [{ stageId: "build", attempt: 1, conversationId: "conversation_stage_1", agentPath: null, paneId: null, error: "host is unreachable" }],
+};
 mock.module("@/lib/pipelines/engine", () => ({
   getPipelines: () => ({ pipelines: [pipeline] }),
   createPipelineFromRequest: () => ({ pipeline }),
@@ -11,6 +25,12 @@ mock.module("@/lib/pipelines/engine", () => ({
     if (id !== pipeline.id) return { error: "pipeline not found", status: 404 };
     if ((body as { repoDir?: string }).repoDir === "/blocked") {
       return { error: "Git metadata is not writable: /blocked/.git", status: 403, code: "git_metadata_unwritable", field: "repoDir", path: "/blocked/.git" };
+    }
+    if ((body as { action?: string }).action === "close") {
+      if ((body as { stageId?: string }).stageId === "stuck") {
+        return { error: "could not stop stage build attempt 1", status: 409, close: refusedClose };
+      }
+      return { pipeline: { ...pipeline, body }, close: closeReport };
     }
     return { pipeline: { ...pipeline, body } };
   },
@@ -41,6 +61,22 @@ test("pipeline DELETE discards a draft through the delete action", async () => {
   );
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ ok: true, pipeline: { ...pipeline, body: { action: "delete" } } });
+});
+
+test("pipeline close forwards its host-teardown report on success and on refusal (#670)", async () => {
+  const response = await PATCH(
+    new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", { method: "PATCH", headers: { host: "127.0.0.1" }, body: JSON.stringify({ action: "close" }) }),
+    { params: Promise.resolve({ id: "pipeline-1" }) },
+  );
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ ok: true, close: closeReport });
+
+  const refused = await PATCH(
+    new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", { method: "PATCH", headers: { host: "127.0.0.1" }, body: JSON.stringify({ action: "close", stageId: "stuck" }) }),
+    { params: Promise.resolve({ id: "pipeline-1" }) },
+  );
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toEqual({ error: "could not stop stage build attempt 1", close: refusedClose });
 });
 
 test("pipeline PATCH rejects unknown actions", async () => {
@@ -76,5 +112,23 @@ test("pipeline PATCH forwards repository-admission fields from final revalidatio
     code: "git_metadata_unwritable",
     field: "repoDir",
     path: "/blocked/.git",
+  });
+});
+
+test("pipeline close forwards the operator's host acknowledgement to the engine (#670)", async () => {
+  const response = await PATCH(
+    new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", {
+      method: "PATCH",
+      headers: { host: "127.0.0.1" },
+      body: JSON.stringify({ action: "close", acknowledgeHosts: true }),
+    }),
+    { params: Promise.resolve({ id: "pipeline-1" }) },
+  );
+  expect(response.status).toBe(200);
+  /* The dismissal has to survive the route, or the operator's only way out of
+     an unidentifiable pane never reaches the close. */
+  expect(await response.json()).toMatchObject({
+    ok: true,
+    pipeline: { body: { action: "close", acknowledgeHosts: true } },
   });
 });

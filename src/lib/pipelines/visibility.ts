@@ -42,6 +42,10 @@ export function filterPipelinesForFileScan(
     };
     const restored = restoredPipelineIds.has(pipeline.id) || pipeline.runs.some((run) => run.attempts.some((attempt) =>
       Boolean((attempt.conversationId && pinnedConversationIds.has(attempt.conversationId)) || (attempt.agentPath && context.pinnedPaths.has(attempt.agentPath)))));
+    /* A close that could not confirm its kill keeps the lane on the board: the
+       possible survivor must stay addressable, never hidden behind a closed
+       record (#670). It clears itself as soon as a close confirms the host. */
+    if (pipeline.unconfirmedHosts?.length) return [{ ...projected, restored: true }];
     if (pipeline.state === "closed" || pipeline.hiddenAt) return restored ? [{ ...projected, restored: true }] : [];
     if ((pipeline.repoDir && fs.existsSync(pipeline.repoDir)) || (pipeline.worktreeDir && fs.existsSync(pipeline.worktreeDir))) return [projected];
     return projected.runs.some((run) => run.attempts.some((attempt) => Boolean(attempt.agentPath && scanned.has(attempt.agentPath)))) ? [projected] : [];

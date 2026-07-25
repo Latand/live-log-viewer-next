@@ -79,6 +79,30 @@ export function commitPipelineStage(pipeline: Pipeline, stageId: string, allowCo
   return { ok: true, sha: head.stdout.trim() };
 }
 
+export type PipelineWorktreeChanges =
+  | { ok: true; paths: string[]; truncated: boolean }
+  | { ok: false; error: string };
+
+/** Lists the uncommitted paths a pipeline worktree still holds. Closing a
+    pipeline (#670) must never discard stage work, so the close only reads this
+    — it reports what it left behind instead of resetting or cleaning. */
+export function pipelineWorktreeChanges(
+  pipeline: Pick<Pipeline, "worktreeDir">,
+  exec: ExecPort,
+  limit = 20,
+): PipelineWorktreeChanges {
+  const status = exec("git", ["status", "--porcelain"], pipeline.worktreeDir);
+  if (status.code !== 0) return failure("checking the pipeline worktree", status);
+  const paths = status.stdout
+    .split("\n")
+    .map((line) => line.trimEnd())
+    /* Porcelain v1 lines are `XY <path>`; a rename carries `<old> -> <new>`. */
+    .filter((line) => line.length > 3)
+    .map((line) => line.slice(3).split(" -> ").at(-1)!.trim())
+    .filter((entry) => entry.length > 0);
+  return { ok: true, paths: paths.slice(0, limit), truncated: paths.length > limit };
+}
+
 export function resetPipelineStage(pipeline: Pipeline, exec: ExecPort): PipelineGitResult {
   if (!pipeline.lastPassedCommit) return { ok: false, error: "the pipeline has no passed-stage commit" };
   const reset = exec("git", ["reset", "--hard", pipeline.lastPassedCommit], pipeline.worktreeDir);

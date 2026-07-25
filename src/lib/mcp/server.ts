@@ -74,7 +74,18 @@ export type McpToolFailure = {
   error: string;
   code: string;
   retryable: boolean;
+  /** Structured evidence a binding attached to its refusal, so an agent gets the
+      same payload an HTTP caller does instead of only the prose message. */
+  details?: McpToolPayload;
 };
+
+/** Thrown by a binding that refuses with machine-readable evidence. */
+export class McpToolRefusal extends Error {
+  constructor(message: string, readonly details: McpToolPayload) {
+    super(message);
+    this.name = "McpToolRefusal";
+  }
+}
 
 export type McpToolResult = McpToolSuccess | McpToolFailure;
 
@@ -830,8 +841,9 @@ function failure(
   error: string,
   retryable: boolean,
   replayed = false,
+  details?: McpToolPayload,
 ): McpToolFailure {
-  return { ok: false, toolName, clientRequestId: requestId, replayed, error, code, retryable };
+  return { ok: false, toolName, clientRequestId: requestId, replayed, error, code, retryable, ...(details ? { details } : {}) };
 }
 
 export interface McpToolService {
@@ -882,6 +894,8 @@ export function createMcpToolService(
             "tool_failed",
             error instanceof Error ? error.message : String(error),
             true,
+            false,
+            error instanceof McpToolRefusal ? error.details : undefined,
           );
         }
         await receipts.complete(key, digest, settled, retention);
