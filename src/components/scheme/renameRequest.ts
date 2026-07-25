@@ -22,3 +22,12 @@ export function clearStaleRename(prev: RenameRequest, expandedPath: string | nul
 export function autoEditTokenFor(request: RenameRequest, expandedPath: string | null): number | undefined {
   return request && expandedPath !== null && request.path === expandedPath ? request.token : undefined;
 }
+
+/** An imposed pane title (a pipeline stage's «role · stage · position», #658)
+    yields to a pending rename: the F2 editor is the expanded pane's SessionTitle,
+    and an override replaces it, so the override is dropped exactly while a token
+    is live. Without this, imposing an identity on a stage pane would silently
+    remove the last rename path those transcripts have. */
+export function titleUnderRename(title: string | undefined, autoEditToken: number | undefined): string | undefined {
+  return autoEditToken === undefined ? title : undefined;
+}

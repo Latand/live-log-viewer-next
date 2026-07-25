@@ -146,10 +146,16 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      launch the file path is still `spawn:<launchId>` with no artifact, so an
      artifact-only lookup would miss the live host and drop the first deltas; the
      transcript path stays a fallback for subagents that carry no bus id. */
-  const runtimeLiveTurn = useRuntimeSessionForConversation(
+  const runtimeSession = useRuntimeSessionForConversation(
     file?.conversationId ?? null,
     file?.path ?? null,
-  )?.session.liveTurn ?? null;
+  )?.session ?? null;
+  const runtimeLiveTurn = runtimeSession?.liveTurn ?? null;
+  /* Liveness for the in-flight exemption (issue #674 review): a `streaming`
+     overlay row outranks the transcript only while the turn is actually
+     running. Once the turn is idle a lingering one — a broker that died
+     mid-stream leaves it streaming forever — is fenced like any other. */
+  const runtimeTurn = runtimeSession?.turn ?? null;
   /* The scroll magnet lives per feed instance, so each column remembers its
      own state across polls: glued to the live tail, or released by the user.
      A remount inherits the transcript's remembered state. */
@@ -514,8 +520,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     publishCanonicalAssistantClaims(memoryKey, feed.items);
   }, [file, memoryKey, feed.items]);
   const visibleLiveTurnItems = useMemo(
-    () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items, assistantClaims),
-    [runtimeLiveTurn, feed.items, assistantClaims],
+    () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn),
+    [runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn],
   );
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */

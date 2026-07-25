@@ -190,20 +190,16 @@ function ProjectViewTabs({
   value,
   onChange,
   floating = false,
-  header = false,
 }: {
   value: ProjectView;
   onChange: (next: ProjectView) => void;
   floating?: boolean;
-  /** Compact, unpositioned pill for the mobile toolbar row (finding 7): the
-      scheme/list toggle rides in the header instead of its own stacked row. */
-  header?: boolean;
 }) {
   const { t } = useLocale();
   return (
     <div
       className={`z-30 inline-flex shrink-0 items-center gap-0.5 rounded-full border border-border bg-card p-0.5 shadow-1 ${
-        header ? "" : floating ? "absolute left-3 top-3" : "mx-3 mt-3 self-start"
+        floating ? "absolute left-3 top-3" : "mx-3 mt-3 self-start"
       }`}
     >
       {(["scheme", "list"] as const).map((mode) => (
@@ -213,12 +209,12 @@ function ProjectViewTabs({
           aria-pressed={value === mode}
           onClick={() => onChange(mode)}
           aria-label={t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
-          className={`inline-flex items-center justify-center gap-1 rounded-full text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-            header ? "h-11 w-11" : "px-2 py-1"
-          } ${value === mode ? "bg-accent/10 text-accent" : "text-muted hover:text-primary"}`}
+          className={`inline-flex items-center justify-center gap-1 rounded-full px-2 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            value === mode ? "bg-accent/10 text-accent" : "text-muted hover:text-primary"
+          }`}
         >
-          {mode === "scheme" ? <Network className={header ? "h-3.5 w-3.5" : "h-3 w-3"} aria-hidden /> : <List className={header ? "h-3.5 w-3.5" : "h-3 w-3"} aria-hidden />}
-          {header ? null : t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
+          {mode === "scheme" ? <Network className="h-3 w-3" aria-hidden /> : <List className="h-3 w-3" aria-hidden />}
+          {t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
         </button>
       ))}
     </div>
@@ -279,15 +275,20 @@ function HeaderMenu({
   );
 }
 
-/** One 44px-tall row inside a HeaderMenu popover. */
-function HeaderMenuItem({ icon, label, onSelect, disabled = false }: { icon: React.ReactNode; label: string; onSelect: () => void; disabled?: boolean }) {
+/** One 44px-tall row inside a HeaderMenu popover. Passing `checked` turns the
+    row into a radio option (the folded scheme/list switch, issue #613) so the
+    face currently shown is announced instead of merely tinted. */
+function HeaderMenuItem({ icon, label, onSelect, disabled = false, checked }: { icon: React.ReactNode; label: string; onSelect: () => void; disabled?: boolean; checked?: boolean }) {
   return (
     <button
       type="button"
-      role="menuitem"
+      role={checked === undefined ? "menuitem" : "menuitemradio"}
+      aria-checked={checked}
       onClick={onSelect}
       disabled={disabled}
-      className="flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 text-left text-[13px] font-semibold text-primary hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
+      className={`flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 text-left text-[13px] font-semibold hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45 ${
+        checked ? "bg-accent/10 text-accent" : "text-primary"
+      }`}
     >
       <span className="flex h-5 w-5 shrink-0 items-center justify-center text-accent">{icon}</span>
       {label}
@@ -1380,10 +1381,23 @@ export function ProjectDashboard({
   return (
     <FavoritesProvider value={favoritesApi}>
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* The phone header fits 390px BY CONSTRUCTION (issue #613, where it
+          measured 422px and hung «More actions» off the screen). Its budget: at
+          most five fixed 44px targets (projects, undo, shelf, create, more) plus
+          the bounded attention pill — ~326px with the gaps and padding — and the
+          project name as the ONE elastic cell, which truncates into whatever is
+          left. 390px is the narrowest viewport this layout supports — a fully
+          populated row leaves the name ~73px there, ~43px at 360px, a sliver at
+          320px, and at 280px the fixed targets alone overflow the row by ~29px.
+          That collapse below 390px is a documented limit, not a defect: a
+          narrower phone would need a further fold into the «⋯» menu. Any control
+          added later either fits the budget as a 44px target or folds into that
+          menu, the way the scheme/list switch did. */}
       <div
+        data-testid={isMobile ? "mobile-project-header" : undefined}
         className={
           isMobile
-            ? "flex min-h-[52px] shrink-0 items-center gap-1 border-b border-border bg-card px-2 py-1.5"
+            ? "flex min-h-[52px] min-w-0 shrink-0 items-center gap-1 border-b border-border bg-card px-2 py-1.5"
             : "flex h-10 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4"
         }
       >
@@ -1400,11 +1414,12 @@ export function ProjectDashboard({
           </button>
         ) : null}
         {/* The project name takes priority on the phone (issue #419 finding 2):
-            it shows in full (short names like «atlas» never compress to «a…»),
-            capped at 45vw so a very long name truncates instead of overflowing.
-            The attention filler beside it yields the slack. Desktop keeps its
-            natural width. */}
-        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 shrink-0 max-w-[45vw]" : ""}`} title={project}>{projectDisplayName(project)}</h1>
+            short names like «atlas» never compress to «a…», and it is capped at
+            45vw so a very long one truncates. It is also the ONLY cell that
+            gives width back when the row runs out (issue #613 — as `shrink-0` it
+            held its 45vw and pushed «More actions» off a 390px screen instead).
+            Desktop keeps its natural width. */}
+        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 max-w-[45vw]" : ""}`} title={project}>{projectDisplayName(project)}</h1>
         <BoardHistoryControls
           canUndo={history.canUndo}
           canRedo={history.canRedo}
@@ -1416,15 +1431,21 @@ export function ProjectDashboard({
         />
         {isMobile ? (
           <>
-            {/* Toolbar folds to a single row (findings 1, 7): the scheme/list
-                toggle rides here instead of its own stacked row, all create
-                actions collapse into one `+` menu, and the secondary project
-                actions into a `⋯` menu — every control is a 44px hit target. */}
-            {viewToggle ? <ProjectViewTabs value={projectView} onChange={chooseEmptyView} header /> : null}
-            {/* Flexible filler beside the prioritized title: absorbs the slack
-                and shrinks/truncates first so the row never overflows and the
-                project name keeps its width (issue #419 finding 2). */}
-            <span className="min-w-0 flex-1 shrink truncate">{attention}</span>
+            {/* Toolbar folds to a single row (findings 1, 7): all create actions
+                collapse into one `+` menu and the secondary project actions into
+                a `⋯` menu — every control is a 44px hit target. The scheme/list
+                switch used to sit here as a 94px segmented pair; at 390px it is
+                one tap inside the `⋯` menu instead (issue #613). */}
+            {/* Empty filler: absorbs whatever slack the row has so the control
+                cluster stays right-aligned while the project name keeps its
+                natural width (issue #419 finding 2). It collapses to nothing
+                first, before the name starts truncating. */}
+            <span aria-hidden className="min-w-0 flex-1" />
+            {/* The attention queue badge is an ACTION (it opens the queue), not
+                decoration, so it holds its own bounded pill width — riding the
+                elastic filler squeezed it to zero px at 390px, which hid it
+                (issue #613). */}
+            {attention ? <span className="flex shrink-0 items-center">{attention}</span> : null}
             {/* Handoff/hidden/readiness access as a compact header trigger (issue
                 #419 reopened) — the focused chat below reserves no bottom row for
                 it; a tap opens the overlay sheet. */}
@@ -1456,6 +1477,29 @@ export function ProjectDashboard({
             <HeaderMenu triggerLabel={t("dash.moreMenu")} icon={<MoreHorizontal className="h-5 w-5" aria-hidden />}>
               {(close) => (
                 <>
+                  {/* The scheme/list switch (issue #613). Inline it cost 94px of
+                      a 390px row and pushed this very trigger off screen; here
+                      both faces stay one tap away and the current one is
+                      announced as the checked radio option. */}
+                  {viewToggle ? (
+                    <>
+                      <div role="group" aria-label={t("dash.viewMenuGroup")} className="flex flex-col gap-0.5">
+                        <HeaderMenuItem
+                          icon={<Network className="h-4 w-4" aria-hidden />}
+                          label={t("dash.viewSchemeMenu")}
+                          checked={projectView === "scheme"}
+                          onSelect={() => { close(); chooseEmptyView("scheme"); }}
+                        />
+                        <HeaderMenuItem
+                          icon={<List className="h-4 w-4" aria-hidden />}
+                          label={t("dash.viewListMenu")}
+                          checked={projectView === "list"}
+                          onSelect={() => { close(); chooseEmptyView("list"); }}
+                        />
+                      </div>
+                      <span aria-hidden className="my-0.5 h-px shrink-0 bg-border" />
+                    </>
+                  ) : null}
                   {/* Redo lives here on mobile — the header shows only a single
                       undo button, so its counterpart rides the «⋯» menu (and
                       Ctrl+Shift+Z), shown only while a redo is possible. */}
@@ -1558,8 +1602,9 @@ export function ProjectDashboard({
 
       {isMobile ? (
         <>
-          {/* The scheme/list toggle moved into the header row (finding 7), so the
-              phone shell is two nav rows at most: header + the focus-view strip. */}
+          {/* The phone shell is two nav rows at most: header + the focus-view
+              strip (finding 7). The scheme/list switch is not one of them — it
+              is one tap inside the header's «⋯» menu (issue #613). */}
           {!boardReady ? (
             <SchemeSkeleton />
           ) : projectView === "scheme" && schemeAvailable ? (

@@ -506,6 +506,11 @@ export interface LimitWindow {
   usedPercent: number;
   /** Unix seconds when the window resets, or null when unknown. */
   resetsAt: number | null;
+  /** The window's own length in minutes as the provider declared it (Codex
+      `windowDurationMins` / `window_minutes`; 300 and 10080 for Claude's two
+      windows). This is the horizon the number carries, and labels are taken
+      from it. Absent on snapshots cached before issue #606. */
+  windowMinutes?: number | null;
 }
 
 /** Plan rate limits of one engine, returned by GET /api/limits. */
@@ -565,6 +570,10 @@ export interface BurndownSeries {
   windowSeconds: number;
   /** Remaining-quota samples inside the current window, oldest first. */
   samples: LimitSample[];
+  /** True when the current snapshot carries no window of this horizon at all —
+      e.g. a Codex plan that reports only a weekly limit. The chart then names
+      that reason instead of the generic "no history yet" (issue #606). */
+  windowUnreported?: boolean;
 }
 
 /** Both windows' burndown series for one engine. */
