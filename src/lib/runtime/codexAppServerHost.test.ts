@@ -14,6 +14,7 @@ import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import type { HostState, RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef } from "./structuredContent";
+import { voicePersona } from "./voicePersona";
 
 class MemoryEventStore implements RuntimeEventStore {
   private readonly events = new Map<string, RuntimeEvent[]>();
@@ -305,7 +306,11 @@ describe("CodexAppServerHost", () => {
        every 9-second kill arrived on. */
     const injected = server.requests.find((request) => request.method === "thread/inject_items");
     expect((injected?.params as { threadId?: string })?.threadId).toBe("voice-thread");
-    expect(JSON.stringify(injected?.params)).toContain("Алік");
+    /* Compared against the resolved persona rather than a phrase from it: the
+       wording is edited without a deploy, and an operator override replaces it
+       wholesale, so any literal here would be asserting last month's text. */
+    expect((injected?.params as { items?: { role?: string; text?: string }[] })?.items)
+      .toEqual([{ role: "developer", text: voicePersona() }]);
     expect(server.requests.findIndex((request) => request.method === "thread/inject_items"))
       .toBeLessThan(server.requests.findIndex((request) => request.method === "thread/realtime/start"));
 
