@@ -8,6 +8,7 @@ import { handleOverlayEscape } from "@/lib/overlay";
 import type { BurndownPayload, BurndownSeries } from "@/lib/types";
 
 import { X } from "./icons";
+import { windowLabel } from "./rateLimit";
 import { engineTintOf } from "./utils";
 
 const VB_W = 320;
@@ -127,6 +128,9 @@ export function BurndownPanel({
   }, []);
 
   const engineData = burndownForActiveAccount(data, engine, activeAccountId);
+  // Each tab is named by the horizon its own series carries, so a plan whose
+  // "5h" window is really a weekly one is never labelled 5h (issue #606).
+  const tabLabel = (key: WindowKey) => windowLabel(t, key, engineData ? engineData[key].windowSeconds / 60 : null);
   // A response whose account stamp no longer matches is treated as not-yet-loaded
   // so a stale-account curve never shows; the effect above will refetch.
   const ownershipPending = Boolean(data && !engineData);
@@ -171,7 +175,7 @@ export function BurndownPanel({
                 onClick={() => setWindow(key)}
                 className={`rounded-[6px] px-2 py-0.5 text-[10.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${window === key ? "bg-sunken text-primary" : "text-muted hover:text-primary"}`}
               >
-                {t(key === "weekly" ? "limits.week" : "limits.5h")}
+                {tabLabel(key)}
               </button>
             ))}
           </div>
@@ -211,6 +215,10 @@ export function BurndownPanel({
               </div>
             ) : null}
           </>
+        ) : series?.windowUnreported ? (
+          // A precise reason beats "no history yet": the engine reports no
+          // window of this horizon at all, so no sampling will ever fill it.
+          <div className="py-6 text-center text-[12px] text-muted">{t("burndown.windowUnreported", { window: tabLabel(window) })}</div>
         ) : (
           <div className="py-6 text-center text-[12px] text-muted">
             {t("burndown.empty")}
