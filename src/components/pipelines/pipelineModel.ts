@@ -829,8 +829,13 @@ function firstLine(value: string | null | undefined, max = 120): string {
  * Why a settled stage ended the way it did, in one line (#658) — the substance
  * the collapsed status row carries in place of the stage prompt. The record the
  * engine actually wrote wins, in order: a recorded error, the verdict's first
- * finding, then the attempt's output summary (a skip writes its own). Without any
- * of those the row states the attempt's raw state, so the row is never blank.
+ * finding, then the attempt's output summary. Without any of those the row states
+ * the attempt's raw state, so the row is never blank.
+ * A SKIP is the one outcome the engine narrates itself, in a hardcoded English
+ * sentence it stamps into `output` — so a skipped attempt with nothing more
+ * specific to say reads from the catalogue instead, and a Ukrainian badge and
+ * title never sit beside an English line. Free-form agent output on a
+ * passed/failed stage stays verbatim: that is data, not copy.
  */
 export function stageOutcomeReason(
   t: TFunction,
@@ -842,6 +847,7 @@ export function stageOutcomeReason(
   if (error) return error;
   const finding = firstLine(attempt?.verdict?.findings?.[0]);
   if (finding) return `${verdictStatusLabel(t, attempt!.verdict!.status)} — ${finding}`;
+  if (attempt?.state === "skipped") return t("pipelineSlot.reasonSkipped");
   const output = firstLine(attempt?.output);
   if (output) return output;
   if (attempt?.verdict) return verdictStatusLabel(t, attempt.verdict.status);

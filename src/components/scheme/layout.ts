@@ -436,6 +436,19 @@ export function buildSchemeLayout(
   const chainPlansByHost = new Map<string, StageChainPlan[]>();
   const rowPlansByTip = new Map<string, StageChainPlan[]>();
   const stageChainPlans: StageChainPlan[] = [];
+  /* Execution-order rank of every stage transcript, keyed by the path the board
+     may place it at (#658). Read by the rest band far below to lay a pipeline's
+     scattered stage trees out stage 1 → stage 2 → stage 3 instead of in
+     activity+recency order (newest first, i.e. the chain backwards).
+     Populated from the DECLARED pipelines, before any plan is dropped: the chains
+     that need the ordering most are exactly the ones that get discarded. Once a
+     pipeline's last stage launches it has no slot left, and with every stage
+     transcript its own root there is no lineage host either — so the plan has
+     nothing to emit and is dropped, and ranks derived from surviving plans
+     vanished with it precisely when a long chain is read most. Ranks emit
+     nothing on their own: no slot, no region, no halo, no revived empty plan.
+     The pipeline's own position keys the ranks so two chains never interleave. */
+  const stageRankByPath = new Map<string, number>();
   {
     /* Only THIS project's pipelines may grow memberless slot rows — the global
        list serves cross-project stage membership, so without this fence a
@@ -450,7 +463,17 @@ export function buildSchemeLayout(
     });
     /* Each placed task card belongs to at most one pipeline region. */
     const claimedTaskIds = new Set<string>();
-    for (const pipeline of pool) {
+    for (const [pipelineIndex, pipeline] of pool.entries()) {
+      /* Rank first, unconditionally — every declared stage, whatever becomes of
+         this pipeline's plan below. A folded review-loop ranks at its flow
+         implementer, the path the board actually places for it. */
+      pipeline.stages.forEach((stage, stageIndex) => {
+        const attempt = latestAttempt(pipeline, stage.id);
+        const implPath = stage.kind === "review-loop" && attempt?.flowId ? implOfFlow(attempt.flowId) : null;
+        for (const path of [attempt?.agentPath ?? null, implPath]) {
+          if (path && !stageRankByPath.has(path)) stageRankByPath.set(path, pipelineIndex * 10_000 + stageIndex);
+        }
+      });
       const placeholderIds = new Set(pipelinePlaceholderStages(pipeline, prePlacedNodePaths, prePlacedDeckFlowIds).map((stage) => stage.id));
       /* Completed cards only grow on an active pipeline, and never for the cursor
          stage itself: a cursor stage whose only transcript is quiet history
@@ -1071,17 +1094,12 @@ export function buildSchemeLayout(
      placed its LIVE later stage first and pushed the earlier, already-finished
      one rightwards — or, on an overflowing row, down onto the next row. Reading
      order then fought execution order: stage 1/3 ended up below the active 2/3.
-     A stage member tree carries its stage's position, and the cluster below lays
-     its ranked trees out in that order, so a pipeline always reads
-     stage 1 → stage 2 → stage 3 along the band. Ranking spans plans (a cluster
-     may bridge two pipelines) by keying on the plan first, the stage second. */
-  const stageRankByPath = new Map<string, number>();
-  stageChainPlans.forEach((plan, planIndex) => {
-    for (const entry of plan.entries) {
-      if (entry.kind !== "node" || stageRankByPath.has(entry.path)) continue;
-      stageRankByPath.set(entry.path, planIndex * 10_000 + entry.index);
-    }
-  });
+     Every stage transcript carries its stage's position (`stageRankByPath`, built
+     from the declared pipelines above so it outlives a dropped plan), and the
+     cluster below lays its ranked trees out in that order, so a pipeline always
+     reads stage 1 → stage 2 → stage 3 along the band. A tree ranks by the
+     earliest stage it carries, which keeps a pipeline's trees in chain order even
+     when one tree hosts several stages. */
   const stageRankOf = (paths: readonly string[]): number | null => {
     const ranks = paths.flatMap((path) => {
       const rank = stageRankByPath.get(path);

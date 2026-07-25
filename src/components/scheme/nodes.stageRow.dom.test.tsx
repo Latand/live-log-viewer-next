@@ -39,6 +39,7 @@ function bindDomGlobals() {
     Event: dom.Event,
     CustomEvent: dom.CustomEvent,
     MouseEvent: dom.MouseEvent,
+    KeyboardEvent: dom.KeyboardEvent,
     sessionStorage: dom.sessionStorage,
     localStorage: dom.localStorage,
     ResizeObserver: InertResizeObserver,
@@ -132,7 +133,10 @@ function layout(slots: StageSlot[]): SchemeLayout {
   };
 }
 
-function mountLayer(next: SchemeLayout, pipelines: Pipeline[] = []): { host: HTMLElement; root: Root } {
+/* Escaping a slot key (it carries `::`) for a CSS id selector. */
+const CSS_ESCAPE = (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
+
+function mountLayer(next: SchemeLayout, pipelines: Pipeline[] = [], options: { lite?: boolean } = {}): { host: HTMLElement; root: Root } {
   const element = dom.document.createElement("div");
   dom.document.body.append(element);
   const host = element as unknown as HTMLElement;
@@ -146,7 +150,7 @@ function mountLayer(next: SchemeLayout, pipelines: Pipeline[] = []): { host: HTM
         files={next.nodes.map((item) => item.file)}
         pipelines={pipelines}
         interactive
-        lite={false}
+        lite={options.lite ?? false}
         dormant
         selected={null}
         multi={new Set()}
@@ -184,7 +188,8 @@ test("a skipped stage collapses to one status row — badge, role-first title, w
   /* The title is the stage's identity, not the prompt's shared preamble. */
   expect(row.textContent).toContain("Architect · plan_v3_voice · stage 1/3");
   expect(row.textContent).toContain("skipped");
-  expect(row.textContent).toContain("Skipped by operator.");
+  /* The why-line comes from the catalogue, not from the engine's English marker. */
+  expect(row.textContent).toContain("Skipped by the operator — the chain moved on");
   expect(row.textContent).not.toContain("Work alone");
   /* Collapsed means collapsed: no prompt block, and the reserved row height. */
   expect(host.textContent).not.toContain("Stage prompt");
@@ -206,6 +211,36 @@ test("the collapsed row discloses the full stage card on demand", () => {
   /* One surface per declared stage: the identity moves to the disclosed card
      instead of being claimed twice. */
   expect(host.querySelectorAll('[data-pipeline-stage-card="p658::plan_v3_voice"]')).toHaveLength(1);
+});
+
+test("the disclosure is a real overlay: the toggle names the card it opens, and Escape closes it", () => {
+  /* The disclosed card floats over whatever the board placed below it, so it owes
+     the operator the same way out an overlay does — and the toggle owes assistive
+     tech a pointer to what it controls. */
+  const { host } = mountLayer(layout([
+    slot({ stage: stages[0]!, index: 0, pipeline: skippedPipeline, collapsedRow: true, h: SLOT_ROW_H }),
+  ]));
+  const toggle = host.querySelector("button[data-stage-row-toggle]") as HTMLButtonElement;
+  const controls = toggle.getAttribute("aria-controls")!;
+  expect(controls).toBeTruthy();
+  flushSync(() => toggle.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  /* aria-controls resolves to the card that just appeared. */
+  const card = host.querySelector(`#${CSS_ESCAPE(controls)}`) as HTMLElement;
+  expect(card).toBeTruthy();
+  expect(card.hasAttribute("data-stage-row-card")).toBe(true);
+  expect(card.textContent).toContain("Stage prompt");
+
+  flushSync(() => dom.document.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  expect(host.querySelector("[data-stage-row-card]")).toBeNull();
+  expect((host.querySelector("button[data-stage-row-toggle]") as HTMLButtonElement).getAttribute("aria-expanded")).toBe("false");
+});
+
+test("at map zoom the row is a label, not a control — no disclosure to open", () => {
+  const { host } = mountLayer(layout([
+    slot({ stage: stages[0]!, index: 0, pipeline: skippedPipeline, collapsedRow: true, h: SLOT_ROW_H }),
+  ]), [], { lite: true });
+  expect(host.querySelector('[data-pipeline-stage-row="true"]')).toBeTruthy();
+  expect(host.querySelector("button[data-stage-row-toggle]")).toBeNull();
 });
 
 test("a pending stage ahead of the cursor keeps its full card", () => {

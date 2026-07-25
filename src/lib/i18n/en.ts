@@ -1159,6 +1159,7 @@ export const en = {
   "pipelineSlot.saved": "Saved",
   // settled stages collapsed to one status row (#658)
   "pipelineSlot.rowAria": "Finished stage {title}",
+  "pipelineSlot.reasonSkipped": "Skipped by the operator — the chain moved on",
   "pipelineSlot.rowExpand": "Show the full stage card",
   "pipelineSlot.rowCollapse": "Collapse back to the status row",
   "pipelineTemplates.planBuildReview": "Plan → Build → Review",

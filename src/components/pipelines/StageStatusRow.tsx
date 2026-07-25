@@ -21,10 +21,13 @@ import { STAGE_GLYPH, STAGE_TONES, latestAttempt, stageChipState, stageOutcomeRe
 export function StageStatusRow({
   slot,
   expanded,
+  controls,
   onToggle,
 }: {
   slot: StageSlot;
   expanded: boolean;
+  /** DOM id of the card this row discloses, tying the toggle to what it opens. */
+  controls?: string;
   onToggle?: () => void;
 }) {
   const { t } = useLocale();
@@ -67,6 +70,7 @@ export function StageStatusRow({
             data-scheme-ui
             data-stage-row-toggle
             aria-expanded={expanded}
+            aria-controls={controls}
             aria-label={expanded ? t("pipelineSlot.rowCollapse") : t("pipelineSlot.rowExpand")}
             title={expanded ? t("pipelineSlot.rowCollapse") : t("pipelineSlot.rowExpand")}
             className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-control border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"

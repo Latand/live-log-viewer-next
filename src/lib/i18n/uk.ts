@@ -1128,6 +1128,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineSlot.saved": "Збережено",
   // згорнуті завершені стадії в один рядок статусу (#658)
   "pipelineSlot.rowAria": "Завершений етап {title}",
+  "pipelineSlot.reasonSkipped": "Пропущено оператором — ланцюжок пішов далі",
   "pipelineSlot.rowExpand": "Показати повну картку етапу",
   "pipelineSlot.rowCollapse": "Згорнути назад до рядка статусу",
   "pipelineTemplates.planBuildReview": "План → Збірка → Рев’ю",

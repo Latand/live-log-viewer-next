@@ -1043,6 +1043,48 @@ describe("a pipeline's stages read in execution order (#658)", () => {
     expect(future.incomingAnchorY).toBe(HANDOFF_BADGE_Y);
   });
 
+  test("all three stages launched — zero slots — still read stage 1 → 2 → 3 in one halo", () => {
+    /* The configuration this ordering exists for, at its END state: every stage
+       transcript surfaced as its own root, so there is no lineage host, and the
+       last stage has launched, so there is no slot left either. The chain plan is
+       dropped for having nothing to emit — and with it (round 2 regression) went
+       every stage rank, leaving the band to fall back on activity+recency:
+       newest stage leftmost, i.e. the whole chain backwards. Ranks come from the
+       declared pipeline now, so the order survives the plan being dropped. */
+    const p = threeStage();
+    (p as unknown as { runs: unknown }).runs = [
+      { stageId: "plan_v3_voice", attempts: [{ n: 1, state: "passed", agentPath: "/s1", flowId: null }] },
+      { stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "passed", agentPath: "/s2", flowId: null }] },
+      { stageId: "verify_v3_voice", attempts: [{ n: 1, state: "running", agentPath: "/s3", flowId: null }] },
+    ];
+    (p as unknown as { cursor: unknown }).cursor = { stageId: "verify_v3_voice", state: "running", input: null, activatedBy: null };
+    /* The freshest, liveliest tree is the LAST stage — what the band would put first. */
+    const s1 = entry({ path: "/s1", mtime: 1_000, activity: "idle" });
+    const s2 = entry({ path: "/s2", mtime: 2_000, activity: "idle" });
+    const s3 = entry({ path: "/s3", mtime: 9_000, activity: "live", proc: "running" });
+    const layout = buildSchemeLayout(
+      [rootGroup(s1), rootGroup(s2), rootGroup(s3)], [], [s1, s2, s3], [], [], [p], [p],
+    );
+
+    expect(layout.slots).toHaveLength(0);
+    const byPath = new Map(layout.nodes.map((node) => [node.file.path, node] as const));
+    expect([...byPath.keys()].sort()).toEqual(["/s1", "/s2", "/s3"]);
+    expect(byPath.get("/s1")!.x).toBeLessThan(byPath.get("/s2")!.x);
+    expect(byPath.get("/s2")!.x).toBeLessThan(byPath.get("/s3")!.x);
+    /* One row: execution order reads left→right, never bottom-up. */
+    expect(byPath.get("/s1")!.y).toBe(byPath.get("/s2")!.y);
+    expect(byPath.get("/s2")!.y).toBe(byPath.get("/s3")!.y);
+    /* The halo still spans exactly the three stage panes — ranking emits nothing. */
+    const halos = layout.groups.filter((group) => group.kind === "pipeline" && group.id === "p658");
+    expect(halos).toHaveLength(1);
+    expect([...halos[0]!.members].sort()).toEqual(["/s1", "/s2", "/s3"]);
+    for (const path of ["/s1", "/s2", "/s3"]) {
+      const node = byPath.get(path)!;
+      expect(node.x).toBeGreaterThanOrEqual(halos[0]!.x);
+      expect(node.x + node.w).toBeLessThanOrEqual(halos[0]!.x + halos[0]!.w);
+    }
+  });
+
   test("a skipped stage with no placed transcript reserves one status row, not a full card", () => {
     /* Stage 1 was skipped and its transcript never reached the board: it surfaces
        as a slot, and a skipped slot is settled work — one row. */

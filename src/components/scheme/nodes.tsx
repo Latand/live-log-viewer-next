@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Layers } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -1055,6 +1055,29 @@ function DraftShell({
 }
 
 /**
+ * Escape for a board disclosure (#658). Mounted only while its disclosure is
+ * open, capture-phase so the innermost open thing wins, and it stops propagation
+ * so the same key does not also clear the canvas selection underneath. Text
+ * fields keep their own Escape — the disclosed stage card carries a prompt
+ * editor.
+ */
+function EscapeToClose({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const el = event.target as HTMLElement | null;
+      if (el && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+  return null;
+}
+
+/**
  * A planned pipeline stage's dashed placeholder window as a scheme citizen
  * (issue #196): the SAME draft-agent window recipe, plus the handoff badge
  * riding the gap to its left when the previous stage's slot sits directly
@@ -1080,6 +1103,7 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
   if (slot.collapsedRow) {
     const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
     const file = target ? resolveStageNavFile(target, files) : null;
+    const cardId = `${slot.key}::card`;
     return (
       <div
         data-scheme-node={slot.key}
@@ -1095,9 +1119,27 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
             {slot.incoming === "review-loop" ? "⟳" : "→"}
           </span>
         ) : null}
-        <StageStatusRow slot={slot} expanded={rowOpen} onToggle={lite ? undefined : () => setRowOpen((open) => !open)} />
+        {/* At map zoom the row is a label, not a control: card text is unreadable
+            there anyway and the transcript link is already inert, so the
+            disclosure asks the operator to zoom in rather than opening a 620px
+            card nobody can read. */}
+        <StageStatusRow
+          slot={slot}
+          expanded={rowOpen}
+          controls={cardId}
+          onToggle={lite ? undefined : () => setRowOpen((open) => !open)}
+        />
         {rowOpen ? (
-          <div className="absolute left-0 top-[calc(100%+8px)] z-30 flex" style={{ width: slot.w, height: SLOT_H }}>
+          /* The disclosed card floats over whatever the board placed below, so it
+             behaves like the overlay it is: Escape closes it, same as the
+             full-window pane and the canvas selection. */
+          <div
+            id={cardId}
+            data-stage-row-card
+            className="absolute left-0 top-[calc(100%+8px)] z-30 flex"
+            style={{ width: slot.w, height: SLOT_H }}
+          >
+            <EscapeToClose onClose={() => setRowOpen(false)} />
             {slot.presentation === "completed" ? (
               <StageCompletedCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} />
             ) : (

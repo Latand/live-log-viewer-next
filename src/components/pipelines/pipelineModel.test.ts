@@ -1616,11 +1616,26 @@ describe("stage surface titles and settled rows (#658)", () => {
     });
     expect(stageOutcomeReason(fakeT, withFinding, buildStage)).toBe("pipelineVerdict.fail — the relay drops the persona");
 
+    /* A skip is narrated by the engine in a hardcoded English sentence stamped
+       into `output`; the row reads the catalogue instead, so a localized badge
+       and title never sit beside an English line. */
     const skipped = pipeline({
       stages,
       runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "skipped", output: "Skipped by operator." } as never] }],
     });
-    expect(stageOutcomeReason(fakeT, skipped, buildStage)).toBe("Skipped by operator.");
+    expect(stageOutcomeReason(fakeT, skipped, buildStage)).toBe("pipelineSlot.reasonSkipped");
+    /* A skip that recorded a real error still leads with the error. */
+    const skippedWithError = pipeline({
+      stages,
+      runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "skipped", output: "Skipped by operator.", error: "worktree reset failed" } as never] }],
+    });
+    expect(stageOutcomeReason(fakeT, skippedWithError, buildStage)).toBe("worktree reset failed");
+    /* Free-form agent output on a settled non-skip stage stays verbatim. */
+    const finished = pipeline({
+      stages,
+      runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "passed", output: "Relay wired, 14 tests green." } as never] }],
+    });
+    expect(stageOutcomeReason(fakeT, finished, buildStage)).toBe("Relay wired, 14 tests green.");
 
     const bare = pipeline({ stages, runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "passed" } as never] }] });
     expect(stageOutcomeReason(fakeT, bare, buildStage)).toBe("pipelineChipState.passed");
